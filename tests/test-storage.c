@@ -110,12 +110,13 @@ test_messages_round_trip (Fixture       *fixture,
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
                                             "how do I add a rate limiter?",
-                                            NULL, &error));
+                                            NULL, NULL, &error));
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "assistant",
                                             "Use a token bucket.",
-                                            "{\"type\":\"result\"}", &error));
+                                            "{\"type\":\"result\"}",
+                                            "Claude Opus 5 · High", &error));
   g_assert_no_error (error);
 
   messages = hy_storage_list_messages (fixture->storage, chat_id, &error);
@@ -127,6 +128,21 @@ test_messages_round_trip (Fixture       *fixture,
                    "Use a token bucket.");
   g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->raw_json, ==,
                    "{\"type\":\"result\"}");
+
+  /* What produced a reply belongs to the reply. Changing the chat's model
+   * afterwards must not rewrite what the earlier ones were answered by. */
+  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->label, ==,
+                   "Claude Opus 5 · High");
+  g_assert_null (((HyMessage *) g_ptr_array_index (messages, 0))->label);
+
+  g_assert_true (hy_storage_set_model (fixture->storage, chat_id, "claude-haiku-4-5", &error));
+  g_assert_no_error (error);
+
+  g_ptr_array_unref (messages);
+  messages = hy_storage_list_messages (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->label, ==,
+                   "Claude Opus 5 · High");
 }
 
 /*
@@ -214,8 +230,8 @@ test_each_backend_tracks_what_it_has_seen (Fixture       *fixture,
                                     "claude", NULL, NULL, NULL, &error);
 
   /* Claude answers the first exchange. */
-  hy_storage_append_message (fixture->storage, chat_id, "user", "who are you", NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Claude here", NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "user", "who are you", NULL, NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Claude here", NULL, NULL, &error);
   g_assert_no_error (error);
 
   after_claude = hy_storage_last_message_id (fixture->storage, chat_id);
@@ -223,8 +239,8 @@ test_each_backend_tracks_what_it_has_seen (Fixture       *fixture,
                                            after_claude, &error));
 
   /* Then the user switches to Codex for a turn. */
-  hy_storage_append_message (fixture->storage, chat_id, "user", "and you?", NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Codex here", NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "user", "and you?", NULL, NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Codex here", NULL, NULL, &error);
   g_assert_no_error (error);
 
   /* Claude has never been told about that exchange. */
@@ -253,7 +269,7 @@ test_forgetting_a_session_replays_everything (Fixture       *fixture,
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "user", "hello", NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "user", "hello", NULL, NULL, &error);
   hy_storage_set_session_id (fixture->storage, chat_id, "claude", "sess", &error);
   hy_storage_set_last_seen (fixture->storage, chat_id, "claude",
                             hy_storage_last_message_id (fixture->storage, chat_id),
@@ -328,7 +344,7 @@ test_deleting_a_chat_takes_its_messages (Fixture       *fixture,
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
-                                            "hello", NULL, &error));
+                                            "hello", NULL, NULL, &error));
   g_assert_true (hy_storage_delete_chat (fixture->storage, chat_id, &error));
   g_assert_no_error (error);
 
@@ -350,9 +366,9 @@ test_search_finds_messages (Fixture       *fixture,
   g_assert_no_error (error);
 
   hy_storage_append_message (fixture->storage, chat_id, "user",
-                             "the websocket reconnect loop is wrong", NULL, &error);
+                             "the websocket reconnect loop is wrong", NULL, NULL, &error);
   hy_storage_append_message (fixture->storage, chat_id, "assistant",
-                             "add exponential backoff", NULL, &error);
+                             "add exponential backoff", NULL, NULL, &error);
   g_assert_no_error (error);
 
   hits = hy_storage_search (fixture->storage, "websocket", 10, &error);
@@ -383,7 +399,7 @@ test_reopening_keeps_data (Fixture       *fixture,
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
   hy_storage_append_message (fixture->storage, chat_id, "user", "persist me",
-                             NULL, &error);
+                             NULL, NULL, &error);
   g_assert_no_error (error);
 
   g_clear_object (&fixture->storage);

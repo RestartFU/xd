@@ -10,7 +10,6 @@ struct _HyMessageRow
   GString *text;
 
   GtkLabel *body;
-  GtkLabel *title;
   GtkWidget *spinner;
 };
 
@@ -41,19 +40,6 @@ hy_message_kind_to_role (HyMessageKind kind)
     case HY_MESSAGE_ERROR:     return "error";
     case HY_MESSAGE_USER:
     default:                   return "user";
-    }
-}
-
-static const char *
-kind_title (HyMessageKind kind)
-{
-  switch (kind)
-    {
-    case HY_MESSAGE_ASSISTANT: return "Assistant";
-    case HY_MESSAGE_TOOL:      return "Tool";
-    case HY_MESSAGE_ERROR:     return "Error";
-    case HY_MESSAGE_USER:
-    default:                   return "You";
     }
 }
 
@@ -92,28 +78,15 @@ hy_message_row_new (HyMessageKind  kind,
 {
   HyMessageRow *self = g_object_new (HY_TYPE_MESSAGE_ROW, NULL);
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
-  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   gboolean bubble = kind_is_bubble (kind);
   const char *css_class;
 
   self->kind = kind;
   self->text = g_string_new (text != NULL ? text : "");
 
-  self->title = GTK_LABEL (gtk_label_new (kind_title (kind)));
-  gtk_label_set_xalign (self->title, 0.0f);
-  gtk_widget_add_css_class (GTK_WIDGET (self->title), "caption-heading");
-  gtk_widget_add_css_class (GTK_WIDGET (self->title), "dim-label");
-
   self->spinner = gtk_spinner_new ();
   gtk_widget_set_visible (self->spinner, FALSE);
-  gtk_widget_set_valign (self->spinner, GTK_ALIGN_CENTER);
-
-  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->title));
-  gtk_box_append (GTK_BOX (header), self->spinner);
-
-  /* A bubble on the right is already unmistakably the user; naming them adds
-   * a line of text per message and says nothing. */
-  gtk_widget_set_visible (header, !bubble);
+  gtk_widget_set_halign (self->spinner, GTK_ALIGN_START);
 
   self->body = GTK_LABEL (gtk_label_new (NULL));
   render_body (self);
@@ -126,7 +99,7 @@ hy_message_row_new (HyMessageKind  kind,
   if (css_class != NULL)
     gtk_widget_add_css_class (GTK_WIDGET (self->body), css_class);
 
-  gtk_box_append (GTK_BOX (card), header);
+  gtk_box_append (GTK_BOX (card), self->spinner);
   gtk_box_append (GTK_BOX (card), GTK_WIDGET (self->body));
 
   gtk_widget_set_margin_top (card, 6);
@@ -149,6 +122,7 @@ hy_message_row_new (HyMessageKind  kind,
       gtk_widget_set_margin_bottom (GTK_WIDGET (self->body), 10);
       gtk_widget_set_margin_start (GTK_WIDGET (self->body), 14);
       gtk_widget_set_margin_end (GTK_WIDGET (self->body), 14);
+      gtk_label_set_xalign (self->body, 0.0f);
     }
   else
     {
@@ -207,14 +181,22 @@ hy_message_row_set_text (HyMessageRow *self,
   gtk_widget_set_visible (GTK_WIDGET (self->body), self->text->len > 0);
 }
 
+/*
+ * Records what produced the message, as a tooltip.
+ *
+ * Which side a message is on already says whether the user or the agent
+ * wrote it, so the model and effort do not need a line of their own. They
+ * still answer a question that comes up after the fact -- which model said
+ * this? -- so they are kept within reach rather than dropped.
+ */
 void
-hy_message_row_set_title (HyMessageRow *self,
-                          const char   *title)
+hy_message_row_set_source (HyMessageRow *self,
+                           const char   *source)
 {
   g_return_if_fail (HY_IS_MESSAGE_ROW (self));
 
-  if (title != NULL)
-    gtk_label_set_label (self->title, title);
+  if (source != NULL && *source != '\0')
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self), source);
 }
 
 const char *
@@ -234,8 +216,8 @@ hy_message_row_set_waiting (HyMessageRow *self,
   gtk_widget_set_visible (self->spinner, waiting);
   gtk_spinner_set_spinning (GTK_SPINNER (self->spinner), waiting);
 
-  /* An empty label collapses to nothing, which makes the card look broken
-   * while waiting; the spinner in the header carries the state instead. */
+  /* An empty label collapses to nothing, which makes the row look broken
+   * while waiting; the spinner carries the state instead. */
   gtk_widget_set_visible (GTK_WIDGET (self->body), self->text->len > 0);
 }
 

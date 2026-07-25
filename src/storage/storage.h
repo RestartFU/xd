@@ -26,6 +26,7 @@ typedef struct
   char *role;         /* "user" | "assistant" | "error" */
   char *content;
   char *raw_json;     /* the backend's own event, when there was one */
+  char *label;        /* who produced it: model and effort, for replies */
   gint64 created_at;
 } HyMessage;
 
@@ -161,6 +162,7 @@ gboolean    hy_storage_append_message  (HyStorage   *self,
                                         const char  *role,
                                         const char  *content,
                                         const char  *raw_json,
+                                        const char  *label,
                                         GError     **error);
 
 /* Oldest first. Elements are HyMessage*. */

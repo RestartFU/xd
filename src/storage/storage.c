@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 7
+#define HY_STORAGE_SCHEMA_VERSION 8
 
 struct _HyStorage
 {
@@ -41,6 +41,7 @@ hy_message_free (HyMessage *self)
   g_free (self->role);
   g_free (self->content);
   g_free (self->raw_json);
+  g_free (self->label);
   g_free (self);
 }
 
@@ -227,6 +228,13 @@ migrate (HyStorage  *self,
       !exec_sql (self,
                  "ALTER TABLE chats ADD COLUMN plan INTEGER NOT NULL DEFAULT 0;",
                  error))
+    return FALSE;
+
+  /* Replies used to be labelled from the chat's current model, so changing
+   * model relabelled everything already said. What produced a message is a
+   * property of the message. */
+  if (version < 8 &&
+      !exec_sql (self, "ALTER TABLE messages ADD COLUMN label TEXT;", error))
     return FALSE;
 
   if (version < 6 &&
@@ -786,6 +794,7 @@ hy_storage_append_message (HyStorage   *self,
                            const char  *role,
                            const char  *content,
                            const char  *raw_json,
+                           const char  *label,
                            GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
@@ -796,8 +805,8 @@ hy_storage_append_message (HyStorage   *self,
   g_return_val_if_fail (role != NULL, FALSE);
 
   if (sqlite3_prepare_v2 (self->db,
-                          "INSERT INTO messages (chat_id, role, content, raw_json, created_at)"
-                          " VALUES (?, ?, ?, ?, ?);",
+                          "INSERT INTO messages (chat_id, role, content, raw_json, created_at, label)"
+                          " VALUES (?, ?, ?, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot store the message");
@@ -809,6 +818,7 @@ hy_storage_append_message (HyStorage   *self,
   bind_text (stmt, 3, content != NULL ? content : "");
   bind_text (stmt, 4, raw_json);
   sqlite3_bind_int64 (stmt, 5, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 6, label);
 
   ok = sqlite3_step (stmt) == SQLITE_DONE;
   if (!ok)
@@ -834,11 +844,12 @@ message_from_row (sqlite3_stmt *stmt)
   message->content    = column_text (stmt, 3);
   message->raw_json   = column_text (stmt, 4);
   message->created_at = sqlite3_column_int64 (stmt, 5);
+  message->label      = column_text (stmt, 6);
 
   return message;
 }
 
-#define MESSAGE_COLUMNS "id, chat_id, role, content, raw_json, created_at"
+#define MESSAGE_COLUMNS "id, chat_id, role, content, raw_json, created_at, label"
 
 GPtrArray *
 hy_storage_list_messages (HyStorage   *self,

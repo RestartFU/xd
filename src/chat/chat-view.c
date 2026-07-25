@@ -24,6 +24,7 @@ typedef struct
   char *chat_id;
   char *backend_id;         /* the backend this turn's session id belongs to */
   char *prompt;             /* kept so a dead session can be retried */
+  char *label;              /* the model and effort this turn actually ran on */
   GString *text;
   HyMessageRow *row;        /* NULL while the chat is not on screen */
   gboolean resumed;
@@ -330,26 +331,17 @@ append_choices (HyChatView  *self,
 static void
 append_reply (HyChatView *self,
               const char *text,
+              const char *source,
               gboolean    answerable)
 {
   g_autoptr (HyAsk) ask = NULL;
-  g_autoptr (HyChat) chat = NULL;
   g_autofree char *prose = NULL;
   HyMessageRow *row;
 
   ask = hy_ask_parse (text, &prose);
 
   row = append_row (self, HY_MESSAGE_ASSISTANT, ask != NULL ? prose : text);
-
-  if (self->chat != NULL)
-    chat = hy_storage_get_chat (self->storage, hy_node_get_chat_id (self->chat), NULL);
-
-  if (chat != NULL)
-    {
-      g_autofree char *title = reply_title (chat);
-
-      hy_message_row_set_title (row, title);
-    }
+  hy_message_row_set_source (row, source);
 
   if (ask != NULL)
     append_choices (self, ask, answerable);
@@ -385,7 +377,8 @@ load_transcript (HyChatView *self)
       const HyMessage *message = g_ptr_array_index (messages, i);
 
       if (g_strcmp0 (message->role, "assistant") == 0)
-        append_reply (self, message->content, i + 1 == messages->len);
+        append_reply (self, message->content, message->label,
+                      i + 1 == messages->len);
       else
         append_row (self, hy_message_kind_from_role (message->role), message->content);
     }
@@ -411,6 +404,7 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->chat_id, g_free);
   g_clear_pointer (&turn->backend_id, g_free);
   g_clear_pointer (&turn->prompt, g_free);
+  g_clear_pointer (&turn->label, g_free);
   g_string_free (turn->text, TRUE);
   g_free (turn);
 }
@@ -522,7 +516,7 @@ on_turn_finished (HyChatSession *session,
   if (turn->text->len > 0)
     {
       if (!hy_storage_append_message (self->storage, chat_id, "assistant",
-                                      turn->text->str, NULL, &error))
+                                      turn->text->str, NULL, turn->label, &error))
         g_warning ("cannot store the reply: %s", error->message);
     }
 
@@ -540,7 +534,7 @@ on_turn_finished (HyChatSession *session,
                            ? message : "The backend stopped unexpectedly.";
 
       if (!hy_storage_append_message (self->storage, chat_id, "error", text,
-                                      NULL, &error))
+                                      NULL, NULL, &error))
         g_warning ("cannot store the error: %s", error->message);
 
       if (visible)
@@ -562,7 +556,7 @@ on_turn_finished (HyChatSession *session,
         {
           gtk_box_remove (self->transcript, GTK_WIDGET (turn->row));
           turn->row = NULL;
-          append_reply (self, turn->text->str, TRUE);
+          append_reply (self, turn->text->str, turn->label, TRUE);
         }
     }
 
@@ -731,12 +725,12 @@ start_turn (HyChatView *self,
   turn->resumed = resume_session_id != NULL;
   turn->text = g_string_new (NULL);
   turn->session = hy_chat_session_new (backend);
+  /* Taken now rather than when the reply lands: the model can be changed
+   * while the agent is still working, and what answered is whatever was
+   * running when the turn started. */
+  turn->label = reply_title (chat);
   turn->row = append_row (self, HY_MESSAGE_ASSISTANT, NULL);
-  {
-    g_autofree char *title = reply_title (chat);
-
-    hy_message_row_set_title (turn->row, title);
-  }
+  hy_message_row_set_source (turn->row, turn->label);
   hy_message_row_set_waiting (turn->row, TRUE);
 
   g_signal_connect (turn->session, "session-started",
@@ -780,7 +774,7 @@ start_turn (HyChatView *self,
     {
       append_row (self, HY_MESSAGE_ERROR, error->message);
       hy_storage_append_message (self->storage, chat->id, "error",
-                                 error->message, NULL, NULL);
+                                 error->message, NULL, NULL, NULL);
       g_hash_table_remove (self->turns, chat->id);
     }
 
@@ -854,7 +848,7 @@ send_message (HyChatView *self,
     return;
 
   if (!hy_storage_append_message (self->storage, hy_node_get_chat_id (self->chat),
-                                  "user", text, NULL, &error))
+                                  "user", text, NULL, NULL, &error))
     {
       append_row (self, HY_MESSAGE_ERROR, error->message);
       return;
@@ -1211,16 +1205,8 @@ hy_chat_view_set_chat (HyChatView *self,
   turn = current_turn (self);
   if (turn != NULL)
     {
-      g_autoptr (HyChat) record =
-        hy_storage_get_chat (self->storage, hy_node_get_chat_id (chat), NULL);
-
       turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->text->str);
-      if (record != NULL)
-        {
-          g_autofree char *title = reply_title (record);
-
-          hy_message_row_set_title (turn->row, title);
-        }
+      hy_message_row_set_source (turn->row, turn->label);
       hy_message_row_set_waiting (turn->row, TRUE);
     }
 
