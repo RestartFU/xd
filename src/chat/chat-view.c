@@ -966,6 +966,11 @@ send_message (HyChatView *self,
 
 /* --- pasted images --------------------------------------------------------- */
 
+/* Big enough to recognise a screenshot, small enough to leave the composer
+ * where it was. */
+#define PREVIEW_HEIGHT 72
+#define PREVIEW_MAX_WIDTH 160
+
 static void
 forget_attachments (HyChatView *self)
 {
@@ -1039,9 +1044,41 @@ add_attachment (HyChatView *self,
       return;
     }
 
-  picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (texture));
-  gtk_widget_set_size_request (picture, -1, 72);
-  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_SCALE_DOWN);
+  /*
+   * A thumbnail, not the image scaled down by the widget.
+   *
+   * GtkPicture asks for the size of what it holds, and a size request is a
+   * minimum rather than a cap, so a screenshot of the screen wants the height
+   * of the screen. Shrinking the pixels themselves is the only thing that
+   * actually makes it small. The file on disk stays full size -- that is what
+   * gets read.
+   */
+  {
+    g_autoptr (GdkPixbuf) full = gdk_pixbuf_get_from_texture (texture);
+    g_autoptr (GdkPixbuf) small = NULL;
+    g_autoptr (GdkTexture) thumbnail = NULL;
+    int width, height;
+    double scale;
+
+    if (full == NULL)
+      return;
+
+    width = gdk_pixbuf_get_width (full);
+    height = gdk_pixbuf_get_height (full);
+
+    scale = MIN ((double) PREVIEW_HEIGHT / height, (double) PREVIEW_MAX_WIDTH / width);
+    scale = MIN (scale, 1.0);
+
+    small = gdk_pixbuf_scale_simple (full, MAX ((int) (width * scale), 1),
+                                     MAX ((int) (height * scale), 1),
+                                     GDK_INTERP_BILINEAR);
+    thumbnail = gdk_texture_new_for_pixbuf (small);
+
+    picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (thumbnail));
+  }
+
+  gtk_widget_set_halign (picture, GTK_ALIGN_START);
+  gtk_widget_set_valign (picture, GTK_ALIGN_START);
   gtk_widget_add_css_class (picture, "card");
 
   remove = gtk_button_new_from_icon_name ("window-close-symbolic");
