@@ -42,6 +42,30 @@ hy_ask_instructions (void)
     "</asking_the_user>";
 }
 
+gsize
+hy_ask_visible_length (const char *text)
+{
+  const char *open;
+  gsize length;
+
+  if (text == NULL)
+    return 0;
+
+  open = strstr (text, ASK_OPEN);
+  if (open != NULL)
+    return open - text;
+
+  /* No complete tag yet. If the tail could still grow into one, hold it. */
+  length = strlen (text);
+  for (gsize back = MIN (strlen (ASK_OPEN) - 1, length); back > 0; back--)
+    {
+      if (strncmp (text + length - back, ASK_OPEN, back) == 0)
+        return length - back;
+    }
+
+  return length;
+}
+
 /* Trims and drops the leading list marker, if any. */
 static char *
 clean_option (const char *line)

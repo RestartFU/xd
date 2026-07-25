@@ -225,7 +225,7 @@ static void
 append_choices (HyChatView *self,
                 const HyAsk *ask)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   GtkWidget *question = gtk_label_new (ask->question);
   GtkWidget *choices = gtk_flow_box_new ();
 
@@ -233,10 +233,12 @@ append_choices (HyChatView *self,
   gtk_label_set_xalign (GTK_LABEL (question), 0.0f);
   gtk_widget_add_css_class (question, "heading");
 
+  /* One per line: the options are sentences, so side by side they would each
+   * be too narrow to read. */
   gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (choices), GTK_SELECTION_NONE);
-  gtk_flow_box_set_column_spacing (GTK_FLOW_BOX (choices), 8);
-  gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (choices), 8);
-  gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (choices), 3);
+  gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (choices), 4);
+  gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (choices), 1);
+  gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (choices), TRUE);
 
   for (gsize i = 0; ask->options[i] != NULL; i++)
     {
@@ -247,18 +249,14 @@ append_choices (HyChatView *self,
                               g_strdup (ask->options[i]), g_free);
       g_signal_connect (button, "clicked", G_CALLBACK (on_choice_clicked), self);
 
-      /* The first option is the assistant's own recommendation. */
-      if (i == 0)
-        gtk_widget_add_css_class (button, "suggested-action");
-
+      /* No option is highlighted: which one is right is the user's call, and
+       * colouring one of them is hy putting a thumb on the scale. */
       gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
     }
 
   gtk_box_append (GTK_BOX (box), question);
   gtk_box_append (GTK_BOX (box), choices);
-  gtk_widget_add_css_class (box, "card");
-  gtk_widget_set_margin_top (box, 6);
-  gtk_widget_set_margin_bottom (box, 6);
+  gtk_widget_set_margin_top (box, 4);
   gtk_widget_set_margin_start (box, 12);
   gtk_widget_set_margin_end (box, 12);
 
@@ -377,7 +375,22 @@ on_text_delta (HyChatSession *session,
 
   if (turn->row != NULL)
     {
-      hy_message_row_append (turn->row, delta);
+      /* Show only what is safe to show: a question block is rendered as
+       * buttons when the turn ends and must not flash past as markup first. */
+      gsize visible = hy_ask_visible_length (turn->text->str);
+
+      if (visible == turn->text->len)
+        {
+          hy_message_row_append (turn->row, delta);
+        }
+      else
+        {
+          g_autofree char *prose = g_strndup (turn->text->str, visible);
+
+          g_strchomp (prose);
+          hy_message_row_set_text (turn->row, prose);
+        }
+
       queue_scroll_to_bottom (turn->view);
     }
 }

@@ -29,6 +29,11 @@ void          hy_message_row_append     (HyMessageRow  *self,
 
 const char   *hy_message_row_get_text   (HyMessageRow  *self);
 
+/* Replaces what the row shows. Streaming rows use this to keep a block the
+ * user should never see out of view while it arrives. */
+void          hy_message_row_set_text   (HyMessageRow  *self,
+                                         const char    *text);
+
 /* Shows a spinner while the row is still waiting for its first token. */
 void          hy_message_row_set_waiting (HyMessageRow *self,
                                           gboolean      waiting);

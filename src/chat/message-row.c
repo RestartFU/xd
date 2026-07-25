@@ -156,6 +156,18 @@ hy_message_row_append (HyMessageRow *self,
   hy_message_row_set_waiting (self, FALSE);
 }
 
+void
+hy_message_row_set_text (HyMessageRow *self,
+                         const char   *text)
+{
+  g_return_if_fail (HY_IS_MESSAGE_ROW (self));
+
+  g_string_assign (self->text, text != NULL ? text : "");
+  render_body (self);
+
+  gtk_widget_set_visible (GTK_WIDGET (self->body), self->text->len > 0);
+}
+
 const char *
 hy_message_row_get_text (HyMessageRow *self)
 {
