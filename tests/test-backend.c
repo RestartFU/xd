@@ -214,11 +214,12 @@ test_unknown_backend (void)
 }
 
 /*
- * Every backend must offer "leave it to the CLI" as its first option, so a
- * chat can decline to pin a model name that will eventually age out.
+ * Every model is named and every backend nominates one for new chats, so a
+ * chat can always say which model answered it. The nominated model has to be
+ * one the backend actually lists, or the picker would open on nothing.
  */
 static void
-test_every_backend_offers_a_default (void)
+test_every_backend_names_its_models (void)
 {
   const AiBackend *const *backends;
   guint n_backends;
@@ -228,13 +229,23 @@ test_every_backend_offers_a_default (void)
 
   for (guint i = 0; i < n_backends; i++)
     {
-      g_assert_cmpuint (backends[i]->n_models, >, 0);
-      g_assert_null (backends[i]->models[0].id);
-      g_assert_nonnull (backends[i]->icon_name);
+      const AiBackend *backend = backends[i];
+      gboolean default_is_listed = FALSE;
 
-      /* Only the first entry may be the default. */
-      for (gsize m = 1; m < backends[i]->n_models; m++)
-        g_assert_nonnull (backends[i]->models[m].id);
+      g_assert_cmpuint (backend->n_models, >, 0);
+      g_assert_nonnull (backend->icon_name);
+      g_assert_nonnull (backend->default_model);
+
+      for (gsize m = 0; m < backend->n_models; m++)
+        {
+          g_assert_nonnull (backend->models[m].id);
+          g_assert_nonnull (backend->models[m].display_name);
+
+          if (g_strcmp0 (backend->models[m].id, backend->default_model) == 0)
+            default_is_listed = TRUE;
+        }
+
+      g_assert_true (default_is_listed);
     }
 }
 
@@ -245,7 +256,9 @@ test_model_labels (void)
 
   g_assert_cmpstr (ai_backend_model_label (claude, "claude-opus-5"), ==,
                    "Claude Opus 5");
-  g_assert_cmpstr (ai_backend_model_label (claude, NULL), ==, "Default");
+  /* Chats created before models were pinned have none stored, and read back
+   * as the backend's own default rather than as a blank. */
+  g_assert_cmpstr (ai_backend_model_label (claude, NULL), ==, "Claude Opus 5");
 
   /* A model set by hand, or one released after this build, still reads back
    * as something rather than blank. */
@@ -282,7 +295,7 @@ main (int   argc,
   g_test_add_func ("/backend/codex/argv", test_codex_argv);
   g_test_add_func ("/backend/garbage", test_garbage_is_survivable);
   g_test_add_func ("/backend/unknown", test_unknown_backend);
-  g_test_add_func ("/backend/models/default", test_every_backend_offers_a_default);
+  g_test_add_func ("/backend/models/named", test_every_backend_names_its_models);
   g_test_add_func ("/backend/models/labels", test_model_labels);
   g_test_add_func ("/backend/models/argv", test_model_reaches_argv);
 

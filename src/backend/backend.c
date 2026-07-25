@@ -38,8 +38,9 @@ ai_backend_model_label (const AiBackend *self,
 {
   g_return_val_if_fail (self != NULL, NULL);
 
+  /* Chats created before models were pinned have none stored. */
   if (model_id == NULL || *model_id == '\0')
-    return self->n_models > 0 ? self->models[0].display_name : "Default";
+    model_id = self->default_model;
 
   for (gsize i = 0; i < self->n_models; i++)
     {

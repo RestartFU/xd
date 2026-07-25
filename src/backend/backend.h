@@ -47,13 +47,9 @@ typedef struct
 typedef struct _AiParser AiParser;
 typedef struct _AiBackend AiBackend;
 
-/*
- * One selectable model.
- *
- * A NULL id means "whatever the CLI is configured to use" -- always the first
- * entry, so a chat can be left alone rather than pinned to a name that will
- * age out.
- */
+/* One selectable model. Every chat names one; there is no "let the CLI
+ * decide", because a chat that does not say which model answers it cannot show
+ * the user which model answered it. */
 typedef struct
 {
   const char *id;
@@ -69,6 +65,7 @@ struct _AiBackend
 
   const AiModel *models;
   gsize n_models;
+  const char *default_model;    /* what a new chat gets */
 
   /* Returns a NULL-terminated argv; the caller owns it. */
   GPtrArray *(*build_argv) (const AiBackend *self,

@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 4
+#define HY_STORAGE_SCHEMA_VERSION 5
 
 struct _HyStorage
 {
@@ -110,11 +110,14 @@ static const char *SCHEMA_SQL =
   ");"
   "CREATE INDEX IF NOT EXISTS chats_folder ON chats (folder_id, updated_at DESC);"
 
-  /* One resumable session per backend: the ids are not interchangeable. */
+  /* One row per backend a chat has used: the resumable session id, which is
+   * not interchangeable between CLIs, and how far through the conversation
+   * that backend has been brought. */
   "CREATE TABLE IF NOT EXISTS chat_sessions ("
-  "  chat_id    TEXT NOT NULL REFERENCES chats (id) ON DELETE CASCADE,"
-  "  backend    TEXT NOT NULL,"
-  "  session_id TEXT NOT NULL,"
+  "  chat_id         TEXT NOT NULL REFERENCES chats (id) ON DELETE CASCADE,"
+  "  backend         TEXT NOT NULL,"
+  "  session_id      TEXT,"
+  "  last_message_id INTEGER NOT NULL DEFAULT 0,"
   "  PRIMARY KEY (chat_id, backend)"
   ");"
 
@@ -200,6 +203,24 @@ migrate (HyStorage  *self,
                  error))
     return FALSE;
 
+  /* v4's chat_sessions had no last_message_id and required session_id;
+   * rebuilding is simpler than trying to relax a column in place. */
+  if (version == 4 &&
+      !exec_sql (self,
+                 "CREATE TABLE chat_sessions_new ("
+                 "  chat_id         TEXT NOT NULL REFERENCES chats (id) ON DELETE CASCADE,"
+                 "  backend         TEXT NOT NULL,"
+                 "  session_id      TEXT,"
+                 "  last_message_id INTEGER NOT NULL DEFAULT 0,"
+                 "  PRIMARY KEY (chat_id, backend)"
+                 ");"
+                 "INSERT OR IGNORE INTO chat_sessions_new (chat_id, backend, session_id)"
+                 "  SELECT chat_id, backend, session_id FROM chat_sessions;"
+                 "DROP TABLE chat_sessions;"
+                 "ALTER TABLE chat_sessions_new RENAME TO chat_sessions;",
+                 error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          HY_STORAGE_SCHEMA_VERSION);
@@ -252,6 +273,7 @@ hy_storage_create_chat (HyStorage   *self,
                         const char  *folder_id,
                         const char  *title,
                         const char  *backend,
+                        const char  *model,
                         const char  *workdir,
                         GError     **error)
 {
@@ -268,8 +290,8 @@ hy_storage_create_chat (HyStorage   *self,
 
   if (sqlite3_prepare_v2 (self->db,
                           "INSERT INTO chats (id, folder_id, title, backend,"
-                          "                   session_id, workdir, created_at, updated_at)"
-                          " VALUES (?, ?, ?, ?, NULL, ?, ?, ?);",
+                          "                   model, workdir, created_at, updated_at)"
+                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot create the chat");
@@ -280,9 +302,10 @@ hy_storage_create_chat (HyStorage   *self,
   bind_text (stmt, 2, folder_id);
   bind_text (stmt, 3, title);
   bind_text (stmt, 4, backend);
-  bind_text (stmt, 5, workdir);
-  sqlite3_bind_int64 (stmt, 6, now);
+  bind_text (stmt, 5, model);
+  bind_text (stmt, 6, workdir);
   sqlite3_bind_int64 (stmt, 7, now);
+  sqlite3_bind_int64 (stmt, 8, now);
 
   if (sqlite3_step (stmt) != SQLITE_DONE)
     {
@@ -464,10 +487,13 @@ hy_storage_set_session_id (HyStorage   *self,
   g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
   g_return_val_if_fail (backend != NULL, FALSE);
 
+  /* A session that cannot be resumed remembers nothing, so forgetting it also
+   * resets how much of the conversation that backend has been told. */
   if (session_id == NULL)
     {
       if (sqlite3_prepare_v2 (self->db,
-                              "DELETE FROM chat_sessions"
+                              "UPDATE chat_sessions"
+                              "   SET session_id = NULL, last_message_id = 0"
                               " WHERE chat_id = ? AND backend = ?;",
                               -1, &stmt, NULL) != SQLITE_OK)
         {
@@ -525,6 +551,95 @@ hy_storage_set_workdir (HyStorage   *self,
                              "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
                              workdir, chat_id, "Cannot change the working directory",
                              error);
+}
+
+gint64
+hy_storage_get_last_seen (HyStorage  *self,
+                          const char *chat_id,
+                          const char *backend)
+{
+  sqlite3_stmt *stmt = NULL;
+  gint64 last_seen = 0;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), 0);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "SELECT last_message_id FROM chat_sessions"
+                          " WHERE chat_id = ? AND backend = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    return 0;
+
+  bind_text (stmt, 1, chat_id);
+  bind_text (stmt, 2, backend);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    last_seen = sqlite3_column_int64 (stmt, 0);
+
+  sqlite3_finalize (stmt);
+
+  return last_seen;
+}
+
+gboolean
+hy_storage_set_last_seen (HyStorage   *self,
+                          const char  *chat_id,
+                          const char  *backend,
+                          gint64       message_id,
+                          GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  /* The row may not exist yet: a backend can be brought up to date before it
+   * has ever reported a session id. */
+  if (sqlite3_prepare_v2 (self->db,
+                          "INSERT INTO chat_sessions (chat_id, backend, last_message_id)"
+                          " VALUES (?, ?, ?)"
+                          " ON CONFLICT (chat_id, backend)"
+                          "   DO UPDATE SET last_message_id = excluded.last_message_id;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot record what the assistant has seen");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  bind_text (stmt, 2, backend);
+  sqlite3_bind_int64 (stmt, 3, message_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot record what the assistant has seen");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
+}
+
+gint64
+hy_storage_last_message_id (HyStorage  *self,
+                            const char *chat_id)
+{
+  sqlite3_stmt *stmt = NULL;
+  gint64 id = 0;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), 0);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    return 0;
+
+  bind_text (stmt, 1, chat_id);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    id = sqlite3_column_int64 (stmt, 0);
+
+  sqlite3_finalize (stmt);
+
+  return id;
 }
 
 gboolean
@@ -667,6 +782,38 @@ hy_storage_list_messages (HyStorage   *self,
     }
 
   bind_text (stmt, 1, chat_id);
+
+  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) hy_message_free);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    g_ptr_array_add (messages, message_from_row (stmt));
+
+  sqlite3_finalize (stmt);
+
+  return messages;
+}
+
+GPtrArray *
+hy_storage_list_messages_since (HyStorage   *self,
+                                const char  *chat_id,
+                                gint64       after_id,
+                                GError     **error)
+{
+  GPtrArray *messages;
+  sqlite3_stmt *stmt = NULL;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "SELECT " MESSAGE_COLUMNS " FROM messages"
+                          " WHERE chat_id = ? AND id > ? ORDER BY id;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot read the conversation");
+      return NULL;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  sqlite3_bind_int64 (stmt, 2, after_id);
 
   messages = g_ptr_array_new_with_free_func ((GDestroyNotify) hy_message_free);
   while (sqlite3_step (stmt) == SQLITE_ROW)

@@ -50,6 +50,7 @@ char       *hy_storage_create_chat     (HyStorage   *self,
                                         const char  *folder_id,
                                         const char  *title,
                                         const char  *backend,
+                                        const char  *model,
                                         const char  *workdir,
                                         GError     **error);
 
@@ -89,12 +90,41 @@ char       *hy_storage_get_session_id  (HyStorage   *self,
                                         const char  *backend,
                                         GError     **error);
 
-/* @session_id may be NULL to forget a session that no longer resumes. */
+/* @session_id may be NULL to forget a session that no longer resumes; doing so
+ * also resets how much of the conversation that backend is known to have seen,
+ * because a session it cannot resume is a session that remembers nothing. */
 gboolean    hy_storage_set_session_id  (HyStorage   *self,
                                         const char  *chat_id,
                                         const char  *backend,
                                         const char  *session_id,
                                         GError     **error);
+
+/*
+ * How far through the conversation a backend has been brought.
+ *
+ * Resuming a session only restores what *that* assistant was told. Anything
+ * said to the other one in between is missing from it, so hy records the last
+ * message each backend has seen and replays whatever came after.
+ */
+gint64      hy_storage_get_last_seen   (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *backend);
+
+gboolean    hy_storage_set_last_seen   (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *backend,
+                                        gint64       message_id,
+                                        GError     **error);
+
+/* Highest message id in a chat; 0 when it has none. */
+gint64      hy_storage_last_message_id (HyStorage   *self,
+                                        const char  *chat_id);
+
+/* Messages with an id above @after_id, oldest first. Elements are HyMessage*. */
+GPtrArray  *hy_storage_list_messages_since (HyStorage   *self,
+                                            const char  *chat_id,
+                                            gint64       after_id,
+                                            GError     **error);
 
 gboolean    hy_storage_set_backend     (HyStorage   *self,
                                         const char  *chat_id,

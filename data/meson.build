@@ -25,7 +25,12 @@ install_data(
   [
     'icons/hicolor/scalable/apps/com.restartfu.Hy.svg',
     'icons/hicolor/scalable/apps/hy-backend-claude.svg',
-    'icons/hicolor/scalable/apps/hy-backend-codex.svg',
   ],
   install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps',
+)
+
+# The OpenAI mark is monochrome, so it ships symbolic and GTK paints it in the
+# theme's foreground colour instead of it vanishing in light or dark.
+install_data('icons/hicolor/symbolic/apps/hy-backend-codex-symbolic.svg',
+  install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'symbolic' / 'apps',
 )

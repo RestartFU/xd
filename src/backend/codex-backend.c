@@ -144,12 +144,10 @@ codex_parse_object (AiParser    *parser,
 
 /*
  * Codex exposes no way to list its models, so these are the ones seen in the
- * local Codex configuration and session history. "Default" leaves the choice
- * to ~/.codex/config.toml, which is the honest option when the list here
- * cannot be authoritative.
+ * local Codex configuration and session history. The first entry is what new
+ * chats get, so the newest model leads.
  */
 static const AiModel codex_models[] = {
-  { NULL,                  "Default" },
   { "gpt-5.6-sol",         "GPT-5.6 Sol" },
   { "gpt-5.6-luna",        "GPT-5.6 Luna" },
   { "gpt-5.6-terra",       "GPT-5.6 Terra" },
@@ -161,7 +159,8 @@ const AiBackend hy_codex_backend = {
   .id = "codex",
   .display_name = "Codex",
   .program = "codex",
-  .icon_name = "hy-backend-codex",
+  .icon_name = "hy-backend-codex-symbolic",
+  .default_model = "gpt-5.6-sol",
   .models = codex_models,
   .n_models = G_N_ELEMENTS (codex_models),
   .build_argv = codex_build_argv,

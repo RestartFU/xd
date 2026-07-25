@@ -58,12 +58,12 @@ test_create_and_list (Fixture       *fixture,
   const HyChat *chat;
 
   first = hy_storage_create_chat (fixture->storage, "folder-a", "Rate limiting",
-                                  "claude", NULL, &error);
+                                  "claude", NULL, NULL, &error);
   g_assert_no_error (error);
   g_assert_nonnull (first);
 
   second = hy_storage_create_chat (fixture->storage, "folder-b", "Elsewhere",
-                                   "codex", NULL, &error);
+                                   "codex", NULL, NULL, &error);
   g_assert_no_error (error);
 
   chats = hy_storage_list_chats (fixture->storage, "folder-a", &error);
@@ -87,7 +87,7 @@ test_chats_follow_folder_id (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "stable-uuid", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   g_assert_no_error (error);
 
   chats = hy_storage_list_chats (fixture->storage, "stable-uuid", &error);
@@ -105,7 +105,7 @@ test_messages_round_trip (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
@@ -145,7 +145,7 @@ test_sessions_are_per_backend (Fixture       *fixture,
   g_autofree char *missing = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
@@ -179,7 +179,7 @@ test_forgetting_one_session (Fixture       *fixture,
   g_autofree char *codex_session = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   hy_storage_set_session_id (fixture->storage, chat_id, "claude", "sess-a", &error);
   hy_storage_set_session_id (fixture->storage, chat_id, "codex", "sess-b", &error);
   g_assert_no_error (error);
@@ -196,6 +196,76 @@ test_forgetting_one_session (Fixture       *fixture,
   g_assert_cmpstr (codex_session, ==, "sess-b");
 }
 
+/*
+ * Resuming a session restores only what that assistant was sent. Anything
+ * said to the other one in between has to be replayed, so each backend tracks
+ * how far through the conversation it has been brought.
+ */
+static void
+test_each_backend_tracks_what_it_has_seen (Fixture       *fixture,
+                                           gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) unseen = NULL;
+  g_autofree char *chat_id = NULL;
+  gint64 after_claude;
+
+  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, &error);
+
+  /* Claude answers the first exchange. */
+  hy_storage_append_message (fixture->storage, chat_id, "user", "who are you", NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Claude here", NULL, &error);
+  g_assert_no_error (error);
+
+  after_claude = hy_storage_last_message_id (fixture->storage, chat_id);
+  g_assert_true (hy_storage_set_last_seen (fixture->storage, chat_id, "claude",
+                                           after_claude, &error));
+
+  /* Then the user switches to Codex for a turn. */
+  hy_storage_append_message (fixture->storage, chat_id, "user", "and you?", NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Codex here", NULL, &error);
+  g_assert_no_error (error);
+
+  /* Claude has never been told about that exchange. */
+  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"),
+                   ==, after_claude);
+  unseen = hy_storage_list_messages_since (fixture->storage, chat_id,
+                                           after_claude, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (unseen->len, ==, 2);
+  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (unseen, 1))->content, ==,
+                   "Codex here");
+
+  /* Codex, which has answered but never been given a starting point, is owed
+   * the whole conversation. */
+  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "codex"), ==, 0);
+}
+
+/* A session that cannot be resumed remembers nothing, so forgetting it must
+ * also reset what that backend is assumed to have seen. */
+static void
+test_forgetting_a_session_replays_everything (Fixture       *fixture,
+                                              gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+
+  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, &error);
+  hy_storage_append_message (fixture->storage, chat_id, "user", "hello", NULL, &error);
+  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "sess", &error);
+  hy_storage_set_last_seen (fixture->storage, chat_id, "claude",
+                            hy_storage_last_message_id (fixture->storage, chat_id),
+                            &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"), >, 0);
+
+  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id, "claude",
+                                            NULL, &error));
+  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"), ==, 0);
+}
+
 /* Re-reporting overwrites rather than accumulating: the CLI hands back an id
  * on every turn, and only the latest one resumes. */
 static void
@@ -207,7 +277,7 @@ test_session_id_is_replaced (Fixture       *fixture,
   g_autofree char *session = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   hy_storage_set_session_id (fixture->storage, chat_id, "claude", "first", &error);
   hy_storage_set_session_id (fixture->storage, chat_id, "claude", "second", &error);
   g_assert_no_error (error);
@@ -225,7 +295,7 @@ test_deleting_a_chat_takes_its_messages (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
@@ -247,7 +317,7 @@ test_search_finds_messages (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   g_assert_no_error (error);
 
   hy_storage_append_message (fixture->storage, chat_id, "user",
@@ -282,7 +352,7 @@ test_reopening_keeps_data (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", NULL, &error);
+                                    "claude", NULL, NULL, &error);
   hy_storage_append_message (fixture->storage, chat_id, "user", "persist me",
                              NULL, &error);
   g_assert_no_error (error);
@@ -317,6 +387,8 @@ main (int   argc,
   ADD ("/storage/sessions-per-backend", test_sessions_are_per_backend);
   ADD ("/storage/forget-one-session", test_forgetting_one_session);
   ADD ("/storage/session-id-replaced", test_session_id_is_replaced);
+  ADD ("/storage/tracks-what-was-seen", test_each_backend_tracks_what_it_has_seen);
+  ADD ("/storage/forgetting-replays", test_forgetting_a_session_replays_everything);
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);

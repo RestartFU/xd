@@ -53,6 +53,7 @@ HyNode      *hy_fs_tree_create_chat    (HyFsTree    *self,
                                         HyNode      *folder,
                                         const char  *title,
                                         const char  *backend,
+                                        const char  *model,
                                         const char  *workdir,
                                         GError     **error);
 

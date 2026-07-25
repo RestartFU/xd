@@ -260,6 +260,14 @@ on_turn_finished (HyChatSession *session,
         g_warning ("cannot store the reply: %s", error->message);
     }
 
+  /* This backend has now been told everything up to and including its own
+   * reply, so the next turn only has to replay what comes after. */
+  if (success &&
+      !hy_storage_set_last_seen (self->storage, chat_id, turn->backend_id,
+                                 hy_storage_last_message_id (self->storage, chat_id),
+                                 &error))
+    g_warning ("cannot record what the assistant has seen: %s", error->message);
+
   if (!success)
     {
       const char *text = message != NULL && *message != '\0'
@@ -334,24 +342,26 @@ workdir_for (const HyChat              *chat,
 #define HANDOVER_LIMIT_BYTES 12000
 
 /*
- * Retells the conversation so far.
+ * Retells whatever this backend has not been told.
  *
- * A session id cannot cross from one CLI to the other, so switching
- * assistants mid-chat would otherwise drop everything said before. Replaying
- * the transcript is what makes the new assistant pick up where the old one
- * left off. The message being sent right now is already stored, so the last
- * entry is skipped.
+ * Resuming a session restores only what *that* assistant was sent, so
+ * anything said to the other one in between is missing from it. Replaying
+ * those messages is what keeps one conversation coherent across two CLIs --
+ * and it matters on every turn, not only the first after a switch. The
+ * message being sent right now is already stored, so the last entry is
+ * skipped; it travels as the prompt.
  */
 static char *
 build_handover (HyChatView *self,
-                const char *chat_id)
+                const char *chat_id,
+                gint64      last_seen)
 {
   g_autoptr (GPtrArray) messages = NULL;
   g_autoptr (GString) text = NULL;
   gsize budget = 0;
   guint first;
 
-  messages = hy_storage_list_messages (self->storage, chat_id, NULL);
+  messages = hy_storage_list_messages_since (self->storage, chat_id, last_seen, NULL);
   if (messages == NULL || messages->len < 2)
     return NULL;
 
@@ -365,8 +375,10 @@ build_handover (HyChatView *self,
         break;
     }
 
-  text = g_string_new ("[Earlier in this conversation, which was handled by a "
-                       "different assistant. Continue from it -- do not greet "
+  text = g_string_new ("[Part of this conversation happened with a different "
+                       "assistant, so you have not seen it. It is reproduced "
+                       "below verbatim. Treat it as part of the conversation "
+                       "you are already in: continue from it, and do not greet "
                        "the user again or re-introduce yourself.]\n\n");
 
   for (guint i = first; i + 1 < messages->len; i++)
@@ -425,10 +437,11 @@ start_turn (HyChatView *self,
   resume_session_id = hy_storage_get_session_id (self->storage, chat->id,
                                                  backend->id, NULL);
 
-  /* No session with this assistant yet -- either the chat is new, or it has
-   * been talking to the other one. Bring it up to speed. */
-  if (resume_session_id == NULL)
-    handover = build_handover (self, chat->id);
+  /* Whatever this backend has not been told -- because the chat is new, or
+   * because those turns went to the other assistant. */
+  handover = build_handover (self, chat->id,
+                             hy_storage_get_last_seen (self->storage, chat->id,
+                                                       backend->id));
 
   full_prompt = handover != NULL ? g_strdup_printf ("%s\n\n%s", handover, prompt)
                                  : g_strdup (prompt);

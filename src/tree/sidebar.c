@@ -1,5 +1,6 @@
 #include "sidebar.h"
 
+#include "backend/backend.h"
 #include "settings/folder-settings-dialog.h"
 #include "settings/settings-resolver.h"
 
@@ -307,6 +308,7 @@ on_new_chat_response (GObject      *source,
   NewChatPrompt *prompt = user_data;
   g_autoptr (GError) error = NULL;
   g_autofree char *backend = NULL;
+  g_autofree char *model = NULL;
   const char *response;
   const char *title;
   HyNode *chat;
@@ -330,12 +332,21 @@ on_new_chat_response (GObject      *source,
       g_settings_get_string (prompt->self->settings, "default-backend");
     g_autoptr (HyEffectiveSettings) resolved =
       hy_settings_resolve (prompt->folder, fallback);
+    const AiBackend *definition;
 
     backend = g_strdup (resolved->backend);
+
+    /* Every chat names a model, so it can always say which one answered. The
+     * folder chain gets to pick; failing that, the backend's newest. */
+    definition = ai_backend_lookup (backend);
+    if (resolved->model != NULL)
+      model = g_strdup (resolved->model);
+    else if (definition != NULL)
+      model = g_strdup (definition->default_model);
   }
 
   chat = hy_fs_tree_create_chat (prompt->self->tree, prompt->folder, title,
-                                 backend, prompt->workdir, &error);
+                                 backend, model, prompt->workdir, &error);
   if (chat == NULL)
     show_error (prompt->self, "Could not start the chat", error);
   else
