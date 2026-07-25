@@ -59,6 +59,18 @@
       <summary>Window maximized state</summary>
     </key>
 
+    <key name="terminal-visible" type="b">
+      <default>false</default>
+      <summary>Terminal panel shown</summary>
+      <description>Whether the shell panel is open under the conversation.</description>
+    </key>
+
+    <key name="terminal-height" type="i">
+      <default>260</default>
+      <summary>Height of the terminal panel</summary>
+      <description>How tall the shell panel was left, in pixels.</description>
+    </key>
+
     <key name="sidebar-width" type="i">
       <default>280</default>
       <summary>Sidebar width</summary>

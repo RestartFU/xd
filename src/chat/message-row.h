@@ -18,8 +18,9 @@ G_DECLARE_FINAL_TYPE (HyMessageRow, hy_message_row, HY, MESSAGE_ROW, AdwBin)
 /*
  * One message in the transcript.
  *
- * Assistant rows are created empty and grown by hy_message_row_append() as the
- * backend streams, so the text appears as it arrives.
+ * Assistant rows are created empty, hold a spinner while the backend is
+ * talking, and are given their text by hy_message_row_set_text() once the
+ * message is complete.
  */
 HyMessageRow *hy_message_row_new        (HyMessageKind  kind,
                                          const char    *text);
@@ -29,8 +30,7 @@ void          hy_message_row_append     (HyMessageRow  *self,
 
 const char   *hy_message_row_get_text   (HyMessageRow  *self);
 
-/* Replaces what the row shows. Streaming rows use this to keep a block the
- * user should never see out of view while it arrives. */
+/* Replaces what the row shows. */
 void          hy_message_row_set_text   (HyMessageRow  *self,
                                          const char    *text);
 

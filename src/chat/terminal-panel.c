@@ -111,6 +111,20 @@ hy_terminal_panel_set_workdir (HyTerminalPanel *self,
 
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
+
+  /* The panel may have been waiting for this: it is opened before any chat is
+   * chosen when its state is restored at startup. */
+  if (gtk_widget_get_visible (GTK_WIDGET (self)))
+    hy_terminal_panel_start (self);
+}
+
+void
+hy_terminal_panel_start (HyTerminalPanel *self)
+{
+  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+
+  if (!self->running && self->workdir != NULL)
+    spawn_shell (self);
 }
 
 void
@@ -118,9 +132,7 @@ hy_terminal_panel_activate (HyTerminalPanel *self)
 {
   g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
 
-  if (!self->running)
-    spawn_shell (self);
-
+  hy_terminal_panel_start (self);
   gtk_widget_grab_focus (GTK_WIDGET (self->terminal));
 }
 

@@ -42,29 +42,7 @@ hy_ask_instructions (void)
     "</asking_the_user>";
 }
 
-gsize
-hy_ask_visible_length (const char *text)
-{
-  const char *open;
-  gsize length;
 
-  if (text == NULL)
-    return 0;
-
-  open = strstr (text, ASK_OPEN);
-  if (open != NULL)
-    return open - text;
-
-  /* No complete tag yet. If the tail could still grow into one, hold it. */
-  length = strlen (text);
-  for (gsize back = MIN (strlen (ASK_OPEN) - 1, length); back > 0; back--)
-    {
-      if (strncmp (text + length - back, ASK_OPEN, back) == 0)
-        return length - back;
-    }
-
-  return length;
-}
 
 /* Trims and drops the leading list marker, if any. */
 static char *
@@ -87,27 +65,18 @@ clean_option (const char *line)
   }
 }
 
-HyAsk *
-hy_ask_parse (const char  *text,
-              char       **remainder)
+/* Reads the block starting at @open, or NULL if what is there is not one. */
+static HyAsk *
+parse_at (const char  *text,
+          const char  *open,
+          char       **remainder)
 {
   g_autoptr (GPtrArray) options = NULL;
   g_auto (GStrv) lines = NULL;
   g_autofree char *body = NULL;
   g_autofree char *question = NULL;
-  const char *open;
   const char *close;
   HyAsk *ask;
-
-  if (remainder != NULL)
-    *remainder = NULL;
-
-  if (text == NULL)
-    return NULL;
-
-  open = strstr (text, ASK_OPEN);
-  if (open == NULL)
-    return NULL;
 
   close = strstr (open, ASK_CLOSE);
   if (close == NULL)
@@ -169,4 +138,116 @@ hy_ask_parse (const char  *text,
   ask->options = (GStrv) g_ptr_array_free (g_steal_pointer (&options), FALSE);
 
   return ask;
+}
+
+/*
+ * The block the assistant meant, read from the end backwards.
+ *
+ * Taking the first "<ask>" in the text loses to a reply that talks about the
+ * format before using it -- "the response should have been wrapped in
+ * <ask>...</ask>" parses as a block with no options, and the real one further
+ * down is never reached. The last block that actually holds options is the
+ * question being asked; anything earlier is prose that mentions the tag.
+ */
+static const char *
+find_block (const char  *text,
+            HyAsk      **out,
+            char       **remainder)
+{
+  const char *found = NULL;
+  HyAsk *ask = NULL;
+
+  for (const char *open = strstr (text, ASK_OPEN);
+       open != NULL;
+       open = strstr (open + 1, ASK_OPEN))
+    {
+      HyAsk *candidate = parse_at (text, open, NULL);
+
+      if (candidate != NULL)
+        {
+          g_clear_pointer (&ask, hy_ask_free);
+          ask = candidate;
+          found = open;
+        }
+    }
+
+  if (found != NULL && remainder != NULL)
+    {
+      g_clear_pointer (&ask, hy_ask_free);
+      ask = parse_at (text, found, remainder);
+    }
+
+  if (out != NULL)
+    *out = ask;
+  else
+    g_clear_pointer (&ask, hy_ask_free);
+
+  return found;
+}
+
+HyAsk *
+hy_ask_parse (const char  *text,
+              char       **remainder)
+{
+  HyAsk *ask = NULL;
+
+  if (remainder != NULL)
+    *remainder = NULL;
+
+  if (text == NULL)
+    return NULL;
+
+  find_block (text, &ask, remainder);
+
+  return ask;
+}
+
+/*
+ * How much of @text can be shown while it is still arriving.
+ *
+ * The block itself is held back: it becomes buttons once the turn ends, and
+ * must not flash past as raw tags first. Only the block that will actually
+ * become buttons is hidden -- prose that happens to mention the tag stays
+ * visible, since nothing is going to replace it.
+ */
+gsize
+hy_ask_visible_length (const char *text)
+{
+  const char *block;
+  const char *tail;
+  gsize length;
+
+  if (text == NULL)
+    return 0;
+
+  block = find_block (text, NULL, NULL);
+  if (block != NULL)
+    return block - text;
+
+  /* A block that has opened but not closed yet is on its way to becoming
+   * one, so it is held back too. */
+  tail = NULL;
+  for (const char *open = strstr (text, ASK_OPEN);
+       open != NULL;
+       open = strstr (open + 1, ASK_OPEN))
+    {
+      if (strstr (open, ASK_CLOSE) == NULL)
+        {
+          tail = open;
+          break;
+        }
+    }
+
+  if (tail != NULL)
+    return tail - text;
+
+  /* No complete tag yet. If the tail could still grow into one, hold it. */
+  length = strlen (text);
+  for (gsize back = MIN (strlen (ASK_OPEN) - 1, length); back > 0; back--)
+    {
+      if (strncmp (text + length - back, ASK_OPEN, back) == 0)
+        return length - back;
+    }
+
+  return length;
 }

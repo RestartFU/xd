@@ -1,5 +1,7 @@
 #include "util/ask-block.h"
 
+#include <string.h>
+
 /* The happy path: a question and its options come out, and the markup that
  * carried them never reaches the transcript. */
 static void
@@ -94,6 +96,43 @@ test_hides_the_block_while_it_streams (void)
   g_assert_cmpuint (hy_ask_visible_length (NULL), ==, 0);
 }
 
+/*
+ * A reply that talks about the format before using it.
+ *
+ * Codex answered "the prior response should have been wrapped in the required
+ * <ask>...</ask> format", then asked properly underneath. Reading the first
+ * "<ask>" found the sentence, which has no options, and the real question was
+ * shown as raw tags.
+ */
+static void
+test_ignores_the_tag_mentioned_in_prose (void)
+{
+  g_autofree char *remainder = NULL;
+  g_autoptr (HyAsk) ask = NULL;
+  const char *text =
+    "You're right -- the prior response should have been wrapped in the "
+    "required <ask>...</ask> format and I missed that.\n\n"
+    "<ask>\n"
+    "Which approach should I take?\n"
+    "- Audit the repo first\n"
+    "- Clean up one parser file\n"
+    "</ask>";
+
+  ask = hy_ask_parse (text, &remainder);
+
+  g_assert_nonnull (ask);
+  g_assert_cmpstr (ask->question, ==, "Which approach should I take?");
+  g_assert_cmpuint (g_strv_length (ask->options), ==, 2);
+  g_assert_cmpstr (ask->options[0], ==, "Audit the repo first");
+
+  /* The sentence that mentions the tag is prose, and stays. */
+  g_assert_nonnull (strstr (remainder, "required <ask>...</ask> format"));
+
+  /* It also stays visible while the reply is still arriving. */
+  g_assert_cmpuint (hy_ask_visible_length (text), ==,
+                    (gsize) (strstr (text, "\n\n<ask>") + 2 - text));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -105,6 +144,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/ask/plain-text", test_plain_text_is_left_alone);
   g_test_add_func ("/ask/both-sides", test_keeps_text_on_both_sides);
   g_test_add_func ("/ask/hidden-while-streaming", test_hides_the_block_while_it_streams);
+  g_test_add_func ("/ask/tag-in-prose", test_ignores_the_tag_mentioned_in_prose);
 
   return g_test_run ();
 }

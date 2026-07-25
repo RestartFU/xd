@@ -20,6 +20,16 @@ HyTerminalPanel *hy_terminal_panel_new         (void);
 void             hy_terminal_panel_set_workdir (HyTerminalPanel *self,
                                                 const char      *workdir);
 
+/*
+ * Starts the shell if none is running.
+ *
+ * Separate from taking the keyboard so a panel restored at startup can come
+ * back with its shell running without stealing focus from the composer. Does
+ * nothing until a working directory is known, so the shell never starts in
+ * whichever directory hy happened to be launched from.
+ */
+void             hy_terminal_panel_start       (HyTerminalPanel *self);
+
 /* Starts the shell if none is running, and takes the keyboard. */
 void             hy_terminal_panel_activate    (HyTerminalPanel *self);
 

@@ -27,6 +27,7 @@ typedef struct
   char *label;              /* the model and effort this turn actually ran on */
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
+  GPtrArray *said;          /* finished messages, held until the turn ends */
   HyMessageRow *row;        /* NULL until the segment has somewhere to go */
   gboolean resumed;
   gboolean is_retry;
@@ -58,6 +59,7 @@ struct _HyChatView
   GtkToggleButton *terminal_button;
   HyTerminalPanel *terminal;
   GtkPaned *split;
+  GSettings *settings;
 
   /* Set while the choosers are filled in from the chat, so the resulting
    * notify does not read back as the user picking something. */
@@ -408,6 +410,7 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->label, g_free);
   g_string_free (turn->text, TRUE);
   g_string_free (turn->segment, TRUE);
+  g_clear_pointer (&turn->said, g_ptr_array_unref);
   g_free (turn);
 }
 
@@ -445,32 +448,20 @@ on_text_delta (HyChatSession *session,
   g_string_append (turn->text, delta);
   g_string_append (turn->segment, delta);
 
-  /* The previous segment ended at a tool call, so this text needs a row of
-   * its own -- below the tools, where it was said. */
+  /*
+   * The text is not shown as it arrives.
+   *
+   * A message half-written reflows on every token, and Markdown read
+   * character by character renders as its own source until the syntax closes.
+   * The row holds a spinner until the message is what it is going to be. The
+   * previous one ended at a tool call, so this needs a row of its own --
+   * below the tools, where it was said.
+   */
   if (turn->row == NULL && turn_is_visible (turn))
     {
       turn->row = append_row (turn->view, HY_MESSAGE_ASSISTANT, NULL);
       hy_message_row_set_source (turn->row, turn->label);
-    }
-
-  if (turn->row != NULL)
-    {
-      /* Show only what is safe to show: a question block is rendered as
-       * buttons when the turn ends and must not flash past as markup first. */
-      gsize visible = hy_ask_visible_length (turn->segment->str);
-
-      if (visible == turn->segment->len)
-        {
-          hy_message_row_append (turn->row, delta);
-        }
-      else
-        {
-          g_autofree char *prose = g_strndup (turn->segment->str, visible);
-
-          g_strchomp (prose);
-          hy_message_row_set_text (turn->row, prose);
-        }
-
+      hy_message_row_set_waiting (turn->row, TRUE);
       queue_scroll_to_bottom (turn->view);
     }
 }
@@ -487,20 +478,45 @@ on_text_delta (HyChatSession *session,
 static void
 close_segment (Turn *turn)
 {
-  g_autoptr (GError) error = NULL;
-
   if (turn->segment->len == 0)
     return;
 
-  if (!hy_storage_append_message (turn->view->storage, turn->chat_id, "assistant",
-                                  turn->segment->str, NULL, turn->label, &error))
-    g_warning ("cannot store the reply: %s", error->message);
+  /* Held rather than written: a message is worth storing once it is what it
+   * is going to be, and the turn is still running. */
+  g_ptr_array_add (turn->said, g_strdup (turn->segment->str));
 
   if (turn->row != NULL)
-    hy_message_row_set_waiting (turn->row, FALSE);
+    {
+      /* Show only what is safe to show: a question block becomes buttons when
+       * the turn ends and must not appear as markup first. */
+      gsize visible = hy_ask_visible_length (turn->segment->str);
+      g_autofree char *prose = g_strndup (turn->segment->str, visible);
+
+      g_strchomp (prose);
+      hy_message_row_set_text (turn->row, prose);
+      hy_message_row_set_waiting (turn->row, FALSE);
+      queue_scroll_to_bottom (turn->view);
+    }
 
   g_string_truncate (turn->segment, 0);
   turn->row = NULL;
+}
+
+/* Writes what the turn said, in the order it said it. */
+static void
+store_what_was_said (Turn *turn)
+{
+  for (guint i = 0; i < turn->said->len; i++)
+    {
+      g_autoptr (GError) error = NULL;
+
+      if (!hy_storage_append_message (turn->view->storage, turn->chat_id,
+                                      "assistant", g_ptr_array_index (turn->said, i),
+                                      NULL, turn->label, &error))
+        g_warning ("cannot store the reply: %s", error->message);
+    }
+
+  g_ptr_array_set_size (turn->said, 0);
 }
 
 static void
@@ -555,27 +571,6 @@ on_turn_finished (HyChatSession *session,
     }
 
 
-  /* This backend has now been told everything up to and including its own
-   * reply, so the next turn only has to replay what comes after. */
-  if (success &&
-      !hy_storage_set_last_seen (self->storage, chat_id, turn->backend_id,
-                                 hy_storage_last_message_id (self->storage, chat_id),
-                                 &error))
-    g_warning ("cannot record what the assistant has seen: %s", error->message);
-
-  if (!success)
-    {
-      const char *text = message != NULL && *message != '\0'
-                           ? message : "The backend stopped unexpectedly.";
-
-      if (!hy_storage_append_message (self->storage, chat_id, "error", text,
-                                      NULL, NULL, &error))
-        g_warning ("cannot store the error: %s", error->message);
-
-      if (visible)
-        append_row (self, HY_MESSAGE_ERROR, text);
-    }
-
   if (turn->row != NULL)
     {
       g_autoptr (HyAsk) ask = hy_ask_parse (turn->segment->str, NULL);
@@ -598,8 +593,32 @@ on_turn_finished (HyChatSession *session,
     }
 
   /* Whatever was still being written when the turn ended is a message like
-   * any other. */
+   * any other. Only now, with all of them final, do they reach the database.
+   */
   close_segment (turn);
+  store_what_was_said (turn);
+
+  /* This backend has now been told everything up to and including its own
+   * reply, so the next turn only has to replay what comes after. Read after
+   * the reply is stored, or it would not count. */
+  if (success &&
+      !hy_storage_set_last_seen (self->storage, chat_id, turn->backend_id,
+                                 hy_storage_last_message_id (self->storage, chat_id),
+                                 &error))
+    g_warning ("cannot record what the assistant has seen: %s", error->message);
+
+  if (!success)
+    {
+      const char *text = message != NULL && *message != '\0'
+                           ? message : "The backend stopped unexpectedly.";
+
+      if (!hy_storage_append_message (self->storage, chat_id, "error", text,
+                                      NULL, NULL, &error))
+        g_warning ("cannot store the error: %s", error->message);
+
+      if (visible)
+        append_row (self, HY_MESSAGE_ERROR, text);
+    }
 
   /* Frees the turn, so nothing may touch it afterwards. */
   g_hash_table_remove (self->turns, chat_id);
@@ -766,6 +785,7 @@ start_turn (HyChatView *self,
   turn->resumed = resume_session_id != NULL;
   turn->text = g_string_new (NULL);
   turn->segment = g_string_new (NULL);
+  turn->said = g_ptr_array_new_with_free_func (g_free);
   turn->session = hy_chat_session_new (backend);
   /* Taken now rather than when the reply lands: the model can be changed
    * while the agent is still working, and what answered is whatever was
@@ -973,9 +993,33 @@ describe_context (const char *workdir)
   return g_string_free (g_steal_pointer (&text), FALSE);
 }
 
-/* Roughly a third of the window: enough for a build log, little enough that
- * the conversation is still the thing on screen. */
-#define TERMINAL_SHARE 0.66
+/* Used only the first time the panel is opened, before there is a remembered
+ * height: enough for a build log, little enough that the conversation is
+ * still the thing on screen. */
+#define TERMINAL_DEFAULT_HEIGHT 260
+
+/* Puts the divider where it leaves the terminal @height tall. */
+static void
+set_terminal_height (HyChatView *self,
+                     int         height)
+{
+  int available = gtk_widget_get_height (GTK_WIDGET (self->split));
+
+  /* Before the first allocation there is nothing to divide; the position is
+   * set again when the panel is next shown. */
+  if (available <= 0 || height <= 0)
+    return;
+
+  gtk_paned_set_position (self->split, MAX (available - height, 0));
+}
+
+static int
+terminal_height (HyChatView *self)
+{
+  int height = gtk_widget_get_height (GTK_WIDGET (self->terminal));
+
+  return height > 0 ? height : g_settings_get_int (self->settings, "terminal-height");
+}
 
 /*
  * Shows or hides the shell that runs where the agent does.
@@ -992,20 +1036,20 @@ on_terminal_toggled (GtkToggleButton *button,
   HyChatView *self = user_data;
   gboolean shown = gtk_toggle_button_get_active (button);
 
-  gtk_widget_set_visible (GTK_WIDGET (self->terminal), shown);
+  /* Recorded as it changes rather than only on the way out, so a crash or a
+   * kill does not lose it. */
+  g_settings_set_boolean (self->settings, "terminal-visible", shown);
 
   if (!shown)
-    return;
-
-  /* Only once the panel has a height to divide. */
-  if (gtk_paned_get_position (self->split) == 0)
     {
-      int height = gtk_widget_get_height (GTK_WIDGET (self->split));
-
-      if (height > 0)
-        gtk_paned_set_position (self->split, (int) (height * TERMINAL_SHARE));
+      /* Kept before the panel loses its allocation and reports zero. */
+      g_settings_set_int (self->settings, "terminal-height", terminal_height (self));
+      gtk_widget_set_visible (GTK_WIDGET (self->terminal), FALSE);
+      return;
     }
 
+  gtk_widget_set_visible (GTK_WIDGET (self->terminal), TRUE);
+  set_terminal_height (self, g_settings_get_int (self->settings, "terminal-height"));
   hy_terminal_panel_activate (self->terminal);
 }
 
@@ -1443,6 +1487,7 @@ hy_chat_view_dispose (GObject *object)
   HyChatView *self = HY_CHAT_VIEW (object);
 
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  g_clear_object (&self->settings);
   g_clear_object (&self->storage);
   g_clear_object (&self->tree);
 
@@ -1466,6 +1511,7 @@ hy_chat_view_init (HyChatView *self)
   GMenu *menu;
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
+  self->settings = g_settings_new (HY_APP_ID);
 
   self->title = ADW_WINDOW_TITLE (adw_window_title_new ("hy", NULL));
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));
@@ -1523,5 +1569,11 @@ hy_chat_view_init (HyChatView *self)
   gtk_paned_set_shrink_end_child (self->split, FALSE);
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->split));
+
+  /* Reopened as it was left. The toggle does the work, so the height and the
+   * shell start the same way they would on a click -- except that the shell
+   * waits for a chat, since there is no working directory yet. */
+  if (g_settings_get_boolean (self->settings, "terminal-visible"))
+    gtk_toggle_button_set_active (self->terminal_button, TRUE);
   adw_bin_set_child (ADW_BIN (self), toolbar);
 }
