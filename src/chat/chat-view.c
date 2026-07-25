@@ -52,6 +52,8 @@ struct _HyChatView
   GtkTextView *composer;
   GtkButton *send_button;
   GtkWidget *composer_area;
+  GtkWidget *attachments_bar;
+  GPtrArray *attachments;   /* absolute paths of pasted images */
   HyModelPicker *model_picker;
   GtkDropDown *effort_chooser;
   GtkDropDown *access_chooser;
@@ -953,13 +955,172 @@ send_message (HyChatView *self,
   start_turn (self, text);
 }
 
+/* --- pasted images --------------------------------------------------------- */
+
+static void
+forget_attachments (HyChatView *self)
+{
+  g_ptr_array_set_size (self->attachments, 0);
+
+  gtk_widget_set_visible (self->attachments_bar, FALSE);
+
+  for (GtkWidget *child = gtk_widget_get_first_child (self->attachments_bar);
+       child != NULL;
+       child = gtk_widget_get_first_child (self->attachments_bar))
+    gtk_box_remove (GTK_BOX (self->attachments_bar), child);
+}
+
+static void
+on_attachment_removed (GtkButton *button,
+                       gpointer   user_data)
+{
+  HyChatView *self = user_data;
+  GtkWidget *chip = gtk_widget_get_ancestor (GTK_WIDGET (button), GTK_TYPE_OVERLAY);
+  const char *path = g_object_get_data (G_OBJECT (chip), "path");
+
+  for (guint i = 0; i < self->attachments->len; i++)
+    {
+      if (g_strcmp0 (g_ptr_array_index (self->attachments, i), path) == 0)
+        {
+          g_ptr_array_remove_index (self->attachments, i);
+          break;
+        }
+    }
+
+  gtk_box_remove (GTK_BOX (self->attachments_bar), chip);
+
+  if (self->attachments->len == 0)
+    gtk_widget_set_visible (self->attachments_bar, FALSE);
+}
+
+/*
+ * Shows a pasted image before it is sent.
+ *
+ * A thumbnail rather than the filename: the whole point of pasting a
+ * screenshot is that it is quicker than describing it, and a path says
+ * nothing about whether the right thing was captured.
+ */
+static void
+add_attachment (HyChatView *self,
+                GdkTexture *texture)
+{
+  g_autofree char *directory = g_build_filename (g_get_user_cache_dir (), "hy",
+                                                 "pasted", NULL);
+  g_autofree char *name = NULL;
+  g_autofree char *path = NULL;
+  g_autoptr (GError) error = NULL;
+  GtkWidget *chip;
+  GtkWidget *picture;
+  GtkWidget *remove;
+
+  if (g_mkdir_with_parents (directory, 0700) != 0)
+    {
+      append_row (self, HY_MESSAGE_ERROR, "Cannot write the pasted image.");
+      return;
+    }
+
+  /* The CLIs read the image off disk, so it needs a real file with a name
+   * that will not collide with the next paste. */
+  name = g_strdup_printf ("paste-%" G_GINT64_FORMAT ".png", g_get_real_time ());
+  path = g_build_filename (directory, name, NULL);
+
+  if (!gdk_texture_save_to_png (texture, path))
+    {
+      append_row (self, HY_MESSAGE_ERROR, "Cannot write the pasted image.");
+      return;
+    }
+
+  picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (texture));
+  gtk_widget_set_size_request (picture, -1, 72);
+  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_SCALE_DOWN);
+  gtk_widget_add_css_class (picture, "card");
+
+  remove = gtk_button_new_from_icon_name ("window-close-symbolic");
+  gtk_widget_add_css_class (remove, "circular");
+  gtk_widget_set_halign (remove, GTK_ALIGN_END);
+  gtk_widget_set_valign (remove, GTK_ALIGN_START);
+  gtk_widget_set_tooltip_text (remove, "Remove");
+  g_signal_connect (remove, "clicked", G_CALLBACK (on_attachment_removed), self);
+
+  chip = gtk_overlay_new ();
+  gtk_overlay_set_child (GTK_OVERLAY (chip), picture);
+  gtk_overlay_add_overlay (GTK_OVERLAY (chip), remove);
+  g_object_set_data_full (G_OBJECT (chip), "path", g_strdup (path), g_free);
+
+  gtk_box_append (GTK_BOX (self->attachments_bar), chip);
+  gtk_widget_set_visible (self->attachments_bar, TRUE);
+
+  g_ptr_array_add (self->attachments, g_steal_pointer (&path));
+}
+
+static void
+on_texture_pasted (GObject      *source,
+                   GAsyncResult *result,
+                   gpointer      user_data)
+{
+  HyChatView *self = user_data;
+  g_autoptr (GdkTexture) texture = NULL;
+  g_autoptr (GError) error = NULL;
+
+  texture = gdk_clipboard_read_texture_finish (GDK_CLIPBOARD (source), result, &error);
+  if (texture == NULL)
+    {
+      g_debug ("nothing pasteable in the clipboard: %s",
+               error != NULL ? error->message : "no image");
+      return;
+    }
+
+  add_attachment (self, texture);
+}
+
+/* True when the clipboard holds an image, which is pasted as one. */
+static gboolean
+paste_image (HyChatView *self)
+{
+  GdkClipboard *clipboard = gtk_widget_get_clipboard (GTK_WIDGET (self));
+  GdkContentFormats *formats = gdk_clipboard_get_formats (clipboard);
+
+  if (!gdk_content_formats_contain_gtype (formats, GDK_TYPE_TEXTURE))
+    return FALSE;
+
+  gdk_clipboard_read_texture_async (clipboard, NULL, on_texture_pasted, self);
+
+  return TRUE;
+}
+
 static void
 send_current_message (HyChatView *self)
 {
   g_autofree char *text = take_composer_text (self);
+  g_autoptr (GString) message = NULL;
 
-  if (text != NULL)
-    send_message (self, text);
+  if (self->attachments->len == 0)
+    {
+      if (text != NULL)
+        send_message (self, text);
+      return;
+    }
+
+  /*
+   * Images travel as paths.
+   *
+   * Neither CLI takes an image on the command line, but both can read a file
+   * they are told about, so the message names them. They are written where
+   * they will still be there afterwards, since the transcript refers to them.
+   */
+  message = g_string_new (text != NULL ? text : "");
+
+  for (guint i = 0; i < self->attachments->len; i++)
+    {
+      if (message->len > 0)
+        g_string_append (message, "\n");
+
+      g_string_append_printf (message, "[image: %s]",
+                              (const char *) g_ptr_array_index (self->attachments, i));
+    }
+
+  forget_attachments (self);
+  send_message (self, message->str);
 }
 
 static void
@@ -1313,6 +1474,11 @@ on_composer_key (GtkEventControllerKey *controller,
 {
   HyChatView *self = user_data;
 
+  /* An image in the clipboard is pasted as an image; anything else falls
+   * through to the text view's own handling. */
+  if (keyval == GDK_KEY_v && (state & GDK_CONTROL_MASK) && paste_image (self))
+    return GDK_EVENT_STOP;
+
   /* Enter sends, Shift+Enter inserts a newline. */
   if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) &&
       !(state & GDK_SHIFT_MASK))
@@ -1439,6 +1605,12 @@ build_composer (HyChatView *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
                                  GTK_WIDGET (self->composer));
 
+  self->attachments_bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_set_visible (self->attachments_bar, FALSE);
+  gtk_widget_set_margin_top (self->attachments_bar, 8);
+  gtk_widget_set_margin_start (self->attachments_bar, 10);
+  gtk_widget_set_margin_end (self->attachments_bar, 10);
+
   self->model_picker = hy_model_picker_new ();
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->model_picker),
                                "Which assistant and model answer in this chat");
@@ -1556,6 +1728,9 @@ build_composer (HyChatView *self)
   gtk_widget_set_margin_end (toolbar, 6);
   gtk_widget_set_margin_bottom (toolbar, 6);
 
+  /* Above what is being typed, the way an attachment reads: this is going
+   * with the message below it. */
+  gtk_box_append (GTK_BOX (column), self->attachments_bar);
   gtk_box_append (GTK_BOX (column), scroller);
   gtk_box_append (GTK_BOX (column), toolbar);
 
@@ -1574,6 +1749,7 @@ hy_chat_view_dispose (GObject *object)
   HyChatView *self = HY_CHAT_VIEW (object);
 
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  g_clear_pointer (&self->attachments, g_ptr_array_unref);
   g_clear_object (&self->settings);
   g_clear_object (&self->storage);
   g_clear_object (&self->tree);
@@ -1599,6 +1775,7 @@ hy_chat_view_init (HyChatView *self)
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
   self->settings = g_settings_new (HY_APP_ID);
+  self->attachments = g_ptr_array_new_with_free_func (g_free);
 
   self->title = ADW_WINDOW_TITLE (adw_window_title_new ("hy", NULL));
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));
