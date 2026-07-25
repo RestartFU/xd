@@ -21,6 +21,11 @@ if desktop_validate.found()
   test('validate-desktop-file', desktop_validate, args: [desktop_file])
 endif
 
-install_data('icons/hicolor/scalable/apps/com.restartfu.Hy.svg',
+install_data(
+  [
+    'icons/hicolor/scalable/apps/com.restartfu.Hy.svg',
+    'icons/hicolor/scalable/apps/hy-backend-claude.svg',
+    'icons/hicolor/scalable/apps/hy-backend-codex.svg',
+  ],
   install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps',
 )

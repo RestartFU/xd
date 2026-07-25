@@ -142,10 +142,28 @@ codex_parse_object (AiParser    *parser,
   g_debug ("codex: ignoring event %s", type != NULL ? type : "(none)");
 }
 
+/*
+ * Codex exposes no way to list its models, so these are the ones seen in the
+ * local Codex configuration and session history. "Default" leaves the choice
+ * to ~/.codex/config.toml, which is the honest option when the list here
+ * cannot be authoritative.
+ */
+static const AiModel codex_models[] = {
+  { NULL,                  "Default" },
+  { "gpt-5.6-sol",         "GPT-5.6 Sol" },
+  { "gpt-5.6-luna",        "GPT-5.6 Luna" },
+  { "gpt-5.6-terra",       "GPT-5.6 Terra" },
+  { "gpt-5.5",             "GPT-5.5" },
+  { "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark" },
+};
+
 const AiBackend hy_codex_backend = {
   .id = "codex",
   .display_name = "Codex",
   .program = "codex",
+  .icon_name = "hy-backend-codex",
+  .models = codex_models,
+  .n_models = G_N_ELEMENTS (codex_models),
   .build_argv = codex_build_argv,
   .parse_object = codex_parse_object,
 };

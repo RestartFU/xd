@@ -26,6 +26,15 @@
       <description>Backend used when no folder in the chain specifies one.</description>
     </key>
 
+    <key name="favorite-models" type="as">
+      <default>[]</default>
+      <summary>Starred models</summary>
+      <description>
+        Models starred in the picker, as "backend/model" pairs, listed first
+        when choosing which assistant answers.
+      </description>
+    </key>
+
     <key name="expanded-folders" type="as">
       <default>[]</default>
       <summary>Folders left open in the sidebar</summary>

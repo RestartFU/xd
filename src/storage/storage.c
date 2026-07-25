@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 2
+#define HY_STORAGE_SCHEMA_VERSION 3
 
 struct _HyStorage
 {
@@ -26,6 +26,7 @@ hy_chat_free (HyChat *self)
   g_free (self->backend);
   g_free (self->session_id);
   g_free (self->workdir);
+  g_free (self->model);
   g_free (self);
 }
 
@@ -178,6 +179,10 @@ migrate (HyStorage  *self,
       !exec_sql (self, "ALTER TABLE chats ADD COLUMN workdir TEXT;", error))
     return FALSE;
 
+  if (version < 3 &&
+      !exec_sql (self, "ALTER TABLE chats ADD COLUMN model TEXT;", error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          HY_STORAGE_SCHEMA_VERSION);
@@ -285,14 +290,15 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->backend    = column_text (stmt, 3);
   chat->session_id = column_text (stmt, 4);
   chat->workdir    = column_text (stmt, 5);
-  chat->created_at = sqlite3_column_int64 (stmt, 6);
-  chat->updated_at = sqlite3_column_int64 (stmt, 7);
+  chat->model      = column_text (stmt, 6);
+  chat->created_at = sqlite3_column_int64 (stmt, 7);
+  chat->updated_at = sqlite3_column_int64 (stmt, 8);
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
-  "id, folder_id, title, backend, session_id, workdir, created_at, updated_at"
+  "id, folder_id, title, backend, session_id, workdir, model, created_at, updated_at"
 
 HyChat *
 hy_storage_get_chat (HyStorage   *self,
@@ -436,6 +442,19 @@ hy_storage_set_workdir (HyStorage   *self,
                              "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
                              workdir, chat_id, "Cannot change the working directory",
                              error);
+}
+
+gboolean
+hy_storage_set_model (HyStorage   *self,
+                      const char  *chat_id,
+                      const char  *model,
+                      GError     **error)
+{
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  return update_chat_column (self,
+                             "UPDATE chats SET model = ?, updated_at = ? WHERE id = ?;",
+                             model, chat_id, "Cannot change the model", error);
 }
 
 gboolean

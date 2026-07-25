@@ -33,6 +33,25 @@ ai_backend_all (guint *n_backends)
 }
 
 const char *
+ai_backend_model_label (const AiBackend *self,
+                        const char      *model_id)
+{
+  g_return_val_if_fail (self != NULL, NULL);
+
+  if (model_id == NULL || *model_id == '\0')
+    return self->n_models > 0 ? self->models[0].display_name : "Default";
+
+  for (gsize i = 0; i < self->n_models; i++)
+    {
+      if (g_strcmp0 (self->models[i].id, model_id) == 0)
+        return self->models[i].display_name;
+    }
+
+  /* A model set by hand, or one that shipped after this build. */
+  return model_id;
+}
+
+const char *
 ai_json_get_string (JsonObject *object,
                     const char *member)
 {

@@ -38,6 +38,7 @@ hy_sources = files(
   'tree/fs-tree.c',
   'tree/sidebar.c',
   'settings/folder-settings-dialog.c',
+  'chat/model-picker.c',
   'chat/message-row.c',
   'chat/chat-view.c',
   'chat/search-dialog.c',

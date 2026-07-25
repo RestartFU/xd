@@ -12,6 +12,7 @@ typedef struct
   char *backend;
   char *session_id;   /* NULL until the CLI reports one */
   char *workdir;      /* NULL: inherit the folder's */
+  char *model;        /* NULL: the backend's default */
   gint64 created_at;
   gint64 updated_at;
 } HyChat;
@@ -56,6 +57,11 @@ char       *hy_storage_create_chat     (HyStorage   *self,
 gboolean    hy_storage_set_workdir     (HyStorage   *self,
                                         const char  *chat_id,
                                         const char  *workdir,
+                                        GError     **error);
+
+gboolean    hy_storage_set_model       (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *model,
                                         GError     **error);
 
 HyChat     *hy_storage_get_chat        (HyStorage   *self,

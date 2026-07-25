@@ -47,11 +47,28 @@ typedef struct
 typedef struct _AiParser AiParser;
 typedef struct _AiBackend AiBackend;
 
+/*
+ * One selectable model.
+ *
+ * A NULL id means "whatever the CLI is configured to use" -- always the first
+ * entry, so a chat can be left alone rather than pinned to a name that will
+ * age out.
+ */
+typedef struct
+{
+  const char *id;
+  const char *display_name;
+} AiModel;
+
 struct _AiBackend
 {
   const char *id;
   const char *display_name;
   const char *program;          /* looked up in PATH */
+  const char *icon_name;
+
+  const AiModel *models;
+  gsize n_models;
 
   /* Returns a NULL-terminated argv; the caller owns it. */
   GPtrArray *(*build_argv) (const AiBackend *self,
@@ -66,6 +83,11 @@ struct _AiBackend
 
 const AiBackend        *ai_backend_lookup (const char *id);
 const AiBackend *const *ai_backend_all    (guint      *n_backends);
+
+/* Human-readable name for a model id, falling back to the id itself so an
+ * unknown or hand-typed model still shows something meaningful. */
+const char             *ai_backend_model_label (const AiBackend *self,
+                                                const char      *model_id);
 
 /*
  * Per-run parser state.

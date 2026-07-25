@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stylised burst standing in for the Claude mark. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g stroke="#d97757" stroke-width="1.35" stroke-linecap="round">
+    <path d="M8 1.6v12.8"/>
+    <path d="M1.6 8h12.8"/>
+    <path d="M3.5 3.5l9 9"/>
+    <path d="M12.5 3.5l-9 9"/>
+    <path d="M5.4 1.9l5.2 12.2" stroke-width="1"/>
+    <path d="M10.6 1.9L5.4 14.1" stroke-width="1"/>
+    <path d="M1.9 5.4l12.2 5.2" stroke-width="1"/>
+    <path d="M1.9 10.6L14.1 5.4" stroke-width="1"/>
+  </g>
+</svg>

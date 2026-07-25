@@ -2,6 +2,7 @@
 
 #include "chat-session.h"
 #include "message-row.h"
+#include "model-picker.h"
 #include "settings/settings-resolver.h"
 #include "util/git-info.h"
 
@@ -40,21 +41,18 @@ struct _HyChatView
   GtkTextView *composer;
   GtkButton *send_button;
   GtkWidget *composer_area;
-  GtkDropDown *backend_chooser;
+  HyModelPicker *model_picker;
   GtkLabel *context_label;
-
-  /* Set while the chooser is being filled in from the chat, so the resulting
-   * notify does not read back as the user picking something. */
-  gboolean syncing_backend;
 };
 
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
 static void update_send_button (HyChatView *self);
-static void on_backend_selected (GtkDropDown *chooser,
-                                 GParamSpec  *pspec,
-                                 gpointer     user_data);
+static void on_model_chosen (HyModelPicker *picker,
+                             const char    *backend_id,
+                             const char    *model_id,
+                             gpointer       user_data);
 static HyMessageRow *append_row (HyChatView    *self,
                                  HyMessageKind  kind,
                                  const char    *text);
@@ -350,7 +348,8 @@ start_turn (HyChatView *self,
 
   spec.prompt = prompt;
   spec.workdir = workdir_for (chat, resolved);
-  spec.model = resolved->model;
+  /* The chat's own pick wins; the folder chain is the fallback. */
+  spec.model = chat->model != NULL ? chat->model : resolved->model;
   spec.system_prompt = resolved->instructions;
   spec.resume_session_id = chat->session_id;
 
@@ -510,13 +509,11 @@ describe_context (const char *workdir)
 }
 
 static void
-update_context_bar (HyChatView *self,
+update_context_bar (HyChatView   *self,
                     const HyChat *chat)
 {
   g_autoptr (HyEffectiveSettings) resolved = NULL;
   g_autofree char *description = NULL;
-  const AiBackend *const *backends;
-  guint n_backends;
 
   resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
   description = describe_context (workdir_for (chat, resolved));
@@ -524,55 +521,57 @@ update_context_bar (HyChatView *self,
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
 
-  backends = ai_backend_all (&n_backends);
-  self->syncing_backend = TRUE;
-  for (guint i = 0; i < n_backends; i++)
-    {
-      if (g_strcmp0 (backends[i]->id, chat->backend) == 0)
-        gtk_drop_down_set_selected (self->backend_chooser, i);
-    }
-  self->syncing_backend = FALSE;
+  hy_model_picker_set_selected (self->model_picker, chat->backend,
+                                chat->model != NULL ? chat->model : resolved->model);
 }
 
 static void
-on_backend_selected (GtkDropDown *chooser,
-                     GParamSpec  *pspec,
-                     gpointer     user_data)
+on_model_chosen (HyModelPicker *picker,
+                 const char    *backend_id,
+                 const char    *model_id,
+                 gpointer       user_data)
 {
   HyChatView *self = user_data;
   g_autoptr (GError) error = NULL;
-  const AiBackend *const *backends;
-  guint n_backends;
-  guint selected;
+  g_autoptr (HyChat) chat = NULL;
+  const char *chat_id;
+  gboolean backend_changed;
 
-  if (self->syncing_backend || self->chat == NULL)
+  if (self->chat == NULL)
     return;
 
-  backends = ai_backend_all (&n_backends);
-  selected = gtk_drop_down_get_selected (chooser);
-  if (selected >= n_backends)
+  chat_id = hy_node_get_chat_id (self->chat);
+  chat = hy_storage_get_chat (self->storage, chat_id, NULL);
+  if (chat == NULL)
     return;
 
-  if (!hy_storage_set_backend (self->storage, hy_node_get_chat_id (self->chat),
-                               backends[selected]->id, &error))
+  backend_changed = g_strcmp0 (chat->backend, backend_id) != 0;
+
+  if (backend_changed &&
+      !hy_storage_set_backend (self->storage, chat_id, backend_id, &error))
+    {
+      append_row (self, HY_MESSAGE_ERROR, error->message);
+      return;
+    }
+
+  if (!hy_storage_set_model (self->storage, chat_id, model_id, &error))
     {
       append_row (self, HY_MESSAGE_ERROR, error->message);
       return;
     }
 
   /* A session id only means something to the CLI that issued it, so switching
-   * assistants starts a fresh one rather than resuming into the wrong tool. */
-  if (!hy_storage_set_session_id (self->storage, hy_node_get_chat_id (self->chat),
-                                  NULL, &error))
+   * assistants starts a fresh one rather than resuming into the wrong tool.
+   * Changing model within the same CLI keeps the session. */
+  if (backend_changed &&
+      !hy_storage_set_session_id (self->storage, chat_id, NULL, &error))
     g_warning ("cannot reset the session: %s", error->message);
 
   {
-    g_autoptr (HyChat) chat = hy_storage_get_chat (self->storage,
-                                                   hy_node_get_chat_id (self->chat),
-                                                   NULL);
+    g_autoptr (HyChat) updated = hy_storage_get_chat (self->storage, chat_id, NULL);
 
-    if (chat != NULL)
-      update_context_bar (self, chat);
+    if (updated != NULL)
+      update_context_bar (self, updated);
   }
 }
 
@@ -703,10 +702,7 @@ build_composer (HyChatView *self)
   GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *toolbar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *scroller = gtk_scrolled_window_new ();
-  GtkStringList *backend_names = gtk_string_list_new (NULL);
-  const AiBackend *const *backends;
   GtkEventController *keys;
-  guint n_backends;
 
   self->composer = GTK_TEXT_VIEW (gtk_text_view_new ());
   gtk_text_view_set_wrap_mode (self->composer, GTK_WRAP_WORD_CHAR);
@@ -726,17 +722,11 @@ build_composer (HyChatView *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
                                  GTK_WIDGET (self->composer));
 
-  backends = ai_backend_all (&n_backends);
-  for (guint i = 0; i < n_backends; i++)
-    gtk_string_list_append (backend_names, backends[i]->display_name);
-
-  self->backend_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (backend_names),
-                                                            NULL));
-  gtk_widget_add_css_class (GTK_WIDGET (self->backend_chooser), "flat");
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->backend_chooser),
-                               "Which assistant answers in this chat");
-  g_signal_connect (self->backend_chooser, "notify::selected",
-                    G_CALLBACK (on_backend_selected), self);
+  self->model_picker = hy_model_picker_new ();
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->model_picker),
+                               "Which assistant and model answer in this chat");
+  g_signal_connect (self->model_picker, "model-chosen",
+                    G_CALLBACK (on_model_chosen), self);
 
   self->context_label = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_ellipsize (self->context_label, PANGO_ELLIPSIZE_MIDDLE);
@@ -751,7 +741,7 @@ build_composer (HyChatView *self)
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->send_button), "Send (Enter)");
   g_signal_connect (self->send_button, "clicked", G_CALLBACK (on_send_clicked), self);
 
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->backend_chooser));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->model_picker));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
   gtk_widget_set_margin_start (toolbar, 6);

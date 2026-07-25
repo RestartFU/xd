@@ -187,10 +187,27 @@ claude_parse_object (AiParser    *parser,
   g_debug ("claude: ignoring event %s", type != NULL ? type : "(none)");
 }
 
+/*
+ * The CLI takes either a bare alias ("opus", "sonnet") or a full model name.
+ * Full names are used here so a chat keeps answering with the model it was
+ * started on rather than following whatever the alias points at later.
+ */
+static const AiModel claude_models[] = {
+  { NULL,               "Default" },
+  { "claude-fable-5",   "Claude Fable 5" },
+  { "claude-opus-5",    "Claude Opus 5" },
+  { "claude-sonnet-5",  "Claude Sonnet 5" },
+  { "claude-haiku-4-5", "Claude Haiku 4.5" },
+  { "claude-opus-4-8",  "Claude Opus 4.8" },
+};
+
 const AiBackend hy_claude_backend = {
   .id = "claude",
   .display_name = "Claude Code",
   .program = "claude",
+  .icon_name = "hy-backend-claude",
+  .models = claude_models,
+  .n_models = G_N_ELEMENTS (claude_models),
   .build_argv = claude_build_argv,
   .parse_object = claude_parse_object,
 };
