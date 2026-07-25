@@ -224,20 +224,37 @@ append_tool_line (HyChatView *self,
   queue_scroll_to_bottom (self);
 }
 
+/*
+ * Retires every question on screen.
+ *
+ * Sending anything answers whatever was outstanding -- by button, by typing
+ * something else, or by ignoring it and moving on. Once the conversation has
+ * gone past a question, clicking one of its options would send an answer to
+ * something nobody is asking any more.
+ */
+static void
+retire_open_questions (HyChatView *self)
+{
+  for (GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript));
+       child != NULL;
+       child = gtk_widget_get_next_sibling (child))
+    {
+      GtkWidget *choices = g_object_get_data (G_OBJECT (child), "hy-choices");
+
+      if (choices != NULL)
+        gtk_widget_set_sensitive (choices, FALSE);
+    }
+}
+
 static void
 on_choice_clicked (GtkButton *button,
                    gpointer   user_data)
 {
   HyChatView *self = user_data;
   const char *answer = g_object_get_data (G_OBJECT (button), "answer");
-  GtkWidget *row = gtk_widget_get_ancestor (GTK_WIDGET (button), GTK_TYPE_FLOW_BOX);
 
   if (answer == NULL || self->chat == NULL)
     return;
-
-  /* The question has been answered, so the buttons stop being an offer. */
-  if (row != NULL)
-    gtk_widget_set_sensitive (row, FALSE);
 
   send_message (self, answer);
 }
@@ -285,6 +302,9 @@ append_choices (HyChatView  *self,
   /* A question with something after it has already been answered. It stays
    * on screen as a record of what was offered, but it is not an offer. */
   gtk_widget_set_sensitive (choices, answerable);
+
+  /* Tagged so sending anything can retire it, however it was answered. */
+  g_object_set_data (G_OBJECT (box), "hy-choices", choices);
 
   gtk_box_append (GTK_BOX (box), question);
   gtk_box_append (GTK_BOX (box), choices);
@@ -836,6 +856,7 @@ send_message (HyChatView *self,
       return;
     }
 
+  retire_open_questions (self);
   append_row (self, HY_MESSAGE_USER, text);
   name_chat_after_first_message (self, text);
   hy_fs_tree_bump_chat (self->tree, self->chat);
