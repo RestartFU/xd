@@ -545,6 +545,95 @@ rebase_subtree (HyNode     *node,
     }
 }
 
+/* True when @folder is @node or lives somewhere inside it. */
+static gboolean
+is_within (HyNode *folder,
+           HyNode *node)
+{
+  for (HyNode *at = folder; at != NULL; at = hy_node_get_parent (at))
+    {
+      if (at == node)
+        return TRUE;
+    }
+
+  return FALSE;
+}
+
+gboolean
+hy_fs_tree_move_folder (HyFsTree    *self,
+                        HyNode      *node,
+                        HyNode      *new_parent,
+                        GError     **error)
+{
+  g_autoptr (GFile) source = NULL;
+  g_autoptr (GFile) destination = NULL;
+  g_autofree char *new_path = NULL;
+  const char *name;
+  HyNode *old_parent;
+
+  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (HY_IS_NODE (node), FALSE);
+  g_return_val_if_fail (hy_node_get_kind (node) == HY_NODE_FOLDER, FALSE);
+
+  /* NULL means the top level, which is the root node's own children. */
+  if (new_parent == NULL)
+    new_parent = self->root;
+
+  old_parent = hy_node_get_parent (node);
+  if (new_parent == old_parent)
+    return TRUE;
+
+  /* A folder cannot hold itself, and moving one into its own subtree would
+   * take the destination along with it. */
+  if (new_parent != NULL && is_within (new_parent, node))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                   "A folder cannot be moved inside itself.");
+      return FALSE;
+    }
+
+  name = hy_node_get_name (node);
+  new_path = g_build_filename (hy_node_get_path (new_parent), name, NULL);
+
+  source = g_file_new_for_path (hy_node_get_path (node));
+  destination = g_file_new_for_path (new_path);
+
+  if (g_file_query_exists (destination, NULL))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+                   "\u201c%s\u201d already has a folder called \u201c%s\u201d.",
+                   new_parent == self->root ? "Workspaces" : hy_node_get_name (new_parent),
+                   name);
+      return FALSE;
+    }
+
+  /* A plain rename, since everything is under one root. Across filesystems
+   * this fails rather than copying, which is the honest outcome: the folder
+   * would no longer be the same directory the chats were written against. */
+  if (!g_file_move (source, destination, G_FILE_COPY_NONE, NULL, NULL, NULL, error))
+    return FALSE;
+
+  rebase_subtree (node, new_path);
+
+  g_object_ref (node);
+
+  if (old_parent != NULL)
+    {
+      guint position;
+
+      if (g_list_store_find (hy_node_get_children (old_parent), node, &position))
+        g_list_store_remove (hy_node_get_children (old_parent), position);
+    }
+
+  hy_node_set_parent (node, new_parent);
+  g_list_store_insert (hy_node_get_children (new_parent),
+                       folder_insert_position (new_parent, name), node);
+
+  g_object_unref (node);
+
+  return TRUE;
+}
+
 gboolean
 hy_fs_tree_rename_folder (HyFsTree    *self,
                           HyNode      *node,

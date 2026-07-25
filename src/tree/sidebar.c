@@ -649,6 +649,95 @@ on_row_right_clicked (GtkGestureClick *gesture,
   gtk_popover_popup (popover);
 }
 
+/* --- moving folders by dragging ------------------------------------------- */
+
+/*
+ * The node a row is showing, or NULL for the empty space below the tree.
+ *
+ * Read from the widget at drop time rather than captured when the row was
+ * built: rows are recycled as the list scrolls, so a callback holding the
+ * node it was bound with would be answering for a different one.
+ */
+static HyNode *
+node_for_row (GtkWidget *widget)
+{
+  return g_object_get_data (G_OBJECT (widget), "node");
+}
+
+static GdkContentProvider *
+on_drag_prepare (GtkDragSource *source,
+                 double         x,
+                 double         y,
+                 gpointer       user_data)
+{
+  HyNode *node = node_for_row (user_data);
+
+  /* Chats belong to whichever folder they were made in; only folders move. */
+  if (node == NULL || hy_node_get_kind (node) != HY_NODE_FOLDER)
+    return NULL;
+
+  return gdk_content_provider_new_typed (HY_TYPE_NODE, node);
+}
+
+static void
+on_drag_begin (GtkDragSource *source,
+               GdkDrag       *drag,
+               gpointer       user_data)
+{
+  GtkWidget *row = user_data;
+  g_autoptr (GdkPaintable) paintable = gtk_widget_paintable_new (row);
+
+  gtk_drag_source_set_icon (source, paintable, 0, 0);
+}
+
+static gboolean
+on_drop (GtkDropTarget *target,
+         const GValue  *value,
+         double         x,
+         double         y,
+         gpointer       user_data)
+{
+  HySidebar *self = g_object_get_data (G_OBJECT (target), "sidebar");
+  HyNode *dropped = g_value_get_object (value);
+  HyNode *onto = node_for_row (user_data);
+  g_autoptr (GError) error = NULL;
+
+  if (dropped == NULL)
+    return FALSE;
+
+  /* Dropped on a chat: it stands for the folder holding it, which is what
+   * the row looks like it is part of. */
+  if (onto != NULL && hy_node_get_kind (onto) != HY_NODE_FOLDER)
+    onto = hy_node_get_parent (onto);
+
+  if (!hy_fs_tree_move_folder (self->tree, dropped, onto, &error))
+    {
+      /* Refusing to move is normal here -- into itself, onto a name already
+       * taken -- so it is worth saying why rather than doing nothing. */
+      show_error (self, "Cannot Move the Folder", error);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+/*
+ * Answers for a row, or for the empty space below the tree.
+ *
+ * The empty space is how a folder gets back out to the top level: there is
+ * no row standing for "not in any folder" to drop it on.
+ */
+static void
+add_drop_target (HySidebar *self,
+                 GtkWidget *widget)
+{
+  GtkDropTarget *target = gtk_drop_target_new (HY_TYPE_NODE, GDK_ACTION_MOVE);
+
+  g_object_set_data (G_OBJECT (target), "sidebar", self);
+  g_signal_connect (target, "drop", G_CALLBACK (on_drop), widget);
+  gtk_widget_add_controller (widget, GTK_EVENT_CONTROLLER (target));
+}
+
 static void
 on_item_setup (GtkSignalListItemFactory *factory,
                GtkListItem              *item,
@@ -683,6 +772,17 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (gesture), GDK_BUTTON_SECONDARY);
   g_signal_connect (gesture, "pressed", G_CALLBACK (on_row_right_clicked), popover);
   gtk_widget_add_controller (box, GTK_EVENT_CONTROLLER (gesture));
+
+  {
+    GtkDragSource *source = gtk_drag_source_new ();
+
+    gtk_drag_source_set_actions (source, GDK_ACTION_MOVE);
+    g_signal_connect (source, "prepare", G_CALLBACK (on_drag_prepare), box);
+    g_signal_connect (source, "drag-begin", G_CALLBACK (on_drag_begin), box);
+    gtk_widget_add_controller (box, GTK_EVENT_CONTROLLER (source));
+
+    add_drop_target (user_data, box);
+  }
 
   gtk_tree_expander_set_child (GTK_TREE_EXPANDER (expander), box);
   gtk_list_item_set_child (item, expander);
@@ -780,6 +880,9 @@ on_item_bind (GtkSignalListItemFactory *factory,
 
   gtk_tree_expander_set_list_row (GTK_TREE_EXPANDER (expander), row);
   gtk_image_set_from_icon_name (GTK_IMAGE (icon), hy_node_get_icon_name (node));
+
+  /* Read back by the drag handlers, which run long after this returns. */
+  g_object_set_data (G_OBJECT (box), "node", node);
 
   g_object_set_data (G_OBJECT (item), "name-binding",
                      g_object_bind_property (node, "name", label, "label",
@@ -1009,6 +1112,10 @@ hy_sidebar_init (HySidebar *self)
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled),
                                  GTK_WIDGET (self->list_view));
+
+  /* Nothing under the last row stands for the top level, so the empty space
+   * itself is the way back out of a folder. */
+  add_drop_target (self, GTK_WIDGET (self->list_view));
   gtk_widget_set_vexpand (scrolled, TRUE);
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), scrolled);

@@ -39,6 +39,17 @@ gboolean     hy_fs_tree_rename_folder  (HyFsTree    *self,
                                         const char  *new_name,
                                         GError     **error);
 
+/*
+ * Moves a folder under @new_parent, or to the root when it is NULL.
+ *
+ * The folder's id lives in a dotfile inside it, so it travels with the
+ * directory and the chats written against it stay attached.
+ */
+gboolean     hy_fs_tree_move_folder    (HyFsTree    *self,
+                                        HyNode      *node,
+                                        HyNode      *new_parent,
+                                        GError     **error);
+
 /* Moves the folder to the trash rather than deleting it outright. */
 gboolean     hy_fs_tree_trash_folder   (HyFsTree    *self,
                                         HyNode      *node,
