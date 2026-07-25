@@ -968,8 +968,8 @@ send_message (HyChatView *self,
 
 /* Big enough to recognise a screenshot, small enough to leave the composer
  * where it was. */
-#define PREVIEW_HEIGHT 72
-#define PREVIEW_MAX_WIDTH 160
+#define PREVIEW_HEIGHT 96
+#define PREVIEW_MAX_WIDTH 168
 
 static void
 forget_attachments (HyChatView *self)
@@ -1077,9 +1077,8 @@ add_attachment (HyChatView *self,
     picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (thumbnail));
   }
 
-  gtk_widget_set_halign (picture, GTK_ALIGN_START);
-  gtk_widget_set_valign (picture, GTK_ALIGN_START);
-  gtk_widget_add_css_class (picture, "card");
+  gtk_widget_set_halign (picture, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (picture, GTK_ALIGN_CENTER);
 
   remove = gtk_button_new_from_icon_name ("window-close-symbolic");
   gtk_widget_add_css_class (remove, "circular");
@@ -1088,10 +1087,32 @@ add_attachment (HyChatView *self,
   gtk_widget_set_tooltip_text (remove, "Remove");
   g_signal_connect (remove, "clicked", G_CALLBACK (on_attachment_removed), self);
 
-  chip = gtk_overlay_new ();
-  gtk_overlay_set_child (GTK_OVERLAY (chip), picture);
-  gtk_overlay_add_overlay (GTK_OVERLAY (chip), remove);
-  g_object_set_data_full (G_OBJECT (chip), "path", g_strdup (path), g_free);
+  /* A card with the name under it, so it reads as a file going with the
+   * message rather than as part of what is being typed. */
+  {
+    GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+    GtkWidget *label = gtk_label_new (name);
+
+    gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_max_width_chars (GTK_LABEL (label), 18);
+    gtk_widget_add_css_class (label, "caption");
+    gtk_widget_add_css_class (label, "dim-label");
+
+    gtk_box_append (GTK_BOX (card), picture);
+    gtk_box_append (GTK_BOX (card), label);
+    gtk_widget_add_css_class (card, "card");
+    gtk_widget_set_margin_top (card, 6);
+    gtk_widget_set_margin_bottom (card, 6);
+    gtk_widget_set_margin_start (card, 6);
+    gtk_widget_set_margin_end (card, 6);
+    gtk_widget_set_halign (card, GTK_ALIGN_START);
+
+    chip = gtk_overlay_new ();
+    gtk_overlay_set_child (GTK_OVERLAY (chip), card);
+    gtk_overlay_add_overlay (GTK_OVERLAY (chip), remove);
+    gtk_widget_set_halign (chip, GTK_ALIGN_START);
+    g_object_set_data_full (G_OBJECT (chip), "path", g_strdup (path), g_free);
+  }
 
   gtk_box_append (GTK_BOX (self->attachments_bar), chip);
   gtk_widget_set_visible (self->attachments_bar, TRUE);
@@ -1304,8 +1325,8 @@ describe_context (const char *workdir)
   if (git->linked_worktree)
     g_string_append (text, " (worktree)");
 
-  if (git->remote_url != NULL)
-    g_string_append_printf (text, " · %s", git->remote_url);
+  /* The remote is not shown: it is the longest thing in the bar and the least
+   * likely to be in question, and it crowded out the branch, which changes. */
 
   return g_string_free (g_steal_pointer (&text), FALSE);
 }
