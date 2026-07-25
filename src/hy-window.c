@@ -1,6 +1,7 @@
 #include "hy-window.h"
 
 #include "chat/chat-view.h"
+#include "chat/search-dialog.h"
 #include "storage/storage.h"
 #include "tree/fs-tree.h"
 #include "tree/sidebar.h"
@@ -56,6 +57,29 @@ on_node_activated (HySidebar *sidebar,
 
   if (node != NULL && hy_node_get_kind (node) == HY_NODE_CHAT)
     hy_chat_view_set_chat (self->chat_view, node);
+}
+
+static void
+on_search_result_chosen (HyNode   *chat,
+                         gpointer  user_data)
+{
+  HyWindow *self = user_data;
+
+  hy_chat_view_set_chat (self->chat_view, chat);
+}
+
+static void
+on_search_action (GtkWidget  *widget,
+                  const char *action_name,
+                  GVariant   *parameter)
+{
+  HyWindow *self = HY_WINDOW (widget);
+
+  if (self->storage == NULL)
+    return;
+
+  hy_search_dialog_present (widget, self->storage, self->tree,
+                            on_search_result_chosen, self);
 }
 
 static gboolean
@@ -148,8 +172,16 @@ static void
 hy_window_class_init (HyWindowClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
 
   object_class->dispose = hy_window_dispose;
+
+  gtk_widget_class_install_action (widget_class, "win.search", NULL,
+                                   on_search_action);
+  gtk_widget_class_add_binding_action (widget_class, GDK_KEY_k, GDK_CONTROL_MASK,
+                                       "win.search", NULL);
+  gtk_widget_class_add_binding_action (widget_class, GDK_KEY_f, GDK_CONTROL_MASK,
+                                       "win.search", NULL);
 }
 
 static void

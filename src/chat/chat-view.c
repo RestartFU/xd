@@ -3,6 +3,7 @@
 #include "chat-session.h"
 #include "message-row.h"
 #include "settings/settings-resolver.h"
+#include "util/git-info.h"
 
 /*
  * A turn in flight.
@@ -39,12 +40,26 @@ struct _HyChatView
   GtkTextView *composer;
   GtkButton *send_button;
   GtkWidget *composer_area;
+  GtkDropDown *backend_chooser;
+  GtkLabel *context_label;
+
+  /* Set while the chooser is being filled in from the chat, so the resulting
+   * notify does not read back as the user picking something. */
+  gboolean syncing_backend;
 };
 
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
 static void update_send_button (HyChatView *self);
+static void on_backend_selected (GtkDropDown *chooser,
+                                 GParamSpec  *pspec,
+                                 gpointer     user_data);
+static HyMessageRow *append_row (HyChatView    *self,
+                                 HyMessageKind  kind,
+                                 const char    *text);
+static const char *workdir_for (const HyChat              *chat,
+                                const HyEffectiveSettings *resolved);
 
 /* --- transcript ----------------------------------------------------------- */
 
@@ -350,6 +365,59 @@ start_turn (HyChatView *self,
   update_send_button (self);
 }
 
+/* How much of the first message becomes the chat's name. */
+#define TITLE_LENGTH 48
+
+/*
+ * An unnamed chat takes its name from what was asked first. Deriving it from
+ * the text costs nothing, where asking the model for a title would cost a
+ * whole extra round trip before the answer even starts.
+ */
+static void
+name_chat_after_first_message (HyChatView *self,
+                               const char *prompt)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *title = NULL;
+  const char *newline;
+  glong length;
+
+  if (g_strcmp0 (hy_node_get_name (self->chat), "New Chat") != 0)
+    return;
+
+  messages = hy_storage_list_messages (self->storage,
+                                       hy_node_get_chat_id (self->chat), &error);
+  if (messages == NULL || messages->len > 1)
+    return;
+
+  /* First line only: a pasted stack trace should not become the title. */
+  newline = strchr (prompt, '\n');
+  title = newline != NULL ? g_strndup (prompt, newline - prompt)
+                          : g_strdup (prompt);
+  g_strstrip (title);
+
+  length = g_utf8_strlen (title, -1);
+  if (length > TITLE_LENGTH)
+    {
+      g_autofree char *shortened = g_utf8_substring (title, 0, TITLE_LENGTH);
+
+      g_free (title);
+      title = g_strconcat (shortened, "…", NULL);
+    }
+
+  if (*title == '\0')
+    return;
+
+  if (!hy_fs_tree_rename_chat (self->tree, self->chat, title, &error))
+    {
+      g_warning ("cannot name the chat: %s", error->message);
+      return;
+    }
+
+  adw_window_title_set_title (self->title, title);
+}
+
 static void
 send_current_message (HyChatView *self)
 {
@@ -375,6 +443,7 @@ send_current_message (HyChatView *self)
     }
 
   append_row (self, HY_MESSAGE_USER, text);
+  name_chat_after_first_message (self, text);
   hy_fs_tree_bump_chat (self->tree, self->chat);
 
   start_turn (self, text);
@@ -401,6 +470,110 @@ update_send_button (HyChatView *self)
       gtk_widget_remove_css_class (GTK_WIDGET (self->send_button), "destructive-action");
       gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "suggested-action");
     }
+}
+
+/* --- the context bar ------------------------------------------------------ */
+
+/*
+ * Describes the checkout the next message will run against: branch, the
+ * directory's name, whether it is a linked worktree, and where it came from.
+ */
+static char *
+describe_context (const char *workdir)
+{
+  g_autoptr (HyGitInfo) git = hy_git_info_for_path (workdir);
+  g_autoptr (GString) text = g_string_new (NULL);
+
+  if (workdir == NULL)
+    return g_strdup ("No working directory");
+
+  if (git == NULL)
+    {
+      g_autofree char *name = g_path_get_basename (workdir);
+
+      return g_strdup_printf ("%s — not a repository", name);
+    }
+
+  if (git->branch != NULL)
+    g_string_append_printf (text, "%s %s", git->detached ? "detached at" : "⎇",
+                            git->branch);
+
+  g_string_append_printf (text, "%s%s", text->len > 0 ? " · " : "", git->name);
+
+  if (git->linked_worktree)
+    g_string_append (text, " (worktree)");
+
+  if (git->remote_url != NULL)
+    g_string_append_printf (text, " · %s", git->remote_url);
+
+  return g_string_free (g_steal_pointer (&text), FALSE);
+}
+
+static void
+update_context_bar (HyChatView *self,
+                    const HyChat *chat)
+{
+  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autofree char *description = NULL;
+  const AiBackend *const *backends;
+  guint n_backends;
+
+  resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
+  description = describe_context (workdir_for (chat, resolved));
+
+  gtk_label_set_label (self->context_label, description);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
+
+  backends = ai_backend_all (&n_backends);
+  self->syncing_backend = TRUE;
+  for (guint i = 0; i < n_backends; i++)
+    {
+      if (g_strcmp0 (backends[i]->id, chat->backend) == 0)
+        gtk_drop_down_set_selected (self->backend_chooser, i);
+    }
+  self->syncing_backend = FALSE;
+}
+
+static void
+on_backend_selected (GtkDropDown *chooser,
+                     GParamSpec  *pspec,
+                     gpointer     user_data)
+{
+  HyChatView *self = user_data;
+  g_autoptr (GError) error = NULL;
+  const AiBackend *const *backends;
+  guint n_backends;
+  guint selected;
+
+  if (self->syncing_backend || self->chat == NULL)
+    return;
+
+  backends = ai_backend_all (&n_backends);
+  selected = gtk_drop_down_get_selected (chooser);
+  if (selected >= n_backends)
+    return;
+
+  if (!hy_storage_set_backend (self->storage, hy_node_get_chat_id (self->chat),
+                               backends[selected]->id, &error))
+    {
+      append_row (self, HY_MESSAGE_ERROR, error->message);
+      return;
+    }
+
+  /* A session id only means something to the CLI that issued it, so switching
+   * assistants starts a fresh one rather than resuming into the wrong tool. */
+  if (!hy_storage_set_session_id (self->storage, hy_node_get_chat_id (self->chat),
+                                  NULL, &error))
+    g_warning ("cannot reset the session: %s", error->message);
+
+  {
+    g_autoptr (HyChat) chat = hy_storage_get_chat (self->storage,
+                                                   hy_node_get_chat_id (self->chat),
+                                                   NULL);
+
+    if (chat != NULL)
+      update_context_bar (self, chat);
+  }
 }
 
 static void
@@ -467,6 +640,15 @@ hy_chat_view_set_chat (HyChatView *self,
   gtk_widget_set_visible (self->composer_area, TRUE);
   adw_window_title_set_title (self->title, hy_node_get_name (chat));
 
+  {
+    g_autoptr (HyChat) record = hy_storage_get_chat (self->storage,
+                                                     hy_node_get_chat_id (chat),
+                                                     NULL);
+
+    if (record != NULL)
+      update_context_bar (self, record);
+  }
+
   load_transcript (self);
 
   /* Re-attach a reply that kept arriving while another chat was on screen. */
@@ -509,13 +691,22 @@ hy_chat_view_new (HyStorage *storage,
 
 /* --- construction --------------------------------------------------------- */
 
+/*
+ * The composer is a bar rather than a bare entry: the two things worth knowing
+ * before pressing Enter are which assistant will answer and which checkout it
+ * will be looking at, so both sit next to the text.
+ */
 static GtkWidget *
 build_composer (HyChatView *self)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *frame = gtk_frame_new (NULL);
+  GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *toolbar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *scroller = gtk_scrolled_window_new ();
+  GtkStringList *backend_names = gtk_string_list_new (NULL);
+  const AiBackend *const *backends;
   GtkEventController *keys;
+  guint n_backends;
 
   self->composer = GTK_TEXT_VIEW (gtk_text_view_new ());
   gtk_text_view_set_wrap_mode (self->composer, GTK_WRAP_WORD_CHAR);
@@ -535,25 +726,48 @@ build_composer (HyChatView *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
                                  GTK_WIDGET (self->composer));
 
-  gtk_frame_set_child (GTK_FRAME (frame), scroller);
-  gtk_widget_set_hexpand (frame, TRUE);
+  backends = ai_backend_all (&n_backends);
+  for (guint i = 0; i < n_backends; i++)
+    gtk_string_list_append (backend_names, backends[i]->display_name);
+
+  self->backend_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (backend_names),
+                                                            NULL));
+  gtk_widget_add_css_class (GTK_WIDGET (self->backend_chooser), "flat");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->backend_chooser),
+                               "Which assistant answers in this chat");
+  g_signal_connect (self->backend_chooser, "notify::selected",
+                    G_CALLBACK (on_backend_selected), self);
+
+  self->context_label = GTK_LABEL (gtk_label_new (NULL));
+  gtk_label_set_ellipsize (self->context_label, PANGO_ELLIPSIZE_MIDDLE);
+  gtk_label_set_xalign (self->context_label, 0.0f);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->context_label), TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->context_label), "dim-label");
+  gtk_widget_add_css_class (GTK_WIDGET (self->context_label), "caption");
 
   self->send_button = GTK_BUTTON (gtk_button_new_from_icon_name ("go-up-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "suggested-action");
   gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "circular");
-  gtk_widget_set_valign (GTK_WIDGET (self->send_button), GTK_ALIGN_END);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->send_button), "Send (Enter)");
   g_signal_connect (self->send_button, "clicked", G_CALLBACK (on_send_clicked), self);
 
-  gtk_box_append (GTK_BOX (box), frame);
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->send_button));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->backend_chooser));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
+  gtk_widget_set_margin_start (toolbar, 6);
+  gtk_widget_set_margin_end (toolbar, 6);
+  gtk_widget_set_margin_bottom (toolbar, 6);
 
-  gtk_widget_set_margin_top (box, 6);
-  gtk_widget_set_margin_bottom (box, 12);
-  gtk_widget_set_margin_start (box, 12);
-  gtk_widget_set_margin_end (box, 12);
+  gtk_box_append (GTK_BOX (column), scroller);
+  gtk_box_append (GTK_BOX (column), toolbar);
 
-  return box;
+  gtk_frame_set_child (GTK_FRAME (frame), column);
+  gtk_widget_set_margin_top (frame, 6);
+  gtk_widget_set_margin_bottom (frame, 12);
+  gtk_widget_set_margin_start (frame, 12);
+  gtk_widget_set_margin_end (frame, 12);
+
+  return frame;
 }
 
 static void
@@ -590,6 +804,7 @@ hy_chat_view_init (HyChatView *self)
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));
 
   menu = g_menu_new ();
+  g_menu_append (menu, "Search…", "win.search");
   g_menu_append (menu, "About hy", "app.about");
   g_menu_append (menu, "Quit", "app.quit");
 

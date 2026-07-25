@@ -9,6 +9,7 @@ hy_tests = {
   'backend': 'test-backend.c',
   'session': 'test-session.c',
   'settings': 'test-settings.c',
+  'markdown': 'test-markdown.c',
 }
 
 foreach name, source : hy_tests

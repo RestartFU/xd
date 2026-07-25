@@ -3,6 +3,8 @@
 hy_core_sources = files(
   'settings/folder-settings.c',
   'settings/settings-resolver.c',
+  'util/markdown.c',
+  'util/git-info.c',
   'tree/hy-node.c',
   'storage/storage.c',
   'backend/backend.c',
@@ -12,7 +14,9 @@ hy_core_sources = files(
   'chat/chat-session.c',
 )
 
-hy_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep]
+# Pango, but not GTK: the Markdown converter validates the markup it produces,
+# which needs the parser and nothing else.
+hy_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
 
 hy_core_inc = include_directories('.')
 
@@ -36,6 +40,7 @@ hy_sources = files(
   'settings/folder-settings-dialog.c',
   'chat/message-row.c',
   'chat/chat-view.c',
+  'chat/search-dialog.c',
 )
 
 executable('hy',

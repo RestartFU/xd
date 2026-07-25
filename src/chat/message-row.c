@@ -1,5 +1,7 @@
 #include "message-row.h"
 
+#include "util/markdown.h"
+
 struct _HyMessageRow
 {
   AdwBin parent_instance;
@@ -12,6 +14,8 @@ struct _HyMessageRow
 };
 
 G_DEFINE_FINAL_TYPE (HyMessageRow, hy_message_row, ADW_TYPE_BIN)
+
+static void render_body (HyMessageRow *self);
 
 HyMessageKind
 hy_message_kind_from_role (const char *role)
@@ -87,7 +91,8 @@ hy_message_row_new (HyMessageKind  kind,
   gtk_box_append (GTK_BOX (header), title);
   gtk_box_append (GTK_BOX (header), self->spinner);
 
-  self->body = GTK_LABEL (gtk_label_new (self->text->str));
+  self->body = GTK_LABEL (gtk_label_new (NULL));
+  render_body (self);
   gtk_label_set_wrap (self->body, TRUE);
   gtk_label_set_wrap_mode (self->body, PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign (self->body, 0.0f);
@@ -120,6 +125,22 @@ hy_message_row_new (HyMessageKind  kind,
   return self;
 }
 
+/* Replies are Markdown; what the user typed is shown exactly as typed. */
+static void
+render_body (HyMessageRow *self)
+{
+  if (self->kind == HY_MESSAGE_ASSISTANT)
+    {
+      g_autofree char *markup = hy_markdown_to_pango (self->text->str);
+
+      gtk_label_set_markup (self->body, markup);
+    }
+  else
+    {
+      gtk_label_set_text (self->body, self->text->str);
+    }
+}
+
 void
 hy_message_row_append (HyMessageRow *self,
                        const char   *delta)
@@ -130,7 +151,7 @@ hy_message_row_append (HyMessageRow *self,
     return;
 
   g_string_append (self->text, delta);
-  gtk_label_set_text (self->body, self->text->str);
+  render_body (self);
 
   hy_message_row_set_waiting (self, FALSE);
 }

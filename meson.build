@@ -19,6 +19,7 @@ gio_unix_dep  = dependency('gio-unix-2.0')
 gtk_dep       = dependency('gtk4', version: '>= 4.10')
 adw_dep       = dependency('libadwaita-1', version: '>= 1.4')
 json_dep      = dependency('json-glib-1.0')
+pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
 
 add_project_arguments([
