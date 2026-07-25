@@ -53,6 +53,23 @@ On non-Debian hosts, fontconfig prints parse warnings on startup for files under
 library and the host's copy is a newer format. Fonts resolve correctly; the
 noise is cosmetic.
 
+## What it does
+
+- Workspaces and folders are real directories under `~/Workspaces`, nested to
+  any depth. Each carries a `.hy.json` with a UUID, so a folder can be renamed
+  or moved without its chats losing track of it.
+- A folder *refers* to a repository rather than containing one. Working
+  directory, repository, backend, model and project instructions are set per
+  folder and inherited by everything below; instructions accumulate from the
+  root down, everything else is overridden by the nearest folder that sets it.
+- New chats pick their own working directory, so two chats in the same folder
+  can point at different checkouts.
+- The composer shows which assistant will answer and which branch, worktree and
+  remote it is looking at.
+- Replies stream in and are rendered as Markdown. Stopping sends SIGINT first,
+  so the CLI's own session survives and the chat can still be resumed.
+- `Ctrl+K` searches every message.
+
 ## Layout
 
 | Path            | What lives there                                     |
