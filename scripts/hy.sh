@@ -19,6 +19,16 @@ mkdir -p "$RUNTIME"
 sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/loaders.cache.in" > "$RUNTIME/loaders.cache"
 sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/fonts.conf.in"    > "$RUNTIME/fonts.conf"
 
+# Anything hy launches for the user -- a terminal, an editor -- must run in the
+# host's environment, not the bundle's. Remember the values before they are
+# overridden so they can be handed back; see src/util/host-launch.c.
+export HY_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
+export HY_HOST_LANG="${LANG-}"
+export HY_HOST_LC_ALL="${LC_ALL-}"
+export HY_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
+export HY_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
+export HY_HOST_GTK_PATH="${GTK_PATH-}"
+
 # GNOME sessions export these to point GTK/GIO at host plugins (ibus, dconf,
 # gvfs). Those .so files are built against the host's glib and GTK; dlopening
 # them into the bundled stack mixes ABIs. hy needs none of them: it only

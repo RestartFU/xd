@@ -6,6 +6,7 @@
 #include "settings/settings-resolver.h"
 #include "util/ask-block.h"
 #include "util/git-info.h"
+#include "util/host-launch.h"
 
 /*
  * A turn in flight.
@@ -52,6 +53,7 @@ struct _HyChatView
   GtkToggleButton *build_toggle;
   GtkToggleButton *plan_toggle;
   GtkLabel *context_label;
+  GtkButton *terminal_button;
 
   /* Set while the choosers are filled in from the chat, so the resulting
    * notify does not read back as the user picking something. */
@@ -933,6 +935,42 @@ describe_context (const char *workdir)
   return g_string_free (g_steal_pointer (&text), FALSE);
 }
 
+/*
+ * Opens a terminal where the agent works.
+ *
+ * The directory is resolved exactly as it is for a turn, so the terminal
+ * lands where the CLI would run rather than wherever hy was started.
+ */
+static void
+on_terminal_clicked (GtkButton *button,
+                     gpointer   user_data)
+{
+  HyChatView *self = user_data;
+  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (HyChat) chat = NULL;
+  g_autoptr (GError) error = NULL;
+  const char *workdir;
+
+  if (self->chat == NULL)
+    return;
+
+  chat = hy_storage_get_chat (self->storage, hy_node_get_chat_id (self->chat), NULL);
+  if (chat == NULL)
+    return;
+
+  resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
+  workdir = workdir_for (chat, resolved);
+
+  if (workdir == NULL || *workdir == '\0')
+    {
+      append_row (self, HY_MESSAGE_ERROR, "This chat has no working directory.");
+      return;
+    }
+
+  if (!hy_open_terminal (workdir, &error))
+    append_row (self, HY_MESSAGE_ERROR, error->message);
+}
+
 static void
 update_context_bar (HyChatView   *self,
                     const HyChat *chat)
@@ -945,6 +983,17 @@ update_context_bar (HyChatView   *self,
 
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
+
+  {
+    const char *workdir = workdir_for (chat, resolved);
+    gboolean have_workdir = workdir != NULL && *workdir != '\0';
+    g_autofree char *tooltip =
+      have_workdir ? g_strdup_printf ("Open a terminal in %s", workdir) : NULL;
+
+    gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
+                                 have_workdir ? tooltip : "This chat has no working directory");
+  }
 
   hy_model_picker_set_selected (self->model_picker, chat->backend,
                                 chat->model != NULL ? chat->model : resolved->model);
@@ -1328,7 +1377,13 @@ build_composer (HyChatView *self)
 
     gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   }
+  self->terminal_button = GTK_BUTTON (gtk_button_new_from_icon_name ("utilities-terminal-symbolic"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->terminal_button), "flat");
+  g_signal_connect (self->terminal_button, "clicked",
+                    G_CALLBACK (on_terminal_clicked), self);
+
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->terminal_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
   /* The controls sit under the text the user is typing, so they need enough
    * clearance not to read as part of it. */
