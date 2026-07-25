@@ -79,15 +79,61 @@ static const GActionEntry app_actions[] = {
  * following whatever the desktop font is set to.
  */
 static const char *HY_STYLE =
+  /*
+   * A near-black palette rather than Adwaita's grey.
+   *
+   * These are libadwaita's own colour names, so overriding them here reaches
+   * every widget that follows the theme -- including ones hy never touches --
+   * instead of restyling each in turn and missing some.
+   */
+  "@define-color window_bg_color #0c0c0e;\n"
+  "@define-color view_bg_color #0c0c0e;\n"
+  "@define-color headerbar_bg_color #0c0c0e;\n"
+  "@define-color sidebar_bg_color #101013;\n"
+  "@define-color popover_bg_color #17171b;\n"
+  "@define-color dialog_bg_color #17171b;\n"
+  "@define-color card_bg_color #17171b;\n"
+
   "window { font-size: 0.9em; }\n"
-  /* The tree: rows sized to their text rather than to a finger. */
-  "listview > row { min-height: 0; padding: 3px 6px; }\n"
-  "listview > row label { padding: 0; }\n"
-  "headerbar { min-height: 38px; }\n"
+
+  /* Flat: the window is one surface, so the bars that divide it are told
+   * apart by spacing rather than by lines and shading. */
+  "headerbar { min-height: 38px; background: transparent; box-shadow: none;"
+  " border: none; }\n"
   "headerbar button { min-height: 26px; min-width: 26px; padding: 2px 6px; }\n"
-  /* The composer's controls, which are buttons in a row and do not need the
-   * height of a dialog's. */
+  "paned > separator { background: alpha(currentColor, 0.06); }\n"
+
+  /* The tree: rows sized to their text, and rounded so a selection reads as
+   * a highlight rather than as a band across the pane. */
+  "listview > row { min-height: 0; padding: 4px 8px; margin: 0 6px;"
+  " border-radius: 8px; }\n"
+  "listview > row label { padding: 0; }\n"
+  "listview > row:selected { background: alpha(currentColor, 0.10); }\n"
+  "listview > row:hover:not(:selected) { background: alpha(currentColor, 0.05); }\n"
+
+  /* Controls: pills, sized for a toolbar rather than a dialog. */
+  "button, dropdown > button, togglebutton { border-radius: 8px; }\n"
   "button.flat, dropdown > button, togglebutton { min-height: 24px; }\n"
+  "togglebutton:checked { background: alpha(@accent_bg_color, 0.22);"
+  " color: @accent_fg_color; }\n"
+  "button.circular { border-radius: 9999px; }\n"
+
+  /* What the user typed, and the box they type into: the same rounded shape,
+   * so a message looks like what the composer produces. */
+  ".card { border-radius: 12px; }\n"
+  "frame, frame > border { border-radius: 16px; border-color:"
+  " alpha(currentColor, 0.08); }\n"
+
+  "popover > contents { border-radius: 12px; padding: 4px; }\n"
+  "popover menuitem { border-radius: 8px; }\n"
+
+  /* Out of the way until used, which keeps a long transcript from being
+   * framed by a bar down its side. */
+  "scrollbar { background: transparent; border: none; }\n"
+  "scrollbar slider { min-width: 6px; min-height: 6px;"
+  " background: alpha(currentColor, 0.18); }\n"
+  "scrollbar slider:hover { background: alpha(currentColor, 0.32); }\n"
+
   /* A chat waiting to be answered, in a tree the user may not be looking at.
    * Slow enough to notice without being the thing you look at. */
   "@keyframes hy-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
@@ -113,6 +159,11 @@ hy_application_startup (GApplication *app)
   G_APPLICATION_CLASS (hy_application_parent_class)->startup (app);
 
   self->settings = g_settings_new (HY_APP_ID);
+
+  /* The palette above is hand-picked for a dark window; in light it would be
+   * black text on black. */
+  adw_style_manager_set_color_scheme (adw_style_manager_get_default (),
+                                      ADW_COLOR_SCHEME_FORCE_DARK);
 
   load_style ();
 
