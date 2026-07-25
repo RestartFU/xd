@@ -25,8 +25,9 @@ typedef struct
   char *backend_id;         /* the backend this turn's session id belongs to */
   char *prompt;             /* kept so a dead session can be retried */
   char *label;              /* the model and effort this turn actually ran on */
-  GString *text;
-  HyMessageRow *row;        /* NULL while the chat is not on screen */
+  GString *text;            /* everything the turn has said, for the ask block */
+  GString *segment;         /* what belongs in the row being written now */
+  HyMessageRow *row;        /* NULL until the segment has somewhere to go */
   gboolean resumed;
   gboolean is_retry;
 } Turn;
@@ -406,6 +407,7 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->prompt, g_free);
   g_clear_pointer (&turn->label, g_free);
   g_string_free (turn->text, TRUE);
+  g_string_free (turn->segment, TRUE);
   g_free (turn);
 }
 
@@ -441,20 +443,29 @@ on_text_delta (HyChatSession *session,
   Turn *turn = user_data;
 
   g_string_append (turn->text, delta);
+  g_string_append (turn->segment, delta);
+
+  /* The previous segment ended at a tool call, so this text needs a row of
+   * its own -- below the tools, where it was said. */
+  if (turn->row == NULL && turn_is_visible (turn))
+    {
+      turn->row = append_row (turn->view, HY_MESSAGE_ASSISTANT, NULL);
+      hy_message_row_set_source (turn->row, turn->label);
+    }
 
   if (turn->row != NULL)
     {
       /* Show only what is safe to show: a question block is rendered as
        * buttons when the turn ends and must not flash past as markup first. */
-      gsize visible = hy_ask_visible_length (turn->text->str);
+      gsize visible = hy_ask_visible_length (turn->segment->str);
 
-      if (visible == turn->text->len)
+      if (visible == turn->segment->len)
         {
           hy_message_row_append (turn->row, delta);
         }
       else
         {
-          g_autofree char *prose = g_strndup (turn->text->str, visible);
+          g_autofree char *prose = g_strndup (turn->segment->str, visible);
 
           g_strchomp (prose);
           hy_message_row_set_text (turn->row, prose);
@@ -464,12 +475,42 @@ on_text_delta (HyChatSession *session,
     }
 }
 
+/*
+ * Ends the message being written, if there is one.
+ *
+ * An agent that works in steps says something, uses a tool, then says
+ * something about what it found. Kept in one row, all of that text collapses
+ * into a single paragraph sitting above every tool it ever called, in an
+ * order that never happened. Each stretch of speech is its own message, so
+ * the transcript reads the way the work went.
+ */
+static void
+close_segment (Turn *turn)
+{
+  g_autoptr (GError) error = NULL;
+
+  if (turn->segment->len == 0)
+    return;
+
+  if (!hy_storage_append_message (turn->view->storage, turn->chat_id, "assistant",
+                                  turn->segment->str, NULL, turn->label, &error))
+    g_warning ("cannot store the reply: %s", error->message);
+
+  if (turn->row != NULL)
+    hy_message_row_set_waiting (turn->row, FALSE);
+
+  g_string_truncate (turn->segment, 0);
+  turn->row = NULL;
+}
+
 static void
 on_tool_use (HyChatSession *session,
              const char    *name,
              gpointer       user_data)
 {
   Turn *turn = user_data;
+
+  close_segment (turn);
 
   if (turn_is_visible (turn))
     append_tool_line (turn->view, name);
@@ -513,12 +554,6 @@ on_turn_finished (HyChatSession *session,
       return;
     }
 
-  if (turn->text->len > 0)
-    {
-      if (!hy_storage_append_message (self->storage, chat_id, "assistant",
-                                      turn->text->str, NULL, turn->label, &error))
-        g_warning ("cannot store the reply: %s", error->message);
-    }
 
   /* This backend has now been told everything up to and including its own
    * reply, so the next turn only has to replay what comes after. */
@@ -543,7 +578,7 @@ on_turn_finished (HyChatSession *session,
 
   if (turn->row != NULL)
     {
-      g_autoptr (HyAsk) ask = hy_ask_parse (turn->text->str, NULL);
+      g_autoptr (HyAsk) ask = hy_ask_parse (turn->segment->str, NULL);
 
       hy_message_row_set_waiting (turn->row, FALSE);
 
@@ -554,11 +589,17 @@ on_turn_finished (HyChatSession *session,
       /* The block streamed in as text; re-render it as a question. */
       if (ask != NULL && visible)
         {
+          g_autofree char *said = g_strdup (turn->segment->str);
+
           gtk_box_remove (self->transcript, GTK_WIDGET (turn->row));
           turn->row = NULL;
-          append_reply (self, turn->text->str, turn->label, TRUE);
+          append_reply (self, said, turn->label, TRUE);
         }
     }
+
+  /* Whatever was still being written when the turn ended is a message like
+   * any other. */
+  close_segment (turn);
 
   /* Frees the turn, so nothing may touch it afterwards. */
   g_hash_table_remove (self->turns, chat_id);
@@ -724,6 +765,7 @@ start_turn (HyChatView *self,
   turn->prompt = g_strdup (prompt);
   turn->resumed = resume_session_id != NULL;
   turn->text = g_string_new (NULL);
+  turn->segment = g_string_new (NULL);
   turn->session = hy_chat_session_new (backend);
   /* Taken now rather than when the reply lands: the model can be changed
    * while the agent is still working, and what answered is whatever was
@@ -1205,7 +1247,7 @@ hy_chat_view_set_chat (HyChatView *self,
   turn = current_turn (self);
   if (turn != NULL)
     {
-      turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->text->str);
+      turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->segment->str);
       hy_message_row_set_source (turn->row, turn->label);
       hy_message_row_set_waiting (turn->row, TRUE);
     }

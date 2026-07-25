@@ -69,6 +69,37 @@ static const GActionEntry app_actions[] = {
   { "quit",  on_quit_action,  NULL, NULL, NULL, { 0 } },
 };
 
+/*
+ * Tightens the default GNOME scale.
+ *
+ * Adwaita is sized for touch-friendly desktop apps: a tool window that is
+ * mostly a tree and a transcript gets far less on screen than it has room
+ * for. This trims the type and the row heights to roughly what t3 shows,
+ * without imposing a fixed pixel size on the text itself -- em keeps it
+ * following whatever the desktop font is set to.
+ */
+static const char *HY_STYLE =
+  "window { font-size: 0.9em; }\n"
+  /* The tree: rows sized to their text rather than to a finger. */
+  "listview > row { min-height: 0; padding: 3px 6px; }\n"
+  "listview > row label { padding: 0; }\n"
+  "headerbar { min-height: 38px; }\n"
+  "headerbar button { min-height: 26px; min-width: 26px; padding: 2px 6px; }\n"
+  /* The composer's controls, which are buttons in a row and do not need the
+   * height of a dialog's. */
+  "button.flat, dropdown > button, togglebutton { min-height: 24px; }\n";
+
+static void
+load_style (void)
+{
+  g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
+
+  gtk_css_provider_load_from_string (provider, HY_STYLE);
+  gtk_style_context_add_provider_for_display (gdk_display_get_default (),
+                                              GTK_STYLE_PROVIDER (provider),
+                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
 static void
 hy_application_startup (GApplication *app)
 {
@@ -77,6 +108,8 @@ hy_application_startup (GApplication *app)
   G_APPLICATION_CLASS (hy_application_parent_class)->startup (app);
 
   self->settings = g_settings_new (HY_APP_ID);
+
+  load_style ();
 
   g_action_map_add_action_entries (G_ACTION_MAP (self), app_actions,
                                    G_N_ELEMENTS (app_actions), self);

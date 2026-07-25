@@ -14,7 +14,7 @@ struct _HyWindow
   HyStorage *storage;
   HyFsTree *tree;
 
-  AdwNavigationSplitView *split_view;
+  GtkPaned *split_view;
   HyChatView *chat_view;
 };
 
@@ -92,6 +92,8 @@ on_close_request (GtkWindow *window,
   gtk_window_get_default_size (window, &width, &height);
   g_settings_set_int (self->settings, "window-width", width);
   g_settings_set_int (self->settings, "window-height", height);
+  g_settings_set_int (self->settings, "sidebar-width",
+                      gtk_paned_get_position (self->split_view));
   g_settings_set_boolean (self->settings, "window-maximized",
                           gtk_window_is_maximized (window));
 
@@ -144,12 +146,10 @@ hy_window_new (HyApplication *app)
 
   self->chat_view = hy_chat_view_new (self->storage, self->tree);
 
-  adw_navigation_split_view_set_sidebar (self->split_view,
-                                         adw_navigation_page_new (GTK_WIDGET (sidebar),
-                                                                  "Workspaces"));
-  adw_navigation_split_view_set_content (self->split_view,
-                                         adw_navigation_page_new (GTK_WIDGET (self->chat_view),
-                                                                  "Chat"));
+  gtk_paned_set_start_child (self->split_view, GTK_WIDGET (sidebar));
+  gtk_paned_set_end_child (self->split_view, GTK_WIDGET (self->chat_view));
+  gtk_paned_set_position (self->split_view,
+                          g_settings_get_int (self->settings, "sidebar-width"));
 
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
 
@@ -189,10 +189,17 @@ hy_window_init (HyWindow *self)
 {
   gtk_window_set_title (GTK_WINDOW (self), "hy");
 
-  self->split_view = ADW_NAVIGATION_SPLIT_VIEW (adw_navigation_split_view_new ());
-  adw_navigation_split_view_set_min_sidebar_width (self->split_view, 200);
-  adw_navigation_split_view_set_max_sidebar_width (self->split_view, 420);
-  adw_navigation_split_view_set_sidebar_width_fraction (self->split_view, 0.28);
+  /*
+   * A paned rather than AdwNavigationSplitView, which sizes the sidebar by a
+   * fraction of the window and cannot be dragged. The cost is the split
+   * view's narrow-window behaviour, where the sidebar becomes a page of its
+   * own; hy is a desktop window with a tree that is worth widening.
+   */
+  self->split_view = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
+  gtk_paned_set_resize_start_child (self->split_view, FALSE);
+  gtk_paned_set_shrink_start_child (self->split_view, FALSE);
+  gtk_paned_set_resize_end_child (self->split_view, TRUE);
+  gtk_paned_set_shrink_end_child (self->split_view, FALSE);
 
   adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
                                       GTK_WIDGET (self->split_view));
