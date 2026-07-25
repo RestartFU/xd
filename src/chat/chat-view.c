@@ -56,6 +56,7 @@ struct _HyChatView
   GtkWidget *queued_bar;
   GtkLabel *queued_label;
   char *queued;             /* typed while a turn was running */
+  gboolean syncing_panes;   /* setting the toggles to match the chat */
   GPtrArray *attachments;   /* absolute paths of pasted images */
   HyModelPicker *model_picker;
   GtkDropDown *effort_chooser;
@@ -1277,19 +1278,84 @@ describe_context (const char *workdir)
  * still the thing on screen. */
 #define TERMINAL_DEFAULT_HEIGHT 260
 
-/* Puts the divider where it leaves the terminal @height tall. */
+typedef struct
+{
+  GtkPaned *paned;
+  int size;                 /* how big the end child should be */
+  gboolean vertical;
+} PendingSplit;
+
+/*
+ * Puts the divider where it leaves the end child @size big.
+ *
+ * A window that has not been laid out yet has nothing to divide, which is
+ * exactly the case when a chat is opened at startup -- so instead of giving
+ * up, it waits for the first frame that has a size. Getting this wrong is
+ * silent: the pane simply comes back the default size, as though nothing had
+ * ever been remembered.
+ */
+static gboolean
+apply_split (GtkWidget     *widget,
+             GdkFrameClock *clock,
+             gpointer       user_data)
+{
+  PendingSplit *pending = user_data;
+  int available = pending->vertical ? gtk_widget_get_height (GTK_WIDGET (pending->paned))
+                                    : gtk_widget_get_width (GTK_WIDGET (pending->paned));
+
+  if (available <= 0)
+    return G_SOURCE_CONTINUE;
+
+  gtk_paned_set_position (pending->paned, MAX (available - pending->size, 0));
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+set_end_child_size (GtkPaned *paned,
+                    int       size,
+                    gboolean  vertical)
+{
+  PendingSplit *pending;
+
+  if (size <= 0)
+    return;
+
+  pending = g_new0 (PendingSplit, 1);
+  pending->paned = paned;
+  pending->size = size;
+  pending->vertical = vertical;
+
+  gtk_widget_add_tick_callback (GTK_WIDGET (paned), apply_split, pending, g_free);
+}
+
 static void
 set_terminal_height (HyChatView *self,
                      int         height)
 {
-  int available = gtk_widget_get_height (GTK_WIDGET (self->split));
+  set_end_child_size (self->split, height, TRUE);
+}
 
-  /* Before the first allocation there is nothing to divide; the position is
-   * set again when the panel is next shown. */
-  if (available <= 0 || height <= 0)
+/*
+ * Writes which panes this chat is working with.
+ *
+ * Skipped while the toggles are being set to match a chat being opened,
+ * which would otherwise write the chat's own state back over itself -- and,
+ * worse, write it against whichever chat was open a moment ago.
+ */
+static void
+remember_panes (HyChatView *self)
+{
+  g_autoptr (GError) error = NULL;
+
+  if (self->syncing_panes || self->chat == NULL)
     return;
 
-  gtk_paned_set_position (self->split, MAX (available - height, 0));
+  if (!hy_storage_set_panes (self->storage, hy_node_get_chat_id (self->chat),
+                             gtk_toggle_button_get_active (self->terminal_button),
+                             gtk_toggle_button_get_active (self->diff_button),
+                             &error))
+    g_warning ("cannot remember the open panes: %s", error->message);
 }
 
 /*
@@ -1299,6 +1365,33 @@ set_terminal_height (HyChatView *self,
  * something writes to the repository, which here means an agent finishing a
  * turn or the user running something in the terminal.
  */
+/* The divider is where the user put it, so it is written when it moves
+ * rather than only when a pane is closed -- a window shut with both open
+ * would otherwise lose both sizes. */
+static void
+on_terminal_dragged (GtkPaned   *paned,
+                     GParamSpec *pspec,
+                     gpointer    user_data)
+{
+  HyChatView *self = user_data;
+  int height = gtk_widget_get_height (GTK_WIDGET (self->terminal));
+
+  if (height > 0 && gtk_widget_get_visible (GTK_WIDGET (self->terminal)))
+    g_settings_set_int (self->settings, "terminal-height", height);
+}
+
+static void
+on_diff_dragged (GtkPaned   *paned,
+                 GParamSpec *pspec,
+                 gpointer    user_data)
+{
+  HyChatView *self = user_data;
+  int width = gtk_widget_get_width (GTK_WIDGET (self->diff));
+
+  if (width > 0 && gtk_widget_get_visible (GTK_WIDGET (self->diff)))
+    g_settings_set_int (self->settings, "diff-width", width);
+}
+
 static void
 on_diff_toggled (GtkToggleButton *button,
                  gpointer         user_data)
@@ -1306,7 +1399,7 @@ on_diff_toggled (GtkToggleButton *button,
   HyChatView *self = user_data;
   gboolean shown = gtk_toggle_button_get_active (button);
 
-  g_settings_set_boolean (self->settings, "diff-visible", shown);
+  remember_panes (self);
 
   if (!shown)
     {
@@ -1321,13 +1414,8 @@ on_diff_toggled (GtkToggleButton *button,
 
   gtk_widget_set_visible (GTK_WIDGET (self->diff), TRUE);
 
-  {
-    int available = gtk_widget_get_width (GTK_WIDGET (self->side_split));
-    int width = g_settings_get_int (self->settings, "diff-width");
-
-    if (available > 0 && width > 0)
-      gtk_paned_set_position (self->side_split, MAX (available - width, 0));
-  }
+  set_end_child_size (self->side_split,
+                      g_settings_get_int (self->settings, "diff-width"), FALSE);
 
   hy_diff_pane_refresh (self->diff);
 }
@@ -1355,9 +1443,7 @@ on_terminal_toggled (GtkToggleButton *button,
   HyChatView *self = user_data;
   gboolean shown = gtk_toggle_button_get_active (button);
 
-  /* Recorded as it changes rather than only on the way out, so a crash or a
-   * kill does not lose it. */
-  g_settings_set_boolean (self->settings, "terminal-visible", shown);
+  remember_panes (self);
 
   if (!shown)
     {
@@ -1369,7 +1455,13 @@ on_terminal_toggled (GtkToggleButton *button,
 
   gtk_widget_set_visible (GTK_WIDGET (self->terminal), TRUE);
   set_terminal_height (self, g_settings_get_int (self->settings, "terminal-height"));
-  hy_terminal_panel_activate (self->terminal);
+
+  /* Only take the keyboard when the user asked for the panel, not when it is
+   * being reopened because a chat had it open. */
+  if (self->syncing_panes)
+    hy_terminal_panel_start (self->terminal);
+  else
+    hy_terminal_panel_activate (self->terminal);
 }
 
 static void
@@ -1393,6 +1485,12 @@ update_context_bar (HyChatView   *self,
 
     hy_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
     hy_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
+
+    /* The panes belong to the chat, so opening one brings them back. */
+    self->syncing_panes = TRUE;
+    gtk_toggle_button_set_active (self->terminal_button, chat->terminal_open);
+    gtk_toggle_button_set_active (self->diff_button, chat->diff_open);
+    self->syncing_panes = FALSE;
 
     gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
@@ -1957,6 +2055,8 @@ hy_chat_view_init (HyChatView *self)
   gtk_widget_set_visible (GTK_WIDGET (self->terminal), FALSE);
 
   self->split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_VERTICAL));
+  g_signal_connect (self->split, "notify::position",
+                    G_CALLBACK (on_terminal_dragged), self);
   gtk_paned_set_start_child (self->split, content);
   gtk_paned_set_resize_start_child (self->split, TRUE);
   gtk_paned_set_shrink_start_child (self->split, FALSE);
@@ -1970,6 +2070,8 @@ hy_chat_view_init (HyChatView *self)
   gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
 
   self->side_split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
+  g_signal_connect (self->side_split, "notify::position",
+                    G_CALLBACK (on_diff_dragged), self);
   gtk_paned_set_start_child (self->side_split, GTK_WIDGET (self->split));
   gtk_paned_set_resize_start_child (self->side_split, TRUE);
   gtk_paned_set_shrink_start_child (self->side_split, FALSE);
@@ -1979,13 +2081,6 @@ hy_chat_view_init (HyChatView *self)
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->side_split));
 
-  /* Reopened as it was left. The toggle does the work, so the height and the
-   * shell start the same way they would on a click -- except that the shell
-   * waits for a chat, since there is no working directory yet. */
-  if (g_settings_get_boolean (self->settings, "terminal-visible"))
-    gtk_toggle_button_set_active (self->terminal_button, TRUE);
 
-  if (g_settings_get_boolean (self->settings, "diff-visible"))
-    gtk_toggle_button_set_active (self->diff_button, TRUE);
   adw_bin_set_child (ADW_BIN (self), toolbar);
 }

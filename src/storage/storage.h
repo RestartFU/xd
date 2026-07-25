@@ -15,6 +15,8 @@ typedef struct
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
   gboolean plan;      /* think it through, change nothing */
+  gboolean terminal_open;  /* the panes this chat was left with */
+  gboolean diff_open;
   gint64 created_at;
   gint64 updated_at;
 } HyChat;
@@ -81,6 +83,14 @@ gboolean    hy_storage_set_access      (HyStorage   *self,
 
 /* Plan mode rides alongside the access level rather than replacing it, so
  * leaving plan restores whatever access the chat had. */
+/* Which panes a chat is working with. Kept per chat rather than per window:
+ * one chat is a repository being edited, the next is a question. */
+gboolean    hy_storage_set_panes       (HyStorage   *self,
+                                        const char  *chat_id,
+                                        gboolean     terminal_open,
+                                        gboolean     diff_open,
+                                        GError     **error);
+
 gboolean    hy_storage_set_plan        (HyStorage   *self,
                                         const char  *chat_id,
                                         gboolean     plan,

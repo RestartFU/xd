@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 8
+#define HY_STORAGE_SCHEMA_VERSION 9
 
 struct _HyStorage
 {
@@ -230,6 +230,11 @@ migrate (HyStorage  *self,
                  error))
     return FALSE;
 
+  if (version < 9 &&
+      (!exec_sql (self, "ALTER TABLE chats ADD COLUMN terminal_open INTEGER NOT NULL DEFAULT 0;", error) ||
+       !exec_sql (self, "ALTER TABLE chats ADD COLUMN diff_open INTEGER NOT NULL DEFAULT 0;", error)))
+    return FALSE;
+
   /* Replies used to be labelled from the chat's current model, so changing
    * model relabelled everything already said. What produced a message is a
    * property of the message. */
@@ -359,13 +364,15 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->plan       = sqlite3_column_int (stmt, 8) != 0;
   chat->created_at = sqlite3_column_int64 (stmt, 9);
   chat->updated_at = sqlite3_column_int64 (stmt, 10);
+  chat->terminal_open = sqlite3_column_int (stmt, 11) != 0;
+  chat->diff_open     = sqlite3_column_int (stmt, 12) != 0;
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
   "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
-  " created_at, updated_at"
+  " created_at, updated_at, terminal_open, diff_open"
 
 HyChat *
 hy_storage_get_chat (HyStorage   *self,
@@ -707,6 +714,42 @@ hy_storage_set_access (HyStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET access = ?, updated_at = ? WHERE id = ?;",
                              access, chat_id, "Cannot change the access level", error);
+}
+
+gboolean
+hy_storage_set_panes (HyStorage   *self,
+                      const char  *chat_id,
+                      gboolean     terminal_open,
+                      gboolean     diff_open,
+                      GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  /* updated_at is left alone: opening a pane is not work on the chat, and
+   * bumping it would reorder the sidebar for looking at something. */
+  if (sqlite3_prepare_v2 (self->db,
+                          "UPDATE chats SET terminal_open = ?, diff_open = ?"
+                          " WHERE id = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot remember the open panes");
+      return FALSE;
+    }
+
+  sqlite3_bind_int (stmt, 1, terminal_open ? 1 : 0);
+  sqlite3_bind_int (stmt, 2, diff_open ? 1 : 0);
+  bind_text (stmt, 3, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot remember the open panes");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
 }
 
 gboolean
