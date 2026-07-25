@@ -206,6 +206,68 @@ test_codex_argv (void)
   g_assert_nonnull (strstr (plain, "be brief\n\nhello"));
 }
 
+/*
+ * Access maps onto whatever each CLI calls it. The default has to be the
+ * least permissive rung: an unrecognised value must never open the sandbox.
+ */
+static void
+test_access_maps_to_each_cli (void)
+{
+  const AiBackend *claude = ai_backend_lookup ("claude");
+  const AiBackend *codex = ai_backend_lookup ("codex");
+  AiRunSpec spec = { .prompt = "hello" };
+
+  struct { AiAccess access; const char *claude_flag; const char *codex_flag; } cases[] = {
+    { AI_ACCESS_PLAN,      "--permission-mode plan",              "-s read-only" },
+    { AI_ACCESS_READ_ONLY, "--permission-mode manual",            "-s read-only" },
+    { AI_ACCESS_EDIT,      "--permission-mode acceptEdits",       "-s workspace-write" },
+    { AI_ACCESS_FULL,      "--permission-mode bypassPermissions", "-s danger-full-access" },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      g_autofree char *claude_argv = NULL;
+      g_autofree char *codex_argv = NULL;
+
+      spec.access = cases[i].access;
+      claude_argv = argv_to_string (claude, &spec);
+      codex_argv = argv_to_string (codex, &spec);
+
+      g_assert_nonnull (strstr (claude_argv, cases[i].claude_flag));
+      g_assert_nonnull (strstr (codex_argv, cases[i].codex_flag));
+    }
+
+  /* Codex has no plan mode, so planning has to be asked for in words. */
+  spec.access = AI_ACCESS_PLAN;
+  {
+    g_autofree char *codex_argv = argv_to_string (codex, &spec);
+
+    g_assert_nonnull (strstr (codex_argv, "Plan only"));
+  }
+
+  g_assert_cmpint (ai_access_from_string ("something-new"), ==, AI_ACCESS_READ_ONLY);
+  g_assert_cmpint (ai_access_from_string (NULL), ==, AI_ACCESS_READ_ONLY);
+}
+
+static void
+test_effort_maps_to_each_cli (void)
+{
+  const AiBackend *claude = ai_backend_lookup ("claude");
+  const AiBackend *codex = ai_backend_lookup ("codex");
+  AiRunSpec spec = { .prompt = "hello", .effort = AI_EFFORT_XHIGH };
+  g_autofree char *claude_argv = argv_to_string (claude, &spec);
+  g_autofree char *codex_argv = argv_to_string (codex, &spec);
+  g_autofree char *unset = NULL;
+
+  g_assert_nonnull (strstr (claude_argv, "--effort xhigh"));
+  g_assert_nonnull (strstr (codex_argv, "model_reasoning_effort=\"xhigh\""));
+
+  /* Left at default, neither CLI is told anything and its own setting wins. */
+  spec.effort = AI_EFFORT_DEFAULT;
+  unset = argv_to_string (claude, &spec);
+  g_assert_null (strstr (unset, "--effort"));
+}
+
 static void
 test_unknown_backend (void)
 {
@@ -298,6 +360,8 @@ main (int   argc,
   g_test_add_func ("/backend/models/named", test_every_backend_names_its_models);
   g_test_add_func ("/backend/models/labels", test_model_labels);
   g_test_add_func ("/backend/models/argv", test_model_reaches_argv);
+  g_test_add_func ("/backend/access", test_access_maps_to_each_cli);
+  g_test_add_func ("/backend/effort", test_effort_maps_to_each_cli);
 
   return g_test_run ();
 }

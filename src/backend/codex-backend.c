@@ -15,6 +15,21 @@
  * why everything unrecognised is skipped rather than treated as an error.
  */
 
+/* Codex has no plan mode of its own, so planning runs read-only and the
+ * instruction to plan rather than act rides in the prompt. */
+static const char *
+codex_sandbox (AiAccess access)
+{
+  switch (access)
+    {
+    case AI_ACCESS_EDIT: return "workspace-write";
+    case AI_ACCESS_FULL: return "danger-full-access";
+    case AI_ACCESS_PLAN:
+    case AI_ACCESS_READ_ONLY:
+    default:             return "read-only";
+    }
+}
+
 static GPtrArray *
 codex_build_argv (const AiBackend *self,
                   const AiRunSpec *spec)
@@ -32,9 +47,16 @@ codex_build_argv (const AiBackend *self,
 
   g_ptr_array_add (argv, g_strdup ("--json"));
 
-  /* A chat window has no business running commands unattended. */
   g_ptr_array_add (argv, g_strdup ("-s"));
-  g_ptr_array_add (argv, g_strdup ("read-only"));
+  g_ptr_array_add (argv, g_strdup (codex_sandbox (spec->access)));
+
+  /* Codex takes effort as a config override rather than a flag. */
+  if (spec->effort != AI_EFFORT_DEFAULT)
+    {
+      g_ptr_array_add (argv, g_strdup ("-c"));
+      g_ptr_array_add (argv, g_strdup_printf ("model_reasoning_effort=\"%s\"",
+                                              ai_effort_to_string (spec->effort)));
+    }
 
   if (spec->model != NULL)
     {
@@ -49,12 +71,21 @@ codex_build_argv (const AiBackend *self,
     }
 
   /* Codex has no --append-system-prompt, so folder instructions ride along in
-   * front of the prompt itself. */
-  if (spec->system_prompt != NULL)
-    g_ptr_array_add (argv, g_strdup_printf ("%s\n\n%s", spec->system_prompt,
-                                            spec->prompt));
-  else
-    g_ptr_array_add (argv, g_strdup (spec->prompt));
+   * front of the prompt itself -- as does the plan-only instruction, which it
+   * has no flag for either. */
+  {
+    g_autoptr (GString) prompt = g_string_new (NULL);
+
+    if (spec->access == AI_ACCESS_PLAN)
+      g_string_append (prompt, "Plan only: describe what you would do and why. "
+                               "Do not modify anything.\n\n");
+
+    if (spec->system_prompt != NULL)
+      g_string_append_printf (prompt, "%s\n\n", spec->system_prompt);
+
+    g_string_append (prompt, spec->prompt);
+    g_ptr_array_add (argv, g_string_free (g_steal_pointer (&prompt), FALSE));
+  }
 
   g_ptr_array_add (argv, NULL);
 

@@ -15,6 +15,23 @@
  * use by default, which is what we want for a chat window.
  */
 
+/*
+ * "manual" asks before every tool use, and in print mode there is nobody to
+ * ask, so it comes out read-only -- which is exactly the intent.
+ */
+static const char *
+claude_permission_mode (AiAccess access)
+{
+  switch (access)
+    {
+    case AI_ACCESS_PLAN:  return "plan";
+    case AI_ACCESS_EDIT:  return "acceptEdits";
+    case AI_ACCESS_FULL:  return "bypassPermissions";
+    case AI_ACCESS_READ_ONLY:
+    default:              return "manual";
+    }
+}
+
 static GPtrArray *
 claude_build_argv (const AiBackend *self,
                    const AiRunSpec *spec)
@@ -50,6 +67,15 @@ claude_build_argv (const AiBackend *self,
       g_ptr_array_add (argv, g_strdup ("--append-system-prompt"));
       g_ptr_array_add (argv, g_strdup (spec->system_prompt));
     }
+
+  if (spec->effort != AI_EFFORT_DEFAULT)
+    {
+      g_ptr_array_add (argv, g_strdup ("--effort"));
+      g_ptr_array_add (argv, g_strdup (ai_effort_to_string (spec->effort)));
+    }
+
+  g_ptr_array_add (argv, g_strdup ("--permission-mode"));
+  g_ptr_array_add (argv, g_strdup (claude_permission_mode (spec->access)));
 
   g_ptr_array_add (argv, NULL);
 

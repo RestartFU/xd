@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 5
+#define HY_STORAGE_SCHEMA_VERSION 6
 
 struct _HyStorage
 {
@@ -26,6 +26,8 @@ hy_chat_free (HyChat *self)
   g_free (self->backend);
   g_free (self->workdir);
   g_free (self->model);
+  g_free (self->effort);
+  g_free (self->access);
   g_free (self);
 }
 
@@ -221,6 +223,11 @@ migrate (HyStorage  *self,
                  error))
     return FALSE;
 
+  if (version < 6 &&
+      (!exec_sql (self, "ALTER TABLE chats ADD COLUMN effort TEXT;", error) ||
+       !exec_sql (self, "ALTER TABLE chats ADD COLUMN access TEXT;", error)))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          HY_STORAGE_SCHEMA_VERSION);
@@ -330,14 +337,17 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->backend    = column_text (stmt, 3);
   chat->workdir    = column_text (stmt, 4);
   chat->model      = column_text (stmt, 5);
-  chat->created_at = sqlite3_column_int64 (stmt, 6);
-  chat->updated_at = sqlite3_column_int64 (stmt, 7);
+  chat->effort     = column_text (stmt, 6);
+  chat->access     = column_text (stmt, 7);
+  chat->created_at = sqlite3_column_int64 (stmt, 8);
+  chat->updated_at = sqlite3_column_int64 (stmt, 9);
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
-  "id, folder_id, title, backend, workdir, model, created_at, updated_at"
+  "id, folder_id, title, backend, workdir, model, effort, access,"\
+  " created_at, updated_at"
 
 HyChat *
 hy_storage_get_chat (HyStorage   *self,
@@ -653,6 +663,32 @@ hy_storage_set_model (HyStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET model = ?, updated_at = ? WHERE id = ?;",
                              model, chat_id, "Cannot change the model", error);
+}
+
+gboolean
+hy_storage_set_effort (HyStorage   *self,
+                       const char  *chat_id,
+                       const char  *effort,
+                       GError     **error)
+{
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  return update_chat_column (self,
+                             "UPDATE chats SET effort = ?, updated_at = ? WHERE id = ?;",
+                             effort, chat_id, "Cannot change the effort", error);
+}
+
+gboolean
+hy_storage_set_access (HyStorage   *self,
+                       const char  *chat_id,
+                       const char  *access,
+                       GError     **error)
+{
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  return update_chat_column (self,
+                             "UPDATE chats SET access = ?, updated_at = ? WHERE id = ?;",
+                             access, chat_id, "Cannot change the access level", error);
 }
 
 gboolean

@@ -32,6 +32,94 @@ ai_backend_all (guint *n_backends)
   return backends;
 }
 
+/* Stored in the database, so these strings are part of the file format. */
+static const struct { AiEffort effort; const char *id; const char *label; } efforts[] = {
+  { AI_EFFORT_DEFAULT, "default", "Default effort" },
+  { AI_EFFORT_LOW,     "low",     "Low" },
+  { AI_EFFORT_MEDIUM,  "medium",  "Medium" },
+  { AI_EFFORT_HIGH,    "high",    "High" },
+  { AI_EFFORT_XHIGH,   "xhigh",   "Extra high" },
+  { AI_EFFORT_MAX,     "max",     "Max" },
+};
+
+static const struct { AiAccess access; const char *id; const char *label; const char *icon; } accesses[] = {
+  { AI_ACCESS_PLAN,      "plan",      "Plan only",   "view-list-bullet-symbolic" },
+  { AI_ACCESS_READ_ONLY, "read-only", "Read only",   "changes-prevent-symbolic" },
+  { AI_ACCESS_EDIT,      "edit",      "Edit files",  "document-edit-symbolic" },
+  { AI_ACCESS_FULL,      "full",      "Full access", "changes-allow-symbolic" },
+};
+
+const char *
+ai_effort_to_string (AiEffort effort)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (efforts); i++)
+    if (efforts[i].effort == effort)
+      return efforts[i].id;
+
+  return "default";
+}
+
+AiEffort
+ai_effort_from_string (const char *name)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (efforts); i++)
+    if (g_strcmp0 (efforts[i].id, name) == 0)
+      return efforts[i].effort;
+
+  return AI_EFFORT_DEFAULT;
+}
+
+const char *
+ai_effort_label (AiEffort effort)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (efforts); i++)
+    if (efforts[i].effort == effort)
+      return efforts[i].label;
+
+  return "Default effort";
+}
+
+const char *
+ai_access_to_string (AiAccess access)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (accesses); i++)
+    if (accesses[i].access == access)
+      return accesses[i].id;
+
+  return "read-only";
+}
+
+AiAccess
+ai_access_from_string (const char *name)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (accesses); i++)
+    if (g_strcmp0 (accesses[i].id, name) == 0)
+      return accesses[i].access;
+
+  /* Anything unrecognised errs on the safe side. */
+  return AI_ACCESS_READ_ONLY;
+}
+
+const char *
+ai_access_label (AiAccess access)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (accesses); i++)
+    if (accesses[i].access == access)
+      return accesses[i].label;
+
+  return "Read only";
+}
+
+const char *
+ai_access_icon_name (AiAccess access)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (accesses); i++)
+    if (accesses[i].access == access)
+      return accesses[i].icon;
+
+  return "changes-prevent-symbolic";
+}
+
 const char *
 ai_backend_model_label (const AiBackend *self,
                         const char      *model_id)

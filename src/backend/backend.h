@@ -35,6 +35,40 @@ typedef struct
 typedef void (*AiEventFunc) (const AiEvent *event,
                              gpointer       user_data);
 
+/*
+ * How much rope the assistant gets in the working directory.
+ *
+ * Ordered least to most permissive; the CLIs spell these differently but the
+ * ladder is the same, and hy defaults to the bottom of it.
+ */
+typedef enum
+{
+  AI_ACCESS_PLAN,       /* think it through, change nothing */
+  AI_ACCESS_READ_ONLY,
+  AI_ACCESS_EDIT,       /* may edit files in the working directory */
+  AI_ACCESS_FULL,       /* no confirmation for anything */
+} AiAccess;
+
+/* How hard the model is asked to think. NULL leaves it to the CLI. */
+typedef enum
+{
+  AI_EFFORT_DEFAULT,
+  AI_EFFORT_LOW,
+  AI_EFFORT_MEDIUM,
+  AI_EFFORT_HIGH,
+  AI_EFFORT_XHIGH,
+  AI_EFFORT_MAX,
+} AiEffort;
+
+const char *ai_effort_to_string   (AiEffort    effort);
+AiEffort    ai_effort_from_string (const char *name);
+const char *ai_effort_label       (AiEffort    effort);
+
+const char *ai_access_to_string   (AiAccess    access);
+AiAccess    ai_access_from_string (const char *name);
+const char *ai_access_label       (AiAccess    access);
+const char *ai_access_icon_name   (AiAccess    access);
+
 typedef struct
 {
   const char *prompt;
@@ -42,6 +76,8 @@ typedef struct
   const char *system_prompt;      /* NULL: no extra instructions */
   const char *resume_session_id;  /* NULL: start a new session */
   const char *workdir;            /* NULL: inherit ours */
+  AiEffort effort;
+  AiAccess access;
 } AiRunSpec;
 
 typedef struct _AiParser AiParser;

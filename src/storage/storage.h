@@ -12,6 +12,8 @@ typedef struct
   char *backend;
   char *workdir;      /* NULL: inherit the folder's */
   char *model;        /* NULL: the backend's default */
+  char *effort;       /* NULL: the CLI's own setting */
+  char *access;       /* NULL: read-only */
   gint64 created_at;
   gint64 updated_at;
 } HyChat;
@@ -62,6 +64,16 @@ gboolean    hy_storage_set_workdir     (HyStorage   *self,
 gboolean    hy_storage_set_model       (HyStorage   *self,
                                         const char  *chat_id,
                                         const char  *model,
+                                        GError     **error);
+
+gboolean    hy_storage_set_effort      (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *effort,
+                                        GError     **error);
+
+gboolean    hy_storage_set_access      (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *access,
                                         GError     **error);
 
 HyChat     *hy_storage_get_chat        (HyStorage   *self,

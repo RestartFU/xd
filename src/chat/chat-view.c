@@ -46,7 +46,23 @@ struct _HyChatView
   GtkButton *send_button;
   GtkWidget *composer_area;
   HyModelPicker *model_picker;
+  GtkDropDown *effort_chooser;
+  GtkDropDown *access_chooser;
   GtkLabel *context_label;
+
+  /* Set while the choosers are filled in from the chat, so the resulting
+   * notify does not read back as the user picking something. */
+  gboolean syncing_run_options;
+};
+
+/* Offered in the composer bar, least permissive first. */
+static const AiAccess access_choices[] = {
+  AI_ACCESS_PLAN, AI_ACCESS_READ_ONLY, AI_ACCESS_EDIT, AI_ACCESS_FULL,
+};
+
+static const AiEffort effort_choices[] = {
+  AI_EFFORT_DEFAULT, AI_EFFORT_LOW, AI_EFFORT_MEDIUM,
+  AI_EFFORT_HIGH, AI_EFFORT_XHIGH, AI_EFFORT_MAX,
 };
 
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
@@ -59,6 +75,12 @@ static void on_model_chosen (HyModelPicker *picker,
                              const char    *backend_id,
                              const char    *model_id,
                              gpointer       user_data);
+static void on_effort_selected (GtkDropDown *chooser,
+                                GParamSpec  *pspec,
+                                gpointer     user_data);
+static void on_access_selected (GtkDropDown *chooser,
+                                GParamSpec  *pspec,
+                                gpointer     user_data);
 static HyMessageRow *append_row (HyChatView    *self,
                                  HyMessageKind  kind,
                                  const char    *text);
@@ -479,6 +501,8 @@ start_turn (HyChatView *self,
   spec.model = chat->model != NULL ? chat->model : resolved->model;
   spec.system_prompt = resolved->instructions;
   spec.resume_session_id = resume_session_id;
+  spec.effort = ai_effort_from_string (chat->effort);
+  spec.access = ai_access_from_string (chat->access);
 
   if (!hy_chat_session_start (turn->session, &spec, &error))
     {
@@ -650,6 +674,60 @@ update_context_bar (HyChatView   *self,
 
   hy_model_picker_set_selected (self->model_picker, chat->backend,
                                 chat->model != NULL ? chat->model : resolved->model);
+
+  self->syncing_run_options = TRUE;
+
+  for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
+    {
+      if (effort_choices[i] == ai_effort_from_string (chat->effort))
+        gtk_drop_down_set_selected (self->effort_chooser, i);
+    }
+
+  for (guint i = 0; i < G_N_ELEMENTS (access_choices); i++)
+    {
+      if (access_choices[i] == ai_access_from_string (chat->access))
+        gtk_drop_down_set_selected (self->access_chooser, i);
+    }
+
+  self->syncing_run_options = FALSE;
+}
+
+static void
+on_effort_selected (GtkDropDown *chooser,
+                    GParamSpec  *pspec,
+                    gpointer     user_data)
+{
+  HyChatView *self = user_data;
+  g_autoptr (GError) error = NULL;
+  guint selected = gtk_drop_down_get_selected (chooser);
+
+  if (self->syncing_run_options || self->chat == NULL ||
+      selected >= G_N_ELEMENTS (effort_choices))
+    return;
+
+  if (!hy_storage_set_effort (self->storage, hy_node_get_chat_id (self->chat),
+                              ai_effort_to_string (effort_choices[selected]),
+                              &error))
+    append_row (self, HY_MESSAGE_ERROR, error->message);
+}
+
+static void
+on_access_selected (GtkDropDown *chooser,
+                    GParamSpec  *pspec,
+                    gpointer     user_data)
+{
+  HyChatView *self = user_data;
+  g_autoptr (GError) error = NULL;
+  guint selected = gtk_drop_down_get_selected (chooser);
+
+  if (self->syncing_run_options || self->chat == NULL ||
+      selected >= G_N_ELEMENTS (access_choices))
+    return;
+
+  if (!hy_storage_set_access (self->storage, hy_node_get_chat_id (self->chat),
+                              ai_access_to_string (access_choices[selected]),
+                              &error))
+    append_row (self, HY_MESSAGE_ERROR, error->message);
 }
 
 static void
@@ -866,7 +944,38 @@ build_composer (HyChatView *self)
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->send_button), "Send (Enter)");
   g_signal_connect (self->send_button, "clicked", G_CALLBACK (on_send_clicked), self);
 
+  {
+    GtkStringList *efforts = gtk_string_list_new (NULL);
+    GtkStringList *accesses = gtk_string_list_new (NULL);
+
+    for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
+      gtk_string_list_append (efforts, ai_effort_label (effort_choices[i]));
+
+    for (guint i = 0; i < G_N_ELEMENTS (access_choices); i++)
+      gtk_string_list_append (accesses, ai_access_label (access_choices[i]));
+
+    self->effort_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (efforts), NULL));
+    gtk_widget_add_css_class (GTK_WIDGET (self->effort_chooser), "flat");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->effort_chooser),
+                                 "How hard the model is asked to think");
+    g_signal_connect (self->effort_chooser, "notify::selected",
+                      G_CALLBACK (on_effort_selected), self);
+
+    self->access_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (accesses), NULL));
+    gtk_widget_add_css_class (GTK_WIDGET (self->access_chooser), "flat");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->access_chooser),
+                                 "What the assistant may do in the working "
+                                 "directory");
+    g_signal_connect (self->access_chooser, "notify::selected",
+                      G_CALLBACK (on_access_selected), self);
+  }
+
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->model_picker));
+  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->effort_chooser));
+  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->access_chooser));
+  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
   gtk_widget_set_margin_start (toolbar, 6);
