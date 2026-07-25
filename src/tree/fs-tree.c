@@ -1,5 +1,7 @@
 #include "fs-tree.h"
 
+#include "backend/backend.h"
+
 #include <string.h>
 
 #include "settings/folder-settings.h"
@@ -32,6 +34,16 @@ struct _HyFsTree
 };
 
 G_DEFINE_FINAL_TYPE (HyFsTree, hy_fs_tree, G_TYPE_OBJECT)
+
+/* The icon of the assistant a chat is set to, so the tree says at a glance
+ * which one has been answering. */
+static const char *
+backend_icon (const char *backend_id)
+{
+  const AiBackend *backend = ai_backend_lookup (backend_id);
+
+  return backend != NULL ? backend->icon_name : NULL;
+}
 
 static void scan_node (HyFsTree *self, HyNode *node);
 static void watch_node (HyFsTree *self, HyNode *node);
@@ -251,6 +263,8 @@ load_chats (HyFsTree *self,
     {
       const HyChat *chat = g_ptr_array_index (chats, i);
       HyNode *node = hy_node_new_chat (chat->id, chat->title, folder);
+
+      hy_node_set_icon_name (node, backend_icon (chat->backend));
 
       g_list_store_insert (hy_node_get_children (folder), position + i, node);
       g_object_unref (node);
@@ -782,6 +796,7 @@ hy_fs_tree_create_chat (HyFsTree    *self,
     return NULL;
 
   node = hy_node_new_chat (chat_id, title, folder);
+  hy_node_set_icon_name (node, backend_icon (backend));
   g_list_store_insert (hy_node_get_children (folder),
                        chat_section_start (folder), node);
   g_object_unref (node);

@@ -649,6 +649,36 @@ on_row_right_clicked (GtkGestureClick *gesture,
   gtk_popover_popup (popover);
 }
 
+/*
+ * Draws what a chat is doing.
+ *
+ * A spinner while it is working, since that is the one state that is going to
+ * end on its own and a still picture cannot say "still going". A chat waiting
+ * to be answered keeps its own icon but is marked as needing attention, which
+ * the stylesheet pulses -- it is waiting for the user, so it should catch the
+ * eye rather than sit still. Otherwise the assistant's icon, which is the
+ * resting state and says who has been answering.
+ */
+static void
+show_state (HyNode     *node,
+            GParamSpec *pspec,
+            gpointer    user_data)
+{
+  GtkWidget *box = user_data;
+  GtkWidget *icon = g_object_get_data (G_OBJECT (box), "icon");
+  GtkWidget *spinner = g_object_get_data (G_OBJECT (box), "spinner");
+  HyNodeState state = hy_node_get_state (node);
+
+  gtk_widget_set_visible (spinner, state == HY_NODE_WORKING);
+  gtk_spinner_set_spinning (GTK_SPINNER (spinner), state == HY_NODE_WORKING);
+  gtk_widget_set_visible (icon, state != HY_NODE_WORKING);
+
+  if (state == HY_NODE_WAITING)
+    gtk_widget_add_css_class (icon, "hy-waiting");
+  else
+    gtk_widget_remove_css_class (icon, "hy-waiting");
+}
+
 /* --- moving folders by dragging ------------------------------------------- */
 
 /*
@@ -746,6 +776,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
   GtkWidget *expander = gtk_tree_expander_new ();
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *icon = gtk_image_new ();
+  GtkWidget *spinner = gtk_spinner_new ();
   GtkWidget *label = gtk_label_new (NULL);
   GtkWidget *menu_button = gtk_menu_button_new ();
   GtkWidget *popover = gtk_popover_menu_new_from_model (NULL);
@@ -760,6 +791,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_widget_set_valign (menu_button, GTK_ALIGN_CENTER);
 
   gtk_box_append (GTK_BOX (box), icon);
+  gtk_box_append (GTK_BOX (box), spinner);
   gtk_box_append (GTK_BOX (box), label);
   gtk_box_append (GTK_BOX (box), menu_button);
 
@@ -874,12 +906,24 @@ on_item_bind (GtkSignalListItemFactory *factory,
   GtkWidget *expander = gtk_list_item_get_child (item);
   GtkWidget *box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
   GtkWidget *icon = gtk_widget_get_first_child (box);
-  GtkWidget *label = gtk_widget_get_next_sibling (icon);
+  GtkWidget *spinner = gtk_widget_get_next_sibling (icon);
+  GtkWidget *label = gtk_widget_get_next_sibling (spinner);
   GtkWidget *menu_button = gtk_widget_get_next_sibling (label);
   g_autoptr (HyNode) node = gtk_tree_list_row_get_item (row);
 
   gtk_tree_expander_set_list_row (GTK_TREE_EXPANDER (expander), row);
   gtk_image_set_from_icon_name (GTK_IMAGE (icon), hy_node_get_icon_name (node));
+
+  g_object_set_data (G_OBJECT (item), "icon-binding",
+                     g_object_bind_property (node, "icon-name", icon, "icon-name",
+                                             G_BINDING_SYNC_CREATE));
+
+  g_object_set_data (G_OBJECT (box), "icon", icon);
+  g_object_set_data (G_OBJECT (box), "spinner", spinner);
+  show_state (node, NULL, box);
+  g_signal_connect (node, "notify::state", G_CALLBACK (show_state), box);
+  g_object_set_data_full (G_OBJECT (item), "state-watch", g_object_ref (node),
+                          g_object_unref);
 
   /* Read back by the drag handlers, which run long after this returns. */
   g_object_set_data (G_OBJECT (box), "node", node);
@@ -927,8 +971,25 @@ on_item_unbind (GtkSignalListItemFactory *factory,
                 gpointer                  user_data)
 {
   GBinding *binding = g_object_get_data (G_OBJECT (item), "name-binding");
+  GBinding *icon_binding = g_object_get_data (G_OBJECT (item), "icon-binding");
+  HyNode *watched = g_object_get_data (G_OBJECT (item), "state-watch");
   gpointer handler = g_object_get_data (G_OBJECT (item), "expanded-handler");
   GtkTreeListRow *row = gtk_list_item_get_item (item);
+
+  if (icon_binding != NULL)
+    {
+      g_binding_unbind (icon_binding);
+      g_object_set_data (G_OBJECT (item), "icon-binding", NULL);
+    }
+
+  if (watched != NULL)
+    {
+      GtkWidget *expander = gtk_list_item_get_child (item);
+      GtkWidget *box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
+
+      g_signal_handlers_disconnect_by_func (watched, G_CALLBACK (show_state), box);
+      g_object_set_data (G_OBJECT (item), "state-watch", NULL);
+    }
 
   /* Rows are recycled, so the label must stop following the node it showed
    * before, or it keeps updating on behalf of a row it no longer represents. */

@@ -87,7 +87,12 @@ static const char *HY_STYLE =
   "headerbar button { min-height: 26px; min-width: 26px; padding: 2px 6px; }\n"
   /* The composer's controls, which are buttons in a row and do not need the
    * height of a dialog's. */
-  "button.flat, dropdown > button, togglebutton { min-height: 24px; }\n";
+  "button.flat, dropdown > button, togglebutton { min-height: 24px; }\n"
+  /* A chat waiting to be answered, in a tree the user may not be looking at.
+   * Slow enough to notice without being the thing you look at. */
+  "@keyframes hy-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
+  ".hy-waiting { color: @accent_color;"
+  " animation: hy-pulse 1.4s ease-in-out infinite alternate; }\n";
 
 static void
 load_style (void)

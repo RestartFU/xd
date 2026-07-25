@@ -10,6 +10,20 @@ typedef enum
   HY_NODE_CHAT,
 } HyNodeKind;
 
+/*
+ * What a chat is doing, as far as the tree is concerned.
+ *
+ * The sidebar is often the only part of a chat on screen -- the user is
+ * reading another one, or another window entirely -- so a chat says whether
+ * it is still working, waiting to be answered, or done.
+ */
+typedef enum
+{
+  HY_NODE_IDLE,
+  HY_NODE_WORKING,
+  HY_NODE_WAITING,   /* it asked something and nobody has answered */
+} HyNodeState;
+
 #define HY_TYPE_NODE (hy_node_get_type ())
 G_DECLARE_FINAL_TYPE (HyNode, hy_node, HY, NODE, GObject)
 
@@ -38,6 +52,19 @@ void         hy_node_set_path       (HyNode     *self,
 const char  *hy_node_get_folder_id  (HyNode *self);
 const char  *hy_node_get_chat_id    (HyNode *self);
 const char  *hy_node_get_icon_name  (HyNode *self);
+
+/*
+ * The icon a chat rests at, which is the assistant that last answered it.
+ *
+ * Folders ignore this. Chats made before the icon was recorded, and any
+ * backend that has since gone away, fall back to a plain chat bubble.
+ */
+void         hy_node_set_icon_name  (HyNode     *self,
+                                     const char *icon_name);
+
+HyNodeState  hy_node_get_state      (HyNode *self);
+void         hy_node_set_state      (HyNode      *self,
+                                     HyNodeState  state);
 
 /* Folders only; chats return NULL. Owned by the node. */
 GListStore  *hy_node_get_children   (HyNode *self);

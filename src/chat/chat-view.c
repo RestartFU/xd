@@ -26,6 +26,7 @@ typedef struct
   char *backend_id;         /* the backend this turn's session id belongs to */
   char *prompt;             /* kept so a dead session can be retried */
   char *label;              /* the model and effort this turn actually ran on */
+  HyNode *node;             /* the row in the tree, so it can show the state */
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
   GPtrArray *said;          /* finished messages, held until the turn ends */
@@ -412,6 +413,7 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->backend_id, g_free);
   g_clear_pointer (&turn->prompt, g_free);
   g_clear_pointer (&turn->label, g_free);
+  g_clear_object (&turn->node);
   g_string_free (turn->text, TRUE);
   g_string_free (turn->segment, TRUE);
   g_clear_pointer (&turn->said, g_ptr_array_unref);
@@ -567,6 +569,10 @@ on_turn_finished (HyChatSession *session,
       if (turn->row != NULL)
         gtk_widget_set_visible (GTK_WIDGET (turn->row), FALSE);
 
+      /* start_turn() marks it working again; without this the row would sit
+       * idle for as long as the retry takes. */
+      hy_node_set_state (turn->node, HY_NODE_IDLE);
+
       g_hash_table_remove (self->turns, chat_id);
 
       if (visible)
@@ -595,6 +601,18 @@ on_turn_finished (HyChatSession *session,
           append_reply (self, said, turn->label, TRUE);
         }
     }
+
+  /*
+   * A chat that asked something is waiting for the user, not finished. Read
+   * before the segment is cleared, and from the text rather than from whether
+   * buttons were drawn -- a chat the user is not looking at has no row to
+   * draw them on, and is exactly the one worth marking.
+   */
+  {
+    g_autoptr (HyAsk) asked = hy_ask_parse (turn->segment->str, NULL);
+
+    hy_node_set_state (turn->node, asked != NULL ? HY_NODE_WAITING : HY_NODE_IDLE);
+  }
 
   /* Whatever was still being written when the turn ended is a message like
    * any other. Only now, with all of them final, do they reach the database.
@@ -786,6 +804,9 @@ start_turn (HyChatView *self,
 
   turn = g_new0 (Turn, 1);
   turn->view = self;
+  turn->node = g_object_ref (self->chat);
+
+  hy_node_set_state (turn->node, HY_NODE_WORKING);
   turn->chat_id = g_strdup (chat->id);
   turn->backend_id = g_strdup (backend->id);
   turn->prompt = g_strdup (prompt);
@@ -924,6 +945,7 @@ send_message (HyChatView *self,
     }
 
   retire_open_questions (self);
+  hy_node_set_state (self->chat, HY_NODE_IDLE);
   append_row (self, HY_MESSAGE_USER, text);
   name_chat_after_first_message (self, text);
   hy_fs_tree_bump_chat (self->tree, self->chat);
@@ -1245,6 +1267,15 @@ on_model_chosen (HyModelPicker *picker,
     {
       append_row (self, HY_MESSAGE_ERROR, error->message);
       return;
+    }
+
+  /* The tree shows which assistant a chat belongs to, so it follows. */
+  if (backend_changed)
+    {
+      const AiBackend *backend = ai_backend_lookup (backend_id);
+
+      if (backend != NULL)
+        hy_node_set_icon_name (self->chat, backend->icon_name);
     }
 
   /* Nothing is discarded here. Sessions are kept per backend, so switching

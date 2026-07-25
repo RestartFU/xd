@@ -9,6 +9,8 @@ struct _HyNode
   char *path;
   char *folder_id;
   char *chat_id;
+  char *icon_name;
+  HyNodeState state;
 
   GListStore *children;   /* folders only */
   HyNode *parent;         /* weak */
@@ -18,6 +20,8 @@ enum
 {
   PROP_0,
   PROP_NAME,
+  PROP_ICON_NAME,
+  PROP_STATE,
   N_PROPS,
 };
 
@@ -38,6 +42,12 @@ hy_node_get_property (GObject    *object,
     case PROP_NAME:
       g_value_set_string (value, self->name);
       break;
+    case PROP_ICON_NAME:
+      g_value_set_string (value, hy_node_get_icon_name (self));
+      break;
+    case PROP_STATE:
+      g_value_set_int (value, self->state);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -55,6 +65,7 @@ hy_node_finalize (GObject *object)
   g_clear_pointer (&self->path, g_free);
   g_clear_pointer (&self->folder_id, g_free);
   g_clear_pointer (&self->chat_id, g_free);
+  g_clear_pointer (&self->icon_name, g_free);
   g_clear_object (&self->children);
 
   G_OBJECT_CLASS (hy_node_parent_class)->finalize (object);
@@ -71,6 +82,15 @@ hy_node_class_init (HyNodeClass *klass)
   properties[PROP_NAME] =
     g_param_spec_string ("name", NULL, NULL, NULL,
                          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+  properties[PROP_ICON_NAME] =
+    g_param_spec_string ("icon-name", NULL, NULL, NULL,
+                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+  properties[PROP_STATE] =
+    g_param_spec_int ("state", NULL, NULL,
+                      HY_NODE_IDLE, HY_NODE_WAITING, HY_NODE_IDLE,
+                      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (object_class, N_PROPS, properties);
 }
@@ -181,8 +201,47 @@ hy_node_get_icon_name (HyNode *self)
 {
   g_return_val_if_fail (HY_IS_NODE (self), NULL);
 
-  return self->kind == HY_NODE_FOLDER ? "folder-symbolic"
-                                      : "chat-bubble-text-symbolic";
+  if (self->kind == HY_NODE_FOLDER)
+    return "folder-symbolic";
+
+  return self->icon_name != NULL ? self->icon_name : "chat-bubble-text-symbolic";
+}
+
+void
+hy_node_set_icon_name (HyNode     *self,
+                       const char *icon_name)
+{
+  g_return_if_fail (HY_IS_NODE (self));
+
+  if (g_strcmp0 (self->icon_name, icon_name) == 0)
+    return;
+
+  g_free (self->icon_name);
+  self->icon_name = g_strdup (icon_name);
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_ICON_NAME]);
+}
+
+HyNodeState
+hy_node_get_state (HyNode *self)
+{
+  g_return_val_if_fail (HY_IS_NODE (self), HY_NODE_IDLE);
+
+  return self->state;
+}
+
+void
+hy_node_set_state (HyNode      *self,
+                   HyNodeState  state)
+{
+  g_return_if_fail (HY_IS_NODE (self));
+
+  if (self->state == state)
+    return;
+
+  self->state = state;
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_STATE]);
 }
 
 GListStore *
