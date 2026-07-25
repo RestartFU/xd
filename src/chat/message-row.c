@@ -57,6 +57,24 @@ kind_title (HyMessageKind kind)
     }
 }
 
+/*
+ * Only what the user said is drawn as a bubble.
+ *
+ * Replies are long and often hold code, tables and lists, so boxing them
+ * would waste the width they need and turn the transcript into a column of
+ * competing cards. Sides alone say who is speaking: a bubble on the right is
+ * the user, plain text on the left is everything else.
+ */
+static gboolean
+kind_is_bubble (HyMessageKind kind)
+{
+  return kind == HY_MESSAGE_USER;
+}
+
+/* Roughly the width of the reply column, so a bubble wraps well before it
+ * reaches the far side rather than filling the window. */
+#define BUBBLE_MAX_WIDTH_CHARS 60
+
 static const char *
 kind_css_class (HyMessageKind kind)
 {
@@ -75,6 +93,7 @@ hy_message_row_new (HyMessageKind  kind,
   HyMessageRow *self = g_object_new (HY_TYPE_MESSAGE_ROW, NULL);
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gboolean bubble = kind_is_bubble (kind);
   const char *css_class;
 
   self->kind = kind;
@@ -92,6 +111,10 @@ hy_message_row_new (HyMessageKind  kind,
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->title));
   gtk_box_append (GTK_BOX (header), self->spinner);
 
+  /* A bubble on the right is already unmistakably the user; naming them adds
+   * a line of text per message and says nothing. */
+  gtk_widget_set_visible (header, !bubble);
+
   self->body = GTK_LABEL (gtk_label_new (NULL));
   render_body (self);
   gtk_label_set_wrap (self->body, TRUE);
@@ -106,20 +129,35 @@ hy_message_row_new (HyMessageKind  kind,
   gtk_box_append (GTK_BOX (card), header);
   gtk_box_append (GTK_BOX (card), GTK_WIDGET (self->body));
 
-  gtk_widget_add_css_class (card, "card");
   gtk_widget_set_margin_top (card, 6);
   gtk_widget_set_margin_bottom (card, 6);
   gtk_widget_set_margin_start (card, 12);
   gtk_widget_set_margin_end (card, 12);
 
-  /* The card class alone has no padding; without this the text touches the
-   * border. */
-  gtk_widget_set_margin_top (header, 12);
-  gtk_widget_set_margin_start (header, 12);
-  gtk_widget_set_margin_end (header, 12);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self->body), 12);
-  gtk_widget_set_margin_start (GTK_WIDGET (self->body), 12);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->body), 12);
+  if (bubble)
+    {
+      gtk_widget_add_css_class (card, "card");
+      gtk_widget_set_halign (card, GTK_ALIGN_END);
+
+      /* Shrink to the text: a short message should be a short bubble, not a
+       * wide one with the words pushed left. */
+      gtk_widget_set_hexpand (GTK_WIDGET (self->body), FALSE);
+      gtk_label_set_max_width_chars (self->body, BUBBLE_MAX_WIDTH_CHARS);
+
+      /* The card class carries no padding of its own. */
+      gtk_widget_set_margin_top (GTK_WIDGET (self->body), 10);
+      gtk_widget_set_margin_bottom (GTK_WIDGET (self->body), 10);
+      gtk_widget_set_margin_start (GTK_WIDGET (self->body), 14);
+      gtk_widget_set_margin_end (GTK_WIDGET (self->body), 14);
+    }
+  else
+    {
+      /* Replies keep the full width, so they read as the page rather than as
+       * something pinned to one side of it. */
+      gtk_widget_set_halign (card, GTK_ALIGN_FILL);
+      gtk_widget_set_hexpand (card, TRUE);
+      gtk_widget_set_margin_top (card, 12);
+    }
 
   adw_bin_set_child (ADW_BIN (self), card);
 
