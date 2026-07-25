@@ -103,18 +103,51 @@ spawn_shell (HyTerminalPanel *self)
                             -1, NULL, on_spawned, self);
 }
 
+/*
+ * Walks the running shell over to @workdir.
+ *
+ * One shell is shared by every chat, so switching chats has to move it rather
+ * than start another: a pty per chat would multiply for no reason, and
+ * killing this one would throw away whatever is in it.
+ *
+ * The line is cleared first, so a half-typed command does not end up with cd
+ * stuck on the front of it. If something is running, both go to that program
+ * instead -- there is no way to ask a pty whether it is at a prompt, and
+ * waiting for one that may never come is worse than a stray line.
+ */
+static void
+follow_workdir (HyTerminalPanel *self)
+{
+  g_autofree char *quoted = g_shell_quote (self->workdir);
+  g_autofree char *command = g_strdup_printf ("\025cd %s\n", quoted);
+
+  vte_terminal_feed_child (self->terminal, command, -1);
+}
+
 void
 hy_terminal_panel_set_workdir (HyTerminalPanel *self,
                                const char      *workdir)
 {
+  gboolean changed;
+
   g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+
+  changed = g_strcmp0 (self->workdir, workdir) != 0;
+  if (!changed)
+    return;
 
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
 
-  /* The panel may have been waiting for this: it is opened before any chat is
-   * chosen when its state is restored at startup. */
-  if (gtk_widget_get_visible (GTK_WIDGET (self)))
+  if (self->workdir == NULL)
+    return;
+
+  /* Already talking to a shell: move it. Otherwise the panel may have been
+   * waiting for this, since it is restored at startup before any chat is
+   * chosen, and the shell starts here in the right place. */
+  if (self->running)
+    follow_workdir (self);
+  else if (gtk_widget_get_visible (GTK_WIDGET (self)))
     hy_terminal_panel_start (self);
 }
 

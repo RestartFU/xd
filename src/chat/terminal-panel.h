@@ -13,9 +13,9 @@ HyTerminalPanel *hy_terminal_panel_new         (void);
 /*
  * Points the terminal at @workdir.
  *
- * A shell that is already running is left where it is: it may hold a session
- * the user is in the middle of, and moving it would mean either killing that
- * or typing behind their back. The directory applies to the next shell.
+ * One shell is shared by every chat, so a shell that is already running is
+ * walked over with cd rather than restarted -- restarting would discard
+ * whatever is in it.
  */
 void             hy_terminal_panel_set_workdir (HyTerminalPanel *self,
                                                 const char      *workdir);
