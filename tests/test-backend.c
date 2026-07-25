@@ -439,6 +439,7 @@ main (int   argc,
   g_test_add_func ("/backend/access", test_access_maps_to_each_cli);
   g_test_add_func ("/backend/effort", test_effort_maps_to_each_cli);
   g_test_add_func ("/backend/tools/order", test_tool_calls_are_reported_in_order);
+  g_test_add_func ("/backend/tools/live", test_claude_reports_tool_use);
   g_test_add_func ("/backend/tools/summary", test_tool_summary_names_the_work);
 
   return g_test_run ();

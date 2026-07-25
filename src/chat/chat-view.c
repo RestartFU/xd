@@ -4,6 +4,7 @@
 #include "message-row.h"
 #include "model-picker.h"
 #include "diff-pane.h"
+#include "git-actions.h"
 #include "terminal-panel.h"
 #include "settings/settings-resolver.h"
 #include "util/ask-block.h"
@@ -67,6 +68,7 @@ struct _HyChatView
   GtkToggleButton *terminal_button;
   HyTerminalPanel *terminal;
   GtkToggleButton *diff_button;
+  HyGitActions *git_actions;
   HyDiffPane *diff;
   GtkPaned *split;
   GtkPaned *side_split;
@@ -651,6 +653,7 @@ on_turn_finished (HyChatSession *session,
 
   /* An agent that edited anything has finished doing so. */
   hy_diff_pane_refresh (self->diff);
+  hy_git_actions_refresh (self->git_actions);
 
   /* Frees the turn, so nothing may touch it afterwards. */
   g_hash_table_remove (self->turns, chat_id);
@@ -1054,26 +1057,18 @@ add_attachment (HyChatView *self,
    * gets read.
    */
   {
-    g_autoptr (GdkPixbuf) full = gdk_pixbuf_get_from_texture (texture);
-    g_autoptr (GdkPixbuf) small = NULL;
+    /* Read back from the file just written, at the size it will be shown:
+     * the loader does the scaling, and the full-size copy never has to be
+     * held in memory a second time. */
+    g_autoptr (GdkPixbuf) small =
+      gdk_pixbuf_new_from_file_at_scale (path, PREVIEW_MAX_WIDTH, PREVIEW_HEIGHT,
+                                         TRUE, NULL);
     g_autoptr (GdkTexture) thumbnail = NULL;
-    int width, height;
-    double scale;
 
-    if (full == NULL)
+    if (small == NULL)
       return;
 
-    width = gdk_pixbuf_get_width (full);
-    height = gdk_pixbuf_get_height (full);
-
-    scale = MIN ((double) PREVIEW_HEIGHT / height, (double) PREVIEW_MAX_WIDTH / width);
-    scale = MIN (scale, 1.0);
-
-    small = gdk_pixbuf_scale_simple (full, MAX ((int) (width * scale), 1),
-                                     MAX ((int) (height * scale), 1),
-                                     GDK_INTERP_BILINEAR);
     thumbnail = gdk_texture_new_for_pixbuf (small);
-
     picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (thumbnail));
   }
 
@@ -1543,6 +1538,7 @@ update_context_bar (HyChatView   *self,
 
     hy_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
     hy_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
+    hy_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
 
     /* The panes belong to the chat, so opening one brings them back. */
     self->syncing_panes = TRUE;
@@ -1999,7 +1995,10 @@ build_composer (HyChatView *self)
   g_signal_connect (self->diff_button, "toggled",
                     G_CALLBACK (on_diff_toggled), self);
 
+  self->git_actions = hy_git_actions_new ();
+
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->git_actions));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->diff_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->terminal_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
