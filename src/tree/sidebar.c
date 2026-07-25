@@ -5,6 +5,7 @@ struct _HySidebar
   AdwBin parent_instance;
 
   HyFsTree *tree;
+  GSettings *settings;
   GtkTreeListModel *tree_model;
   GtkSingleSelection *selection;
   GtkListView *list_view;
@@ -189,6 +190,86 @@ on_rename (GtkWidget  *widget,
                    hy_node_get_name (node), node, rename_folder);
 }
 
+/* --- chats ---------------------------------------------------------------- */
+
+static HyNode *
+chat_from_target (HySidebar *self,
+                  GVariant  *target)
+{
+  if (target == NULL)
+    return NULL;
+
+  return hy_fs_tree_lookup_chat (self->tree, g_variant_get_string (target, NULL));
+}
+
+static void
+on_new_chat (GtkWidget  *widget,
+             const char *action_name,
+             GVariant   *target)
+{
+  HySidebar *self = HY_SIDEBAR (widget);
+  HyNode *folder = node_from_target (self, target);
+  g_autofree char *backend = NULL;
+  g_autoptr (GError) error = NULL;
+  HyNode *chat;
+
+  if (folder == NULL)
+    return;
+
+  backend = g_settings_get_string (self->settings, "default-backend");
+
+  chat = hy_fs_tree_create_chat (self->tree, folder, "New Chat", backend, &error);
+  if (chat == NULL)
+    {
+      show_error (self, "Could not start the chat", error);
+      return;
+    }
+
+  g_signal_emit (self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
+}
+
+static void
+rename_chat (HySidebar  *self,
+             HyNode     *chat,
+             const char *title)
+{
+  g_autoptr (GError) error = NULL;
+
+  if (!hy_fs_tree_rename_chat (self->tree, chat, title, &error))
+    show_error (self, "Could not rename the chat", error);
+}
+
+static void
+on_rename_chat (GtkWidget  *widget,
+                const char *action_name,
+                GVariant   *target)
+{
+  HySidebar *self = HY_SIDEBAR (widget);
+  HyNode *chat = chat_from_target (self, target);
+
+  if (chat == NULL)
+    return;
+
+  prompt_for_name (self, "Rename Chat", NULL, "Rename",
+                   hy_node_get_name (chat), chat, rename_chat);
+}
+
+static void
+on_delete_chat (GtkWidget  *widget,
+                const char *action_name,
+                GVariant   *target)
+{
+  HySidebar *self = HY_SIDEBAR (widget);
+  HyNode *chat = chat_from_target (self, target);
+  g_autoptr (GError) error = NULL;
+
+  if (chat == NULL)
+    return;
+
+  if (!hy_fs_tree_delete_chat (self->tree, chat, &error))
+    show_error (self, "Could not delete the chat", error);
+}
+
 typedef struct
 {
   HySidebar *self;
@@ -296,9 +377,14 @@ build_row_menu (HyNode *node)
     g_variant_ref_sink (g_variant_new_string (hy_node_get_path (node)));
   GMenu *menu = g_menu_new ();
   GMenu *section = g_menu_new ();
+  g_autoptr (GMenuItem) new_chat = NULL;
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) rename = NULL;
   g_autoptr (GMenuItem) trash = NULL;
+
+  new_chat = g_menu_item_new ("New Chat", NULL);
+  g_menu_item_set_action_and_target_value (new_chat, "sidebar.new-chat", target);
+  g_menu_append_item (menu, new_chat);
 
   new_folder = g_menu_item_new ("New Folder", NULL);
   g_menu_item_set_action_and_target_value (new_folder, "sidebar.new-folder", target);
@@ -311,6 +397,29 @@ build_row_menu (HyNode *node)
   trash = g_menu_item_new ("Move to Trash", NULL);
   g_menu_item_set_action_and_target_value (trash, "sidebar.trash", target);
   g_menu_append_item (section, trash);
+  g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
+  g_object_unref (section);
+
+  return G_MENU_MODEL (menu);
+}
+
+static GMenuModel *
+build_chat_menu (HyNode *node)
+{
+  g_autoptr (GVariant) target =
+    g_variant_ref_sink (g_variant_new_string (hy_node_get_chat_id (node)));
+  GMenu *menu = g_menu_new ();
+  GMenu *section = g_menu_new ();
+  g_autoptr (GMenuItem) rename = NULL;
+  g_autoptr (GMenuItem) delete = NULL;
+
+  rename = g_menu_item_new ("Rename…", NULL);
+  g_menu_item_set_action_and_target_value (rename, "sidebar.rename-chat", target);
+  g_menu_append_item (menu, rename);
+
+  delete = g_menu_item_new ("Delete Chat", NULL);
+  g_menu_item_set_action_and_target_value (delete, "sidebar.delete-chat", target);
+  g_menu_append_item (section, delete);
   g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
   g_object_unref (section);
 
@@ -337,17 +446,13 @@ on_item_bind (GtkSignalListItemFactory *factory,
                      g_object_bind_property (node, "name", label, "label",
                                              G_BINDING_SYNC_CREATE));
 
-  if (hy_node_get_kind (node) == HY_NODE_FOLDER)
-    {
-      g_autoptr (GMenuModel) menu = build_row_menu (node);
+  {
+    g_autoptr (GMenuModel) menu = hy_node_get_kind (node) == HY_NODE_FOLDER
+                                    ? build_row_menu (node)
+                                    : build_chat_menu (node);
 
-      gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), menu);
-      gtk_widget_set_visible (menu_button, TRUE);
-    }
-  else
-    {
-      gtk_widget_set_visible (menu_button, FALSE);
-    }
+    gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), menu);
+  }
 }
 
 static void
@@ -439,6 +544,7 @@ hy_sidebar_dispose (GObject *object)
 
   g_clear_object (&self->selection);
   g_clear_object (&self->tree_model);
+  g_clear_object (&self->settings);
   g_clear_object (&self->tree);
 
   G_OBJECT_CLASS (hy_sidebar_parent_class)->dispose (object);
@@ -468,6 +574,12 @@ hy_sidebar_class_init (HySidebarClass *klass)
                                    on_rename);
   gtk_widget_class_install_action (widget_class, "sidebar.trash", "s",
                                    on_trash);
+  gtk_widget_class_install_action (widget_class, "sidebar.new-chat", "s",
+                                   on_new_chat);
+  gtk_widget_class_install_action (widget_class, "sidebar.rename-chat", "s",
+                                   on_rename_chat);
+  gtk_widget_class_install_action (widget_class, "sidebar.delete-chat", "s",
+                                   on_delete_chat);
 }
 
 static void
@@ -478,6 +590,8 @@ hy_sidebar_init (HySidebar *self)
   GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
   GtkWidget *scrolled = gtk_scrolled_window_new ();
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
+
+  self->settings = g_settings_new (HY_APP_ID);
 
   gtk_widget_set_tooltip_text (new_button, "New Workspace");
   gtk_actionable_set_action_name (GTK_ACTIONABLE (new_button), "sidebar.new-workspace");

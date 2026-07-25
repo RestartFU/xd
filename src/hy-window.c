@@ -1,5 +1,7 @@
 #include "hy-window.h"
 
+#include "chat/chat-view.h"
+#include "storage/storage.h"
 #include "tree/fs-tree.h"
 #include "tree/sidebar.h"
 
@@ -8,10 +10,11 @@ struct _HyWindow
   AdwApplicationWindow parent_instance;
 
   GSettings *settings;
+  HyStorage *storage;
   HyFsTree *tree;
 
   AdwNavigationSplitView *split_view;
-  AdwStatusPage *placeholder;
+  HyChatView *chat_view;
 };
 
 G_DEFINE_FINAL_TYPE (HyWindow, hy_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -31,6 +34,8 @@ resolve_root (GSettings  *settings,
   return g_build_filename (g_get_home_dir (), fallback_name, NULL);
 }
 
+/* Selecting a chat opens it; selecting a folder leaves the current chat alone,
+ * so browsing the tree does not throw away what you were reading. */
 static void
 on_node_selected (HySidebar *sidebar,
                   HyNode    *node,
@@ -38,47 +43,19 @@ on_node_selected (HySidebar *sidebar,
 {
   HyWindow *self = user_data;
 
-  if (node == NULL)
-    {
-      adw_status_page_set_title (self->placeholder, "hy");
-      adw_status_page_set_description (self->placeholder,
-                                       "Pick a folder in the sidebar to get started.");
-      return;
-    }
-
-  adw_status_page_set_title (self->placeholder, hy_node_get_name (node));
-  adw_status_page_set_description (self->placeholder, hy_node_get_path (node));
+  if (node != NULL && hy_node_get_kind (node) == HY_NODE_CHAT)
+    hy_chat_view_set_chat (self->chat_view, node);
 }
 
-static AdwNavigationPage *
-build_content_page (HyWindow *self)
+static void
+on_node_activated (HySidebar *sidebar,
+                   HyNode    *node,
+                   gpointer   user_data)
 {
-  GtkWidget *toolbar = adw_toolbar_view_new ();
-  GtkWidget *header = adw_header_bar_new ();
-  GtkWidget *menu_button;
-  GMenu *menu;
+  HyWindow *self = user_data;
 
-  menu = g_menu_new ();
-  g_menu_append (menu, "About hy", "app.about");
-  g_menu_append (menu, "Quit", "app.quit");
-
-  menu_button = gtk_menu_button_new ();
-  gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (menu_button), "open-menu-symbolic");
-  gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), G_MENU_MODEL (menu));
-  g_object_unref (menu);
-
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), menu_button);
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
-
-  self->placeholder = ADW_STATUS_PAGE (adw_status_page_new ());
-  adw_status_page_set_icon_name (self->placeholder, "folder-symbolic");
-  adw_status_page_set_title (self->placeholder, "hy");
-  adw_status_page_set_description (self->placeholder,
-                                   "Pick a folder in the sidebar to get started.");
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar),
-                                GTK_WIDGET (self->placeholder));
-
-  return adw_navigation_page_new (toolbar, "Chat");
+  if (node != NULL && hy_node_get_kind (node) == HY_NODE_CHAT)
+    hy_chat_view_set_chat (self->chat_view, node);
 }
 
 static gboolean
@@ -101,6 +78,8 @@ HyWindow *
 hy_window_new (HyApplication *app)
 {
   g_autofree char *workspaces_root = NULL;
+  g_autofree char *db_path = NULL;
+  g_autoptr (GError) error = NULL;
   HySidebar *sidebar;
   HyWindow *self;
 
@@ -115,16 +94,38 @@ hy_window_new (HyApplication *app)
   if (g_settings_get_boolean (self->settings, "window-maximized"))
     gtk_window_maximize (GTK_WINDOW (self));
 
+  db_path = g_build_filename (g_get_user_data_dir (), "hy", "chats.db", NULL);
+  self->storage = hy_storage_new (db_path, &error);
+  if (self->storage == NULL)
+    {
+      /* Without storage there is nothing to show, so say so plainly rather
+       * than starting up half-working. */
+      AdwAlertDialog *dialog =
+        ADW_ALERT_DIALOG (adw_alert_dialog_new ("Cannot Open the Chat Database",
+                                                error->message));
+
+      adw_alert_dialog_add_response (dialog, "quit", "Quit");
+      g_signal_connect_swapped (dialog, "response", G_CALLBACK (gtk_window_destroy), self);
+      adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
+
+      return self;
+    }
+
   workspaces_root = resolve_root (self->settings, "workspaces-root", "Workspaces");
-  self->tree = hy_fs_tree_new (workspaces_root);
+  self->tree = hy_fs_tree_new (workspaces_root, self->storage);
 
   sidebar = hy_sidebar_new (self->tree);
   g_signal_connect (sidebar, "node-selected", G_CALLBACK (on_node_selected), self);
+  g_signal_connect (sidebar, "node-activated", G_CALLBACK (on_node_activated), self);
+
+  self->chat_view = hy_chat_view_new (self->storage, self->tree);
 
   adw_navigation_split_view_set_sidebar (self->split_view,
                                          adw_navigation_page_new (GTK_WIDGET (sidebar),
                                                                   "Workspaces"));
-  adw_navigation_split_view_set_content (self->split_view, build_content_page (self));
+  adw_navigation_split_view_set_content (self->split_view,
+                                         adw_navigation_page_new (GTK_WIDGET (self->chat_view),
+                                                                  "Chat"));
 
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
 
@@ -137,6 +138,7 @@ hy_window_dispose (GObject *object)
   HyWindow *self = HY_WINDOW (object);
 
   g_clear_object (&self->tree);
+  g_clear_object (&self->storage);
   g_clear_object (&self->settings);
 
   G_OBJECT_CLASS (hy_window_parent_class)->dispose (object);

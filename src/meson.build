@@ -2,6 +2,7 @@
 # exercised by the headless tests in tests/.
 hy_core_sources = files(
   'settings/folder-settings.c',
+  'storage/storage.c',
 )
 
 hy_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep]
@@ -26,6 +27,8 @@ hy_sources = files(
   'tree/hy-node.c',
   'tree/fs-tree.c',
   'tree/sidebar.c',
+  'chat/message-row.c',
+  'chat/chat-view.c',
 )
 
 executable('hy',

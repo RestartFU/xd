@@ -26,6 +26,7 @@ struct _HyFsTree
 
   char *root_path;
   HyNode *root;
+  HyStorage *storage;
   GHashTable *watches;    /* HyNode* -> Watch* */
   GCancellable *cancellable;
 };
@@ -204,6 +205,58 @@ folder_insert_position (HyNode     *parent,
   return i;
 }
 
+/* Chats sort after every folder, so this is where the chat section starts. */
+static guint
+chat_section_start (HyNode *folder)
+{
+  GListModel *model = G_LIST_MODEL (hy_node_get_children (folder));
+  guint n_items = g_list_model_get_n_items (model);
+  guint i;
+
+  for (i = 0; i < n_items; i++)
+    {
+      g_autoptr (HyNode) child = g_list_model_get_item (model, i);
+
+      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+        break;
+    }
+
+  return i;
+}
+
+static void
+load_chats (HyFsTree *self,
+            HyNode   *folder)
+{
+  g_autoptr (GPtrArray) chats = NULL;
+  g_autoptr (GError) error = NULL;
+  const char *folder_id = hy_node_get_folder_id (folder);
+  guint position;
+
+  if (self->storage == NULL || folder_id == NULL)
+    return;
+
+  chats = hy_storage_list_chats (self->storage, folder_id, &error);
+  if (chats == NULL)
+    {
+      g_warning ("cannot list chats of %s: %s", hy_node_get_name (folder),
+                 error->message);
+      return;
+    }
+
+  /* list_chats already returns most-recent-first, so appending in order keeps
+   * that ordering in the sidebar. */
+  position = chat_section_start (folder);
+  for (guint i = 0; i < chats->len; i++)
+    {
+      const HyChat *chat = g_ptr_array_index (chats, i);
+      HyNode *node = hy_node_new_chat (chat->id, chat->title, folder);
+
+      g_list_store_insert (hy_node_get_children (folder), position + i, node);
+      g_object_unref (node);
+    }
+}
+
 static HyNode *
 add_folder_child (HyFsTree   *self,
                   HyNode     *parent,
@@ -231,6 +284,8 @@ add_folder_child (HyFsTree   *self,
   g_list_store_insert (hy_node_get_children (parent),
                        folder_insert_position (parent, name), child);
   g_object_unref (child);
+
+  load_chats (self, child);
 
   return child;
 }
@@ -383,7 +438,8 @@ scan_node (HyFsTree *self,
 /* --- public API ----------------------------------------------------------- */
 
 HyFsTree *
-hy_fs_tree_new (const char *root_path)
+hy_fs_tree_new (const char *root_path,
+                HyStorage  *storage)
 {
   g_autoptr (GError) error = NULL;
   g_autoptr (GFile) root_file = NULL;
@@ -398,6 +454,7 @@ hy_fs_tree_new (const char *root_path)
 
   self = g_object_new (HY_TYPE_FS_TREE, NULL);
   self->root_path = g_strdup (root_path);
+  self->storage = storage != NULL ? g_object_ref (storage) : NULL;
   self->root = hy_node_new_folder (root_path, "Workspaces", NULL);
 
   scan_node (self, self->root);
@@ -603,6 +660,148 @@ hy_fs_tree_lookup (HyFsTree   *self,
   return lookup_in (self->root, path);
 }
 
+/* --- chats ---------------------------------------------------------------- */
+
+HyNode *
+hy_fs_tree_create_chat (HyFsTree    *self,
+                        HyNode      *folder,
+                        const char  *title,
+                        const char  *backend,
+                        GError     **error)
+{
+  g_autofree char *chat_id = NULL;
+  HyNode *node;
+
+  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (HY_IS_NODE (folder), NULL);
+  g_return_val_if_fail (self->storage != NULL, NULL);
+
+  if (hy_node_get_folder_id (folder) == NULL)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "Chats live in a folder; pick one first");
+      return NULL;
+    }
+
+  chat_id = hy_storage_create_chat (self->storage, hy_node_get_folder_id (folder),
+                                    title, backend, error);
+  if (chat_id == NULL)
+    return NULL;
+
+  node = hy_node_new_chat (chat_id, title, folder);
+  g_list_store_insert (hy_node_get_children (folder),
+                       chat_section_start (folder), node);
+  g_object_unref (node);
+
+  return node;
+}
+
+gboolean
+hy_fs_tree_rename_chat (HyFsTree    *self,
+                        HyNode      *chat,
+                        const char  *title,
+                        GError     **error)
+{
+  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (HY_IS_NODE (chat), FALSE);
+
+  if (!hy_storage_set_chat_title (self->storage, hy_node_get_chat_id (chat),
+                                  title, error))
+    return FALSE;
+
+  hy_node_set_name (chat, title);
+
+  return TRUE;
+}
+
+gboolean
+hy_fs_tree_delete_chat (HyFsTree    *self,
+                        HyNode      *chat,
+                        GError     **error)
+{
+  HyNode *parent;
+  guint position;
+
+  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (HY_IS_NODE (chat), FALSE);
+
+  if (!hy_storage_delete_chat (self->storage, hy_node_get_chat_id (chat), error))
+    return FALSE;
+
+  parent = hy_node_get_parent (chat);
+  if (parent != NULL &&
+      g_list_store_find (hy_node_get_children (parent), chat, &position))
+    g_list_store_remove (hy_node_get_children (parent), position);
+
+  return TRUE;
+}
+
+void
+hy_fs_tree_bump_chat (HyFsTree *self,
+                      HyNode   *chat)
+{
+  HyNode *parent;
+  guint position, target;
+
+  g_return_if_fail (HY_IS_FS_TREE (self));
+  g_return_if_fail (HY_IS_NODE (chat));
+
+  parent = hy_node_get_parent (chat);
+  if (parent == NULL)
+    return;
+
+  if (!g_list_store_find (hy_node_get_children (parent), chat, &position))
+    return;
+
+  target = chat_section_start (parent);
+  if (position == target)
+    return;
+
+  g_object_ref (chat);
+  g_list_store_remove (hy_node_get_children (parent), position);
+  g_list_store_insert (hy_node_get_children (parent), target, chat);
+  g_object_unref (chat);
+}
+
+static HyNode *
+lookup_chat_in (HyNode     *node,
+                const char *chat_id)
+{
+  GListStore *children = hy_node_get_children (node);
+
+  if (children == NULL)
+    return NULL;
+
+  for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
+    {
+      g_autoptr (HyNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
+      HyNode *found;
+
+      if (hy_node_get_kind (child) == HY_NODE_CHAT)
+        {
+          if (g_strcmp0 (hy_node_get_chat_id (child), chat_id) == 0)
+            return child;
+          continue;
+        }
+
+      found = lookup_chat_in (child, chat_id);
+      if (found != NULL)
+        return found;
+    }
+
+  return NULL;
+}
+
+HyNode *
+hy_fs_tree_lookup_chat (HyFsTree   *self,
+                        const char *chat_id)
+{
+  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (chat_id != NULL, NULL);
+
+  return lookup_chat_in (self->root, chat_id);
+}
+
 /* --- GObject -------------------------------------------------------------- */
 
 static void
@@ -613,6 +812,7 @@ hy_fs_tree_dispose (GObject *object)
   g_cancellable_cancel (self->cancellable);
   g_clear_pointer (&self->watches, g_hash_table_unref);
   g_clear_object (&self->root);
+  g_clear_object (&self->storage);
   g_clear_object (&self->cancellable);
 
   G_OBJECT_CLASS (hy_fs_tree_parent_class)->dispose (object);

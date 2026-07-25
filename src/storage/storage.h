@@ -1,0 +1,104 @@
+#pragma once
+
+#include <gio/gio.h>
+
+G_BEGIN_DECLS
+
+typedef struct
+{
+  char *id;
+  char *folder_id;
+  char *title;
+  char *backend;
+  char *session_id;   /* NULL until the CLI reports one */
+  gint64 created_at;
+  gint64 updated_at;
+} HyChat;
+
+typedef struct
+{
+  gint64 id;
+  char *chat_id;
+  char *role;         /* "user" | "assistant" | "error" */
+  char *content;
+  char *raw_json;     /* the backend's own event, when there was one */
+  gint64 created_at;
+} HyMessage;
+
+void hy_chat_free    (HyChat    *self);
+void hy_message_free (HyMessage *self);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (HyChat, hy_chat_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (HyMessage, hy_message_free)
+
+#define HY_TYPE_STORAGE (hy_storage_get_type ())
+G_DECLARE_FINAL_TYPE (HyStorage, hy_storage, HY, STORAGE, GObject)
+
+/*
+ * Chats and their messages, in one SQLite database.
+ *
+ * Chats are attached to a folder by its UUID rather than its path, so folders
+ * can be renamed or moved on disk without losing their conversations. Writes
+ * happen on the main loop: they are one small row per turn, never per token.
+ */
+HyStorage  *hy_storage_new             (const char  *db_path,
+                                        GError     **error);
+
+/* Returns the new chat's id. */
+char       *hy_storage_create_chat     (HyStorage   *self,
+                                        const char  *folder_id,
+                                        const char  *title,
+                                        const char  *backend,
+                                        GError     **error);
+
+HyChat     *hy_storage_get_chat        (HyStorage   *self,
+                                        const char  *chat_id,
+                                        GError     **error);
+
+/* Most recently used first. Elements are HyChat*. */
+GPtrArray  *hy_storage_list_chats      (HyStorage   *self,
+                                        const char  *folder_id,
+                                        GError     **error);
+
+gboolean    hy_storage_set_chat_title  (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *title,
+                                        GError     **error);
+
+gboolean    hy_storage_set_session_id  (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *session_id,
+                                        GError     **error);
+
+gboolean    hy_storage_set_backend     (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *backend,
+                                        GError     **error);
+
+gboolean    hy_storage_delete_chat     (HyStorage   *self,
+                                        const char  *chat_id,
+                                        GError     **error);
+
+gboolean    hy_storage_append_message  (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *role,
+                                        const char  *content,
+                                        const char  *raw_json,
+                                        GError     **error);
+
+/* Oldest first. Elements are HyMessage*. */
+GPtrArray  *hy_storage_list_messages   (HyStorage   *self,
+                                        const char  *chat_id,
+                                        GError     **error);
+
+/* Full-text search across every message. Elements are HyMessage*. */
+GPtrArray  *hy_storage_search          (HyStorage   *self,
+                                        const char  *query,
+                                        guint        limit,
+                                        GError     **error);
+
+/* Folder ids that own at least one chat; used to spot orphaned chats. */
+GPtrArray  *hy_storage_list_folder_ids (HyStorage   *self,
+                                        GError     **error);
+
+G_END_DECLS
