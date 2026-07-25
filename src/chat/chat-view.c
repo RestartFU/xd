@@ -909,10 +909,10 @@ build_composer (HyChatView *self)
 
   self->composer = GTK_TEXT_VIEW (gtk_text_view_new ());
   gtk_text_view_set_wrap_mode (self->composer, GTK_WRAP_WORD_CHAR);
-  gtk_text_view_set_top_margin (self->composer, 8);
-  gtk_text_view_set_bottom_margin (self->composer, 8);
-  gtk_text_view_set_left_margin (self->composer, 8);
-  gtk_text_view_set_right_margin (self->composer, 8);
+  gtk_text_view_set_top_margin (self->composer, 10);
+  gtk_text_view_set_bottom_margin (self->composer, 10);
+  gtk_text_view_set_left_margin (self->composer, 10);
+  gtk_text_view_set_right_margin (self->composer, 10);
 
   keys = gtk_event_controller_key_new ();
   g_signal_connect (keys, "key-pressed", G_CALLBACK (on_composer_key), self);
@@ -978,6 +978,9 @@ build_composer (HyChatView *self)
   gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
+  /* The controls sit under the text the user is typing, so they need enough
+   * clearance not to read as part of it. */
+  gtk_widget_set_margin_top (toolbar, 10);
   gtk_widget_set_margin_start (toolbar, 6);
   gtk_widget_set_margin_end (toolbar, 6);
   gtk_widget_set_margin_bottom (toolbar, 6);
