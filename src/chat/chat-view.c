@@ -222,8 +222,9 @@ on_choice_clicked (GtkButton *button,
  * the assistant did not think of is usually the interesting one.
  */
 static void
-append_choices (HyChatView *self,
-                const HyAsk *ask)
+append_choices (HyChatView  *self,
+                const HyAsk *ask,
+                gboolean     answerable)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   GtkWidget *question = gtk_label_new (ask->question);
@@ -254,6 +255,10 @@ append_choices (HyChatView *self,
       gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
     }
 
+  /* A question with something after it has already been answered. It stays
+   * on screen as a record of what was offered, but it is not an offer. */
+  gtk_widget_set_sensitive (choices, answerable);
+
   gtk_box_append (GTK_BOX (box), question);
   gtk_box_append (GTK_BOX (box), choices);
   gtk_widget_set_margin_top (box, 4);
@@ -264,10 +269,17 @@ append_choices (HyChatView *self,
   queue_scroll_to_bottom (self);
 }
 
-/* Assistant text may carry a question; the block itself is never shown. */
+/*
+ * Assistant text may carry a question; the block itself is never shown.
+ *
+ * @answerable is false when the transcript continues past this message: the
+ * question was answered when it was asked, and reopening the chat must not
+ * offer it again.
+ */
 static void
 append_reply (HyChatView *self,
-              const char *text)
+              const char *text,
+              gboolean    answerable)
 {
   g_autoptr (HyAsk) ask = NULL;
   g_autofree char *prose = NULL;
@@ -277,7 +289,7 @@ append_reply (HyChatView *self,
   append_row (self, HY_MESSAGE_ASSISTANT, ask != NULL ? prose : text);
 
   if (ask != NULL)
-    append_choices (self, ask);
+    append_choices (self, ask, answerable);
 }
 
 static void
@@ -310,7 +322,7 @@ load_transcript (HyChatView *self)
       const HyMessage *message = g_ptr_array_index (messages, i);
 
       if (g_strcmp0 (message->role, "assistant") == 0)
-        append_reply (self, message->content);
+        append_reply (self, message->content, i + 1 == messages->len);
       else
         append_row (self, hy_message_kind_from_role (message->role), message->content);
     }
@@ -487,7 +499,7 @@ on_turn_finished (HyChatSession *session,
         {
           gtk_box_remove (self->transcript, GTK_WIDGET (turn->row));
           turn->row = NULL;
-          append_reply (self, turn->text->str);
+          append_reply (self, turn->text->str, TRUE);
         }
     }
 
