@@ -287,6 +287,7 @@ hy_storage_create_chat (HyStorage   *self,
                         const char  *title,
                         const char  *backend,
                         const char  *model,
+                        const char  *effort,
                         const char  *workdir,
                         GError     **error)
 {
@@ -303,8 +304,9 @@ hy_storage_create_chat (HyStorage   *self,
 
   if (sqlite3_prepare_v2 (self->db,
                           "INSERT INTO chats (id, folder_id, title, backend,"
-                          "                   model, workdir, created_at, updated_at)"
-                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                          "                   model, effort, workdir,"
+                          "                   created_at, updated_at)"
+                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot create the chat");
@@ -316,9 +318,10 @@ hy_storage_create_chat (HyStorage   *self,
   bind_text (stmt, 3, title);
   bind_text (stmt, 4, backend);
   bind_text (stmt, 5, model);
-  bind_text (stmt, 6, workdir);
-  sqlite3_bind_int64 (stmt, 7, now);
+  bind_text (stmt, 6, effort);
+  bind_text (stmt, 7, workdir);
   sqlite3_bind_int64 (stmt, 8, now);
+  sqlite3_bind_int64 (stmt, 9, now);
 
   if (sqlite3_step (stmt) != SQLITE_DONE)
     {

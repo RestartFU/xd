@@ -34,7 +34,6 @@ ai_backend_all (guint *n_backends)
 
 /* Stored in the database, so these strings are part of the file format. */
 static const struct { AiEffort effort; const char *id; const char *label; } efforts[] = {
-  { AI_EFFORT_DEFAULT, "default", "Default effort" },
   { AI_EFFORT_LOW,     "low",     "Low" },
   { AI_EFFORT_MEDIUM,  "medium",  "Medium" },
   { AI_EFFORT_HIGH,    "high",    "High" },
@@ -56,7 +55,7 @@ ai_effort_to_string (AiEffort effort)
     if (efforts[i].effort == effort)
       return efforts[i].id;
 
-  return "default";
+  return "high";
 }
 
 AiEffort
@@ -66,7 +65,55 @@ ai_effort_from_string (const char *name)
     if (g_strcmp0 (efforts[i].id, name) == 0)
       return efforts[i].effort;
 
-  return AI_EFFORT_DEFAULT;
+  return AI_EFFORT_HIGH;
+}
+
+/* Pulls "key": "value" out of JSON, or key = "value" out of TOML. Both files
+ * are the CLI's own, so a hand-rolled scan beats pulling in a parser. */
+static AiEffort
+effort_from_config (const char *path,
+                    const char *key)
+{
+  g_autofree char *contents = NULL;
+  g_autoptr (GRegex) regex = NULL;
+  g_autoptr (GMatchInfo) match = NULL;
+  g_autofree char *pattern = NULL;
+
+  if (!g_file_get_contents (path, &contents, NULL, NULL))
+    return AI_EFFORT_HIGH;
+
+  pattern = g_strdup_printf ("\"?%s\"?\\s*[:=]\\s*\"([a-zA-Z]+)\"", key);
+  regex = g_regex_new (pattern, 0, 0, NULL);
+
+  if (regex != NULL && g_regex_match (regex, contents, 0, &match))
+    {
+      g_autofree char *value = g_match_info_fetch (match, 1);
+      g_autofree char *lowered = g_ascii_strdown (value, -1);
+
+      for (gsize i = 0; i < G_N_ELEMENTS (efforts); i++)
+        if (g_strcmp0 (efforts[i].id, lowered) == 0)
+          return efforts[i].effort;
+    }
+
+  return AI_EFFORT_HIGH;
+}
+
+AiEffort
+ai_backend_default_effort (const AiBackend *self)
+{
+  g_autofree char *path = NULL;
+
+  g_return_val_if_fail (self != NULL, AI_EFFORT_HIGH);
+
+  if (g_strcmp0 (self->id, "codex") == 0)
+    {
+      path = g_build_filename (g_get_home_dir (), ".codex", "config.toml", NULL);
+      return effort_from_config (path, "model_reasoning_effort");
+    }
+
+  path = g_build_filename (g_get_home_dir (), ".claude", "settings.json", NULL);
+
+  return effort_from_config (path, "effortLevel");
 }
 
 const char *
@@ -76,7 +123,7 @@ ai_effort_label (AiEffort effort)
     if (efforts[i].effort == effort)
       return efforts[i].label;
 
-  return "Default effort";
+  return "High";
 }
 
 const char *

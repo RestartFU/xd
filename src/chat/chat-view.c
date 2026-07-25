@@ -69,8 +69,8 @@ static const AiAccess access_choices[] = {
 };
 
 static const AiEffort effort_choices[] = {
-  AI_EFFORT_DEFAULT, AI_EFFORT_LOW, AI_EFFORT_MEDIUM,
-  AI_EFFORT_HIGH, AI_EFFORT_XHIGH, AI_EFFORT_MAX,
+  AI_EFFORT_LOW, AI_EFFORT_MEDIUM, AI_EFFORT_HIGH,
+  AI_EFFORT_XHIGH, AI_EFFORT_MAX,
 };
 
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
@@ -98,6 +98,33 @@ static HyMessageRow *append_row (HyChatView    *self,
                                  const char    *text);
 static const char *workdir_for (const HyChat              *chat,
                                 const HyEffectiveSettings *resolved);
+
+/* A chat with nothing stored runs at whatever the CLI is configured to use. */
+static AiEffort
+effort_for (const HyChat *chat)
+{
+  const AiBackend *backend = ai_backend_lookup (chat->backend);
+
+  if (chat->effort != NULL)
+    return ai_effort_from_string (chat->effort);
+
+  return backend != NULL ? ai_backend_default_effort (backend) : AI_EFFORT_HIGH;
+}
+
+/* "Claude Opus 5 · High" rather than "Assistant": which model answered, and
+ * how hard it was asked to think, are the two things worth knowing. */
+static char *
+reply_title (const HyChat *chat)
+{
+  const AiBackend *backend = ai_backend_lookup (chat->backend);
+
+  if (backend == NULL)
+    return g_strdup ("Assistant");
+
+  return g_strdup_printf ("%s · %s",
+                          ai_backend_model_label (backend, chat->model),
+                          ai_effort_label (effort_for (chat)));
+}
 
 /* --- transcript ----------------------------------------------------------- */
 
@@ -282,11 +309,23 @@ append_reply (HyChatView *self,
               gboolean    answerable)
 {
   g_autoptr (HyAsk) ask = NULL;
+  g_autoptr (HyChat) chat = NULL;
   g_autofree char *prose = NULL;
+  HyMessageRow *row;
 
   ask = hy_ask_parse (text, &prose);
 
-  append_row (self, HY_MESSAGE_ASSISTANT, ask != NULL ? prose : text);
+  row = append_row (self, HY_MESSAGE_ASSISTANT, ask != NULL ? prose : text);
+
+  if (self->chat != NULL)
+    chat = hy_storage_get_chat (self->storage, hy_node_get_chat_id (self->chat), NULL);
+
+  if (chat != NULL)
+    {
+      g_autofree char *title = reply_title (chat);
+
+      hy_message_row_set_title (row, title);
+    }
 
   if (ask != NULL)
     append_choices (self, ask, answerable);
@@ -669,6 +708,11 @@ start_turn (HyChatView *self,
   turn->text = g_string_new (NULL);
   turn->session = hy_chat_session_new (backend);
   turn->row = append_row (self, HY_MESSAGE_ASSISTANT, NULL);
+  {
+    g_autofree char *title = reply_title (chat);
+
+    hy_message_row_set_title (turn->row, title);
+  }
   hy_message_row_set_waiting (turn->row, TRUE);
 
   g_signal_connect (turn->session, "session-started",
@@ -702,7 +746,7 @@ start_turn (HyChatView *self,
     system_prompt = (char *) spec.system_prompt;
   }
   spec.resume_session_id = resume_session_id;
-  spec.effort = ai_effort_from_string (chat->effort);
+  spec.effort = effort_for (chat);
   /* Plan overrides the access level for as long as it is on, without
    * overwriting it. */
   spec.access = chat->plan ? AI_ACCESS_PLAN
@@ -888,7 +932,7 @@ update_context_bar (HyChatView   *self,
 
   for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
     {
-      if (effort_choices[i] == ai_effort_from_string (chat->effort))
+      if (effort_choices[i] == effort_for (chat))
         gtk_drop_down_set_selected (self->effort_chooser, i);
     }
 
@@ -1093,7 +1137,16 @@ hy_chat_view_set_chat (HyChatView *self,
   turn = current_turn (self);
   if (turn != NULL)
     {
+      g_autoptr (HyChat) record =
+        hy_storage_get_chat (self->storage, hy_node_get_chat_id (chat), NULL);
+
       turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->text->str);
+      if (record != NULL)
+        {
+          g_autofree char *title = reply_title (record);
+
+          hy_message_row_set_title (turn->row, title);
+        }
       hy_message_row_set_waiting (turn->row, TRUE);
     }
 

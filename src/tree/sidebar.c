@@ -316,6 +316,7 @@ on_new_chat_response (GObject      *source,
   g_autoptr (GError) error = NULL;
   g_autofree char *backend = NULL;
   g_autofree char *model = NULL;
+  g_autofree char *effort = NULL;
   const char *response;
   const char *title;
   HyNode *chat;
@@ -350,10 +351,14 @@ on_new_chat_response (GObject      *source,
       model = g_strdup (resolved->model);
     else if (definition != NULL)
       model = g_strdup (definition->default_model);
+
+    if (definition != NULL)
+      effort = g_strdup (ai_effort_to_string (ai_backend_default_effort (definition)));
   }
 
   chat = hy_fs_tree_create_chat (prompt->self->tree, prompt->folder, title,
-                                 backend, model, prompt->workdir, &error);
+                                 backend, model, effort, prompt->workdir,
+                                 &error);
   if (chat == NULL)
     show_error (prompt->self, "Could not start the chat", error);
   else

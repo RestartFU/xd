@@ -262,10 +262,10 @@ test_effort_maps_to_each_cli (void)
   g_assert_nonnull (strstr (claude_argv, "--effort xhigh"));
   g_assert_nonnull (strstr (codex_argv, "model_reasoning_effort=\"xhigh\""));
 
-  /* Left at default, neither CLI is told anything and its own setting wins. */
-  spec.effort = AI_EFFORT_DEFAULT;
+  /* Every chat names an effort, so the flag is always passed. */
+  spec.effort = AI_EFFORT_LOW;
   unset = argv_to_string (claude, &spec);
-  g_assert_null (strstr (unset, "--effort"));
+  g_assert_nonnull (strstr (unset, "--effort low"));
 }
 
 /*

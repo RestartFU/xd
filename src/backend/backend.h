@@ -49,10 +49,9 @@ typedef enum
   AI_ACCESS_FULL,       /* no confirmation for anything */
 } AiAccess;
 
-/* How hard the model is asked to think. NULL leaves it to the CLI. */
+/* How hard the model is asked to think. Every chat names one. */
 typedef enum
 {
-  AI_EFFORT_DEFAULT,
   AI_EFFORT_LOW,
   AI_EFFORT_MEDIUM,
   AI_EFFORT_HIGH,
@@ -113,6 +112,14 @@ struct _AiBackend
                         AiEventFunc  callback,
                         gpointer     user_data);
 };
+
+/*
+ * What the CLI would do if hy said nothing.
+ *
+ * Read from the CLI's own configuration, so the value hy offers is the one
+ * the user already had rather than a guess baked in here.
+ */
+AiEffort                ai_backend_default_effort (const AiBackend *self);
 
 const AiBackend        *ai_backend_lookup (const char *id);
 const AiBackend *const *ai_backend_all    (guint      *n_backends);

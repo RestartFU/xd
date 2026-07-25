@@ -10,6 +10,7 @@ struct _HyMessageRow
   GString *text;
 
   GtkLabel *body;
+  GtkLabel *title;
   GtkWidget *spinner;
 };
 
@@ -74,21 +75,21 @@ hy_message_row_new (HyMessageKind  kind,
   HyMessageRow *self = g_object_new (HY_TYPE_MESSAGE_ROW, NULL);
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-  GtkWidget *title = gtk_label_new (kind_title (kind));
   const char *css_class;
 
   self->kind = kind;
   self->text = g_string_new (text != NULL ? text : "");
 
-  gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
-  gtk_widget_add_css_class (title, "caption-heading");
-  gtk_widget_add_css_class (title, "dim-label");
+  self->title = GTK_LABEL (gtk_label_new (kind_title (kind)));
+  gtk_label_set_xalign (self->title, 0.0f);
+  gtk_widget_add_css_class (GTK_WIDGET (self->title), "caption-heading");
+  gtk_widget_add_css_class (GTK_WIDGET (self->title), "dim-label");
 
   self->spinner = gtk_spinner_new ();
   gtk_widget_set_visible (self->spinner, FALSE);
   gtk_widget_set_valign (self->spinner, GTK_ALIGN_CENTER);
 
-  gtk_box_append (GTK_BOX (header), title);
+  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->title));
   gtk_box_append (GTK_BOX (header), self->spinner);
 
   self->body = GTK_LABEL (gtk_label_new (NULL));
@@ -166,6 +167,16 @@ hy_message_row_set_text (HyMessageRow *self,
   render_body (self);
 
   gtk_widget_set_visible (GTK_WIDGET (self->body), self->text->len > 0);
+}
+
+void
+hy_message_row_set_title (HyMessageRow *self,
+                          const char   *title)
+{
+  g_return_if_fail (HY_IS_MESSAGE_ROW (self));
+
+  if (title != NULL)
+    gtk_label_set_label (self->title, title);
 }
 
 const char *

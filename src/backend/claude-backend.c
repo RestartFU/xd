@@ -68,11 +68,8 @@ claude_build_argv (const AiBackend *self,
       g_ptr_array_add (argv, g_strdup (spec->system_prompt));
     }
 
-  if (spec->effort != AI_EFFORT_DEFAULT)
-    {
-      g_ptr_array_add (argv, g_strdup ("--effort"));
-      g_ptr_array_add (argv, g_strdup (ai_effort_to_string (spec->effort)));
-    }
+  g_ptr_array_add (argv, g_strdup ("--effort"));
+  g_ptr_array_add (argv, g_strdup (ai_effort_to_string (spec->effort)));
 
   g_ptr_array_add (argv, g_strdup ("--permission-mode"));
   g_ptr_array_add (argv, g_strdup (claude_permission_mode (spec->access)));

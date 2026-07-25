@@ -72,12 +72,9 @@ codex_build_argv (const AiBackend *self,
   g_ptr_array_add (argv, g_strdup (codex_sandbox (spec->access)));
 
   /* Codex takes effort as a config override rather than a flag. */
-  if (spec->effort != AI_EFFORT_DEFAULT)
-    {
-      g_ptr_array_add (argv, g_strdup ("-c"));
-      g_ptr_array_add (argv, g_strdup_printf ("model_reasoning_effort=\"%s\"",
-                                              ai_effort_to_string (spec->effort)));
-    }
+  g_ptr_array_add (argv, g_strdup ("-c"));
+  g_ptr_array_add (argv, g_strdup_printf ("model_reasoning_effort=\"%s\"",
+                                          ai_effort_to_string (spec->effort)));
 
   if (spec->model != NULL)
     {

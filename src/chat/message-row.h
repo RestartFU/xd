@@ -34,6 +34,11 @@ const char   *hy_message_row_get_text   (HyMessageRow  *self);
 void          hy_message_row_set_text   (HyMessageRow  *self,
                                          const char    *text);
 
+/* Replaces the row's heading. Replies use it to name the model that answered
+ * instead of the anonymous "Assistant". */
+void          hy_message_row_set_title  (HyMessageRow  *self,
+                                         const char    *title);
+
 /* Shows a spinner while the row is still waiting for its first token. */
 void          hy_message_row_set_waiting (HyMessageRow *self,
                                           gboolean      waiting);

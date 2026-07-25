@@ -54,6 +54,7 @@ char       *hy_storage_create_chat     (HyStorage   *self,
                                         const char  *title,
                                         const char  *backend,
                                         const char  *model,
+                                        const char  *effort,
                                         const char  *workdir,
                                         GError     **error);
 
