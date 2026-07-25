@@ -107,6 +107,28 @@ test_claude_stream (void)
   collected_clear (&collected);
 }
 
+/*
+ * A real turn that used a tool, captured from the CLI.
+ *
+ * Tool calls are announced before their arguments exist and only described
+ * once the block closes, so they are reported from a different event than the
+ * one that names them. That is easy to break while changing how replies are
+ * assembled, and nothing else in the transcript would show it.
+ */
+static void
+test_claude_reports_tool_use (void)
+{
+  Collected collected = { 0 };
+
+  replay_fixture ("claude", "claude-tool-use.jsonl", &collected);
+
+  g_assert_cmpuint (collected.n_tools, >=, 1);
+  g_assert_cmpuint (collected.n_results, ==, 1);
+  g_assert_cmpuint (collected.n_errors, ==, 0);
+
+  collected_clear (&collected);
+}
+
 static void
 test_codex_stream (void)
 {

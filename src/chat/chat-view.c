@@ -53,6 +53,9 @@ struct _HyChatView
   GtkButton *send_button;
   GtkWidget *composer_area;
   GtkWidget *attachments_bar;
+  GtkWidget *queued_bar;
+  GtkLabel *queued_label;
+  char *queued;             /* typed while a turn was running */
   GPtrArray *attachments;   /* absolute paths of pasted images */
   HyModelPicker *model_picker;
   GtkDropDown *effort_chooser;
@@ -91,6 +94,7 @@ static const AiEffort effort_choices[] = {
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
+static void send_queued (HyChatView *self);
 static void send_message (HyChatView *self,
                           const char *text);
 static void update_send_button (HyChatView *self);
@@ -652,6 +656,10 @@ on_turn_finished (HyChatSession *session,
 
   if (visible)
     update_send_button (self);
+
+  /* Whatever was typed while it was working is what to do next. */
+  if (visible && self->queued != NULL)
+    send_queued (self);
 }
 
 /* --- sending -------------------------------------------------------------- */
@@ -1088,6 +1096,76 @@ paste_image (HyChatView *self)
   return TRUE;
 }
 
+/* --- messages typed while the agent is working ------------------------------ */
+
+static void
+show_queued (HyChatView *self)
+{
+  gtk_widget_set_visible (self->queued_bar, self->queued != NULL);
+
+  if (self->queued != NULL)
+    gtk_label_set_label (self->queued_label, self->queued);
+}
+
+static void
+queue_message (HyChatView *self,
+               const char *text)
+{
+  /* A second message replaces the first rather than piling up: what is meant
+   * is the latest instruction, not a list of them to be answered in turn. */
+  g_free (self->queued);
+  self->queued = g_strdup (text);
+
+  show_queued (self);
+}
+
+/*
+ * Sends what is queued as soon as it can be sent.
+ *
+ * Called when a turn ends. The queued text goes through the normal path, so
+ * it is stored, shown and answered like anything else.
+ */
+static void
+send_queued (HyChatView *self)
+{
+  g_autofree char *text = g_steal_pointer (&self->queued);
+
+  show_queued (self);
+
+  if (text != NULL)
+    send_message (self, text);
+}
+
+/*
+ * Interrupts the turn to say this now.
+ *
+ * Neither CLI takes input mid-turn -- they are given a prompt and run to
+ * completion -- so steering means stopping the turn and starting another.
+ * What was said up to the stop is kept, and the next turn replays it, so the
+ * agent knows what it had got to before being redirected.
+ */
+static void
+on_steer_clicked (GtkButton *button,
+                  gpointer   user_data)
+{
+  HyChatView *self = user_data;
+  Turn *turn = current_turn (self);
+
+  if (turn != NULL)
+    hy_chat_session_cancel (turn->session);
+  /* The queued text goes out when the turn reports that it has stopped. */
+}
+
+static void
+on_queued_dropped (GtkButton *button,
+                   gpointer   user_data)
+{
+  HyChatView *self = user_data;
+
+  g_clear_pointer (&self->queued, g_free);
+  show_queued (self);
+}
+
 static void
 send_current_message (HyChatView *self)
 {
@@ -1096,8 +1174,15 @@ send_current_message (HyChatView *self)
 
   if (self->attachments->len == 0)
     {
-      if (text != NULL)
+      if (text == NULL)
+        return;
+
+      /* One turn at a time, so anything typed meanwhile waits for it. */
+      if (current_turn (self) != NULL)
+        queue_message (self, text);
+      else
         send_message (self, text);
+
       return;
     }
 
@@ -1120,7 +1205,11 @@ send_current_message (HyChatView *self)
     }
 
   forget_attachments (self);
-  send_message (self, message->str);
+
+  if (current_turn (self) != NULL)
+    queue_message (self, message->str);
+  else
+    send_message (self, message->str);
 }
 
 static void
@@ -1605,6 +1694,43 @@ build_composer (HyChatView *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
                                  GTK_WIDGET (self->composer));
 
+  /*
+   * What is waiting to be sent, with a way to send it now.
+   *
+   * Queued rather than refused: a message typed while the agent is working is
+   * still what the user wants next, and making them retype it after the turn
+   * ends wastes the time they spent typing it.
+   */
+  {
+    GtkWidget *icon = gtk_image_new_from_icon_name ("document-send-symbolic");
+    GtkWidget *steer = gtk_button_new_from_icon_name ("media-skip-forward-symbolic");
+    GtkWidget *drop = gtk_button_new_from_icon_name ("window-close-symbolic");
+
+    self->queued_label = GTK_LABEL (gtk_label_new (NULL));
+    gtk_label_set_ellipsize (self->queued_label, PANGO_ELLIPSIZE_END);
+    gtk_label_set_xalign (self->queued_label, 0.0f);
+    gtk_widget_set_hexpand (GTK_WIDGET (self->queued_label), TRUE);
+    gtk_widget_add_css_class (GTK_WIDGET (self->queued_label), "dim-label");
+
+    gtk_widget_add_css_class (steer, "flat");
+    gtk_widget_set_tooltip_text (steer, "Send now, interrupting the agent");
+    g_signal_connect (steer, "clicked", G_CALLBACK (on_steer_clicked), self);
+
+    gtk_widget_add_css_class (drop, "flat");
+    gtk_widget_set_tooltip_text (drop, "Discard");
+    g_signal_connect (drop, "clicked", G_CALLBACK (on_queued_dropped), self);
+
+    self->queued_bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append (GTK_BOX (self->queued_bar), icon);
+    gtk_box_append (GTK_BOX (self->queued_bar), GTK_WIDGET (self->queued_label));
+    gtk_box_append (GTK_BOX (self->queued_bar), steer);
+    gtk_box_append (GTK_BOX (self->queued_bar), drop);
+    gtk_widget_set_visible (self->queued_bar, FALSE);
+    gtk_widget_set_margin_top (self->queued_bar, 6);
+    gtk_widget_set_margin_start (self->queued_bar, 10);
+    gtk_widget_set_margin_end (self->queued_bar, 6);
+  }
+
   self->attachments_bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_set_visible (self->attachments_bar, FALSE);
   gtk_widget_set_margin_top (self->attachments_bar, 8);
@@ -1730,6 +1856,7 @@ build_composer (HyChatView *self)
 
   /* Above what is being typed, the way an attachment reads: this is going
    * with the message below it. */
+  gtk_box_append (GTK_BOX (column), self->queued_bar);
   gtk_box_append (GTK_BOX (column), self->attachments_bar);
   gtk_box_append (GTK_BOX (column), scroller);
   gtk_box_append (GTK_BOX (column), toolbar);
@@ -1750,6 +1877,7 @@ hy_chat_view_dispose (GObject *object)
 
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
+  g_clear_pointer (&self->queued, g_free);
   g_clear_object (&self->settings);
   g_clear_object (&self->storage);
   g_clear_object (&self->tree);

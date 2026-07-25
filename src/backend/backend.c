@@ -244,9 +244,26 @@ ai_tool_summary (const char *tool_name,
   };
   const char *detail = NULL;
   g_autofree char *trimmed = NULL;
+  g_autofree char *heading = NULL;
 
   if (tool_name == NULL)
     tool_name = "tool";
+
+  /*
+   * A subagent is not a tool call like the others.
+   *
+   * It is another agent doing its own work, and a row reading "Task" hides
+   * that entirely. The kind of agent is what distinguishes one from the next,
+   * so it goes in the heading rather than the detail.
+   */
+  if (g_strcmp0 (tool_name, "Task") == 0)
+    {
+      const char *kind = ai_json_get_string (input, "subagent_type");
+
+      heading = kind != NULL ? g_strdup_printf ("Subagent: %s", kind)
+                             : g_strdup ("Subagent");
+      tool_name = heading;
+    }
 
   for (gsize i = 0; i < G_N_ELEMENTS (keys) && detail == NULL; i++)
     detail = ai_json_get_string (input, keys[i]);

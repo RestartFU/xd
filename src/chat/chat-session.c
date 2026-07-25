@@ -133,7 +133,10 @@ on_event (const AiEvent *event,
       break;
 
     case AI_EVENT_ERROR:
-      finish (self, FALSE, event->text);
+      /* Interrupting a CLI makes it report the turn as failed, which is true
+       * from its side and misleading from ours: the user stopped it, and
+       * being told the backend died is both wrong and alarming. */
+      finish (self, self->stopping, self->stopping ? NULL : event->text);
       break;
 
     default:

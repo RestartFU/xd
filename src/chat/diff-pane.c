@@ -16,12 +16,15 @@ struct _HyDiffPane
   AdwBin parent_instance;
 
   char *workdir;
+  char *base;               /* what the branch is measured against */
+  gboolean branch_mode;
   GCancellable *cancellable;
 
   GtkListBox *files;
   GtkTextView *diff;
   GtkLabel *summary;
   GtkWidget *stack;
+  GtkWidget *changes;
 };
 
 G_DEFINE_FINAL_TYPE (HyDiffPane, hy_diff_pane, ADW_TYPE_BIN)
@@ -32,6 +35,21 @@ typedef struct
   char *path;
   gboolean untracked;
 } DiffRequest;
+
+/*
+ * Where this branch left the one it came from.
+ *
+ * Tried in order: what the remote calls its default, then the usual names.
+ * A shell runs the chain because each candidate only matters if the ones
+ * before it are absent, and spawning git five times to find that out is
+ * five round trips for one answer.
+ */
+static const char *BASE_SCRIPT =
+  "for ref in \"$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD)\" "
+  "origin/main origin/master main master; do "
+  "  [ -n \"$ref\" ] || continue; "
+  "  git rev-parse --verify --quiet \"$ref\" >/dev/null && { echo \"$ref\"; exit 0; }; "
+  "done";
 
 static void load_diff (HyDiffPane *self, const char *path, gboolean untracked);
 
@@ -148,7 +166,17 @@ load_diff (HyDiffPane *self,
   request->path = g_strdup (path);
   request->untracked = untracked;
 
-  if (untracked)
+  if (self->branch_mode)
+    {
+      /* Three dots: what this branch added since it diverged, rather than
+       * every difference between the two tips. That is the change under
+       * review -- what a pull request shows. */
+      g_autofree char *range = g_strdup_printf ("%s...HEAD", self->base);
+      const char *argv[] = { "git", "--no-pager", "diff", range, "--", path, NULL };
+
+      run_git (self, argv, on_diff_read, request);
+    }
+  else if (untracked)
     {
       /* A file git does not know about has nothing to be compared against,
        * so it is diffed against nothing and reads as all additions. */
@@ -254,11 +282,25 @@ on_status_read (GObject      *source,
 
   for (gsize i = 0; lines[i] != NULL; i++)
     {
-      /* "XY path", with the two status letters in a fixed position. */
       if (strlen (lines[i]) < 4)
         continue;
 
-      add_file_row (self, lines[i], lines[i] + 3);
+      /* status --porcelain gives "XY path"; diff --name-status gives the
+       * letter, a tab, then the path. */
+      if (self->branch_mode)
+        {
+          const char *tab = strchr (lines[i], '\t');
+
+          if (tab == NULL)
+            continue;
+
+          add_file_row (self, lines[i], tab + 1);
+        }
+      else
+        {
+          add_file_row (self, lines[i], lines[i] + 3);
+        }
+
       changed++;
     }
 
@@ -278,16 +320,74 @@ on_status_read (GObject      *source,
   }
   gtk_stack_set_visible_child_name (GTK_STACK (self->stack), "changes");
 
+  /* Half the pane at most: enough to see the shape of the change list without
+   * pushing the diff itself off the bottom. */
+  {
+    int available = gtk_widget_get_height (self->changes);
+
+    if (available > 0)
+      gtk_paned_set_position (GTK_PANED (self->changes),
+                              MIN (available / 2, (int) changed * 34 + 8));
+  }
+
   /* Showing the first file beats showing an empty pane next to a list. */
   gtk_list_box_select_row (self->files,
                            gtk_list_box_get_row_at_index (self->files, 0));
 }
 
+static void
+read_changed_files (HyDiffPane *self)
+{
+  if (self->branch_mode)
+    {
+      g_autofree char *range = g_strdup_printf ("%s...HEAD", self->base);
+      const char *argv[] = { "git", "--no-pager", "diff", "--name-status",
+                             range, NULL };
+
+      run_git (self, argv, on_status_read, self);
+    }
+  else
+    {
+      const char *argv[] = { "git", "status", "--porcelain", NULL };
+
+      run_git (self, argv, on_status_read, self);
+    }
+}
+
+static void
+on_base_read (GObject      *source,
+              GAsyncResult *result,
+              gpointer      user_data)
+{
+  HyDiffPane *self = user_data;
+  g_autofree char *output = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (!g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result,
+                                             &output, NULL, &error))
+    return;
+
+  if (output != NULL)
+    g_strstrip (output);
+
+  if (output == NULL || *output == '\0')
+    {
+      /* No branch to compare against: a repository with no remote and no
+       * main, or a checkout of the default branch itself. */
+      gtk_label_set_label (self->summary, "No branch to compare against");
+      gtk_stack_set_visible_child_name (GTK_STACK (self->stack), "empty");
+      return;
+    }
+
+  g_free (self->base);
+  self->base = g_steal_pointer (&output);
+
+  read_changed_files (self);
+}
+
 void
 hy_diff_pane_refresh (HyDiffPane *self)
 {
-  const char *argv[] = { "git", "status", "--porcelain", NULL };
-
   g_return_if_fail (HY_IS_DIFF_PANE (self));
 
   if (!gtk_widget_get_visible (GTK_WIDGET (self)))
@@ -305,7 +405,17 @@ hy_diff_pane_refresh (HyDiffPane *self)
       return;
     }
 
-  run_git (self, argv, on_status_read, self);
+  /* Resolved every time rather than remembered: branches are switched and
+   * remotes are added while the pane sits there. */
+  if (self->branch_mode)
+    {
+      const char *argv[] = { "sh", "-c", BASE_SCRIPT, NULL };
+
+      run_git (self, argv, on_base_read, self);
+      return;
+    }
+
+  read_changed_files (self);
 }
 
 void
@@ -330,6 +440,17 @@ hy_diff_pane_new (void)
 }
 
 static void
+on_scope_changed (GtkToggleButton *button,
+                  gpointer         user_data)
+{
+  HyDiffPane *self = user_data;
+
+  self->branch_mode = gtk_toggle_button_get_active (button);
+
+  hy_diff_pane_refresh (self);
+}
+
+static void
 hy_diff_pane_dispose (GObject *object)
 {
   HyDiffPane *self = HY_DIFF_PANE (object);
@@ -337,6 +458,7 @@ hy_diff_pane_dispose (GObject *object)
   g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->workdir, g_free);
+  g_clear_pointer (&self->base, g_free);
 
   G_OBJECT_CLASS (hy_diff_pane_parent_class)->dispose (object);
 }
@@ -365,12 +487,36 @@ hy_diff_pane_init (HyDiffPane *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->summary), "heading");
 
   gtk_widget_add_css_class (refresh, "flat");
-  gtk_widget_set_tooltip_text (refresh, "Read the working tree again");
+  gtk_widget_set_tooltip_text (refresh, "Read again");
   g_signal_connect_swapped (refresh, "clicked",
                             G_CALLBACK (hy_diff_pane_refresh), self);
 
-  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->summary));
-  gtk_box_append (GTK_BOX (header), refresh);
+  /*
+   * Two questions, both worth asking here: what has changed since the last
+   * commit, and what this branch changes as a whole. The second is the one a
+   * pull request shows, and is not visible from the working tree at all once
+   * the work has been committed.
+   */
+  {
+    GtkWidget *modes = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *working = gtk_toggle_button_new_with_label ("Working");
+    GtkWidget *branch = gtk_toggle_button_new_with_label ("Branch");
+
+    gtk_widget_set_tooltip_text (working, "Changes not yet committed");
+    gtk_widget_set_tooltip_text (branch, "Everything this branch changes");
+    gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (branch),
+                                 GTK_TOGGLE_BUTTON (working));
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (working), TRUE);
+    g_signal_connect (branch, "toggled", G_CALLBACK (on_scope_changed), self);
+
+    gtk_widget_add_css_class (modes, "linked");
+    gtk_box_append (GTK_BOX (modes), working);
+    gtk_box_append (GTK_BOX (modes), branch);
+
+    gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->summary));
+    gtk_box_append (GTK_BOX (header), modes);
+    gtk_box_append (GTK_BOX (header), refresh);
+  }
   gtk_widget_set_margin_start (header, 12);
   gtk_widget_set_margin_end (header, 6);
   gtk_widget_set_margin_top (header, 6);
@@ -401,12 +547,22 @@ hy_diff_pane_init (HyDiffPane *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (diff_window),
                                  GTK_WIDGET (self->diff));
 
-  /* The file list is short and the diff is long, so the split starts well up
-   * the pane and can be dragged. */
+  /*
+   * The list takes what it needs before it starts scrolling.
+   *
+   * A fixed height wasted the pane both ways: five rows visible with a
+   * hundred files left to scroll through, and the same five rows floating
+   * above empty space when only one file changed. It grows to its contents
+   * and stops at half the pane, past which the diff needs the room more.
+   */
+  gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (files_window), TRUE);
+  gtk_widget_set_vexpand (files_window, FALSE);
+
   gtk_paned_set_start_child (GTK_PANED (changes), files_window);
   gtk_paned_set_end_child (GTK_PANED (changes), diff_window);
-  gtk_paned_set_position (GTK_PANED (changes), 180);
-  gtk_paned_set_resize_start_child (GTK_PANED (changes), FALSE);
+  gtk_paned_set_resize_start_child (GTK_PANED (changes), TRUE);
+  gtk_paned_set_shrink_start_child (GTK_PANED (changes), FALSE);
+  gtk_paned_set_resize_end_child (GTK_PANED (changes), TRUE);
 
   adw_status_page_set_icon_name (ADW_STATUS_PAGE (empty), "object-select-symbolic");
   adw_status_page_set_title (ADW_STATUS_PAGE (empty), "Nothing Changed");
@@ -414,6 +570,7 @@ hy_diff_pane_init (HyDiffPane *self)
   self->stack = gtk_stack_new ();
   gtk_stack_add_named (GTK_STACK (self->stack), empty, "empty");
   gtk_stack_add_named (GTK_STACK (self->stack), changes, "changes");
+  self->changes = changes;
   gtk_widget_set_vexpand (self->stack, TRUE);
 
   gtk_box_append (GTK_BOX (box), header);
