@@ -2,6 +2,8 @@
 # exercised by the headless tests in tests/.
 hy_core_sources = files(
   'settings/folder-settings.c',
+  'settings/settings-resolver.c',
+  'tree/hy-node.c',
   'storage/storage.c',
   'backend/backend.c',
   'backend/claude-backend.c',
@@ -29,9 +31,9 @@ hy_sources = files(
   'main.c',
   'hy-app.c',
   'hy-window.c',
-  'tree/hy-node.c',
   'tree/fs-tree.c',
   'tree/sidebar.c',
+  'settings/folder-settings-dialog.c',
   'chat/message-row.c',
   'chat/chat-view.c',
 )

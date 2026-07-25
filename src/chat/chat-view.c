@@ -2,6 +2,7 @@
 
 #include "chat-session.h"
 #include "message-row.h"
+#include "settings/settings-resolver.h"
 
 /*
  * A turn in flight.
@@ -268,19 +269,15 @@ take_composer_text (HyChatView *self)
 }
 
 /* Where the backend runs, which is how project context reaches the CLI. The
- * chat's own choice wins; otherwise it falls back to its folder. */
+ * chat's own choice wins; otherwise the folder chain decides. */
 static const char *
-workdir_for (HyChatView *self,
-             const HyChat *chat)
+workdir_for (const HyChat              *chat,
+             const HyEffectiveSettings *resolved)
 {
-  HyNode *folder;
-
   if (chat->workdir != NULL && *chat->workdir != '\0')
     return chat->workdir;
 
-  folder = hy_node_get_parent (self->chat);
-
-  return folder != NULL ? hy_node_get_path (folder) : NULL;
+  return resolved->workdir;
 }
 
 static void
@@ -289,6 +286,7 @@ start_turn (HyChatView *self,
 {
   g_autoptr (HyChat) chat = NULL;
   g_autoptr (GError) error = NULL;
+  g_autoptr (HyEffectiveSettings) resolved = NULL;
   const AiBackend *backend;
   AiRunSpec spec = { 0 };
   Turn *turn;
@@ -330,8 +328,15 @@ start_turn (HyChatView *self,
 
   g_hash_table_insert (self->turns, g_strdup (chat->id), turn);
 
+  /* Resolved per turn rather than at creation, so editing a folder's
+   * instructions or model takes effect on the next message instead of only on
+   * chats made afterwards. */
+  resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
+
   spec.prompt = prompt;
-  spec.workdir = workdir_for (self, chat);
+  spec.workdir = workdir_for (chat, resolved);
+  spec.model = resolved->model;
+  spec.system_prompt = resolved->instructions;
   spec.resume_session_id = chat->session_id;
 
   if (!hy_chat_session_start (turn->session, &spec, &error))

@@ -1,5 +1,8 @@
 #include "sidebar.h"
 
+#include "settings/folder-settings-dialog.h"
+#include "settings/settings-resolver.h"
+
 struct _HySidebar
 {
   AdwBin parent_instance;
@@ -320,7 +323,16 @@ on_new_chat_response (GObject      *source,
   if (*title == '\0')
     title = "New Chat";
 
-  backend = g_settings_get_string (prompt->self->settings, "default-backend");
+  /* The backend is fixed when the chat is created, because the session id the
+   * CLI hands back only means something to that CLI. */
+  {
+    g_autofree char *fallback =
+      g_settings_get_string (prompt->self->settings, "default-backend");
+    g_autoptr (HyEffectiveSettings) resolved =
+      hy_settings_resolve (prompt->folder, fallback);
+
+    backend = g_strdup (resolved->backend);
+  }
 
   chat = hy_fs_tree_create_chat (prompt->self->tree, prompt->folder, title,
                                  backend, prompt->workdir, &error);
@@ -429,6 +441,20 @@ on_delete_chat (GtkWidget  *widget,
 
   if (!hy_fs_tree_delete_chat (self->tree, chat, &error))
     show_error (self, "Could not delete the chat", error);
+}
+
+static void
+on_folder_settings (GtkWidget  *widget,
+                    const char *action_name,
+                    GVariant   *target)
+{
+  HySidebar *self = HY_SIDEBAR (widget);
+  HyNode *folder = node_from_target (self, target);
+
+  if (folder == NULL)
+    return;
+
+  hy_folder_settings_dialog_present (GTK_WIDGET (self), folder, self->settings);
 }
 
 typedef struct
@@ -603,6 +629,7 @@ build_row_menu (HyNode *node)
   g_autoptr (GMenuItem) new_chat = NULL;
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) rename = NULL;
+  g_autoptr (GMenuItem) settings = NULL;
   g_autoptr (GMenuItem) trash = NULL;
 
   new_chat = g_menu_item_new ("New Chat", NULL);
@@ -616,6 +643,10 @@ build_row_menu (HyNode *node)
   rename = g_menu_item_new ("Rename…", NULL);
   g_menu_item_set_action_and_target_value (rename, "sidebar.rename", target);
   g_menu_append_item (menu, rename);
+
+  settings = g_menu_item_new ("Folder Settings…", NULL);
+  g_menu_item_set_action_and_target_value (settings, "sidebar.settings", target);
+  g_menu_append_item (menu, settings);
 
   trash = g_menu_item_new ("Move to Trash", NULL);
   g_menu_item_set_action_and_target_value (trash, "sidebar.trash", target);
@@ -836,6 +867,8 @@ hy_sidebar_class_init (HySidebarClass *klass)
                                    on_rename_chat);
   gtk_widget_class_install_action (widget_class, "sidebar.delete-chat", "s",
                                    on_delete_chat);
+  gtk_widget_class_install_action (widget_class, "sidebar.settings", "s",
+                                   on_folder_settings);
 }
 
 static void
