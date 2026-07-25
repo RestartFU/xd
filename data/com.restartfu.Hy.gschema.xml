@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.restartfu.Hy" path="/com/restartfu/Hy/">
+
+    <key name="workspaces-root" type="s">
+      <default>''</default>
+      <summary>Workspaces root directory</summary>
+      <description>
+        Directory holding the workspace tree. Empty means the default,
+        $HOME/Workspaces.
+      </description>
+    </key>
+
+    <key name="projects-root" type="s">
+      <default>''</default>
+      <summary>Projects root directory</summary>
+      <description>
+        Directory suggested first when picking a working directory or repository
+        for a folder. Empty means the default, $HOME/projects.
+      </description>
+    </key>
+
+    <key name="default-backend" type="s">
+      <default>'claude'</default>
+      <summary>Default AI backend</summary>
+      <description>Backend used when no folder in the chain specifies one.</description>
+    </key>
+
+    <key name="window-width" type="i">
+      <default>1100</default>
+      <summary>Window width</summary>
+    </key>
+
+    <key name="window-height" type="i">
+      <default>720</default>
+      <summary>Window height</summary>
+    </key>
+
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Window maximized state</summary>
+    </key>
+
+    <key name="sidebar-width" type="i">
+      <default>280</default>
+      <summary>Sidebar width</summary>
+    </key>
+
+  </schema>
+</schemalist>
