@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 6
+#define HY_STORAGE_SCHEMA_VERSION 7
 
 struct _HyStorage
 {
@@ -223,6 +223,12 @@ migrate (HyStorage  *self,
                  error))
     return FALSE;
 
+  if (version < 7 &&
+      !exec_sql (self,
+                 "ALTER TABLE chats ADD COLUMN plan INTEGER NOT NULL DEFAULT 0;",
+                 error))
+    return FALSE;
+
   if (version < 6 &&
       (!exec_sql (self, "ALTER TABLE chats ADD COLUMN effort TEXT;", error) ||
        !exec_sql (self, "ALTER TABLE chats ADD COLUMN access TEXT;", error)))
@@ -339,14 +345,15 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->model      = column_text (stmt, 5);
   chat->effort     = column_text (stmt, 6);
   chat->access     = column_text (stmt, 7);
-  chat->created_at = sqlite3_column_int64 (stmt, 8);
-  chat->updated_at = sqlite3_column_int64 (stmt, 9);
+  chat->plan       = sqlite3_column_int (stmt, 8) != 0;
+  chat->created_at = sqlite3_column_int64 (stmt, 9);
+  chat->updated_at = sqlite3_column_int64 (stmt, 10);
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
-  "id, folder_id, title, backend, workdir, model, effort, access,"\
+  "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
   " created_at, updated_at"
 
 HyChat *
@@ -689,6 +696,38 @@ hy_storage_set_access (HyStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET access = ?, updated_at = ? WHERE id = ?;",
                              access, chat_id, "Cannot change the access level", error);
+}
+
+gboolean
+hy_storage_set_plan (HyStorage   *self,
+                     const char  *chat_id,
+                     gboolean     plan,
+                     GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "UPDATE chats SET plan = ?, updated_at = ? WHERE id = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot change plan mode");
+      return FALSE;
+    }
+
+  sqlite3_bind_int (stmt, 1, plan ? 1 : 0);
+  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 3, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot change plan mode");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
 }
 
 gboolean

@@ -48,8 +48,6 @@ struct _HyChatView
   HyModelPicker *model_picker;
   GtkDropDown *effort_chooser;
   GtkDropDown *access_chooser;
-  GtkToggleButton *build_toggle;
-  GtkToggleButton *plan_toggle;
   GtkLabel *context_label;
 
   /* Set while the choosers are filled in from the chat, so the resulting
@@ -57,14 +55,9 @@ struct _HyChatView
   gboolean syncing_run_options;
 };
 
-/*
- * Offered in the composer bar, least permissive first.
- *
- * Plan is not on this list: it is a mode rather than a rung, and it sits on
- * its own toggle so leaving it restores whatever access the chat had.
- */
+/* Offered in the composer bar, least permissive first. */
 static const AiAccess access_choices[] = {
-  AI_ACCESS_READ_ONLY, AI_ACCESS_EDIT, AI_ACCESS_FULL,
+  AI_ACCESS_PLAN, AI_ACCESS_READ_ONLY, AI_ACCESS_EDIT, AI_ACCESS_FULL,
 };
 
 static const AiEffort effort_choices[] = {
@@ -88,8 +81,6 @@ static void on_effort_selected (GtkDropDown *chooser,
 static void on_access_selected (GtkDropDown *chooser,
                                 GParamSpec  *pspec,
                                 gpointer     user_data);
-static void on_plan_toggled (GtkToggleButton *toggle,
-                             gpointer         user_data);
 static HyMessageRow *append_row (HyChatView    *self,
                                  HyMessageKind  kind,
                                  const char    *text);
@@ -511,10 +502,7 @@ start_turn (HyChatView *self,
   spec.system_prompt = resolved->instructions;
   spec.resume_session_id = resume_session_id;
   spec.effort = ai_effort_from_string (chat->effort);
-  /* Plan overrides the access level for as long as it is on, without
-   * overwriting it. */
-  spec.access = chat->plan ? AI_ACCESS_PLAN
-                           : ai_access_from_string (chat->access);
+  spec.access = ai_access_from_string (chat->access);
 
   if (!hy_chat_session_start (turn->session, &spec, &error))
     {
@@ -701,34 +689,7 @@ update_context_bar (HyChatView   *self,
         gtk_drop_down_set_selected (self->access_chooser, i);
     }
 
-  gtk_toggle_button_set_active (chat->plan ? self->plan_toggle : self->build_toggle,
-                                TRUE);
-
-  /* Planning changes nothing, so how much it is allowed to change is moot. */
-  gtk_widget_set_sensitive (GTK_WIDGET (self->access_chooser), !chat->plan);
-
   self->syncing_run_options = FALSE;
-}
-
-static void
-on_plan_toggled (GtkToggleButton *toggle,
-                 gpointer         user_data)
-{
-  HyChatView *self = user_data;
-  g_autoptr (GError) error = NULL;
-  gboolean plan = gtk_toggle_button_get_active (self->plan_toggle);
-
-  if (self->syncing_run_options || self->chat == NULL)
-    return;
-
-  if (!hy_storage_set_plan (self->storage, hy_node_get_chat_id (self->chat),
-                            plan, &error))
-    {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
-      return;
-    }
-
-  gtk_widget_set_sensitive (GTK_WIDGET (self->access_chooser), !plan);
 }
 
 static void
@@ -941,7 +902,7 @@ static GtkWidget *
 build_composer (HyChatView *self)
 {
   GtkWidget *frame = gtk_frame_new (NULL);
-  GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   GtkWidget *toolbar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *scroller = gtk_scrolled_window_new ();
   GtkEventController *keys;
@@ -1015,67 +976,21 @@ build_composer (HyChatView *self)
   gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->access_chooser));
   gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
-
-  /* Build and Plan are two states of one choice, so they read as one control
-   * rather than two independent buttons. */
-  {
-    GtkWidget *modes = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-
-    self->build_toggle = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
-    gtk_button_set_child (GTK_BUTTON (self->build_toggle),
-                          adw_button_content_new ());
-    adw_button_content_set_icon_name (
-      ADW_BUTTON_CONTENT (gtk_button_get_child (GTK_BUTTON (self->build_toggle))),
-      "package-x-generic-symbolic");
-    adw_button_content_set_label (
-      ADW_BUTTON_CONTENT (gtk_button_get_child (GTK_BUTTON (self->build_toggle))),
-      "Build");
-    gtk_widget_set_tooltip_text (GTK_WIDGET (self->build_toggle),
-                                 "Carry the work out");
-
-    self->plan_toggle = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
-    gtk_button_set_child (GTK_BUTTON (self->plan_toggle),
-                          adw_button_content_new ());
-    adw_button_content_set_icon_name (
-      ADW_BUTTON_CONTENT (gtk_button_get_child (GTK_BUTTON (self->plan_toggle))),
-      "view-list-bullet-symbolic");
-    adw_button_content_set_label (
-      ADW_BUTTON_CONTENT (gtk_button_get_child (GTK_BUTTON (self->plan_toggle))),
-      "Plan");
-    gtk_widget_set_tooltip_text (GTK_WIDGET (self->plan_toggle),
-                                 "Work out an approach without changing anything");
-
-    gtk_toggle_button_set_group (self->plan_toggle, self->build_toggle);
-    gtk_toggle_button_set_active (self->build_toggle, TRUE);
-    g_signal_connect (self->plan_toggle, "toggled",
-                      G_CALLBACK (on_plan_toggled), self);
-
-    gtk_box_append (GTK_BOX (modes), GTK_WIDGET (self->build_toggle));
-    gtk_box_append (GTK_BOX (modes), GTK_WIDGET (self->plan_toggle));
-    gtk_widget_add_css_class (modes, "linked");
-    gtk_box_append (GTK_BOX (toolbar), modes);
-
-    gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
-  }
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
-  /* The controls sit under the text the user is typing, so they need enough
-   * clearance not to read as part of it. */
-  gtk_widget_set_margin_top (toolbar, 10);
-  gtk_widget_set_margin_start (toolbar, 6);
-  gtk_widget_set_margin_end (toolbar, 6);
-  gtk_widget_set_margin_bottom (toolbar, 6);
+  /* The controls sit outside the frame. Inside it they read as part of the
+   * text being typed rather than as a toolbar acting on it. */
+  gtk_frame_set_child (GTK_FRAME (frame), scroller);
 
-  gtk_box_append (GTK_BOX (column), scroller);
+  gtk_box_append (GTK_BOX (column), frame);
   gtk_box_append (GTK_BOX (column), toolbar);
 
-  gtk_frame_set_child (GTK_FRAME (frame), column);
-  gtk_widget_set_margin_top (frame, 6);
-  gtk_widget_set_margin_bottom (frame, 12);
-  gtk_widget_set_margin_start (frame, 12);
-  gtk_widget_set_margin_end (frame, 12);
+  gtk_widget_set_margin_top (column, 6);
+  gtk_widget_set_margin_bottom (column, 12);
+  gtk_widget_set_margin_start (column, 12);
+  gtk_widget_set_margin_end (column, 12);
 
-  return frame;
+  return column;
 }
 
 static void

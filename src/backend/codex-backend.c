@@ -15,8 +15,29 @@
  * why everything unrecognised is skipped rather than treated as an error.
  */
 
-/* Codex has no plan mode of its own, so planning runs read-only and the
- * instruction to plan rather than act rides in the prompt. */
+/*
+ * Codex has no plan mode of its own, so it has to be asked for in words.
+ *
+ * The distinction that matters is exploring versus doing: a good plan needs
+ * the model to read, search and check things first, so forbidding it from
+ * touching anything at all would make the plan worse. This mirrors the split
+ * t3code draws in its own Codex plan instructions (MIT).
+ */
+static const char *CODEX_PLAN_INSTRUCTIONS =
+  "<plan_mode>\n"
+  "You are planning, not implementing. Produce a plan detailed enough that "
+  "someone else could carry it out without having to make decisions.\n\n"
+  "Explore freely: read and search files, inspect configuration and types, "
+  "run tests, builds and dry runs. Anything that tells you how things "
+  "actually are makes the plan better.\n\n"
+  "Do not carry the work out: no editing or writing files, no patches, "
+  "migrations or codegen, no formatters that rewrite, and no commands whose "
+  "purpose is to do the work rather than to understand it.\n\n"
+  "If asked to go ahead and do something, plan that instead. Plan mode ends "
+  "when the user leaves it, not because a message sounds like an "
+  "instruction.\n"
+  "</plan_mode>";
+
 static const char *
 codex_sandbox (AiAccess access)
 {
@@ -77,8 +98,7 @@ codex_build_argv (const AiBackend *self,
     g_autoptr (GString) prompt = g_string_new (NULL);
 
     if (spec->access == AI_ACCESS_PLAN)
-      g_string_append (prompt, "Plan only: describe what you would do and why. "
-                               "Do not modify anything.\n\n");
+      g_string_append_printf (prompt, "%s\n\n", CODEX_PLAN_INSTRUCTIONS);
 
     if (spec->system_prompt != NULL)
       g_string_append_printf (prompt, "%s\n\n", spec->system_prompt);

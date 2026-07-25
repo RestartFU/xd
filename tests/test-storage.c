@@ -266,6 +266,35 @@ test_forgetting_a_session_replays_everything (Fixture       *fixture,
   g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"), ==, 0);
 }
 
+/*
+ * Plan sits alongside the access level rather than replacing it, so leaving
+ * plan puts the chat back where it was instead of dropping it to read-only.
+ */
+static void
+test_plan_preserves_the_access_level (Fixture       *fixture,
+                                      gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (HyChat) planning = NULL;
+  g_autoptr (HyChat) building = NULL;
+
+  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, &error);
+  g_assert_true (hy_storage_set_access (fixture->storage, chat_id, "full", &error));
+  g_assert_true (hy_storage_set_plan (fixture->storage, chat_id, TRUE, &error));
+  g_assert_no_error (error);
+
+  planning = hy_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_true (planning->plan);
+  g_assert_cmpstr (planning->access, ==, "full");
+
+  g_assert_true (hy_storage_set_plan (fixture->storage, chat_id, FALSE, &error));
+  building = hy_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_false (building->plan);
+  g_assert_cmpstr (building->access, ==, "full");
+}
+
 /* Re-reporting overwrites rather than accumulating: the CLI hands back an id
  * on every turn, and only the latest one resumes. */
 static void
@@ -389,6 +418,7 @@ main (int   argc,
   ADD ("/storage/session-id-replaced", test_session_id_is_replaced);
   ADD ("/storage/tracks-what-was-seen", test_each_backend_tracks_what_it_has_seen);
   ADD ("/storage/forgetting-replays", test_forgetting_a_session_replays_everything);
+  ADD ("/storage/plan-keeps-access", test_plan_preserves_the_access_level);
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);

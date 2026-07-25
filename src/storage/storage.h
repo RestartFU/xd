@@ -14,6 +14,7 @@ typedef struct
   char *model;        /* NULL: the backend's default */
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
+  gboolean plan;      /* think it through, change nothing */
   gint64 created_at;
   gint64 updated_at;
 } HyChat;
@@ -74,6 +75,13 @@ gboolean    hy_storage_set_effort      (HyStorage   *self,
 gboolean    hy_storage_set_access      (HyStorage   *self,
                                         const char  *chat_id,
                                         const char  *access,
+                                        GError     **error);
+
+/* Plan mode rides alongside the access level rather than replacing it, so
+ * leaving plan restores whatever access the chat had. */
+gboolean    hy_storage_set_plan        (HyStorage   *self,
+                                        const char  *chat_id,
+                                        gboolean     plan,
                                         GError     **error);
 
 HyChat     *hy_storage_get_chat        (HyStorage   *self,

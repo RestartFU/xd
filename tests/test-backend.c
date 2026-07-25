@@ -242,7 +242,7 @@ test_access_maps_to_each_cli (void)
   {
     g_autofree char *codex_argv = argv_to_string (codex, &spec);
 
-    g_assert_nonnull (strstr (codex_argv, "Plan only"));
+    g_assert_nonnull (strstr (codex_argv, "<plan_mode>"));
   }
 
   g_assert_cmpint (ai_access_from_string ("something-new"), ==, AI_ACCESS_READ_ONLY);
