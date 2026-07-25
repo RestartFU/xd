@@ -35,6 +35,18 @@ export GTK_IM_MODULE=gtk-im-context-simple
 export FONTCONFIG_PATH="$HERE/etc/fonts"
 export FONTCONFIG_FILE="$RUNTIME/fonts.conf"
 
+# Keymap data. A host without these (they are not standard outside X11
+# installs) leaves GDK with no keymap, which crashes on the first key event.
+export XKB_CONFIG_ROOT="$HERE/share/X11/xkb"
+export XLOCALEDIR="$HERE/share/X11/locale"
+
+# The bundle carries no compiled locale data, so anything but C.UTF-8 would
+# fail in setlocale() and fall back to plain C -- losing UTF-8 handling along
+# with it. C.UTF-8 is built into glibc and behaves correctly, at the cost of
+# locale-specific number and date formatting.
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
 export GDK_PIXBUF_MODULE_FILE="$RUNTIME/loaders.cache"
 export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"
 export XDG_DATA_DIRS="$HERE/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"

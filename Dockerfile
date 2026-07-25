@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libjson-glib-dev \
       libsqlite3-dev \
       librsvg2-common \
+      xkb-data \
+      libx11-data \
       adwaita-icon-theme \
       fonts-cantarell \
       fonts-dejavu-core \

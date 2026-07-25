@@ -75,6 +75,14 @@ cp -a /usr/share/icons/hicolor "$OUT/share/icons/"
 cp -a "$STAGE/usr/share/icons/hicolor/." "$OUT/share/icons/hicolor/"
 gtk4-update-icon-cache -q -t -f "$OUT/share/icons/hicolor" 2>/dev/null || true
 
+# --- keyboard data ----------------------------------------------------------
+# libxkbcommon compiles the keymap the compositor hands over against these
+# files. Without them GDK ends up with no keymap at all and crashes on the
+# first input event, so they are not optional.
+mkdir -p "$OUT/share/X11"
+cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
+[ -d /usr/share/X11/locale ] && cp -a /usr/share/X11/locale "$OUT/share/X11/locale"
+
 # --- fonts + fontconfig -----------------------------------------------------
 # FONTCONFIG_SYSROOT would isolate the config more thoroughly, but fontconfig
 # reports FC_FILE without the sysroot prefix, so cairo then fails to open every
