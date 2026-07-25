@@ -11,6 +11,7 @@ typedef struct
   char *title;
   char *backend;
   char *session_id;   /* NULL until the CLI reports one */
+  char *workdir;      /* NULL: inherit the folder's */
   gint64 created_at;
   gint64 updated_at;
 } HyChat;
@@ -44,11 +45,17 @@ G_DECLARE_FINAL_TYPE (HyStorage, hy_storage, HY, STORAGE, GObject)
 HyStorage  *hy_storage_new             (const char  *db_path,
                                         GError     **error);
 
-/* Returns the new chat's id. */
+/* Returns the new chat's id. @workdir may be NULL to inherit the folder's. */
 char       *hy_storage_create_chat     (HyStorage   *self,
                                         const char  *folder_id,
                                         const char  *title,
                                         const char  *backend,
+                                        const char  *workdir,
+                                        GError     **error);
+
+gboolean    hy_storage_set_workdir     (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *workdir,
                                         GError     **error);
 
 HyChat     *hy_storage_get_chat        (HyStorage   *self,

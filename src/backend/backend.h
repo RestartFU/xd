@@ -1,0 +1,102 @@
+#pragma once
+
+#include <gio/gio.h>
+#include <json-glib/json-glib.h>
+
+G_BEGIN_DECLS
+
+/*
+ * hy never speaks to an AI API. It drives the CLIs already installed and
+ * authenticated on the machine -- claude and codex -- and reads the JSONL they
+ * write to stdout.
+ *
+ * A backend contributes two things: how to build the command line, and how to
+ * turn one line of its output into events. Spawning, reading and cancelling
+ * are the same for every backend and live in HyChatSession.
+ */
+
+typedef enum
+{
+  AI_EVENT_SESSION_STARTED,   /* carries the id needed to resume later */
+  AI_EVENT_TEXT_DELTA,        /* a piece of the reply */
+  AI_EVENT_TOOL_USE,          /* the agent reached for a tool */
+  AI_EVENT_RESULT,            /* the turn finished; text is the whole reply */
+  AI_EVENT_ERROR,
+} AiEventType;
+
+typedef struct
+{
+  AiEventType type;
+  const char *session_id;
+  const char *text;
+  JsonNode *raw;
+} AiEvent;
+
+typedef void (*AiEventFunc) (const AiEvent *event,
+                             gpointer       user_data);
+
+typedef struct
+{
+  const char *prompt;
+  const char *model;              /* NULL: let the CLI choose */
+  const char *system_prompt;      /* NULL: no extra instructions */
+  const char *resume_session_id;  /* NULL: start a new session */
+  const char *workdir;            /* NULL: inherit ours */
+} AiRunSpec;
+
+typedef struct _AiParser AiParser;
+typedef struct _AiBackend AiBackend;
+
+struct _AiBackend
+{
+  const char *id;
+  const char *display_name;
+  const char *program;          /* looked up in PATH */
+
+  /* Returns a NULL-terminated argv; the caller owns it. */
+  GPtrArray *(*build_argv) (const AiBackend *self,
+                            const AiRunSpec *spec);
+
+  /* @root is one parsed line of output. */
+  void (*parse_object) (AiParser    *parser,
+                        JsonObject  *root,
+                        AiEventFunc  callback,
+                        gpointer     user_data);
+};
+
+const AiBackend        *ai_backend_lookup (const char *id);
+const AiBackend *const *ai_backend_all    (guint      *n_backends);
+
+/*
+ * Per-run parser state.
+ *
+ * Some backends report the same text twice -- claude streams deltas and then
+ * repeats the finished message -- so the parser has to remember what it has
+ * already handed out.
+ */
+struct _AiParser
+{
+  const AiBackend *backend;
+  JsonParser *json;
+  gboolean streamed_text;
+};
+
+AiParser *ai_parser_new       (const AiBackend *backend);
+void      ai_parser_free      (AiParser        *self);
+
+/* Malformed lines are logged and skipped: a backend hiccup must not take the
+ * conversation down with it. */
+void      ai_parser_feed_line (AiParser        *self,
+                               const char      *line,
+                               AiEventFunc      callback,
+                               gpointer         user_data);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (AiParser, ai_parser_free)
+
+/* Helpers shared by the backend implementations. */
+const char *ai_json_get_string (JsonObject *object,
+                                const char *member);
+JsonObject *ai_json_get_object (JsonObject *object,
+                                const char *member);
+
+G_END_DECLS

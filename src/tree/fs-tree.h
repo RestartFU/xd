@@ -53,6 +53,7 @@ HyNode      *hy_fs_tree_create_chat    (HyFsTree    *self,
                                         HyNode      *folder,
                                         const char  *title,
                                         const char  *backend,
+                                        const char  *workdir,
                                         GError     **error);
 
 gboolean     hy_fs_tree_rename_chat    (HyFsTree    *self,

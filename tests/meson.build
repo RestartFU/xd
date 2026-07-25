@@ -6,6 +6,8 @@ test_env.set('G_DEBUG', 'gc-friendly')
 
 hy_tests = {
   'storage': 'test-storage.c',
+  'backend': 'test-backend.c',
+  'session': 'test-session.c',
 }
 
 foreach name, source : hy_tests

@@ -667,6 +667,7 @@ hy_fs_tree_create_chat (HyFsTree    *self,
                         HyNode      *folder,
                         const char  *title,
                         const char  *backend,
+                        const char  *workdir,
                         GError     **error)
 {
   g_autofree char *chat_id = NULL;
@@ -684,7 +685,7 @@ hy_fs_tree_create_chat (HyFsTree    *self,
     }
 
   chat_id = hy_storage_create_chat (self->storage, hy_node_get_folder_id (folder),
-                                    title, backend, error);
+                                    title, backend, workdir, error);
   if (chat_id == NULL)
     return NULL;
 

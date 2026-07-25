@@ -1,6 +1,25 @@
 #include "chat-view.h"
 
+#include "chat-session.h"
 #include "message-row.h"
+
+/*
+ * A turn in flight.
+ *
+ * Turns are tracked per chat rather than per view so that switching to another
+ * chat while the model is answering does not throw the answer away: the
+ * subprocess keeps running, the text keeps accumulating, and the reply is
+ * still written to the database. Coming back to the chat re-attaches the live
+ * row to what has arrived so far.
+ */
+typedef struct
+{
+  HyChatView *view;         /* unowned; the view outlives its turns */
+  HyChatSession *session;
+  char *chat_id;
+  GString *text;
+  HyMessageRow *row;        /* NULL while the chat is not on screen */
+} Turn;
 
 struct _HyChatView
 {
@@ -9,6 +28,8 @@ struct _HyChatView
   HyStorage *storage;
   HyFsTree *tree;
   HyNode *chat;                 /* unowned; owned by the tree */
+
+  GHashTable *turns;            /* chat id -> Turn* */
 
   AdwWindowTitle *title;
   GtkStack *stack;
@@ -22,6 +43,7 @@ struct _HyChatView
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
+static void update_send_button (HyChatView *self);
 
 /* --- transcript ----------------------------------------------------------- */
 
@@ -40,8 +62,8 @@ scroll_to_bottom (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
-/* The new row has no allocation yet, so the adjustment only knows its final
- * extent once layout has run. */
+/* A freshly appended row has no allocation yet, so the adjustment only knows
+ * its final extent once layout has run. */
 static void
 queue_scroll_to_bottom (HyChatView *self)
 {
@@ -94,7 +116,131 @@ load_transcript (HyChatView *self)
     }
 }
 
-/* --- composer ------------------------------------------------------------- */
+/* --- turns ---------------------------------------------------------------- */
+
+static Turn *
+current_turn (HyChatView *self)
+{
+  if (self->chat == NULL)
+    return NULL;
+
+  return g_hash_table_lookup (self->turns, hy_node_get_chat_id (self->chat));
+}
+
+static void
+turn_free (gpointer data)
+{
+  Turn *turn = data;
+
+  g_clear_object (&turn->session);
+  g_clear_pointer (&turn->chat_id, g_free);
+  g_string_free (turn->text, TRUE);
+  g_free (turn);
+}
+
+/* True when @turn's chat is the one currently on screen. */
+static gboolean
+turn_is_visible (Turn *turn)
+{
+  return turn->view->chat != NULL &&
+         g_strcmp0 (hy_node_get_chat_id (turn->view->chat), turn->chat_id) == 0;
+}
+
+static void
+on_session_started (HyChatSession *session,
+                    const char    *session_id,
+                    gpointer       user_data)
+{
+  Turn *turn = user_data;
+  g_autoptr (GError) error = NULL;
+
+  /* Stored immediately: if hy dies mid-reply the conversation can still be
+   * resumed from where the CLI left it. */
+  if (!hy_storage_set_session_id (turn->view->storage, turn->chat_id,
+                                  session_id, &error))
+    g_warning ("cannot store the session id: %s", error->message);
+}
+
+static void
+on_text_delta (HyChatSession *session,
+               const char    *delta,
+               gpointer       user_data)
+{
+  Turn *turn = user_data;
+
+  g_string_append (turn->text, delta);
+
+  if (turn->row != NULL)
+    {
+      hy_message_row_append (turn->row, delta);
+      queue_scroll_to_bottom (turn->view);
+    }
+}
+
+static void
+on_tool_use (HyChatSession *session,
+             const char    *name,
+             gpointer       user_data)
+{
+  Turn *turn = user_data;
+
+  if (turn_is_visible (turn))
+    {
+      g_autofree char *text = g_strdup_printf ("Using %s…", name);
+
+      append_row (turn->view, HY_MESSAGE_TOOL, text);
+    }
+}
+
+static void
+on_turn_finished (HyChatSession *session,
+                  gboolean       success,
+                  const char    *message,
+                  gpointer       user_data)
+{
+  Turn *turn = user_data;
+  HyChatView *self = turn->view;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = g_strdup (turn->chat_id);
+  gboolean visible = turn_is_visible (turn);
+
+  if (turn->text->len > 0)
+    {
+      if (!hy_storage_append_message (self->storage, chat_id, "assistant",
+                                      turn->text->str, NULL, &error))
+        g_warning ("cannot store the reply: %s", error->message);
+    }
+
+  if (!success)
+    {
+      const char *text = message != NULL && *message != '\0'
+                           ? message : "The backend stopped unexpectedly.";
+
+      if (!hy_storage_append_message (self->storage, chat_id, "error", text,
+                                      NULL, &error))
+        g_warning ("cannot store the error: %s", error->message);
+
+      if (visible)
+        append_row (self, HY_MESSAGE_ERROR, text);
+    }
+
+  if (turn->row != NULL)
+    {
+      hy_message_row_set_waiting (turn->row, FALSE);
+
+      /* Nothing came back at all: say so rather than leaving a blank card. */
+      if (turn->text->len == 0 && success)
+        hy_message_row_append (turn->row, "(no reply)");
+    }
+
+  /* Frees the turn, so nothing may touch it afterwards. */
+  g_hash_table_remove (self->turns, chat_id);
+
+  if (visible)
+    update_send_button (self);
+}
+
+/* --- sending -------------------------------------------------------------- */
 
 static char *
 take_composer_text (HyChatView *self)
@@ -121,6 +267,84 @@ take_composer_text (HyChatView *self)
   return trimmed;
 }
 
+/* Where the backend runs, which is how project context reaches the CLI. The
+ * chat's own choice wins; otherwise it falls back to its folder. */
+static const char *
+workdir_for (HyChatView *self,
+             const HyChat *chat)
+{
+  HyNode *folder;
+
+  if (chat->workdir != NULL && *chat->workdir != '\0')
+    return chat->workdir;
+
+  folder = hy_node_get_parent (self->chat);
+
+  return folder != NULL ? hy_node_get_path (folder) : NULL;
+}
+
+static void
+start_turn (HyChatView *self,
+            const char *prompt)
+{
+  g_autoptr (HyChat) chat = NULL;
+  g_autoptr (GError) error = NULL;
+  const AiBackend *backend;
+  AiRunSpec spec = { 0 };
+  Turn *turn;
+
+  chat = hy_storage_get_chat (self->storage, hy_node_get_chat_id (self->chat),
+                              &error);
+  if (chat == NULL)
+    {
+      append_row (self, HY_MESSAGE_ERROR, error->message);
+      return;
+    }
+
+  backend = ai_backend_lookup (chat->backend);
+  if (backend == NULL)
+    {
+      g_autofree char *text = g_strdup_printf ("Unknown backend “%s”.",
+                                               chat->backend);
+
+      append_row (self, HY_MESSAGE_ERROR, text);
+      return;
+    }
+
+  turn = g_new0 (Turn, 1);
+  turn->view = self;
+  turn->chat_id = g_strdup (chat->id);
+  turn->text = g_string_new (NULL);
+  turn->session = hy_chat_session_new (backend);
+  turn->row = append_row (self, HY_MESSAGE_ASSISTANT, NULL);
+  hy_message_row_set_waiting (turn->row, TRUE);
+
+  g_signal_connect (turn->session, "session-started",
+                    G_CALLBACK (on_session_started), turn);
+  g_signal_connect (turn->session, "text-delta",
+                    G_CALLBACK (on_text_delta), turn);
+  g_signal_connect (turn->session, "tool-use",
+                    G_CALLBACK (on_tool_use), turn);
+  g_signal_connect (turn->session, "finished",
+                    G_CALLBACK (on_turn_finished), turn);
+
+  g_hash_table_insert (self->turns, g_strdup (chat->id), turn);
+
+  spec.prompt = prompt;
+  spec.workdir = workdir_for (self, chat);
+  spec.resume_session_id = chat->session_id;
+
+  if (!hy_chat_session_start (turn->session, &spec, &error))
+    {
+      append_row (self, HY_MESSAGE_ERROR, error->message);
+      hy_storage_append_message (self->storage, chat->id, "error",
+                                 error->message, NULL, NULL);
+      g_hash_table_remove (self->turns, chat->id);
+    }
+
+  update_send_button (self);
+}
+
 static void
 send_current_message (HyChatView *self)
 {
@@ -128,6 +352,10 @@ send_current_message (HyChatView *self)
   g_autofree char *text = NULL;
 
   if (self->chat == NULL)
+    return;
+
+  /* One turn at a time per chat; the button is a stop button meanwhile. */
+  if (current_turn (self) != NULL)
     return;
 
   text = take_composer_text (self);
@@ -143,6 +371,44 @@ send_current_message (HyChatView *self)
 
   append_row (self, HY_MESSAGE_USER, text);
   hy_fs_tree_bump_chat (self->tree, self->chat);
+
+  start_turn (self, text);
+}
+
+static void
+update_send_button (HyChatView *self)
+{
+  gboolean running = current_turn (self) != NULL;
+
+  gtk_button_set_icon_name (self->send_button,
+                            running ? "media-playback-stop-symbolic"
+                                    : "go-up-symbolic");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->send_button),
+                               running ? "Stop" : "Send (Enter)");
+
+  if (running)
+    {
+      gtk_widget_remove_css_class (GTK_WIDGET (self->send_button), "suggested-action");
+      gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "destructive-action");
+    }
+  else
+    {
+      gtk_widget_remove_css_class (GTK_WIDGET (self->send_button), "destructive-action");
+      gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "suggested-action");
+    }
+}
+
+static void
+on_send_clicked (GtkButton *button,
+                 gpointer   user_data)
+{
+  HyChatView *self = user_data;
+  Turn *turn = current_turn (self);
+
+  if (turn != NULL)
+    hy_chat_session_cancel (turn->session);
+  else
+    send_current_message (self);
 }
 
 static gboolean
@@ -165,20 +431,20 @@ on_composer_key (GtkEventControllerKey *controller,
   return GDK_EVENT_PROPAGATE;
 }
 
-static void
-on_send_clicked (GtkButton *button,
-                 gpointer   user_data)
-{
-  send_current_message (user_data);
-}
-
 /* --- public API ----------------------------------------------------------- */
 
 void
 hy_chat_view_set_chat (HyChatView *self,
                        HyNode     *chat)
 {
+  Turn *turn;
+
   g_return_if_fail (HY_IS_CHAT_VIEW (self));
+
+  /* The outgoing chat's row is about to be destroyed with the transcript. */
+  turn = current_turn (self);
+  if (turn != NULL)
+    turn->row = NULL;
 
   self->chat = chat;
 
@@ -194,10 +460,19 @@ hy_chat_view_set_chat (HyChatView *self,
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
   gtk_widget_set_visible (self->composer_area, TRUE);
-
   adw_window_title_set_title (self->title, hy_node_get_name (chat));
 
   load_transcript (self);
+
+  /* Re-attach a reply that kept arriving while another chat was on screen. */
+  turn = current_turn (self);
+  if (turn != NULL)
+    {
+      turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->text->str);
+      hy_message_row_set_waiting (turn->row, TRUE);
+    }
+
+  update_send_button (self);
   gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 }
 
@@ -281,6 +556,7 @@ hy_chat_view_dispose (GObject *object)
 {
   HyChatView *self = HY_CHAT_VIEW (object);
 
+  g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_object (&self->storage);
   g_clear_object (&self->tree);
 
@@ -302,6 +578,8 @@ hy_chat_view_init (HyChatView *self)
   GtkWidget *empty = adw_status_page_new ();
   GtkWidget *menu_button;
   GMenu *menu;
+
+  self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
 
   self->title = ADW_WINDOW_TITLE (adw_window_title_new ("hy", NULL));
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));

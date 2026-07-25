@@ -3,6 +3,11 @@
 hy_core_sources = files(
   'settings/folder-settings.c',
   'storage/storage.c',
+  'backend/backend.c',
+  'backend/claude-backend.c',
+  'backend/codex-backend.c',
+  # No GTK here either, so the subprocess plumbing can be tested headlessly.
+  'chat/chat-session.c',
 )
 
 hy_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep]

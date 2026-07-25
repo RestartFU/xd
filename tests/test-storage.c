@@ -58,12 +58,12 @@ test_create_and_list (Fixture       *fixture,
   const HyChat *chat;
 
   first = hy_storage_create_chat (fixture->storage, "folder-a", "Rate limiting",
-                                  "claude", &error);
+                                  "claude", NULL, &error);
   g_assert_no_error (error);
   g_assert_nonnull (first);
 
   second = hy_storage_create_chat (fixture->storage, "folder-b", "Elsewhere",
-                                   "codex", &error);
+                                   "codex", NULL, &error);
   g_assert_no_error (error);
 
   chats = hy_storage_list_chats (fixture->storage, "folder-a", &error);
@@ -88,7 +88,7 @@ test_chats_follow_folder_id (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "stable-uuid", "Chat",
-                                    "claude", &error);
+                                    "claude", NULL, &error);
   g_assert_no_error (error);
 
   chats = hy_storage_list_chats (fixture->storage, "stable-uuid", &error);
@@ -106,7 +106,7 @@ test_messages_round_trip (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", &error);
+                                    "claude", NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
@@ -139,7 +139,7 @@ test_session_id_persists (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", &error);
+                                    "claude", NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
@@ -160,7 +160,7 @@ test_deleting_a_chat_takes_its_messages (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", &error);
+                                    "claude", NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
@@ -182,7 +182,7 @@ test_search_finds_messages (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", &error);
+                                    "claude", NULL, &error);
   g_assert_no_error (error);
 
   hy_storage_append_message (fixture->storage, chat_id, "user",
@@ -217,7 +217,7 @@ test_reopening_keeps_data (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
-                                    "claude", &error);
+                                    "claude", NULL, &error);
   hy_storage_append_message (fixture->storage, chat_id, "user", "persist me",
                              NULL, &error);
   g_assert_no_error (error);

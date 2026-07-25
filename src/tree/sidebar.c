@@ -9,6 +9,9 @@ struct _HySidebar
   GtkTreeListModel *tree_model;
   GtkSingleSelection *selection;
   GtkListView *list_view;
+
+  GHashTable *expanded;     /* folder ids the user left open */
+  guint save_expanded_id;
 };
 
 enum
@@ -202,6 +205,133 @@ chat_from_target (HySidebar *self,
   return hy_fs_tree_lookup_chat (self->tree, g_variant_get_string (target, NULL));
 }
 
+/*
+ * New chats ask for a working directory, because a folder is an
+ * organisational thing: "Lunar / Proxy" may want the proxy repo one day and a
+ * scratch checkout the next, and neither of them lives inside the workspace
+ * tree. Leaving it unset inherits the folder's own directory.
+ */
+typedef struct
+{
+  HySidebar *self;
+  HyNode *folder;           /* unowned; owned by the tree */
+  GtkEditable *title_entry;
+  GtkButton *dir_button;
+  char *workdir;            /* NULL: inherit */
+} NewChatPrompt;
+
+static void
+new_chat_prompt_free (NewChatPrompt *prompt)
+{
+  g_object_unref (prompt->self);
+  g_free (prompt->workdir);
+  g_free (prompt);
+}
+
+static void
+update_dir_button (NewChatPrompt *prompt)
+{
+  if (prompt->workdir != NULL)
+    {
+      g_autofree char *name = g_path_get_basename (prompt->workdir);
+
+      gtk_button_set_label (prompt->dir_button, name);
+      gtk_widget_set_tooltip_text (GTK_WIDGET (prompt->dir_button), prompt->workdir);
+    }
+  else
+    {
+      gtk_button_set_label (prompt->dir_button, "Same as folder");
+      gtk_widget_set_tooltip_text (GTK_WIDGET (prompt->dir_button),
+                                   hy_node_get_path (prompt->folder));
+    }
+}
+
+static void
+on_directory_chosen (GObject      *source,
+                     GAsyncResult *result,
+                     gpointer      user_data)
+{
+  NewChatPrompt *prompt = user_data;
+  g_autoptr (GFile) folder = NULL;
+
+  folder = gtk_file_dialog_select_folder_finish (GTK_FILE_DIALOG (source),
+                                                 result, NULL);
+  if (folder == NULL)
+    return;
+
+  g_free (prompt->workdir);
+  prompt->workdir = g_file_get_path (folder);
+
+  update_dir_button (prompt);
+}
+
+static void
+on_choose_directory (GtkButton *button,
+                     gpointer   user_data)
+{
+  NewChatPrompt *prompt = user_data;
+  g_autoptr (GtkFileDialog) dialog = gtk_file_dialog_new ();
+  g_autofree char *projects_root = NULL;
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (prompt->self));
+
+  gtk_file_dialog_set_title (dialog, "Working Directory");
+
+  /* Start where the user's repositories actually live, not in the workspace
+   * tree, which holds no code. */
+  projects_root = g_settings_get_string (prompt->self->settings, "projects-root");
+  if (projects_root == NULL || *projects_root == '\0')
+    {
+      g_free (projects_root);
+      projects_root = g_build_filename (g_get_home_dir (), "projects", NULL);
+    }
+
+  if (g_file_test (projects_root, G_FILE_TEST_IS_DIR))
+    {
+      g_autoptr (GFile) initial = g_file_new_for_path (projects_root);
+
+      gtk_file_dialog_set_initial_folder (dialog, initial);
+    }
+
+  gtk_file_dialog_select_folder (dialog, GTK_WINDOW (root), NULL,
+                                 on_directory_chosen, prompt);
+}
+
+static void
+on_new_chat_response (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  NewChatPrompt *prompt = user_data;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *backend = NULL;
+  const char *response;
+  const char *title;
+  HyNode *chat;
+
+  response = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), result);
+
+  if (g_strcmp0 (response, "confirm") != 0)
+    {
+      new_chat_prompt_free (prompt);
+      return;
+    }
+
+  title = gtk_editable_get_text (prompt->title_entry);
+  if (*title == '\0')
+    title = "New Chat";
+
+  backend = g_settings_get_string (prompt->self->settings, "default-backend");
+
+  chat = hy_fs_tree_create_chat (prompt->self->tree, prompt->folder, title,
+                                 backend, prompt->workdir, &error);
+  if (chat == NULL)
+    show_error (prompt->self, "Could not start the chat", error);
+  else
+    g_signal_emit (prompt->self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
+
+  new_chat_prompt_free (prompt);
+}
+
 static void
 on_new_chat (GtkWidget  *widget,
              const char *action_name,
@@ -209,23 +339,54 @@ on_new_chat (GtkWidget  *widget,
 {
   HySidebar *self = HY_SIDEBAR (widget);
   HyNode *folder = node_from_target (self, target);
-  g_autofree char *backend = NULL;
-  g_autoptr (GError) error = NULL;
-  HyNode *chat;
+  NewChatPrompt *prompt;
+  AdwAlertDialog *dialog;
+  GtkWidget *box;
+  GtkWidget *dir_row;
+  GtkWidget *dir_label;
 
   if (folder == NULL)
     return;
 
-  backend = g_settings_get_string (self->settings, "default-backend");
+  prompt = g_new0 (NewChatPrompt, 1);
+  prompt->self = g_object_ref (self);
+  prompt->folder = folder;
 
-  chat = hy_fs_tree_create_chat (self->tree, folder, "New Chat", backend, &error);
-  if (chat == NULL)
-    {
-      show_error (self, "Could not start the chat", error);
-      return;
-    }
+  dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new ("New Chat", NULL));
+  adw_alert_dialog_add_responses (dialog,
+                                  "cancel", "Cancel",
+                                  "confirm", "Create",
+                                  NULL);
+  adw_alert_dialog_set_response_appearance (dialog, "confirm",
+                                            ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response (dialog, "confirm");
+  adw_alert_dialog_set_close_response (dialog, "cancel");
 
-  g_signal_emit (self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
+  box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+
+  prompt->title_entry = GTK_EDITABLE (gtk_entry_new ());
+  gtk_entry_set_placeholder_text (GTK_ENTRY (prompt->title_entry), "Chat name");
+  gtk_entry_set_activates_default (GTK_ENTRY (prompt->title_entry), TRUE);
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (prompt->title_entry));
+
+  dir_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  dir_label = gtk_label_new ("Runs in");
+  gtk_widget_add_css_class (dir_label, "dim-label");
+
+  prompt->dir_button = GTK_BUTTON (gtk_button_new ());
+  gtk_widget_set_hexpand (GTK_WIDGET (prompt->dir_button), TRUE);
+  g_signal_connect (prompt->dir_button, "clicked",
+                    G_CALLBACK (on_choose_directory), prompt);
+  update_dir_button (prompt);
+
+  gtk_box_append (GTK_BOX (dir_row), dir_label);
+  gtk_box_append (GTK_BOX (dir_row), GTK_WIDGET (prompt->dir_button));
+  gtk_box_append (GTK_BOX (box), dir_row);
+
+  adw_alert_dialog_set_extra_child (dialog, box);
+
+  adw_alert_dialog_choose (dialog, GTK_WIDGET (self), NULL,
+                           on_new_chat_response, prompt);
 }
 
 static void
@@ -343,6 +504,68 @@ create_child_model (gpointer item,
   return G_LIST_MODEL (g_object_ref (hy_node_get_children (node)));
 }
 
+/* --- expansion state ------------------------------------------------------ */
+
+/*
+ * Which folders are open is remembered by folder id, not by path, so the tree
+ * comes back the way it was left even if a folder was renamed or moved in
+ * between. Rows are bound as their parents expand, so restoring happens
+ * naturally from the root down.
+ */
+
+static gboolean
+save_expanded (gpointer user_data)
+{
+  HySidebar *self = user_data;
+  g_autoptr (GPtrArray) ids = g_ptr_array_new ();
+  GHashTableIter iter;
+  gpointer id;
+
+  self->save_expanded_id = 0;
+
+  g_hash_table_iter_init (&iter, self->expanded);
+  while (g_hash_table_iter_next (&iter, &id, NULL))
+    g_ptr_array_add (ids, id);
+  g_ptr_array_add (ids, NULL);
+
+  g_settings_set_strv (self->settings, "expanded-folders",
+                       (const char * const *) ids->pdata);
+
+  return G_SOURCE_REMOVE;
+}
+
+/* Expanding a deep branch toggles many rows at once; coalesce the writes. */
+static void
+queue_save_expanded (HySidebar *self)
+{
+  if (self->save_expanded_id == 0)
+    self->save_expanded_id = g_idle_add (save_expanded, self);
+}
+
+static void
+on_row_expanded (GtkTreeListRow *row,
+                 GParamSpec     *pspec,
+                 gpointer        user_data)
+{
+  HySidebar *self = user_data;
+  g_autoptr (HyNode) node = gtk_tree_list_row_get_item (row);
+  const char *folder_id;
+
+  if (node == NULL || hy_node_get_kind (node) != HY_NODE_FOLDER)
+    return;
+
+  folder_id = hy_node_get_folder_id (node);
+  if (folder_id == NULL)
+    return;
+
+  if (gtk_tree_list_row_get_expanded (row))
+    g_hash_table_add (self->expanded, g_strdup (folder_id));
+  else
+    g_hash_table_remove (self->expanded, folder_id);
+
+  queue_save_expanded (self);
+}
+
 static void
 on_item_setup (GtkSignalListItemFactory *factory,
                GtkListItem              *item,
@@ -431,6 +654,7 @@ on_item_bind (GtkSignalListItemFactory *factory,
               GtkListItem              *item,
               gpointer                  user_data)
 {
+  HySidebar *self = user_data;
   GtkTreeListRow *row = gtk_list_item_get_item (item);
   GtkWidget *expander = gtk_list_item_get_child (item);
   GtkWidget *box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
@@ -453,6 +677,23 @@ on_item_bind (GtkSignalListItemFactory *factory,
 
     gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), menu);
   }
+
+  if (hy_node_get_kind (node) == HY_NODE_FOLDER)
+    {
+      const char *folder_id = hy_node_get_folder_id (node);
+      gulong handler;
+
+      /* Restore before listening, or restoring would itself be recorded. */
+      if (folder_id != NULL)
+        gtk_tree_list_row_set_expanded (row,
+                                        g_hash_table_contains (self->expanded,
+                                                               folder_id));
+
+      handler = g_signal_connect (row, "notify::expanded",
+                                  G_CALLBACK (on_row_expanded), self);
+      g_object_set_data (G_OBJECT (item), "expanded-handler",
+                         GSIZE_TO_POINTER (handler));
+    }
 }
 
 static void
@@ -461,6 +702,8 @@ on_item_unbind (GtkSignalListItemFactory *factory,
                 gpointer                  user_data)
 {
   GBinding *binding = g_object_get_data (G_OBJECT (item), "name-binding");
+  gpointer handler = g_object_get_data (G_OBJECT (item), "expanded-handler");
+  GtkTreeListRow *row = gtk_list_item_get_item (item);
 
   /* Rows are recycled, so the label must stop following the node it showed
    * before, or it keeps updating on behalf of a row it no longer represents. */
@@ -468,6 +711,12 @@ on_item_unbind (GtkSignalListItemFactory *factory,
     {
       g_binding_unbind (binding);
       g_object_set_data (G_OBJECT (item), "name-binding", NULL);
+    }
+
+  if (handler != NULL && row != NULL)
+    {
+      g_signal_handler_disconnect (row, GPOINTER_TO_SIZE (handler));
+      g_object_set_data (G_OBJECT (item), "expanded-handler", NULL);
     }
 }
 
@@ -542,6 +791,13 @@ hy_sidebar_dispose (GObject *object)
 {
   HySidebar *self = HY_SIDEBAR (object);
 
+  if (self->save_expanded_id != 0)
+    {
+      g_clear_handle_id (&self->save_expanded_id, g_source_remove);
+      save_expanded (self);
+    }
+
+  g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);
   g_clear_object (&self->tree_model);
   g_clear_object (&self->settings);
@@ -591,7 +847,14 @@ hy_sidebar_init (HySidebar *self)
   GtkWidget *scrolled = gtk_scrolled_window_new ();
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
 
+  g_auto (GStrv) expanded = NULL;
+
   self->settings = g_settings_new (HY_APP_ID);
+  self->expanded = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
+  expanded = g_settings_get_strv (self->settings, "expanded-folders");
+  for (gsize i = 0; expanded[i] != NULL; i++)
+    g_hash_table_add (self->expanded, g_strdup (expanded[i]));
 
   gtk_widget_set_tooltip_text (new_button, "New Workspace");
   gtk_actionable_set_action_name (GTK_ACTIONABLE (new_button), "sidebar.new-workspace");

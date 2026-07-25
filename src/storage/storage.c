@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 1
+#define HY_STORAGE_SCHEMA_VERSION 2
 
 struct _HyStorage
 {
@@ -25,6 +25,7 @@ hy_chat_free (HyChat *self)
   g_free (self->title);
   g_free (self->backend);
   g_free (self->session_id);
+  g_free (self->workdir);
   g_free (self);
 }
 
@@ -140,19 +141,45 @@ static const char *SCHEMA_SQL =
   "  INSERT INTO messages_fts (rowid, content) VALUES (new.id, new.content);"
   "END;";
 
+static int
+read_schema_version (HyStorage *self)
+{
+  sqlite3_stmt *stmt = NULL;
+  int version = 0;
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "SELECT value FROM meta WHERE key = 'schema_version';",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    return 0;
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    version = sqlite3_column_int (stmt, 0);
+
+  sqlite3_finalize (stmt);
+
+  return version;
+}
+
 static gboolean
 migrate (HyStorage  *self,
          GError    **error)
 {
   g_autofree char *sql = NULL;
+  int version;
 
   if (!exec_sql (self, SCHEMA_SQL, error))
     return FALSE;
 
-  /* Nothing to upgrade yet; the row exists so a future version can tell what
-   * it is looking at. */
+  /* A fresh database reports version 0, so it walks the same upgrade path as
+   * an old one; there is only ever one way a column gets added. */
+  version = read_schema_version (self);
+
+  if (version < 2 &&
+      !exec_sql (self, "ALTER TABLE chats ADD COLUMN workdir TEXT;", error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
-                         "  ON CONFLICT (key) DO NOTHING;",
+                         "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          HY_STORAGE_SCHEMA_VERSION);
 
   return exec_sql (self, sql, error);
@@ -203,6 +230,7 @@ hy_storage_create_chat (HyStorage   *self,
                         const char  *folder_id,
                         const char  *title,
                         const char  *backend,
+                        const char  *workdir,
                         GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
@@ -218,8 +246,8 @@ hy_storage_create_chat (HyStorage   *self,
 
   if (sqlite3_prepare_v2 (self->db,
                           "INSERT INTO chats (id, folder_id, title, backend,"
-                          "                   session_id, created_at, updated_at)"
-                          " VALUES (?, ?, ?, ?, NULL, ?, ?);",
+                          "                   session_id, workdir, created_at, updated_at)"
+                          " VALUES (?, ?, ?, ?, NULL, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot create the chat");
@@ -230,8 +258,9 @@ hy_storage_create_chat (HyStorage   *self,
   bind_text (stmt, 2, folder_id);
   bind_text (stmt, 3, title);
   bind_text (stmt, 4, backend);
-  sqlite3_bind_int64 (stmt, 5, now);
+  bind_text (stmt, 5, workdir);
   sqlite3_bind_int64 (stmt, 6, now);
+  sqlite3_bind_int64 (stmt, 7, now);
 
   if (sqlite3_step (stmt) != SQLITE_DONE)
     {
@@ -255,14 +284,15 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->title      = column_text (stmt, 2);
   chat->backend    = column_text (stmt, 3);
   chat->session_id = column_text (stmt, 4);
-  chat->created_at = sqlite3_column_int64 (stmt, 5);
-  chat->updated_at = sqlite3_column_int64 (stmt, 6);
+  chat->workdir    = column_text (stmt, 5);
+  chat->created_at = sqlite3_column_int64 (stmt, 6);
+  chat->updated_at = sqlite3_column_int64 (stmt, 7);
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
-  "id, folder_id, title, backend, session_id, created_at, updated_at"
+  "id, folder_id, title, backend, session_id, workdir, created_at, updated_at"
 
 HyChat *
 hy_storage_get_chat (HyStorage   *self,
@@ -392,6 +422,20 @@ hy_storage_set_backend (HyStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET backend = ?, updated_at = ? WHERE id = ?;",
                              backend, chat_id, "Cannot change the backend", error);
+}
+
+gboolean
+hy_storage_set_workdir (HyStorage   *self,
+                        const char  *chat_id,
+                        const char  *workdir,
+                        GError     **error)
+{
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+
+  return update_chat_column (self,
+                             "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
+                             workdir, chat_id, "Cannot change the working directory",
+                             error);
 }
 
 gboolean

@@ -26,6 +26,15 @@
       <description>Backend used when no folder in the chain specifies one.</description>
     </key>
 
+    <key name="expanded-folders" type="as">
+      <default>[]</default>
+      <summary>Folders left open in the sidebar</summary>
+      <description>
+        Folder ids (from each folder's .hy.json) that were expanded when the
+        window was last used, so the tree comes back the way it was left.
+      </description>
+    </key>
+
     <key name="window-width" type="i">
       <default>1100</default>
       <summary>Window width</summary>
