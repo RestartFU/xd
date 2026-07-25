@@ -1,34 +1,53 @@
 #include "hy-window.h"
 
+#include "tree/fs-tree.h"
+#include "tree/sidebar.h"
+
 struct _HyWindow
 {
   AdwApplicationWindow parent_instance;
 
   GSettings *settings;
+  HyFsTree *tree;
 
   AdwNavigationSplitView *split_view;
-  AdwNavigationPage *content_page;
+  AdwStatusPage *placeholder;
 };
 
 G_DEFINE_FINAL_TYPE (HyWindow, hy_window, ADW_TYPE_APPLICATION_WINDOW)
 
-static AdwNavigationPage *
-build_sidebar_page (HyWindow *self)
+/* An empty setting means "use the default", which keeps this user's home
+ * directory out of the stored configuration. */
+static char *
+resolve_root (GSettings  *settings,
+              const char *key,
+              const char *fallback_name)
 {
-  GtkWidget *toolbar = adw_toolbar_view_new ();
-  GtkWidget *header = adw_header_bar_new ();
-  GtkWidget *placeholder;
+  g_autofree char *configured = g_settings_get_string (settings, key);
 
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
+  if (configured != NULL && *configured != '\0')
+    return g_steal_pointer (&configured);
 
-  placeholder = adw_status_page_new ();
-  adw_status_page_set_icon_name (ADW_STATUS_PAGE (placeholder), "folder-symbolic");
-  adw_status_page_set_title (ADW_STATUS_PAGE (placeholder), "No Workspaces");
-  adw_status_page_set_description (ADW_STATUS_PAGE (placeholder),
-                                   "The workspace tree lands here.");
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), placeholder);
+  return g_build_filename (g_get_home_dir (), fallback_name, NULL);
+}
 
-  return adw_navigation_page_new (toolbar, "Workspaces");
+static void
+on_node_selected (HySidebar *sidebar,
+                  HyNode    *node,
+                  gpointer   user_data)
+{
+  HyWindow *self = user_data;
+
+  if (node == NULL)
+    {
+      adw_status_page_set_title (self->placeholder, "hy");
+      adw_status_page_set_description (self->placeholder,
+                                       "Pick a folder in the sidebar to get started.");
+      return;
+    }
+
+  adw_status_page_set_title (self->placeholder, hy_node_get_name (node));
+  adw_status_page_set_description (self->placeholder, hy_node_get_path (node));
 }
 
 static AdwNavigationPage *
@@ -36,7 +55,6 @@ build_content_page (HyWindow *self)
 {
   GtkWidget *toolbar = adw_toolbar_view_new ();
   GtkWidget *header = adw_header_bar_new ();
-  GtkWidget *status;
   GtkWidget *menu_button;
   GMenu *menu;
 
@@ -52,12 +70,13 @@ build_content_page (HyWindow *self)
   adw_header_bar_pack_end (ADW_HEADER_BAR (header), menu_button);
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
 
-  status = adw_status_page_new ();
-  adw_status_page_set_icon_name (ADW_STATUS_PAGE (status), "user-available-symbolic");
-  adw_status_page_set_title (ADW_STATUS_PAGE (status), "hy");
-  adw_status_page_set_description (ADW_STATUS_PAGE (status),
-                                   "Pick a chat in the sidebar to get started.");
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), status);
+  self->placeholder = ADW_STATUS_PAGE (adw_status_page_new ());
+  adw_status_page_set_icon_name (self->placeholder, "folder-symbolic");
+  adw_status_page_set_title (self->placeholder, "hy");
+  adw_status_page_set_description (self->placeholder,
+                                   "Pick a folder in the sidebar to get started.");
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar),
+                                GTK_WIDGET (self->placeholder));
 
   return adw_navigation_page_new (toolbar, "Chat");
 }
@@ -81,6 +100,8 @@ on_close_request (GtkWindow *window,
 HyWindow *
 hy_window_new (HyApplication *app)
 {
+  g_autofree char *workspaces_root = NULL;
+  HySidebar *sidebar;
   HyWindow *self;
 
   g_return_val_if_fail (HY_IS_APPLICATION (app), NULL);
@@ -94,10 +115,16 @@ hy_window_new (HyApplication *app)
   if (g_settings_get_boolean (self->settings, "window-maximized"))
     gtk_window_maximize (GTK_WINDOW (self));
 
-  adw_navigation_split_view_set_sidebar (self->split_view, build_sidebar_page (self));
+  workspaces_root = resolve_root (self->settings, "workspaces-root", "Workspaces");
+  self->tree = hy_fs_tree_new (workspaces_root);
 
-  self->content_page = build_content_page (self);
-  adw_navigation_split_view_set_content (self->split_view, self->content_page);
+  sidebar = hy_sidebar_new (self->tree);
+  g_signal_connect (sidebar, "node-selected", G_CALLBACK (on_node_selected), self);
+
+  adw_navigation_split_view_set_sidebar (self->split_view,
+                                         adw_navigation_page_new (GTK_WIDGET (sidebar),
+                                                                  "Workspaces"));
+  adw_navigation_split_view_set_content (self->split_view, build_content_page (self));
 
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
 
@@ -109,6 +136,7 @@ hy_window_dispose (GObject *object)
 {
   HyWindow *self = HY_WINDOW (object);
 
+  g_clear_object (&self->tree);
   g_clear_object (&self->settings);
 
   G_OBJECT_CLASS (hy_window_parent_class)->dispose (object);

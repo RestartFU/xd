@@ -1,6 +1,7 @@
 # Backend / storage / settings logic that must stay free of GTK so it can be
 # exercised by the headless tests in tests/.
 hy_core_sources = files(
+  'settings/folder-settings.c',
 )
 
 hy_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep]
@@ -22,6 +23,9 @@ hy_sources = files(
   'main.c',
   'hy-app.c',
   'hy-window.c',
+  'tree/hy-node.c',
+  'tree/fs-tree.c',
+  'tree/sidebar.c',
 )
 
 executable('hy',
