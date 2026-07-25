@@ -1,17 +1,18 @@
 #pragma once
 
-#include <gio/gio.h>
+#include <glib.h>
 
 G_BEGIN_DECLS
 
 /*
- * Opens a terminal in @workdir.
+ * The environment as it was before hy's launcher rewrote it.
  *
- * hy runs out of a bundle carrying its own GTK, fonts and settings schemas,
- * and a terminal that inherited those would load the wrong ones. The child is
- * given the host environment back before it starts.
+ * hy runs out of a bundle carrying its own GTK, fonts and settings schemas.
+ * A shell started under that environment would hand it to everything it runs,
+ * so anything graphical launched from the terminal would load the bundle's
+ * libraries instead of the host's. The launcher records the host values under
+ * HY_HOST_* before overriding them; this hands them back.
  */
-gboolean hy_open_terminal (const char  *workdir,
-                           GError     **error);
+GStrv hy_host_environ (void);
 
 G_END_DECLS

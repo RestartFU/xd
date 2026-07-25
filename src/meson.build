@@ -41,6 +41,7 @@ hy_sources = files(
   'tree/sidebar.c',
   'settings/folder-settings-dialog.c',
   'chat/model-picker.c',
+  'chat/terminal-panel.c',
   'chat/message-row.c',
   'chat/chat-view.c',
   'chat/search-dialog.c',
@@ -48,7 +49,7 @@ hy_sources = files(
 
 executable('hy',
   hy_sources,
-  dependencies: [glib_dep, gio_dep, gio_unix_dep, gtk_dep, adw_dep, json_dep, sqlite_dep],
+  dependencies: [glib_dep, gio_dep, gio_unix_dep, gtk_dep, adw_dep, json_dep, sqlite_dep, vte_dep],
   include_directories: hy_core_inc,
   link_with: hy_core_lib,
   install: true,

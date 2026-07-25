@@ -3,10 +3,10 @@
 #include "chat-session.h"
 #include "message-row.h"
 #include "model-picker.h"
+#include "terminal-panel.h"
 #include "settings/settings-resolver.h"
 #include "util/ask-block.h"
 #include "util/git-info.h"
-#include "util/host-launch.h"
 
 /*
  * A turn in flight.
@@ -53,7 +53,9 @@ struct _HyChatView
   GtkToggleButton *build_toggle;
   GtkToggleButton *plan_toggle;
   GtkLabel *context_label;
-  GtkButton *terminal_button;
+  GtkToggleButton *terminal_button;
+  HyTerminalPanel *terminal;
+  GtkPaned *split;
 
   /* Set while the choosers are filled in from the chat, so the resulting
    * notify does not read back as the user picking something. */
@@ -935,40 +937,40 @@ describe_context (const char *workdir)
   return g_string_free (g_steal_pointer (&text), FALSE);
 }
 
+/* Roughly a third of the window: enough for a build log, little enough that
+ * the conversation is still the thing on screen. */
+#define TERMINAL_SHARE 0.66
+
 /*
- * Opens a terminal where the agent works.
+ * Shows or hides the shell that runs where the agent does.
  *
- * The directory is resolved exactly as it is for a turn, so the terminal
- * lands where the CLI would run rather than wherever hy was started.
+ * The shell is only started the first time it is opened -- an embedded
+ * terminal nobody looks at is a process and a pty for nothing -- and is left
+ * running when the panel is hidden, so closing it does not throw away what is
+ * on screen or interrupt a command.
  */
 static void
-on_terminal_clicked (GtkButton *button,
-                     gpointer   user_data)
+on_terminal_toggled (GtkToggleButton *button,
+                     gpointer         user_data)
 {
   HyChatView *self = user_data;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
-  g_autoptr (HyChat) chat = NULL;
-  g_autoptr (GError) error = NULL;
-  const char *workdir;
+  gboolean shown = gtk_toggle_button_get_active (button);
 
-  if (self->chat == NULL)
+  gtk_widget_set_visible (GTK_WIDGET (self->terminal), shown);
+
+  if (!shown)
     return;
 
-  chat = hy_storage_get_chat (self->storage, hy_node_get_chat_id (self->chat), NULL);
-  if (chat == NULL)
-    return;
-
-  resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
-  workdir = workdir_for (chat, resolved);
-
-  if (workdir == NULL || *workdir == '\0')
+  /* Only once the panel has a height to divide. */
+  if (gtk_paned_get_position (self->split) == 0)
     {
-      append_row (self, HY_MESSAGE_ERROR, "This chat has no working directory.");
-      return;
+      int height = gtk_widget_get_height (GTK_WIDGET (self->split));
+
+      if (height > 0)
+        gtk_paned_set_position (self->split, (int) (height * TERMINAL_SHARE));
     }
 
-  if (!hy_open_terminal (workdir, &error))
-    append_row (self, HY_MESSAGE_ERROR, error->message);
+  hy_terminal_panel_activate (self->terminal);
 }
 
 static void
@@ -988,7 +990,9 @@ update_context_bar (HyChatView   *self,
     const char *workdir = workdir_for (chat, resolved);
     gboolean have_workdir = workdir != NULL && *workdir != '\0';
     g_autofree char *tooltip =
-      have_workdir ? g_strdup_printf ("Open a terminal in %s", workdir) : NULL;
+      have_workdir ? g_strdup_printf ("Terminal in %s", workdir) : NULL;
+
+    hy_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
 
     gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
@@ -1377,10 +1381,11 @@ build_composer (HyChatView *self)
 
     gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   }
-  self->terminal_button = GTK_BUTTON (gtk_button_new_from_icon_name ("utilities-terminal-symbolic"));
+  self->terminal_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
+  gtk_button_set_icon_name (GTK_BUTTON (self->terminal_button), "utilities-terminal-symbolic");
   gtk_widget_add_css_class (GTK_WIDGET (self->terminal_button), "flat");
-  g_signal_connect (self->terminal_button, "clicked",
-                    G_CALLBACK (on_terminal_clicked), self);
+  g_signal_connect (self->terminal_button, "toggled",
+                    G_CALLBACK (on_terminal_toggled), self);
 
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->terminal_button));
@@ -1475,6 +1480,20 @@ hy_chat_view_init (HyChatView *self)
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->stack));
   gtk_box_append (GTK_BOX (content), self->composer_area);
 
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), content);
+  /* The terminal shares the window with the conversation rather than covering
+   * it: the reason to open one is usually to check something the agent just
+   * said, which means reading both at once. */
+  self->terminal = hy_terminal_panel_new ();
+  gtk_widget_set_visible (GTK_WIDGET (self->terminal), FALSE);
+
+  self->split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_VERTICAL));
+  gtk_paned_set_start_child (self->split, content);
+  gtk_paned_set_resize_start_child (self->split, TRUE);
+  gtk_paned_set_shrink_start_child (self->split, FALSE);
+  gtk_paned_set_end_child (self->split, GTK_WIDGET (self->terminal));
+  gtk_paned_set_resize_end_child (self->split, FALSE);
+  gtk_paned_set_shrink_end_child (self->split, FALSE);
+
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->split));
   adw_bin_set_child (ADW_BIN (self), toolbar);
 }

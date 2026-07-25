@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libadwaita-1-dev \
       libjson-glib-dev \
       libsqlite3-dev \
+      libvte-2.91-gtk4-dev \
       librsvg2-common \
       xkb-data \
       libx11-data \

@@ -21,6 +21,7 @@ adw_dep       = dependency('libadwaita-1', version: '>= 1.4')
 json_dep      = dependency('json-glib-1.0')
 pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
+vte_dep       = dependency('vte-2.91-gtk4')
 
 add_project_arguments([
   '-DG_LOG_DOMAIN="hy"',
