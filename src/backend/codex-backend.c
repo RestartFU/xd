@@ -138,7 +138,9 @@ parse_item (AiParser    *parser,
     {
       /* Reasoning, command executions and the like: worth a line in the
        * transcript, but not part of the reply. */
-      emit (callback, user_data, AI_EVENT_TOOL_USE, type, NULL);
+      g_autofree char *summary = ai_tool_summary (type, item);
+
+      emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
       return;
     }
 

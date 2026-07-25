@@ -129,11 +129,22 @@ const char             *ai_backend_model_label (const AiBackend *self,
  * repeats the finished message -- so the parser has to remember what it has
  * already handed out.
  */
+/* A tool call whose arguments are still streaming in. */
+typedef struct
+{
+  char *name;
+  GString *json;
+} AiPendingTool;
+
 struct _AiParser
 {
   const AiBackend *backend;
   JsonParser *json;
   gboolean streamed_text;
+
+  /* Block index -> AiPendingTool*. Tool arguments arrive in fragments after
+   * the block opens, so the call cannot be described until it closes. */
+  GHashTable *pending_tools;
 };
 
 AiParser *ai_parser_new       (const AiBackend *backend);
@@ -153,5 +164,13 @@ const char *ai_json_get_string (JsonObject *object,
                                 const char *member);
 JsonObject *ai_json_get_object (JsonObject *object,
                                 const char *member);
+
+/*
+ * "Read" on its own says nothing; "Read src/backend/backend.c" says what is
+ * happening. Picks the argument that identifies the work -- the command, the
+ * path, the pattern -- and appends it to the tool's name.
+ */
+char       *ai_tool_summary    (const char *tool_name,
+                                JsonObject *input);
 
 G_END_DECLS

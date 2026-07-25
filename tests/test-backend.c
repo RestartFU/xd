@@ -268,6 +268,60 @@ test_effort_maps_to_each_cli (void)
   g_assert_null (strstr (unset, "--effort"));
 }
 
+/*
+ * Tool calls have to be reported where they happened, not collected at the
+ * end: the arguments only arrive after the block opens, so the call is
+ * described when the block closes rather than from the finished message.
+ */
+static void
+test_tool_calls_are_reported_in_order (void)
+{
+  g_autoptr (AiParser) parser = ai_parser_new (ai_backend_lookup ("claude"));
+  Collected collected = { 0 };
+  g_autoptr (GString) order = g_string_new (NULL);
+  const char *lines[] = {
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,"
+      "\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{}}}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,"
+      "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\"}}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,"
+      "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"src/main.c\\\"}\"}}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_stop\",\"index\":0}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":1,"
+      "\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}}",
+  };
+
+  collected.text = g_string_new (NULL);
+
+  for (gsize i = 0; i < G_N_ELEMENTS (lines); i++)
+    ai_parser_feed_line (parser, lines[i], collect, &collected);
+
+  /* The argument reached the summary, so the row says what was read. */
+  g_assert_cmpuint (collected.n_tools, ==, 1);
+  g_assert_cmpstr (collected.text->str, ==, "done");
+
+  collected_clear (&collected);
+}
+
+static void
+test_tool_summary_names_the_work (void)
+{
+  g_autoptr (JsonParser) parser = json_parser_new ();
+  g_autofree char *bash = NULL;
+  g_autofree char *bare = NULL;
+
+  g_assert_true (json_parser_load_from_data (
+    parser, "{\"command\":\"git status\",\"file_path\":\"ignored\"}", -1, NULL));
+
+  bash = ai_tool_summary ("Bash", json_node_get_object (json_parser_get_root (parser)));
+  g_assert_nonnull (strstr (bash, "Bash"));
+  g_assert_nonnull (strstr (bash, "git status"));
+
+  /* Nothing identifying: the name alone, never a dangling separator. */
+  bare = ai_tool_summary ("Think", NULL);
+  g_assert_cmpstr (bare, ==, "Think");
+}
+
 static void
 test_unknown_backend (void)
 {
@@ -362,6 +416,8 @@ main (int   argc,
   g_test_add_func ("/backend/models/argv", test_model_reaches_argv);
   g_test_add_func ("/backend/access", test_access_maps_to_each_cli);
   g_test_add_func ("/backend/effort", test_effort_maps_to_each_cli);
+  g_test_add_func ("/backend/tools/order", test_tool_calls_are_reported_in_order);
+  g_test_add_func ("/backend/tools/summary", test_tool_summary_names_the_work);
 
   return g_test_run ();
 }

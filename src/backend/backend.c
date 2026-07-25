@@ -172,6 +172,55 @@ ai_json_get_object (JsonObject *object,
   return json_node_get_object (node);
 }
 
+/* Enough of a command or path to recognise it, not enough to wrap the line. */
+#define TOOL_DETAIL_LIMIT 110
+
+static void
+pending_tool_free (gpointer data)
+{
+  AiPendingTool *pending = data;
+
+  g_free (pending->name);
+  g_string_free (pending->json, TRUE);
+  g_free (pending);
+}
+
+char *
+ai_tool_summary (const char *tool_name,
+                 JsonObject *input)
+{
+  /* In the order that identifies the work best: what is being run beats
+   * where, which beats how. */
+  static const char *keys[] = {
+    "command", "file_path", "path", "pattern", "url", "query",
+    "description", "notebook_path", "prompt",
+  };
+  const char *detail = NULL;
+  g_autofree char *trimmed = NULL;
+
+  if (tool_name == NULL)
+    tool_name = "tool";
+
+  for (gsize i = 0; i < G_N_ELEMENTS (keys) && detail == NULL; i++)
+    detail = ai_json_get_string (input, keys[i]);
+
+  if (detail == NULL || *detail == '\0')
+    return g_strdup (tool_name);
+
+  trimmed = g_strdup (detail);
+  g_strdelimit (trimmed, "\n\r\t", ' ');
+  g_strstrip (trimmed);
+
+  if (g_utf8_strlen (trimmed, -1) > TOOL_DETAIL_LIMIT)
+    {
+      g_autofree char *shortened = g_utf8_substring (trimmed, 0, TOOL_DETAIL_LIMIT);
+
+      return g_strdup_printf ("%s  %s…", tool_name, shortened);
+    }
+
+  return g_strdup_printf ("%s  %s", tool_name, trimmed);
+}
+
 AiParser *
 ai_parser_new (const AiBackend *backend)
 {
@@ -182,6 +231,8 @@ ai_parser_new (const AiBackend *backend)
   self = g_new0 (AiParser, 1);
   self->backend = backend;
   self->json = json_parser_new ();
+  self->pending_tools = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                               NULL, pending_tool_free);
 
   return self;
 }
@@ -192,6 +243,7 @@ ai_parser_free (AiParser *self)
   if (self == NULL)
     return;
 
+  g_clear_pointer (&self->pending_tools, g_hash_table_unref);
   g_clear_object (&self->json);
   g_free (self);
 }

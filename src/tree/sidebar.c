@@ -52,6 +52,7 @@ typedef struct
 {
   HySidebar *self;
   HyNode *node;         /* unowned; owned by the tree */
+  GtkEditable *entry;
   NameCallback callback;
 } NamePrompt;
 
@@ -61,14 +62,11 @@ on_name_response (GObject      *source,
                   gpointer      data)
 {
   NamePrompt *prompt = data;
-  AdwAlertDialog *dialog = ADW_ALERT_DIALOG (source);
   const char *response;
-  GtkEditable *entry;
   const char *name;
 
-  response = adw_alert_dialog_choose_finish (dialog, result);
-  entry = GTK_EDITABLE (adw_alert_dialog_get_extra_child (dialog));
-  name = gtk_editable_get_text (entry);
+  response = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), result);
+  name = gtk_editable_get_text (prompt->entry);
 
   if (g_strcmp0 (response, "confirm") == 0 && *name != '\0')
     prompt->callback (prompt->self, prompt->node, name);
@@ -88,7 +86,8 @@ prompt_for_name (HySidebar    *self,
 {
   AdwAlertDialog *dialog;
   NamePrompt *prompt;
-  GtkWidget *entry;
+  GtkWidget *group;
+  GtkWidget *row;
 
   dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new (heading, body));
   adw_alert_dialog_add_responses (dialog,
@@ -100,14 +99,21 @@ prompt_for_name (HySidebar    *self,
   adw_alert_dialog_set_default_response (dialog, "confirm");
   adw_alert_dialog_set_close_response (dialog, "cancel");
 
-  entry = gtk_entry_new ();
-  gtk_editable_set_text (GTK_EDITABLE (entry), initial != NULL ? initial : "");
-  gtk_entry_set_activates_default (GTK_ENTRY (entry), TRUE);
-  adw_alert_dialog_set_extra_child (dialog, entry);
+  /* A titled row rather than a bare entry, so the field looks like the rest
+   * of the interface instead of a box dropped into a dialog. */
+  row = adw_entry_row_new ();
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), "Name");
+  gtk_editable_set_text (GTK_EDITABLE (row), initial != NULL ? initial : "");
+  g_object_set (row, "activates-default", TRUE, NULL);
+
+  group = adw_preferences_group_new ();
+  adw_preferences_group_add (ADW_PREFERENCES_GROUP (group), row);
+  adw_alert_dialog_set_extra_child (dialog, group);
 
   prompt = g_new0 (NamePrompt, 1);
   prompt->self = g_object_ref (self);
   prompt->node = node;
+  prompt->entry = GTK_EDITABLE (row);
   prompt->callback = callback;
 
   adw_alert_dialog_choose (dialog, GTK_WIDGET (self), NULL,
@@ -220,7 +226,7 @@ typedef struct
   HySidebar *self;
   HyNode *folder;           /* unowned; owned by the tree */
   GtkEditable *title_entry;
-  GtkButton *dir_button;
+  AdwActionRow *dir_row;
   char *workdir;            /* NULL: inherit */
 } NewChatPrompt;
 
@@ -233,21 +239,22 @@ new_chat_prompt_free (NewChatPrompt *prompt)
 }
 
 static void
-update_dir_button (NewChatPrompt *prompt)
+update_dir_row (NewChatPrompt *prompt)
 {
   if (prompt->workdir != NULL)
-    {
-      g_autofree char *name = g_path_get_basename (prompt->workdir);
-
-      gtk_button_set_label (prompt->dir_button, name);
-      gtk_widget_set_tooltip_text (GTK_WIDGET (prompt->dir_button), prompt->workdir);
-    }
+    adw_action_row_set_subtitle (prompt->dir_row, prompt->workdir);
   else
-    {
-      gtk_button_set_label (prompt->dir_button, "Same as folder");
-      gtk_widget_set_tooltip_text (GTK_WIDGET (prompt->dir_button),
-                                   hy_node_get_path (prompt->folder));
-    }
+    adw_action_row_set_subtitle (prompt->dir_row, "Same as the folder");
+}
+
+static void
+on_clear_directory (GtkButton *button,
+                    gpointer   user_data)
+{
+  NewChatPrompt *prompt = user_data;
+
+  g_clear_pointer (&prompt->workdir, g_free);
+  update_dir_row (prompt);
 }
 
 static void
@@ -266,7 +273,7 @@ on_directory_chosen (GObject      *source,
   g_free (prompt->workdir);
   prompt->workdir = g_file_get_path (folder);
 
-  update_dir_button (prompt);
+  update_dir_row (prompt);
 }
 
 static void
@@ -364,9 +371,11 @@ on_new_chat (GtkWidget  *widget,
   HyNode *folder = node_from_target (self, target);
   NewChatPrompt *prompt;
   AdwAlertDialog *dialog;
-  GtkWidget *box;
-  GtkWidget *dir_row;
-  GtkWidget *dir_label;
+  GtkWidget *group;
+  GtkWidget *title_row;
+  GtkWidget *choose;
+  GtkWidget *clear;
+  GtkWidget *buttons;
 
   if (folder == NULL)
     return;
@@ -385,28 +394,42 @@ on_new_chat (GtkWidget  *widget,
   adw_alert_dialog_set_default_response (dialog, "confirm");
   adw_alert_dialog_set_close_response (dialog, "cancel");
 
-  box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  /* Two rows in a boxed list: a name and where it runs. The directory is a
+   * subtitle rather than a button the width of the dialog, because a path is
+   * something to read, not something to press. */
+  title_row = adw_entry_row_new ();
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (title_row), "Name");
+  g_object_set (title_row, "activates-default", TRUE, NULL);
+  prompt->title_entry = GTK_EDITABLE (title_row);
 
-  prompt->title_entry = GTK_EDITABLE (gtk_entry_new ());
-  gtk_entry_set_placeholder_text (GTK_ENTRY (prompt->title_entry), "Chat name");
-  gtk_entry_set_activates_default (GTK_ENTRY (prompt->title_entry), TRUE);
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (prompt->title_entry));
+  prompt->dir_row = ADW_ACTION_ROW (adw_action_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (prompt->dir_row), "Runs in");
+  adw_action_row_set_subtitle_lines (prompt->dir_row, 2);
 
-  dir_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-  dir_label = gtk_label_new ("Runs in");
-  gtk_widget_add_css_class (dir_label, "dim-label");
+  choose = gtk_button_new_from_icon_name ("folder-open-symbolic");
+  gtk_widget_add_css_class (choose, "flat");
+  gtk_widget_set_valign (choose, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text (choose, "Choose a directory…");
+  g_signal_connect (choose, "clicked", G_CALLBACK (on_choose_directory), prompt);
 
-  prompt->dir_button = GTK_BUTTON (gtk_button_new ());
-  gtk_widget_set_hexpand (GTK_WIDGET (prompt->dir_button), TRUE);
-  g_signal_connect (prompt->dir_button, "clicked",
-                    G_CALLBACK (on_choose_directory), prompt);
-  update_dir_button (prompt);
+  clear = gtk_button_new_from_icon_name ("edit-clear-symbolic");
+  gtk_widget_add_css_class (clear, "flat");
+  gtk_widget_set_valign (clear, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text (clear, "Use the folder's own directory");
+  g_signal_connect (clear, "clicked", G_CALLBACK (on_clear_directory), prompt);
 
-  gtk_box_append (GTK_BOX (dir_row), dir_label);
-  gtk_box_append (GTK_BOX (dir_row), GTK_WIDGET (prompt->dir_button));
-  gtk_box_append (GTK_BOX (box), dir_row);
+  buttons = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_box_append (GTK_BOX (buttons), choose);
+  gtk_box_append (GTK_BOX (buttons), clear);
+  adw_action_row_add_suffix (prompt->dir_row, buttons);
 
-  adw_alert_dialog_set_extra_child (dialog, box);
+  update_dir_row (prompt);
+
+  group = adw_preferences_group_new ();
+  adw_preferences_group_add (ADW_PREFERENCES_GROUP (group), title_row);
+  adw_preferences_group_add (ADW_PREFERENCES_GROUP (group),
+                             GTK_WIDGET (prompt->dir_row));
+  adw_alert_dialog_set_extra_child (dialog, group);
 
   adw_alert_dialog_choose (dialog, GTK_WIDGET (self), NULL,
                            on_new_chat_response, prompt);

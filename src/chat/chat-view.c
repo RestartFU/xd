@@ -134,6 +134,66 @@ append_row (HyChatView    *self,
   return row;
 }
 
+/*
+ * Tool calls collapse into one row.
+ *
+ * A turn can make a dozen of them, and expanded they push the reply off the
+ * screen. Consecutive calls join the group that is already open; anything
+ * else closes it, so the grouping follows the shape of the turn.
+ */
+static void
+append_tool_line (HyChatView *self,
+                  const char *summary)
+{
+  GtkWidget *last = gtk_widget_get_last_child (GTK_WIDGET (self->transcript));
+  GtkWidget *lines;
+  GtkWidget *line;
+  GtkWidget *expander;
+  g_autofree char *title = NULL;
+  int count;
+
+  if (last != NULL && GTK_IS_EXPANDER (last))
+    {
+      expander = last;
+    }
+  else
+    {
+      expander = gtk_expander_new (NULL);
+      gtk_expander_set_expanded (GTK_EXPANDER (expander), FALSE);
+      gtk_widget_add_css_class (expander, "dim-label");
+      gtk_widget_set_margin_top (expander, 4);
+      gtk_widget_set_margin_bottom (expander, 4);
+      gtk_widget_set_margin_start (expander, 24);
+      gtk_widget_set_margin_end (expander, 24);
+
+      lines = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+      gtk_widget_set_margin_top (lines, 4);
+      gtk_widget_set_margin_start (lines, 12);
+      gtk_expander_set_child (GTK_EXPANDER (expander), lines);
+
+      g_object_set_data (G_OBJECT (expander), "count", GINT_TO_POINTER (0));
+      gtk_box_append (self->transcript, expander);
+    }
+
+  lines = gtk_expander_get_child (GTK_EXPANDER (expander));
+
+  line = gtk_label_new (summary);
+  gtk_label_set_xalign (GTK_LABEL (line), 0.0f);
+  gtk_label_set_ellipsize (GTK_LABEL (line), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_label_set_selectable (GTK_LABEL (line), TRUE);
+  gtk_widget_add_css_class (line, "caption");
+  gtk_box_append (GTK_BOX (lines), line);
+
+  count = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (expander), "count")) + 1;
+  g_object_set_data (G_OBJECT (expander), "count", GINT_TO_POINTER (count));
+
+  title = count == 1 ? g_strdup ("1 tool call")
+                     : g_strdup_printf ("%d tool calls", count);
+  gtk_expander_set_label (GTK_EXPANDER (expander), title);
+
+  queue_scroll_to_bottom (self);
+}
+
 static void
 clear_transcript (HyChatView *self)
 {
@@ -239,11 +299,7 @@ on_tool_use (HyChatSession *session,
   Turn *turn = user_data;
 
   if (turn_is_visible (turn))
-    {
-      g_autofree char *text = g_strdup_printf ("Using %s…", name);
-
-      append_row (turn->view, HY_MESSAGE_TOOL, text);
-    }
+    append_tool_line (turn->view, name);
 }
 
 static void

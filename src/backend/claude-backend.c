@@ -107,24 +107,82 @@ parse_stream_event (AiParser    *parser,
   if (g_strcmp0 (type, "content_block_delta") == 0)
     {
       JsonObject *delta = ai_json_get_object (event, "delta");
+      const char *delta_type = ai_json_get_string (delta, "type");
       const char *text = ai_json_get_string (delta, "text");
 
-      if (g_strcmp0 (ai_json_get_string (delta, "type"), "text_delta") == 0 &&
-          text != NULL)
+      if (g_strcmp0 (delta_type, "text_delta") == 0 && text != NULL)
         {
           parser->streamed_text = TRUE;
           emit (callback, user_data, AI_EVENT_TEXT_DELTA, text, NULL);
+          return;
+        }
+
+      /* Tool arguments arrive as fragments of JSON that only parse once the
+       * whole block has been seen. */
+      if (g_strcmp0 (delta_type, "input_json_delta") == 0)
+        {
+          gint64 index = json_object_get_int_member_with_default (event, "index", -1);
+          AiPendingTool *pending = g_hash_table_lookup (parser->pending_tools,
+                                                        GINT_TO_POINTER ((int) index));
+          const char *fragment = ai_json_get_string (delta, "partial_json");
+
+          if (pending != NULL && fragment != NULL)
+            g_string_append (pending->json, fragment);
+        }
+
+      return;
+    }
+
+  /*
+   * Tool calls are announced before their arguments exist and described only
+   * once the block closes. Reporting them from the finished assistant message
+   * instead would be simpler, but they would all land after the reply text
+   * rather than where they happened.
+   */
+  if (g_strcmp0 (type, "content_block_start") == 0)
+    {
+      JsonObject *block = ai_json_get_object (event, "content_block");
+      gint64 index = json_object_get_int_member_with_default (event, "index", -1);
+
+      if (index >= 0 &&
+          g_strcmp0 (ai_json_get_string (block, "type"), "tool_use") == 0)
+        {
+          AiPendingTool *pending = g_new0 (AiPendingTool, 1);
+
+          pending->name = g_strdup (ai_json_get_string (block, "name"));
+          pending->json = g_string_new (NULL);
+          g_hash_table_insert (parser->pending_tools,
+                               GINT_TO_POINTER ((int) index), pending);
         }
       return;
     }
 
-  if (g_strcmp0 (type, "content_block_start") == 0)
+  if (g_strcmp0 (type, "content_block_stop") == 0)
     {
-      JsonObject *block = ai_json_get_object (event, "content_block");
+      gint64 index = json_object_get_int_member_with_default (event, "index", -1);
+      AiPendingTool *pending = g_hash_table_lookup (parser->pending_tools,
+                                                    GINT_TO_POINTER ((int) index));
+      g_autoptr (JsonParser) input = NULL;
+      g_autofree char *summary = NULL;
+      JsonObject *arguments = NULL;
 
-      if (g_strcmp0 (ai_json_get_string (block, "type"), "tool_use") == 0)
-        emit (callback, user_data, AI_EVENT_TOOL_USE,
-              ai_json_get_string (block, "name"), NULL);
+      if (pending == NULL)
+        return;
+
+      input = json_parser_new ();
+      if (pending->json->len > 0 &&
+          json_parser_load_from_data (input, pending->json->str, -1, NULL))
+        {
+          JsonNode *root = json_parser_get_root (input);
+
+          if (root != NULL && JSON_NODE_HOLDS_OBJECT (root))
+            arguments = json_node_get_object (root);
+        }
+
+      summary = ai_tool_summary (pending->name, arguments);
+      emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+
+      g_hash_table_remove (parser->pending_tools, GINT_TO_POINTER ((int) index));
     }
 }
 
@@ -150,10 +208,19 @@ parse_assistant (AiParser    *parser,
       JsonObject *block = json_array_get_object_element (content, i);
       const char *type = ai_json_get_string (block, "type");
 
+      /* Tool calls were already reported as their blocks closed, in the order
+       * they happened; repeating them here would list them all again after
+       * the reply. */
       if (g_strcmp0 (type, "tool_use") == 0)
         {
-          emit (callback, user_data, AI_EVENT_TOOL_USE,
-                ai_json_get_string (block, "name"), NULL);
+          if (!parser->streamed_text)
+            {
+              g_autofree char *summary =
+                ai_tool_summary (ai_json_get_string (block, "name"),
+                                 ai_json_get_object (block, "input"));
+
+              emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+            }
           continue;
         }
 
