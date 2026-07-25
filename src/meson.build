@@ -4,6 +4,7 @@ hy_core_sources = files(
   'settings/folder-settings.c',
   'settings/settings-resolver.c',
   'util/markdown.c',
+  'util/ask-block.c',
   'util/git-info.c',
   'tree/hy-node.c',
   'storage/storage.c',

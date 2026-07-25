@@ -4,6 +4,7 @@
 #include "message-row.h"
 #include "model-picker.h"
 #include "settings/settings-resolver.h"
+#include "util/ask-block.h"
 #include "util/git-info.h"
 
 /*
@@ -75,6 +76,8 @@ static const AiEffort effort_choices[] = {
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
+static void send_message (HyChatView *self,
+                          const char *text);
 static void update_send_button (HyChatView *self);
 static void start_turn (HyChatView *self,
                         const char *prompt);
@@ -195,6 +198,91 @@ append_tool_line (HyChatView *self,
 }
 
 static void
+on_choice_clicked (GtkButton *button,
+                   gpointer   user_data)
+{
+  HyChatView *self = user_data;
+  const char *answer = g_object_get_data (G_OBJECT (button), "answer");
+  GtkWidget *row = gtk_widget_get_ancestor (GTK_WIDGET (button), GTK_TYPE_FLOW_BOX);
+
+  if (answer == NULL || self->chat == NULL)
+    return;
+
+  /* The question has been answered, so the buttons stop being an offer. */
+  if (row != NULL)
+    gtk_widget_set_sensitive (row, FALSE);
+
+  send_message (self, answer);
+}
+
+/*
+ * Renders a question the assistant asked as a row of buttons.
+ *
+ * Answering by clicking is the point, but the composer stays live: an option
+ * the assistant did not think of is usually the interesting one.
+ */
+static void
+append_choices (HyChatView *self,
+                const HyAsk *ask)
+{
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  GtkWidget *question = gtk_label_new (ask->question);
+  GtkWidget *choices = gtk_flow_box_new ();
+
+  gtk_label_set_wrap (GTK_LABEL (question), TRUE);
+  gtk_label_set_xalign (GTK_LABEL (question), 0.0f);
+  gtk_widget_add_css_class (question, "heading");
+
+  gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (choices), GTK_SELECTION_NONE);
+  gtk_flow_box_set_column_spacing (GTK_FLOW_BOX (choices), 8);
+  gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (choices), 8);
+  gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (choices), 3);
+
+  for (gsize i = 0; ask->options[i] != NULL; i++)
+    {
+      GtkWidget *button = gtk_button_new_with_label (ask->options[i]);
+
+      gtk_label_set_wrap (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (button))), TRUE);
+      g_object_set_data_full (G_OBJECT (button), "answer",
+                              g_strdup (ask->options[i]), g_free);
+      g_signal_connect (button, "clicked", G_CALLBACK (on_choice_clicked), self);
+
+      /* The first option is the assistant's own recommendation. */
+      if (i == 0)
+        gtk_widget_add_css_class (button, "suggested-action");
+
+      gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
+    }
+
+  gtk_box_append (GTK_BOX (box), question);
+  gtk_box_append (GTK_BOX (box), choices);
+  gtk_widget_add_css_class (box, "card");
+  gtk_widget_set_margin_top (box, 6);
+  gtk_widget_set_margin_bottom (box, 6);
+  gtk_widget_set_margin_start (box, 12);
+  gtk_widget_set_margin_end (box, 12);
+
+  gtk_box_append (self->transcript, box);
+  queue_scroll_to_bottom (self);
+}
+
+/* Assistant text may carry a question; the block itself is never shown. */
+static void
+append_reply (HyChatView *self,
+              const char *text)
+{
+  g_autoptr (HyAsk) ask = NULL;
+  g_autofree char *prose = NULL;
+
+  ask = hy_ask_parse (text, &prose);
+
+  append_row (self, HY_MESSAGE_ASSISTANT, ask != NULL ? prose : text);
+
+  if (ask != NULL)
+    append_choices (self, ask);
+}
+
+static void
 clear_transcript (HyChatView *self)
 {
   GtkWidget *child;
@@ -223,7 +311,10 @@ load_transcript (HyChatView *self)
     {
       const HyMessage *message = g_ptr_array_index (messages, i);
 
-      append_row (self, hy_message_kind_from_role (message->role), message->content);
+      if (g_strcmp0 (message->role, "assistant") == 0)
+        append_reply (self, message->content);
+      else
+        append_row (self, hy_message_kind_from_role (message->role), message->content);
     }
 }
 
@@ -370,11 +461,21 @@ on_turn_finished (HyChatSession *session,
 
   if (turn->row != NULL)
     {
+      g_autoptr (HyAsk) ask = hy_ask_parse (turn->text->str, NULL);
+
       hy_message_row_set_waiting (turn->row, FALSE);
 
       /* Nothing came back at all: say so rather than leaving a blank card. */
       if (turn->text->len == 0 && success)
         hy_message_row_append (turn->row, "(no reply)");
+
+      /* The block streamed in as text; re-render it as a question. */
+      if (ask != NULL && visible)
+        {
+          gtk_box_remove (self->transcript, GTK_WIDGET (turn->row));
+          turn->row = NULL;
+          append_reply (self, turn->text->str);
+        }
     }
 
   /* Frees the turn, so nothing may touch it afterwards. */
@@ -499,6 +600,7 @@ start_turn (HyChatView *self,
   g_autofree char *resume_session_id = NULL;
   g_autofree char *handover = NULL;
   g_autofree char *full_prompt = NULL;
+  g_autofree char *system_prompt = NULL;
   const AiBackend *backend;
   AiRunSpec spec = { 0 };
   Turn *turn;
@@ -564,7 +666,16 @@ start_turn (HyChatView *self,
   spec.workdir = workdir_for (chat, resolved);
   /* The chat's own pick wins; the folder chain is the fallback. */
   spec.model = chat->model != NULL ? chat->model : resolved->model;
-  spec.system_prompt = resolved->instructions;
+  {
+    g_autofree char *instructions =
+      resolved->instructions != NULL
+        ? g_strdup_printf ("%s\n\n%s", resolved->instructions, hy_ask_instructions ())
+        : g_strdup (hy_ask_instructions ());
+
+    spec.system_prompt = g_strdup (instructions);
+    g_free (system_prompt);
+    system_prompt = (char *) spec.system_prompt;
+  }
   spec.resume_session_id = resume_session_id;
   spec.effort = ai_effort_from_string (chat->effort);
   /* Plan overrides the access level for as long as it is on, without
@@ -637,20 +748,16 @@ name_chat_after_first_message (HyChatView *self,
 }
 
 static void
-send_current_message (HyChatView *self)
+send_message (HyChatView *self,
+              const char *text)
 {
   g_autoptr (GError) error = NULL;
-  g_autofree char *text = NULL;
 
-  if (self->chat == NULL)
+  if (self->chat == NULL || text == NULL || *text == '\0')
     return;
 
   /* One turn at a time per chat; the button is a stop button meanwhile. */
   if (current_turn (self) != NULL)
-    return;
-
-  text = take_composer_text (self);
-  if (text == NULL)
     return;
 
   if (!hy_storage_append_message (self->storage, hy_node_get_chat_id (self->chat),
@@ -665,6 +772,15 @@ send_current_message (HyChatView *self)
   hy_fs_tree_bump_chat (self->tree, self->chat);
 
   start_turn (self, text);
+}
+
+static void
+send_current_message (HyChatView *self)
+{
+  g_autofree char *text = take_composer_text (self);
+
+  if (text != NULL)
+    send_message (self, text);
 }
 
 static void
