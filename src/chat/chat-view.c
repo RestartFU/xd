@@ -3,6 +3,7 @@
 #include "chat-session.h"
 #include "message-row.h"
 #include "model-picker.h"
+#include "diff-pane.h"
 #include "terminal-panel.h"
 #include "settings/settings-resolver.h"
 #include "util/ask-block.h"
@@ -58,7 +59,10 @@ struct _HyChatView
   GtkLabel *context_label;
   GtkToggleButton *terminal_button;
   HyTerminalPanel *terminal;
+  GtkToggleButton *diff_button;
+  HyDiffPane *diff;
   GtkPaned *split;
+  GtkPaned *side_split;
   GSettings *settings;
 
   /* Set while the choosers are filled in from the chat, so the resulting
@@ -620,6 +624,9 @@ on_turn_finished (HyChatSession *session,
         append_row (self, HY_MESSAGE_ERROR, text);
     }
 
+  /* An agent that edited anything has finished doing so. */
+  hy_diff_pane_refresh (self->diff);
+
   /* Frees the turn, so nothing may touch it afterwards. */
   g_hash_table_remove (self->turns, chat_id);
 
@@ -1013,6 +1020,46 @@ set_terminal_height (HyChatView *self,
   gtk_paned_set_position (self->split, MAX (available - height, 0));
 }
 
+/*
+ * Shows or hides what the working tree looks like now.
+ *
+ * Read when opened rather than watched: the answer only changes when
+ * something writes to the repository, which here means an agent finishing a
+ * turn or the user running something in the terminal.
+ */
+static void
+on_diff_toggled (GtkToggleButton *button,
+                 gpointer         user_data)
+{
+  HyChatView *self = user_data;
+  gboolean shown = gtk_toggle_button_get_active (button);
+
+  g_settings_set_boolean (self->settings, "diff-visible", shown);
+
+  if (!shown)
+    {
+      int width = gtk_widget_get_width (GTK_WIDGET (self->diff));
+
+      if (width > 0)
+        g_settings_set_int (self->settings, "diff-width", width);
+
+      gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
+      return;
+    }
+
+  gtk_widget_set_visible (GTK_WIDGET (self->diff), TRUE);
+
+  {
+    int available = gtk_widget_get_width (GTK_WIDGET (self->side_split));
+    int width = g_settings_get_int (self->settings, "diff-width");
+
+    if (available > 0 && width > 0)
+      gtk_paned_set_position (self->side_split, MAX (available - width, 0));
+  }
+
+  hy_diff_pane_refresh (self->diff);
+}
+
 static int
 terminal_height (HyChatView *self)
 {
@@ -1073,6 +1120,7 @@ update_context_bar (HyChatView   *self,
       have_workdir ? g_strdup_printf ("Terminal in %s", workdir) : NULL;
 
     hy_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
+    hy_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
 
     gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
@@ -1459,7 +1507,15 @@ build_composer (HyChatView *self)
   g_signal_connect (self->terminal_button, "toggled",
                     G_CALLBACK (on_terminal_toggled), self);
 
+  self->diff_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
+  gtk_button_set_icon_name (GTK_BUTTON (self->diff_button), "view-list-ordered-symbolic");
+  gtk_widget_add_css_class (GTK_WIDGET (self->diff_button), "flat");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->diff_button), "Changed files");
+  g_signal_connect (self->diff_button, "toggled",
+                    G_CALLBACK (on_diff_toggled), self);
+
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->diff_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->terminal_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
   /* The controls sit under the text the user is typing, so they need enough
@@ -1572,12 +1628,28 @@ hy_chat_view_init (HyChatView *self)
   gtk_paned_set_resize_end_child (self->split, FALSE);
   gtk_paned_set_shrink_end_child (self->split, FALSE);
 
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->split));
+  /* The diff sits beside the conversation and the terminal together, since
+   * it is about the repository rather than about either of them. */
+  self->diff = hy_diff_pane_new ();
+  gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
+
+  self->side_split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
+  gtk_paned_set_start_child (self->side_split, GTK_WIDGET (self->split));
+  gtk_paned_set_resize_start_child (self->side_split, TRUE);
+  gtk_paned_set_shrink_start_child (self->side_split, FALSE);
+  gtk_paned_set_end_child (self->side_split, GTK_WIDGET (self->diff));
+  gtk_paned_set_resize_end_child (self->side_split, FALSE);
+  gtk_paned_set_shrink_end_child (self->side_split, FALSE);
+
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->side_split));
 
   /* Reopened as it was left. The toggle does the work, so the height and the
    * shell start the same way they would on a click -- except that the shell
    * waits for a chat, since there is no working directory yet. */
   if (g_settings_get_boolean (self->settings, "terminal-visible"))
     gtk_toggle_button_set_active (self->terminal_button, TRUE);
+
+  if (g_settings_get_boolean (self->settings, "diff-visible"))
+    gtk_toggle_button_set_active (self->diff_button, TRUE);
   adw_bin_set_child (ADW_BIN (self), toolbar);
 }

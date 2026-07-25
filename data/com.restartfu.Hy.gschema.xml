@@ -71,6 +71,17 @@
       <description>How tall the shell panel was left, in pixels.</description>
     </key>
 
+    <key name="diff-visible" type="b">
+      <default>false</default>
+      <summary>Changed-files pane shown</summary>
+      <description>Whether the working tree's changes are shown beside the chat.</description>
+    </key>
+
+    <key name="diff-width" type="i">
+      <default>420</default>
+      <summary>Width of the changed-files pane</summary>
+    </key>
+
     <key name="sidebar-width" type="i">
       <default>280</default>
       <summary>Sidebar width</summary>
