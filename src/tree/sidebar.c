@@ -983,6 +983,17 @@ hy_sidebar_init (HySidebar *self)
   gtk_widget_set_tooltip_text (new_button, "New Workspace");
   gtk_actionable_set_action_name (GTK_ACTIONABLE (new_button), "sidebar.new-workspace");
   adw_header_bar_pack_start (ADW_HEADER_BAR (header), new_button);
+
+  /*
+   * The window's own title and buttons belong to the chat side.
+   *
+   * A header bar shows the window controls unless told otherwise, and the
+   * sidebar sits beside another header bar rather than under it -- so without
+   * this the window gets a second set of close buttons, over the tree.
+   */
+  adw_header_bar_set_title_widget (ADW_HEADER_BAR (header),
+                                   adw_window_title_new ("Workspaces", NULL));
+  adw_header_bar_set_show_end_title_buttons (ADW_HEADER_BAR (header), FALSE);
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
 
   g_signal_connect (factory, "setup", G_CALLBACK (on_item_setup), self);

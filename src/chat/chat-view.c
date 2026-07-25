@@ -1516,6 +1516,10 @@ hy_chat_view_init (HyChatView *self)
   self->title = ADW_WINDOW_TITLE (adw_window_title_new ("hy", NULL));
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));
 
+  /* The sidebar is the leftmost header bar, so whatever the desktop puts on
+   * that side of the title bar is its to draw. */
+  adw_header_bar_set_show_start_title_buttons (ADW_HEADER_BAR (header), FALSE);
+
   menu = g_menu_new ();
   g_menu_append (menu, "Search…", "win.search");
   g_menu_append (menu, "About hy", "app.about");
