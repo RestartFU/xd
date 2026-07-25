@@ -10,7 +10,6 @@ typedef struct
   char *folder_id;
   char *title;
   char *backend;
-  char *session_id;   /* NULL until the CLI reports one */
   char *workdir;      /* NULL: inherit the folder's */
   char *model;        /* NULL: the backend's default */
   gint64 created_at;
@@ -78,8 +77,22 @@ gboolean    hy_storage_set_chat_title  (HyStorage   *self,
                                         const char  *title,
                                         GError     **error);
 
+/*
+ * Resumable sessions are tracked per backend.
+ *
+ * A session id only means something to the CLI that issued it, so a chat that
+ * has talked to both keeps one of each — switching assistants and switching
+ * back resumes each side where it was left rather than starting over.
+ */
+char       *hy_storage_get_session_id  (HyStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *backend,
+                                        GError     **error);
+
+/* @session_id may be NULL to forget a session that no longer resumes. */
 gboolean    hy_storage_set_session_id  (HyStorage   *self,
                                         const char  *chat_id,
+                                        const char  *backend,
                                         const char  *session_id,
                                         GError     **error);
 

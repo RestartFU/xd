@@ -20,8 +20,12 @@ typedef struct
   HyChatView *view;         /* unowned; the view outlives its turns */
   HyChatSession *session;
   char *chat_id;
+  char *backend_id;         /* the backend this turn's session id belongs to */
+  char *prompt;             /* kept so a dead session can be retried */
   GString *text;
   HyMessageRow *row;        /* NULL while the chat is not on screen */
+  gboolean resumed;
+  gboolean is_retry;
 } Turn;
 
 struct _HyChatView
@@ -49,6 +53,8 @@ G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
 static void update_send_button (HyChatView *self);
+static void start_turn (HyChatView *self,
+                        const char *prompt);
 static void on_model_chosen (HyModelPicker *picker,
                              const char    *backend_id,
                              const char    *model_id,
@@ -148,6 +154,8 @@ turn_free (gpointer data)
 
   g_clear_object (&turn->session);
   g_clear_pointer (&turn->chat_id, g_free);
+  g_clear_pointer (&turn->backend_id, g_free);
+  g_clear_pointer (&turn->prompt, g_free);
   g_string_free (turn->text, TRUE);
   g_free (turn);
 }
@@ -168,10 +176,11 @@ on_session_started (HyChatSession *session,
   Turn *turn = user_data;
   g_autoptr (GError) error = NULL;
 
-  /* Stored immediately: if hy dies mid-reply the conversation can still be
-   * resumed from where the CLI left it. */
+  /* Stored immediately, and against the backend that issued it: if hy dies
+   * mid-reply the conversation can still be resumed from where the CLI left
+   * it, and switching assistants does not overwrite the other's session. */
   if (!hy_storage_set_session_id (turn->view->storage, turn->chat_id,
-                                  session_id, &error))
+                                  turn->backend_id, session_id, &error))
     g_warning ("cannot store the session id: %s", error->message);
 }
 
@@ -216,7 +225,33 @@ on_turn_finished (HyChatSession *session,
   HyChatView *self = turn->view;
   g_autoptr (GError) error = NULL;
   g_autofree char *chat_id = g_strdup (turn->chat_id);
+  g_autofree char *retry_prompt = NULL;
   gboolean visible = turn_is_visible (turn);
+
+  /*
+   * A resumed turn that failed without producing a single token is almost
+   * always a session the CLI no longer has -- they are cleaned up over time.
+   * Forget it and run the same message again from the transcript instead of
+   * making the user retype it. Checked by outcome rather than by matching the
+   * CLI's error text, which neither CLI promises to keep stable.
+   */
+  if (!success && turn->resumed && !turn->is_retry && turn->text->len == 0)
+    {
+      retry_prompt = g_strdup (turn->prompt);
+
+      if (!hy_storage_set_session_id (self->storage, chat_id, turn->backend_id,
+                                      NULL, &error))
+        g_warning ("cannot forget the stale session: %s", error->message);
+
+      if (turn->row != NULL)
+        gtk_widget_set_visible (GTK_WIDGET (turn->row), FALSE);
+
+      g_hash_table_remove (self->turns, chat_id);
+
+      if (visible)
+        start_turn (self, retry_prompt);
+      return;
+    }
 
   if (turn->text->len > 0)
     {
@@ -293,6 +328,68 @@ workdir_for (const HyChat              *chat,
   return resolved->workdir;
 }
 
+/* Roughly how much earlier conversation to hand to a backend that has no
+ * session of its own. Enough to carry the thread, not so much that it crowds
+ * out the message the user actually asked. */
+#define HANDOVER_LIMIT_BYTES 12000
+
+/*
+ * Retells the conversation so far.
+ *
+ * A session id cannot cross from one CLI to the other, so switching
+ * assistants mid-chat would otherwise drop everything said before. Replaying
+ * the transcript is what makes the new assistant pick up where the old one
+ * left off. The message being sent right now is already stored, so the last
+ * entry is skipped.
+ */
+static char *
+build_handover (HyChatView *self,
+                const char *chat_id)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autoptr (GString) text = NULL;
+  gsize budget = 0;
+  guint first;
+
+  messages = hy_storage_list_messages (self->storage, chat_id, NULL);
+  if (messages == NULL || messages->len < 2)
+    return NULL;
+
+  /* Walk back from the most recent, keeping what fits. */
+  for (first = messages->len - 1; first > 0; first--)
+    {
+      const HyMessage *message = g_ptr_array_index (messages, first - 1);
+
+      budget += strlen (message->content) + 16;
+      if (budget > HANDOVER_LIMIT_BYTES)
+        break;
+    }
+
+  text = g_string_new ("[Earlier in this conversation, which was handled by a "
+                       "different assistant. Continue from it -- do not greet "
+                       "the user again or re-introduce yourself.]\n\n");
+
+  for (guint i = first; i + 1 < messages->len; i++)
+    {
+      const HyMessage *message = g_ptr_array_index (messages, i);
+      const char *who;
+
+      if (g_strcmp0 (message->role, "user") == 0)
+        who = "User";
+      else if (g_strcmp0 (message->role, "assistant") == 0)
+        who = "Assistant";
+      else
+        continue;   /* errors and tool notes are ours, not the conversation */
+
+      g_string_append_printf (text, "%s: %s\n\n", who, message->content);
+    }
+
+  g_string_append (text, "[End of earlier conversation. The user's new message "
+                         "follows.]");
+
+  return g_string_free (g_steal_pointer (&text), FALSE);
+}
+
 static void
 start_turn (HyChatView *self,
             const char *prompt)
@@ -300,6 +397,9 @@ start_turn (HyChatView *self,
   g_autoptr (HyChat) chat = NULL;
   g_autoptr (GError) error = NULL;
   g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autofree char *resume_session_id = NULL;
+  g_autofree char *handover = NULL;
+  g_autofree char *full_prompt = NULL;
   const AiBackend *backend;
   AiRunSpec spec = { 0 };
   Turn *turn;
@@ -322,9 +422,23 @@ start_turn (HyChatView *self,
       return;
     }
 
+  resume_session_id = hy_storage_get_session_id (self->storage, chat->id,
+                                                 backend->id, NULL);
+
+  /* No session with this assistant yet -- either the chat is new, or it has
+   * been talking to the other one. Bring it up to speed. */
+  if (resume_session_id == NULL)
+    handover = build_handover (self, chat->id);
+
+  full_prompt = handover != NULL ? g_strdup_printf ("%s\n\n%s", handover, prompt)
+                                 : g_strdup (prompt);
+
   turn = g_new0 (Turn, 1);
   turn->view = self;
   turn->chat_id = g_strdup (chat->id);
+  turn->backend_id = g_strdup (backend->id);
+  turn->prompt = g_strdup (prompt);
+  turn->resumed = resume_session_id != NULL;
   turn->text = g_string_new (NULL);
   turn->session = hy_chat_session_new (backend);
   turn->row = append_row (self, HY_MESSAGE_ASSISTANT, NULL);
@@ -346,12 +460,12 @@ start_turn (HyChatView *self,
    * chats made afterwards. */
   resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
 
-  spec.prompt = prompt;
+  spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
   /* The chat's own pick wins; the folder chain is the fallback. */
   spec.model = chat->model != NULL ? chat->model : resolved->model;
   spec.system_prompt = resolved->instructions;
-  spec.resume_session_id = chat->session_id;
+  spec.resume_session_id = resume_session_id;
 
   if (!hy_chat_session_start (turn->session, &spec, &error))
     {
@@ -560,12 +674,10 @@ on_model_chosen (HyModelPicker *picker,
       return;
     }
 
-  /* A session id only means something to the CLI that issued it, so switching
-   * assistants starts a fresh one rather than resuming into the wrong tool.
-   * Changing model within the same CLI keeps the session. */
-  if (backend_changed &&
-      !hy_storage_set_session_id (self->storage, chat_id, NULL, &error))
-    g_warning ("cannot reset the session: %s", error->message);
+  /* Nothing is discarded here. Sessions are kept per backend, so switching
+   * assistants resumes that assistant's own session when it has one, and
+   * otherwise the next turn replays the transcript to it. Either way the
+   * conversation carries over. */
 
   {
     g_autoptr (HyChat) updated = hy_storage_get_chat (self->storage, chat_id, NULL);

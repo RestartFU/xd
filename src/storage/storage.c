@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 3
+#define HY_STORAGE_SCHEMA_VERSION 4
 
 struct _HyStorage
 {
@@ -24,7 +24,6 @@ hy_chat_free (HyChat *self)
   g_free (self->folder_id);
   g_free (self->title);
   g_free (self->backend);
-  g_free (self->session_id);
   g_free (self->workdir);
   g_free (self->model);
   g_free (self);
@@ -111,6 +110,14 @@ static const char *SCHEMA_SQL =
   ");"
   "CREATE INDEX IF NOT EXISTS chats_folder ON chats (folder_id, updated_at DESC);"
 
+  /* One resumable session per backend: the ids are not interchangeable. */
+  "CREATE TABLE IF NOT EXISTS chat_sessions ("
+  "  chat_id    TEXT NOT NULL REFERENCES chats (id) ON DELETE CASCADE,"
+  "  backend    TEXT NOT NULL,"
+  "  session_id TEXT NOT NULL,"
+  "  PRIMARY KEY (chat_id, backend)"
+  ");"
+
   "CREATE TABLE IF NOT EXISTS messages ("
   "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
   "  chat_id    TEXT NOT NULL REFERENCES chats (id) ON DELETE CASCADE,"
@@ -181,6 +188,16 @@ migrate (HyStorage  *self,
 
   if (version < 3 &&
       !exec_sql (self, "ALTER TABLE chats ADD COLUMN model TEXT;", error))
+    return FALSE;
+
+  /* Sessions used to live on the chat row, which meant a chat could only ever
+   * remember one backend's. Move them across rather than dropping them. */
+  if (version < 4 &&
+      !exec_sql (self,
+                 "INSERT OR IGNORE INTO chat_sessions (chat_id, backend, session_id)"
+                 "  SELECT id, backend, session_id FROM chats"
+                 "  WHERE session_id IS NOT NULL;",
+                 error))
     return FALSE;
 
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
@@ -288,17 +305,16 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->folder_id  = column_text (stmt, 1);
   chat->title      = column_text (stmt, 2);
   chat->backend    = column_text (stmt, 3);
-  chat->session_id = column_text (stmt, 4);
-  chat->workdir    = column_text (stmt, 5);
-  chat->model      = column_text (stmt, 6);
-  chat->created_at = sqlite3_column_int64 (stmt, 7);
-  chat->updated_at = sqlite3_column_int64 (stmt, 8);
+  chat->workdir    = column_text (stmt, 4);
+  chat->model      = column_text (stmt, 5);
+  chat->created_at = sqlite3_column_int64 (stmt, 6);
+  chat->updated_at = sqlite3_column_int64 (stmt, 7);
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
-  "id, folder_id, title, backend, session_id, workdir, model, created_at, updated_at"
+  "id, folder_id, title, backend, workdir, model, created_at, updated_at"
 
 HyChat *
 hy_storage_get_chat (HyStorage   *self,
@@ -404,17 +420,84 @@ hy_storage_set_chat_title (HyStorage   *self,
                              title, chat_id, "Cannot rename the chat", error);
 }
 
+char *
+hy_storage_get_session_id (HyStorage   *self,
+                           const char  *chat_id,
+                           const char  *backend,
+                           GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  char *session_id = NULL;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "SELECT session_id FROM chat_sessions"
+                          " WHERE chat_id = ? AND backend = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot read the session id");
+      return NULL;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  bind_text (stmt, 2, backend);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    session_id = column_text (stmt, 0);
+
+  sqlite3_finalize (stmt);
+
+  return session_id;
+}
+
 gboolean
 hy_storage_set_session_id (HyStorage   *self,
                            const char  *chat_id,
+                           const char  *backend,
                            const char  *session_id,
                            GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
 
-  return update_chat_column (self,
-                             "UPDATE chats SET session_id = ?, updated_at = ? WHERE id = ?;",
-                             session_id, chat_id, "Cannot store the session id", error);
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (backend != NULL, FALSE);
+
+  if (session_id == NULL)
+    {
+      if (sqlite3_prepare_v2 (self->db,
+                              "DELETE FROM chat_sessions"
+                              " WHERE chat_id = ? AND backend = ?;",
+                              -1, &stmt, NULL) != SQLITE_OK)
+        {
+          set_sqlite_error (error, self->db, "Cannot forget the session id");
+          return FALSE;
+        }
+    }
+  else if (sqlite3_prepare_v2 (self->db,
+                               "INSERT INTO chat_sessions (chat_id, backend, session_id)"
+                               " VALUES (?, ?, ?)"
+                               " ON CONFLICT (chat_id, backend)"
+                               "   DO UPDATE SET session_id = excluded.session_id;",
+                               -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot store the session id");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  bind_text (stmt, 2, backend);
+  if (session_id != NULL)
+    bind_text (stmt, 3, session_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot store the session id");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
 }
 
 gboolean

@@ -74,7 +74,6 @@ test_create_and_list (Fixture       *fixture,
   g_assert_cmpstr (chat->id, ==, first);
   g_assert_cmpstr (chat->title, ==, "Rate limiting");
   g_assert_cmpstr (chat->backend, ==, "claude");
-  g_assert_null (chat->session_id);
 }
 
 /* Chats hang off a folder's UUID, never its path: that is what lets a folder
@@ -130,25 +129,91 @@ test_messages_round_trip (Fixture       *fixture,
                    "{\"type\":\"result\"}");
 }
 
+/*
+ * A session id only means something to the CLI that issued it, so a chat that
+ * has talked to both keeps one of each. Switching assistants and back must
+ * resume each side rather than starting over.
+ */
 static void
-test_session_id_persists (Fixture       *fixture,
-                          gconstpointer  user_data)
+test_sessions_are_per_backend (Fixture       *fixture,
+                               gconstpointer  user_data)
 {
   g_autoptr (GError) error = NULL;
-  g_autoptr (HyChat) chat = NULL;
   g_autofree char *chat_id = NULL;
+  g_autofree char *claude_session = NULL;
+  g_autofree char *codex_session = NULL;
+  g_autofree char *missing = NULL;
 
   chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, &error);
   g_assert_no_error (error);
 
   g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
-                                            "sess-123", &error));
+                                            "claude", "sess-claude", &error));
+  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
+                                            "codex", "sess-codex", &error));
   g_assert_no_error (error);
 
-  chat = hy_storage_get_chat (fixture->storage, chat_id, &error);
+  claude_session = hy_storage_get_session_id (fixture->storage, chat_id,
+                                              "claude", &error);
+  codex_session = hy_storage_get_session_id (fixture->storage, chat_id,
+                                             "codex", &error);
   g_assert_no_error (error);
-  g_assert_cmpstr (chat->session_id, ==, "sess-123");
+  g_assert_cmpstr (claude_session, ==, "sess-claude");
+  g_assert_cmpstr (codex_session, ==, "sess-codex");
+
+  /* A backend the chat has never used has nothing to resume. */
+  missing = hy_storage_get_session_id (fixture->storage, chat_id, "nobody", &error);
+  g_assert_no_error (error);
+  g_assert_null (missing);
+}
+
+/* Sessions expire CLI-side; forgetting one must not disturb the other. */
+static void
+test_forgetting_one_session (Fixture       *fixture,
+                             gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autofree char *claude_session = NULL;
+  g_autofree char *codex_session = NULL;
+
+  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, &error);
+  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "sess-a", &error);
+  hy_storage_set_session_id (fixture->storage, chat_id, "codex", "sess-b", &error);
+  g_assert_no_error (error);
+
+  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
+                                            "claude", NULL, &error));
+  g_assert_no_error (error);
+
+  claude_session = hy_storage_get_session_id (fixture->storage, chat_id,
+                                              "claude", &error);
+  codex_session = hy_storage_get_session_id (fixture->storage, chat_id,
+                                             "codex", &error);
+  g_assert_null (claude_session);
+  g_assert_cmpstr (codex_session, ==, "sess-b");
+}
+
+/* Re-reporting overwrites rather than accumulating: the CLI hands back an id
+ * on every turn, and only the latest one resumes. */
+static void
+test_session_id_is_replaced (Fixture       *fixture,
+                             gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autofree char *session = NULL;
+
+  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, &error);
+  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "first", &error);
+  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "second", &error);
+  g_assert_no_error (error);
+
+  session = hy_storage_get_session_id (fixture->storage, chat_id, "claude", &error);
+  g_assert_cmpstr (session, ==, "second");
 }
 
 static void
@@ -249,7 +314,9 @@ main (int   argc,
   ADD ("/storage/create-and-list", test_create_and_list);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
-  ADD ("/storage/session-id-persists", test_session_id_persists);
+  ADD ("/storage/sessions-per-backend", test_sessions_are_per_backend);
+  ADD ("/storage/forget-one-session", test_forgetting_one_session);
+  ADD ("/storage/session-id-replaced", test_session_id_is_replaced);
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);
