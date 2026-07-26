@@ -155,8 +155,13 @@ touch "$ICON_DIR" "$ICON_THEME" "$DATA_HOME/applications" 2>/dev/null || true
 
 # --- say what happened ------------------------------------------------------
 
+# Asked of the thing that was just installed rather than of the download, so
+# what is printed is what will actually run -- and so "is the fix in this one?"
+# is answered here instead of being a second thing to go and check.
+VERSION=$("$BIN" --version 2>/dev/null || echo "$NAME")
+
 say ""
-say "Installed $NAME."
+say "Installed $VERSION."
 say "  app       $OPT"
 say "  command   $BIN"
 say "  data      $DATA_HOME/$NAME"
