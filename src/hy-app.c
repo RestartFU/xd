@@ -120,14 +120,26 @@ static const char *HY_STYLE =
    * surface sits a little above the one behind it, with a hairline edge
    * where they meet -- which is what reads as glass.
    */
-  ".hy-surface, .hy-surface > * { background-color: #0b0b0e; }\n"
-  ".hy-sidebar, .hy-sidebar > * { background-color: #08080a; }\n"
-  "window, .background, headerbar, .toolbar { background-color: #08080a; }\n"
-  ".hy-raised { background-color: alpha(#ffffff, 0.035);"
-  " border: 1px solid alpha(#ffffff, 0.07); }\n"
+  ".hy-surface, .hy-surface > *, .hy-sidebar, .hy-sidebar > *,"
+  " window, .background, headerbar, .toolbar"
+  " { background-color: #0a0a0c; }\n"
+
+  /*
+   * Everything above the base is white over it, never a colour of its own.
+   *
+   * Three hand-picked near-blacks did not sit together -- the terminal read
+   * as a hole and the buttons as grey borrowed from somewhere else. One base
+   * with everything else a percentage of white over it cannot clash with
+   * itself, and stays right if the base moves.
+   */
+  "button, togglebutton, dropdown > button, entry, .osd"
+  " { background-color: alpha(#ffffff, 0.05); border-color:"
+  " alpha(#ffffff, 0.07); }\n"
+  "button:hover, togglebutton:hover, dropdown > button:hover"
+  " { background-color: alpha(#ffffff, 0.09); }\n"
 
   /* The bar under the composer: what is being worked on, not a control. */
-  ".hy-context { background-color: alpha(#ffffff, 0.02); border-radius: 0 0 14px 14px;"
+  ".hy-context { background-color: alpha(#ffffff, 0.025); border-radius: 0 0 14px 14px;"
   " padding: 4px 12px; }\n"
   ".hy-context label { font-size: 0.85em; }\n"
 
@@ -180,11 +192,11 @@ static const char *HY_STYLE =
 
   /* What the user typed, and the box they type into: the same rounded shape,
    * so a message looks like what the composer produces. */
-  ".card { border-radius: 12px; background-color: alpha(#ffffff, 0.05);"
-  " border: 1px solid alpha(#ffffff, 0.06); }\n"
+  ".card { border-radius: 12px; background-color: alpha(#ffffff, 0.06);"
+  " border: 1px solid alpha(#ffffff, 0.05); }\n"
   "frame, frame > border { border-radius: 16px;"
-  " background-color: alpha(#ffffff, 0.035);"
-  " border-color: alpha(#ffffff, 0.09); }\n"
+  " background-color: alpha(#ffffff, 0.04);"
+  " border-color: alpha(#ffffff, 0.07); }\n"
   /* The composer is the one thing on screen the user acts on, so it gets
    * room rather than being another thin bar. */
   "frame > box { padding: 4px; }\n"
