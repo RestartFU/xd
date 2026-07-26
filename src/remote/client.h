@@ -82,8 +82,8 @@ gboolean        xd_remote_client_pair_finish (XdRemoteClient  *self,
 /*
  * Connects, says hello with the stored token, and keeps the connection open.
  *
- * A dropped line is retried with a widening delay rather than reported as the
- * end of the remote: a laptop that slept should come back on its own. ::opened
+ * A dropped line is retried every few seconds rather than reported as the end
+ * of the remote: a laptop that slept should come back on its own. ::opened
  * fires each time a greeting is accepted -- on the first connection and on
  * every reconnection, because whatever was read before may have moved on --
  * and ::closed when the line goes.

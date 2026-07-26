@@ -784,6 +784,58 @@ test_a_refused_change_is_reported (void)
   daemon_stop (&daemon);
 }
 
+/*
+ * A remote that is not answering says so on its own row.
+ *
+ * This is what a window opened while the daemon is off looks like, and without
+ * it the remote is a row with nothing under it -- indistinguishable from one
+ * that is connected and empty.
+ */
+static void
+test_a_remote_that_is_not_answering_shows_offline (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  XdNode *root;
+
+  daemon_start (&daemon);
+
+  /* Nothing has been connected to yet, which is the state a client is in for
+   * as long as the machine it is pointed at is not there. */
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = xd_remote_tree_new (client);
+  root = xd_remote_tree_get_root (tree);
+
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_OFFLINE);
+  g_assert_cmpstr (xd_node_get_icon_name (root), ==, "network-offline-symbolic");
+
+  /* And stops saying so once the daemon answers. */
+  {
+    g_autofree char *code = xd_remote_server_arm_pairing (daemon.server, 60);
+    Wait pairing = { 0 };
+    Wait loading = { 0 };
+
+    g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &loading);
+
+    xd_remote_client_pair_async (client, code, "test-device", NULL,
+                                 on_paired, &pairing);
+    wait_for (&pairing);
+    if (!pairing.ok)
+      g_error ("pairing failed: %s", pairing.failure);
+
+    wait_for (&loading);
+    g_signal_handlers_disconnect_by_data (tree, &loading);
+    g_free (pairing.failure);
+  }
+
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
+  g_assert_cmpstr (xd_node_get_icon_name (root), ==, "network-server-symbolic");
+  g_assert_cmpuint (child_count (root), ==, 1);
+
+  daemon_stop (&daemon);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -798,6 +850,8 @@ main (int argc, char *argv[])
                    test_folders_and_chats_are_managed_from_the_client);
   g_test_add_func ("/remote/a-refused-change-is-reported",
                    test_a_refused_change_is_reported);
+  g_test_add_func ("/remote/a-remote-that-is-not-answering-shows-offline",
+                   test_a_remote_that_is_not_answering_shows_offline);
 
   return g_test_run ();
 }

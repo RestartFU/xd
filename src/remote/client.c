@@ -10,12 +10,19 @@
  * writes its replies the same way.
  *
  * A dropped line is not an error the user has to act on -- a laptop sleeps,
- * a network changes -- so it is retried with a widening delay, and whoever is
- * showing the remote hears about it through ::opened and ::closed instead.
+ * a network changes -- so it is retried on a timer, and whoever is showing the
+ * remote hears about it through ::opened and ::closed instead.
  */
 
-#define RECONNECT_MIN_SECONDS 1
-#define RECONNECT_MAX_SECONDS 30
+/*
+ * How long before a dropped connection is tried again.
+ *
+ * Flat rather than widening: a daemon is a machine the user knows about and
+ * expects to come back -- a laptop opened, a network rejoined -- and a delay
+ * that grew would leave the tree looking dead for minutes after it was there
+ * again. One connection attempt every few seconds costs nothing on either end.
+ */
+#define RECONNECT_SECONDS 5
 
 G_DEFINE_QUARK (xd-remote-error-quark, xd_remote_error)
 
@@ -64,7 +71,6 @@ struct _XdRemoteClient
   gboolean running;             /* keep the line up */
   gboolean connected;           /* a greeting has been accepted */
   guint reconnect_id;
-  guint reconnect_seconds;
 };
 
 enum
@@ -160,13 +166,8 @@ schedule_reconnect (XdRemoteClient *self)
   if (!self->running || self->reconnect_id != 0)
     return;
 
-  self->reconnect_id = g_timeout_add_seconds (self->reconnect_seconds,
+  self->reconnect_id = g_timeout_add_seconds (RECONNECT_SECONDS,
                                               on_reconnect_elapsed, self);
-
-  /* Widening, so a daemon that is switched off is not asked once a second all
-   * day, and capped, so one that comes back is found again promptly. */
-  self->reconnect_seconds = MIN (self->reconnect_seconds * 2,
-                                 RECONNECT_MAX_SECONDS);
 }
 
 static void
@@ -298,7 +299,6 @@ complete_call (XdRemoteClient *self,
    * ordinary one and is kept up like any other. */
   self->greeting = GREETING_HELLO;
   self->connected = TRUE;
-  self->reconnect_seconds = RECONNECT_MIN_SECONDS;
 
   if (call->task != NULL)
     g_task_return_boolean (call->task, TRUE);
@@ -624,7 +624,6 @@ xd_remote_client_pair_async (XdRemoteClient      *self,
   /* Keeping the line up from here means the tree can be read the moment
    * pairing lands, without a second round of connecting. */
   self->running = TRUE;
-  self->reconnect_seconds = RECONNECT_MIN_SECONDS;
 
   /* Nothing is written until the handshake finishes, so the task waits on the
    * client and is picked up by the greeting when there is a line to write it
@@ -656,7 +655,6 @@ xd_remote_client_start (XdRemoteClient *self)
 
   self->running = TRUE;
   self->greeting = GREETING_HELLO;
-  self->reconnect_seconds = RECONNECT_MIN_SECONDS;
 
   connect_now (self);
 }
@@ -809,5 +807,4 @@ xd_remote_client_init (XdRemoteClient *self)
   self->socket_client = g_socket_client_new ();
   self->cancellable = g_cancellable_new ();
   self->pending = g_queue_new ();
-  self->reconnect_seconds = RECONNECT_MIN_SECONDS;
 }

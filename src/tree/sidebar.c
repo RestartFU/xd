@@ -764,7 +764,7 @@ on_row_right_clicked (GtkGestureClick *gesture,
 }
 
 /*
- * Draws what a chat is doing.
+ * Draws what a row is doing.
  *
  * A spinner while it is working, since that is the one state that is going to
  * end on its own and a still picture cannot say "still going". A chat waiting
@@ -772,6 +772,10 @@ on_row_right_clicked (GtkGestureClick *gesture,
  * the stylesheet pulses -- it is waiting for the user, so it should catch the
  * eye rather than sit still. Otherwise the assistant's icon, which is the
  * resting state and says who has been answering.
+ *
+ * A remote that is not answering goes red. Its rows are still there and still
+ * readable, so nothing else on the row would say that what they show is what
+ * the daemon last said rather than what it says now.
  */
 static void
 show_state (XdNode     *node,
@@ -791,6 +795,15 @@ show_state (XdNode     *node,
     gtk_widget_add_css_class (icon, "xd-waiting");
   else
     gtk_widget_remove_css_class (icon, "xd-waiting");
+
+  if (state == XD_NODE_OFFLINE)
+    gtk_widget_add_css_class (icon, "xd-offline");
+  else
+    gtk_widget_remove_css_class (icon, "xd-offline");
+
+  gtk_widget_set_tooltip_text (icon, state == XD_NODE_OFFLINE
+                                     ? "Not connected. Trying again every few "
+                                       "seconds." : NULL);
 }
 
 /* --- moving folders by dragging ------------------------------------------- */

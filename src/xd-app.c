@@ -360,7 +360,11 @@ static const char *XD_STYLE =
    * Slow enough to notice without being the thing you look at. */
   "@keyframes xd-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
   ".xd-waiting { color: @accent_color;"
-  " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n";
+  " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
+
+  /* A remote that is not answering. Still, not pulsing: it is a state the row
+   * may sit in for hours, and nothing is being waited on. */
+  ".xd-offline { color: @error_color; }\n";
 
 static void
 load_style (void)

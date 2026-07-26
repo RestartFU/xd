@@ -89,7 +89,7 @@ xd_node_class_init (XdNodeClass *klass)
 
   properties[PROP_STATE] =
     g_param_spec_int ("state", NULL, NULL,
-                      XD_NODE_IDLE, XD_NODE_WAITING, XD_NODE_IDLE,
+                      XD_NODE_IDLE, XD_NODE_OFFLINE, XD_NODE_IDLE,
                       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (object_class, N_PROPS, properties);

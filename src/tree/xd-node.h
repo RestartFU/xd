@@ -11,17 +11,22 @@ typedef enum
 } XdNodeKind;
 
 /*
- * What a chat is doing, as far as the tree is concerned.
+ * What a row is doing, as far as the tree is concerned.
  *
  * The sidebar is often the only part of a chat on screen -- the user is
  * reading another one, or another window entirely -- so a chat says whether
  * it is still working, waiting to be answered, or done.
+ *
+ * A remote's own root uses the same states for the same reason: it is a row
+ * that stands for a machine, and whether that machine is answering is
+ * something the tree has to be able to show without being asked.
  */
 typedef enum
 {
   XD_NODE_IDLE,
   XD_NODE_WORKING,
   XD_NODE_WAITING,   /* it asked something and nobody has answered */
+  XD_NODE_OFFLINE,   /* a remote that is not answering */
 } XdNodeState;
 
 #define XD_TYPE_NODE (xd_node_get_type ())

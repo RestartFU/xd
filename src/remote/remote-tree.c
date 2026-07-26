@@ -46,6 +46,8 @@ static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (XdRemoteTree, xd_remote_tree, G_TYPE_OBJECT)
 
+static void set_root_state (XdRemoteTree *self, XdNodeState state);
+
 /* --- reconciling ---------------------------------------------------------- */
 
 /*
@@ -341,7 +343,7 @@ apply_tree (XdRemoteTree *self,
   g_hash_table_unref (reload.children);
   g_ptr_array_unref (reload.removed);
 
-  xd_node_set_state (self->root, XD_NODE_IDLE);
+  set_root_state (self, XD_NODE_IDLE);
 
   /* The chat that was just made now has a row, which is the first moment it
    * can be opened. */
@@ -358,6 +360,25 @@ apply_tree (XdRemoteTree *self,
 }
 
 /* --- fetching ------------------------------------------------------------- */
+
+/*
+ * How the remote's own row shows what the connection is doing.
+ *
+ * The icon changes with it rather than only the colour: a row that has gone
+ * red is easy to miss on a tree the user is not looking at, and a plug pulled
+ * out of a socket says the same thing at a glance that "offline" says in
+ * words.
+ */
+static void
+set_root_state (XdRemoteTree *self,
+                XdNodeState   state)
+{
+  gboolean offline = state == XD_NODE_OFFLINE;
+
+  xd_node_set_icon_name (self->root, offline ? "network-offline-symbolic"
+                                             : "network-server-symbolic");
+  xd_node_set_state (self->root, state);
+}
 
 static void
 on_tree_received (GObject      *source,
@@ -377,7 +398,8 @@ on_tree_received (GObject      *source,
 
       /* The connection will come back on its own and ask again; until then the
        * remote shows whatever it last had rather than pretending to work. */
-      xd_node_set_state (self->root, XD_NODE_IDLE);
+      set_root_state (self, xd_remote_client_is_connected (self->client)
+                            ? XD_NODE_IDLE : XD_NODE_OFFLINE);
       return;
     }
 
@@ -390,11 +412,14 @@ xd_remote_tree_refresh (XdRemoteTree *self)
   g_return_if_fail (XD_IS_REMOTE_TREE (self));
 
   if (!xd_remote_client_is_connected (self->client))
-    return;
+    {
+      set_root_state (self, XD_NODE_OFFLINE);
+      return;
+    }
 
   /* The remote's own row says it is working, which is the one thing the tree
    * can show while there is nothing under it yet. */
-  xd_node_set_state (self->root, XD_NODE_WORKING);
+  set_root_state (self, XD_NODE_WORKING);
 
   xd_remote_client_call_op_async (self->client, "tree", NULL, NULL,
                                   self->cancellable, on_tree_received,
@@ -664,9 +689,10 @@ on_client_closed (XdRemoteClient *client,
 {
   XdRemoteTree *self = user_data;
 
-  /* The tree stays as it was: it is what the daemon last said, and the client
-   * is already on its way back. */
-  xd_node_set_state (self->root, XD_NODE_IDLE);
+  /* The rows stay as they were -- they are what the daemon last said, and it
+   * is worth being able to read them while it is away. What changes is the
+   * remote's own row, which stops claiming to be a live view. */
+  set_root_state (self, XD_NODE_OFFLINE);
 }
 
 /* --- public API ----------------------------------------------------------- */
@@ -690,7 +716,6 @@ xd_remote_tree_new (XdRemoteClient *client)
    * whether the remote was left open without it ever colliding with a real
    * folder's id. */
   self->root = xd_node_new_folder (uri, xd_remote_client_get_host (client), uri);
-  xd_node_set_icon_name (self->root, "network-server-symbolic");
 
   g_list_store_append (self->roots, self->root);
 
@@ -698,9 +723,12 @@ xd_remote_tree_new (XdRemoteClient *client)
   g_signal_connect (client, "closed", G_CALLBACK (on_client_closed), self);
 
   /* Already up, when the tree is made for a client that has been paired this
-   * moment rather than one about to connect. */
+   * moment rather than one about to connect. Otherwise the remote starts the
+   * way it will look until the first greeting lands: not answering. */
   if (xd_remote_client_is_connected (client))
     xd_remote_tree_refresh (self);
+  else
+    set_root_state (self, XD_NODE_OFFLINE);
 
   return self;
 }
