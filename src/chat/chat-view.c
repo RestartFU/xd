@@ -654,6 +654,30 @@ on_remote_messages (GObject      *source,
                                  ? json_object_get_array_member (reply, "messages")
                                  : NULL);
   render_transcript (self, messages);
+
+  /*
+   * Why there is nothing to type into.
+   *
+   * A remote chat with no messages yet is otherwise an empty window with no
+   * composer, which reads as something that failed to open rather than as a
+   * chat that is read-only from here.
+   */
+  {
+    g_autofree char *text =
+      g_strdup_printf ("This chat runs on %s. It can be read from here; "
+                       "sending is not built yet.",
+                       xd_remote_client_get_host (self->remote));
+    GtkWidget *notice = gtk_label_new (text);
+
+    gtk_label_set_xalign (GTK_LABEL (notice), 0.0f);
+    gtk_label_set_wrap (GTK_LABEL (notice), TRUE);
+    gtk_widget_add_css_class (notice, "caption");
+    gtk_widget_add_css_class (notice, "dim-label");
+    gtk_widget_set_margin_start (notice, 24);
+    gtk_widget_set_margin_top (notice, 12);
+    gtk_box_append (self->transcript, notice);
+  }
+
   queue_scroll_to_bottom (self);
 }
 

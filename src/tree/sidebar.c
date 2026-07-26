@@ -17,6 +17,16 @@ struct _XdSidebar
   GtkListView *list_view;
 
   GHashTable *expanded;     /* folder ids the user left open */
+
+  /* The row that is an entry right now, and -- when it stands for a folder
+   * that does not exist yet -- the folder it will be created in. */
+  XdNode *editing;
+  XdNode *editing_parent;
+  gboolean creating;
+
+  /* Rows that reported themselves closed, until it is known whether the user
+   * closed them or something above them did. GtkTreeListRow* -> folder id. */
+  GHashTable *closing;
   guint save_expanded_id;
 };
 
@@ -54,80 +64,253 @@ show_error (XdSidebar  *self,
   show_error_message (self, heading, error->message);
 }
 
-typedef void (*NameCallback) (XdSidebar  *self,
-                              XdNode     *node,
-                              const char *name);
+/* --- naming a row in place ------------------------------------------------- */
 
-typedef struct
+static void create_folder (XdSidebar *self, XdNode *parent, const char *name);
+static void rename_folder (XdSidebar *self, XdNode *node, const char *name);
+static void rename_chat   (XdSidebar *self, XdNode *chat, const char *title);
+
+/*
+ * Renaming and creating happen on the row itself.
+ *
+ * A dialog to ask for one word is a lot of ceremony, and it covers the tree
+ * the name belongs in -- which is the thing being looked at to decide what to
+ * call it. The row becomes an entry instead: Enter keeps the name, Escape puts
+ * the row back as it was, and clicking away keeps what was typed.
+ *
+ * A folder being created is a row that does not stand for anything yet. It is
+ * put in the tree to be typed into and taken out again when the name is in, at
+ * which point the folder is actually made -- so a cancelled one leaves nothing
+ * behind, on screen or on disk.
+ */
+
+/* The row showing @node, or NULL when it is not on screen. Rows are recycled,
+ * so this asks the widgets what they are showing rather than remembering. */
+static GtkWidget *
+row_box_for_node (XdSidebar *self,
+                  XdNode    *node)
 {
-  XdSidebar *self;
-  XdNode *node;         /* unowned; owned by the tree */
-  GtkEditable *entry;
-  NameCallback callback;
-} NamePrompt;
+  for (GtkWidget *item = gtk_widget_get_first_child (GTK_WIDGET (self->list_view));
+       item != NULL;
+       item = gtk_widget_get_next_sibling (item))
+    {
+      GtkWidget *expander = gtk_widget_get_first_child (item);
+      GtkWidget *box;
 
+      if (!GTK_IS_TREE_EXPANDER (expander))
+        continue;
+
+      box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
+
+      if (box != NULL && g_object_get_data (G_OBJECT (box), "node") == node)
+        return box;
+    }
+
+  return NULL;
+}
+
+/* The tree row a box belongs to, which is what holds its expanded state. */
+static GtkTreeListRow *
+row_for_box (GtkWidget *box)
+{
+  GtkWidget *expander = gtk_widget_get_parent (box);
+
+  if (!GTK_IS_TREE_EXPANDER (expander))
+    return NULL;
+
+  return gtk_tree_expander_get_list_row (GTK_TREE_EXPANDER (expander));
+}
+
+/*
+ * Puts the keyboard in the entry once the row it is in exists on screen.
+ *
+ * A row that has only just been added is bound before it is mapped, and a
+ * widget that is not on screen cannot take focus -- so the row for a folder
+ * being created would come up as an entry that typing does not reach.
+ */
+static gboolean
+focus_editor (gpointer user_data)
+{
+  g_autoptr (GtkWidget) box = user_data;
+  GtkWidget *entry = g_object_get_data (G_OBJECT (box), "entry");
+
+  /* Hidden by now means the row was recycled onto something else, or the name
+   * is already in: either way the keyboard belongs elsewhere. */
+  if (entry != NULL && gtk_widget_get_mapped (entry) &&
+      gtk_widget_get_visible (entry))
+    {
+      gtk_widget_grab_focus (entry);
+      gtk_editable_select_region (GTK_EDITABLE (entry), 0, -1);
+    }
+
+  return G_SOURCE_REMOVE;
+}
+
+/* Swaps a row between showing its name and being an entry holding that name. */
 static void
-on_name_response (GObject      *source,
-                  GAsyncResult *result,
-                  gpointer      data)
+show_editor (GtkWidget *box,
+             gboolean   editing)
 {
-  NamePrompt *prompt = data;
-  const char *response;
-  const char *name;
+  GtkWidget *label = g_object_get_data (G_OBJECT (box), "label");
+  GtkWidget *entry = g_object_get_data (G_OBJECT (box), "entry");
+  XdNode *node = g_object_get_data (G_OBJECT (box), "node");
 
-  response = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), result);
-  name = gtk_editable_get_text (prompt->entry);
+  gtk_widget_set_visible (label, !editing);
+  gtk_widget_set_visible (entry, editing);
 
-  if (g_strcmp0 (response, "confirm") == 0 && *name != '\0')
-    prompt->callback (prompt->self, prompt->node, name);
+  if (!editing || node == NULL)
+    return;
 
-  g_object_unref (prompt->self);
-  g_free (prompt);
+  gtk_editable_set_text (GTK_EDITABLE (entry), xd_node_get_name (node));
+
+  /* Selected: typing replaces the name, and the old one is still there to
+   * read while deciding, which is most of what renaming is. */
+  gtk_editable_select_region (GTK_EDITABLE (entry), 0, -1);
+  gtk_widget_grab_focus (entry);
+
+  g_idle_add (focus_editor, g_object_ref (box));
 }
 
 static void
-prompt_for_name (XdSidebar    *self,
-                 const char   *heading,
-                 const char   *body,
-                 const char   *confirm_label,
-                 const char   *initial,
-                 XdNode       *node,
-                 NameCallback  callback)
+end_editing (XdSidebar *self,
+             gboolean   keep)
 {
-  AdwAlertDialog *dialog;
-  NamePrompt *prompt;
-  GtkWidget *group;
-  GtkWidget *row;
+  g_autoptr (XdNode) node = g_steal_pointer (&self->editing);
+  g_autoptr (XdNode) parent = g_steal_pointer (&self->editing_parent);
+  gboolean creating = self->creating;
+  g_autofree char *name = NULL;
+  GtkWidget *box;
 
-  dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new (heading, body));
-  adw_alert_dialog_add_responses (dialog,
-                                  "cancel", "Cancel",
-                                  "confirm", confirm_label,
-                                  NULL);
-  adw_alert_dialog_set_response_appearance (dialog, "confirm",
-                                            ADW_RESPONSE_SUGGESTED);
-  adw_alert_dialog_set_default_response (dialog, "confirm");
-  adw_alert_dialog_set_close_response (dialog, "cancel");
+  if (node == NULL)
+    return;
 
-  /* A titled row rather than a bare entry, so the field looks like the rest
-   * of the interface instead of a box dropped into a dialog. */
-  row = adw_entry_row_new ();
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), "Name");
-  gtk_editable_set_text (GTK_EDITABLE (row), initial != NULL ? initial : "");
-  g_object_set (row, "activates-default", TRUE, NULL);
+  self->creating = FALSE;
 
-  group = adw_preferences_group_new ();
-  adw_preferences_group_add (ADW_PREFERENCES_GROUP (group), row);
-  adw_alert_dialog_set_extra_child (dialog, group);
+  box = row_box_for_node (self, node);
+  if (box != NULL)
+    {
+      GtkWidget *entry = g_object_get_data (G_OBJECT (box), "entry");
 
-  prompt = g_new0 (NamePrompt, 1);
-  prompt->self = g_object_ref (self);
-  prompt->node = node;
-  prompt->entry = GTK_EDITABLE (row);
-  prompt->callback = callback;
+      name = g_strdup (gtk_editable_get_text (GTK_EDITABLE (entry)));
+      show_editor (box, FALSE);
+    }
 
-  adw_alert_dialog_choose (dialog, GTK_WIDGET (self), NULL,
-                           on_name_response, prompt);
+  /* The stand-in goes either way: what replaces it, if anything, is the row
+   * the tree makes for the folder once it exists. */
+  if (creating && parent != NULL)
+    {
+      GListStore *children = xd_node_get_children (parent);
+      guint position;
+
+      if (g_list_store_find (children, node, &position))
+        g_list_store_remove (children, position);
+    }
+
+  if (!keep || name == NULL || *name == '\0')
+    return;
+
+  if (creating)
+    create_folder (self, parent, name);
+  else if (xd_node_get_kind (node) == XD_NODE_CHAT)
+    rename_chat (self, node, name);
+  else if (g_strcmp0 (name, xd_node_get_name (node)) != 0)
+    rename_folder (self, node, name);
+}
+
+static void
+begin_renaming (XdSidebar *self,
+                XdNode    *node)
+{
+  GtkWidget *box;
+
+  /* Anything already being named is settled first, and kept: starting on
+   * another row is not a way of taking back what was typed on this one. */
+  end_editing (self, TRUE);
+
+  g_set_object (&self->editing, node);
+  g_clear_object (&self->editing_parent);
+  self->creating = FALSE;
+
+  box = row_box_for_node (self, node);
+  if (box != NULL)
+    show_editor (box, TRUE);
+}
+
+/*
+ * Puts a row in @parent for a folder that does not exist yet.
+ *
+ * At the top of its folders: that is where a new one sorts to often enough,
+ * it is next to the row the user just acted on, and it pushes nothing else
+ * out of place.
+ */
+static void
+begin_creating_folder (XdSidebar *self,
+                       XdNode    *parent)
+{
+  g_autoptr (XdNode) placeholder = NULL;
+  GtkWidget *parent_box;
+
+  end_editing (self, TRUE);
+
+  placeholder = xd_node_new_folder (NULL, "", NULL);
+  xd_node_set_parent (placeholder, parent);
+
+  /* Nothing to type into if the folder it is going in is closed. */
+  parent_box = row_box_for_node (self, parent);
+  if (parent_box != NULL)
+    {
+      GtkTreeListRow *row = row_for_box (parent_box);
+
+      if (row != NULL)
+        gtk_tree_list_row_set_expanded (row, TRUE);
+    }
+
+  /* Set before the row is there: what starts the entry is the row being bound,
+   * and that can happen the moment it is in the store. */
+  g_set_object (&self->editing, placeholder);
+  g_set_object (&self->editing_parent, parent);
+  self->creating = TRUE;
+
+  g_list_store_insert (xd_node_get_children (parent), 0, placeholder);
+}
+
+static void
+on_editor_activate (GtkEntry *entry,
+                    gpointer  user_data)
+{
+  end_editing (user_data, TRUE);
+}
+
+static gboolean
+on_editor_key (GtkEventControllerKey *controller,
+               guint                  keyval,
+               guint                  keycode,
+               GdkModifierType        state,
+               gpointer               user_data)
+{
+  if (keyval != GDK_KEY_Escape)
+    return GDK_EVENT_PROPAGATE;
+
+  end_editing (user_data, FALSE);
+
+  return GDK_EVENT_STOP;
+}
+
+static void
+on_editor_focus_left (GtkEventControllerFocus *controller,
+                      gpointer                 user_data)
+{
+  XdSidebar *self = user_data;
+  GtkWidget *entry = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (controller));
+  GtkWidget *box = gtk_widget_get_parent (entry);
+
+  /* Rows are recycled, so an entry losing focus because its row was given to
+   * another node is not the row being named being finished with. */
+  if (self->editing == NULL || box == NULL ||
+      g_object_get_data (G_OBJECT (box), "node") != self->editing)
+    return;
+
+  end_editing (self, TRUE);
 }
 
 /* --- actions -------------------------------------------------------------- */
@@ -191,10 +374,7 @@ on_new_workspace (GtkWidget  *widget,
 {
   XdSidebar *self = XD_SIDEBAR (widget);
 
-  prompt_for_name (self, "New Workspace",
-                   "A workspace groups the folders and chats for one company, "
-                   "client or project.",
-                   "Create", NULL, NULL, create_folder);
+  begin_creating_folder (self, xd_fs_tree_get_root (self->tree));
 }
 
 static void
@@ -208,8 +388,7 @@ on_new_folder (GtkWidget  *widget,
   if (parent == NULL)
     return;
 
-  prompt_for_name (self, "New Folder", NULL, "Create", NULL,
-                   parent, create_folder);
+  begin_creating_folder (self, parent);
 }
 
 static void
@@ -240,8 +419,7 @@ on_rename (GtkWidget  *widget,
   if (node == NULL)
     return;
 
-  prompt_for_name (self, "Rename Folder", NULL, "Rename",
-                   xd_node_get_name (node), node, rename_folder);
+  begin_renaming (self, node);
 }
 
 /* --- chats ---------------------------------------------------------------- */
@@ -543,8 +721,7 @@ on_rename_chat (GtkWidget  *widget,
   if (chat == NULL)
     return;
 
-  prompt_for_name (self, "Rename Chat", NULL, "Rename",
-                   xd_node_get_name (chat), chat, rename_chat);
+  begin_renaming (self, chat);
 }
 
 static void
@@ -692,6 +869,55 @@ create_child_model (gpointer item,
  * naturally from the root down.
  */
 
+/*
+ * Is this row still one of the tree's, or did it go when something above it
+ * closed?
+ *
+ * A row that has been dropped keeps answering questions about itself -- its
+ * position, its item, all as they were -- so the only way to tell is to ask
+ * the model whether that is still the row it has there.
+ */
+static gboolean
+row_is_in_tree (XdSidebar      *self,
+                GtkTreeListRow *row)
+{
+  guint position = gtk_tree_list_row_get_position (row);
+  g_autoptr (GtkTreeListRow) here = NULL;
+
+  if (position == GTK_INVALID_LIST_POSITION)
+    return FALSE;
+
+  here = gtk_tree_list_model_get_row (self->tree_model, position);
+
+  return here == row;
+}
+
+/*
+ * Folders the user closed, as opposed to folders that were merely taken off
+ * screen by a parent closing.
+ *
+ * Collapsing a folder collapses everything under it, and GTK reports every one
+ * of those as a row that is no longer expanded -- which, taken at face value,
+ * means opening the parent again shows a subtree that has forgotten how it was
+ * left. The two are told apart afterwards: the row the user acted on is still
+ * in the tree, and the rows that went with it are not.
+ */
+static void
+forget_closed_folders (XdSidebar *self)
+{
+  GHashTableIter iter;
+  gpointer row, folder_id;
+
+  g_hash_table_iter_init (&iter, self->closing);
+  while (g_hash_table_iter_next (&iter, &row, &folder_id))
+    {
+      if (row_is_in_tree (self, row))
+        g_hash_table_remove (self->expanded, folder_id);
+    }
+
+  g_hash_table_remove_all (self->closing);
+}
+
 static gboolean
 save_expanded (gpointer user_data)
 {
@@ -701,6 +927,8 @@ save_expanded (gpointer user_data)
   gpointer id;
 
   self->save_expanded_id = 0;
+
+  forget_closed_folders (self);
 
   g_hash_table_iter_init (&iter, self->expanded);
   while (g_hash_table_iter_next (&iter, &id, NULL))
@@ -738,9 +966,19 @@ on_row_expanded (GtkTreeListRow *row,
     return;
 
   if (gtk_tree_list_row_get_expanded (row))
-    g_hash_table_add (self->expanded, g_strdup (folder_id));
+    {
+      g_hash_table_add (self->expanded, g_strdup (folder_id));
+
+      /* Opened again before the question of why it closed was settled. */
+      g_hash_table_remove (self->closing, row);
+    }
   else
-    g_hash_table_remove (self->expanded, folder_id);
+    {
+      /* Whether this counts as the user closing the folder cannot be decided
+       * yet: the same thing happens to every row under one that closed. */
+      g_hash_table_insert (self->closing, g_object_ref (row),
+                           g_strdup (folder_id));
+    }
 
   queue_save_expanded (self);
 }
@@ -829,8 +1067,10 @@ on_drag_prepare (GtkDragSource *source,
 {
   XdNode *node = node_for_row (user_data);
 
-  /* Chats belong to whichever folder they were made in; only folders move. */
-  if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER)
+  /* Chats belong to whichever folder they were made in; only folders move.
+   * A folder still being named is not on disk to be moved. */
+  if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER ||
+      xd_node_get_path (node) == NULL)
     return NULL;
 
   return gdk_content_provider_new_typed (XD_TYPE_NODE, node);
@@ -924,6 +1164,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
   GtkWidget *icon = gtk_image_new ();
   GtkWidget *spinner = gtk_spinner_new ();
   GtkWidget *label = gtk_label_new (NULL);
+  GtkWidget *entry = gtk_entry_new ();
   GtkWidget *popover = gtk_popover_menu_new_from_model (NULL);
 
   gtk_widget_add_css_class (popover, "xd-menu-popover");
@@ -933,9 +1174,33 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
   gtk_widget_set_hexpand (label, TRUE);
 
+  /* Built with every row and shown on the one being named, so a rename is the
+   * row itself rather than something that appears over it. */
+  gtk_widget_set_visible (entry, FALSE);
+  gtk_widget_set_hexpand (entry, TRUE);
+  gtk_widget_set_valign (entry, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class (entry, "xd-inline-entry");
+
   gtk_box_append (GTK_BOX (box), icon);
   gtk_box_append (GTK_BOX (box), spinner);
   gtk_box_append (GTK_BOX (box), label);
+  gtk_box_append (GTK_BOX (box), entry);
+
+  g_object_set_data (G_OBJECT (box), "label", label);
+  g_object_set_data (G_OBJECT (box), "entry", entry);
+
+  g_signal_connect (entry, "activate", G_CALLBACK (on_editor_activate), user_data);
+
+  {
+    GtkEventController *keys = gtk_event_controller_key_new ();
+    GtkEventController *focus = gtk_event_controller_focus_new ();
+
+    g_signal_connect (keys, "key-pressed", G_CALLBACK (on_editor_key), user_data);
+    gtk_widget_add_controller (entry, keys);
+
+    g_signal_connect (focus, "leave", G_CALLBACK (on_editor_focus_left), user_data);
+    gtk_widget_add_controller (entry, focus);
+  }
 
   gtk_widget_set_parent (popover, box);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
@@ -980,16 +1245,25 @@ on_item_teardown (GtkSignalListItemFactory *factory,
 static GMenuModel *
 build_row_menu (XdNode *node)
 {
-  g_autoptr (GVariant) target =
-    g_variant_ref_sink (g_variant_new_string (xd_node_get_path (node)));
+  const char *path = xd_node_get_path (node);
+  g_autoptr (GVariant) target = NULL;
   gboolean remote = is_remote_row (node);
-  GMenu *menu = g_menu_new ();
-  GMenu *section = g_menu_new ();
+  GMenu *menu;
+  GMenu *section;
   g_autoptr (GMenuItem) new_chat = NULL;
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) rename = NULL;
   g_autoptr (GMenuItem) settings = NULL;
   g_autoptr (GMenuItem) trash = NULL;
+
+  /* A row for a folder that is still being named stands for nothing yet, so
+   * there is nothing to do to it. */
+  if (path == NULL)
+    return NULL;
+
+  target = g_variant_ref_sink (g_variant_new_string (path));
+  menu = g_menu_new ();
+  section = g_menu_new ();
 
   new_chat = g_menu_item_new ("New Chat", NULL);
   g_menu_item_set_action_and_target_value (new_chat, "sidebar.new-chat", target);
@@ -1125,6 +1399,10 @@ on_item_bind (GtkSignalListItemFactory *factory,
      * every folder row was a column of dots down the tree. */
     gtk_popover_menu_set_menu_model (GTK_POPOVER_MENU (popover), menu);
   }
+
+  /* Recycled rows have to be told they are not the one being named, as much
+   * as the one being named has to be told that it is. */
+  show_editor (box, node == self->editing);
 
   if (xd_node_get_kind (node) == XD_NODE_FOLDER)
     {
@@ -1334,6 +1612,9 @@ xd_sidebar_dispose (GObject *object)
   if (self->remote != NULL)
     g_signal_handlers_disconnect_by_data (self->remote, self);
 
+  g_clear_object (&self->editing);
+  g_clear_object (&self->editing_parent);
+  g_clear_pointer (&self->closing, g_hash_table_unref);
   g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);
   g_clear_object (&self->tree_model);
@@ -1395,6 +1676,7 @@ xd_sidebar_init (XdSidebar *self)
 
   self->settings = g_settings_new (XD_APP_ID);
   self->expanded = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  self->closing = g_hash_table_new_full (NULL, NULL, g_object_unref, g_free);
 
   expanded = g_settings_get_strv (self->settings, "expanded-folders");
   for (gsize i = 0; expanded[i] != NULL; i++)

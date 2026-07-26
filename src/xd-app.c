@@ -364,7 +364,11 @@ static const char *XD_STYLE =
 
   /* A remote that is not answering. Still, not pulsing: it is a state the row
    * may sit in for hours, and nothing is being waited on. */
-  ".xd-offline { color: @error_color; }\n";
+  ".xd-offline { color: @error_color; }\n"
+
+  /* The entry a row becomes while it is being named. Sized to the row rather
+   * than to a form, so naming something does not make the tree jump. */
+  ".xd-inline-entry { min-height: 0; padding: 0 4px; }\n";
 
 static void
 load_style (void)
