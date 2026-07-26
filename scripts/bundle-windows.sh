@@ -11,11 +11,20 @@ set -euo pipefail
 STAGE="${1:?staging dir}"
 OUT="${2:?output dir}"
 PREFIX="${MINGW_PREFIX:?MINGW_PREFIX is not set}"
-STAGED_PREFIX="$STAGE$PREFIX"
+STAGED_EXE="$(find "$STAGE" -type f -path '*/bin/xd.exe' -print -quit)"
+
+if [ -z "$STAGED_EXE" ]; then
+  echo "bundle-windows: staged xd.exe not found under $STAGE" >&2
+  exit 1
+fi
+
+# Meson canonicalizes /ucrt64 to its native drive path before DESTDIR is
+# applied, so the staged prefix is not necessarily "$STAGE$MINGW_PREFIX".
+STAGED_PREFIX="${STAGED_EXE%/bin/xd.exe}"
 
 mkdir -p "$OUT"/{bin,etc,lib,share}
 
-install -Dm755 "$STAGED_PREFIX/bin/xd.exe" "$OUT/bin/xd.exe"
+install -Dm755 "$STAGED_EXE" "$OUT/bin/xd.exe"
 cp -a "$STAGED_PREFIX/share/." "$OUT/share/"
 
 # GSettings schemas used by GTK/libadwaita plus xd's installed schema.
