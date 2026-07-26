@@ -1,6 +1,7 @@
 #include "message-row.h"
 
 #include "util/markdown.h"
+#include "util/host-launch.h"
 
 struct _HyMessageRow
 {
@@ -76,6 +77,27 @@ kind_css_class (HyMessageKind kind)
     }
 }
 
+/*
+ * Opens the link with the host's browser, not the bundle's environment.
+ *
+ * GTK's own handler would spawn xdg-open under hy's rewritten environment,
+ * and a browser launched with the bundle's GTK and schemas is a different
+ * program than the one configured.
+ */
+static gboolean
+on_link_activated (GtkLabel   *label,
+                   const char *uri,
+                   gpointer    user_data)
+{
+  g_auto (GStrv) env = hy_host_environ ();
+  const char *argv[] = { "xdg-open", uri, NULL };
+
+  g_spawn_async (NULL, (char **) argv, env, G_SPAWN_SEARCH_PATH,
+                 NULL, NULL, NULL, NULL);
+
+  return TRUE;
+}
+
 HyMessageRow *
 hy_message_row_new (HyMessageKind  kind,
                     const char    *text)
@@ -93,6 +115,8 @@ hy_message_row_new (HyMessageKind  kind,
   gtk_widget_set_halign (self->spinner, GTK_ALIGN_START);
 
   self->body = GTK_LABEL (gtk_label_new (NULL));
+  g_signal_connect (self->body, "activate-link",
+                    G_CALLBACK (on_link_activated), NULL);
   render_body (self);
   gtk_label_set_wrap (self->body, TRUE);
   gtk_label_set_wrap_mode (self->body, PANGO_WRAP_WORD_CHAR);

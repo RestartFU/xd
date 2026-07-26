@@ -2,6 +2,8 @@
 
 #include "util/markdown.h"
 
+#include <string.h>
+
 static void
 assert_valid_markup (const char *markup)
 {
@@ -98,6 +100,20 @@ test_empty_and_null (void)
   g_assert_cmpstr (null_input, ==, "");
 }
 
+/* A link renders as one, and the URL is escaped as an attribute. */
+static void
+test_links (void)
+{
+  g_autofree char *out =
+    hy_markdown_to_pango ("see [PR #54](https://github.com/x/practice/pull/54) now");
+  g_autofree char *amp =
+    hy_markdown_to_pango ("[q](https://x.dev/a?b=1&c=2)");
+
+  g_assert_nonnull (strstr (out,
+    "<a href=\"https://github.com/x/practice/pull/54\">PR #54</a>"));
+  g_assert_nonnull (strstr (amp, "b=1&amp;c=2"));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -111,6 +127,8 @@ main (int   argc,
   g_test_add_func ("/markdown/fence", test_fenced_block);
   g_test_add_func ("/markdown/heading", test_heading);
   g_test_add_func ("/markdown/empty", test_empty_and_null);
+
+  g_test_add_func ("/markdown/links", test_links);
 
   return g_test_run ();
 }

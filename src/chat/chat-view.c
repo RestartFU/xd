@@ -1998,6 +1998,18 @@ hy_chat_view_set_chat (HyChatView *self,
   turn = current_turn (self);
   if (turn != NULL)
     {
+      /* The finished parts of this turn live only in memory until it ends,
+       * so the rebuilt transcript has to replay them or they vanish until
+       * the chat is next reopened. */
+      for (guint i = 0; i < turn->said->len; i++)
+        {
+          HyMessageRow *said =
+            append_row (self, HY_MESSAGE_ASSISTANT,
+                        g_ptr_array_index (turn->said, i));
+
+          hy_message_row_set_source (said, turn->label);
+        }
+
       turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->segment->str);
       hy_message_row_set_source (turn->row, turn->label);
       hy_message_row_set_waiting (turn->row, TRUE);

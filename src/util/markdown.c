@@ -65,6 +65,32 @@ append_inline (GString    *out,
               continue;
             }
         }
+      else if (p[0] == '[')
+        {
+          /* [text](url): a link, rendered as one. Both halves have to close
+             on the same line for it to count; anything else is prose that
+             happens to start with a bracket. */
+          const char *close = find_close (p + 1, "]");
+
+          if (close != NULL && close[1] == '(')
+            {
+              const char *end = find_close (close + 2, ")");
+
+              if (end != NULL && end > close + 2 &&
+                  memchr (p, '\n', end - p) == NULL)
+                {
+                  g_autofree char *label = g_strndup (p + 1, close - (p + 1));
+                  g_autofree char *url = g_strndup (close + 2, end - (close + 2));
+                  g_autofree char *href = g_markup_escape_text (url, -1);
+
+                  g_string_append_printf (out, "<a href=\"%s\">", href);
+                  append_inline (out, label);
+                  g_string_append (out, "</a>");
+                  p = end + 1;
+                  continue;
+                }
+            }
+        }
       else if (p[0] == '*')
         {
           const char *close = find_close (p + 1, "*");
