@@ -246,6 +246,10 @@ test_codex_argv (void)
   g_free (plain);
   plain = argv_to_string (backend, &spec);
   g_assert_nonnull (strstr (plain, "be brief\n\nhello"));
+  g_assert_nonnull (
+    strstr (plain, "Co-authored-by: Codex <codex@openai.com>"));
+  g_assert_nonnull (
+    strstr (plain, "unless the user specifically asks you not to"));
 }
 
 /*

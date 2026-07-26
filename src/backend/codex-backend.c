@@ -48,6 +48,13 @@ static const char *CODEX_PLAN_INSTRUCTIONS =
   "its structure showing.\n"
   "</plan_mode>";
 
+static const char *CODEX_COMMIT_INSTRUCTIONS =
+  "<commit_attribution>\n"
+  "When you create a Git commit, add this trailer to the commit message unless "
+  "the user specifically asks you not to:\n\n"
+  "Co-authored-by: Codex <codex@openai.com>\n"
+  "</commit_attribution>";
+
 static const char *
 codex_sandbox (AiAccess access)
 {
@@ -114,14 +121,17 @@ codex_build_argv (const AiBackend *self,
   if (resuming)
     g_ptr_array_add (argv, g_strdup (spec->resume_session_id));
 
-  /* Codex has no --append-system-prompt, so folder instructions ride along in
-   * front of the prompt itself -- as does the plan-only instruction, which it
-   * has no flag for either. */
+  /*
+   * Codex has no --append-system-prompt, so built-in and folder instructions
+   * ride in front of the prompt itself.
+   */
   {
     g_autoptr (GString) prompt = g_string_new (NULL);
 
     if (spec->access == AI_ACCESS_PLAN)
       g_string_append_printf (prompt, "%s\n\n", CODEX_PLAN_INSTRUCTIONS);
+
+    g_string_append_printf (prompt, "%s\n\n", CODEX_COMMIT_INSTRUCTIONS);
 
     if (spec->system_prompt != NULL)
       g_string_append_printf (prompt, "%s\n\n", spec->system_prompt);
