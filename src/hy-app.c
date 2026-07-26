@@ -177,8 +177,14 @@ static const char *HY_STYLE =
   ".hy-composer button, .hy-composer togglebutton,"
   " .hy-composer dropdown > button { background: none; border: none;"
   " box-shadow: none; padding: 4px 10px; }\n"
-  ".hy-composer togglebutton:checked { background: alpha(#3584e4, 0.20);"
-  " color: #7db3f0; }\n"
+  /* Settings, not statements: they say how the next message will be handled,
+   * which is worth reading once and then ignoring. */
+  ".hy-composer button label, .hy-composer togglebutton label,"
+  " .hy-composer dropdown label { color: alpha(#ffffff, 0.6); }\n"
+  ".hy-composer button:hover label, .hy-composer togglebutton:hover label"
+  " { color: alpha(#ffffff, 0.85); }\n"
+  ".hy-composer togglebutton:checked { background: alpha(#3584e4, 0.20); }\n"
+  ".hy-composer togglebutton:checked label { color: #8ab8f2; }\n"
   ".hy-composer button:hover, .hy-composer togglebutton:hover,"
   " .hy-composer dropdown > button:hover"
   " { background: alpha(currentColor, 0.08); }\n"
