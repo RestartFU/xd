@@ -1807,6 +1807,14 @@ on_local_change_settled (gpointer user_data)
 }
 
 static void
+queue_local_change (XdRemoteServer *self)
+{
+  g_clear_handle_id (&self->local_change_id, g_source_remove);
+  self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
+                                         on_local_change_settled, self);
+}
+
+static void
 on_local_change (GFileMonitor      *monitor,
                  GFile             *file,
                  GFile             *other_file,
@@ -1815,9 +1823,14 @@ on_local_change (GFileMonitor      *monitor,
 {
   XdRemoteServer *self = user_data;
 
-  g_clear_handle_id (&self->local_change_id, g_source_remove);
-  self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
-                                         on_local_change_settled, self);
+  queue_local_change (self);
+}
+
+static void
+on_local_storage_change (XdStorage *storage,
+                         gpointer   user_data)
+{
+  queue_local_change (user_data);
 }
 
 static void
@@ -1830,8 +1843,8 @@ watch_for_local_changes (XdRemoteServer *self)
   /* The database says when it changes; everyone reading it listens the same
    * way, this side included. */
   xd_storage_watch (self->storage);
-  g_signal_connect_swapped (self->storage, "changed",
-                            G_CALLBACK (on_local_change_settled), self);
+  g_signal_connect (self->storage, "changed",
+                    G_CALLBACK (on_local_storage_change), self);
 
   {
     g_autoptr (GFile) file = g_file_new_for_path (self->root_path);
