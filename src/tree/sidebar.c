@@ -778,7 +778,6 @@ on_item_setup (GtkSignalListItemFactory *factory,
   GtkWidget *icon = gtk_image_new ();
   GtkWidget *spinner = gtk_spinner_new ();
   GtkWidget *label = gtk_label_new (NULL);
-  GtkWidget *menu_button = gtk_menu_button_new ();
   GtkWidget *popover = gtk_popover_menu_new_from_model (NULL);
   GtkGesture *gesture;
 
@@ -786,14 +785,9 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
   gtk_widget_set_hexpand (label, TRUE);
 
-  gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (menu_button), "view-more-symbolic");
-  gtk_widget_add_css_class (menu_button, "flat");
-  gtk_widget_set_valign (menu_button, GTK_ALIGN_CENTER);
-
   gtk_box_append (GTK_BOX (box), icon);
   gtk_box_append (GTK_BOX (box), spinner);
   gtk_box_append (GTK_BOX (box), label);
-  gtk_box_append (GTK_BOX (box), menu_button);
 
   gtk_widget_set_parent (popover, box);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
@@ -908,7 +902,6 @@ on_item_bind (GtkSignalListItemFactory *factory,
   GtkWidget *icon = gtk_widget_get_first_child (box);
   GtkWidget *spinner = gtk_widget_get_next_sibling (icon);
   GtkWidget *label = gtk_widget_get_next_sibling (spinner);
-  GtkWidget *menu_button = gtk_widget_get_next_sibling (label);
   g_autoptr (HyNode) node = gtk_tree_list_row_get_item (row);
 
   gtk_tree_expander_set_list_row (GTK_TREE_EXPANDER (expander), row);
@@ -925,8 +918,10 @@ on_item_bind (GtkSignalListItemFactory *factory,
   g_object_set_data_full (G_OBJECT (item), "state-watch", g_object_ref (node),
                           g_object_unref);
 
-  /* Read back by the drag handlers, which run long after this returns. */
-  g_object_set_data (G_OBJECT (box), "node", node);
+  /* Read back by the drag handlers, which run long after this returns, and
+   * survives the row being recycled onto a different node. */
+  g_object_set_data_full (G_OBJECT (box), "node", g_object_ref (node),
+                          g_object_unref);
 
   g_object_set_data (G_OBJECT (item), "name-binding",
                      g_object_bind_property (node, "name", label, "label",
@@ -938,12 +933,8 @@ on_item_bind (GtkSignalListItemFactory *factory,
                                             : build_chat_menu (node);
     GtkWidget *popover = g_object_get_data (G_OBJECT (item), "context-menu");
 
-    /* Folders carry a visible button because they have more to offer; a chat
-     * has two entries and would just be clutter. Both answer a right-click. */
-    gtk_widget_set_visible (menu_button, is_folder);
-    if (is_folder)
-      gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), menu);
-
+    /* Right-click is the only way in, for folders as for chats: a button on
+     * every folder row was a column of dots down the tree. */
     gtk_popover_menu_set_menu_model (GTK_POPOVER_MENU (popover), menu);
   }
 

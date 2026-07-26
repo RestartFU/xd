@@ -46,7 +46,14 @@ struct _HyChatView
 
   HyStorage *storage;
   HyFsTree *tree;
-  HyNode *chat;                 /* unowned; owned by the tree */
+  /*
+   * Held, not borrowed.
+   *
+   * The tree drops and rebuilds chat nodes whenever a folder is rescanned,
+   * and the view goes on using this one until it is told otherwise -- so
+   * borrowing it means reading freed memory the moment the two disagree.
+   */
+  HyNode *chat;
 
   GHashTable *turns;            /* chat id -> Turn* */
 
@@ -1750,7 +1757,7 @@ hy_chat_view_set_chat (HyChatView *self,
   if (turn != NULL)
     turn->row = NULL;
 
-  self->chat = chat;
+  g_set_object (&self->chat, chat);
 
   if (chat == NULL)
     {
@@ -2031,6 +2038,7 @@ hy_chat_view_dispose (GObject *object)
 {
   HyChatView *self = HY_CHAT_VIEW (object);
 
+  g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
   g_clear_pointer (&self->queued, g_free);

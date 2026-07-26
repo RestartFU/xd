@@ -86,13 +86,15 @@ static const char *HY_STYLE =
    * every widget that follows the theme -- including ones hy never touches --
    * instead of restyling each in turn and missing some.
    */
-  "@define-color window_bg_color #0c0c0e;\n"
-  "@define-color view_bg_color #0c0c0e;\n"
-  "@define-color headerbar_bg_color #0c0c0e;\n"
-  "@define-color sidebar_bg_color #101013;\n"
-  "@define-color popover_bg_color #17171b;\n"
-  "@define-color dialog_bg_color #17171b;\n"
-  "@define-color card_bg_color #17171b;\n"
+  "@define-color window_bg_color #000000;\n"
+  "@define-color view_bg_color #000000;\n"
+  "@define-color headerbar_bg_color #000000;\n"
+  "@define-color sidebar_bg_color #050506;\n"
+  "@define-color popover_bg_color #0e0e10;\n"
+  "@define-color dialog_bg_color #0e0e10;\n"
+  "@define-color card_bg_color #0e0e10;\n"
+  "@define-color window_fg_color #f2f2f4;\n"
+  "@define-color view_fg_color #f2f2f4;\n"
 
   "window { font-size: 0.9em; }\n"
 
