@@ -129,8 +129,55 @@ jobs:
             xd-windows-x86_64.msi.sha256
             scripts/install.ps1
 
+  macos:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install native dependencies
+        run: >-
+          brew install
+          meson
+          ninja
+          pkgconf
+          gtk4
+          libadwaita
+          json-glib
+          sqlite
+          vte3
+          glib-networking
+          librsvg
+
+      - name: Build and test the Apple Silicon app
+        run: |
+          set -euo pipefail
+          meson setup build-macos \
+            --prefix="$PWD/macos-prefix" \
+            --buildtype=release \
+            -Dcommit="${GITHUB_SHA:0:7}"
+          meson compile -C build-macos
+          meson test -C build-macos --print-errorlogs
+          meson install -C build-macos --no-rebuild
+          ./scripts/bundle-macos.sh \
+            "$PWD/macos-prefix" "$PWD" release
+          ditto -c -k --sequesterRsrc --keepParent \
+            xd.app xd-macos-arm64.zip
+          shasum -a 256 xd-macos-arm64.zip \
+            > xd-macos-arm64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            xd-macos-arm64.zip
+            xd-macos-arm64.zip.sha256
+            scripts/install-macos.sh
+
   publish:
-    needs: [linux, windows]
+    needs: [linux, windows, macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -168,7 +215,16 @@ jobs:
           This first Windows build omits the embedded terminal and Windows
           daemon hosting.
 
-          Both downloads are self-contained. On Linux, the daemon is the same
+          macOS 14+, Apple Silicon:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
+          \`\`\`
+
+          The macOS app is a separate native Mach-O build. It includes the
+          embedded terminal; daemon hosting is not available there yet.
+
+          All downloads are self-contained. On Linux, the daemon is the same
           binary — \`./xd/bin/xd serve --pair\`.
           EOF
           )
@@ -180,7 +236,8 @@ jobs:
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
               xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
-              scripts/install.sh scripts/install.ps1
+              xd-macos-arm64.zip xd-macos-arm64.zip.sha256 \
+              scripts/install.sh scripts/install.ps1 scripts/install-macos.sh
           else
             gh release create "$tag" \
               --title "$tag" \
@@ -189,6 +246,9 @@ jobs:
               xd-linux-x86_64.tar.gz.sha256 \
               xd-windows-x86_64.msi \
               xd-windows-x86_64.msi.sha256 \
+              xd-macos-arm64.zip \
+              xd-macos-arm64.zip.sha256 \
               scripts/install.sh \
-              scripts/install.ps1
+              scripts/install.ps1 \
+              scripts/install-macos.sh
           fi

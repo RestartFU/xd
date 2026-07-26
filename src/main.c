@@ -3,10 +3,16 @@
 
 #include <stdio.h>
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
 #ifdef G_OS_WIN32
 #include <glib/gstdio.h>
 #include <glib/gwin32.h>
-#else
+#endif
+
+#if XD_HAS_SERVER
 #include "remote/server.h"
 #endif
 
@@ -52,6 +58,113 @@ prepare_windows_runtime (void)
 }
 #endif
 
+#ifdef __APPLE__
+static void
+remember_host_value (const char *name)
+{
+  g_autofree char *key = g_strconcat ("XD_HOST_", name, NULL);
+  const char *value = g_getenv (name);
+
+  g_setenv (key, value != NULL ? value : "", TRUE);
+}
+
+static char *
+expand_macos_template (const char *resources,
+                       const char *template_name,
+                       const char *output_name)
+{
+  g_autofree char *template_path =
+    g_build_filename (resources, "etc", template_name, NULL);
+  g_autofree char *template_text = NULL;
+  g_autofree char *cache_dir = NULL;
+  g_autofree char *output_path = NULL;
+  g_autoptr (GString) output = NULL;
+
+  if (!g_file_get_contents (template_path, &template_text, NULL, NULL))
+    return NULL;
+
+  output = g_string_new (template_text);
+  g_string_replace (output, "@BUNDLE@", resources, 0);
+
+  cache_dir = g_build_filename (g_get_user_cache_dir (), XD_DATA_NAME, NULL);
+  output_path = g_build_filename (cache_dir, output_name, NULL);
+  if (g_mkdir_with_parents (cache_dir, 0700) != 0 ||
+      !g_file_set_contents (output_path, output->str, output->len, NULL))
+    return NULL;
+
+  return g_steal_pointer (&output_path);
+}
+
+/*
+ * A .app moves as one directory, so paths compiled into Homebrew libraries
+ * cannot name runtime data. Resolve everything from Contents/MacOS/xd before
+ * GIO or GTK starts, while preserving the user's environment for child CLIs.
+ */
+static void
+prepare_macos_runtime (void)
+{
+  static const char *host_names[] = {
+    "XDG_DATA_DIRS", "LANG", "LC_ALL", "GIO_EXTRA_MODULES",
+    "GTK_IM_MODULE", "GTK_PATH",
+  };
+  uint32_t size = 0;
+  g_autofree char *executable = NULL;
+  g_autofree char *canonical = NULL;
+  g_autofree char *macos = NULL;
+  g_autofree char *contents = NULL;
+  g_autofree char *resources = NULL;
+  g_autofree char *share = NULL;
+  g_autofree char *gio_modules = NULL;
+  g_autofree char *schemas = NULL;
+  g_autofree char *pixbuf_cache = NULL;
+  g_autofree char *fontconfig_file = NULL;
+  g_autofree char *fontconfig_path = NULL;
+
+  if (_NSGetExecutablePath (NULL, &size) == 0 || size == 0)
+    return;
+
+  executable = g_malloc (size);
+  if (_NSGetExecutablePath (executable, &size) != 0)
+    return;
+
+  canonical = g_canonicalize_filename (executable, NULL);
+  macos = g_path_get_dirname (canonical);
+  contents = g_path_get_dirname (macos);
+  resources = g_build_filename (contents, "Resources", NULL);
+  if (!g_file_test (resources, G_FILE_TEST_IS_DIR))
+    return;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (host_names); i++)
+    remember_host_value (host_names[i]);
+
+  share = g_build_filename (resources, "share", NULL);
+  gio_modules = g_build_filename (resources, "lib", "gio", "modules", NULL);
+  schemas = g_build_filename (share, "glib-2.0", "schemas", NULL);
+  fontconfig_path = g_build_filename (resources, "etc", "fonts", NULL);
+  pixbuf_cache = expand_macos_template (
+    resources, "gdk-pixbuf-loaders.cache.in", "gdk-pixbuf-loaders.cache");
+  fontconfig_file = expand_macos_template (
+    resources, "fonts.conf.in", "fonts.conf");
+
+  g_setenv ("XDG_DATA_DIRS", share, TRUE);
+  g_setenv ("GIO_EXTRA_MODULES", gio_modules, TRUE);
+  g_setenv ("GSETTINGS_SCHEMA_DIR", schemas, TRUE);
+  g_setenv ("GSETTINGS_BACKEND", "keyfile", FALSE);
+  g_setenv ("GTK_DATA_PREFIX", resources, TRUE);
+  g_setenv ("GTK_EXE_PREFIX", resources, TRUE);
+  g_setenv ("GTK_PATH", resources, TRUE);
+  g_setenv ("GTK_IM_MODULE", "gtk-im-context-simple", TRUE);
+
+  if (pixbuf_cache != NULL)
+    g_setenv ("GDK_PIXBUF_MODULE_FILE", pixbuf_cache, TRUE);
+  if (fontconfig_file != NULL)
+    {
+      g_setenv ("FONTCONFIG_FILE", fontconfig_file, TRUE);
+      g_setenv ("FONTCONFIG_PATH", fontconfig_path, TRUE);
+    }
+}
+#endif
+
 /*
  * Loads the daemon's certificate, minting one the first time.
  *
@@ -61,6 +174,7 @@ prepare_windows_runtime (void)
  * certificate at pairing time, the way SSH pins a host key, so a CA would
  * add nothing but a bill.
  */
+#if XD_HAS_SERVER
 static GTlsCertificate *
 ensure_certificate (GError **error)
 {
@@ -90,6 +204,7 @@ ensure_certificate (GError **error)
 
   return g_tls_certificate_new_from_files (cert_path, key_path, error);
 }
+#endif
 
 static void
 print_version (void)
@@ -100,8 +215,8 @@ print_version (void)
 static int
 run_serve (int argc, char *argv[])
 {
-#ifdef G_OS_WIN32
-  fprintf (stderr, "xd serve is not available in the Windows build yet.\n");
+#if !XD_HAS_SERVER
+  fprintf (stderr, "xd serve is not available in this build yet.\n");
   return 1;
 #else
   g_autoptr (GError) error = NULL;
@@ -178,6 +293,9 @@ main (int argc, char *argv[])
 {
 #ifdef G_OS_WIN32
   prepare_windows_runtime ();
+#endif
+#ifdef __APPLE__
+  prepare_macos_runtime ();
 #endif
 
   /*

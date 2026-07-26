@@ -22,7 +22,7 @@ xd_core_sources = files(
   'chat/chat-title.c',
 )
 
-if not is_windows
+if has_server
   xd_core_sources += files(
     'remote/server.c',
     'remote/turn.c',
@@ -33,7 +33,7 @@ endif
 # Pango, but not GTK: the Markdown converter validates the markup it produces,
 # which needs the parser and nothing else.
 xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
-if not is_windows
+if has_server
   xd_core_deps += util_dep
 endif
 

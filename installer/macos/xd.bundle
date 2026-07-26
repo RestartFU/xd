@@ -1,0 +1,38 @@
+<?xml version="1.0" standalone="no"?>
+<app-bundle>
+  <meta>
+    <prefix name="default">${env:HOMEBREW_PREFIX}</prefix>
+    <prefix name="app">${env:XD_MACOS_PREFIX}</prefix>
+    <destination overwrite="yes">${env:XD_MACOS_DEST}</destination>
+    <run-install-name-tool/>
+    <gtk>gtk4</gtk>
+  </meta>
+
+  <plist>${env:XD_MACOS_PLIST}</plist>
+  <main-binary>${prefix:app}/bin/xd</main-binary>
+
+  <!-- Runtime modules are loaded dynamically, so linked-library discovery
+       cannot find them from the main executable. -->
+  <binary>
+    ${prefix}/lib/gio/modules/*.so
+  </binary>
+  <binary>
+    ${prefix}/lib/gdk-pixbuf-2.0/${pkg:gdk-pixbuf-2.0:gdk_pixbuf_binary_version}/loaders/*.so
+  </binary>
+
+  <data>
+    ${prefix}/share/glib-2.0/schemas
+  </data>
+  <data>
+    ${prefix}/share/icons
+  </data>
+  <data dest="${bundle}/Contents/Resources/share/glib-2.0/schemas">
+    ${prefix:app}/share/glib-2.0/schemas
+  </data>
+  <data dest="${bundle}/Contents/Resources/share/icons">
+    ${prefix:app}/share/icons
+  </data>
+  <data dest="${bundle}/Contents/Resources/xd.icns">
+    ${env:XD_MACOS_ICON}
+  </data>
+</app-bundle>

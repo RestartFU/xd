@@ -14,7 +14,7 @@ xd_tests = {
   'worktree': 'test-worktree.c',
 }
 
-if not is_windows
+if has_server
   xd_tests += {'remote': 'test-remote.c'}
 endif
 

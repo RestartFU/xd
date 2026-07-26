@@ -34,6 +34,8 @@ endif
 gnome = import('gnome')
 cc = meson.get_compiler('c')
 is_windows = host_machine.system() == 'windows'
+is_macos = host_machine.system() == 'darwin'
+has_server = not is_windows and not is_macos
 
 glib_dep      = dependency('glib-2.0', version: '>= 2.72')
 gio_dep       = dependency('gio-2.0')
@@ -46,11 +48,15 @@ sqlite_dep    = dependency('sqlite3')
 if is_windows
   gio_unix_dep = declare_dependency()
   vte_dep      = declare_dependency()
-  util_dep     = declare_dependency()
 else
   gio_unix_dep = dependency('gio-unix-2.0')
   vte_dep      = dependency('vte-2.91-gtk4')
+endif
+
+if has_server
   util_dep     = cc.find_library('util')
+else
+  util_dep     = declare_dependency()
 endif
 
 #
@@ -82,6 +88,7 @@ add_project_arguments([
   '-DXD_DATA_NAME="' + app_data_name + '"',
   '-DXD_VERSION="' + meson.project_version() + '"',
   '-DXD_HAS_TERMINAL=' + (is_windows ? '0' : '1'),
+  '-DXD_HAS_SERVER=' + (has_server ? '1' : '0'),
   '-D_GNU_SOURCE',
 ], language: 'c')
 

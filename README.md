@@ -56,6 +56,18 @@ daemon. Embedded terminals and hosting the daemon on Windows are not available
 yet. The terminal button is omitted instead of exposing a control that cannot
 work.
 
+macOS 14 or newer, Apple Silicon:
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
+```
+
+macOS needs its own native Mach-O build; the Linux ELF/glibc bundle cannot run
+there. The installer verifies the download and puts the self-contained app in
+`~/Applications/xd-nightly.app`. This first macOS build supports local chats,
+the embedded terminal, and connecting to a paired Linux daemon. Hosting the
+daemon on macOS is not available yet.
+
 ## Build
 
 Docker is the only requirement. Nothing is installed on the host.
