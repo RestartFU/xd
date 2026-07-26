@@ -1606,6 +1606,143 @@ both_queues_changed (gpointer user_data)
   return seen[0].changes > 0 && seen[1].changes > 0;
 }
 
+typedef struct
+{
+  const char *chat_id;
+  gboolean queue_cleared;
+  gboolean turn_started;
+} SteerEvents;
+
+static void
+on_steer_event (XdRemoteClient *client,
+                JsonObject     *event,
+                gpointer        user_data)
+{
+  SteerEvents *seen = user_data;
+  const char *name =
+    json_object_get_string_member_with_default (event, "event", NULL);
+  const char *chat_id =
+    json_object_get_string_member_with_default (event, "chat", NULL);
+
+  if (g_strcmp0 (chat_id, seen->chat_id) != 0)
+    return;
+
+  if (g_strcmp0 (name, "queued") == 0 &&
+      !json_object_has_member (event, "text"))
+    seen->queue_cleared = TRUE;
+  else if (g_strcmp0 (name, "turn-started") == 0)
+    seen->turn_started = TRUE;
+}
+
+static gboolean
+steer_started_queued_turn (gpointer user_data)
+{
+  SteerEvents *seen = user_data;
+
+  return seen->queue_cleared && seen->turn_started;
+}
+
+/*
+ * The client may know about a queued instruction before it knows a remote turn
+ * stopped. Clicking steer must still do work: cancel is sent regardless of the
+ * client's stale state, and an idle daemon promotes the persisted queue.
+ */
+static void
+test_steer_starts_an_idle_remote_queue (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  RemoteReply queued = { 0 };
+  RemoteReply steered = { 0 };
+  SteerEvents seen = { 0 };
+
+  daemon_start (&daemon);
+  seen.chat_id = daemon.chat_id;
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-steered\"}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  g_signal_connect (client, "event", G_CALLBACK (on_steer_event), &seen);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "queue");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "follow up now");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &queued);
+  }
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_cmpstr (stored->queued, ==, "follow up now");
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "cancel");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &steered);
+  }
+
+  wait_until (steer_started_queued_turn, &seen);
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_null (stored->queued);
+  }
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  g_signal_handlers_disconnect_by_data (client, &seen);
+  json_object_unref (queued.reply);
+  json_object_unref (steered.reply);
+  g_free (queued.wait.failure);
+  g_free (steered.wait.failure);
+  daemon_stop (&daemon);
+}
+
 /*
  * A device joining after work started must learn that state from the tree
  * snapshot. It never saw the earlier turn-started event.
@@ -1968,6 +2105,7 @@ main (int argc, char *argv[])
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
+  ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
   ADD ("/remote/an-interrupted-turn-keeps-its-timeline", test_an_interrupted_turn_keeps_its_timeline);
 

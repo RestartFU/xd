@@ -2162,11 +2162,16 @@ on_steer_clicked (GtkButton *button,
   XdChatView *self = user_data;
   Turn *turn = current_turn (self);
 
-  if (self->remote != NULL && self->remote_working)
+  /*
+   * Always ask the daemon for a remote chat. Its working event may be late or
+   * may have been missed, while the queued instruction is already persisted
+   * there. Cancel is idempotent, and the daemon also promotes an idle queue.
+   */
+  if (self->remote != NULL)
     cancel_remote_turn (self);
   else if (turn != NULL)
     xd_chat_session_cancel (turn->session);
-  else if (self->remote == NULL)
+  else
     send_queued (self);
   /* The queued text goes out when the turn reports that it has stopped. */
 }

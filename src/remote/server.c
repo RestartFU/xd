@@ -1200,6 +1200,15 @@ handle_cancel (Connection *connection,
   turn = g_hash_table_lookup (connection->server->turns, chat_id);
   if (turn != NULL)
     xd_daemon_turn_cancel (turn);
+  else
+    {
+      /*
+       * A client can miss the working event while its queued instruction has
+       * already reached this daemon. Treat cancel as the steer action it is:
+       * when nothing needs stopping, start that instruction immediately.
+       */
+      start_queued (connection->server, chat_id);
+    }
 
   send_done (connection, NULL);
 }
