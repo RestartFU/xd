@@ -232,6 +232,54 @@ pending_tool_free (gpointer data)
   g_free (pending);
 }
 
+/*
+ * The command as it would have been typed.
+ *
+ * Both CLIs run commands through a shell, so what arrives is the whole
+ * invocation -- /run/current-system/sw/bin/bash -lc "the actual command" --
+ * and the part worth reading is inside the quotes. Everything in front of it
+ * is the same on every line, which makes it the least useful thing occupying
+ * the most room.
+ */
+static char *
+unwrap_shell (const char *command)
+{
+  static const char *const flags[] = { " -lic ", " -lc ", " -ic ", " -c " };
+  g_autofree char *program = NULL;
+  const char *space = strchr (command, ' ');
+  const char *inner = NULL;
+  gsize length;
+
+  if (space == NULL)
+    return g_strdup (command);
+
+  /* Only when the thing being run really is a shell: anything else is a
+   * command whose first word matters. */
+  program = g_path_get_basename (g_strndup (command, space - command));
+  if (!g_str_has_suffix (program, "sh"))
+    return g_strdup (command);
+
+  for (gsize i = 0; i < G_N_ELEMENTS (flags) && inner == NULL; i++)
+    {
+      const char *at = strstr (command, flags[i]);
+
+      if (at != NULL)
+        inner = at + strlen (flags[i]);
+    }
+
+  if (inner == NULL)
+    return g_strdup (command);
+
+  /* The shell's argument is one quoted string; the quotes are the wrapper's,
+   * not the command's. */
+  length = strlen (inner);
+  if (length >= 2 && (inner[0] == '"' || inner[0] == '\'') &&
+      inner[length - 1] == inner[0])
+    return g_strndup (inner + 1, length - 2);
+
+  return g_strdup (inner);
+}
+
 char *
 ai_tool_summary (const char *tool_name,
                  JsonObject *input)
@@ -245,6 +293,7 @@ ai_tool_summary (const char *tool_name,
   const char *detail = NULL;
   g_autofree char *trimmed = NULL;
   g_autofree char *heading = NULL;
+  gboolean is_command = FALSE;
 
   if (tool_name == NULL)
     tool_name = "tool";
@@ -266,10 +315,39 @@ ai_tool_summary (const char *tool_name,
     }
 
   for (gsize i = 0; i < G_N_ELEMENTS (keys) && detail == NULL; i++)
-    detail = ai_json_get_string (input, keys[i]);
+    {
+      detail = ai_json_get_string (input, keys[i]);
+      is_command = detail != NULL && i == 0;
+    }
 
   if (detail == NULL || *detail == '\0')
     return g_strdup (tool_name);
+
+  /*
+   * A command is shown as a command.
+   *
+   * The name of the tool that ran it -- "Bash", "command_execution" -- says
+   * nothing the command does not, and repeating it down the left of every row
+   * pushes the part being read off the end of the line.
+   */
+  if (is_command)
+    {
+      g_autofree char *command = unwrap_shell (detail);
+
+      trimmed = g_strdup (command);
+      g_strdelimit (trimmed, "\n\r\t", ' ');
+      g_strstrip (trimmed);
+
+      if (g_utf8_strlen (trimmed, -1) > TOOL_DETAIL_LIMIT)
+        {
+          g_autofree char *shortened =
+            g_utf8_substring (trimmed, 0, TOOL_DETAIL_LIMIT);
+
+          return g_strdup_printf ("$ %s…", shortened);
+        }
+
+      return g_strdup_printf ("$ %s", trimmed);
+    }
 
   trimmed = g_strdup (detail);
   g_strdelimit (trimmed, "\n\r\t", ' ');

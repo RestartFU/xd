@@ -355,9 +355,25 @@ test_tool_summary_names_the_work (void)
   g_assert_true (json_parser_load_from_data (
     parser, "{\"command\":\"git status\",\"file_path\":\"ignored\"}", -1, NULL));
 
+  /* A command is shown as one: the name of the tool that ran it says nothing
+   * the command does not. */
   bash = ai_tool_summary ("Bash", json_node_get_object (json_parser_get_root (parser)));
-  g_assert_nonnull (strstr (bash, "Bash"));
-  g_assert_nonnull (strstr (bash, "git status"));
+  g_assert_cmpstr (bash, ==, "$ git status");
+
+  /* And the shell it was run through is the wrapper, not the work. */
+  {
+    g_autoptr (JsonParser) shell = json_parser_new ();
+    g_autofree char *summary = NULL;
+
+    g_assert_true (json_parser_load_from_data (
+      shell,
+      "{\"command\":\"/run/current-system/sw/bin/bash -lc \\\"rg -n 'x|y' src/\\\"\"}",
+      -1, NULL));
+
+    summary = ai_tool_summary ("command_execution",
+                               json_node_get_object (json_parser_get_root (shell)));
+    g_assert_cmpstr (summary, ==, "$ rg -n 'x|y' src/");
+  }
 
   /* Nothing identifying: the name alone, never a dangling separator. */
   bare = ai_tool_summary ("Think", NULL);
