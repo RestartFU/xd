@@ -1716,6 +1716,9 @@ test_a_joining_device_sees_an_active_turn (void)
     json_builder_end_object (builder);
 
     call_remote_request (joining, builder, &options);
+    g_assert_true (json_object_has_member (options.reply, "working_for"));
+    g_assert_cmpint (json_object_get_int_member (options.reply, "working_for"),
+                     >=, 0);
     g_assert_cmpstr (json_object_get_string_member (options.reply, "queued"),
                      ==, "follow up");
     json_object_unref (options.reply);

@@ -37,6 +37,7 @@ struct _XdDaemonTurn
   /* The same, plus the tools, in the order they happened: what a device that
    * joins mid-turn is shown. XdTurnItem*. */
   GPtrArray *items;
+  gint64 started_at;           /* monotonic usec */
   gboolean resumed;
 };
 
@@ -337,6 +338,8 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   g_return_val_if_fail (chat_id != NULL && prompt != NULL, FALSE);
   g_return_val_if_fail (self->session == NULL, FALSE);
 
+  self->started_at = g_get_monotonic_time ();
+
   chat = xd_storage_get_chat (self->storage, chat_id, error);
   if (chat == NULL)
     return FALSE;
@@ -443,6 +446,17 @@ xd_daemon_turn_is_running (XdDaemonTurn *self)
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), FALSE);
 
   return self->session != NULL && xd_chat_session_is_running (self->session);
+}
+
+gint64
+xd_daemon_turn_get_elapsed (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), 0);
+
+  if (self->started_at <= 0)
+    return 0;
+
+  return MAX ((g_get_monotonic_time () - self->started_at) / G_USEC_PER_SEC, 0);
 }
 
 const char *

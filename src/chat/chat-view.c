@@ -88,8 +88,11 @@ struct _XdChatView
    * which are the ones where "is it still going?" is the question.
    */
   GtkWidget *working_row;
+  GtkLabel *working_label;
+  guint working_timer;
 
   gboolean remote_working;
+  gint64 remote_started_at;       /* monotonic usec on this device */
   XdMessageRow *remote_row;
   GString *remote_said;
   char *remote_label;
@@ -296,16 +299,23 @@ reply_title (const XdChat *chat)
  * tools and replies reads as one unit of work with its cost at the top.
  */
 static char *
-format_worked_for (gint64 seconds)
+format_elapsed (const char *verb,
+                gint64      seconds)
 {
   if (seconds >= 3600)
-    return g_strdup_printf ("Worked for %dh %02dm", (int) (seconds / 3600),
+    return g_strdup_printf ("%s for %dh %02dm", verb, (int) (seconds / 3600),
                             (int) ((seconds % 3600) / 60));
   if (seconds >= 60)
-    return g_strdup_printf ("Worked for %dm %02ds", (int) (seconds / 60),
+    return g_strdup_printf ("%s for %dm %02ds", verb, (int) (seconds / 60),
                             (int) (seconds % 60));
 
-  return g_strdup_printf ("Worked for %ds", (int) seconds);
+  return g_strdup_printf ("%s for %ds", verb, (int) seconds);
+}
+
+static char *
+format_worked_for (gint64 seconds)
+{
+  return format_elapsed ("Worked", seconds);
 }
 
 static GtkWidget *
@@ -597,8 +607,8 @@ clear_transcript (XdChatView *self)
 {
   GtkWidget *child;
 
-  /* It is about to be taken out with everything else. */
-  self->working_row = NULL;
+  /* It is about to be taken out with everything else. Stop its timer too. */
+  set_working (self, FALSE);
 
   while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript))) != NULL)
     gtk_box_remove (self->transcript, child);
@@ -617,6 +627,34 @@ keep_working_last (XdChatView *self)
   g_object_unref (self->working_row);
 }
 
+static gint64
+working_seconds (XdChatView *self)
+{
+  Turn *turn = current_turn (self);
+  gint64 started_at = turn != NULL ? turn->started_at
+                                   : self->remote_started_at;
+
+  if (started_at <= 0)
+    return 0;
+
+  return MAX ((g_get_monotonic_time () - started_at) / G_USEC_PER_SEC, 0);
+}
+
+static gboolean
+update_working_label (gpointer user_data)
+{
+  XdChatView *self = user_data;
+  g_autofree char *text = NULL;
+
+  if (self->working_label == NULL)
+    return G_SOURCE_REMOVE;
+
+  text = format_elapsed ("Working", working_seconds (self));
+  gtk_label_set_label (self->working_label, text);
+
+  return G_SOURCE_CONTINUE;
+}
+
 /*
  * Shows that the turn is still going, for as long as it is.
  *
@@ -628,23 +666,45 @@ static void
 set_working (XdChatView *self,
              gboolean    working)
 {
-  if (working == (self->working_row != NULL))
-    return;
-
   if (!working)
     {
-      gtk_box_remove (self->transcript, self->working_row);
+      g_clear_handle_id (&self->working_timer, g_source_remove);
+      self->working_label = NULL;
+
+      if (self->working_row != NULL)
+        gtk_box_remove (self->transcript, self->working_row);
       self->working_row = NULL;
       return;
     }
 
-  self->working_row = GTK_WIDGET (xd_dots_new ());
-  gtk_widget_add_css_class (self->working_row, "xd-dots-large");
+  if (self->working_row != NULL)
+    {
+      update_working_label (self);
+      return;
+    }
+
+  {
+    GtkWidget *dots = GTK_WIDGET (xd_dots_new ());
+
+    self->working_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+    self->working_label = GTK_LABEL (gtk_label_new ("Working for 0s"));
+    gtk_label_set_xalign (self->working_label, 0.0f);
+    gtk_widget_add_css_class (GTK_WIDGET (self->working_label), "caption");
+    gtk_widget_add_css_class (GTK_WIDGET (self->working_label), "dim-label");
+    gtk_widget_add_css_class (dots, "caption");
+    gtk_widget_add_css_class (dots, "dim-label");
+    gtk_box_append (GTK_BOX (self->working_row),
+                    GTK_WIDGET (self->working_label));
+    gtk_box_append (GTK_BOX (self->working_row), dots);
+  }
+
   gtk_widget_set_halign (self->working_row, GTK_ALIGN_START);
   gtk_widget_set_margin_start (self->working_row, 24);
-  gtk_widget_set_margin_top (self->working_row, 4);
+  gtk_widget_set_margin_top (self->working_row, 6);
 
   gtk_box_append (self->transcript, self->working_row);
+  update_working_label (self);
+  self->working_timer = g_timeout_add_seconds (1, update_working_label, self);
 }
 
 /*
@@ -822,6 +882,7 @@ static void
 end_remote_turn (XdChatView *self)
 {
   self->remote_working = FALSE;
+  self->remote_started_at = 0;
   self->remote_row = NULL;
   g_clear_pointer (&self->remote_label, g_free);
 
@@ -860,12 +921,13 @@ on_remote_event (XdRemoteClient *client,
   if (g_strcmp0 (name, "turn-started") == 0)
     {
       /* Started here or on another device -- there is no difference to draw. */
+      load_remote_transcript (self);
       self->remote_working = TRUE;
+      self->remote_started_at = g_get_monotonic_time ();
       g_free (self->remote_label);
       self->remote_label =
         g_strdup (json_object_get_string_member_with_default (event, "label", NULL));
 
-      load_remote_transcript (self);
       set_working (self, TRUE);
       update_send_button (self);
       return;
@@ -1013,8 +1075,12 @@ on_remote_options_received (GObject      *source,
       const char *segment = member_string (reply, "segment", NULL);
       JsonArray *items = json_object_has_member (reply, "items")
         ? json_object_get_array_member (reply, "items") : NULL;
+      gint64 elapsed =
+        json_object_get_int_member_with_default (reply, "working_for", 0);
 
       self->remote_working = TRUE;
+      self->remote_started_at =
+        g_get_monotonic_time () - MAX (elapsed, 0) * G_USEC_PER_SEC;
 
       g_free (self->remote_label);
       self->remote_label = g_strdup (member_string (reply, "label", NULL));
@@ -1603,8 +1669,6 @@ start_turn (XdChatView *self,
   xd_message_row_set_source (turn->row, turn->label);
   xd_message_row_set_waiting (turn->row, TRUE);
 
-  set_working (self, TRUE);
-
   g_signal_connect (turn->session, "session-started",
                     G_CALLBACK (on_session_started), turn);
   g_signal_connect (turn->session, "text-delta",
@@ -1615,6 +1679,7 @@ start_turn (XdChatView *self,
                     G_CALLBACK (on_turn_finished), turn);
 
   g_hash_table_insert (self->turns, g_strdup (chat->id), turn);
+  set_working (self, TRUE);
 
   /* Resolved per turn rather than at creation, so editing a folder's
    * instructions or model takes effect on the next message instead of only on
@@ -2807,9 +2872,9 @@ xd_chat_view_set_chat (XdChatView *self,
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
   set_remote (self, NULL);
+  set_working (self, FALSE);
   end_remote_turn (self);
   set_queued_text (self, NULL);
-  self->working_row = NULL;
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
 
@@ -3183,6 +3248,8 @@ xd_chat_view_dispose (GObject *object)
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
 
+  g_clear_handle_id (&self->working_timer, g_source_remove);
+  self->working_label = NULL;
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
   g_clear_object (&self->remote);

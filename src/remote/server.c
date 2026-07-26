@@ -1660,6 +1660,8 @@ handle_chat (Connection *connection,
 
         json_builder_set_member_name (builder, "label");
         json_builder_add_string_value (builder, xd_daemon_turn_get_label (turn));
+        json_builder_set_member_name (builder, "working_for");
+        json_builder_add_int_value (builder, xd_daemon_turn_get_elapsed (turn));
 
         json_builder_set_member_name (builder, "items");
         json_builder_begin_array (builder);

@@ -396,10 +396,6 @@ static const char *XD_STYLE =
    * text its ascenders met that edge. A row of clearance costs nothing. */
   ".xd-sidebar listview { padding-top: 4px; }\n"
 
-  /* In a chat the dots stand where the reply will be, so they are sized like
-   * one rather than like the small marker a sidebar row can afford. */
-  ".xd-dots-large { font-size: 200%; letter-spacing: 2px; }\n"
-
   /* The entry a row becomes while it is being named. Sized to the row rather
    * than to a form, so naming something does not make the tree jump. */
   ".xd-inline-entry { min-height: 0; padding: 0 4px; }\n";

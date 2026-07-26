@@ -46,6 +46,9 @@ void          xd_daemon_turn_cancel    (XdDaemonTurn *self);
 
 gboolean      xd_daemon_turn_is_running (XdDaemonTurn *self);
 
+/* Whole seconds since this turn started, measured on daemon's monotonic clock. */
+gint64        xd_daemon_turn_get_elapsed (XdDaemonTurn *self);
+
 /*
  * Where @chat runs, once the folder chain has had its say.
  *
