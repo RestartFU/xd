@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libx11-data \
       adwaita-icon-theme \
       fonts-cantarell \
+      fonts-inter \
       fonts-dejavu-core \
       fontconfig \
       file \

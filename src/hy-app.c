@@ -121,7 +121,9 @@ static const char *HY_STYLE =
   " padding: 4px 12px; }\n"
   ".hy-context label { font-size: 0.85em; }\n"
 
-  "window { font-size: 0.9em; }\n"
+  /* Inter, which is what interfaces of this kind are set in and what the
+   * bundle now carries; Cantarell is the fallback it shipped with. */
+  "window { font-family: \"Inter\", \"Cantarell\", sans-serif; font-size: 0.9em; }\n"
 
   /* Flat: the window is one surface, so the bars that divide it are told
    * apart by spacing rather than by lines and shading. */
@@ -137,6 +139,27 @@ static const char *HY_STYLE =
   "listview > row label { padding: 0; }\n"
   "listview > row:selected { background: alpha(currentColor, 0.10); }\n"
   "listview > row:hover:not(:selected) { background: alpha(currentColor, 0.05); }\n"
+
+  /*
+   * The composer's controls are text, not boxes.
+   *
+   * Each one framed made a row of five buttons read as five separate things
+   * to decide; flat, they read as one line of settings with the send button
+   * at the end of it.
+   */
+  ".hy-composer button, .hy-composer togglebutton,"
+  " .hy-composer dropdown > button { background: none; border: none;"
+  " box-shadow: none; padding: 4px 10px; }\n"
+  ".hy-composer togglebutton:checked { background: alpha(#3584e4, 0.20);"
+  " color: #7db3f0; }\n"
+  ".hy-composer button:hover, .hy-composer togglebutton:hover,"
+  " .hy-composer dropdown > button:hover"
+  " { background: alpha(currentColor, 0.08); }\n"
+  ".hy-composer separator { margin: 6px 2px; }\n"
+
+  /* Except the one that sends, which is the action rather than a setting. */
+  ".hy-composer button.suggested-action { background: #3584e4; color: #ffffff;"
+  " border-radius: 9999px; min-width: 28px; min-height: 28px; padding: 4px; }\n"
 
   /* Controls: pills, sized for a toolbar rather than a dialog. */
   "button, dropdown > button, togglebutton { border-radius: 8px; }\n"

@@ -88,7 +88,8 @@ cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 # reports FC_FILE without the sysroot prefix, so cairo then fails to open every
 # font. Pointing FONTCONFIG_FILE/PATH at the bundle is the workable option.
 mkdir -p "$OUT/share/fonts"
-for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu; do
+for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu \
+           /usr/share/fonts/truetype/inter /usr/share/fonts/opentype/inter; do
   [ -d "$dir" ] && cp -a "$dir" "$OUT/share/fonts/"
 done
 

@@ -2028,6 +2028,7 @@ build_composer (HyChatView *self)
   gtk_box_append (GTK_BOX (column), self->queued_bar);
   gtk_box_append (GTK_BOX (column), self->attachments_bar);
   gtk_box_append (GTK_BOX (column), scroller);
+  gtk_widget_add_css_class (toolbar, "hy-composer");
   gtk_box_append (GTK_BOX (column), toolbar);
 
   gtk_frame_set_child (GTK_FRAME (frame), column);
