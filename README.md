@@ -26,7 +26,7 @@ subprocesses, streaming their JSONL output into the UI.
 Linux, x86_64:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/master/scripts/install.sh | sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 ```
 
 That fetches the latest nightly, puts it in `~/.local/opt/xd-nightly`, adds the

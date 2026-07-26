@@ -2,11 +2,15 @@
 #
 # Installs xd on Linux, from the prebuilt bundle:
 #
-#   curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/master/scripts/install.sh | sh
+#   curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 #
 # and takes it away again with:
 #
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
+#
+# Published beside the bundle it installs, from the same commit, so the two can
+# never be from different builds. The tag is rolling: that link is always the
+# most recent nightly.
 #
 # Nothing is compiled and nothing is needed on the machine: the bundle carries
 # its own GTK, glib and everything under them, so it runs on any glibc x86_64

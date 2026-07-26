@@ -7,6 +7,10 @@
 #
 #   https://github.com/<owner>/<repo>/releases/download/nightly/xd-nightly-linux-x86_64.tar.gz
 #
+# The installer is published beside it, from the same commit, so the script and
+# the bundle it installs can never be from different builds. (Not /latest/: that
+# resolves to the newest full release, and a nightly is a prerelease.)
+#
 # Built as the nightly profile, which gives it its own application id, settings,
 # data directory and workspaces -- so installing it does not disturb a release
 # on the same machine, and neither one edits the other's chats.
@@ -68,7 +72,7 @@ jobs:
           Install it:
 
           \`\`\`
-          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/scripts/install.sh | sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.sh | sh
           \`\`\`
 
           Or unpack it yourself:
@@ -96,4 +100,5 @@ jobs:
             --title "Nightly $(date -u +%Y-%m-%d)" \
             --notes "$notes" \
             xd-nightly-linux-x86_64.tar.gz \
-            xd-nightly-linux-x86_64.tar.gz.sha256
+            xd-nightly-linux-x86_64.tar.gz.sha256 \
+            scripts/install.sh

@@ -22,5 +22,12 @@ foreach name, source : xd_tests
     link_with: xd_core_lib,
   )
 
-  test(name, exe, env: test_env, args: ['--tap'], protocol: 'tap')
+  # The remote suite talks over real sockets with real TLS, mints certificates
+  # and waits on file monitors; meson's 30 seconds is meant for unit tests.
+  test(name, exe,
+    env: test_env,
+    args: ['--tap'],
+    protocol: 'tap',
+    timeout: name == 'remote' ? 180 : 30,
+  )
 endforeach

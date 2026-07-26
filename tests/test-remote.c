@@ -153,22 +153,38 @@ typedef struct
   char *failure;
 } Exchange;
 
+/*
+ * Sends a request and reads the answer to it.
+ *
+ * Events are stepped over on the way. The daemon talks without being asked --
+ * a turn saying something, a tree that changed under it -- and one of those
+ * arriving between a request and its reply is not the reply. Any client has to
+ * do this; reading the next line and hoping is how the answers end up belonging
+ * to the wrong questions.
+ */
 static JsonObject *
 round_trip (GDataInputStream *in,
             GOutputStream    *out,
             const char       *request,
             JsonParser       *parser)
 {
-  g_autofree char *line = NULL;
-
   g_output_stream_write_all (out, request, strlen (request), NULL, NULL, NULL);
   g_output_stream_write_all (out, "\n", 1, NULL, NULL, NULL);
 
-  line = g_data_input_stream_read_line_utf8 (in, NULL, NULL, NULL);
-  if (line == NULL || !json_parser_load_from_data (parser, line, -1, NULL))
-    return NULL;
+  for (;;)
+    {
+      g_autofree char *line = NULL;
+      JsonObject *object;
 
-  return json_node_get_object (json_parser_get_root (parser));
+      line = g_data_input_stream_read_line_utf8 (in, NULL, NULL, NULL);
+      if (line == NULL || !json_parser_load_from_data (parser, line, -1, NULL))
+        return NULL;
+
+      object = json_node_get_object (json_parser_get_root (parser));
+
+      if (!json_object_has_member (object, "event"))
+        return object;
+    }
 }
 
 static gboolean
@@ -305,8 +321,22 @@ test_pair_hello_tree (void)
   exchange.code = xd_remote_server_arm_pairing (daemon.server, 60);
 
   thread = g_thread_new ("client", client_thread, &exchange);
-  while (!exchange.done)
-    g_main_context_iteration (NULL, TRUE);
+
+  /* The client half of this one blocks on reads in a thread of its own, so a
+   * daemon that never answers would otherwise be a test that never ends. */
+  {
+    Wait wait = { 0 };
+    guint id = g_timeout_add_seconds (30, on_wait_elapsed, &wait);
+
+    while (!exchange.done && !wait.timed_out)
+      g_main_context_iteration (NULL, TRUE);
+
+    if (!wait.timed_out)
+      g_source_remove (id);
+
+    g_assert_false (wait.timed_out);
+  }
+
   g_thread_join (thread);
 
   if (exchange.failure != NULL)
