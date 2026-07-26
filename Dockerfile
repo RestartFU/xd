@@ -44,13 +44,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- stage 2: compile -------------------------------------------------------
 FROM deps AS build
 
+# Which build this is: "nightly" gives the app its own id, settings, data
+# directory and workspaces, so it installs beside a release rather than over
+# it. See meson_options.txt.
+ARG PROFILE=default
+
 WORKDIR /src
-COPY meson.build ./
+COPY meson.build meson_options.txt ./
 COPY data ./data
 COPY src ./src
 COPY tests ./tests
 
-RUN meson setup /build --prefix=/usr --buildtype=release \
+RUN meson setup /build --prefix=/usr --buildtype=release -Dprofile="$PROFILE" \
  && meson compile -C /build
 
 # --- stage 3: headless tests (CI gate: docker build --target test .) --------

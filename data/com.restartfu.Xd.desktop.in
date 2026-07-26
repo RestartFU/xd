@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=xd
+Name=@APP_NAME@
 Comment=Workspace-organized AI conversations
 Exec=xd
 Icon=@APP_ID@

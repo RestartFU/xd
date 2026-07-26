@@ -1,5 +1,6 @@
 #include "xd-app.h"
 #include "remote/server.h"
+#include "util/app-paths.h"
 
 #include <stdio.h>
 
@@ -15,11 +16,9 @@
 static GTlsCertificate *
 ensure_certificate (GError **error)
 {
-  g_autofree char *dir = g_build_filename (g_get_user_data_dir (), "xd", NULL);
+  const char *dir = xd_app_data_dir ();
   g_autofree char *cert_path = g_build_filename (dir, "server-cert.pem", NULL);
   g_autofree char *key_path = g_build_filename (dir, "server-key.pem", NULL);
-
-  g_mkdir_with_parents (dir, 0700);
 
   if (!g_file_test (cert_path, G_FILE_TEST_EXISTS))
     {
@@ -73,9 +72,9 @@ run_serve (int argc, char *argv[])
     }
 
   if (root == NULL)
-    root = g_build_filename (g_get_home_dir (), "Workspaces", NULL);
+    root = xd_app_workspaces_root ();
 
-  db_path = g_build_filename (g_get_user_data_dir (), "xd", "chats.db", NULL);
+  db_path = xd_app_database_path ();
   storage = xd_storage_new (db_path, &error);
   if (storage == NULL)
     {

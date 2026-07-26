@@ -8,7 +8,28 @@ project('xd', 'c',
   ],
 )
 
-app_id = 'com.restartfu.Xd'
+#
+# What this build is.
+#
+# A nightly installs beside a release rather than over it: its own application
+# id, its own settings, its own data directory and therefore its own
+# workspaces and chats. The settings path of the release build is left exactly
+# as it was -- it is where existing installs keep everything, including the
+# token a paired device is known by.
+#
+profile = get_option('profile')
+
+if profile == 'nightly'
+  app_id        = 'com.restartfu.Xd.Nightly'
+  app_name      = 'xd (Nightly)'
+  app_data_name = 'xd-nightly'
+  settings_path = '/com/restartfu/XdNightly/'
+else
+  app_id        = 'com.restartfu.Xd'
+  app_name      = 'xd'
+  app_data_name = 'xd'
+  settings_path = '/com/restartfu/Hy/'
+endif
 
 gnome = import('gnome')
 cc = meson.get_compiler('c')
@@ -26,6 +47,8 @@ vte_dep       = dependency('vte-2.91-gtk4')
 add_project_arguments([
   '-DG_LOG_DOMAIN="xd"',
   '-DXD_APP_ID="' + app_id + '"',
+  '-DXD_APP_NAME="' + app_name + '"',
+  '-DXD_DATA_NAME="' + app_data_name + '"',
   '-DXD_VERSION="' + meson.project_version() + '"',
   '-D_GNU_SOURCE',
 ], language: 'c')

@@ -1,0 +1,7 @@
+option('profile',
+  type: 'combo',
+  choices: ['default', 'nightly'],
+  value: 'default',
+  description: 'Which build this is. A nightly installs beside a release: ' +
+               'its own application id, settings, data directory and workspaces.',
+)

@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="com.restartfu.Xd" path="/com/restartfu/Hy/">
+  <schema id="@APP_ID@" path="@SETTINGS_PATH@">
 
     <key name="workspaces-root" type="s">
       <default>''</default>
       <summary>Workspaces root directory</summary>
       <description>
-        Directory holding the workspace tree. Empty means the default,
-        $HOME/Workspaces.
+        Directory holding the workspace tree. Empty means the default, which
+        is inside the application's own data directory -- separate per build,
+        so a nightly does not share a release's work.
       </description>
     </key>
 

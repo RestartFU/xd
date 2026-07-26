@@ -11,7 +11,9 @@ set -e
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
-RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/xd-$(id -u)"
+# Per bundle, not just per user: a nightly and a release installed side by side
+# would otherwise rewrite each other's caches while both are running.
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/xd-$(id -u)/$(basename "$HERE")"
 mkdir -p "$RUNTIME"
 
 # These caches store absolute paths, so they are rewritten per launch from

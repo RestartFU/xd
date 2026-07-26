@@ -7,6 +7,7 @@
 #include "storage/storage.h"
 #include "tree/fs-tree.h"
 #include "tree/sidebar.h"
+#include "util/app-paths.h"
 
 struct _XdWindow
 {
@@ -32,15 +33,14 @@ G_DEFINE_FINAL_TYPE (XdWindow, xd_window, ADW_TYPE_APPLICATION_WINDOW)
  * directory out of the stored configuration. */
 static char *
 resolve_root (GSettings  *settings,
-              const char *key,
-              const char *fallback_name)
+              const char *key)
 {
   g_autofree char *configured = g_settings_get_string (settings, key);
 
   if (configured != NULL && *configured != '\0')
     return g_steal_pointer (&configured);
 
-  return g_build_filename (g_get_home_dir (), fallback_name, NULL);
+  return xd_app_workspaces_root ();
 }
 
 /*
@@ -274,7 +274,7 @@ xd_window_new (XdApplication *app)
   if (g_settings_get_boolean (self->settings, "window-maximized"))
     gtk_window_maximize (GTK_WINDOW (self));
 
-  db_path = g_build_filename (g_get_user_data_dir (), "xd", "chats.db", NULL);
+  db_path = xd_app_database_path ();
   self->storage = xd_storage_new (db_path, &error);
   if (self->storage == NULL)
     {
@@ -291,7 +291,7 @@ xd_window_new (XdApplication *app)
       return self;
     }
 
-  workspaces_root = resolve_root (self->settings, "workspaces-root", "Workspaces");
+  workspaces_root = resolve_root (self->settings, "workspaces-root");
   self->tree = xd_fs_tree_new (workspaces_root, self->storage);
 
   self->sidebar = xd_sidebar_new (self->tree);

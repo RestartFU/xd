@@ -392,13 +392,14 @@ xd_application_startup (GApplication *app)
    * The project was called hy first. Anything it left behind is moved
    * across rather than abandoned: a rename should not read as data loss.
    */
-  {
-    g_autofree char *was = g_build_filename (g_get_user_data_dir (), "hy", NULL);
-    g_autofree char *now = g_build_filename (g_get_user_data_dir (), "xd", NULL);
+  if (g_strcmp0 (XD_DATA_NAME, "xd") == 0)
+    {
+      g_autofree char *was = g_build_filename (g_get_user_data_dir (), "hy", NULL);
+      g_autofree char *now = g_build_filename (g_get_user_data_dir (), "xd", NULL);
 
-    if (g_file_test (was, G_FILE_TEST_IS_DIR) && !g_file_test (now, G_FILE_TEST_EXISTS))
-      g_rename (was, now);
-  }
+      if (g_file_test (was, G_FILE_TEST_IS_DIR) && !g_file_test (now, G_FILE_TEST_EXISTS))
+        g_rename (was, now);
+    }
 
   self->settings = g_settings_new (XD_APP_ID);
 

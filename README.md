@@ -21,6 +21,24 @@ The app does not talk to any AI API itself. It drives the CLIs already
 installed and authenticated on your machine — `claude` and `codex` — as
 subprocesses, streaming their JSONL output into the UI.
 
+## Install
+
+Linux, x86_64:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/master/scripts/install.sh | sh
+```
+
+That fetches the latest nightly, puts it in `~/.local/opt/xd-nightly`, adds the
+command `xd-nightly` and an entry in the app menu. No root, no package manager,
+and nothing compiled: the bundle carries its own GTK and everything under it, so
+it runs anywhere with glibc.
+
+Chats and workspaces live in `~/.local/share/xd-nightly`, which is the nightly's
+own — it installs beside a release rather than over it, and neither edits the
+other's work. `sh -s -- --uninstall` takes it away again and leaves that
+directory alone.
+
 ## Build
 
 Docker is the only requirement. Nothing is installed on the host.

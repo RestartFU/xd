@@ -5,7 +5,11 @@
 # without a GTK stack of its own. Published under a rolling "nightly" tag, so
 # the download link never changes:
 #
-#   https://github.com/<owner>/<repo>/releases/download/nightly/xd-linux-x86_64.tar.gz
+#   https://github.com/<owner>/<repo>/releases/download/nightly/xd-nightly-linux-x86_64.tar.gz
+#
+# Built as the nightly profile, which gives it its own application id, settings,
+# data directory and workspaces -- so installing it does not disturb a release
+# on the same machine, and neither one edits the other's chats.
 #
 # The headless suite runs first and the release only happens if it passes: a
 # nightly that does not work is worse than no nightly.
@@ -39,16 +43,17 @@ jobs:
         run: ./scripts/test.sh
 
       - name: Build the bundle
-        run: ./scripts/build.sh
+        run: ./scripts/build.sh --build-arg PROFILE=nightly
 
       - name: Pack it
         run: |
           set -euo pipefail
           # Named so it unpacks into a directory rather than over the one it
-          # was unpacked in.
-          mv dist xd
-          tar -czf xd-linux-x86_64.tar.gz xd
-          sha256sum xd-linux-x86_64.tar.gz > xd-linux-x86_64.tar.gz.sha256
+          # was unpacked in, and named for the build so it cannot be mistaken
+          # for a release.
+          mv dist xd-nightly
+          tar -czf xd-nightly-linux-x86_64.tar.gz xd-nightly
+          sha256sum xd-nightly-linux-x86_64.tar.gz > xd-nightly-linux-x86_64.tar.gz.sha256
 
       - name: Publish
         env:
@@ -60,15 +65,23 @@ jobs:
           notes=$(cat <<EOF
           Built from \`${GITHUB_SHA:0:7}\` — $subject
 
-          Unpack and run:
+          Install it:
 
           \`\`\`
-          tar -xzf xd-linux-x86_64.tar.gz
-          ./xd/xd.sh
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/scripts/install.sh | sh
           \`\`\`
 
-          Self-contained: no GTK, glib or VTE needed on the host. The daemon is
-          the same binary — \`./xd/bin/xd serve --pair\`.
+          Or unpack it yourself:
+
+          \`\`\`
+          tar -xzf xd-nightly-linux-x86_64.tar.gz
+          ./xd-nightly/xd.sh
+          \`\`\`
+
+          Self-contained: no GTK, glib or VTE needed on the host. Installs beside
+          a release rather than over it -- its own settings, chats and
+          workspaces. The daemon is the same binary —
+          \`./xd-nightly/bin/xd serve --pair\`.
           EOF
           )
 
@@ -82,5 +95,5 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Nightly $(date -u +%Y-%m-%d)" \
             --notes "$notes" \
-            xd-linux-x86_64.tar.gz \
-            xd-linux-x86_64.tar.gz.sha256
+            xd-nightly-linux-x86_64.tar.gz \
+            xd-nightly-linux-x86_64.tar.gz.sha256

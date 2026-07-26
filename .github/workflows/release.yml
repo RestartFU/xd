@@ -1,0 +1,80 @@
+# A release, cut from a tag.
+#
+# The same bundle the nightly publishes, built from the default profile -- so
+# it installs as "xd", keeps its data in ~/.local/share/xd, and a nightly sitting
+# beside it stays out of its way.
+#
+# Tag and push to cut one:
+#
+#   git tag -a v0.2.0 -m "..." && git push origin v0.2.0
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to build a release from
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the bundle
+        run: ./scripts/build.sh
+
+      - name: Pack it
+        run: |
+          set -euo pipefail
+          mv dist xd
+          tar -czf xd-linux-x86_64.tar.gz xd
+          sha256sum xd-linux-x86_64.tar.gz > xd-linux-x86_64.tar.gz.sha256
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="${{ inputs.tag || github.ref_name }}"
+
+          notes=$(cat <<EOF
+          Install it:
+
+          \`\`\`
+          tar -xzf xd-linux-x86_64.tar.gz
+          ./xd/xd.sh
+          \`\`\`
+
+          Self-contained: no GTK, glib or VTE needed on the host. The daemon is
+          the same binary — \`./xd/bin/xd serve --pair\`.
+          EOF
+          )
+
+          # A tag is published once. Re-running against one that already has a
+          # release replaces its files rather than making a second release of
+          # the same thing.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber \
+              xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes "$notes" \
+              xd-linux-x86_64.tar.gz \
+              xd-linux-x86_64.tar.gz.sha256
+          fi
