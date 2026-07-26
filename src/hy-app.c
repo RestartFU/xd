@@ -160,10 +160,11 @@ static const char *HY_STYLE =
    * keeps its width the rest of the time. */
   /* opacity rather than background: the theme paints the separator with a
    * background of its own that outlives a background override, and opacity
-   * removes whatever it is painted with. */
+   * removes whatever it is painted with. Never shown, not even on hover --
+   * the cursor already changes to a resize arrow there, which is all the
+   * telling a divider needs. */
   "paned > separator { min-width: 2px; min-height: 2px; border: none;"
-  " background: alpha(#ffffff, 0.14); opacity: 0; }\n"
-  "paned > separator:hover { opacity: 1; }\n"
+  " opacity: 0; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
