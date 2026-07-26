@@ -46,9 +46,15 @@ apply_colours (HyTerminalPanel *self)
   /* VTE defaults to black on white whatever the rest of the window is doing,
    * so the theme has to be followed by hand. */
   gdk_rgba_parse (&foreground, dark ? "#ffffff" : "#1d1d1d");
-  /* The same base as the rest of the window: a terminal at pure black
-   * reads as a hole cut in the panel next to it. */
-  gdk_rgba_parse (&background, dark ? "#0a0a0c" : "#ffffff");
+  /*
+   * A step above the window, like every other raised surface.
+   *
+   * The terminal is a panel sitting on the window, not a hole in it, so it
+   * takes the same lift the composer and the cards do -- roughly four percent
+   * of white over the base, matched by hand because VTE takes a colour rather
+   * than following the stylesheet.
+   */
+  gdk_rgba_parse (&background, dark ? "#121216" : "#ffffff");
 
   vte_terminal_set_colors (self->terminal, &foreground, &background, NULL, 0);
 }
