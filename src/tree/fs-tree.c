@@ -378,125 +378,6 @@ on_storage_changed (XdStorage *storage,
   reload_all_chats (self, self->root);
 }
 
-/*
- * Brings a folder's chats back in line with the database.
- *
- * Chats are rows in a file that other things write: the daemon running a turn
- * for another device, a second window. Folders have directory monitors to
- * notice that sort of thing; chats had nothing, so a chat made elsewhere never
- * appeared and a chat deleted elsewhere stayed on screen.
- *
- * Nodes are matched by id and kept, so the chat being read stays the same
- * object -- what changes is the list it is in.
- */
-static void
-reload_chats (XdFsTree *self,
-              XdNode   *folder)
-{
-  g_autoptr (GPtrArray) rows = NULL;
-  g_autoptr (GPtrArray) desired = g_ptr_array_new ();
-  g_autoptr (GPtrArray) gone = g_ptr_array_new_with_free_func (g_object_unref);
-  GListStore *children = xd_node_get_children (folder);
-  GListModel *model = G_LIST_MODEL (children);
-  const char *folder_id = xd_node_get_folder_id (folder);
-  guint start;
-
-  if (self->storage == NULL || folder_id == NULL)
-    return;
-
-  rows = xd_storage_list_chats (self->storage, folder_id, NULL);
-  if (rows == NULL)
-    return;
-
-  start = chat_section_start (folder);
-
-  for (guint i = 0; i < rows->len; i++)
-    {
-      const XdChat *chat = g_ptr_array_index (rows, i);
-      XdNode *node = NULL;
-
-      for (guint at = start; at < g_list_model_get_n_items (model); at++)
-        {
-          g_autoptr (XdNode) child = g_list_model_get_item (model, at);
-
-          if (g_strcmp0 (xd_node_get_chat_id (child), chat->id) == 0)
-            {
-              node = child;
-              break;
-            }
-        }
-
-      if (node == NULL)
-        {
-          node = xd_node_new_chat (chat->id, chat->title, folder);
-          g_ptr_array_add (desired, node);
-          g_object_unref (node);
-        }
-      else
-        {
-          xd_node_set_name (node, chat->title);
-          g_ptr_array_add (desired, node);
-        }
-
-      xd_node_set_icon_name (node, backend_icon (chat->backend));
-    }
-
-  /* Held alive across the removal: whoever is showing one has to hear that it
-   * is gone before it is freed. */
-  for (guint at = start; at < g_list_model_get_n_items (model); at++)
-    {
-      g_autoptr (XdNode) child = g_list_model_get_item (model, at);
-
-      if (!g_ptr_array_find (desired, child, NULL))
-        g_ptr_array_add (gone, g_object_ref (child));
-    }
-
-  /* Positions before the one being looked at already match, so a row that is
-   * where it belongs is never removed. */
-  for (guint i = 0; i < desired->len; i++)
-    {
-      XdNode *wanted = g_ptr_array_index (desired, i);
-      guint at;
-
-      if (start + i < g_list_model_get_n_items (model))
-        {
-          g_autoptr (XdNode) here = g_list_model_get_item (model, start + i);
-
-          if (here == wanted)
-            continue;
-        }
-
-      if (g_list_store_find (children, wanted, &at))
-        g_list_store_remove (children, at);
-
-      g_list_store_insert (children, start + i, wanted);
-    }
-
-  while (g_list_model_get_n_items (model) > start + desired->len)
-    g_list_store_remove (children, start + desired->len);
-
-  for (guint i = 0; i < gone->len; i++)
-    g_signal_emit (self, signals[SIGNAL_CHAT_REMOVED], 0,
-                   g_ptr_array_index (gone, i));
-}
-
-static void
-reload_every_folder (XdFsTree *self,
-                     XdNode   *folder)
-{
-  GListStore *children = xd_node_get_children (folder);
-
-  reload_chats (self, folder);
-
-  for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
-    {
-      g_autoptr (XdNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
-
-      if (xd_node_get_kind (child) == XD_NODE_FOLDER)
-        reload_every_folder (self, child);
-    }
-}
-
 static XdNode *
 add_folder_child (XdFsTree   *self,
                   XdNode     *parent,
@@ -699,13 +580,6 @@ xd_fs_tree_new (const char *root_path,
 
   /* Chats appearing and going, when something other than this window is what
    * made them do so. */
-  if (self->storage != NULL)
-    {
-      xd_storage_watch (self->storage);
-      g_signal_connect (self->storage, "changed",
-                        G_CALLBACK (on_storage_changed), self);
-    }
-
   if (self->storage != NULL)
     {
       xd_storage_watch (self->storage);

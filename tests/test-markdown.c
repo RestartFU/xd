@@ -87,7 +87,11 @@ test_heading (void)
 {
   g_autofree char *result = xd_markdown_to_pango ("## Summary");
 
-  g_assert_cmpstr (result, ==, "<b>Summary</b>");
+  /* Sized as well as bold: a heading has to be visible as one among the
+   * emphasised words around it. */
+  g_assert_nonnull (strstr (result, "size=\"large\""));
+  g_assert_nonnull (strstr (result, "<b>Summary</b>"));
+  assert_valid_markup (result);
 }
 
 static void

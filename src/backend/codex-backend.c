@@ -40,7 +40,12 @@ static const char *CODEX_PLAN_INSTRUCTIONS =
   "purpose is to do the work rather than to understand it.\n\n"
   "If asked to go ahead and do something, plan that instead. Plan mode ends "
   "when the user leaves it, not because a message sounds like an "
-  "instruction.\n"
+  "instruction.\n\n"
+  "Write the plan as Markdown: \"##\" headings for the parts of the work, "
+  "\"-\" for lists, \"1.\" for steps that happen in order, and fenced code "
+  "blocks for commands, paths and snippets. It is read in a window that "
+  "renders it, so a wall of prose is harder to follow than the same plan with "
+  "its structure showing.\n"
   "</plan_mode>";
 
 static const char *

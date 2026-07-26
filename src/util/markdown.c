@@ -119,20 +119,32 @@ is_fence (const char *line)
   return g_str_has_prefix (line, "```") || g_str_has_prefix (line, "~~~");
 }
 
+/*
+ * A heading, at a size that says which level it is.
+ *
+ * Bold alone made every heading in a long answer look like every emphasised
+ * phrase in it, so a plan with sections read as one unbroken column of text.
+ * Two sizes are enough: the top of a document, and everything under it.
+ */
 static void
 append_heading (GString    *out,
                 const char *line)
 {
   const char *text = line;
+  int level = 0;
 
   while (*text == '#')
-    text++;
+    {
+      level++;
+      text++;
+    }
   while (*text == ' ')
     text++;
 
-  g_string_append (out, "<b>");
+  g_string_append_printf (out, "<span size=\"%s\"><b>",
+                          level <= 2 ? "large" : "medium");
   append_inline (out, text);
-  g_string_append (out, "</b>");
+  g_string_append (out, "</b></span>");
 }
 
 char *
@@ -155,8 +167,12 @@ xd_markdown_to_pango (const char *text)
       if (is_fence (line))
         {
           /* The tag closes even if the block never does, which is the normal
-           * state of affairs while a reply is still streaming. */
-          g_string_append (out, in_fence ? "</tt>" : "<tt>");
+           * state of affairs while a reply is still streaming.
+           *
+           * Monospace and a darker ground: a block of commands surrounded by
+           * prose has to be seen to be one before it is read. */
+          g_string_append (out, in_fence ? "</span></tt>"
+                                         : "<tt><span background=\"#181818\">");
           in_fence = !in_fence;
           continue;
         }
@@ -191,7 +207,7 @@ xd_markdown_to_pango (const char *text)
     }
 
   if (in_fence)
-    g_string_append (out, "</tt>");
+    g_string_append (out, "</span></tt>");
 
   /* Last line of defence: anything Pango will not accept is shown as plain
    * text rather than as nothing at all. Links are stripped first -- <a> is
