@@ -41,7 +41,7 @@ XdAsk *xd_ask_parse (const char  *text,
  */
 gsize xd_ask_visible_length (const char *text);
 
-/* Told to the assistant so it knows the block exists. */
+/* Built-in interaction and reporting instructions given to every assistant. */
 const char *xd_ask_instructions (void);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdAsk, xd_ask_free)

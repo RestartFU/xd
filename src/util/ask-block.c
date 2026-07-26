@@ -39,7 +39,14 @@ xd_ask_instructions (void)
     "Use it only when different answers lead to materially different work. "
     "Anything you can settle yourself, or find out by looking, is not a "
     "question -- decide it and say what you decided.\n"
-    "</asking_the_user>";
+    "</asking_the_user>\n\n"
+    "<commit_links>\n"
+    "When reporting a Git commit, make the hash text a Markdown link to that "
+    "commit's web URL. Example: "
+    "[abc1234](https://github.com/owner/repo/commit/abc1234). Use the actual "
+    "repository URL and hash. Do not report a bare hash when its web URL can "
+    "be determined from the repository remote.\n"
+    "</commit_links>";
 }
 
 

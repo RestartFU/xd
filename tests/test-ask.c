@@ -133,6 +133,17 @@ test_ignores_the_tag_mentioned_in_prose (void)
                     (gsize) (strstr (text, "\n\n<ask>") + 2 - text));
 }
 
+static void
+test_instructions_require_commit_links (void)
+{
+  const char *instructions = xd_ask_instructions ();
+
+  g_assert_nonnull (
+    strstr (instructions,
+            "[abc1234](https://github.com/owner/repo/commit/abc1234)"));
+  g_assert_nonnull (strstr (instructions, "Do not report a bare hash"));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -145,6 +156,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/ask/both-sides", test_keeps_text_on_both_sides);
   g_test_add_func ("/ask/hidden-while-streaming", test_hides_the_block_while_it_streams);
   g_test_add_func ("/ask/tag-in-prose", test_ignores_the_tag_mentioned_in_prose);
+  g_test_add_func ("/ask/instructions-require-commit-links",
+                   test_instructions_require_commit_links);
 
   return g_test_run ();
 }
