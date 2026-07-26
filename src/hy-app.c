@@ -205,12 +205,12 @@ static const char *HY_STYLE =
   "popover > contents { border-radius: 12px; padding: 4px; }\n"
   "popover menuitem { border-radius: 8px; }\n"
 
-  /* Out of the way until used, which keeps a long transcript from being
-   * framed by a bar down its side. */
+  /* Nothing has a scrollbar except the transcript, and that one is a thin
+   * overlay: everywhere else the content says how long it is. */
   "scrollbar { background: transparent; border: none; }\n"
-  "scrollbar slider { min-width: 6px; min-height: 6px;"
-  " background: alpha(currentColor, 0.18); }\n"
-  "scrollbar slider:hover { background: alpha(currentColor, 0.32); }\n"
+  "scrollbar slider { min-width: 5px; min-height: 5px; border: none;"
+  " background: alpha(#ffffff, 0.16); }\n"
+  ".hy-chat-scroll scrollbar slider:hover { background: alpha(#ffffff, 0.3); }\n"
 
   /* A chat waiting to be answered, in a tree the user may not be looking at.
    * Slow enough to notice without being the thing you look at. */

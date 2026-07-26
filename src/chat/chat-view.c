@@ -2131,6 +2131,12 @@ hy_chat_view_init (HyChatView *self)
   gtk_scrolled_window_set_policy (self->scroller, GTK_POLICY_NEVER,
                                   GTK_POLICY_AUTOMATIC);
 
+  /* The one place a scrollbar earns its keep: a transcript has no other way
+   * of saying how much of it there is, or where in it you are. Overlaid and
+   * fading out, so it says that only while it is being used. */
+  gtk_scrolled_window_set_overlay_scrolling (self->scroller, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->scroller), "hy-chat-scroll");
+
   /*
    * A column, not the whole window.
    *

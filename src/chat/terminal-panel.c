@@ -258,7 +258,6 @@ static void
 hy_terminal_panel_init (HyTerminalPanel *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  GtkWidget *scrollbar;
   g_autoptr (PangoFontDescription) font = NULL;
 
   self->terminal = VTE_TERMINAL (vte_terminal_new ());
@@ -276,11 +275,9 @@ hy_terminal_panel_init (HyTerminalPanel *self)
   gtk_widget_set_hexpand (GTK_WIDGET (self->terminal), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->terminal), TRUE);
 
-  scrollbar = gtk_scrollbar_new (GTK_ORIENTATION_VERTICAL,
-                                 gtk_scrollable_get_vadjustment (GTK_SCROLLABLE (self->terminal)));
-
+  /* No scrollbar: a terminal scrolls with the wheel and with the keys, and
+   * the bar was a permanent stripe down a panel that is mostly text. */
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->terminal));
-  gtk_box_append (GTK_BOX (box), scrollbar);
 
   /* Over the terminal rather than above it, so the buttons cost no height
    * and the shell keeps the whole panel. */

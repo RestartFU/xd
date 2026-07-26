@@ -530,7 +530,7 @@ hy_diff_pane_init (HyDiffPane *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (files_window),
                                  GTK_WIDGET (self->files));
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (files_window),
-                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+                                  GTK_POLICY_NEVER, GTK_POLICY_EXTERNAL);
 
   self->diff = GTK_TEXT_VIEW (gtk_text_view_new ());
   gtk_text_view_set_editable (self->diff, FALSE);
@@ -544,6 +544,8 @@ hy_diff_pane_init (HyDiffPane *self)
   gtk_text_buffer_create_tag (buffer, "hunk", "foreground", "#78aeed", NULL);
   gtk_text_buffer_create_tag (buffer, "header", "weight", PANGO_WEIGHT_BOLD, NULL);
 
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (diff_window),
+                                  GTK_POLICY_EXTERNAL, GTK_POLICY_EXTERNAL);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (diff_window),
                                  GTK_WIDGET (self->diff));
 

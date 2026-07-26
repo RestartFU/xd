@@ -1160,8 +1160,10 @@ hy_sidebar_init (HySidebar *self)
   gtk_list_view_set_single_click_activate (self->list_view, FALSE);
   gtk_widget_add_css_class (GTK_WIDGET (self->list_view), "navigation-sidebar");
 
+  /* Scrolls, but shows nothing for it: the tree is short and a bar down its
+   * side is a line the eye keeps returning to. */
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scrolled),
-                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+                                  GTK_POLICY_NEVER, GTK_POLICY_EXTERNAL);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled),
                                  GTK_WIDGET (self->list_view));
 
