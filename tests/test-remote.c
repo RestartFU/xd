@@ -1122,6 +1122,452 @@ test_the_daemon_lists_its_directories (void)
   daemon_stop (&daemon);
 }
 
+typedef struct
+{
+  Wait wait;
+  JsonObject *reply;
+} TerminalReply;
+
+static void
+on_terminal_reply (GObject      *source,
+                   GAsyncResult *result,
+                   gpointer      user_data)
+{
+  TerminalReply *waiting = user_data;
+  g_autoptr (GError) error = NULL;
+
+  waiting->reply =
+    xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+  if (waiting->reply == NULL)
+    waiting->wait.failure = g_strdup (error->message);
+  else
+    waiting->wait.ok = TRUE;
+  waiting->wait.done = TRUE;
+}
+
+typedef struct
+{
+  char *terminal_id;
+  GString *output;
+  guint columns;
+  guint rows;
+  gboolean closed;
+} TerminalEvents;
+
+static void
+on_terminal_event (XdRemoteClient *client,
+                   JsonObject     *event,
+                   gpointer        user_data)
+{
+  TerminalEvents *events = user_data;
+  const char *name =
+    json_object_get_string_member_with_default (event, "event", NULL);
+  const char *id =
+    json_object_get_string_member_with_default (event, "terminal", NULL);
+
+  if (events->terminal_id == NULL || g_strcmp0 (id, events->terminal_id) != 0)
+    return;
+
+  if (g_strcmp0 (name, "terminal-output") == 0)
+    {
+      const char *encoded =
+        json_object_get_string_member_with_default (event, "data", "");
+      g_autofree guchar *data = NULL;
+      gsize length = 0;
+
+      data = g_base64_decode (encoded, &length);
+      g_string_append_len (events->output, (const char *) data, length);
+    }
+  else if (g_strcmp0 (name, "terminal-closed") == 0)
+    {
+      events->closed = TRUE;
+    }
+  else if (g_strcmp0 (name, "terminal-resized") == 0)
+    {
+      events->columns = (guint)
+        json_object_get_int_member_with_default (event, "columns", 0);
+      events->rows = (guint)
+        json_object_get_int_member_with_default (event, "rows", 0);
+    }
+}
+
+static gboolean
+terminal_printed_marker (gpointer user_data)
+{
+  TerminalEvents *events = user_data;
+
+  return strstr (events->output->str, "REMOTE_TERMINAL_OK") != NULL;
+}
+
+static gboolean
+terminal_ignored_hup (gpointer user_data)
+{
+  TerminalEvents *events = user_data;
+
+  return strstr (events->output->str, "HUP_READY") != NULL;
+}
+
+static gboolean
+terminal_printed_tail (gpointer user_data)
+{
+  TerminalEvents *events = user_data;
+
+  return strstr (events->output->str, "TAIL_MARKER") != NULL;
+}
+
+static gboolean
+terminal_printed_after_resize (gpointer user_data)
+{
+  TerminalEvents *events = user_data;
+
+  return strstr (events->output->str, "AFTER_RESIZE") != NULL;
+}
+
+static gboolean
+replay_contains (JsonArray  *replay,
+                 const char *marker)
+{
+  g_autoptr (GString) output = g_string_new (NULL);
+
+  for (guint i = 0; replay != NULL && i < json_array_get_length (replay); i++)
+    {
+      JsonObject *item = json_array_get_object_element (replay, i);
+      const char *encoded =
+        json_object_get_string_member_with_default (item, "data", NULL);
+      g_autofree guchar *data = NULL;
+      gsize length = 0;
+
+      if (encoded == NULL)
+        continue;
+      data = g_base64_decode (encoded, &length);
+      g_string_append_len (output, (const char *) data, length);
+    }
+
+  return strstr (output->str, marker) != NULL;
+}
+
+static gboolean
+replay_crosses_resize (JsonArray *replay)
+{
+  g_autoptr (GString) output = g_string_new (NULL);
+  gssize resize_at = -1;
+  const char *before;
+  const char *after;
+
+  for (guint i = 0; replay != NULL && i < json_array_get_length (replay); i++)
+    {
+      JsonObject *item = json_array_get_object_element (replay, i);
+      const char *encoded =
+        json_object_get_string_member_with_default (item, "data", NULL);
+
+      if (encoded != NULL)
+        {
+          g_autofree guchar *data = NULL;
+          gsize length = 0;
+
+          data = g_base64_decode (encoded, &length);
+          g_string_append_len (output, (const char *) data, length);
+        }
+      else if (json_object_get_int_member_with_default (item, "columns", 0) == 120 &&
+               json_object_get_int_member_with_default (item, "rows", 0) == 40)
+        {
+          resize_at = (gssize) output->len;
+        }
+    }
+
+  before = strstr (output->str, "REMOTE_TERMINAL_OK");
+  after = strstr (output->str, "AFTER_RESIZE");
+
+  return before != NULL && after != NULL && resize_at >= 0 &&
+         before < output->str + resize_at && after >= output->str + resize_at;
+}
+
+static gboolean
+terminal_was_closed (gpointer user_data)
+{
+  return ((TerminalEvents *) user_data)->closed;
+}
+
+static gboolean
+terminal_was_resized (gpointer user_data)
+{
+  TerminalEvents *events = user_data;
+
+  return events->columns == 120 && events->rows == 40;
+}
+
+static void
+call_terminal_request (XdRemoteClient *client,
+                       JsonBuilder    *builder,
+                       TerminalReply  *waiting)
+{
+  g_autoptr (JsonNode) request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (client, request, NULL, on_terminal_reply, waiting);
+  wait_for (&waiting->wait);
+  if (!waiting->wait.ok)
+    g_error ("terminal request failed: %s", waiting->wait.failure);
+}
+
+/*
+ * A pty lives on the daemon, accepts input over the authenticated line, and
+ * keeps enough output for a second device joining after the command ran.
+ */
+static void
+test_remote_terminal_is_shared_and_replayable (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  TerminalEvents events = { 0 };
+  TerminalReply opened = { 0 };
+
+  daemon_start (&daemon);
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  events.output = g_string_new (NULL);
+  g_signal_connect (client, "event", G_CALLBACK (on_terminal_event), &events);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-open");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "columns");
+    json_builder_add_int_value (builder, 100);
+    json_builder_set_member_name (builder, "rows");
+    json_builder_add_int_value (builder, 30);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &opened);
+    events.terminal_id =
+      g_strdup (json_object_get_string_member (opened.reply, "id"));
+  }
+
+  {
+    static const char command[] = "printf '\\nREMOTE_TERMINAL_OK\\n'\n";
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *encoded =
+      g_base64_encode ((const guint8 *) command, strlen (command));
+    TerminalReply written = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-input");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &written);
+    json_object_unref (written.reply);
+    g_free (written.wait.failure);
+  }
+
+  wait_until (terminal_printed_marker, &events);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    TerminalReply listed = { 0 };
+    JsonArray *rows;
+    JsonObject *row;
+    JsonArray *replay;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-list");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &listed);
+    rows = json_object_get_array_member (listed.reply, "terminals");
+    g_assert_cmpuint (json_array_get_length (rows), ==, 1);
+    row = json_array_get_object_element (rows, 0);
+    g_assert_cmpstr (json_object_get_string_member (row, "id"), ==,
+                     events.terminal_id);
+    g_assert_cmpint (json_object_get_int_member (row, "columns"), ==, 100);
+    g_assert_cmpint (json_object_get_int_member (row, "rows"), ==, 30);
+    replay = json_object_get_array_member (row, "replay");
+    g_assert_true (replay_contains (replay, "REMOTE_TERMINAL_OK"));
+
+    json_object_unref (listed.reply);
+    g_free (listed.wait.failure);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    TerminalReply resized = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-resize");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "columns");
+    json_builder_add_int_value (builder, 120);
+    json_builder_set_member_name (builder, "rows");
+    json_builder_add_int_value (builder, 40);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &resized);
+    json_object_unref (resized.reply);
+    g_free (resized.wait.failure);
+  }
+
+  wait_until (terminal_was_resized, &events);
+
+  {
+    static const char command[] = "printf '\\nAFTER_RESIZE\\n'\n";
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *encoded =
+      g_base64_encode ((const guint8 *) command, strlen (command));
+    TerminalReply written = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-input");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &written);
+    json_object_unref (written.reply);
+    g_free (written.wait.failure);
+  }
+
+  wait_until (terminal_printed_after_resize, &events);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    TerminalReply listed = { 0 };
+    JsonArray *rows;
+    JsonObject *row;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-list");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &listed);
+    rows = json_object_get_array_member (listed.reply, "terminals");
+    row = json_array_get_object_element (rows, 0);
+    g_assert_true (replay_crosses_resize (
+      json_object_get_array_member (row, "replay")));
+    json_object_unref (listed.reply);
+    g_free (listed.wait.failure);
+  }
+
+  {
+    static const char command[] =
+      "trap '' HUP; printf '\\nHUP_READY\\n'; sleep 30\n";
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *encoded =
+      g_base64_encode ((const guint8 *) command, strlen (command));
+    TerminalReply written = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-input");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &written);
+    json_object_unref (written.reply);
+    g_free (written.wait.failure);
+  }
+
+  wait_until (terminal_ignored_hup, &events);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    TerminalReply killed = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-kill");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &killed);
+    json_object_unref (killed.reply);
+    g_free (killed.wait.failure);
+  }
+
+  wait_until (terminal_was_closed, &events);
+
+  /*
+   * A second shell emits more than one read callback's budget and exits.
+   * Its tail must arrive before terminal-closed.
+   */
+  events.closed = FALSE;
+  g_string_truncate (events.output, 0);
+  g_clear_pointer (&events.terminal_id, g_free);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    TerminalReply second = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-open");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &second);
+    events.terminal_id =
+      g_strdup (json_object_get_string_member (second.reply, "id"));
+    json_object_unref (second.reply);
+    g_free (second.wait.failure);
+  }
+
+  {
+    static const char command[] =
+      "head -c 200000 /dev/zero | tr '\\0' X; "
+      "printf '\\nTAIL_MARKER\\n'; exit\n";
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *encoded =
+      g_base64_encode ((const guint8 *) command, strlen (command));
+    TerminalReply written = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-input");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    call_terminal_request (client, builder, &written);
+    json_object_unref (written.reply);
+    g_free (written.wait.failure);
+  }
+
+  wait_until (terminal_was_closed, &events);
+  g_assert_true (terminal_printed_tail (&events));
+
+  g_signal_handlers_disconnect_by_data (client, &events);
+  json_object_unref (opened.reply);
+  g_free (opened.wait.failure);
+  g_free (events.terminal_id);
+  g_string_free (events.output, TRUE);
+  daemon_stop (&daemon);
+}
+
 /*
  * Which test is running, and a watchdog that says so.
  *
@@ -1189,6 +1635,7 @@ main (int argc, char *argv[])
   ADD ("/remote/local-changes-reach-the-devices", test_local_changes_reach_the_devices);
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
+  ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
 
   return g_test_run ();
 }

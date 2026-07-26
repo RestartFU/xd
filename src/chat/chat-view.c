@@ -910,9 +910,20 @@ update_remote_options (XdChatView   *self,
                        const XdChat *chat)
 {
   g_autofree char *description = describe_context (chat->workdir);
+  gboolean have_workdir = chat->workdir != NULL && *chat->workdir != '\0';
+  g_autofree char *tooltip =
+    have_workdir ? g_strdup_printf ("Terminal on %s in %s",
+                                    xd_remote_client_get_host (self->remote),
+                                    chat->workdir) : NULL;
 
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
+  xd_terminal_panel_set_workdir (self->terminal,
+                                 have_workdir ? chat->workdir : NULL);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
+                               have_workdir ? tooltip
+                                            : "This chat has no working directory");
 
   xd_model_picker_set_selected (self->model_picker, chat->backend, chat->model);
 
@@ -1086,6 +1097,7 @@ set_remote (XdChatView     *self,
     g_signal_handlers_disconnect_by_data (self->remote, self);
 
   g_set_object (&self->remote, client);
+  xd_terminal_panel_set_remote (self->terminal, client);
 
   if (client != NULL)
     {
@@ -2188,7 +2200,7 @@ remember_panes (XdChatView *self)
 {
   g_autoptr (GError) error = NULL;
 
-  if (self->syncing_panes || self->chat == NULL)
+  if (self->syncing_panes || self->chat == NULL || self->remote != NULL)
     return;
 
   if (!xd_storage_set_panes (self->storage, xd_node_get_chat_id (self->chat),
@@ -2591,18 +2603,15 @@ on_composer_key (GtkEventControllerKey *controller,
 /* --- public API ----------------------------------------------------------- */
 
 /*
- * The parts of the window that act on this machine.
+ * Controls that inspect this machine.
  *
- * A remote chat has none of them: the terminal it would open is a shell here,
- * the changed files are this checkout, and the composer sends through a session
- * started here. All of that belongs to the daemon, so it is taken away rather
- * than left on screen doing the wrong thing quietly.
+ * Diff and git actions are still local-only. Terminal is not: its pty can live
+ * on the daemon, so that button remains useful for a remote chat.
  */
 static void
 set_local_controls_visible (XdChatView *self,
                             gboolean    visible)
 {
-  gtk_widget_set_visible (GTK_WIDGET (self->terminal_button), visible);
   gtk_widget_set_visible (GTK_WIDGET (self->diff_button), visible);
   gtk_widget_set_visible (GTK_WIDGET (self->git_actions), visible);
 
@@ -2612,11 +2621,8 @@ set_local_controls_visible (XdChatView *self,
   /* Closing them without writing the panes back: they are being closed
    * because of where the chat lives, not because the user shut them. */
   self->syncing_panes = TRUE;
-  gtk_toggle_button_set_active (self->terminal_button, FALSE);
   gtk_toggle_button_set_active (self->diff_button, FALSE);
   self->syncing_panes = FALSE;
-
-  xd_terminal_panel_set_chat (self->terminal, NULL);
 }
 
 void
@@ -2638,6 +2644,16 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   set_remote (self, client);
 
   set_local_controls_visible (self, FALSE);
+  xd_terminal_panel_set_chat (self->terminal, xd_node_get_chat_id (chat));
+
+  /* Pane visibility belongs to this device, not daemon state. Start closed
+   * when entering a remote chat; running ptys remain alive on the daemon. */
+  self->syncing_panes = TRUE;
+  gtk_toggle_button_set_active (self->terminal_button, FALSE);
+  self->syncing_panes = FALSE;
+  gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), FALSE);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
+                               "Reading the remote working directory");
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
   gtk_widget_set_visible (self->composer_area, TRUE);

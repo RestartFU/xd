@@ -65,6 +65,20 @@ daemon, and every device attached to that chat sees the same screen and can
 type into it. A terminal that only one device could see would not be the same
 machine's terminal.
 
+Opening the terminal pane first attaches to sessions the daemon already owns;
+the plus button explicitly creates another. Input and resize intents travel
+over the authenticated TLS connection, while pty output is broadcast as
+base64-encoded terminal events. The daemon retains a bounded output history so
+a device joining later can reconstruct the screen before consuming live output;
+because raw terminal state can only be replayed from its beginning, a runaway
+session that exceeds the hard replay limit is closed instead of serving a
+corrupt tail. Rows and columns are canonical daemon state too: a resize is
+broadcast in order before later output, so every attached emulator interprets
+cursor movement and wrapping against the same geometry. Replay retains those
+resize frames between output frames, so a late device interprets older output
+at the geometry that produced it rather than replaying everything at today's
+size. Closing a tab kills that shared session for every attached device.
+
 What stays local to a device is what describes that device rather than the
 work: which panes are open, how wide they are, window size. Those are read
 from the device's own settings, not the daemon.

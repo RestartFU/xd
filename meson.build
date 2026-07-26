@@ -43,6 +43,7 @@ json_dep      = dependency('json-glib-1.0')
 pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
 vte_dep       = dependency('vte-2.91-gtk4')
+util_dep      = cc.find_library('util')
 
 #
 # What --version says.

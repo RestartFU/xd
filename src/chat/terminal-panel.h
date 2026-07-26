@@ -2,6 +2,8 @@
 
 #include <adwaita.h>
 
+#include "remote/client.h"
+
 G_BEGIN_DECLS
 
 #define XD_TYPE_TERMINAL_PANEL (xd_terminal_panel_get_type ())
@@ -20,6 +22,13 @@ G_DECLARE_FINAL_TYPE (XdTerminalPanel, xd_terminal_panel, XD, TERMINAL_PANEL, Ad
  */
 
 XdTerminalPanel *xd_terminal_panel_new         (void);
+
+/*
+ * NULL means local shells. With a client, tabs are views of ptys owned by that
+ * daemon and every input/resize/close is sent back to it.
+ */
+void             xd_terminal_panel_set_remote  (XdTerminalPanel *self,
+                                                XdRemoteClient  *client);
 
 /* Which chat's sessions are on screen. NULL shows none. */
 void             xd_terminal_panel_set_chat    (XdTerminalPanel *self,

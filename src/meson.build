@@ -12,6 +12,7 @@ xd_core_sources = files(
   'remote/client.c',
   'remote/remote-tree.c',
   'remote/turn.c',
+  'remote/terminal.c',
   'tree/xd-node.c',
   'storage/storage.c',
   'backend/backend.c',
@@ -25,7 +26,7 @@ xd_core_sources = files(
 
 # Pango, but not GTK: the Markdown converter validates the markup it produces,
 # which needs the parser and nothing else.
-xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
+xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep, util_dep]
 
 xd_core_inc = include_directories('.')
 

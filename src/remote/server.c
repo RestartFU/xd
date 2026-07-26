@@ -2,6 +2,7 @@
 
 #include "backend/backend.h"
 #include "chat/chat-title.h"
+#include "remote/terminal.h"
 #include "remote/turn.h"
 #include "settings/folder-settings.h"
 
@@ -43,6 +44,10 @@ struct _XdRemoteServer
   /* Turns in flight, by chat. One per chat is the rule, and this is what
    * enforces it. chat id -> XdDaemonTurn*. */
   GHashTable *turns;
+
+  /* Shells live here, not on whichever device opened them. terminal id ->
+   * XdRemoteTerminal*. */
+  GHashTable *terminals;
 
   /* Changes made by anything else on this machine -- the window open here,
    * most of the time -- and the delay that coalesces them. */
@@ -830,6 +835,20 @@ handle_delete_chat (Connection *connection,
       return;
     }
 
+  {
+    GHashTableIter iter;
+    gpointer value;
+
+    g_hash_table_iter_init (&iter, connection->server->terminals);
+    while (g_hash_table_iter_next (&iter, NULL, &value))
+      {
+        XdRemoteTerminal *terminal = value;
+
+        if (g_strcmp0 (xd_remote_terminal_get_chat_id (terminal), chat_id) == 0)
+          xd_remote_terminal_close (terminal);
+      }
+  }
+
   send_done (connection, NULL);
   broadcast_tree (connection->server);
 }
@@ -1113,6 +1132,358 @@ handle_cancel (Connection *connection,
   if (turn != NULL)
     xd_daemon_turn_cancel (turn);
 
+  send_done (connection, NULL);
+}
+
+/* --- terminals ------------------------------------------------------------ */
+
+static XdRemoteTerminal *
+terminal_argument (Connection *connection,
+                   JsonObject *request)
+{
+  const char *id = member_string (request, "terminal");
+  XdRemoteTerminal *terminal;
+
+  if (id == NULL)
+    {
+      send_error (connection, "A terminal id is required.");
+      return NULL;
+    }
+
+  terminal = g_hash_table_lookup (connection->server->terminals, id);
+  if (terminal == NULL)
+    {
+      send_error (connection, "No such terminal.");
+      return NULL;
+    }
+
+  return terminal;
+}
+
+static void
+on_terminal_output (XdRemoteTerminal *terminal,
+                    GBytes          *bytes,
+                    gpointer         user_data)
+{
+  XdRemoteServer *self = user_data;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autofree char *encoded = NULL;
+  gsize length;
+  const guint8 *data = g_bytes_get_data (bytes, &length);
+
+  encoded = g_base64_encode (data, length);
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "terminal-output");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder,
+                                 xd_remote_terminal_get_chat_id (terminal));
+  json_builder_set_member_name (builder, "terminal");
+  json_builder_add_string_value (builder, xd_remote_terminal_get_id (terminal));
+  json_builder_set_member_name (builder, "data");
+  json_builder_add_string_value (builder, encoded);
+  json_builder_end_object (builder);
+
+  broadcast (self, builder);
+}
+
+static void
+on_terminal_closed (XdRemoteTerminal *terminal,
+                    gpointer          user_data)
+{
+  XdRemoteServer *self = user_data;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autofree char *id = g_strdup (xd_remote_terminal_get_id (terminal));
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "terminal-closed");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder,
+                                 xd_remote_terminal_get_chat_id (terminal));
+  json_builder_set_member_name (builder, "terminal");
+  json_builder_add_string_value (builder, id);
+  json_builder_end_object (builder);
+
+  broadcast (self, builder);
+  g_hash_table_remove (self->terminals, id);
+}
+
+static void
+broadcast_terminal_geometry (XdRemoteServer   *self,
+                             XdRemoteTerminal *terminal)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "terminal-resized");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder,
+                                 xd_remote_terminal_get_chat_id (terminal));
+  json_builder_set_member_name (builder, "terminal");
+  json_builder_add_string_value (builder, xd_remote_terminal_get_id (terminal));
+  json_builder_set_member_name (builder, "columns");
+  json_builder_add_int_value (builder,
+                              xd_remote_terminal_get_columns (terminal));
+  json_builder_set_member_name (builder, "rows");
+  json_builder_add_int_value (builder, xd_remote_terminal_get_rows (terminal));
+  json_builder_end_object (builder);
+
+  broadcast (self, builder);
+}
+
+static void
+handle_terminal_list (Connection *connection,
+                      JsonObject *request)
+{
+  const char *chat_id = member_string (request, "chat");
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  GHashTableIter iter;
+  gpointer value;
+
+  if (chat_id == NULL)
+    {
+      send_error (connection, "terminal-list needs a chat id.");
+      return;
+    }
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, TRUE);
+  json_builder_set_member_name (builder, "terminals");
+  json_builder_begin_array (builder);
+
+  g_hash_table_iter_init (&iter, connection->server->terminals);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    {
+      XdRemoteTerminal *terminal = value;
+      GPtrArray *replay;
+
+      if (g_strcmp0 (xd_remote_terminal_get_chat_id (terminal), chat_id) != 0)
+        continue;
+      if (xd_remote_terminal_is_closing (terminal))
+        continue;
+
+      replay = xd_remote_terminal_get_replay (terminal);
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "id");
+      json_builder_add_string_value (builder, xd_remote_terminal_get_id (terminal));
+      json_builder_set_member_name (builder, "title");
+      json_builder_add_string_value (builder,
+                                     xd_remote_terminal_get_title (terminal));
+      json_builder_set_member_name (builder, "columns");
+      json_builder_add_int_value (builder,
+                                  xd_remote_terminal_get_columns (terminal));
+      json_builder_set_member_name (builder, "rows");
+      json_builder_add_int_value (builder,
+                                  xd_remote_terminal_get_rows (terminal));
+      json_builder_set_member_name (builder, "replay");
+      json_builder_begin_array (builder);
+      for (guint j = 0; replay != NULL && j < replay->len; j++)
+        {
+          const XdTerminalReplayItem *item = g_ptr_array_index (replay, j);
+
+          json_builder_begin_object (builder);
+          if (item->data != NULL)
+            {
+              g_autofree char *encoded = NULL;
+              gsize length;
+              const guint8 *data = g_bytes_get_data (item->data, &length);
+
+              encoded = g_base64_encode (data, length);
+              json_builder_set_member_name (builder, "data");
+              json_builder_add_string_value (builder, encoded);
+            }
+          else
+            {
+              json_builder_set_member_name (builder, "columns");
+              json_builder_add_int_value (builder, item->columns);
+              json_builder_set_member_name (builder, "rows");
+              json_builder_add_int_value (builder, item->rows);
+            }
+          json_builder_end_object (builder);
+        }
+      json_builder_end_array (builder);
+      json_builder_end_object (builder);
+    }
+
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+  send_json (connection, builder);
+}
+
+static void
+handle_terminal_open (Connection *connection,
+                      JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdDaemonTurn) resolver = NULL;
+  g_autofree char *workdir = NULL;
+  g_autoptr (XdRemoteTerminal) terminal = NULL;
+  g_autoptr (GError) error = NULL;
+  guint columns = (guint) CLAMP (
+    json_object_get_int_member_with_default (request, "columns", 80), 1, 1000);
+  guint rows = (guint) CLAMP (
+    json_object_get_int_member_with_default (request, "rows", 24), 1, 1000);
+  gboolean reuse =
+    json_object_get_boolean_member_with_default (request, "reuse", FALSE);
+
+  if (chat_id == NULL)
+    {
+      send_error (connection, "terminal-open needs a chat id.");
+      return;
+    }
+
+  if (reuse)
+    {
+      GHashTableIter iter;
+      gpointer value;
+
+      g_hash_table_iter_init (&iter, self->terminals);
+      while (g_hash_table_iter_next (&iter, NULL, &value))
+        {
+          XdRemoteTerminal *existing = value;
+
+          if (!xd_remote_terminal_is_closing (existing) &&
+              g_strcmp0 (xd_remote_terminal_get_chat_id (existing), chat_id) == 0)
+            {
+              send_done (connection, xd_remote_terminal_get_id (existing));
+              return;
+            }
+        }
+    }
+
+  chat = xd_storage_get_chat (self->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error != NULL ? error->message : "No such chat.");
+      return;
+    }
+
+  resolver = xd_daemon_turn_new (self->storage, self->root_path);
+  workdir = xd_daemon_turn_resolve_workdir (resolver, chat);
+  if (workdir == NULL)
+    {
+      send_error (connection, "This chat has no working directory.");
+      return;
+    }
+
+  terminal = xd_remote_terminal_new (chat_id, workdir, columns, rows, &error);
+  if (terminal == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  g_signal_connect (terminal, "output", G_CALLBACK (on_terminal_output), self);
+  g_signal_connect (terminal, "closed", G_CALLBACK (on_terminal_closed), self);
+  g_hash_table_insert (self->terminals,
+                       g_strdup (xd_remote_terminal_get_id (terminal)),
+                       g_object_ref (terminal));
+
+  /*
+   * Reply first. Output is read on the next main-loop dispatch, so the opener
+   * always has a tab to feed before the first terminal-output event arrives.
+   */
+  send_done (connection, xd_remote_terminal_get_id (terminal));
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "event");
+    json_builder_add_string_value (builder, "terminal-opened");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, chat_id);
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, xd_remote_terminal_get_id (terminal));
+    json_builder_set_member_name (builder, "title");
+    json_builder_add_string_value (builder, xd_remote_terminal_get_title (terminal));
+    json_builder_set_member_name (builder, "columns");
+    json_builder_add_int_value (builder,
+                                xd_remote_terminal_get_columns (terminal));
+    json_builder_set_member_name (builder, "rows");
+    json_builder_add_int_value (builder, xd_remote_terminal_get_rows (terminal));
+    json_builder_end_object (builder);
+
+    broadcast (self, builder);
+  }
+}
+
+static void
+handle_terminal_input (Connection *connection,
+                       JsonObject *request)
+{
+  XdRemoteTerminal *terminal = terminal_argument (connection, request);
+  const char *encoded = member_string (request, "data");
+  g_autofree guchar *data = NULL;
+  g_autoptr (GError) error = NULL;
+  gsize length = 0;
+
+  if (terminal == NULL)
+    return;
+  if (encoded == NULL)
+    {
+      send_error (connection, "terminal-input needs data.");
+      return;
+    }
+
+  data = g_base64_decode (encoded, &length);
+  if (!xd_remote_terminal_write (terminal, data, length, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
+static void
+handle_terminal_resize (Connection *connection,
+                        JsonObject *request)
+{
+  XdRemoteTerminal *terminal = terminal_argument (connection, request);
+  g_autoptr (GError) error = NULL;
+  guint columns = (guint) CLAMP (
+    json_object_get_int_member_with_default (request, "columns", 80), 1, 1000);
+  guint rows = (guint) CLAMP (
+    json_object_get_int_member_with_default (request, "rows", 24), 1, 1000);
+
+  if (terminal == NULL)
+    return;
+
+  if (!xd_remote_terminal_resize (terminal, columns, rows, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+  broadcast_terminal_geometry (connection->server, terminal);
+}
+
+static void
+handle_terminal_kill (Connection *connection,
+                      JsonObject *request)
+{
+  const char *id = member_string (request, "terminal");
+  XdRemoteTerminal *terminal;
+
+  if (id == NULL)
+    {
+      send_error (connection, "A terminal id is required.");
+      return;
+    }
+
+  /* Idempotent so a client can safely retry after losing the acknowledgement. */
+  terminal = g_hash_table_lookup (connection->server->terminals, id);
+  if (terminal != NULL)
+    xd_remote_terminal_close (terminal);
   send_done (connection, NULL);
 }
 
@@ -1423,6 +1794,16 @@ dispatch (Connection *connection,
     handle_send (connection, request);
   else if (g_strcmp0 (op, "cancel") == 0)
     handle_cancel (connection, request);
+  else if (g_strcmp0 (op, "terminal-list") == 0)
+    handle_terminal_list (connection, request);
+  else if (g_strcmp0 (op, "terminal-open") == 0)
+    handle_terminal_open (connection, request);
+  else if (g_strcmp0 (op, "terminal-input") == 0)
+    handle_terminal_input (connection, request);
+  else if (g_strcmp0 (op, "terminal-resize") == 0)
+    handle_terminal_resize (connection, request);
+  else if (g_strcmp0 (op, "terminal-kill") == 0)
+    handle_terminal_kill (connection, request);
   else if (g_strcmp0 (op, "ping") == 0)
     {
       g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -1600,6 +1981,21 @@ xd_remote_server_dispose (GObject *object)
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  if (self->terminals != NULL)
+    {
+      GHashTableIter iter;
+      gpointer value;
+
+      g_hash_table_iter_init (&iter, self->terminals);
+      while (g_hash_table_iter_next (&iter, NULL, &value))
+        {
+          XdRemoteTerminal *terminal = value;
+
+          g_signal_handlers_disconnect_by_data (terminal, self);
+          xd_remote_terminal_close (terminal);
+        }
+    }
+  g_clear_pointer (&self->terminals, g_hash_table_unref);
   g_clear_pointer (&self->connections, g_ptr_array_unref);
   g_clear_object (&self->service);
   g_clear_object (&self->certificate);
@@ -1622,4 +2018,6 @@ xd_remote_server_init (XdRemoteServer *self)
   self->connections = g_ptr_array_new ();
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal,
                                        g_free, g_object_unref);
+  self->terminals = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                           g_free, g_object_unref);
 }
