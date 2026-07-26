@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Everything is built in Docker, so the runner needs nothing else. Both
       # builds share layers, which is why the tests are cheap to gate on.
