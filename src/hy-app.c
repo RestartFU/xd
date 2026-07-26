@@ -163,8 +163,12 @@ static const char *HY_STYLE =
    * split -- past the composer and down the terminal, so the division stays
    * clear where the panes are darkest.
    */
+  /* The theme composites its own gradient over any colour set here, so the
+   * final shade is dialled in with opacity over the measured composite --
+   * #444449 at full strength, ~#2a2a2e at this value, read from the harness
+   * rather than predicted. */
   "paned > separator { min-width: 1px; min-height: 1px; border: none;"
-  " background: #35353a; opacity: 1; }\n"
+  " background-color: #26262b; background-image: none; opacity: 0.55; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
