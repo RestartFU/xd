@@ -176,12 +176,31 @@ hy_markdown_to_pango (const char *text)
     g_string_append (out, "</tt>");
 
   /* Last line of defence: anything Pango will not accept is shown as plain
-   * text rather than as nothing at all. */
-  if (!pango_parse_markup (out->str, -1, 0, NULL, NULL, NULL, NULL))
-    {
-      g_debug ("markdown produced invalid markup; falling back to plain text");
-      return g_markup_escape_text (text, -1);
-    }
+   * text rather than as nothing at all. Links are stripped first -- <a> is
+   * GtkLabel's extension, and Pango's own parser rejects it, which silently
+   * vetoed every message containing one. */
+  {
+    g_autoptr (GString) check = g_string_new (out->str);
+    const char *open;
+
+    while ((open = strstr (check->str, "<a href=\"")) != NULL)
+      {
+        const char *end = strchr (open, '>');
+
+        if (end == NULL)
+          break;
+        g_string_erase (check, open - check->str, end - open + 1);
+      }
+
+    while ((open = strstr (check->str, "</a>")) != NULL)
+      g_string_erase (check, open - check->str, 4);
+
+    if (!pango_parse_markup (check->str, -1, 0, NULL, NULL, NULL, NULL))
+      {
+        g_debug ("markdown produced invalid markup; falling back to plain text");
+        return g_markup_escape_text (text, -1);
+      }
+  }
 
   return g_string_free (g_steal_pointer (&out), FALSE);
 }
