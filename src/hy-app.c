@@ -152,7 +152,12 @@ static const char *HY_STYLE =
   "headerbar { min-height: 38px; background: transparent; box-shadow: none;"
   " border: none; }\n"
   "headerbar button { min-height: 26px; min-width: 26px; padding: 2px 6px; }\n"
-  "paned > separator { background: alpha(currentColor, 0.06); }\n"
+  /* A hairline, not a gutter. Two pixels rather than one so it can still be
+   * grabbed -- the separator is its own drag handle, and a line you cannot
+   * catch would mean the panes stop being resizable. */
+  "paned > separator { min-width: 2px; min-height: 2px; border: none;"
+  " background: alpha(#ffffff, 0.06); }\n"
+  "paned > separator:hover { background: alpha(#ffffff, 0.16); }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
