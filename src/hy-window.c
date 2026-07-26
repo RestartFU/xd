@@ -99,6 +99,34 @@ on_search_action (GtkWidget  *widget,
                             on_search_result_chosen, self);
 }
 
+/*
+ * Clicking anywhere else drops a message's text selection.
+ *
+ * A selectable label holds its selection when focus leaves, so highlighted
+ * text lingered all over the transcript. Watched in the capture phase at the
+ * window, which sees the press wherever it lands -- another message, the
+ * composer, the sidebar, or dead space.
+ */
+static void
+on_press_anywhere (GtkGestureClick *gesture,
+                   int              n_press,
+                   double           x,
+                   double           y,
+                   gpointer         user_data)
+{
+  GtkWindow *window = user_data;
+  GtkWidget *focus = gtk_window_get_focus (window);
+  GtkWidget *target;
+
+  if (focus == NULL || !GTK_IS_LABEL (focus) ||
+      !gtk_widget_has_css_class (focus, "hy-body"))
+    return;
+
+  target = gtk_widget_pick (GTK_WIDGET (window), x, y, GTK_PICK_DEFAULT);
+  if (target != focus)
+    gtk_label_select_region (GTK_LABEL (focus), 0, 0);
+}
+
 static gboolean
 on_close_request (GtkWindow *window,
                   gpointer   user_data)
@@ -171,6 +199,15 @@ hy_window_new (HyApplication *app)
                           g_settings_get_int (self->settings, "sidebar-width"));
 
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
+
+  {
+    GtkGesture *press = gtk_gesture_click_new ();
+
+    gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (press),
+                                                GTK_PHASE_CAPTURE);
+    g_signal_connect (press, "pressed", G_CALLBACK (on_press_anywhere), self);
+    gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (press));
+  }
 
   return self;
 }
