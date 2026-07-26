@@ -20,6 +20,7 @@ xd_core_sources = files(
   # No GTK here either, so the subprocess plumbing can be tested headlessly.
   'chat/chat-session.c',
   'chat/handover.c',
+  'chat/chat-title.c',
 )
 
 # Pango, but not GTK: the Markdown converter validates the markup it produces,

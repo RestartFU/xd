@@ -3,6 +3,7 @@
 #include "backend/backend.h"
 #include "settings/folder-settings-dialog.h"
 #include "settings/settings-resolver.h"
+#include "chat/chat-title.h"
 #include "ui/dots.h"
 
 struct _XdSidebar
@@ -29,6 +30,10 @@ struct _XdSidebar
   XdNode *pending_edit;
   XdNode *pending_parent;
   gboolean pending_creating;
+  XdNodeKind pending_kind;
+
+  /* What the selection is on, as a node rather than a position. */
+  XdNode *selected;
 
   /* Rows that reported themselves closed, until it is known whether the user
    * closed them or something above them did. GtkTreeListRow* -> folder id. */
@@ -75,6 +80,7 @@ show_error (XdSidebar  *self,
 
 static gboolean restore_expanded (gpointer user_data);
 static void create_folder (XdSidebar *self, XdNode *parent, const char *name);
+static void create_chat   (XdSidebar *self, XdNode *folder, const char *title);
 static void rename_folder (XdSidebar *self, XdNode *node, const char *name);
 static void rename_chat   (XdSidebar *self, XdNode *chat, const char *title);
 
@@ -218,7 +224,12 @@ end_editing (XdSidebar *self,
     return;
 
   if (creating)
-    create_folder (self, parent, name);
+    {
+      if (xd_node_get_kind (node) == XD_NODE_CHAT)
+        create_chat (self, parent, name);
+      else
+        create_folder (self, parent, name);
+    }
   else if (xd_node_get_kind (node) == XD_NODE_CHAT)
     rename_chat (self, node, name);
   else if (g_strcmp0 (name, xd_node_get_name (node)) != 0)
@@ -226,7 +237,7 @@ end_editing (XdSidebar *self,
 }
 
 static void begin_renaming (XdSidebar *self, XdNode *node);
-static void begin_creating_folder (XdSidebar *self, XdNode *parent);
+static void begin_creating (XdSidebar *self, XdNode *parent, XdNodeKind kind);
 
 static void
 on_menu_closed (GtkPopover *menu,
@@ -242,7 +253,7 @@ on_menu_closed (GtkPopover *menu,
   self->pending_creating = FALSE;
 
   if (creating && parent != NULL)
-    begin_creating_folder (self, parent);
+    begin_creating (self, parent, self->pending_kind);
   else if (node != NULL)
     begin_renaming (self, node);
 }
@@ -256,11 +267,12 @@ on_menu_closed (GtkPopover *menu,
  * back to being a name. So the entry does not appear until the menu has.
  */
 static gboolean
-waiting_for_menu (XdSidebar *self,
-                  XdNode    *row_node,
-                  XdNode    *node,
-                  XdNode    *parent,
-                  gboolean   creating)
+waiting_for_menu (XdSidebar  *self,
+                  XdNode     *row_node,
+                  XdNode     *node,
+                  XdNode     *parent,
+                  gboolean    creating,
+                  XdNodeKind  kind)
 {
   GtkWidget *box = row_box_for_node (self, row_node);
   GtkWidget *menu = box != NULL ? g_object_get_data (G_OBJECT (box), "menu") : NULL;
@@ -268,9 +280,12 @@ waiting_for_menu (XdSidebar *self,
   if (menu == NULL || !gtk_widget_get_visible (menu))
     return FALSE;
 
+  /* All of it before the menu is told to go: closing can finish inside that
+   * call, and what it does when it finishes is read this. */
   g_set_object (&self->pending_edit, node);
   g_set_object (&self->pending_parent, parent);
   self->pending_creating = creating;
+  self->pending_kind = kind;
 
   g_signal_connect (menu, "closed", G_CALLBACK (on_menu_closed), self);
   gtk_popover_popdown (GTK_POPOVER (menu));
@@ -284,7 +299,7 @@ begin_renaming (XdSidebar *self,
 {
   GtkWidget *box;
 
-  if (waiting_for_menu (self, node, node, NULL, FALSE))
+  if (waiting_for_menu (self, node, node, NULL, FALSE, xd_node_get_kind (node)))
     return;
 
   /* Anything already being named is settled first, and kept: starting on
@@ -301,26 +316,49 @@ begin_renaming (XdSidebar *self,
 }
 
 /*
- * Puts a row in @parent for a folder that does not exist yet.
+ * Puts a row in @parent for something that does not exist yet.
  *
- * At the top of its folders: that is where a new one sorts to often enough,
- * it is next to the row the user just acted on, and it pushes nothing else
- * out of place.
+ * Folders go at the top, where a new one sorts to often enough and where it
+ * pushes nothing else out of place; chats go where chats go, under the
+ * folders. A chat's row comes with the name it will have if the user just
+ * presses Enter, selected, so that is one keystroke and naming it is one more.
  */
 static void
-begin_creating_folder (XdSidebar *self,
-                       XdNode    *parent)
+begin_creating (XdSidebar *self,
+                XdNode    *parent,
+                XdNodeKind kind)
 {
   g_autoptr (XdNode) placeholder = NULL;
   GtkWidget *parent_box;
+  guint position = 0;
 
-  if (waiting_for_menu (self, parent, NULL, parent, TRUE))
+  if (waiting_for_menu (self, parent, NULL, parent, TRUE, kind))
     return;
 
   end_editing (self, TRUE);
 
-  placeholder = xd_node_new_folder (NULL, "", NULL);
-  xd_node_set_parent (placeholder, parent);
+  if (kind == XD_NODE_CHAT)
+    {
+      GListModel *children = G_LIST_MODEL (xd_node_get_children (parent));
+
+      placeholder = xd_node_new_chat (NULL, XD_CHAT_UNTITLED, parent);
+
+      /* After the folders, which is where the tree keeps its chats. */
+      while (position < g_list_model_get_n_items (children))
+        {
+          g_autoptr (XdNode) child = g_list_model_get_item (children, position);
+
+          if (xd_node_get_kind (child) != XD_NODE_FOLDER)
+            break;
+
+          position++;
+        }
+    }
+  else
+    {
+      placeholder = xd_node_new_folder (NULL, "", NULL);
+      xd_node_set_parent (placeholder, parent);
+    }
 
   /* Nothing to type into if the folder it is going in is closed. */
   parent_box = row_box_for_node (self, parent);
@@ -338,7 +376,7 @@ begin_creating_folder (XdSidebar *self,
   g_set_object (&self->editing_parent, parent);
   self->creating = TRUE;
 
-  g_list_store_insert (xd_node_get_children (parent), 0, placeholder);
+  g_list_store_insert (xd_node_get_children (parent), position, placeholder);
 }
 
 static void
@@ -441,7 +479,7 @@ on_new_workspace (GtkWidget  *widget,
 {
   XdSidebar *self = XD_SIDEBAR (widget);
 
-  begin_creating_folder (self, xd_fs_tree_get_root (self->tree));
+  begin_creating (self, xd_fs_tree_get_root (self->tree), XD_NODE_FOLDER);
 }
 
 static void
@@ -455,7 +493,7 @@ on_new_folder (GtkWidget  *widget,
   if (parent == NULL)
     return;
 
-  begin_creating_folder (self, parent);
+  begin_creating (self, parent, XD_NODE_FOLDER);
 }
 
 static void
@@ -513,130 +551,33 @@ chat_from_target (XdSidebar *self,
 }
 
 /*
- * New chats ask for a working directory, because a folder is an
- * organisational thing: "Lunar / Proxy" may want the proxy repo one day and a
- * scratch checkout the next, and neither of them lives inside the workspace
- * tree. Leaving it unset inherits the folder's own directory.
+ * A new chat is a row waiting for a name, like a new folder.
+ *
+ * It comes with the name it will keep if nothing is typed, so making one is
+ * Enter, and naming it is a word and then Enter. What it runs on -- the
+ * backend, the model, how hard it thinks -- is the folder chain's to say, and
+ * the folder chain has already said it; asking again in a dialog was asking
+ * the user to repeat something they had configured.
  */
-typedef struct
-{
-  XdSidebar *self;
-  XdNode *folder;           /* unowned; owned by the tree */
-  GtkEditable *title_entry;
-  AdwActionRow *dir_row;
-  char *workdir;            /* NULL: inherit */
-} NewChatPrompt;
-
 static void
-new_chat_prompt_free (NewChatPrompt *prompt)
+create_chat (XdSidebar  *self,
+             XdNode     *folder,
+             const char *title)
 {
-  g_object_unref (prompt->self);
-  g_free (prompt->workdir);
-  g_free (prompt);
-}
-
-static void
-update_dir_row (NewChatPrompt *prompt)
-{
-  if (prompt->workdir != NULL)
-    adw_action_row_set_subtitle (prompt->dir_row, prompt->workdir);
-  else
-    adw_action_row_set_subtitle (prompt->dir_row, "Same as the folder");
-}
-
-static void
-on_clear_directory (GtkButton *button,
-                    gpointer   user_data)
-{
-  NewChatPrompt *prompt = user_data;
-
-  g_clear_pointer (&prompt->workdir, g_free);
-  update_dir_row (prompt);
-}
-
-static void
-on_directory_chosen (GObject      *source,
-                     GAsyncResult *result,
-                     gpointer      user_data)
-{
-  NewChatPrompt *prompt = user_data;
-  g_autoptr (GFile) folder = NULL;
-
-  folder = gtk_file_dialog_select_folder_finish (GTK_FILE_DIALOG (source),
-                                                 result, NULL);
-  if (folder == NULL)
-    return;
-
-  g_free (prompt->workdir);
-  prompt->workdir = g_file_get_path (folder);
-
-  update_dir_row (prompt);
-}
-
-static void
-on_choose_directory (GtkButton *button,
-                     gpointer   user_data)
-{
-  NewChatPrompt *prompt = user_data;
-  g_autoptr (GtkFileDialog) dialog = gtk_file_dialog_new ();
-  g_autofree char *projects_root = NULL;
-  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (prompt->self));
-
-  gtk_file_dialog_set_title (dialog, "Working Directory");
-
-  /* Start where the user's repositories actually live, not in the workspace
-   * tree, which holds no code. */
-  projects_root = g_settings_get_string (prompt->self->settings, "projects-root");
-  if (projects_root == NULL || *projects_root == '\0')
-    {
-      g_free (projects_root);
-      projects_root = g_build_filename (g_get_home_dir (), "projects", NULL);
-    }
-
-  if (g_file_test (projects_root, G_FILE_TEST_IS_DIR))
-    {
-      g_autoptr (GFile) initial = g_file_new_for_path (projects_root);
-
-      gtk_file_dialog_set_initial_folder (dialog, initial);
-    }
-
-  gtk_file_dialog_select_folder (dialog, GTK_WINDOW (root), NULL,
-                                 on_directory_chosen, prompt);
-}
-
-static void
-on_new_chat_response (GObject      *source,
-                      GAsyncResult *result,
-                      gpointer      user_data)
-{
-  NewChatPrompt *prompt = user_data;
   g_autoptr (GError) error = NULL;
   g_autofree char *backend = NULL;
   g_autofree char *model = NULL;
   g_autofree char *effort = NULL;
-  const char *response;
-  const char *title;
   XdNode *chat;
 
-  response = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), result);
+  if (folder == NULL)
+    return;
 
-  if (g_strcmp0 (response, "confirm") != 0)
+  /* On a remote the folder chain is over there, and so is the CLI that will
+   * answer: the daemon fills all of this in and hands back the row. */
+  if (is_remote_row (folder))
     {
-      new_chat_prompt_free (prompt);
-      return;
-    }
-
-  title = gtk_editable_get_text (prompt->title_entry);
-  if (*title == '\0')
-    title = "New Chat";
-
-  /* On a remote the folder chain that decides all of this lives over there,
-   * and so does the CLI that will answer: the daemon fills it in, and the new
-   * chat comes back as a row to open. */
-  if (is_remote_row (prompt->folder))
-    {
-      xd_remote_tree_create_chat (prompt->self->remote, prompt->folder, title);
-      new_chat_prompt_free (prompt);
+      xd_remote_tree_create_chat (self->remote, folder, title);
       return;
     }
 
@@ -644,9 +585,9 @@ on_new_chat_response (GObject      *source,
    * CLI hands back only means something to that CLI. */
   {
     g_autofree char *fallback =
-      g_settings_get_string (prompt->self->settings, "default-backend");
+      g_settings_get_string (self->settings, "default-backend");
     g_autoptr (XdEffectiveSettings) resolved =
-      xd_settings_resolve (prompt->folder, fallback);
+      xd_settings_resolve (folder, fallback);
     const AiBackend *definition;
 
     backend = g_strdup (resolved->backend);
@@ -663,15 +604,14 @@ on_new_chat_response (GObject      *source,
       effort = g_strdup (ai_effort_to_string (ai_backend_default_effort (definition)));
   }
 
-  chat = xd_fs_tree_create_chat (prompt->self->tree, prompt->folder, title,
-                                 backend, model, effort, prompt->workdir,
-                                 &error);
+  /* No working directory of its own: it runs where its folder does, which is
+   * what a chat made without being asked should do. */
+  chat = xd_fs_tree_create_chat (self->tree, folder, title, backend, model,
+                                 effort, NULL, &error);
   if (chat == NULL)
-    show_error (prompt->self, "Could not start the chat", error);
+    show_error (self, "Could not start the chat", error);
   else
-    g_signal_emit (prompt->self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
-
-  new_chat_prompt_free (prompt);
+    g_signal_emit (self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
 }
 
 static void
@@ -681,83 +621,11 @@ on_new_chat (GtkWidget  *widget,
 {
   XdSidebar *self = XD_SIDEBAR (widget);
   XdNode *folder = node_from_target (self, target);
-  NewChatPrompt *prompt;
-  AdwAlertDialog *dialog;
-  GtkWidget *group;
-  GtkWidget *title_row;
-  GtkWidget *choose;
-  GtkWidget *clear;
-  GtkWidget *buttons;
 
   if (folder == NULL)
     return;
 
-  prompt = g_new0 (NewChatPrompt, 1);
-  prompt->self = g_object_ref (self);
-  prompt->folder = folder;
-
-  dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new ("New Chat", NULL));
-  adw_alert_dialog_add_responses (dialog,
-                                  "cancel", "Cancel",
-                                  "confirm", "Create",
-                                  NULL);
-  adw_alert_dialog_set_response_appearance (dialog, "confirm",
-                                            ADW_RESPONSE_SUGGESTED);
-  adw_alert_dialog_set_default_response (dialog, "confirm");
-  adw_alert_dialog_set_close_response (dialog, "cancel");
-
-  /* Two rows in a boxed list: a name and where it runs. The directory is a
-   * subtitle rather than a button the width of the dialog, because a path is
-   * something to read, not something to press. */
-  title_row = adw_entry_row_new ();
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (title_row), "Name");
-  g_object_set (title_row, "activates-default", TRUE, NULL);
-  prompt->title_entry = GTK_EDITABLE (title_row);
-
-  group = adw_preferences_group_new ();
-  adw_preferences_group_add (ADW_PREFERENCES_GROUP (group), title_row);
-
-  /*
-   * Only a name for a remote chat.
-   *
-   * The picker below chooses a directory on this machine, and the chat will
-   * run on another one -- so there is nothing here worth offering. The daemon
-   * takes the working directory from the folder, which is where a local chat
-   * gets it too when nothing is picked.
-   */
-  if (!is_remote_row (folder))
-    {
-      prompt->dir_row = ADW_ACTION_ROW (adw_action_row_new ());
-      adw_preferences_row_set_title (ADW_PREFERENCES_ROW (prompt->dir_row), "Runs in");
-      adw_action_row_set_subtitle_lines (prompt->dir_row, 2);
-
-      choose = gtk_button_new_from_icon_name ("folder-open-symbolic");
-      gtk_widget_add_css_class (choose, "flat");
-      gtk_widget_set_valign (choose, GTK_ALIGN_CENTER);
-      gtk_widget_set_tooltip_text (choose, "Choose a directory…");
-      g_signal_connect (choose, "clicked", G_CALLBACK (on_choose_directory), prompt);
-
-      clear = gtk_button_new_from_icon_name ("edit-clear-symbolic");
-      gtk_widget_add_css_class (clear, "flat");
-      gtk_widget_set_valign (clear, GTK_ALIGN_CENTER);
-      gtk_widget_set_tooltip_text (clear, "Use the folder's own directory");
-      g_signal_connect (clear, "clicked", G_CALLBACK (on_clear_directory), prompt);
-
-      buttons = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
-      gtk_box_append (GTK_BOX (buttons), choose);
-      gtk_box_append (GTK_BOX (buttons), clear);
-      adw_action_row_add_suffix (prompt->dir_row, buttons);
-
-      update_dir_row (prompt);
-
-      adw_preferences_group_add (ADW_PREFERENCES_GROUP (group),
-                                 GTK_WIDGET (prompt->dir_row));
-    }
-
-  adw_alert_dialog_set_extra_child (dialog, group);
-
-  adw_alert_dialog_choose (dialog, GTK_WIDGET (self), NULL,
-                           on_new_chat_response, prompt);
+  begin_creating (self, folder, XD_NODE_CHAT);
 }
 
 static void
@@ -1456,12 +1324,20 @@ build_remote_menu (XdNode *node)
 static GMenuModel *
 build_chat_menu (XdNode *node)
 {
-  g_autoptr (GVariant) target =
-    g_variant_ref_sink (g_variant_new_string (xd_node_get_chat_id (node)));
-  GMenu *menu = g_menu_new ();
-  GMenu *section = g_menu_new ();
+  const char *chat_id = xd_node_get_chat_id (node);
+  g_autoptr (GVariant) target = NULL;
+  GMenu *menu;
+  GMenu *section;
   g_autoptr (GMenuItem) rename = NULL;
   g_autoptr (GMenuItem) delete = NULL;
+
+  /* A row for a chat that is still being named is not a chat yet. */
+  if (chat_id == NULL)
+    return NULL;
+
+  target = g_variant_ref_sink (g_variant_new_string (chat_id));
+  menu = g_menu_new ();
+  section = g_menu_new ();
 
   rename = g_menu_item_new ("Rename…", NULL);
   g_menu_item_set_action_and_target_value (rename, "sidebar.rename-chat", target);
@@ -1605,6 +1481,19 @@ on_item_unbind (GtkSignalListItemFactory *factory,
     }
 }
 
+/*
+ * The selection landed on a different row.
+ *
+ * What is watched is a position, and positions move on their own: a folder
+ * opening above the selected chat, a row arriving from a remote, a tree
+ * reloading. Every one of those looked like the user picking that chat again,
+ * so it was opened again -- its transcript reread, and the keyboard taken to
+ * the composer, out of whatever was being typed at the time. That is what a
+ * folder being named lost its entry to, and with it the name it was given.
+ *
+ * So the node is compared, not the position. Selecting the same thing twice is
+ * not an event.
+ */
 static void
 on_selection_changed (GtkSingleSelection *selection,
                       GParamSpec         *pspec,
@@ -1616,6 +1505,11 @@ on_selection_changed (GtkSingleSelection *selection,
 
   if (row != NULL)
     node = gtk_tree_list_row_get_item (row);
+
+  if (node == self->selected)
+    return;
+
+  g_set_object (&self->selected, node);
 
   g_signal_emit (self, signals[SIGNAL_NODE_SELECTED], 0, node);
 }
@@ -1763,6 +1657,7 @@ xd_sidebar_dispose (GObject *object)
   g_clear_object (&self->editing_parent);
   g_clear_object (&self->pending_edit);
   g_clear_object (&self->pending_parent);
+  g_clear_object (&self->selected);
   g_clear_pointer (&self->closing, g_hash_table_unref);
   g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);

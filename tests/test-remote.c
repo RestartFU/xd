@@ -946,6 +946,66 @@ test_local_changes_reach_the_devices (void)
   daemon_stop (&daemon);
 }
 
+/*
+ * An unnamed chat takes its name from the first thing asked in it.
+ *
+ * Done by the daemon, because the daemon is what writes the message down --
+ * a chat named from one device has to be named on all of them. The turn itself
+ * cannot run here (there is no CLI in a test image) and does not need to: the
+ * naming happens before it starts, which is the only way the message it is
+ * named after is the first one.
+ */
+static void
+test_a_first_message_names_the_chat (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (GError) error = NULL;
+  Wait sending = { 0 };
+
+  daemon_start (&daemon);
+
+  chat_id = xd_storage_create_chat (daemon.storage, "folder-1", "New Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autoptr (JsonNode) request = NULL;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder,
+                                   "make the sidebar stop flickering\nand also this");
+    json_builder_end_object (builder);
+    request = json_builder_get_root (builder);
+
+    xd_remote_client_call_async (client, request, NULL, on_messages, &sending);
+    wait_for (&sending);
+  }
+
+  {
+    g_autoptr (XdChat) chat = xd_storage_get_chat (daemon.storage, chat_id, NULL);
+
+    g_assert_nonnull (chat);
+
+    /* The first line only: a pasted stack trace should not become the title. */
+    g_assert_cmpstr (chat->title, ==, "make the sidebar stop flickering");
+  }
+
+  g_free (sending.failure);
+  daemon_stop (&daemon);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -966,6 +1026,8 @@ main (int argc, char *argv[])
                    test_two_devices_stay_in_step);
   g_test_add_func ("/remote/local-changes-reach-the-devices",
                    test_local_changes_reach_the_devices);
+  g_test_add_func ("/remote/a-first-message-names-the-chat",
+                   test_a_first_message_names_the_chat);
 
   return g_test_run ();
 }

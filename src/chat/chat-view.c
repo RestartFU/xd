@@ -1,6 +1,7 @@
 #include "chat-view.h"
 
 #include "chat-session.h"
+#include "chat-title.h"
 #include "handover.h"
 #include "message-row.h"
 #include "model-picker.h"
@@ -1391,9 +1392,6 @@ start_turn (XdChatView *self,
   update_send_button (self);
 }
 
-/* How much of the first message becomes the chat's name. */
-#define TITLE_LENGTH 48
-
 /*
  * An unnamed chat takes its name from what was asked first. Deriving it from
  * the text costs nothing, where asking the model for a title would cost a
@@ -1406,10 +1404,8 @@ name_chat_after_first_message (XdChatView *self,
   g_autoptr (GPtrArray) messages = NULL;
   g_autoptr (GError) error = NULL;
   g_autofree char *title = NULL;
-  const char *newline;
-  glong length;
 
-  if (g_strcmp0 (xd_node_get_name (self->chat), "New Chat") != 0)
+  if (g_strcmp0 (xd_node_get_name (self->chat), XD_CHAT_UNTITLED) != 0)
     return;
 
   messages = xd_storage_list_messages (self->storage,
@@ -1417,22 +1413,8 @@ name_chat_after_first_message (XdChatView *self,
   if (messages == NULL || messages->len > 1)
     return;
 
-  /* First line only: a pasted stack trace should not become the title. */
-  newline = strchr (prompt, '\n');
-  title = newline != NULL ? g_strndup (prompt, newline - prompt)
-                          : g_strdup (prompt);
-  g_strstrip (title);
-
-  length = g_utf8_strlen (title, -1);
-  if (length > TITLE_LENGTH)
-    {
-      g_autofree char *shortened = g_utf8_substring (title, 0, TITLE_LENGTH);
-
-      g_free (title);
-      title = g_strconcat (shortened, "…", NULL);
-    }
-
-  if (*title == '\0')
+  title = xd_chat_title_from_prompt (prompt);
+  if (title == NULL)
     return;
 
   if (!xd_fs_tree_rename_chat (self->tree, self->chat, title, &error))

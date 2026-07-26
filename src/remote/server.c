@@ -1,6 +1,7 @@
 #include "server.h"
 
 #include "backend/backend.h"
+#include "chat/chat-title.h"
 #include "remote/turn.h"
 #include "settings/folder-settings.h"
 
@@ -773,7 +774,7 @@ handle_new_chat (Connection *connection,
   /* No working directory: the chat inherits the folder's, which is resolved
    * on this side too. */
   chat_id = xd_storage_create_chat (self->storage, folder_id,
-                                    title != NULL ? title : "New Chat",
+                                    title != NULL ? title : XD_CHAT_UNTITLED,
                                     backend, model, effort, NULL, &error);
   if (chat_id == NULL)
     {
@@ -979,6 +980,28 @@ handle_send (Connection *connection,
       send_error (connection, "That chat is already working.");
       return;
     }
+
+  /*
+   * An unnamed chat takes its name from what was asked first.
+   *
+   * Done here rather than by whoever sent it: the daemon is the one writing
+   * the message down, and a chat named on one device has to be named on all of
+   * them. Before the turn starts, because starting it is what stores the
+   * message this looks for the absence of.
+   */
+  {
+    g_autoptr (XdChat) chat = xd_storage_get_chat (self->storage, chat_id, NULL);
+
+    if (chat != NULL && g_strcmp0 (chat->title, XD_CHAT_UNTITLED) == 0 &&
+        xd_storage_last_message_id (self->storage, chat_id) == 0)
+      {
+        g_autofree char *title = xd_chat_title_from_prompt (text);
+
+        if (title != NULL &&
+            xd_storage_set_chat_title (self->storage, chat_id, title, NULL))
+          broadcast_tree (self);
+      }
+  }
 
   turn = xd_daemon_turn_new (self->storage, self->root_path);
 
