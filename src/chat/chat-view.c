@@ -57,6 +57,16 @@ struct _XdChatView
    */
   XdNode *chat;
 
+  /*
+   * Set while the chat on screen belongs to a daemon.
+   *
+   * Everything that writes goes through the storage above, which knows nothing
+   * about that chat -- so this doubles as the flag that says so, and the
+   * transcript is read over the connection instead.
+   */
+  XdRemoteClient *remote;
+  GCancellable *fetching;       /* the transcript request in flight, if any */
+
   GHashTable *turns;            /* chat id -> Turn* */
 
   AdwWindowTitle *title;
@@ -514,22 +524,17 @@ clear_transcript (XdChatView *self)
     gtk_box_remove (self->transcript, child);
 }
 
+/*
+ * Draws a conversation, oldest first.
+ *
+ * Where the messages came from is not this function's business: the local
+ * database and a daemon both hand over the same rows, and a remote chat reads
+ * like a local one because it is drawn by the same code.
+ */
 static void
-load_transcript (XdChatView *self)
+render_transcript (XdChatView *self,
+                   GPtrArray  *messages)
 {
-  g_autoptr (GPtrArray) messages = NULL;
-  g_autoptr (GError) error = NULL;
-
-  clear_transcript (self);
-
-  messages = xd_storage_list_messages (self->storage,
-                                       xd_node_get_chat_id (self->chat), &error);
-  if (messages == NULL)
-    {
-      append_row (self, XD_MESSAGE_ERROR, error->message);
-      return;
-    }
-
   for (guint i = 0; i < messages->len; i++)
     {
       const XdMessage *message = g_ptr_array_index (messages, i);
@@ -566,6 +571,105 @@ load_transcript (XdChatView *self)
       else
         append_row (self, xd_message_kind_from_role (message->role), message->content);
     }
+}
+
+static void
+load_transcript (XdChatView *self)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autoptr (GError) error = NULL;
+
+  clear_transcript (self);
+
+  messages = xd_storage_list_messages (self->storage,
+                                       xd_node_get_chat_id (self->chat), &error);
+  if (messages == NULL)
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      return;
+    }
+
+  render_transcript (self, messages);
+}
+
+/* --- transcripts from a daemon -------------------------------------------- */
+
+static const char *
+member_string (JsonObject *row,
+               const char *name,
+               const char *fallback)
+{
+  return json_object_get_string_member_with_default (row, name, fallback);
+}
+
+/* The daemon's messages, as the rows the transcript is drawn from. Only what
+ * is drawn is read back: ids and raw events stay on the machine that owns
+ * them. */
+static GPtrArray *
+messages_from_json (JsonArray *rows)
+{
+  GPtrArray *messages =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) xd_message_free);
+
+  for (guint i = 0; rows != NULL && i < json_array_get_length (rows); i++)
+    {
+      JsonObject *row = json_array_get_object_element (rows, i);
+      XdMessage *message = g_new0 (XdMessage, 1);
+
+      message->role = g_strdup (member_string (row, "role", "assistant"));
+      message->content = g_strdup (member_string (row, "content", ""));
+      message->label = g_strdup (member_string (row, "label", NULL));
+      message->created_at = json_object_get_int_member_with_default (row, "at", 0);
+
+      g_ptr_array_add (messages, message);
+    }
+
+  return messages;
+}
+
+static void
+on_remote_messages (GObject      *source,
+                    GAsyncResult *result,
+                    gpointer      user_data)
+{
+  g_autoptr (XdChatView) self = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autoptr (GError) error = NULL;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+
+  /* Answered after the user moved on, which happens on every click through the
+   * tree; the transcript on screen belongs to another chat now. */
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    return;
+
+  if (reply == NULL)
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      return;
+    }
+
+  messages = messages_from_json (json_object_has_member (reply, "messages")
+                                 ? json_object_get_array_member (reply, "messages")
+                                 : NULL);
+  render_transcript (self, messages);
+  queue_scroll_to_bottom (self);
+}
+
+static void
+load_remote_transcript (XdChatView *self)
+{
+  clear_transcript (self);
+
+  g_cancellable_cancel (self->fetching);
+  g_clear_object (&self->fetching);
+  self->fetching = g_cancellable_new ();
+
+  xd_remote_client_call_op_async (self->remote, "messages", "chat",
+                                  xd_node_get_chat_id (self->chat),
+                                  self->fetching, on_remote_messages,
+                                  g_object_ref (self));
 }
 
 /* --- turns ---------------------------------------------------------------- */
@@ -1418,6 +1522,12 @@ send_current_message (XdChatView *self)
   g_autofree char *text = take_composer_text (self);
   g_autoptr (GString) message = NULL;
 
+  /* The composer is hidden for a remote chat, but a keyboard shortcut does not
+   * know that: sending here would start a session on this machine against a
+   * chat that lives on another one. */
+  if (self->remote != NULL)
+    return;
+
   if (self->attachments->len == 0)
     {
       if (text == NULL)
@@ -1963,6 +2073,63 @@ on_composer_key (GtkEventControllerKey *controller,
 
 /* --- public API ----------------------------------------------------------- */
 
+/*
+ * The parts of the window that act on this machine.
+ *
+ * A remote chat has none of them: the terminal it would open is a shell here,
+ * the changed files are this checkout, and the composer sends through a session
+ * started here. All of that belongs to the daemon, so it is taken away rather
+ * than left on screen doing the wrong thing quietly.
+ */
+static void
+set_local_controls_visible (XdChatView *self,
+                            gboolean    visible)
+{
+  gtk_widget_set_visible (GTK_WIDGET (self->terminal_button), visible);
+  gtk_widget_set_visible (GTK_WIDGET (self->diff_button), visible);
+  gtk_widget_set_visible (GTK_WIDGET (self->git_actions), visible);
+
+  if (visible)
+    return;
+
+  /* Closing them without writing the panes back: they are being closed
+   * because of where the chat lives, not because the user shut them. */
+  self->syncing_panes = TRUE;
+  gtk_toggle_button_set_active (self->terminal_button, FALSE);
+  gtk_toggle_button_set_active (self->diff_button, FALSE);
+  self->syncing_panes = FALSE;
+
+  xd_terminal_panel_set_chat (self->terminal, NULL);
+}
+
+void
+xd_chat_view_show_remote_chat (XdChatView     *self,
+                               XdNode         *chat,
+                               XdRemoteClient *client)
+{
+  Turn *turn;
+
+  g_return_if_fail (XD_IS_CHAT_VIEW (self));
+  g_return_if_fail (XD_IS_NODE (chat));
+  g_return_if_fail (XD_IS_REMOTE_CLIENT (client));
+
+  turn = current_turn (self);
+  if (turn != NULL)
+    turn->row = NULL;
+
+  g_set_object (&self->chat, chat);
+  g_set_object (&self->remote, client);
+
+  set_local_controls_visible (self, FALSE);
+
+  gtk_stack_set_visible_child_name (self->stack, "chat");
+  gtk_widget_set_visible (self->composer_area, FALSE);
+  adw_window_title_set_title (self->title, xd_node_get_name (chat));
+  adw_window_title_set_subtitle (self->title, xd_remote_client_get_host (client));
+
+  load_remote_transcript (self);
+}
+
 void
 xd_chat_view_set_chat (XdChatView *self,
                        XdNode     *chat)
@@ -1975,6 +2142,14 @@ xd_chat_view_set_chat (XdChatView *self,
   turn = current_turn (self);
   if (turn != NULL)
     turn->row = NULL;
+
+  /* Whatever a daemon was still going to say about the last chat is no longer
+   * about anything on screen. */
+  g_cancellable_cancel (self->fetching);
+  g_clear_object (&self->fetching);
+  g_clear_object (&self->remote);
+  set_local_controls_visible (self, TRUE);
+  adw_window_title_set_subtitle (self->title, NULL);
 
   g_set_object (&self->chat, chat);
 
@@ -2304,6 +2479,9 @@ xd_chat_view_dispose (GObject *object)
 {
   XdChatView *self = XD_CHAT_VIEW (object);
 
+  g_cancellable_cancel (self->fetching);
+  g_clear_object (&self->fetching);
+  g_clear_object (&self->remote);
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);

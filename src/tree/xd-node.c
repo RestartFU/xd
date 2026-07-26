@@ -201,10 +201,11 @@ xd_node_get_icon_name (XdNode *self)
 {
   g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
-  if (self->kind == XD_NODE_FOLDER)
-    return "folder-symbolic";
+  if (self->icon_name != NULL)
+    return self->icon_name;
 
-  return self->icon_name != NULL ? self->icon_name : "chat-bubble-text-symbolic";
+  return self->kind == XD_NODE_FOLDER ? "folder-symbolic"
+                                      : "chat-bubble-text-symbolic";
 }
 
 void

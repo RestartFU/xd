@@ -9,7 +9,9 @@ struct _XdSidebar
   AdwBin parent_instance;
 
   XdFsTree *tree;
+  XdRemoteTree *remote;
   GSettings *settings;
+  GListStore *roots;        /* the models whose rows sit at the top level */
   GtkTreeListModel *tree_model;
   GtkSingleSelection *selection;
   GtkListView *list_view;
@@ -121,6 +123,21 @@ prompt_for_name (XdSidebar    *self,
 }
 
 /* --- actions -------------------------------------------------------------- */
+
+/*
+ * True for a row that belongs to a remote rather than to this machine.
+ *
+ * A chat has no path of its own, so it answers for the folder holding it --
+ * which is the folder the row looks like it is part of.
+ */
+static gboolean
+is_remote_row (XdNode *node)
+{
+  XdNode *folder = xd_node_get_kind (node) == XD_NODE_FOLDER
+    ? node : xd_node_get_parent (node);
+
+  return folder != NULL && xd_remote_tree_is_remote_path (xd_node_get_path (folder));
+}
 
 /* Menu items carry the folder path, which is the only stable handle a GVariant
  * can hold; the node itself is looked up from it. */
@@ -702,8 +719,11 @@ on_drag_prepare (GtkDragSource *source,
 {
   XdNode *node = node_for_row (user_data);
 
-  /* Chats belong to whichever folder they were made in; only folders move. */
-  if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER)
+  /* Chats belong to whichever folder they were made in; only folders move.
+   * A remote's folders are directories on another machine, which this window
+   * does not get to rearrange. */
+  if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER ||
+      is_remote_row (node))
     return NULL;
 
   return gdk_content_provider_new_typed (XD_TYPE_NODE, node);
@@ -739,6 +759,11 @@ on_drop (GtkDropTarget *target,
    * the row looks like it is part of. */
   if (onto != NULL && xd_node_get_kind (onto) != XD_NODE_FOLDER)
     onto = xd_node_get_parent (onto);
+
+  /* Moving a local folder into a remote would mean sending a directory to
+   * another machine, which is not what dragging a row promises. */
+  if (onto != NULL && is_remote_row (onto))
+    return FALSE;
 
   if (!xd_fs_tree_move_folder (self->tree, dropped, onto, &error))
     {
@@ -931,9 +956,14 @@ on_item_bind (GtkSignalListItemFactory *factory,
 
   {
     gboolean is_folder = xd_node_get_kind (node) == XD_NODE_FOLDER;
-    g_autoptr (GMenuModel) menu = is_folder ? build_row_menu (node)
-                                            : build_chat_menu (node);
     GtkWidget *popover = g_object_get_data (G_OBJECT (item), "context-menu");
+    g_autoptr (GMenuModel) menu = NULL;
+
+    /* A remote's rows get no menu at all: every item on it renames, creates or
+     * deletes something on this machine, and the daemon owns that tree. An
+     * empty menu is better than one that quietly does nothing. */
+    if (!is_remote_row (node))
+      menu = is_folder ? build_row_menu (node) : build_chat_menu (node);
 
     /* Right-click is the only way in, for folders as for chats: a button on
      * every folder row was a column of dots down the tree. */
@@ -1041,6 +1071,7 @@ on_row_activated (GtkListView *list_view,
 XdSidebar *
 xd_sidebar_new (XdFsTree *tree)
 {
+  GtkFlattenListModel *top_level;
   XdSidebar *self;
 
   g_return_val_if_fail (XD_IS_FS_TREE (tree), NULL);
@@ -1048,7 +1079,18 @@ xd_sidebar_new (XdFsTree *tree)
   self = g_object_new (XD_TYPE_SIDEBAR, NULL);
   self->tree = g_object_ref (tree);
 
-  self->tree_model = gtk_tree_list_model_new (g_object_ref (xd_fs_tree_get_model (tree)),
+  /*
+   * The top level is a list of lists: the local workspaces, and a remote's own
+   * root after them. Flattening rather than copying keeps each tree the owner
+   * of its rows, so a remote appearing or going away is one model coming and
+   * going rather than the tree being rebuilt around it.
+   */
+  self->roots = g_list_store_new (G_TYPE_LIST_MODEL);
+  g_list_store_append (self->roots, xd_fs_tree_get_model (tree));
+
+  top_level = gtk_flatten_list_model_new (g_object_ref (G_LIST_MODEL (self->roots)));
+
+  self->tree_model = gtk_tree_list_model_new (G_LIST_MODEL (top_level),
                                               FALSE, FALSE,
                                               create_child_model, NULL, NULL);
   self->selection = gtk_single_selection_new (g_object_ref (G_LIST_MODEL (self->tree_model)));
@@ -1065,6 +1107,30 @@ xd_sidebar_new (XdFsTree *tree)
   return self;
 }
 
+void
+xd_sidebar_set_remote (XdSidebar    *self,
+                       XdRemoteTree *remote)
+{
+  guint position;
+
+  g_return_if_fail (XD_IS_SIDEBAR (self));
+
+  if (self->remote == remote)
+    return;
+
+  if (self->remote != NULL &&
+      g_list_store_find (self->roots, xd_remote_tree_get_model (self->remote),
+                         &position))
+    g_list_store_remove (self->roots, position);
+
+  g_set_object (&self->remote, remote);
+
+  /* After the local workspaces, so the tree reads as "what is here, then what
+   * is over there". */
+  if (remote != NULL)
+    g_list_store_append (self->roots, xd_remote_tree_get_model (remote));
+}
+
 static void
 xd_sidebar_dispose (GObject *object)
 {
@@ -1079,7 +1145,9 @@ xd_sidebar_dispose (GObject *object)
   g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);
   g_clear_object (&self->tree_model);
+  g_clear_object (&self->roots);
   g_clear_object (&self->settings);
+  g_clear_object (&self->remote);
   g_clear_object (&self->tree);
 
   G_OBJECT_CLASS (xd_sidebar_parent_class)->dispose (object);
@@ -1125,6 +1193,7 @@ xd_sidebar_init (XdSidebar *self)
   GtkWidget *toolbar = adw_toolbar_view_new ();
   GtkWidget *header = adw_header_bar_new ();
   GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
+  GtkWidget *pair_button = gtk_button_new_from_icon_name ("network-server-symbolic");
   GtkWidget *scrolled = gtk_scrolled_window_new ();
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
 
@@ -1140,6 +1209,13 @@ xd_sidebar_init (XdSidebar *self)
   gtk_widget_set_tooltip_text (new_button, "New Workspace");
   gtk_actionable_set_action_name (GTK_ACTIONABLE (new_button), "sidebar.new-workspace");
   adw_header_bar_pack_start (ADW_HEADER_BAR (header), new_button);
+
+  /* The window's action, not the sidebar's: pairing sets up a connection the
+   * whole window works through, and it is the window that owns it. It sits
+   * here because this is where the remote turns up. */
+  gtk_widget_set_tooltip_text (pair_button, "Connect to a Remote…");
+  gtk_actionable_set_action_name (GTK_ACTIONABLE (pair_button), "win.pair-remote");
+  adw_header_bar_pack_end (ADW_HEADER_BAR (header), pair_button);
 
   /*
    * The window's own title and buttons belong to the chat side.

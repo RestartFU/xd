@@ -2,6 +2,8 @@
 
 #include "chat/chat-view.h"
 #include "chat/search-dialog.h"
+#include "remote/pair-dialog.h"
+#include "remote/remote-tree.h"
 #include "storage/storage.h"
 #include "tree/fs-tree.h"
 #include "tree/sidebar.h"
@@ -14,7 +16,13 @@ struct _XdWindow
   XdStorage *storage;
   XdFsTree *tree;
 
+  /* The daemon this device is paired with, and its tree. Both NULL until
+   * something has been paired, which is most windows. */
+  XdRemoteClient *remote_client;
+  XdRemoteTree *remote_tree;
+
   GtkPaned *split_view;
+  XdSidebar *sidebar;
   XdChatView *chat_view;
 };
 
@@ -35,6 +43,26 @@ resolve_root (GSettings  *settings,
   return g_build_filename (g_get_home_dir (), fallback_name, NULL);
 }
 
+/*
+ * Opens a chat, wherever it lives.
+ *
+ * A remote's chats are the same rows in the same tree, so the sidebar hands
+ * them over the same way; which side of the connection one came from is
+ * settled here, once, rather than by every part of the window.
+ */
+static void
+show_chat (XdWindow *self,
+           XdNode   *node)
+{
+  if (node == NULL || xd_node_get_kind (node) != XD_NODE_CHAT)
+    return;
+
+  if (self->remote_tree != NULL && xd_remote_tree_owns (self->remote_tree, node))
+    xd_chat_view_show_remote_chat (self->chat_view, node, self->remote_client);
+  else
+    xd_chat_view_set_chat (self->chat_view, node);
+}
+
 /* Selecting a chat opens it; selecting a folder leaves the current chat alone,
  * so browsing the tree does not throw away what you were reading. */
 static void
@@ -42,10 +70,7 @@ on_node_selected (XdSidebar *sidebar,
                   XdNode    *node,
                   gpointer   user_data)
 {
-  XdWindow *self = user_data;
-
-  if (node != NULL && xd_node_get_kind (node) == XD_NODE_CHAT)
-    xd_chat_view_set_chat (self->chat_view, node);
+  show_chat (user_data, node);
 }
 
 /*
@@ -70,10 +95,90 @@ on_node_activated (XdSidebar *sidebar,
                    XdNode    *node,
                    gpointer   user_data)
 {
+  show_chat (user_data, node);
+}
+
+/* --- the remote ----------------------------------------------------------- */
+
+/*
+ * Puts a daemon's tree in the sidebar and keeps the connection behind it.
+ *
+ * One at a time: a second remote would be a second root, which the sidebar can
+ * hold, but only one is stored -- so replacing means letting go of the old
+ * connection rather than leaving it dialling in the background.
+ */
+static void
+use_remote (XdWindow       *self,
+            XdRemoteClient *client)
+{
+  if (self->remote_client != NULL)
+    xd_remote_client_stop (self->remote_client);
+
+  g_set_object (&self->remote_client, client);
+  g_clear_object (&self->remote_tree);
+  self->remote_tree = xd_remote_tree_new (client);
+
+  xd_sidebar_set_remote (self->sidebar, self->remote_tree);
+}
+
+static void
+on_remote_paired (XdRemoteClient *client,
+                  gpointer        user_data)
+{
   XdWindow *self = user_data;
 
-  if (node != NULL && xd_node_get_kind (node) == XD_NODE_CHAT)
-    xd_chat_view_set_chat (self->chat_view, node);
+  /* Written together: a token is only usable against the certificate it was
+   * handed over, and neither is worth keeping without the address. */
+  g_settings_set_string (self->settings, "remote-host",
+                         xd_remote_client_get_host (client));
+  g_settings_set_int (self->settings, "remote-port",
+                      xd_remote_client_get_port (client));
+  g_settings_set_string (self->settings, "remote-token",
+                         xd_remote_client_get_token (client));
+  g_settings_set_string (self->settings, "remote-certificate",
+                         xd_remote_client_get_certificate (client));
+
+  use_remote (self, client);
+}
+
+static void
+on_pair_remote_action (GtkWidget  *widget,
+                       const char *action_name,
+                       GVariant   *parameter)
+{
+  XdWindow *self = XD_WINDOW (widget);
+
+  xd_remote_pair_dialog_present (widget, self->settings, on_remote_paired, self);
+}
+
+/*
+ * The remote this device already paired with, brought back at startup.
+ *
+ * Nothing is asked of the user: pairing happened once, and a machine that is
+ * off simply stays absent until the client's own retries find it.
+ */
+static void
+connect_stored_remote (XdWindow *self)
+{
+  g_autofree char *host = g_settings_get_string (self->settings, "remote-host");
+  g_autofree char *token = g_settings_get_string (self->settings, "remote-token");
+  g_autofree char *certificate =
+    g_settings_get_string (self->settings, "remote-certificate");
+  g_autoptr (XdRemoteClient) client = NULL;
+
+  /* All three or none. A token offered to whoever answers on that address,
+   * with nothing to check them against, is the thing pinning exists to
+   * prevent. */
+  if (*host == '\0' || *token == '\0' || *certificate == '\0')
+    return;
+
+  client = xd_remote_client_new (host,
+                                 g_settings_get_int (self->settings, "remote-port"));
+  xd_remote_client_set_token (client, token);
+  xd_remote_client_set_certificate (client, certificate);
+
+  use_remote (self, client);
+  xd_remote_client_start (client);
 }
 
 static void
@@ -151,7 +256,6 @@ xd_window_new (XdApplication *app)
   g_autofree char *workspaces_root = NULL;
   g_autofree char *db_path = NULL;
   g_autoptr (GError) error = NULL;
-  XdSidebar *sidebar;
   XdWindow *self;
 
   g_return_val_if_fail (XD_IS_APPLICATION (app), NULL);
@@ -185,15 +289,17 @@ xd_window_new (XdApplication *app)
   workspaces_root = resolve_root (self->settings, "workspaces-root", "Workspaces");
   self->tree = xd_fs_tree_new (workspaces_root, self->storage);
 
-  sidebar = xd_sidebar_new (self->tree);
-  g_signal_connect (sidebar, "node-selected", G_CALLBACK (on_node_selected), self);
-  g_signal_connect (sidebar, "node-activated", G_CALLBACK (on_node_activated), self);
+  self->sidebar = xd_sidebar_new (self->tree);
+  g_signal_connect (self->sidebar, "node-selected",
+                    G_CALLBACK (on_node_selected), self);
+  g_signal_connect (self->sidebar, "node-activated",
+                    G_CALLBACK (on_node_activated), self);
 
   self->chat_view = xd_chat_view_new (self->storage, self->tree);
   gtk_widget_add_css_class (GTK_WIDGET (self->chat_view), "xd-divider-left");
   g_signal_connect (self->tree, "chat-removed", G_CALLBACK (on_chat_removed), self);
 
-  gtk_paned_set_start_child (self->split_view, GTK_WIDGET (sidebar));
+  gtk_paned_set_start_child (self->split_view, GTK_WIDGET (self->sidebar));
   gtk_paned_set_end_child (self->split_view, GTK_WIDGET (self->chat_view));
   gtk_paned_set_position (self->split_view,
                           g_settings_get_int (self->settings, "sidebar-width"));
@@ -209,6 +315,8 @@ xd_window_new (XdApplication *app)
     gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (press));
   }
 
+  connect_stored_remote (self);
+
   return self;
 }
 
@@ -217,6 +325,11 @@ xd_window_dispose (GObject *object)
 {
   XdWindow *self = XD_WINDOW (object);
 
+  if (self->remote_client != NULL)
+    xd_remote_client_stop (self->remote_client);
+
+  g_clear_object (&self->remote_tree);
+  g_clear_object (&self->remote_client);
   g_clear_object (&self->tree);
   g_clear_object (&self->storage);
   g_clear_object (&self->settings);
@@ -234,6 +347,8 @@ xd_window_class_init (XdWindowClass *klass)
 
   gtk_widget_class_install_action (widget_class, "win.search", NULL,
                                    on_search_action);
+  gtk_widget_class_install_action (widget_class, "win.pair-remote", NULL,
+                                   on_pair_remote_action);
   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_k, GDK_CONTROL_MASK,
                                        "win.search", NULL);
   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_f, GDK_CONTROL_MASK,

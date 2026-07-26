@@ -56,8 +56,10 @@ const char  *xd_node_get_icon_name  (XdNode *self);
 /*
  * The icon a chat rests at, which is the assistant that last answered it.
  *
- * Folders ignore this. Chats made before the icon was recorded, and any
- * backend that has since gone away, fall back to a plain chat bubble.
+ * Chats made before the icon was recorded, and any backend that has since gone
+ * away, fall back to a plain chat bubble. Folders rarely set one -- a folder
+ * looks like a folder -- but a root that is not a directory at all, such as a
+ * remote daemon, says so here.
  */
 void         xd_node_set_icon_name  (XdNode     *self,
                                      const char *icon_name);
