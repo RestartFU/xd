@@ -244,6 +244,41 @@ chat_section_start (XdNode *folder)
   return i;
 }
 
+/* The chat node for @chat_id among @folder's children, or NULL. */
+static XdNode *
+find_chat (XdNode     *folder,
+           const char *chat_id,
+           guint      *position)
+{
+  GListModel *model = G_LIST_MODEL (xd_node_get_children (folder));
+
+  for (guint i = 0; i < g_list_model_get_n_items (model); i++)
+    {
+      g_autoptr (XdNode) child = g_list_model_get_item (model, i);
+
+      if (xd_node_get_kind (child) == XD_NODE_CHAT &&
+          g_strcmp0 (xd_node_get_chat_id (child), chat_id) == 0)
+        {
+          if (position != NULL)
+            *position = i;
+
+          return child;
+        }
+    }
+
+  return NULL;
+}
+
+/*
+ * Brings a folder's chats to what the database says, moving as little as
+ * possible.
+ *
+ * Not simply appending, because this runs again whenever the database
+ * changes -- and it changes under this process as well as inside it: the
+ * daemon serving these same chats to another device writes here too. A row
+ * that did not change keeps its node, so the chat being read stays the chat
+ * being read.
+ */
 static void
 load_chats (XdFsTree *self,
             XdNode   *folder)
@@ -251,7 +286,8 @@ load_chats (XdFsTree *self,
   g_autoptr (GPtrArray) chats = NULL;
   g_autoptr (GError) error = NULL;
   const char *folder_id = xd_node_get_folder_id (folder);
-  guint position;
+  GListStore *children = xd_node_get_children (folder);
+  guint first;
 
   if (self->storage == NULL || folder_id == NULL)
     return;
@@ -264,19 +300,82 @@ load_chats (XdFsTree *self,
       return;
     }
 
-  /* list_chats already returns most-recent-first, so appending in order keeps
-   * that ordering in the sidebar. */
-  position = chat_section_start (folder);
+  /* list_chats returns most-recent-first, which is the order the sidebar
+   * shows, and chats sit after every folder. */
+  first = chat_section_start (folder);
+
   for (guint i = 0; i < chats->len; i++)
     {
       const XdChat *chat = g_ptr_array_index (chats, i);
-      XdNode *node = xd_node_new_chat (chat->id, chat->title, folder);
+      guint at;
+      XdNode *node = find_chat (folder, chat->id, &at);
 
+      if (node == NULL)
+        {
+          node = xd_node_new_chat (chat->id, chat->title, folder);
+          xd_node_set_icon_name (node, backend_icon (chat->backend));
+          g_list_store_insert (children, first + i, node);
+          g_object_unref (node);
+          continue;
+        }
+
+      xd_node_set_name (node, chat->title);
       xd_node_set_icon_name (node, backend_icon (chat->backend));
 
-      g_list_store_insert (xd_node_get_children (folder), position + i, node);
-      g_object_unref (node);
+      if (at != first + i)
+        {
+          g_object_ref (node);
+          g_list_store_remove (children, at);
+          g_list_store_insert (children, first + i, node);
+          g_object_unref (node);
+        }
     }
+
+  /* Whatever is left after them is a chat the database no longer has. */
+  while (g_list_model_get_n_items (G_LIST_MODEL (children)) > first + chats->len)
+    {
+      g_autoptr (XdNode) gone =
+        g_list_model_get_item (G_LIST_MODEL (children), first + chats->len);
+
+      g_signal_emit (self, signals[SIGNAL_CHAT_REMOVED], 0, gone);
+      g_list_store_remove (children, first + chats->len);
+    }
+}
+
+/* Every folder's, after something wrote to the database. */
+static void
+reload_all_chats (XdFsTree *self,
+                  XdNode   *node)
+{
+  GListStore *children = xd_node_get_children (node);
+
+  if (children == NULL)
+    return;
+
+  load_chats (self, node);
+
+  for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
+    {
+      g_autoptr (XdNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
+
+      if (xd_node_get_kind (child) == XD_NODE_FOLDER)
+        reload_all_chats (self, child);
+    }
+}
+
+/*
+ * Something wrote to the database.
+ *
+ * This window, or the daemon on this machine answering another device. Either
+ * way the chats may not be what they were, and nothing else would say so.
+ */
+static void
+on_storage_changed (XdStorage *storage,
+                    gpointer   user_data)
+{
+  XdFsTree *self = user_data;
+
+  reload_all_chats (self, self->root);
 }
 
 static XdNode *
@@ -478,6 +577,13 @@ xd_fs_tree_new (const char *root_path,
   self->root_path = g_strdup (root_path);
   self->storage = storage != NULL ? g_object_ref (storage) : NULL;
   self->root = xd_node_new_folder (root_path, "Workspaces", NULL);
+
+  if (self->storage != NULL)
+    {
+      xd_storage_watch (self->storage);
+      g_signal_connect (self->storage, "changed",
+                        G_CALLBACK (on_storage_changed), self);
+    }
 
   scan_node (self, self->root);
 
@@ -931,6 +1037,10 @@ xd_fs_tree_dispose (GObject *object)
   XdFsTree *self = XD_FS_TREE (object);
 
   g_cancellable_cancel (self->cancellable);
+
+  if (self->storage != NULL)
+    g_signal_handlers_disconnect_by_data (self->storage, self);
+
   g_clear_pointer (&self->watches, g_hash_table_unref);
   g_clear_object (&self->root);
   g_clear_object (&self->storage);

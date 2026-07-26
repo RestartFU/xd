@@ -46,7 +46,6 @@ struct _XdRemoteServer
 
   /* Changes made by anything else on this machine -- the window open here,
    * most of the time -- and the delay that coalesces them. */
-  GFileMonitor *database_watch;
   GFileMonitor *tree_watch;
   guint local_change_id;
 
@@ -1285,25 +1284,14 @@ static void
 watch_for_local_changes (XdRemoteServer *self)
 {
   g_autoptr (GError) error = NULL;
-  g_autofree char *db_dir = NULL;
 
   /* The database directory rather than the file: in WAL mode the writes land
    * beside it, in a journal the file itself never mentions. */
-  db_dir = g_path_get_dirname (xd_storage_get_path (self->storage));
-
-  {
-    g_autoptr (GFile) file = g_file_new_for_path (db_dir);
-
-    self->database_watch = g_file_monitor_directory (file, G_FILE_MONITOR_NONE,
-                                                     NULL, &error);
-    if (self->database_watch == NULL)
-      g_warning ("cannot watch the database: %s", error->message);
-    else
-      g_signal_connect (self->database_watch, "changed",
-                        G_CALLBACK (on_local_change), self);
-  }
-
-  g_clear_error (&error);
+  /* The database says when it changes; everyone reading it listens the same
+   * way, this side included. */
+  xd_storage_watch (self->storage);
+  g_signal_connect_swapped (self->storage, "changed",
+                            G_CALLBACK (on_local_change_settled), self);
 
   {
     g_autoptr (GFile) file = g_file_new_for_path (self->root_path);
@@ -1573,8 +1561,9 @@ xd_remote_server_dispose (GObject *object)
     }
 
   g_clear_handle_id (&self->local_change_id, g_source_remove);
-  g_clear_object (&self->database_watch);
   g_clear_object (&self->tree_watch);
+  if (self->storage != NULL)
+    g_signal_handlers_disconnect_by_data (self->storage, self);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->connections, g_ptr_array_unref);
   g_clear_object (&self->service);

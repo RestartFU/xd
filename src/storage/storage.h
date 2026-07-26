@@ -55,6 +55,31 @@ XdStorage  *xd_storage_new             (const char  *db_path,
  * process on this machine needs it; SQLite says nothing about those. */
 const char *xd_storage_get_path        (XdStorage   *self);
 
+/*
+ * ::changed -- something wrote to this database.
+ *
+ * Including this process: it is a file being watched, not a journal of who did
+ * what. What it is for is the writes nobody here made -- the daemon running a
+ * turn for another device, or a second window -- because SQLite has no way to
+ * mention those, and without it a window shows a conversation that stopped
+ * being true while it was on screen.
+ *
+ * Coalesced, since one statement is several writes.
+ */
+
+/*
+ * Watches the database for writes, and emits ::changed when it settles.
+ *
+ * More than one process works on this file: a window and the daemon serving
+ * the same chats to other devices, at least. SQLite tells a connection nothing
+ * about what another one wrote, so the file itself is watched -- the directory
+ * really, since in WAL mode the writes land beside it.
+ *
+ * The signal fires for this process's own writes too. Whoever listens knows
+ * what it just did; nothing else can tell the difference.
+ */
+void        xd_storage_watch           (XdStorage   *self);
+
 /* Returns the new chat's id. @workdir may be NULL to inherit the folder's. */
 char       *xd_storage_create_chat     (XdStorage   *self,
                                         const char  *folder_id,

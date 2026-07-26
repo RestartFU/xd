@@ -11,9 +11,79 @@ struct _XdStorage
 
   sqlite3 *db;
   char *path;
+
+  /* Writes by anything on this machine, coalesced: SQLite touches its files
+   * several times per statement. */
+  GFileMonitor *watch;
+  guint settled_id;
 };
 
+enum
+{
+  SIGNAL_CHANGED,
+  N_SIGNALS,
+};
+
+static guint signals[N_SIGNALS];
+
+/* SQLite writes several times per statement; one event out the far side is
+ * enough, and a moment late costs nothing. */
+#define SETTLE_MS 400
+
 G_DEFINE_FINAL_TYPE (XdStorage, xd_storage, G_TYPE_OBJECT)
+
+static gboolean
+on_settled (gpointer user_data)
+{
+  XdStorage *self = user_data;
+
+  self->settled_id = 0;
+
+  g_signal_emit (self, signals[SIGNAL_CHANGED], 0);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_file_changed (GFileMonitor      *monitor,
+                 GFile             *file,
+                 GFile             *other_file,
+                 GFileMonitorEvent  event,
+                 gpointer           user_data)
+{
+  XdStorage *self = user_data;
+
+  g_clear_handle_id (&self->settled_id, g_source_remove);
+  self->settled_id = g_timeout_add (SETTLE_MS, on_settled, self);
+}
+
+void
+xd_storage_watch (XdStorage *self)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *dir = NULL;
+  g_autoptr (GFile) file = NULL;
+
+  g_return_if_fail (XD_IS_STORAGE (self));
+
+  if (self->watch != NULL || self->path == NULL)
+    return;
+
+  /* The directory rather than the file: in WAL mode the writes land beside it,
+   * in a journal the database itself never mentions. */
+  dir = g_path_get_dirname (self->path);
+  file = g_file_new_for_path (dir);
+
+  self->watch = g_file_monitor_directory (file, G_FILE_MONITOR_NONE, NULL, &error);
+  if (self->watch == NULL)
+    {
+      /* Not fatal: what is lost is hearing about another process's writes. */
+      g_warning ("cannot watch %s: %s", dir, error->message);
+      return;
+    }
+
+  g_signal_connect (self->watch, "changed", G_CALLBACK (on_file_changed), self);
+}
 
 void
 xd_chat_free (XdChat *self)
@@ -1055,9 +1125,26 @@ xd_storage_finalize (GObject *object)
 }
 
 static void
+xd_storage_dispose (GObject *object)
+{
+  XdStorage *self = XD_STORAGE (object);
+
+  g_clear_handle_id (&self->settled_id, g_source_remove);
+  g_clear_object (&self->watch);
+
+  G_OBJECT_CLASS (xd_storage_parent_class)->dispose (object);
+}
+
+static void
 xd_storage_class_init (XdStorageClass *klass)
 {
+  G_OBJECT_CLASS (klass)->dispose = xd_storage_dispose;
   G_OBJECT_CLASS (klass)->finalize = xd_storage_finalize;
+
+  /* Something wrote to the database -- this process or another. */
+  signals[SIGNAL_CHANGED] =
+    g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void

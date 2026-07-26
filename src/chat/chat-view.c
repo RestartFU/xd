@@ -207,6 +207,7 @@ add_option_descriptions (GtkDropDown       *chooser,
 G_DEFINE_FINAL_TYPE (XdChatView, xd_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (XdChatView *self);
+static void on_storage_changed (XdStorage *storage, gpointer user_data);
 static void load_remote_transcript (XdChatView *self);
 static void load_remote_options (XdChatView *self);
 static void append_tool_line (XdChatView *self, const char *name);
@@ -2380,6 +2381,33 @@ on_composer_key (GtkEventControllerKey *controller,
   return GDK_EVENT_PROPAGATE;
 }
 
+/*
+ * Something wrote to the database underneath this window.
+ *
+ * The daemon on this machine, most likely, answering another device: it runs
+ * turns for the same chats and writes them to the same file, and a window that
+ * only ever redrew what it did itself would show half a conversation.
+ *
+ * Not while a turn is running here, though. The rows for a turn in flight
+ * exist only in this process until it ends, and rereading the transcript now
+ * would replace them with what has been written so far -- which is the same
+ * conversation with its live part cut off.
+ */
+static void
+on_storage_changed (XdStorage *storage,
+                    gpointer   user_data)
+{
+  XdChatView *self = user_data;
+
+  if (self->chat == NULL || self->remote != NULL)
+    return;
+
+  if (current_turn (self) != NULL)
+    return;
+
+  load_transcript (self);
+}
+
 /* --- public API ----------------------------------------------------------- */
 
 /*
@@ -2542,6 +2570,9 @@ xd_chat_view_new (XdStorage *storage,
   /* Here rather than in init: the tree does not exist yet at init time. */
   g_signal_connect_swapped (self->tree, "chat-removed",
                             G_CALLBACK (forget_chat_sessions), self);
+
+  g_signal_connect (self->storage, "changed",
+                    G_CALLBACK (on_storage_changed), self);
 
   xd_chat_view_set_chat (self, NULL);
 
