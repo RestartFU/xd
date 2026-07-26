@@ -59,12 +59,28 @@ char         *xd_daemon_turn_resolve_workdir (XdDaemonTurn *self,
 const char   *xd_daemon_turn_get_label (XdDaemonTurn *self);
 
 /*
- * Everything the turn has said so far.
+ * The turn so far, in the order it happened.
  *
  * A turn is written to the database when it ends, so until then this is the
- * only copy -- and it is what a device that joins the chat halfway through has
- * to be given, or it sees the message that started the turn and nothing else.
+ * only copy -- and it is what a device joining the chat halfway through has to
+ * be given, or it sees the message that started the turn and nothing else.
+ *
+ * In order and in pieces rather than as one string: an agent says something,
+ * reaches for a tool, then says something about what it found, and a device
+ * that joined would otherwise show all of that as one paragraph with the tools
+ * collected at the end -- the same turn, in an order that never happened.
+ *
+ * Elements are XdTurnItem*, owned by the turn.
  */
-const char   *xd_daemon_turn_get_text  (XdDaemonTurn *self);
+typedef struct
+{
+  gboolean tool;      /* a tool it reached for, rather than something it said */
+  char *text;
+} XdTurnItem;
+
+GPtrArray    *xd_daemon_turn_get_items   (XdDaemonTurn *self);
+
+/* What it is saying now, which no item holds yet. */
+const char   *xd_daemon_turn_get_segment (XdDaemonTurn *self);
 
 G_END_DECLS

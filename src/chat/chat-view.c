@@ -968,7 +968,9 @@ on_remote_options_received (GObject      *source,
    */
   if (json_object_get_boolean_member_with_default (reply, "working", FALSE))
     {
-      const char *said = member_string (reply, "said", NULL);
+      const char *segment = member_string (reply, "segment", NULL);
+      JsonArray *items = json_object_has_member (reply, "items")
+        ? json_object_get_array_member (reply, "items") : NULL;
 
       self->remote_working = TRUE;
 
@@ -977,22 +979,38 @@ on_remote_options_received (GObject      *source,
 
       set_working (self, TRUE);
 
-      if (said != NULL && *said != '\0')
+      /* Replayed in order: what it said, and what it reached for in between.
+       * The same turn the device that started it is looking at. */
+      for (guint i = 0; items != NULL && i < json_array_get_length (items); i++)
+        {
+          JsonObject *item = json_array_get_object_element (items, i);
+          const char *text = member_string (item, "text", "");
+
+          if (json_object_get_boolean_member_with_default (item, "tool", FALSE))
+            {
+              append_tool_line (self, text);
+            }
+          else
+            {
+              XdMessageRow *row = append_row (self, XD_MESSAGE_ASSISTANT, text);
+
+              xd_message_row_set_source (row, self->remote_label);
+            }
+        }
+
+      /* And what it is in the middle of saying, which the deltas continue. */
+      if (segment != NULL && *segment != '\0')
         {
           if (self->remote_said == NULL)
             self->remote_said = g_string_new (NULL);
 
-          g_string_assign (self->remote_said, said);
+          g_string_assign (self->remote_said, segment);
 
-          if (self->remote_row == NULL)
-            self->remote_row = append_row (self, XD_MESSAGE_ASSISTANT, NULL);
-
+          self->remote_row = append_row (self, XD_MESSAGE_ASSISTANT, segment);
           xd_message_row_set_source (self->remote_row, self->remote_label);
-          xd_message_row_set_text (self->remote_row, said);
-          xd_message_row_set_waiting (self->remote_row, TRUE);
-          queue_scroll_to_bottom (self);
         }
 
+      queue_scroll_to_bottom (self);
       update_send_button (self);
     }
 }

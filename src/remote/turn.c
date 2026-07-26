@@ -33,6 +33,10 @@ struct _XdDaemonTurn
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
   GPtrArray *said;          /* finished messages, held until the turn ends */
+
+  /* The same, plus the tools, in the order they happened: what a device that
+   * joins mid-turn is shown. XdTurnItem*. */
+  GPtrArray *items;
   gboolean resumed;
 };
 
@@ -190,12 +194,33 @@ on_text_delta (XdChatSession *session,
  * the transcript reads the way the work went.
  */
 static void
+item_free (XdTurnItem *item)
+{
+  g_free (item->text);
+  g_free (item);
+}
+
+static void
+remember (XdDaemonTurn *self,
+          gboolean      tool,
+          const char   *text)
+{
+  XdTurnItem *item = g_new0 (XdTurnItem, 1);
+
+  item->tool = tool;
+  item->text = g_strdup (text);
+
+  g_ptr_array_add (self->items, item);
+}
+
+static void
 close_segment (XdDaemonTurn *self)
 {
   if (self->segment->len == 0)
     return;
 
   g_ptr_array_add (self->said, g_strdup (self->segment->str));
+  remember (self, FALSE, self->segment->str);
   g_string_truncate (self->segment, 0);
 }
 
@@ -207,6 +232,7 @@ on_tool_use (XdChatSession *session,
   XdDaemonTurn *self = user_data;
 
   close_segment (self);
+  remember (self, TRUE, name);
 
   g_signal_emit (self, signals[SIGNAL_TOOL], 0, name);
 }
@@ -371,6 +397,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   self->text = g_string_new (NULL);
   self->segment = g_string_new (NULL);
   self->said = g_ptr_array_new_with_free_func (g_free);
+  self->items = g_ptr_array_new_with_free_func ((GDestroyNotify) item_free);
   self->session = xd_chat_session_new (backend);
 
   g_signal_connect (self->session, "session-started",
@@ -426,12 +453,20 @@ xd_daemon_turn_get_label (XdDaemonTurn *self)
   return self->label;
 }
 
-const char *
-xd_daemon_turn_get_text (XdDaemonTurn *self)
+GPtrArray *
+xd_daemon_turn_get_items (XdDaemonTurn *self)
 {
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
 
-  return self->text != NULL ? self->text->str : NULL;
+  return self->items;
+}
+
+const char *
+xd_daemon_turn_get_segment (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
+
+  return self->segment != NULL ? self->segment->str : NULL;
 }
 
 XdDaemonTurn *
@@ -473,6 +508,7 @@ xd_daemon_turn_finalize (GObject *object)
   g_clear_pointer (&self->backend_id, g_free);
   g_clear_pointer (&self->label, g_free);
   g_clear_pointer (&self->said, g_ptr_array_unref);
+  g_clear_pointer (&self->items, g_ptr_array_unref);
 
   if (self->text != NULL)
     g_string_free (self->text, TRUE);

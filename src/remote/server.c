@@ -1157,19 +1157,35 @@ handle_chat (Connection *connection,
     json_builder_set_member_name (builder, "working");
     json_builder_add_boolean_value (builder, turn != NULL);
 
-    /* What it has said so far, which is nowhere else yet: a device opening
-     * this chat now joins the reply in progress. */
+    /* The turn so far, which is nowhere else yet: a device opening this chat
+     * now joins the reply in progress, in the order it happened. */
     if (turn != NULL)
       {
-        const char *said = xd_daemon_turn_get_text (turn);
+        GPtrArray *items = xd_daemon_turn_get_items (turn);
+        const char *segment = xd_daemon_turn_get_segment (turn);
 
         json_builder_set_member_name (builder, "label");
         json_builder_add_string_value (builder, xd_daemon_turn_get_label (turn));
 
-        if (said != NULL)
+        json_builder_set_member_name (builder, "items");
+        json_builder_begin_array (builder);
+        for (guint i = 0; items != NULL && i < items->len; i++)
           {
-            json_builder_set_member_name (builder, "said");
-            json_builder_add_string_value (builder, said);
+            const XdTurnItem *item = g_ptr_array_index (items, i);
+
+            json_builder_begin_object (builder);
+            json_builder_set_member_name (builder, "tool");
+            json_builder_add_boolean_value (builder, item->tool);
+            json_builder_set_member_name (builder, "text");
+            json_builder_add_string_value (builder, item->text);
+            json_builder_end_object (builder);
+          }
+        json_builder_end_array (builder);
+
+        if (segment != NULL && *segment != '\0')
+          {
+            json_builder_set_member_name (builder, "segment");
+            json_builder_add_string_value (builder, segment);
           }
       }
   }
