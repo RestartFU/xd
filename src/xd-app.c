@@ -270,6 +270,28 @@ static const char *XD_STYLE =
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
+  /*
+   * Dialogs, in the app's own register rather than the system's.
+   *
+   * An alert dialog arrives as a pale rounded sheet with heavy padding and
+   * full-width buttons -- correct for GNOME, foreign here. Same panel tone
+   * as the menus, same radius, buttons that read as the composer's do.
+   */
+  "dialog, .dialog-content, alertdialog > * { background-color: #16161b; }\n"
+  ".dialog-content, alertdialog { border-radius: 14px;"
+  " border: 1px solid alpha(#ffffff, 0.10); }\n"
+  "alertdialog .title { font-size: 1.05em; font-weight: 700; }\n"
+  "alertdialog .response-area button { min-height: 30px; border-radius: 9px;"
+  " background-color: alpha(#ffffff, 0.06); }\n"
+  "alertdialog .response-area button.suggested-action"
+  " { background-color: #3584e4; color: #ffffff; }\n"
+  "alertdialog .response-area button.destructive-action"
+  " { background-color: alpha(#e01b24, 0.85); color: #ffffff; }\n"
+  /* The rows inside a dialog: the same card the transcript uses, not the
+   * system's white-ish list. */
+  "row.entry, row.combo, row.action, preferencesgroup listview > row"
+  " { background-color: alpha(#ffffff, 0.05); border-radius: 10px; }\n"
+  "row.entry:focus-within { background-color: alpha(#ffffff, 0.08); }\n"
   ".xd-preview > contents { padding: 0; }\n"
   ".xd-preview picture { border-radius: 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and

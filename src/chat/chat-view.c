@@ -82,6 +82,10 @@ struct _XdChatView
   GString *remote_said;
   char *remote_label;
 
+  /* The last message the transcript on screen was drawn from, so a write made
+   * by something else can be told from one this window just made. */
+  gint64 rendered_message_id;
+
   GHashTable *turns;            /* chat id -> Turn* */
 
   AdwWindowTitle *title;
@@ -214,6 +218,7 @@ static void append_tool_line (XdChatView *self, const char *name);
 static char *describe_context (const char *workdir);
 static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data);
 static void show_queued (XdChatView *self);
+static Turn *current_turn (XdChatView *self);
 static void send_remote_message (XdChatView *self, const char *text);
 static void send_queued (XdChatView *self);
 static void send_message (XdChatView *self,
@@ -604,6 +609,9 @@ load_transcript (XdChatView *self)
 
   clear_transcript (self);
 
+  self->rendered_message_id =
+    xd_storage_last_message_id (self->storage, xd_node_get_chat_id (self->chat));
+
   messages = xd_storage_list_messages (self->storage,
                                        xd_node_get_chat_id (self->chat), &error);
   if (messages == NULL)
@@ -917,6 +925,27 @@ set_remote_option (XdChatView *self,
                                g_object_ref (self));
 }
 
+/*
+ * The line came back.
+ *
+ * Whatever the daemon said while it was down was said to nobody, so what is on
+ * screen is as old as the disconnection. Reading it again is the catching up.
+ */
+static void
+on_remote_opened (XdRemoteClient *client,
+                  gpointer        user_data)
+{
+  XdChatView *self = user_data;
+
+  if (self->chat == NULL || self->remote == NULL)
+    return;
+
+  end_remote_turn (self);
+  load_remote_transcript (self);
+  load_remote_options (self);
+  update_send_button (self);
+}
+
 /* Connecting is what makes a turn on the daemon visible here: the events are
  * the same for every device watching. */
 static void
@@ -927,12 +956,15 @@ set_remote (XdChatView     *self,
     return;
 
   if (self->remote != NULL)
-    g_signal_handlers_disconnect_by_func (self->remote, on_remote_event, self);
+    g_signal_handlers_disconnect_by_data (self->remote, self);
 
   g_set_object (&self->remote, client);
 
   if (client != NULL)
-    g_signal_connect (client, "event", G_CALLBACK (on_remote_event), self);
+    {
+      g_signal_connect (client, "event", G_CALLBACK (on_remote_event), self);
+      g_signal_connect (client, "opened", G_CALLBACK (on_remote_opened), self);
+    }
 }
 
 static void
@@ -948,6 +980,37 @@ load_remote_transcript (XdChatView *self)
                                   xd_node_get_chat_id (self->chat),
                                   self->fetching, on_remote_messages,
                                   g_object_ref (self));
+}
+
+/*
+ * Something wrote to the database that this window did not.
+ *
+ * The daemon running a turn for another device writes to the same file, and so
+ * does a second window -- and neither of them can tell this one. What can is
+ * the file itself, so the transcript is read again when what is in it has moved
+ * past what is on screen.
+ *
+ * A turn running here is left alone: it is writing that file, and what it has
+ * said is already on screen in the order it was said.
+ */
+static void
+on_storage_changed (XdStorage *storage,
+                    gpointer   user_data)
+{
+  XdChatView *self = user_data;
+  const char *chat_id;
+
+  if (self->chat == NULL || self->remote != NULL || current_turn (self) != NULL)
+    return;
+
+  chat_id = xd_node_get_chat_id (self->chat);
+
+  if (xd_storage_last_message_id (self->storage, chat_id) ==
+      self->rendered_message_id)
+    return;
+
+  load_transcript (self);
+  queue_scroll_to_bottom (self);
 }
 
 /* --- turns ---------------------------------------------------------------- */
@@ -2381,33 +2444,6 @@ on_composer_key (GtkEventControllerKey *controller,
   return GDK_EVENT_PROPAGATE;
 }
 
-/*
- * Something wrote to the database underneath this window.
- *
- * The daemon on this machine, most likely, answering another device: it runs
- * turns for the same chats and writes them to the same file, and a window that
- * only ever redrew what it did itself would show half a conversation.
- *
- * Not while a turn is running here, though. The rows for a turn in flight
- * exist only in this process until it ends, and rereading the transcript now
- * would replace them with what has been written so far -- which is the same
- * conversation with its live part cut off.
- */
-static void
-on_storage_changed (XdStorage *storage,
-                    gpointer   user_data)
-{
-  XdChatView *self = user_data;
-
-  if (self->chat == NULL || self->remote != NULL)
-    return;
-
-  if (current_turn (self) != NULL)
-    return;
-
-  load_transcript (self);
-}
-
 /* --- public API ----------------------------------------------------------- */
 
 /*
@@ -2566,6 +2602,10 @@ xd_chat_view_new (XdStorage *storage,
   self = g_object_new (XD_TYPE_CHAT_VIEW, NULL);
   self->storage = g_object_ref (storage);
   self->tree = g_object_ref (tree);
+
+  /* Writes made by anything else on this machine, the daemon included. */
+  xd_storage_watch (storage);
+  g_signal_connect (storage, "changed", G_CALLBACK (on_storage_changed), self);
 
   /* Here rather than in init: the tree does not exist yet at init time. */
   g_signal_connect_swapped (self->tree, "chat-removed",
@@ -2823,6 +2863,9 @@ static void
 xd_chat_view_dispose (GObject *object)
 {
   XdChatView *self = XD_CHAT_VIEW (object);
+
+  if (self->storage != NULL)
+    g_signal_handlers_disconnect_by_data (self->storage, self);
 
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);

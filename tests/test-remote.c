@@ -640,25 +640,69 @@ paired_tree (Daemon         *daemon,
 }
 
 /*
- * Waits for the tree to be read back, which is what every change ends with.
+ * Waits until the tree is what the test expects.
  *
- * A refusal ends the wait too, and says so: without that the test would sit
- * out its whole timeout and report only that nothing happened.
+ * Not for "a reload happened": the daemon reloads for its own reasons too --
+ * it watches the database it writes to -- so one change can produce several,
+ * and waiting for the first lands on whichever arrived, which may be older
+ * than the thing being waited for.
  */
 static void
-wait_for_reload (XdRemoteTree *tree)
+wait_until (gboolean (*ready) (gpointer),
+            gpointer  data)
 {
   Wait wait = { 0 };
+  guint id = g_timeout_add_seconds (10, on_wait_elapsed, &wait);
 
-  g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &wait);
-  g_signal_connect (tree, "failed", G_CALLBACK (on_failed), &wait);
+  while (!ready (data) && !wait.timed_out)
+    g_main_context_iteration (NULL, TRUE);
 
-  wait_for (&wait);
+  if (!wait.timed_out)
+    g_source_remove (id);
 
-  g_signal_handlers_disconnect_by_data (tree, &wait);
+  g_assert_false (wait.timed_out);
+}
 
-  if (wait.failure != NULL)
-    g_error ("the daemon refused: %s", wait.failure);
+typedef struct
+{
+  XdNode *node;
+  guint count;
+  const char *name;
+} Expected;
+
+static gboolean
+has_children (gpointer data)
+{
+  const Expected *expected = data;
+
+  return child_count (expected->node) == expected->count;
+}
+
+static gboolean
+is_named (gpointer data)
+{
+  const Expected *expected = data;
+
+  return g_strcmp0 (xd_node_get_name (expected->node), expected->name) == 0;
+}
+
+/* Waits for @node to hold exactly @count rows. */
+static void
+wait_for_children (XdNode *node,
+                   guint   count)
+{
+  Expected expected = { .node = node, .count = count };
+
+  wait_until (has_children, &expected);
+}
+
+static void
+wait_for_name (XdNode     *node,
+               const char *name)
+{
+  Expected expected = { .node = node, .name = name };
+
+  wait_until (is_named, &expected);
 }
 
 /*
@@ -686,9 +730,8 @@ test_folders_and_chats_are_managed_from_the_client (void)
 
   /* A workspace at the top level of the remote. */
   xd_remote_tree_create_folder (tree, NULL, "Lunar");
-  wait_for_reload (tree);
+  wait_for_children (root, 2);
 
-  g_assert_cmpuint (child_count (root), ==, 2);
   made = child_at (root, 0);
   g_assert_cmpstr (xd_node_get_name (made), ==, "Lunar");
   g_assert_nonnull (xd_node_get_folder_id (made));
@@ -700,8 +743,7 @@ test_folders_and_chats_are_managed_from_the_client (void)
 
   /* A folder inside one, then renamed. */
   xd_remote_tree_create_folder (tree, made, "Proxy");
-  wait_for_reload (tree);
-  g_assert_cmpuint (child_count (made), ==, 1);
+  wait_for_children (made, 1);
 
   {
     XdNode *proxy = child_at (made, 0);
@@ -709,20 +751,18 @@ test_folders_and_chats_are_managed_from_the_client (void)
     g_assert_cmpstr (xd_node_get_name (proxy), ==, "Proxy");
 
     xd_remote_tree_rename_folder (tree, proxy, "Gateway");
-    wait_for_reload (tree);
+    wait_for_name (proxy, "Gateway");
 
     /* The same node, because the folder's id travelled with the directory. */
     g_assert_true (child_at (made, 0) == proxy);
-    g_assert_cmpstr (xd_node_get_name (proxy), ==, "Gateway");
 
     /* Moved under the workspace that was there from the start. */
     zeno = child_at (root, 1);
     g_assert_cmpstr (xd_node_get_name (zeno), ==, "Zeno");
 
     xd_remote_tree_move_folder (tree, proxy, zeno);
-    wait_for_reload (tree);
+    wait_for_children (made, 0);
 
-    g_assert_cmpuint (child_count (made), ==, 0);
     g_assert_true (child_at (zeno, 0) == proxy);
     {
       g_autofree char *path = g_build_filename (daemon.root, "Zeno", "Gateway", NULL);
@@ -759,8 +799,7 @@ test_folders_and_chats_are_managed_from_the_client (void)
     }
 
     xd_remote_tree_rename_chat (tree, created.chat, "renamed from the client");
-    wait_for_reload (tree);
-    g_assert_cmpstr (xd_node_get_name (created.chat), ==, "renamed from the client");
+    wait_for_name (created.chat, "renamed from the client");
 
     /* Deleting it takes the row away, and says so for whoever is reading it. */
     {
@@ -786,9 +825,8 @@ test_folders_and_chats_are_managed_from_the_client (void)
 
   /* And a folder into the trash, gone from the daemon's disk. */
   xd_remote_tree_trash_folder (tree, made);
-  wait_for_reload (tree);
+  wait_for_children (root, 1);
 
-  g_assert_cmpuint (child_count (root), ==, 1);
   {
     g_autofree char *path = g_build_filename (daemon.root, "Lunar", NULL);
 
@@ -922,9 +960,8 @@ test_two_devices_stay_in_step (void)
   xd_remote_tree_create_folder (tree, NULL, "Lunar");
 
   /* ...and the other finds out on its own. */
-  wait_for_reload (watching);
+  wait_for_children (root, 2);
 
-  g_assert_cmpuint (child_count (root), ==, 2);
   g_assert_cmpstr (xd_node_get_name (child_at (root, 0)), ==, "Lunar");
 
   daemon_stop (&daemon);
@@ -962,9 +999,7 @@ test_local_changes_reach_the_devices (void)
     g_assert_true (g_file_set_contents (dotfile, "{\"id\": \"folder-2\"}", -1, NULL));
   }
 
-  wait_for_reload (tree);
-
-  g_assert_cmpuint (child_count (root), ==, 2);
+  wait_for_children (root, 2);
 
   daemon_stop (&daemon);
 }

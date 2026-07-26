@@ -1786,7 +1786,8 @@ xd_sidebar_init (XdSidebar *self)
 {
   GtkWidget *toolbar = adw_toolbar_view_new ();
   GtkWidget *header = adw_header_bar_new ();
-  GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
+  GtkWidget *new_button = gtk_menu_button_new ();
+
   GtkWidget *pair_button = gtk_button_new_from_icon_name ("network-server-symbolic");
   GtkWidget *scrolled = gtk_scrolled_window_new ();
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
@@ -1801,8 +1802,23 @@ xd_sidebar_init (XdSidebar *self)
   for (gsize i = 0; expanded[i] != NULL; i++)
     g_hash_table_add (self->expanded, g_strdup (expanded[i]));
 
-  gtk_widget_set_tooltip_text (new_button, "New Workspace");
-  gtk_actionable_set_action_name (GTK_ACTIONABLE (new_button), "sidebar.new-workspace");
+  /*
+   * Two ways to gain a workspace: make one here, or connect to a machine
+   * that has them. Pairing had a working dialog and an action all along with
+   * nothing anywhere to invoke it, which made remote xd unreachable.
+   */
+  {
+    GMenu *menu = g_menu_new ();
+
+    g_menu_append (menu, "New Workspace", "sidebar.new-workspace");
+    g_menu_append (menu, "Connect to a Machine\u2026", "win.pair-remote");
+
+    gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (new_button),
+                                    G_MENU_MODEL (menu));
+    g_object_unref (menu);
+  }
+  gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (new_button), "list-add-symbolic");
+  gtk_widget_set_tooltip_text (new_button, "Add a workspace or a machine");
   adw_header_bar_pack_start (ADW_HEADER_BAR (header), new_button);
 
   /* The window's action, not the sidebar's: pairing sets up a connection the
