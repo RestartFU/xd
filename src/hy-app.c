@@ -220,10 +220,19 @@ static const char *HY_STYLE =
   " scrolledwindow > overshoot.top, scrolledwindow > overshoot.bottom"
   " { background: none; box-shadow: none; }\n"
 
-  "scrollbar { background: transparent; border: none; }\n"
-  "scrollbar slider { min-width: 5px; min-height: 5px; border: none;"
-  " background: alpha(#ffffff, 0.16); }\n"
-  ".hy-chat-scroll scrollbar slider:hover { background: alpha(#ffffff, 0.3); }\n"
+  /*
+   * The trough as well as the slider.
+   *
+   * A scrollbar is scrollbar > trough > slider, and styling only the slider
+   * left the trough drawing a full-height band beside the transcript -- wider
+   * than the slider inside it, and always there.
+   */
+  "scrollbar, scrollbar > range, scrollbar > range > trough,"
+  " scrollbar trough { background: none; background-image: none;"
+  " border: none; box-shadow: none; min-width: 0; margin: 0; padding: 0; }\n"
+  "scrollbar slider { min-width: 4px; min-height: 4px; border: none;"
+  " margin: 2px; border-radius: 4px; background: alpha(#ffffff, 0.14); }\n"
+  "scrollbar slider:hover { background: alpha(#ffffff, 0.28); }\n"
 
   /* A chat waiting to be answered, in a tree the user may not be looking at.
    * Slow enough to notice without being the thing you look at. */
