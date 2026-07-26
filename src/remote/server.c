@@ -1131,6 +1131,33 @@ broadcast_queued (XdRemoteServer *self,
                    text != NULL ? "text" : NULL, text);
 }
 
+static gboolean
+store_queued (Connection *connection,
+              const char *chat_id,
+              const char *text)
+{
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (GError) error = NULL;
+
+  chat = xd_storage_get_chat (connection->server->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error->message);
+      return FALSE;
+    }
+
+  if (!xd_storage_set_queued (connection->server->storage, chat_id, text, &error))
+    {
+      send_error (connection, error->message);
+      return FALSE;
+    }
+
+  send_done (connection, NULL);
+  broadcast_queued (connection->server, chat_id, text);
+
+  return TRUE;
+}
+
 /* Consumes the persisted message before starting it, so reconnecting devices
  * cannot race each other into running it twice. */
 static gboolean
@@ -1192,11 +1219,15 @@ handle_send (Connection *connection,
       return;
     }
 
-  /* One turn per chat, enforced here rather than by each client: two devices
-   * sending at once would otherwise be two agents in the same directory. */
+  /*
+   * A client can send before the turn-started event reaches it. Decide at the
+   * daemon, where the current state is authoritative: preserve that text as
+   * the one queued instruction instead of rejecting a valid steer attempt.
+   * This also keeps two devices from starting agents in the same directory.
+   */
   if (g_hash_table_contains (self->turns, chat_id))
     {
-      send_error (connection, "That chat is already working.");
+      store_queued (connection, chat_id, text);
       return;
     }
 
@@ -1245,8 +1276,6 @@ handle_queue (Connection *connection,
 {
   const char *chat_id = member_string (request, "chat");
   const char *text = drop ? NULL : member_string (request, "text");
-  g_autoptr (XdChat) chat = NULL;
-  g_autoptr (GError) error = NULL;
 
   if (chat_id == NULL || (!drop && (text == NULL || *text == '\0')))
     {
@@ -1255,21 +1284,7 @@ handle_queue (Connection *connection,
       return;
     }
 
-  chat = xd_storage_get_chat (connection->server->storage, chat_id, &error);
-  if (chat == NULL)
-    {
-      send_error (connection, error->message);
-      return;
-    }
-
-  if (!xd_storage_set_queued (connection->server->storage, chat_id, text, &error))
-    {
-      send_error (connection, error->message);
-      return;
-    }
-
-  send_done (connection, NULL);
-  broadcast_queued (connection->server, chat_id, text);
+  store_queued (connection, chat_id, text);
 }
 
 /* --- terminals ------------------------------------------------------------ */

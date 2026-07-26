@@ -1671,6 +1671,12 @@ both_queues_changed (gpointer user_data)
   return seen[0].changes > 0 && seen[1].changes > 0;
 }
 
+static gboolean
+queue_changed (gpointer user_data)
+{
+  return ((QueueEvents *) user_data)->changes > 0;
+}
+
 typedef struct
 {
   const char *chat_id;
@@ -1705,6 +1711,104 @@ steer_started_queued_turn (gpointer user_data)
   SteerEvents *seen = user_data;
 
   return seen->queue_cleared && seen->turn_started;
+}
+
+/*
+ * A send raced against turn-started used to fail with "already working".
+ * Daemon knows the real state, so it must accept that send as queued steer
+ * text even when the client still thinks the chat is idle.
+ */
+static void
+test_send_during_turn_queues (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  RemoteReply started = { 0 };
+  RemoteReply steered = { 0 };
+  QueueEvents seen = { 0 };
+
+  daemon_start (&daemon);
+  seen.chat_id = daemon.chat_id;
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-send-race\"}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  g_signal_connect (client, "event", G_CALLBACK (on_queue_event), &seen);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "keep working");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &started);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "steer now");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &steered);
+  }
+
+  wait_until (queue_changed, &seen);
+  g_assert_cmpstr (seen.text, ==, "steer now");
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_cmpstr (stored->queued, ==, "steer now");
+  }
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  g_signal_handlers_disconnect_by_data (client, &seen);
+  json_object_unref (started.reply);
+  json_object_unref (steered.reply);
+  g_free (started.wait.failure);
+  g_free (steered.wait.failure);
+  g_free (seen.text);
+  daemon_stop (&daemon);
 }
 
 /*
@@ -2171,6 +2275,7 @@ main (int argc, char *argv[])
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
+  ADD ("/remote/send-during-turn-queues", test_send_during_turn_queues);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
   ADD ("/remote/an-interrupted-turn-keeps-its-timeline", test_an_interrupted_turn_keeps_its_timeline);
