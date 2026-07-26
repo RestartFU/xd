@@ -74,11 +74,15 @@ export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
 # cairo by itself where GL is genuinely absent.
 export GSK_RENDERER="${GSK_RENDERER:-ngl}"
 
-# The bundle's own Mesa, rendering in software: the same GL on every machine,
-# instead of an EGL that works or fails with the host's driver layout.
+# The bundle's own Mesa, driving the machine's GPU through the kernel's
+# stable DRM interface -- the same arrangement Flatpak uses, so no host GL
+# userland is ever consulted. Where there is no GPU (or an NVIDIA card that
+# only the proprietary driver speaks for), Mesa falls back to its own
+# software rasterizer by itself, and the picture stays identical either way.
+# HY_SOFTWARE_GL=1 forces the software path for comparison.
 export __EGL_VENDOR_LIBRARY_FILENAMES="$RUNTIME/egl_vendor.json"
 export LIBGL_DRIVERS_PATH="$HERE/lib/dri"
-export LIBGL_ALWAYS_SOFTWARE=1
+if [ -n "${HY_SOFTWARE_GL-}" ]; then export LIBGL_ALWAYS_SOFTWARE=1; fi
 
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \

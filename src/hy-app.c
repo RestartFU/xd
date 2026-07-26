@@ -246,14 +246,27 @@ static const char *HY_STYLE =
   "frame > box { padding: 4px; }\n"
   "textview, textview text { background: transparent; }\n"
 
-  /* An explicit fill: the popover colour was being asked of libadwaita's
-   * palette names, which this stylesheet no longer trusts. */
-  /* A step lighter than the composer frame, with a firmer edge: when panel
-   * and background share a tone, the rounded corners disappear against it
-   * and the panel reads as a square. Contrast is what draws the rounding,
-   * since blurred shadows are off the table under cairo. */
-  "popover > contents { border-radius: 12px; padding: 6px;"
-  " background-color: #16161b; border: 1px solid alpha(#ffffff, 0.10); }\n"
+  /*
+   * The panel is a child widget, never the popover's own chrome.
+   *
+   * The surface and contents are rendered at the window system's mercy --
+   * surface alpha, renderer, scale -- and every sharp-corner report traced
+   * back to them. A child widget's rounded background is ordinary scene
+   * geometry, identical under every renderer. Contents carry nothing, and
+   * zero padding makes the surface exactly the panel's rectangle, so there
+   * is no ring around it left to mispaint.
+   */
+  "popover > contents { background: none; border: none; box-shadow: none;"
+  " padding: 0; }\n"
+  "popover listview { background-color: #16161b;"
+  " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
+  " padding: 5px; }\n"
+  ".hy-menu { background-color: #16161b;"
+  " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
+  " padding: 6px; }\n"
+  ".hy-menu-popover > contents { background-color: #16161b;"
+  " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
+  " padding: 5px; }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
   ".hy-preview > contents { padding: 0; }\n"
   ".hy-preview picture { border-radius: 10px; }\n"
@@ -263,8 +276,8 @@ static const char *HY_STYLE =
    * fill unless told not to; the rows should sit on the popover itself. The
    * model picker is a GtkListBox, whose node is "list", beside the
    * GtkListView the dropdowns use. */
-  "popover listview, popover list, popover scrolledwindow, popover viewport,"
-  " popover boxlayout, popover box { background: none; }\n"
+  "popover list, popover scrolledwindow, popover viewport,"
+  " popover box { background: none; }\n"
   /* Chosen with the pointer, so the keyboard focus ring is drawn where no
    * keyboard is involved; hover and selection already say where you are. */
   "popover listview > row, popover list > row { outline: none; }\n"
