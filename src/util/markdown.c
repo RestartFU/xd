@@ -169,7 +169,25 @@ hy_markdown_to_pango (const char *text)
       else if (line[0] == '#')
         append_heading (out, line);
       else
-        append_inline (out, line);
+        {
+          const char *item = line;
+
+          while (*item == ' ')
+            item++;
+
+          /* A list marker becomes the dot it stands for; the indentation in
+           * front of it survives, so nested lists keep their shape. */
+          if ((item[0] == '-' || item[0] == '*') && item[1] == ' ')
+            {
+              append_escaped (out, line, item - line);
+              g_string_append (out, "\xe2\x80\xa2 ");
+              append_inline (out, item + 2);
+            }
+          else
+            {
+              append_inline (out, line);
+            }
+        }
     }
 
   if (in_fence)

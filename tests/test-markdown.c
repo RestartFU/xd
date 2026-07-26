@@ -114,6 +114,18 @@ test_links (void)
   g_assert_nonnull (strstr (amp, "b=1&amp;c=2"));
 }
 
+/* List markers render as the dots they stand for. */
+static void
+test_list_bullets (void)
+{
+  g_autofree char *out = hy_markdown_to_pango ("- first\n- second\n  - nested");
+
+  g_assert_nonnull (strstr (out, "\xe2\x80\xa2 first"));
+  g_assert_nonnull (strstr (out, "\xe2\x80\xa2 second"));
+  g_assert_nonnull (strstr (out, "  \xe2\x80\xa2 nested"));
+  g_assert_null (strstr (out, "- first"));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -129,6 +141,7 @@ main (int   argc,
   g_test_add_func ("/markdown/empty", test_empty_and_null);
 
   g_test_add_func ("/markdown/links", test_links);
+  g_test_add_func ("/markdown/bullets", test_list_bullets);
 
   return g_test_run ();
 }
