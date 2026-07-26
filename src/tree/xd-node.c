@@ -205,7 +205,7 @@ xd_node_get_icon_name (XdNode *self)
     return self->icon_name;
 
   return self->kind == XD_NODE_FOLDER ? "folder-symbolic"
-                                      : "chat-bubble-text-symbolic";
+                                      : XD_CHAT_ICON;
 }
 
 void

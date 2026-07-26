@@ -1868,16 +1868,25 @@ describe_context (const char *workdir)
 {
   g_autoptr (XdGitInfo) git = xd_git_info_for_path (workdir);
   g_autoptr (GString) text = g_string_new (NULL);
+  g_autofree char *shown = NULL;
 
   if (workdir == NULL)
     return g_strdup ("No working directory");
 
-  if (git == NULL)
-    {
-      g_autofree char *name = g_path_get_basename (workdir);
+  /*
+   * The directory, written the way it would be typed.
+   *
+   * Two chats in the same folder can run in different checkouts, and a chat on
+   * a daemon runs somewhere that is not on this machine at all -- so which
+   * directory this is answers a question the branch cannot.
+   */
+  if (g_str_has_prefix (workdir, g_get_home_dir ()))
+    shown = g_strconcat ("~", workdir + strlen (g_get_home_dir ()), NULL);
+  else
+    shown = g_strdup (workdir);
 
-      return g_strdup_printf ("%s — not a repository", name);
-    }
+  if (git == NULL)
+    return g_strdup_printf ("%s — not a repository", shown);
 
   if (git->branch != NULL)
     g_string_append_printf (text, "%s %s", git->detached ? "detached at" : "⎇",
@@ -1890,6 +1899,8 @@ describe_context (const char *workdir)
 
   /* The remote is not shown: it is the longest thing in the bar and the least
    * likely to be in question, and it crowded out the branch, which changes. */
+
+  g_string_append_printf (text, " · %s", shown);
 
   return g_string_free (g_steal_pointer (&text), FALSE);
 }
@@ -2829,7 +2840,7 @@ xd_chat_view_init (XdChatView *self)
 
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
 
-  adw_status_page_set_icon_name (ADW_STATUS_PAGE (empty), "chat-bubble-text-symbolic");
+  adw_status_page_set_icon_name (ADW_STATUS_PAGE (empty), XD_CHAT_ICON);
   adw_status_page_set_title (ADW_STATUS_PAGE (empty), "No Chat Selected");
   adw_status_page_set_description (ADW_STATUS_PAGE (empty),
                                    "Pick a chat in the sidebar, or start a new "

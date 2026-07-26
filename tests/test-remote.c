@@ -1010,16 +1010,19 @@ typedef struct
 {
   Wait wait;
   char *path;
+  char *failure;
   GStrv entries;
 } Listed;
 
 static void
 on_dir_listed (const char        *path,
                const char *const *entries,
+               const char        *trouble,
                gpointer           user_data)
 {
   Listed *listed = user_data;
 
+  listed->failure = g_strdup (trouble);
   listed->path = g_strdup (path);
   listed->entries = g_strdupv ((char **) entries);
   listed->wait.done = TRUE;
@@ -1048,11 +1051,15 @@ test_the_daemon_lists_its_directories (void)
   xd_remote_tree_list_dir (tree, daemon.root, on_dir_listed, &listed);
   wait_for (&listed.wait);
 
+  if (listed.failure != NULL)
+    g_error ("the daemon would not list %s: %s", daemon.root, listed.failure);
+
   g_assert_cmpstr (listed.path, ==, daemon.root);
   g_assert_nonnull (listed.entries);
   g_assert_true (g_strv_contains ((const char * const *) listed.entries, "Zeno"));
 
   g_free (listed.path);
+  g_free (listed.failure);
   g_strfreev (listed.entries);
   daemon_stop (&daemon);
 }

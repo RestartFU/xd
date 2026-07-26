@@ -1,6 +1,77 @@
 #include "dir-browser.h"
 
 /*
+ * The panel's own look, loaded once.
+ *
+ * It travels with the widget rather than living in the application's
+ * stylesheet: this is a surface with no decoration of its own, so what it is
+ * made of -- the black, the corners, the shadow that lifts it off what is
+ * behind -- is part of the widget rather than a theme choice made elsewhere.
+ */
+static const char BROWSER_STYLE[] =
+  ".xd-browser {"
+  "  background: #0b0b0b;"
+  "  border-radius: 14px;"
+  "  border: 1px solid alpha(#ffffff, 0.07);"
+  "  box-shadow: 0 24px 64px alpha(#000000, 0.65);"
+  "}\n"
+
+  /* One surface: the list is part of the panel, not a pane inset into it. */
+  ".xd-browser scrolledwindow,"
+  ".xd-browser listview { background: transparent; }\n"
+
+  ".xd-browser listview > row {"
+  "  border-radius: 9px;"
+  "  margin: 1px 8px;"
+  "  padding: 7px 10px;"
+  "}\n"
+  ".xd-browser listview > row:hover { background: alpha(#ffffff, 0.05); }\n"
+  ".xd-browser listview > row:selected {"
+  "  background: alpha(#ffffff, 0.11);"
+  "  color: inherit;"
+  "}\n"
+
+  ".xd-browser-bar { padding: 13px 16px; }\n"
+  ".xd-browser-head { border-bottom: 1px solid alpha(#ffffff, 0.06); }\n"
+  ".xd-browser-foot { border-top: 1px solid alpha(#ffffff, 0.06); }\n"
+
+  /* The path reads as a path: what it is, rather than a title. */
+  ".xd-browser-path { font-family: monospace; font-size: 96%;"
+  " color: alpha(#ffffff, 0.85); }\n"
+
+  /* Monochrome, because everything else here is. A blue block would be the
+   * loudest thing on a panel whose whole job is to be read. */
+  ".xd-browser-use {"
+  "  background: alpha(#ffffff, 0.10);"
+  "  border: 1px solid alpha(#ffffff, 0.08);"
+  "  border-radius: 9px;"
+  "  padding: 5px 14px;"
+  "  box-shadow: none;"
+  "}\n"
+  ".xd-browser-use:hover { background: alpha(#ffffff, 0.16); }\n"
+
+  ".xd-key { font-size: 85%; padding: 1px 6px; border-radius: 6px;"
+  " background: alpha(#ffffff, 0.09); }\n";
+
+static void
+ensure_style (void)
+{
+  static gsize once = 0;
+
+  if (g_once_init_enter (&once))
+    {
+      g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
+
+      gtk_css_provider_load_from_string (provider, BROWSER_STYLE);
+      gtk_style_context_add_provider_for_display (
+        gdk_display_get_default (), GTK_STYLE_PROVIDER (provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+
+      g_once_init_leave (&once, 1);
+    }
+}
+
+/*
  * One window, one directory at a time.
  *
  * Where the names come from is the only thing that differs between a local
@@ -15,6 +86,7 @@ typedef struct
   XdRemoteTree *remote;         /* NULL: this machine */
 
   GtkLabel *path_label;
+  GtkLabel *trouble;
   GtkStringList *entries;
   GtkSingleSelection *selection;
   GtkListView *list_view;
@@ -69,6 +141,8 @@ fill (Browser            *self,
 {
   guint n = g_list_model_get_n_items (G_LIST_MODEL (self->entries));
 
+  gtk_widget_set_visible (GTK_WIDGET (self->trouble), FALSE);
+
   gtk_string_list_splice (self->entries, 0, n, names);
 
   g_free (self->path);
@@ -82,14 +156,25 @@ fill (Browser            *self,
 static void
 on_remote_listed (const char        *path,
                   const char *const *entries,
+                  const char        *trouble,
                   gpointer           user_data)
 {
   Browser *self = user_data;
 
-  /* A directory that cannot be read leaves the browser where it was, which is
-   * somewhere that could be. */
   if (path != NULL)
-    fill (self, path, entries);
+    {
+      fill (self, path, entries);
+      return;
+    }
+
+  /*
+   * Said rather than swallowed.
+   *
+   * The likeliest reason is a daemon older than the client asking -- it has no
+   * op for this -- and an empty list would look like an empty disk.
+   */
+  gtk_label_set_label (self->trouble, trouble);
+  gtk_widget_set_visible (GTK_WIDGET (self->trouble), TRUE);
 }
 
 static void
@@ -247,7 +332,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
                GtkListItem              *item,
                gpointer                  user_data)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
   GtkWidget *icon = gtk_image_new_from_icon_name ("folder-symbolic");
   GtkWidget *label = gtk_label_new (NULL);
 
@@ -259,8 +344,8 @@ on_item_setup (GtkSignalListItemFactory *factory,
 
   gtk_box_append (GTK_BOX (box), icon);
   gtk_box_append (GTK_BOX (box), label);
-  gtk_widget_set_margin_top (box, 4);
-  gtk_widget_set_margin_bottom (box, 4);
+  gtk_widget_set_margin_top (box, 2);
+  gtk_widget_set_margin_bottom (box, 2);
 
   gtk_list_item_set_child (item, box);
 }
@@ -314,6 +399,8 @@ xd_dir_browser_present (GtkWidget       *parent,
   g_return_if_fail (GTK_IS_WIDGET (parent));
   g_return_if_fail (chosen != NULL);
 
+  ensure_style ();
+
   self = g_new0 (Browser, 1);
   self->remote = remote != NULL ? g_object_ref (remote) : NULL;
   self->chosen = chosen;
@@ -328,7 +415,7 @@ xd_dir_browser_present (GtkWidget       *parent,
                                 GTK_WINDOW (gtk_widget_get_root (parent)));
   gtk_window_set_modal (GTK_WINDOW (window), TRUE);
   gtk_window_set_decorated (GTK_WINDOW (window), FALSE);
-  gtk_window_set_default_size (GTK_WINDOW (window), 560, 420);
+  gtk_window_set_default_size (GTK_WINDOW (window), 620, 460);
   gtk_widget_add_css_class (window, "xd-browser");
 
   /* The path being looked at, and the way to take it. */
@@ -336,16 +423,24 @@ xd_dir_browser_present (GtkWidget       *parent,
   gtk_label_set_ellipsize (self->path_label, PANGO_ELLIPSIZE_START);
   gtk_label_set_xalign (self->path_label, 0.0f);
   gtk_widget_set_hexpand (GTK_WIDGET (self->path_label), TRUE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->path_label), "heading");
+  gtk_widget_add_css_class (GTK_WIDGET (self->path_label), "xd-browser-path");
 
   use = gtk_button_new_with_label ("Work here");
-  gtk_widget_add_css_class (use, "suggested-action");
+  gtk_widget_add_css_class (use, "xd-browser-use");
   g_signal_connect (use, "clicked", G_CALLBACK (on_use_clicked), self);
 
   header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->path_label));
   gtk_box_append (GTK_BOX (header), use);
   gtk_widget_add_css_class (header, "xd-browser-bar");
+  gtk_widget_add_css_class (header, "xd-browser-head");
+
+  self->trouble = GTK_LABEL (gtk_label_new (NULL));
+  gtk_label_set_wrap (self->trouble, TRUE);
+  gtk_label_set_xalign (self->trouble, 0.0f);
+  gtk_widget_set_visible (GTK_WIDGET (self->trouble), FALSE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->trouble), "error");
+  gtk_widget_add_css_class (GTK_WIDGET (self->trouble), "xd-browser-bar");
 
   factory = gtk_signal_list_item_factory_new ();
   g_signal_connect (factory, "setup", G_CALLBACK (on_item_setup), self);
@@ -369,9 +464,11 @@ xd_dir_browser_present (GtkWidget       *parent,
   gtk_box_append (GTK_BOX (footer), hint ("Backspace", "Back"));
   gtk_box_append (GTK_BOX (footer), hint ("Esc", "Use the folder's"));
   gtk_widget_add_css_class (footer, "xd-browser-bar");
+  gtk_widget_add_css_class (footer, "xd-browser-foot");
 
   column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (column), header);
+  gtk_box_append (GTK_BOX (column), GTK_WIDGET (self->trouble));
   gtk_box_append (GTK_BOX (column), scrolled);
   gtk_box_append (GTK_BOX (column), footer);
   gtk_window_set_child (GTK_WINDOW (window), column);

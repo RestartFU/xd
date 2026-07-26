@@ -747,7 +747,9 @@ xd_remote_client_call_op_async (XdRemoteClient      *self,
   json_builder_set_member_name (builder, "op");
   json_builder_add_string_value (builder, op);
 
-  if (argument_name != NULL)
+  /* Both, or neither: a member whose value is null is not the same thing as an
+   * absent member, and the daemon reads absence as "you decide". */
+  if (argument_name != NULL && argument_value != NULL)
     {
       json_builder_set_member_name (builder, argument_name);
       json_builder_add_string_value (builder, argument_value);

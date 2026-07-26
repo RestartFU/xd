@@ -370,13 +370,6 @@ static const char *XD_STYLE =
    * one rather than like the small marker a sidebar row can afford. */
   ".xd-dots-large { font-size: 200%; letter-spacing: 2px; }\n"
 
-  /* The directory browser: a panel rather than a window, since it has no
-   * decoration of its own to sit under. */
-  ".xd-browser { border-radius: 12px; }\n"
-  ".xd-browser-bar { padding: 10px 12px; }\n"
-  ".xd-key { font-size: 85%; padding: 1px 6px; border-radius: 5px;"
-  " background: alpha(currentColor, 0.10); }\n"
-
   /* The entry a row becomes while it is being named. Sized to the row rather
    * than to a form, so naming something does not make the tree jump. */
   ".xd-inline-entry { min-height: 0; padding: 0 4px; }\n";

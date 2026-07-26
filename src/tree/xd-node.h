@@ -29,6 +29,15 @@ typedef enum
   XD_NODE_OFFLINE,   /* a remote that is not answering */
 } XdNodeState;
 
+/*
+ * What a chat looks like before anything has answered it.
+ *
+ * Named here because more than one place needs it, and because the obvious
+ * name for it -- chat-bubble-text-symbolic -- is not in the icon theme this
+ * ships with: rows drew the missing-image placeholder instead.
+ */
+#define XD_CHAT_ICON "chat-message-new-symbolic"
+
 #define XD_TYPE_NODE (xd_node_get_type ())
 G_DECLARE_FINAL_TYPE (XdNode, xd_node, XD, NODE, GObject)
 

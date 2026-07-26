@@ -82,11 +82,16 @@ void            xd_remote_tree_create_chat   (XdRemoteTree *self,
 
 /*
  * The directories inside @path on the daemon, for choosing where a chat runs.
- * NULL asks for its home. The callback gets the path listed and a NULL
- * terminated array of names, or NULL when it could not be read.
+ * NULL asks for its home.
+ *
+ * On success the callback gets the path listed and a NULL terminated array of
+ * names. On failure it gets NULL for both and what the daemon said -- which is
+ * worth showing: "Unknown op" means the daemon is older than the client asking,
+ * and no amount of retrying will change that.
  */
 typedef void (*XdRemoteDirFunc) (const char         *path,
                                  const char *const  *entries,
+                                 const char         *trouble,
                                  gpointer            user_data);
 
 void            xd_remote_tree_list_dir      (XdRemoteTree    *self,

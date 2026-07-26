@@ -668,7 +668,7 @@ on_dir_listed (GObject      *source,
   reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
   if (reply == NULL)
     {
-      listing->callback (NULL, NULL, listing->user_data);
+      listing->callback (NULL, NULL, error->message, listing->user_data);
       g_free (listing);
       return;
     }
@@ -682,7 +682,8 @@ on_dir_listed (GObject      *source,
   g_ptr_array_add (entries, NULL);
 
   listing->callback (member_string (reply, "path"),
-                     (const char *const *) entries->pdata, listing->user_data);
+                     (const char *const *) entries->pdata, NULL,
+                     listing->user_data);
 
   g_free (listing);
 }
