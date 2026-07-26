@@ -125,12 +125,22 @@ jobs:
           "$hash  xd-nightly-windows-x86_64.msi" |
             Set-Content xd-nightly-windows-x86_64.msi.sha256
 
+      - name: Test the PowerShell installer
+        shell: pwsh
+        run: |
+          & ./scripts/install.ps1 `
+            -MsiPath ./xd-nightly-windows-x86_64.msi `
+            -ChecksumPath ./xd-nightly-windows-x86_64.msi.sha256 `
+            -Quiet
+          & "$env:ProgramFiles\RestartFU\xd-nightly\bin\xd.exe" --version
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
             xd-nightly-windows-x86_64.msi
             xd-nightly-windows-x86_64.msi.sha256
+            scripts/install.ps1
 
   publish:
     needs: [linux, windows]
@@ -168,8 +178,14 @@ jobs:
           \`\`\`
 
           Windows x86_64: download and run
-          \`xd-nightly-windows-x86_64.msi\`. This first Windows build omits
-          the embedded terminal and Windows daemon hosting.
+          \`xd-nightly-windows-x86_64.msi\`, or run in PowerShell:
+
+          \`\`\`powershell
+          irm https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.ps1 | iex
+          \`\`\`
+
+          This first Windows build omits the embedded terminal and Windows
+          daemon hosting.
 
           Both downloads are self-contained. Installs beside a release rather
           than over it -- its own settings, chats and workspaces. On Linux, the
@@ -192,4 +208,5 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256 \
             xd-nightly-windows-x86_64.msi \
             xd-nightly-windows-x86_64.msi.sha256 \
-            scripts/install.sh
+            scripts/install.sh \
+            scripts/install.ps1

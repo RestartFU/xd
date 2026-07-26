@@ -41,10 +41,15 @@ directory alone.
 
 Windows, x86_64:
 
-Download `xd-nightly-windows-x86_64.msi` from the
-[nightly release](https://github.com/RestartFU/xd/releases/tag/nightly) and run
-it. The MSI carries GTK and the rest of its runtime; MSYS2 is not required on
-the installed machine.
+```powershell
+irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
+```
+
+That downloads the latest nightly MSI, verifies its SHA256 checksum, and opens
+the Windows installer. Approve the Windows elevation prompt. The MSI carries
+GTK and the rest of its runtime; MSYS2 is not required on the installed
+machine. It can also be downloaded directly from the
+[nightly release](https://github.com/RestartFU/xd/releases/tag/nightly).
 
 This first Windows client supports local chats and connecting to a paired Linux
 daemon. Embedded terminals and hosting the daemon on Windows are not available
