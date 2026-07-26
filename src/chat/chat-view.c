@@ -268,14 +268,19 @@ append_tool_line (HyChatView *self,
 static void
 retire_open_questions (HyChatView *self)
 {
-  for (GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript));
-       child != NULL;
-       child = gtk_widget_get_next_sibling (child))
-    {
-      GtkWidget *choices = g_object_get_data (G_OBJECT (child), "hy-choices");
+  GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript));
 
-      if (choices != NULL)
-        gtk_widget_set_sensitive (choices, FALSE);
+  while (child != NULL)
+    {
+      GtkWidget *next = gtk_widget_get_next_sibling (child);
+
+      /* Taken away rather than greyed out. The answer is about to appear as a
+       * message of its own, so a row of dead buttons above it would only be
+       * saying what was on offer at the time. */
+      if (g_object_get_data (G_OBJECT (child), "hy-choices") != NULL)
+        gtk_box_remove (self->transcript, child);
+
+      child = next;
     }
 }
 
@@ -304,12 +309,13 @@ append_choices (HyChatView  *self,
                 gboolean     answerable)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
-  GtkWidget *question = gtk_label_new (ask->question);
   GtkWidget *choices = gtk_flow_box_new ();
 
-  gtk_label_set_wrap (GTK_LABEL (question), TRUE);
-  gtk_label_set_xalign (GTK_LABEL (question), 0.0f);
-  gtk_widget_add_css_class (question, "heading");
+  /* Only while it can still be answered. The question itself is part of the
+   * reply and stays; these are a way of answering it, and a way of answering
+   * something already answered is just something to explain. */
+  if (!answerable)
+    return;
 
   /* One per line: the options are sentences, so side by side they would each
    * be too narrow to read. */
@@ -336,10 +342,9 @@ append_choices (HyChatView  *self,
    * on screen as a record of what was offered, but it is not an offer. */
   gtk_widget_set_sensitive (choices, answerable);
 
-  /* Tagged so sending anything can retire it, however it was answered. */
+  /* Tagged so sending anything takes it away, however it was answered. */
   g_object_set_data (G_OBJECT (box), "hy-choices", choices);
 
-  gtk_box_append (GTK_BOX (box), question);
   gtk_box_append (GTK_BOX (box), choices);
   gtk_widget_set_margin_top (box, 4);
   gtk_widget_set_margin_start (box, 12);
@@ -368,8 +373,18 @@ append_reply (HyChatView *self,
 
   ask = hy_ask_parse (text, &prose);
 
-  row = append_row (self, HY_MESSAGE_ASSISTANT, ask != NULL ? prose : text);
-  hy_message_row_set_source (row, source);
+  {
+    g_autofree char *said = NULL;
+
+    /* The question goes in the message rather than above the buttons, so the
+     * transcript still reads as a conversation once they are gone. */
+    if (ask != NULL)
+      said = *prose != '\0' ? g_strdup_printf ("%s\n\n**%s**", prose, ask->question)
+                            : g_strdup_printf ("**%s**", ask->question);
+
+    row = append_row (self, HY_MESSAGE_ASSISTANT, said != NULL ? said : text);
+    hy_message_row_set_source (row, source);
+  }
 
   if (ask != NULL)
     append_choices (self, ask, answerable);
