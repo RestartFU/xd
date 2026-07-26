@@ -397,6 +397,9 @@ add_folder (XdRemoteServer *self,
         json_builder_add_string_value (chats, chat->title);
         json_builder_set_member_name (chats, "backend");
         json_builder_add_string_value (chats, chat->backend);
+        json_builder_set_member_name (chats, "working");
+        json_builder_add_boolean_value (
+          chats, g_hash_table_contains (self->turns, chat->id));
         json_builder_end_object (chats);
       }
   }

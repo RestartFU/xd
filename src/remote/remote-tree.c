@@ -225,6 +225,8 @@ read_chats (Reload    *reload,
       const char *folder_id = member_string (row, "folder");
       const char *title = member_string (row, "title");
       const char *backend = member_string (row, "backend");
+      gboolean working =
+        json_object_get_boolean_member_with_default (row, "working", FALSE);
       XdNode *folder = folder_id != NULL
         ? g_hash_table_lookup (reload->folders, folder_id) : NULL;
       XdNode *chat;
@@ -246,6 +248,7 @@ read_chats (Reload    *reload,
         }
 
       xd_node_set_icon_name (chat, backend_icon (backend));
+      xd_node_set_state (chat, working ? XD_NODE_WORKING : XD_NODE_IDLE);
 
       /* The daemon lists a folder's chats most-recent-first, which is the
        * order the sidebar shows them in, and they sort after its folders. */

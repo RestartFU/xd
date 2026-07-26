@@ -6,6 +6,7 @@
 #include <json-glib/json-glib.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /*
@@ -1126,14 +1127,14 @@ typedef struct
 {
   Wait wait;
   JsonObject *reply;
-} TerminalReply;
+} RemoteReply;
 
 static void
 on_terminal_reply (GObject      *source,
                    GAsyncResult *result,
                    gpointer      user_data)
 {
-  TerminalReply *waiting = user_data;
+  RemoteReply *waiting = user_data;
   g_autoptr (GError) error = NULL;
 
   waiting->reply =
@@ -1297,9 +1298,9 @@ terminal_was_resized (gpointer user_data)
 }
 
 static void
-call_terminal_request (XdRemoteClient *client,
-                       JsonBuilder    *builder,
-                       TerminalReply  *waiting)
+call_remote_request (XdRemoteClient *client,
+                     JsonBuilder    *builder,
+                     RemoteReply    *waiting)
 {
   g_autoptr (JsonNode) request = json_builder_get_root (builder);
 
@@ -1320,7 +1321,7 @@ test_remote_terminal_is_shared_and_replayable (void)
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
   TerminalEvents events = { 0 };
-  TerminalReply opened = { 0 };
+  RemoteReply opened = { 0 };
 
   daemon_start (&daemon);
   client = xd_remote_client_new ("127.0.0.1", daemon.port);
@@ -1342,7 +1343,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_int_value (builder, 30);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &opened);
+    call_remote_request (client, builder, &opened);
     events.terminal_id =
       g_strdup (json_object_get_string_member (opened.reply, "id"));
   }
@@ -1352,7 +1353,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     g_autoptr (JsonBuilder) builder = json_builder_new ();
     g_autofree char *encoded =
       g_base64_encode ((const guint8 *) command, strlen (command));
-    TerminalReply written = { 0 };
+    RemoteReply written = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1363,7 +1364,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, encoded);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &written);
+    call_remote_request (client, builder, &written);
     json_object_unref (written.reply);
     g_free (written.wait.failure);
   }
@@ -1372,7 +1373,7 @@ test_remote_terminal_is_shared_and_replayable (void)
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
-    TerminalReply listed = { 0 };
+    RemoteReply listed = { 0 };
     JsonArray *rows;
     JsonObject *row;
     JsonArray *replay;
@@ -1384,7 +1385,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, daemon.chat_id);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &listed);
+    call_remote_request (client, builder, &listed);
     rows = json_object_get_array_member (listed.reply, "terminals");
     g_assert_cmpuint (json_array_get_length (rows), ==, 1);
     row = json_array_get_object_element (rows, 0);
@@ -1401,7 +1402,7 @@ test_remote_terminal_is_shared_and_replayable (void)
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
-    TerminalReply resized = { 0 };
+    RemoteReply resized = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1414,7 +1415,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_int_value (builder, 40);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &resized);
+    call_remote_request (client, builder, &resized);
     json_object_unref (resized.reply);
     g_free (resized.wait.failure);
   }
@@ -1426,7 +1427,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     g_autoptr (JsonBuilder) builder = json_builder_new ();
     g_autofree char *encoded =
       g_base64_encode ((const guint8 *) command, strlen (command));
-    TerminalReply written = { 0 };
+    RemoteReply written = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1437,7 +1438,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, encoded);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &written);
+    call_remote_request (client, builder, &written);
     json_object_unref (written.reply);
     g_free (written.wait.failure);
   }
@@ -1446,7 +1447,7 @@ test_remote_terminal_is_shared_and_replayable (void)
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
-    TerminalReply listed = { 0 };
+    RemoteReply listed = { 0 };
     JsonArray *rows;
     JsonObject *row;
 
@@ -1457,7 +1458,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, daemon.chat_id);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &listed);
+    call_remote_request (client, builder, &listed);
     rows = json_object_get_array_member (listed.reply, "terminals");
     row = json_array_get_object_element (rows, 0);
     g_assert_true (replay_crosses_resize (
@@ -1472,7 +1473,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     g_autoptr (JsonBuilder) builder = json_builder_new ();
     g_autofree char *encoded =
       g_base64_encode ((const guint8 *) command, strlen (command));
-    TerminalReply written = { 0 };
+    RemoteReply written = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1483,7 +1484,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, encoded);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &written);
+    call_remote_request (client, builder, &written);
     json_object_unref (written.reply);
     g_free (written.wait.failure);
   }
@@ -1492,7 +1493,7 @@ test_remote_terminal_is_shared_and_replayable (void)
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
-    TerminalReply killed = { 0 };
+    RemoteReply killed = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1501,7 +1502,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, events.terminal_id);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &killed);
+    call_remote_request (client, builder, &killed);
     json_object_unref (killed.reply);
     g_free (killed.wait.failure);
   }
@@ -1518,7 +1519,7 @@ test_remote_terminal_is_shared_and_replayable (void)
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
-    TerminalReply second = { 0 };
+    RemoteReply second = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1527,7 +1528,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, daemon.chat_id);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &second);
+    call_remote_request (client, builder, &second);
     events.terminal_id =
       g_strdup (json_object_get_string_member (second.reply, "id"));
     json_object_unref (second.reply);
@@ -1541,7 +1542,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     g_autoptr (JsonBuilder) builder = json_builder_new ();
     g_autofree char *encoded =
       g_base64_encode ((const guint8 *) command, strlen (command));
-    TerminalReply written = { 0 };
+    RemoteReply written = { 0 };
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
@@ -1552,7 +1553,7 @@ test_remote_terminal_is_shared_and_replayable (void)
     json_builder_add_string_value (builder, encoded);
     json_builder_end_object (builder);
 
-    call_terminal_request (client, builder, &written);
+    call_remote_request (client, builder, &written);
     json_object_unref (written.reply);
     g_free (written.wait.failure);
   }
@@ -1565,6 +1566,82 @@ test_remote_terminal_is_shared_and_replayable (void)
   g_free (opened.wait.failure);
   g_free (events.terminal_id);
   g_string_free (events.output, TRUE);
+  daemon_stop (&daemon);
+}
+
+/*
+ * A device joining after work started must learn that state from the tree
+ * snapshot. It never saw the earlier turn-started event.
+ */
+static void
+test_a_joining_device_sees_an_active_turn (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) sender = NULL;
+  g_autoptr (XdRemoteClient) joining = NULL;
+  g_autoptr (XdRemoteTree) sender_tree = NULL;
+  g_autoptr (XdRemoteTree) joining_tree = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  RemoteReply started = { 0 };
+  XdNode *chat;
+
+  daemon_start (&daemon);
+
+  /* Keep a real daemon turn alive without requiring an installed CLI. */
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-running\"}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  sender = xd_remote_client_new ("127.0.0.1", daemon.port);
+  sender_tree = paired_tree (&daemon, sender);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "keep working");
+    json_builder_end_object (builder);
+
+    call_remote_request (sender, builder, &started);
+  }
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  /* This tree is created after turn-started, so only its snapshot can know. */
+  joining = xd_remote_client_new ("127.0.0.1", daemon.port);
+  joining_tree = paired_tree (&daemon, joining);
+  chat = xd_remote_tree_lookup_chat (joining_tree, daemon.chat_id);
+
+  g_assert_nonnull (chat);
+  g_assert_cmpint (xd_node_get_state (chat), ==, XD_NODE_WORKING);
+
+  json_object_unref (started.reply);
+  g_free (started.wait.failure);
   daemon_stop (&daemon);
 }
 
@@ -1636,6 +1713,7 @@ main (int argc, char *argv[])
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
+  ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
 
   return g_test_run ();
 }
