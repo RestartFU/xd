@@ -5,22 +5,27 @@
 #include "util/host-launch.h"
 
 /*
- * A shell inside the window, in the directory the agent works in.
+ * Shell sessions, grouped per chat.
  *
- * The point is to see what the agent did without leaving the chat: run the
- * tests it changed, read a diff, undo something. It is a plain shell, not a
- * view of the agent's own commands -- those already appear in the transcript.
+ * Each chat owns an AdwTabView of terminals; the views live in a stack and
+ * survive chat switches, so coming back to a chat finds its shells where
+ * they were. Killing is done by the pty: closing a tab destroys its
+ * terminal, the pty goes with it, and the kernel hangs up the shell.
  */
 
 struct _HyTerminalPanel
 {
   AdwBin parent_instance;
 
-  VteTerminal *terminal;
+  char *chat_id;
   char *workdir;
-  gboolean running;
-  gboolean restarting;
+
+  AdwTabBar *bar;
+  GtkStack *stack;
+  GHashTable *views;        /* chat id -> AdwTabView, owned by the stack */
 };
+
+G_DEFINE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, ADW_TYPE_BIN)
 
 enum
 {
@@ -30,10 +35,6 @@ enum
 
 static guint signals[N_SIGNALS];
 
-G_DEFINE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, ADW_TYPE_BIN)
-
-/* Enough to scroll back through a build log, bounded so a runaway command
- * cannot grow the process without limit. */
 #define SCROLLBACK_LINES 10000
 
 /* One Dark's hues, toned to sit on this window: VTE's stock palette is the
@@ -47,89 +48,72 @@ static const char *TERMINAL_PALETTE[16] = {
 };
 
 static void
-apply_colours (HyTerminalPanel *self)
+apply_colours (VteTerminal *terminal)
 {
-  AdwStyleManager *style = adw_style_manager_get_default ();
-  gboolean dark = adw_style_manager_get_dark (style);
+  gboolean dark = adw_style_manager_get_dark (adw_style_manager_get_default ());
   GdkRGBA foreground, background;
   GdkRGBA palette[16];
 
   for (gsize i = 0; i < 16; i++)
     gdk_rgba_parse (&palette[i], TERMINAL_PALETTE[i]);
 
-  /* VTE defaults to black on white whatever the rest of the window is doing,
-   * so the theme has to be followed by hand. */
   gdk_rgba_parse (&foreground, dark ? "#d4d4d4" : "#1d1d1d");
-  /*
-   * A step above the window, like every other raised surface.
-   *
-   * The terminal is a panel sitting on the window, not a hole in it, so it
-   * takes a clearer lift than the cards do -- it is a large flat area, and at
-   * the same few percent as a button it read as a black rectangle rather than
-   * as a surface. Matched by hand because VTE takes a colour rather than
-   * following the stylesheet.
-   */
-  /* The window's own base. The dividers do all the separating now, and any
-   * lighter fill showed as a grey patch wherever a popover corner floated
-   * over the boundary between panes. */
   gdk_rgba_parse (&background, dark ? "#0a0a0c" : "#ffffff");
 
-  vte_terminal_set_colors (self->terminal, &foreground, &background,
+  vte_terminal_set_colors (terminal, &foreground, &background,
                            palette, G_N_ELEMENTS (palette));
 }
 
-static void
-on_dark_changed (AdwStyleManager *style,
-                 GParamSpec      *pspec,
-                 gpointer         user_data)
+static AdwTabView *
+current_view (HyTerminalPanel *self)
 {
-  apply_colours (user_data);
+  if (self->chat_id == NULL)
+    return NULL;
+
+  return g_hash_table_lookup (self->views, self->chat_id);
 }
 
+static VteTerminal *
+current_terminal (HyTerminalPanel *self)
+{
+  AdwTabView *view = current_view (self);
+  AdwTabPage *page;
+
+  if (view == NULL)
+    return NULL;
+
+  page = adw_tab_view_get_selected_page (view);
+
+  return page != NULL ? VTE_TERMINAL (adw_tab_page_get_child (page)) : NULL;
+}
+
+/* The shell ended on its own; its tab has nothing left to show. */
 static void
 on_child_exited (VteTerminal *terminal,
                  int          status,
                  gpointer     user_data)
 {
   HyTerminalPanel *self = user_data;
+  GHashTableIter iter;
+  gpointer view;
 
-  self->running = FALSE;
-
-  /* Asked for: clear what the old shell left and start again. */
-  if (self->restarting)
+  g_hash_table_iter_init (&iter, self->views);
+  while (g_hash_table_iter_next (&iter, NULL, &view))
     {
-      self->restarting = FALSE;
-      vte_terminal_reset (terminal, TRUE, TRUE);
-      hy_terminal_panel_start (self);
-      return;
-    }
+      AdwTabPage *page = adw_tab_view_get_page (ADW_TAB_VIEW (view),
+                                                GTK_WIDGET (terminal));
 
-  /* Otherwise left as it was rather than restarted: a shell that exits
-   * immediately would respawn in a loop with nothing to show for it. The next
-   * time the panel is opened starts a fresh one. */
-  vte_terminal_feed (terminal, "\r\n\033[2m[exited]\033[0m\r\n", -1);
-}
-
-static void
-on_spawned (VteTerminal *terminal,
-            GPid         pid,
-            GError      *error,
-            gpointer     user_data)
-{
-  HyTerminalPanel *self = user_data;
-
-  if (error != NULL)
-    {
-      g_autofree char *message =
-        g_strdup_printf ("\r\n\033[31m%s\033[0m\r\n", error->message);
-
-      self->running = FALSE;
-      vte_terminal_feed (terminal, message, -1);
+      if (page != NULL)
+        {
+          adw_tab_view_close_page (ADW_TAB_VIEW (view), page);
+          return;
+        }
     }
 }
 
 static void
-spawn_shell (HyTerminalPanel *self)
+spawn_shell (HyTerminalPanel *self,
+             VteTerminal     *terminal)
 {
   g_auto (GStrv) env = hy_host_environ ();
   g_autofree char *shell = vte_get_user_shell ();
@@ -141,113 +125,198 @@ spawn_shell (HyTerminalPanel *self)
     shell = g_strdup ("/bin/sh");
 
   argv[0] = shell;
-  self->running = TRUE;
 
-  vte_terminal_spawn_async (self->terminal, VTE_PTY_DEFAULT,
+  vte_terminal_spawn_async (terminal, VTE_PTY_DEFAULT,
                             self->workdir, argv, env,
                             G_SPAWN_SEARCH_PATH, NULL, NULL, NULL,
-                            -1, NULL, on_spawned, self);
+                            -1, NULL, NULL, NULL);
 }
 
-/*
- * Walks the running shell over to @workdir.
- *
- * One shell is shared by every chat, so switching chats has to move it rather
- * than start another: a pty per chat would multiply for no reason, and
- * killing this one would throw away whatever is in it.
- *
- * The line is cleared first, so a half-typed command does not end up with cd
- * stuck on the front of it. If something is running, both go to that program
- * instead -- there is no way to ask a pty whether it is at a prompt, and
- * waiting for one that may never come is worse than a stray line.
- */
 static void
-follow_workdir (HyTerminalPanel *self)
+add_session (HyTerminalPanel *self,
+             AdwTabView      *view)
 {
-  g_autofree char *quoted = g_shell_quote (self->workdir);
-  g_autofree char *command = g_strdup_printf ("\025cd %s\n", quoted);
+  VteTerminal *terminal = VTE_TERMINAL (vte_terminal_new ());
+  AdwTabPage *page;
+  g_autoptr (PangoFontDescription) font = NULL;
+  g_autofree char *title = NULL;
 
-  vte_terminal_feed_child (self->terminal, command, -1);
+  vte_terminal_set_scrollback_lines (terminal, SCROLLBACK_LINES);
+  vte_terminal_set_scroll_on_output (terminal, FALSE);
+  vte_terminal_set_scroll_on_keystroke (terminal, TRUE);
+  vte_terminal_set_mouse_autohide (terminal, TRUE);
+  vte_terminal_set_cursor_blink_mode (terminal, VTE_CURSOR_BLINK_ON);
+
+  font = pango_font_description_from_string ("JetBrains Mono, Monospace 10");
+  vte_terminal_set_font (terminal, font);
+  apply_colours (terminal);
+
+  gtk_widget_set_hexpand (GTK_WIDGET (terminal), TRUE);
+  gtk_widget_set_vexpand (GTK_WIDGET (terminal), TRUE);
+
+  g_signal_connect (terminal, "child-exited",
+                    G_CALLBACK (on_child_exited), self);
+
+  page = adw_tab_view_append (view, GTK_WIDGET (terminal));
+  title = self->workdir != NULL ? g_path_get_basename (self->workdir)
+                                : g_strdup ("shell");
+  adw_tab_page_set_title (page, title);
+
+  spawn_shell (self, terminal);
+  adw_tab_view_set_selected_page (view, page);
+}
+
+/* The chat's last session is gone, so the panel has nothing to show. */
+static void
+on_page_closed (AdwTabView *view,
+                AdwTabPage *page,
+                gpointer    user_data)
+{
+  HyTerminalPanel *self = user_data;
+
+  if (view == current_view (self) && adw_tab_view_get_n_pages (view) == 1)
+    g_signal_emit (self, signals[SIGNAL_CLOSE_REQUESTED], 0);
+}
+
+static AdwTabView *
+ensure_view (HyTerminalPanel *self,
+             const char      *chat_id)
+{
+  AdwTabView *view = g_hash_table_lookup (self->views, chat_id);
+
+  if (view == NULL)
+    {
+      view = ADW_TAB_VIEW (adw_tab_view_new ());
+      g_signal_connect (view, "close-page", G_CALLBACK (on_page_closed), self);
+      gtk_stack_add_named (self->stack, GTK_WIDGET (view), chat_id);
+      g_hash_table_insert (self->views, g_strdup (chat_id), view);
+    }
+
+  return view;
+}
+
+void
+hy_terminal_panel_set_chat (HyTerminalPanel *self,
+                            const char      *chat_id)
+{
+  AdwTabView *view;
+
+  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+
+  if (g_strcmp0 (self->chat_id, chat_id) == 0)
+    return;
+
+  g_free (self->chat_id);
+  self->chat_id = g_strdup (chat_id);
+
+  if (chat_id == NULL)
+    {
+      adw_tab_bar_set_view (self->bar, NULL);
+      return;
+    }
+
+  view = ensure_view (self, chat_id);
+  gtk_stack_set_visible_child (self->stack, GTK_WIDGET (view));
+  adw_tab_bar_set_view (self->bar, view);
 }
 
 void
 hy_terminal_panel_set_workdir (HyTerminalPanel *self,
                                const char      *workdir)
 {
-  gboolean changed;
-
   g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
-
-  changed = g_strcmp0 (self->workdir, workdir) != 0;
-  if (!changed)
-    return;
 
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
-
-  if (self->workdir == NULL)
-    return;
-
-  /* Already talking to a shell: move it. Otherwise the panel may have been
-   * waiting for this, since it is restored at startup before any chat is
-   * chosen, and the shell starts here in the right place. */
-  if (self->running)
-    follow_workdir (self);
-  else if (gtk_widget_get_visible (GTK_WIDGET (self)))
-    hy_terminal_panel_start (self);
 }
 
 void
 hy_terminal_panel_start (HyTerminalPanel *self)
 {
+  AdwTabView *view;
+
   g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
 
-  if (!self->running && self->workdir != NULL)
-    spawn_shell (self);
+  if (self->chat_id == NULL || self->workdir == NULL)
+    return;
+
+  view = ensure_view (self, self->chat_id);
+  if (adw_tab_view_get_n_pages (view) == 0)
+    add_session (self, view);
 }
 
 void
 hy_terminal_panel_activate (HyTerminalPanel *self)
 {
+  VteTerminal *terminal;
+
   g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
 
   hy_terminal_panel_start (self);
-  gtk_widget_grab_focus (GTK_WIDGET (self->terminal));
+
+  terminal = current_terminal (self);
+  if (terminal != NULL)
+    gtk_widget_grab_focus (GTK_WIDGET (terminal));
+}
+
+void
+hy_terminal_panel_forget_chat (HyTerminalPanel *self,
+                               const char      *chat_id)
+{
+  AdwTabView *view;
+
+  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+
+  view = g_hash_table_lookup (self->views, chat_id);
+  if (view == NULL)
+    return;
+
+  /* Destroying the view destroys the terminals, whose ptys close, which is
+   * what actually kills the shells. */
+  g_hash_table_remove (self->views, chat_id);
+  gtk_stack_remove (self->stack, GTK_WIDGET (view));
+
+  if (g_strcmp0 (self->chat_id, chat_id) == 0)
+    adw_tab_bar_set_view (self->bar, NULL);
+}
+
+/* --- the buttons ----------------------------------------------------------- */
+
+static void
+on_new_session (GtkButton *button,
+                gpointer   user_data)
+{
+  HyTerminalPanel *self = user_data;
+  AdwTabView *view;
+
+  if (self->chat_id == NULL)
+    return;
+
+  view = ensure_view (self, self->chat_id);
+  add_session (self, view);
 }
 
 /*
- * Replaces the shell with a fresh one.
+ * Kills the session on screen.
  *
- * A shell that has been cd'd around, or left inside something, is quicker to
- * replace than to unpick. The old one is killed rather than left running: it
- * has no window to appear in.
+ * Closing the page destroys the terminal; the pty closes with it and the
+ * kernel hangs up everything attached. If it was the last one, on_page_closed
+ * asks for the panel to go too.
  */
 static void
-on_restart_clicked (GtkButton *button,
-                    gpointer   user_data)
+on_kill_session (GtkButton *button,
+                 gpointer   user_data)
 {
   HyTerminalPanel *self = user_data;
+  AdwTabView *view = current_view (self);
+  AdwTabPage *page;
 
-  if (!self->running)
-    {
-      vte_terminal_reset (self->terminal, TRUE, TRUE);
-      hy_terminal_panel_start (self);
-      return;
-    }
+  if (view == NULL)
+    return;
 
-  /* One child per terminal, so the new shell waits for the old one to be
-   * gone rather than racing it. */
-  self->restarting = TRUE;
-  vte_terminal_feed_child (self->terminal, "\004", -1);
-}
-
-static void
-on_close_clicked (GtkButton *button,
-                  gpointer   user_data)
-{
-  HyTerminalPanel *self = user_data;
-
-  g_signal_emit (self, signals[SIGNAL_CLOSE_REQUESTED], 0);
+  page = adw_tab_view_get_selected_page (view);
+  if (page != NULL)
+    adw_tab_view_close_page (view, page);
 }
 
 HyTerminalPanel *
@@ -261,7 +330,8 @@ hy_terminal_panel_finalize (GObject *object)
 {
   HyTerminalPanel *self = HY_TERMINAL_PANEL (object);
 
-  g_signal_handlers_disconnect_by_data (adw_style_manager_get_default (), self);
+  g_clear_pointer (&self->views, g_hash_table_unref);
+  g_free (self->chat_id);
   g_free (self->workdir);
 
   G_OBJECT_CLASS (hy_terminal_panel_parent_class)->finalize (object);
@@ -272,8 +342,6 @@ hy_terminal_panel_class_init (HyTerminalPanelClass *klass)
 {
   G_OBJECT_CLASS (klass)->finalize = hy_terminal_panel_finalize;
 
-  /* The panel cannot take itself off screen: whoever put it there decides
-   * that, and has a button to keep in step. */
   signals[SIGNAL_CLOSE_REQUESTED] =
     g_signal_new ("close-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -282,60 +350,40 @@ hy_terminal_panel_class_init (HyTerminalPanelClass *klass)
 static void
 hy_terminal_panel_init (HyTerminalPanel *self)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  g_autoptr (PangoFontDescription) font = NULL;
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
+  GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
+  GtkWidget *kill_button = gtk_button_new_from_icon_name ("user-trash-symbolic");
+  GtkWidget *overlay = gtk_overlay_new ();
 
-  self->terminal = VTE_TERMINAL (vte_terminal_new ());
-  vte_terminal_set_scrollback_lines (self->terminal, SCROLLBACK_LINES);
-  vte_terminal_set_scroll_on_output (self->terminal, FALSE);
-  vte_terminal_set_scroll_on_keystroke (self->terminal, TRUE);
-  vte_terminal_set_mouse_autohide (self->terminal, TRUE);
-  vte_terminal_set_cursor_blink_mode (self->terminal, VTE_CURSOR_BLINK_ON);
+  self->views = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
-  /* JetBrains Mono, which is the terminal face of the reference; the bundle
-   * carries it, and "Monospace" stays as the fallback resolution. */
-  font = pango_font_description_from_string ("JetBrains Mono, Monospace 10");
-  vte_terminal_set_font (self->terminal, font);
+  self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
+  adw_tab_bar_set_autohide (self->bar, TRUE);
 
-  gtk_widget_set_hexpand (GTK_WIDGET (self->terminal), TRUE);
-  gtk_widget_set_vexpand (GTK_WIDGET (self->terminal), TRUE);
+  self->stack = GTK_STACK (gtk_stack_new ());
+  gtk_widget_set_vexpand (GTK_WIDGET (self->stack), TRUE);
 
-  /* No scrollbar: a terminal scrolls with the wheel and with the keys, and
-   * the bar was a permanent stripe down a panel that is mostly text. */
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->terminal));
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->bar));
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
 
-  /* Over the terminal rather than above it, so the buttons cost no height
-   * and the shell keeps the whole panel. */
-  {
-    GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
-    GtkWidget *restart = gtk_button_new_from_icon_name ("list-add-symbolic");
-    GtkWidget *close = gtk_button_new_from_icon_name ("user-trash-symbolic");
-    GtkWidget *overlay = gtk_overlay_new ();
+  gtk_widget_add_css_class (new_button, "flat");
+  gtk_widget_set_tooltip_text (new_button, "New session");
+  g_signal_connect (new_button, "clicked", G_CALLBACK (on_new_session), self);
 
-    gtk_widget_add_css_class (restart, "flat");
-    gtk_widget_set_tooltip_text (restart, "Start a fresh shell");
-    g_signal_connect (restart, "clicked", G_CALLBACK (on_restart_clicked), self);
+  gtk_widget_add_css_class (kill_button, "flat");
+  gtk_widget_set_tooltip_text (kill_button, "Kill this session");
+  g_signal_connect (kill_button, "clicked", G_CALLBACK (on_kill_session), self);
 
-    gtk_widget_add_css_class (close, "flat");
-    gtk_widget_set_tooltip_text (close, "Close the terminal");
-    g_signal_connect (close, "clicked", G_CALLBACK (on_close_clicked), self);
+  gtk_box_append (GTK_BOX (controls), new_button);
+  gtk_box_append (GTK_BOX (controls), kill_button);
+  gtk_widget_set_halign (controls, GTK_ALIGN_END);
+  gtk_widget_set_valign (controls, GTK_ALIGN_START);
+  gtk_widget_set_margin_top (controls, 4);
+  gtk_widget_set_margin_end (controls, 16);
 
-    gtk_box_append (GTK_BOX (controls), restart);
-    gtk_box_append (GTK_BOX (controls), close);
-    gtk_widget_set_halign (controls, GTK_ALIGN_END);
-    gtk_widget_set_valign (controls, GTK_ALIGN_START);
-    gtk_widget_set_margin_top (controls, 4);
-    gtk_widget_set_margin_end (controls, 16);
+  gtk_overlay_set_child (GTK_OVERLAY (overlay), box);
+  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), controls);
 
-    gtk_overlay_set_child (GTK_OVERLAY (overlay), box);
-    gtk_overlay_add_overlay (GTK_OVERLAY (overlay), controls);
-
-    adw_bin_set_child (ADW_BIN (self), overlay);
-  }
-
-  g_signal_connect (self->terminal, "child-exited",
-                    G_CALLBACK (on_child_exited), self);
-  g_signal_connect (adw_style_manager_get_default (), "notify::dark",
-                    G_CALLBACK (on_dark_changed), self);
-  apply_colours (self);
+  adw_bin_set_child (ADW_BIN (self), overlay);
 }

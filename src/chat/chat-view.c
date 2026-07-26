@@ -1673,6 +1673,14 @@ close_terminal (HyChatView *self)
   gtk_toggle_button_set_active (self->terminal_button, FALSE);
 }
 
+/* A chat that no longer exists has no business keeping shells alive. */
+static void
+forget_chat_sessions (HyChatView *self,
+                      HyNode     *chat)
+{
+  hy_terminal_panel_forget_chat (self->terminal, hy_node_get_chat_id (chat));
+}
+
 static int
 terminal_height (HyChatView *self)
 {
@@ -1736,6 +1744,7 @@ update_context_bar (HyChatView   *self,
     g_autofree char *tooltip =
       have_workdir ? g_strdup_printf ("Terminal in %s", workdir) : NULL;
 
+    hy_terminal_panel_set_chat (self->terminal, hy_node_get_chat_id (self->chat));
     hy_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
     hy_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
     hy_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
@@ -1971,6 +1980,7 @@ hy_chat_view_set_chat (HyChatView *self,
 
   if (chat == NULL)
     {
+      hy_terminal_panel_set_chat (self->terminal, NULL);
       clear_transcript (self);
       gtk_stack_set_visible_child_name (self->stack, "empty");
       gtk_widget_set_visible (self->composer_area, FALSE);
@@ -2039,6 +2049,10 @@ hy_chat_view_new (HyStorage *storage,
   self = g_object_new (HY_TYPE_CHAT_VIEW, NULL);
   self->storage = g_object_ref (storage);
   self->tree = g_object_ref (tree);
+
+  /* Here rather than in init: the tree does not exist yet at init time. */
+  g_signal_connect_swapped (self->tree, "chat-removed",
+                            G_CALLBACK (forget_chat_sessions), self);
 
   hy_chat_view_set_chat (self, NULL);
 
