@@ -414,33 +414,6 @@ render_body (XdMessageRow *self)
   }
 }
 
-void
-xd_message_row_append (XdMessageRow *self,
-                       const char   *delta)
-{
-  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
-
-  if (delta == NULL || *delta == '\0')
-    return;
-
-  g_string_append (self->text, delta);
-  render_body (self);
-
-  xd_message_row_set_waiting (self, FALSE);
-}
-
-void
-xd_message_row_set_text (XdMessageRow *self,
-                         const char   *text)
-{
-  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
-
-  g_string_assign (self->text, text != NULL ? text : "");
-  render_body (self);
-
-  gtk_widget_set_visible (self->body, self->text->len > 0);
-}
-
 /*
  * Records what produced the message, as a tooltip.
  *
@@ -457,30 +430,6 @@ xd_message_row_set_source (XdMessageRow *self,
 
   if (source != NULL && *source != '\0')
     gtk_widget_set_tooltip_text (GTK_WIDGET (self), source);
-}
-
-const char *
-xd_message_row_get_text (XdMessageRow *self)
-{
-  g_return_val_if_fail (XD_IS_MESSAGE_ROW (self), NULL);
-
-  return self->text->str;
-}
-
-void
-xd_message_row_set_waiting (XdMessageRow *self,
-                            gboolean      waiting)
-{
-  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
-
-  /*
-   * Only whether there is anything to show.
-   *
-   * The marker for a turn in progress is on the transcript now, one for the
-   * whole turn: a row that carried its own showed nothing for the stretches
-   * between messages, which are exactly the ones worth marking.
-   */
-  gtk_widget_set_visible (self->body, self->text->len > 0);
 }
 
 static void

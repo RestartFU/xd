@@ -43,7 +43,6 @@ typedef struct
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
   GPtrArray *items;         /* finished speech and tools, in timeline order */
-  XdMessageRow *row;        /* NULL until the segment has somewhere to go */
   gboolean resumed;
   gboolean is_retry;
   gboolean had_tool;
@@ -100,7 +99,6 @@ struct _XdChatView
 
   gboolean remote_working;
   gint64 remote_started_at;       /* monotonic usec on this device */
-  XdMessageRow *remote_row;
   GString *remote_said;
   char *remote_label;
 
@@ -913,23 +911,23 @@ on_remote_messages (GObject      *source,
 static void
 close_remote_segment (XdChatView *self)
 {
-  if (self->remote_row == NULL)
+  if (self->remote_said == NULL || self->remote_said->len == 0)
     return;
 
-  if (self->remote_said != NULL && self->remote_said->len > 0)
-    {
-      gsize visible = xd_ask_visible_length (self->remote_said->str);
-      g_autofree char *prose = g_strndup (self->remote_said->str, visible);
+  {
+    gsize visible = xd_ask_visible_length (self->remote_said->str);
+    g_autofree char *prose = g_strndup (self->remote_said->str, visible);
 
-      g_strchomp (prose);
-      xd_message_row_set_text (self->remote_row, prose);
-    }
+    g_strchomp (prose);
+    if (*prose != '\0')
+      {
+        XdMessageRow *row = append_row (self, XD_MESSAGE_ASSISTANT, prose);
 
-  xd_message_row_set_waiting (self->remote_row, FALSE);
-  self->remote_row = NULL;
+        xd_message_row_set_source (row, self->remote_label);
+      }
+  }
 
-  if (self->remote_said != NULL)
-    g_string_truncate (self->remote_said, 0);
+  g_string_truncate (self->remote_said, 0);
 }
 
 static void
@@ -937,7 +935,6 @@ end_remote_turn (XdChatView *self)
 {
   self->remote_working = FALSE;
   self->remote_started_at = 0;
-  self->remote_row = NULL;
   g_clear_pointer (&self->remote_label, g_free);
 
   if (self->remote_said != NULL)
@@ -999,15 +996,6 @@ on_remote_event (XdRemoteClient *client,
         self->remote_said = g_string_new (NULL);
 
       g_string_append (self->remote_said, text);
-
-      if (self->remote_row == NULL)
-        {
-          self->remote_row = append_row (self, XD_MESSAGE_ASSISTANT, NULL);
-          xd_message_row_set_source (self->remote_row, self->remote_label);
-          xd_message_row_set_waiting (self->remote_row, TRUE);
-          queue_scroll_to_bottom (self);
-        }
-
       return;
     }
 
@@ -1167,9 +1155,6 @@ on_remote_options_received (GObject      *source,
             self->remote_said = g_string_new (NULL);
 
           g_string_assign (self->remote_said, segment);
-
-          self->remote_row = append_row (self, XD_MESSAGE_ASSISTANT, segment);
-          xd_message_row_set_source (self->remote_row, self->remote_label);
         }
 
       queue_scroll_to_bottom (self);
@@ -1410,21 +1395,13 @@ on_text_delta (XdChatSession *session,
   g_string_append (turn->segment, delta);
 
   /*
-   * The text is not shown as it arrives.
+   * The text is not shown, or allocated a row, as it arrives.
    *
    * A message half-written reflows on every token, and Markdown read
    * character by character renders as its own source until the syntax closes.
-   * The row holds a spinner until the message is what it is going to be. The
-   * previous one ended at a tool call, so this needs a row of its own --
-   * below the tools, where it was said.
+   * The turn-level working marker already shows progress; a blank message row
+   * would only reserve unexplained space until this segment is complete.
    */
-  if (turn->row == NULL && turn_is_visible (turn))
-    {
-      turn->row = append_row (turn->view, XD_MESSAGE_ASSISTANT, NULL);
-      xd_message_row_set_source (turn->row, turn->label);
-      xd_message_row_set_waiting (turn->row, TRUE);
-      queue_scroll_to_bottom (turn->view);
-    }
 }
 
 /*
@@ -1437,7 +1414,8 @@ on_text_delta (XdChatSession *session,
  * the transcript reads the way the work went.
  */
 static void
-close_segment (Turn *turn)
+close_segment (Turn     *turn,
+               gboolean  answerable)
 {
   if (turn->segment->len == 0)
     return;
@@ -1446,21 +1424,34 @@ close_segment (Turn *turn)
    * so interruption can store the exact order that happened. */
   remember_turn_item (turn, FALSE, turn->segment->str);
 
-  if (turn->row != NULL)
+  if (turn_is_visible (turn))
     {
-      /* Show only what is safe to show: a question block becomes buttons when
-       * the turn ends and must not appear as markup first. */
-      gsize visible = xd_ask_visible_length (turn->segment->str);
-      g_autofree char *prose = g_strndup (turn->segment->str, visible);
+      g_autoptr (XdAsk) ask = answerable
+        ? xd_ask_parse (turn->segment->str, NULL) : NULL;
 
-      g_strchomp (prose);
-      xd_message_row_set_text (turn->row, prose);
-      xd_message_row_set_waiting (turn->row, FALSE);
-      queue_scroll_to_bottom (turn->view);
+      if (ask != NULL)
+        {
+          append_reply (turn->view, turn->segment->str, turn->label, TRUE);
+        }
+      else
+        {
+          /* Hide a question block until the turn finishes and it can become
+           * buttons, rather than briefly showing its machine-facing markup. */
+          gsize visible = xd_ask_visible_length (turn->segment->str);
+          g_autofree char *prose = g_strndup (turn->segment->str, visible);
+
+          g_strchomp (prose);
+          if (*prose != '\0')
+            {
+              XdMessageRow *row =
+                append_row (turn->view, XD_MESSAGE_ASSISTANT, prose);
+
+              xd_message_row_set_source (row, turn->label);
+            }
+        }
     }
 
   g_string_truncate (turn->segment, 0);
-  turn->row = NULL;
 }
 
 /* Writes everything the turn produced, in the order it happened. */
@@ -1501,7 +1492,7 @@ on_tool_use (XdChatSession *session,
 {
   Turn *turn = user_data;
 
-  close_segment (turn);
+  close_segment (turn, FALSE);
   remember_turn_item (turn, TRUE, name);
   turn->had_tool = TRUE;
 
@@ -1521,6 +1512,7 @@ on_turn_finished (XdChatSession *session,
   g_autofree char *chat_id = g_strdup (turn->chat_id);
   g_autofree char *retry_prompt = NULL;
   gboolean visible = turn_is_visible (turn);
+  gboolean asked_user;
   gint64 seconds =
     MAX ((g_get_monotonic_time () - turn->started_at) / G_USEC_PER_SEC, 0);
 
@@ -1540,9 +1532,6 @@ on_turn_finished (XdChatSession *session,
                                       NULL, &error))
         g_warning ("cannot forget the stale session: %s", error->message);
 
-      if (turn->row != NULL)
-        gtk_widget_set_visible (GTK_WIDGET (turn->row), FALSE);
-
       /* start_turn() marks it working again; without this the row would sit
        * idle for as long as the retry takes. */
       xd_node_set_state (turn->node, XD_NODE_IDLE);
@@ -1555,43 +1544,28 @@ on_turn_finished (XdChatSession *session,
     }
 
 
-  if (turn->row != NULL)
+  /* Nothing came back at all: say so rather than leaving only the timer. */
+  if (turn->text->len == 0 && success && visible)
     {
-      g_autoptr (XdAsk) ask = xd_ask_parse (turn->segment->str, NULL);
+      XdMessageRow *row =
+        append_row (self, XD_MESSAGE_ASSISTANT, "(no reply)");
 
-      xd_message_row_set_waiting (turn->row, FALSE);
-
-      /* Nothing came back at all: say so rather than leaving a blank card. */
-      if (turn->text->len == 0 && success)
-        xd_message_row_append (turn->row, "(no reply)");
-
-      /* The block streamed in as text; re-render it as a question. */
-      if (ask != NULL && visible)
-        {
-          g_autofree char *said = g_strdup (turn->segment->str);
-
-          gtk_box_remove (self->transcript, GTK_WIDGET (turn->row));
-          turn->row = NULL;
-          append_reply (self, said, turn->label, TRUE);
-        }
+      xd_message_row_set_source (row, turn->label);
     }
 
-  /*
-   * A chat that asked something is waiting for the user, not finished. Read
-   * before the segment is cleared, and from the text rather than from whether
-   * buttons were drawn -- a chat the user is not looking at has no row to
-   * draw them on, and is exactly the one worth marking.
-   */
+  /* A chat that asked something waits even when it is not on screen. */
   {
     g_autoptr (XdAsk) asked = xd_ask_parse (turn->segment->str, NULL);
 
-    xd_node_set_state (turn->node, asked != NULL ? XD_NODE_WAITING : XD_NODE_IDLE);
+    asked_user = asked != NULL;
+    xd_node_set_state (turn->node,
+                       asked_user ? XD_NODE_WAITING : XD_NODE_IDLE);
   }
 
   /* Whatever was still being written when the turn ended is a message like
    * any other. Only now, with all of them final, do they reach the database.
    */
-  close_segment (turn);
+  close_segment (turn, asked_user);
   store_turn_items (turn);
   store_turn_duration (turn, seconds);
 
@@ -1758,9 +1732,6 @@ start_turn (XdChatView *self,
    * while the agent is still working, and what answered is whatever was
    * running when the turn started. */
   turn->label = reply_title (chat);
-  turn->row = append_row (self, XD_MESSAGE_ASSISTANT, NULL);
-  xd_message_row_set_source (turn->row, turn->label);
-  xd_message_row_set_waiting (turn->row, TRUE);
 
   g_signal_connect (turn->session, "session-started",
                     G_CALLBACK (on_session_started), turn);
@@ -2911,15 +2882,9 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
                                XdNode         *chat,
                                XdRemoteClient *client)
 {
-  Turn *turn;
-
   g_return_if_fail (XD_IS_CHAT_VIEW (self));
   g_return_if_fail (XD_IS_NODE (chat));
   g_return_if_fail (XD_IS_REMOTE_CLIENT (client));
-
-  turn = current_turn (self);
-  if (turn != NULL)
-    turn->row = NULL;
 
   set_queued_text (self, NULL);
   g_set_object (&self->chat, chat);
@@ -2954,11 +2919,6 @@ xd_chat_view_set_chat (XdChatView *self,
   Turn *turn;
 
   g_return_if_fail (XD_IS_CHAT_VIEW (self));
-
-  /* The outgoing chat's row is about to be destroyed with the transcript. */
-  turn = current_turn (self);
-  if (turn != NULL)
-    turn->row = NULL;
 
   /* Whatever a daemon was still going to say about the last chat is no longer
    * about anything on screen. */
@@ -3025,10 +2985,6 @@ xd_chat_view_set_chat (XdChatView *self,
               xd_message_row_set_source (said, turn->label);
             }
         }
-
-      turn->row = append_row (self, XD_MESSAGE_ASSISTANT, turn->segment->str);
-      xd_message_row_set_source (turn->row, turn->label);
-      xd_message_row_set_waiting (turn->row, TRUE);
 
       /* The transcript was rebuilt, and the marker went with it. */
       set_working (self, TRUE);
