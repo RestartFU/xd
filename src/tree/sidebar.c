@@ -1171,5 +1171,9 @@ hy_sidebar_init (HySidebar *self)
   gtk_widget_set_vexpand (scrolled, TRUE);
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), scrolled);
+  gtk_widget_add_css_class (toolbar, "hy-sidebar");
+  gtk_widget_add_css_class (scrolled, "hy-sidebar");
+  gtk_widget_add_css_class (GTK_WIDGET (self->list_view), "hy-sidebar");
+
   adw_bin_set_child (ADW_BIN (self), toolbar);
 }

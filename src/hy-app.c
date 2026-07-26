@@ -104,11 +104,22 @@ static const char *HY_STYLE =
   " --card-bg-color: #101013;"
   "}\n"
 
-  /* Belt and braces: these are the surfaces the eye reads as "the window",
-   * and a rule on the widget cannot be missed the way a colour name can. */
-  "window, .background, headerbar, .toolbar, .view, textview, textview text,"
-  " listview, scrolledwindow, viewport { background-color: #000000; }\n"
-  ".sidebar-pane, .navigation-sidebar { background-color: #060607; }\n"
+  /*
+   * The surfaces, by a class hy puts on its own widgets.
+   *
+   * Overriding libadwaita's colours has now failed twice -- once because the
+   * name it reads changed, once because the widget painting the background is
+   * not the one the selector names. A class on a widget hy created is the one
+   * thing neither can move out from under.
+   */
+  ".hy-surface, .hy-surface > * { background-color: #000000; }\n"
+  ".hy-sidebar, .hy-sidebar > * { background-color: #060607; }\n"
+  "window, .background, headerbar, .toolbar { background-color: #000000; }\n"
+
+  /* The bar under the composer: what is being worked on, not a control. */
+  ".hy-context { background-color: #070709; border-radius: 0 0 14px 14px;"
+  " padding: 4px 12px; }\n"
+  ".hy-context label { font-size: 0.85em; }\n"
 
   "window { font-size: 0.9em; }\n"
 

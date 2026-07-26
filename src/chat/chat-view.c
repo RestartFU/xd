@@ -2006,9 +2006,15 @@ build_composer (HyChatView *self)
   g_signal_connect (self->diff_button, "toggled",
                     G_CALLBACK (on_diff_toggled), self);
 
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->diff_button));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->terminal_button));
+  /* The send button sits at the end of the row it belongs to, with the
+   * controls that decide what gets sent. */
+  {
+    GtkWidget *filler = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+
+    gtk_widget_set_hexpand (filler, TRUE);
+    gtk_box_append (GTK_BOX (toolbar), filler);
+  }
+
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
   /* The controls sit under the text the user is typing, so they need enough
    * clearance not to read as part of it. */
@@ -2026,11 +2032,32 @@ build_composer (HyChatView *self)
 
   gtk_frame_set_child (GTK_FRAME (frame), column);
   gtk_widget_set_margin_top (frame, 6);
-  gtk_widget_set_margin_bottom (frame, 12);
   gtk_widget_set_margin_start (frame, 12);
   gtk_widget_set_margin_end (frame, 12);
 
-  return frame;
+  /*
+   * What is being worked on goes under the box, not in it.
+   *
+   * The row inside decides how the next message is answered; the branch and
+   * directory are what it will be answered about. Keeping them in one row
+   * left both cramped enough to be truncated.
+   */
+  {
+    GtkWidget *stack = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *context = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+
+    gtk_box_append (GTK_BOX (context), GTK_WIDGET (self->context_label));
+    gtk_widget_add_css_class (context, "hy-context");
+    gtk_widget_add_css_class (context, "dim-label");
+    gtk_widget_set_margin_start (context, 26);
+    gtk_widget_set_margin_end (context, 26);
+    gtk_widget_set_margin_bottom (context, 12);
+
+    gtk_box_append (GTK_BOX (stack), frame);
+    gtk_box_append (GTK_BOX (stack), context);
+
+    return stack;
+  }
 }
 
 static void
@@ -2062,8 +2089,6 @@ hy_chat_view_init (HyChatView *self)
   GtkWidget *header = adw_header_bar_new ();
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *empty = adw_status_page_new ();
-  GtkWidget *menu_button;
-  GMenu *menu;
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
   self->settings = g_settings_new (HY_APP_ID);
@@ -2076,21 +2101,11 @@ hy_chat_view_init (HyChatView *self)
    * that side of the title bar is its to draw. */
   adw_header_bar_set_show_start_title_buttons (ADW_HEADER_BAR (header), FALSE);
 
-  menu = g_menu_new ();
-  g_menu_append (menu, "Search…", "win.search");
-  g_menu_append (menu, "About hy", "app.about");
-  g_menu_append (menu, "Quit", "app.quit");
-
-  menu_button = gtk_menu_button_new ();
-  gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (menu_button), "open-menu-symbolic");
-  gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), G_MENU_MODEL (menu));
-  g_object_unref (menu);
-  /* At the top with the chat's name: it acts on the repository as a whole,
-   * not on the message being written. */
+  /* At the top: these open and close parts of the window, which is what the
+   * header bar is for. The row under the composer decides how the next
+   * message is answered, which is a different question. */
   self->git_actions = hy_git_actions_new ();
   adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->git_actions));
-
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), menu_button);
 
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
 
@@ -2134,6 +2149,11 @@ hy_chat_view_init (HyChatView *self)
 
   self->composer_area = build_composer (self);
 
+  /* Packed here rather than with the rest of the header: the toggles are
+   * built with the composer, so they do not exist until it has been. */
+  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->terminal_button));
+  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->diff_button));
+
   {
     GtkWidget *clamp = adw_clamp_new ();
 
@@ -2176,6 +2196,12 @@ hy_chat_view_init (HyChatView *self)
   gtk_paned_set_end_child (self->side_split, GTK_WIDGET (self->diff));
   gtk_paned_set_resize_end_child (self->side_split, FALSE);
   gtk_paned_set_shrink_end_child (self->side_split, FALSE);
+
+  /* Named so the stylesheet can reach them; see HY_STYLE. */
+  gtk_widget_add_css_class (toolbar, "hy-surface");
+  gtk_widget_add_css_class (content, "hy-surface");
+  gtk_widget_add_css_class (GTK_WIDGET (self->scroller), "hy-surface");
+  gtk_widget_add_css_class (GTK_WIDGET (self->stack), "hy-surface");
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->side_split));
 
