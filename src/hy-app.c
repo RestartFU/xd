@@ -80,21 +80,35 @@ static const GActionEntry app_actions[] = {
  */
 static const char *HY_STYLE =
   /*
-   * A near-black palette rather than Adwaita's grey.
+   * A black palette rather than Adwaita's grey.
    *
-   * These are libadwaita's own colour names, so overriding them here reaches
-   * every widget that follows the theme -- including ones hy never touches --
-   * instead of restyling each in turn and missing some.
+   * Set as custom properties, not with @define-color. libadwaita 1.6 moved
+   * its colours to custom properties and kept the @define-color names as
+   * aliases it no longer reads itself -- so overriding those parses cleanly,
+   * reports nothing, and changes nothing.
    */
-  "@define-color window_bg_color #000000;\n"
-  "@define-color view_bg_color #000000;\n"
-  "@define-color headerbar_bg_color #000000;\n"
-  "@define-color sidebar_bg_color #050506;\n"
-  "@define-color popover_bg_color #0e0e10;\n"
-  "@define-color dialog_bg_color #0e0e10;\n"
-  "@define-color card_bg_color #0e0e10;\n"
-  "@define-color window_fg_color #f2f2f4;\n"
-  "@define-color view_fg_color #f2f2f4;\n"
+  ":root {"
+  " --window-bg-color: #000000;"
+  " --window-fg-color: #f2f2f4;"
+  " --view-bg-color: #000000;"
+  " --view-fg-color: #f2f2f4;"
+  " --headerbar-bg-color: #000000;"
+  " --headerbar-fg-color: #f2f2f4;"
+  " --headerbar-backdrop-color: #000000;"
+  " --sidebar-bg-color: #060607;"
+  " --sidebar-fg-color: #f2f2f4;"
+  " --sidebar-backdrop-color: #060607;"
+  " --secondary-sidebar-bg-color: #060607;"
+  " --popover-bg-color: #101013;"
+  " --dialog-bg-color: #101013;"
+  " --card-bg-color: #101013;"
+  "}\n"
+
+  /* Belt and braces: these are the surfaces the eye reads as "the window",
+   * and a rule on the widget cannot be missed the way a colour name can. */
+  "window, .background, headerbar, .toolbar, .view, textview, textview text,"
+  " listview, scrolledwindow, viewport { background-color: #000000; }\n"
+  ".sidebar-pane, .navigation-sidebar { background-color: #060607; }\n"
 
   "window { font-size: 0.9em; }\n"
 
