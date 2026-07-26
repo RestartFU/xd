@@ -20,6 +20,7 @@
 #   ~/.local/opt/xd-nightly           the program
 #   ~/.local/bin/xd-nightly           the command
 #   ~/.local/share/applications/…     the entry in the app menu
+#   ~/.local/share/icons/…            its icon
 #
 # Chats and workspaces live in ~/.local/share/xd-nightly and are never touched
 # by installing, upgrading or uninstalling.
@@ -44,7 +45,8 @@ die () { printf 'install: %s\n' "$*" >&2; exit 1; }
 
 uninstall () {
   rm -rf "$OPT"
-  rm -f "$BIN" "$DESKTOP"
+  rm -f "$BIN" "$DESKTOP" \
+        "$DATA_HOME/icons/hicolor/scalable/apps/$APP_ID.svg"
 
   say "Removed $NAME."
   say "Its chats and workspaces are still in $DATA_HOME/$NAME."
@@ -100,14 +102,25 @@ mv "$WORK/$NAME" "$OPT"
 
 ln -sfn "$OPT/xd.sh" "$BIN"
 
-# The entry the app menu shows. Written from the one in the bundle so it keeps
-# the name and categories the build gave it, with the paths made absolute --
-# nothing here is on PATH or in an icon theme.
-ICON="$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg"
+#
+# The icon goes in the icon theme, and the entry names it rather than pointing
+# at it.
+#
+# An Icon= that is a path is loaded as a file, outside the theme, and the
+# desktop caches what it drew from that path -- so a new picture at the same
+# path goes on looking like the old one until the session restarts. An icon in
+# the theme is watched: replacing it is a change the desktop notices, which is
+# the whole reason the theme directories exist.
+#
+ICON_THEME="$DATA_HOME/icons/hicolor"
+ICON_DIR="$ICON_THEME/scalable/apps"
+
+mkdir -p "$ICON_DIR"
+cp -f "$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg" "$ICON_DIR/$APP_ID.svg"
 
 if [ -f "$OPT/share/applications/$APP_ID.desktop" ]; then
   sed -e "s|^Exec=.*|Exec=$BIN|" \
-      -e "s|^Icon=.*|Icon=$ICON|" \
+      -e "s|^Icon=.*|Icon=$APP_ID|" \
       "$OPT/share/applications/$APP_ID.desktop" > "$DESKTOP"
 else
   cat > "$DESKTOP" <<EOF
@@ -115,7 +128,7 @@ else
 Name=xd (Nightly)
 Comment=Workspace-organized AI conversations
 Exec=$BIN
-Icon=$ICON
+Icon=$APP_ID
 Terminal=false
 Type=Application
 Categories=Development;Utility;
@@ -125,9 +138,20 @@ fi
 
 chmod 644 "$DESKTOP"
 
+# Both caches are only hints, and both are watched: touching the directories is
+# what tells a running desktop to look again.
+for cache in gtk4-update-icon-cache gtk-update-icon-cache; do
+  if command -v "$cache" >/dev/null 2>&1; then
+    "$cache" -q -f -t "$ICON_THEME" 2>/dev/null || true
+    break
+  fi
+done
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$DATA_HOME/applications" 2>/dev/null || true
 fi
+
+touch "$ICON_DIR" "$ICON_THEME" "$DATA_HOME/applications" 2>/dev/null || true
 
 # --- say what happened ------------------------------------------------------
 
