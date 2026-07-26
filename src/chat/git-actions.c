@@ -28,6 +28,7 @@ struct _HyGitActions
   GitAction suggested;
 
   GtkButton *primary;
+  AdwButtonContent *content;
   GtkWidget *menu_button;
 };
 
@@ -63,6 +64,12 @@ action_label (GitAction action)
     }
 }
 
+/*
+ * Only names the bundled Adwaita theme actually carries.
+ *
+ * A missing icon is not a missing icon: GTK draws a broken-image box, which
+ * looks like the button itself is broken.
+ */
 static const char *
 action_icon (GitAction action)
 {
@@ -70,8 +77,8 @@ action_icon (GitAction action)
     {
     case ACTION_COMMIT:       return "object-select-symbolic";
     case ACTION_PUSH:         return "go-up-symbolic";
-    case ACTION_PULL_REQUEST: return "code-symbolic";
-    default:                  return "object-select-symbolic";
+    case ACTION_PULL_REQUEST: return "mail-send-symbolic";
+    default:                  return "checkbox-checked-symbolic";
     }
 }
 
@@ -200,8 +207,10 @@ on_state_read (GObject      *source,
   else
     self->suggested = ACTION_NONE;
 
-  gtk_button_set_label (self->primary, action_label (self->suggested));
-  gtk_button_set_icon_name (self->primary, action_icon (self->suggested));
+  /* Both, not one or the other: set_icon_name() replaces the child a label
+   * was put in, so setting each in turn leaves only the icon. */
+  adw_button_content_set_icon_name (self->content, action_icon (self->suggested));
+  adw_button_content_set_label (self->content, action_label (self->suggested));
   gtk_widget_set_sensitive (GTK_WIDGET (self->primary),
                             self->suggested != ACTION_NONE);
 }
@@ -366,8 +375,12 @@ hy_git_actions_init (HyGitActions *self)
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GMenu *menu = g_menu_new ();
 
+  self->content = ADW_BUTTON_CONTENT (adw_button_content_new ());
+  adw_button_content_set_icon_name (self->content, action_icon (ACTION_NONE));
+  adw_button_content_set_label (self->content, action_label (ACTION_NONE));
+
   self->primary = GTK_BUTTON (gtk_button_new ());
-  gtk_button_set_label (self->primary, action_label (ACTION_NONE));
+  gtk_button_set_child (self->primary, GTK_WIDGET (self->content));
   gtk_widget_add_css_class (GTK_WIDGET (self->primary), "flat");
   g_signal_connect (self->primary, "clicked", G_CALLBACK (on_primary_clicked), self);
 

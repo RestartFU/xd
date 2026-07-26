@@ -123,6 +123,10 @@ static const char *HY_STYLE =
   ".card { border-radius: 12px; }\n"
   "frame, frame > border { border-radius: 16px; border-color:"
   " alpha(currentColor, 0.08); }\n"
+  /* The composer is the one thing on screen the user acts on, so it gets
+   * room rather than being another thin bar. */
+  "frame > box { padding: 4px; }\n"
+  "textview, textview text { background: transparent; }\n"
 
   "popover > contents { border-radius: 12px; padding: 4px; }\n"
   "popover menuitem { border-radius: 8px; }\n"

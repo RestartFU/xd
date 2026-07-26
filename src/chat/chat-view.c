@@ -36,6 +36,10 @@ typedef struct
   gboolean is_retry;
 } Turn;
 
+/* Wide enough for code and a diff line, narrow enough that a line of prose
+ * is one glance. */
+#define CONTENT_WIDTH 860
+
 struct _HyChatView
 {
   AdwBin parent_instance;
@@ -1995,10 +1999,7 @@ build_composer (HyChatView *self)
   g_signal_connect (self->diff_button, "toggled",
                     G_CALLBACK (on_diff_toggled), self);
 
-  self->git_actions = hy_git_actions_new ();
-
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_label));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->git_actions));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->diff_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->terminal_button));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
@@ -2076,6 +2077,11 @@ hy_chat_view_init (HyChatView *self)
   gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (menu_button), "open-menu-symbolic");
   gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (menu_button), G_MENU_MODEL (menu));
   g_object_unref (menu);
+  /* At the top with the chat's name: it acts on the repository as a whole,
+   * not on the message being written. */
+  self->git_actions = hy_git_actions_new ();
+  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->git_actions));
+
   adw_header_bar_pack_end (ADW_HEADER_BAR (header), menu_button);
 
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
@@ -2086,13 +2092,31 @@ hy_chat_view_init (HyChatView *self)
                                    "Pick a chat in the sidebar, or start a new "
                                    "one in a folder.");
 
-  self->transcript = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+  self->transcript = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 8));
   gtk_widget_set_valign (GTK_WIDGET (self->transcript), GTK_ALIGN_START);
 
   self->scroller = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   gtk_scrolled_window_set_policy (self->scroller, GTK_POLICY_NEVER,
                                   GTK_POLICY_AUTOMATIC);
-  gtk_scrolled_window_set_child (self->scroller, GTK_WIDGET (self->transcript));
+
+  /*
+   * A column, not the whole window.
+   *
+   * Text set across a wide window is hard to read -- the eye loses the line
+   * on the way back -- and a conversation pinned to both edges reads as a log
+   * rather than as something being said. The composer is clamped to match, so
+   * a message lines up with the box it was written in.
+   */
+  {
+    GtkWidget *clamp = adw_clamp_new ();
+
+    adw_clamp_set_maximum_size (ADW_CLAMP (clamp), CONTENT_WIDTH);
+    adw_clamp_set_tightening_threshold (ADW_CLAMP (clamp), CONTENT_WIDTH);
+    adw_clamp_set_child (ADW_CLAMP (clamp), GTK_WIDGET (self->transcript));
+    gtk_widget_set_margin_top (clamp, 12);
+    gtk_widget_set_margin_bottom (clamp, 12);
+    gtk_scrolled_window_set_child (self->scroller, clamp);
+  }
   gtk_widget_set_vexpand (GTK_WIDGET (self->scroller), TRUE);
 
   self->stack = GTK_STACK (gtk_stack_new ());
@@ -2101,6 +2125,15 @@ hy_chat_view_init (HyChatView *self)
   gtk_widget_set_vexpand (GTK_WIDGET (self->stack), TRUE);
 
   self->composer_area = build_composer (self);
+
+  {
+    GtkWidget *clamp = adw_clamp_new ();
+
+    adw_clamp_set_maximum_size (ADW_CLAMP (clamp), CONTENT_WIDTH);
+    adw_clamp_set_tightening_threshold (ADW_CLAMP (clamp), CONTENT_WIDTH);
+    adw_clamp_set_child (ADW_CLAMP (clamp), self->composer_area);
+    self->composer_area = clamp;
+  }
 
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->stack));
   gtk_box_append (GTK_BOX (content), self->composer_area);
