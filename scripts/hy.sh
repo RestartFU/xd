@@ -66,9 +66,11 @@ export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/i
 # is built into GIO, so the bundle needs no dconf module or D-Bus round trip.
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
 
-# Software rendering: the bundled Mesa/GL stack would otherwise have to match
-# the host's kernel drivers.
-export GSK_RENDERER="${GSK_RENDERER:-cairo}"
+# GL is the host's own stack end to end: the bundle carries no Mesa, so
+# libepoxy dlopens the host's libGL -- the same one the desktop runs on.
+# Forcing cairo here was guarding against a mix that cannot happen, and it
+# cost popover transparency and every blurred shadow. GTK falls back to
+# cairo by itself where GL is genuinely absent.
 
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \

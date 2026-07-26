@@ -252,8 +252,8 @@ static const char *HY_STYLE =
    * and background share a tone, the rounded corners disappear against it
    * and the panel reads as a square. Contrast is what draws the rounding,
    * since blurred shadows are off the table under cairo. */
-  "popover > contents { border-radius: 10px; padding: 6px;"
-  " background-color: #18181e; border: 1px solid alpha(#ffffff, 0.13); }\n"
+  "popover > contents { border-radius: 12px; padding: 6px;"
+  " background-color: #16161b; border: 1px solid alpha(#ffffff, 0.10); }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
