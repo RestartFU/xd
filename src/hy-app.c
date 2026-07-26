@@ -158,13 +158,14 @@ static const char *HY_STYLE =
   /* Invisible until reached for. The panes already end where they end; the
    * line only mattered as somewhere to grab, so it appears when hovered and
    * keeps its width the rest of the time. */
-  /* opacity rather than background: the theme paints the separator with a
-   * background of its own that outlives a background override, and opacity
-   * removes whatever it is painted with. Never shown, not even on hover --
-   * the cursor already changes to a resize arrow there, which is all the
-   * telling a divider needs. */
-  "paned > separator { min-width: 2px; min-height: 2px; border: none;"
-  " opacity: 0; }\n"
+  /*
+   * A hairline. The theme paints the separator with a background of its own
+   * that survives background overrides, so it is dimmed with opacity and the
+   * colour underneath is left to the theme's border grey -- at 30% it lands
+   * within a shade of #1d1d1f over this base.
+   */
+  "paned > separator { min-width: 1px; min-height: 1px; border: none;"
+  " opacity: 0.3; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
