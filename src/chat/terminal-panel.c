@@ -59,7 +59,7 @@ apply_colours (HyTerminalPanel *self)
 
   /* VTE defaults to black on white whatever the rest of the window is doing,
    * so the theme has to be followed by hand. */
-  gdk_rgba_parse (&foreground, dark ? "#d6d6dd" : "#1d1d1d");
+  gdk_rgba_parse (&foreground, dark ? "#d4d4d4" : "#1d1d1d");
   /*
    * A step above the window, like every other raised surface.
    *
@@ -69,7 +69,9 @@ apply_colours (HyTerminalPanel *self)
    * as a surface. Matched by hand because VTE takes a colour rather than
    * following the stylesheet.
    */
-  gdk_rgba_parse (&background, dark ? "#1d1d24" : "#ffffff");
+  /* Neutral: the blue-purple cast of a tinted grey is louder than the
+   * lightness it buys. A step over the window, no hue of its own. */
+  gdk_rgba_parse (&background, dark ? "#151516" : "#ffffff");
 
   vte_terminal_set_colors (self->terminal, &foreground, &background,
                            palette, G_N_ELEMENTS (palette));
