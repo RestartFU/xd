@@ -6,6 +6,7 @@ xd_core_sources = files(
   'util/markdown.c',
   'util/ask-block.c',
   'util/git-info.c',
+  'util/worktree.c',
   'util/host-launch.c',
   'util/app-paths.c',
   'remote/server.c',

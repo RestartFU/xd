@@ -15,6 +15,7 @@ typedef struct
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
   char *queued;       /* next message, kept until its turn starts */
+  gboolean new_worktree; /* create an isolated checkout before first turn */
   gboolean plan;      /* think it through, change nothing */
   gboolean terminal_open;  /* the panes this chat was left with */
   gboolean diff_open;
@@ -95,6 +96,18 @@ gboolean    xd_storage_set_workdir     (XdStorage   *self,
                                         const char  *chat_id,
                                         const char  *workdir,
                                         GError     **error);
+
+/* A pending new-worktree choice is consumed when the first turn starts. */
+gboolean    xd_storage_set_new_worktree (XdStorage  *self,
+                                         const char *chat_id,
+                                         gboolean    enabled,
+                                         GError    **error);
+
+/* Atomically consumes the pending choice and points the chat at its checkout. */
+gboolean    xd_storage_use_worktree     (XdStorage   *self,
+                                         const char  *chat_id,
+                                         const char  *workdir,
+                                         GError     **error);
 
 gboolean    xd_storage_set_model       (XdStorage   *self,
                                         const char  *chat_id,

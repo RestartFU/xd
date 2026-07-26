@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 11
+#define XD_STORAGE_SCHEMA_VERSION 12
 
 struct _XdStorage
 {
@@ -321,6 +321,12 @@ migrate (XdStorage  *self,
       !exec_sql (self, "ALTER TABLE chats ADD COLUMN queued TEXT;", error))
     return FALSE;
 
+  if (version < 12 &&
+      !exec_sql (self,
+                 "ALTER TABLE chats ADD COLUMN new_worktree INTEGER NOT NULL DEFAULT 0;",
+                 error))
+    return FALSE;
+
   if (version < 9 &&
       (!exec_sql (self, "ALTER TABLE chats ADD COLUMN terminal_open INTEGER NOT NULL DEFAULT 0;", error) ||
        !exec_sql (self, "ALTER TABLE chats ADD COLUMN diff_open INTEGER NOT NULL DEFAULT 0;", error)))
@@ -460,13 +466,14 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->terminal_open = sqlite3_column_int (stmt, 11) != 0;
   chat->diff_open     = sqlite3_column_int (stmt, 12) != 0;
   chat->queued        = column_text (stmt, 13);
+  chat->new_worktree  = sqlite3_column_int (stmt, 14) != 0;
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
   "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
-  " created_at, updated_at, terminal_open, diff_open, queued"
+  " created_at, updated_at, terminal_open, diff_open, queued, new_worktree"
 
 XdChat *
 xd_storage_get_chat (XdStorage   *self,
@@ -680,6 +687,84 @@ xd_storage_set_workdir (XdStorage   *self,
                              "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
                              workdir, chat_id, "Cannot change the working directory",
                              error);
+}
+
+gboolean
+xd_storage_set_new_worktree (XdStorage   *self,
+                              const char  *chat_id,
+                              gboolean     enabled,
+                              GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats SET new_worktree = ?, updated_at = ?"
+        " WHERE id = ? AND NOT EXISTS"
+        "   (SELECT 1 FROM messages WHERE chat_id = ?);",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot change the workspace");
+      return FALSE;
+    }
+
+  sqlite3_bind_int (stmt, 1, enabled);
+  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 3, chat_id);
+  bind_text (stmt, 4, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "The workspace can only be changed before the first message.");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
+}
+
+gboolean
+xd_storage_use_worktree (XdStorage   *self,
+                         const char  *chat_id,
+                         const char  *workdir,
+                         GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+  g_return_val_if_fail (workdir != NULL, FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats"
+        "   SET workdir = ?, new_worktree = 0, updated_at = ?"
+        " WHERE id = ? AND new_worktree = 1 AND NOT EXISTS"
+        "   (SELECT 1 FROM messages WHERE chat_id = ?);",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot use the new worktree");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, workdir);
+  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 3, chat_id);
+  bind_text (stmt, 4, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "The workspace changed before the worktree was ready.");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
 }
 
 gboolean

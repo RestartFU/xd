@@ -13,6 +13,7 @@
 #include "settings/settings-resolver.h"
 #include "util/ask-block.h"
 #include "util/git-info.h"
+#include "util/worktree.h"
 
 /*
  * A turn in flight.
@@ -122,6 +123,7 @@ struct _XdChatView
   gboolean syncing_panes;   /* setting the toggles to match the chat */
   GPtrArray *attachments;   /* absolute paths of pasted images */
   XdModelPicker *model_picker;
+  GtkDropDown *workspace_chooser;
   GtkDropDown *effort_chooser;
   GtkDropDown *access_chooser;
   GtkToggleButton *build_toggle;
@@ -140,6 +142,7 @@ struct _XdChatView
   /* Set while the choosers are filled in from the chat, so the resulting
    * notify does not read back as the user picking something. */
   gboolean syncing_run_options;
+  gboolean syncing_workspace;
 };
 
 /*
@@ -170,6 +173,10 @@ static const char *const effort_descriptions[] = {
   "Thinks longer before answering.",
   "Extended reasoning for hard problems.",
   "Everything the model has.",
+};
+static const char *const workspace_descriptions[] = {
+  "Use the checkout this chat currently points at.",
+  "Create an isolated branch and checkout for this chat.",
 };
 
 /* --- two-line dropdown rows ------------------------------------------------ */
@@ -247,9 +254,15 @@ static Turn *current_turn (XdChatView *self);
 static void send_remote_message (XdChatView *self, const char *text);
 static void cancel_remote_turn (XdChatView *self);
 static void send_queued (XdChatView *self);
-static void send_message (XdChatView *self,
-                          const char *text);
+static gboolean send_message (XdChatView *self,
+                              const char *text);
 static void update_send_button (XdChatView *self);
+static void update_context_bar (XdChatView *self,
+                                const XdChat *chat);
+static void update_workspace_choice (XdChatView *self,
+                                     const XdChat *chat,
+                                     gboolean      has_messages,
+                                     gboolean      linked_worktree);
 static void start_turn (XdChatView *self,
                         const char *prompt);
 static void on_model_chosen (XdModelPicker *picker,
@@ -1036,9 +1049,15 @@ on_remote_event (XdRemoteClient *client,
  */
 static void
 update_remote_options (XdChatView   *self,
-                       const XdChat *chat)
+                       const XdChat *chat,
+                       gboolean      has_messages,
+                       gboolean      linked_worktree)
 {
-  g_autofree char *description = describe_context (chat->workdir);
+  g_autofree char *base_description = describe_context (chat->workdir);
+  g_autofree char *description =
+    chat->new_worktree
+      ? g_strdup_printf ("New worktree from %s", base_description)
+      : g_strdup (base_description);
   gboolean have_workdir = chat->workdir != NULL && *chat->workdir != '\0';
   g_autofree char *tooltip =
     have_workdir ? g_strdup_printf ("Terminal on %s in %s",
@@ -1047,6 +1066,7 @@ update_remote_options (XdChatView   *self,
 
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
+  update_workspace_choice (self, chat, has_messages, linked_worktree);
   xd_terminal_panel_set_workdir (self->terminal,
                                  have_workdir ? chat->workdir : NULL);
   gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
@@ -1099,8 +1119,13 @@ on_remote_options_received (GObject      *source,
   chat.workdir = (char *) member_string (reply, "workdir", NULL);
   chat.queued = (char *) member_string (reply, "queued", NULL);
   chat.plan = json_object_get_boolean_member_with_default (reply, "plan", FALSE);
+  chat.new_worktree =
+    json_object_get_boolean_member_with_default (reply, "new_worktree", FALSE);
 
-  update_remote_options (self, &chat);
+  update_remote_options (
+    self, &chat,
+    json_object_get_boolean_member_with_default (reply, "has_messages", FALSE),
+    json_object_get_boolean_member_with_default (reply, "linked_worktree", FALSE));
   set_queued_text (self, chat.queued);
 
   /*
@@ -1293,6 +1318,9 @@ on_storage_changed (XdStorage *storage,
 
   if (current_turn (self) != NULL)
     return;
+
+  if (chat != NULL)
+    update_context_bar (self, chat);
 
   /* Another window may have queued this while this one owned the turn. Once
    * that turn is gone, the persisted instruction still runs. */
@@ -1823,26 +1851,65 @@ name_chat_after_first_message (XdChatView *self,
   adw_window_title_set_title (self->title, title);
 }
 
-static void
+static gboolean
+prepare_new_worktree (XdChatView *self,
+                      XdChat     *chat,
+                      GError    **error)
+{
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
+  g_autofree char *worktree = NULL;
+
+  if (!chat->new_worktree)
+    return TRUE;
+
+  resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  worktree = xd_worktree_create (
+    workdir_for (chat, resolved), chat->id, error);
+  if (worktree == NULL)
+    return FALSE;
+
+  if (!xd_storage_use_worktree (
+        self->storage, chat->id, worktree, error))
+    return FALSE;
+
+  g_free (chat->workdir);
+  chat->workdir = g_steal_pointer (&worktree);
+  chat->new_worktree = FALSE;
+  update_context_bar (self, chat);
+
+  return TRUE;
+}
+
+static gboolean
 send_message (XdChatView *self,
               const char *text)
 {
+  g_autoptr (XdChat) chat = NULL;
   g_autoptr (GError) error = NULL;
 
   if (self->chat == NULL || text == NULL || *text == '\0')
-    return;
+    return FALSE;
 
   /* One turn at a time per chat; the button is a stop button meanwhile. */
   if (current_turn (self) != NULL)
-    return;
+    return FALSE;
+
+  chat = xd_storage_get_chat (
+    self->storage, xd_node_get_chat_id (self->chat), &error);
+  if (chat == NULL || !prepare_new_worktree (self, chat, &error))
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      return FALSE;
+    }
 
   if (!xd_storage_append_message (self->storage, xd_node_get_chat_id (self->chat),
                                   "user", text, NULL, NULL, &error))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
-      return;
+      return FALSE;
     }
 
+  gtk_widget_set_sensitive (GTK_WIDGET (self->workspace_chooser), FALSE);
   retire_open_questions (self);
   xd_node_set_state (self->chat, XD_NODE_IDLE);
   append_row (self, XD_MESSAGE_USER, text);
@@ -1850,6 +1917,8 @@ send_message (XdChatView *self,
   xd_fs_tree_bump_chat (self->tree, self->chat);
 
   start_turn (self, text);
+
+  return TRUE;
 }
 
 /* --- pasted images --------------------------------------------------------- */
@@ -2144,7 +2213,11 @@ send_queued (XdChatView *self)
     return;
 
   set_queued_text (self, NULL);
-  send_message (self, text);
+  if (!send_message (self, text))
+    {
+      set_local_queue (self, text);
+      set_queued_text (self, text);
+    }
 }
 
 /*
@@ -2278,8 +2351,9 @@ send_current_message (XdChatView *self)
       /* One turn at a time, so anything typed meanwhile waits for it. */
       if (current_turn (self) != NULL)
         queue_message (self, text);
-      else
-        send_message (self, text);
+      else if (!send_message (self, text))
+        gtk_text_buffer_set_text (
+          gtk_text_view_get_buffer (self->composer), text, -1);
 
       return;
     }
@@ -2306,8 +2380,9 @@ send_current_message (XdChatView *self)
 
   if (current_turn (self) != NULL)
     queue_message (self, message->str);
-  else
-    send_message (self, message->str);
+  else if (!send_message (self, message->str))
+    gtk_text_buffer_set_text (
+      gtk_text_view_get_buffer (self->composer), message->str, -1);
 }
 
 static void
@@ -2379,6 +2454,28 @@ describe_context (const char *workdir)
   g_string_append_printf (text, " · %s", shown);
 
   return g_string_free (g_steal_pointer (&text), FALSE);
+}
+
+static void
+update_workspace_choice (XdChatView   *self,
+                         const XdChat *chat,
+                         gboolean      has_messages,
+                         gboolean      linked_worktree)
+{
+  GtkStringList *options = GTK_STRING_LIST (
+    gtk_drop_down_get_model (self->workspace_chooser));
+  const char *current[] = {
+    linked_worktree ? "Current worktree" : "Current checkout",
+    NULL,
+  };
+
+  self->syncing_workspace = TRUE;
+  gtk_string_list_splice (options, 0, 1, current);
+  gtk_drop_down_set_selected (self->workspace_chooser,
+                              chat->new_worktree ? 1 : 0);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->workspace_chooser),
+                            !has_messages);
+  self->syncing_workspace = FALSE;
 }
 
 /* Used only the first time the panel is opened, before there is a remembered
@@ -2593,16 +2690,27 @@ update_context_bar (XdChatView   *self,
                     const XdChat *chat)
 {
   g_autoptr (XdEffectiveSettings) resolved = NULL;
+  g_autoptr (XdGitInfo) git = NULL;
+  g_autofree char *base_description = NULL;
   g_autofree char *description = NULL;
+  const char *workdir;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
-  description = describe_context (workdir_for (chat, resolved));
+  workdir = workdir_for (chat, resolved);
+  git = xd_git_info_for_path (workdir);
+  base_description = describe_context (workdir);
+  description = chat->new_worktree
+    ? g_strdup_printf ("New worktree from %s", base_description)
+    : g_strdup (base_description);
 
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
+  update_workspace_choice (
+    self, chat,
+    xd_storage_last_message_id (self->storage, chat->id) > 0,
+    git != NULL && git->linked_worktree);
 
   {
-    const char *workdir = workdir_for (chat, resolved);
     gboolean have_workdir = workdir != NULL && *workdir != '\0';
     g_autofree char *tooltip =
       have_workdir ? g_strdup_printf ("Terminal in %s", workdir) : NULL;
@@ -2647,6 +2755,41 @@ update_context_bar (XdChatView   *self,
   gtk_widget_set_sensitive (GTK_WIDGET (self->access_chooser), !chat->plan);
 
   self->syncing_run_options = FALSE;
+}
+
+static void
+on_workspace_selected (GtkDropDown *chooser,
+                       GParamSpec  *pspec,
+                       gpointer     user_data)
+{
+  XdChatView *self = user_data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (XdChat) chat = NULL;
+  gboolean new_worktree;
+
+  if (self->syncing_workspace || self->chat == NULL)
+    return;
+
+  new_worktree = gtk_drop_down_get_selected (chooser) == 1;
+
+  if (self->remote != NULL)
+    {
+      set_remote_option (self, "new-worktree",
+                         new_worktree ? "true" : "false");
+      return;
+    }
+
+  if (!xd_storage_set_new_worktree (
+        self->storage, xd_node_get_chat_id (self->chat), new_worktree, &error))
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      return;
+    }
+
+  chat = xd_storage_get_chat (
+    self->storage, xd_node_get_chat_id (self->chat), NULL);
+  if (chat != NULL)
+    update_context_bar (self, chat);
 }
 
 static void
@@ -3124,6 +3267,26 @@ build_composer (XdChatView *self)
   g_signal_connect (self->model_picker, "model-chosen",
                     G_CALLBACK (on_model_chosen), self);
 
+  {
+    const char *workspaces[] = {
+      "Current checkout",
+      "New worktree",
+      NULL,
+    };
+
+    self->workspace_chooser = GTK_DROP_DOWN (
+      gtk_drop_down_new_from_strings (workspaces));
+    add_option_descriptions (
+      self->workspace_chooser, workspace_descriptions);
+    gtk_widget_add_css_class (GTK_WIDGET (self->workspace_chooser), "flat");
+    gtk_widget_set_tooltip_text (
+      GTK_WIDGET (self->workspace_chooser),
+      "Where this chat works; locked after the first message");
+    g_signal_connect (
+      self->workspace_chooser, "notify::selected",
+      G_CALLBACK (on_workspace_selected), self);
+  }
+
   self->context_label = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_ellipsize (self->context_label, PANGO_ELLIPSIZE_MIDDLE);
   gtk_label_set_xalign (self->context_label, 0.0f);
@@ -3165,6 +3328,8 @@ build_composer (XdChatView *self)
                       G_CALLBACK (on_access_selected), self);
   }
 
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->workspace_chooser));
+  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->model_picker));
   gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->effort_chooser));

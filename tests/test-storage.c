@@ -311,6 +311,33 @@ test_plan_preserves_the_access_level (Fixture       *fixture,
   g_assert_cmpstr (building->access, ==, "full");
 }
 
+static void
+test_workspace_locks_after_first_message (Fixture       *fixture,
+                                          gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (XdChat) chat = NULL;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_true (xd_storage_set_new_worktree (
+    fixture->storage, chat_id, TRUE, &error));
+  g_assert_no_error (error);
+
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_true (chat->new_worktree);
+
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, chat_id, "user", "start", NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  g_assert_false (xd_storage_set_new_worktree (
+    fixture->storage, chat_id, FALSE, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+}
+
 /* Re-reporting overwrites rather than accumulating: the CLI hands back an id
  * on every turn, and only the latest one resumes. */
 static void
@@ -447,6 +474,7 @@ main (int   argc,
   ADD ("/storage/tracks-what-was-seen", test_each_backend_tracks_what_it_has_seen);
   ADD ("/storage/forgetting-replays", test_forgetting_a_session_replays_everything);
   ADD ("/storage/plan-keeps-access", test_plan_preserves_the_access_level);
+  ADD ("/storage/workspace-locks", test_workspace_locks_after_first_message);
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);

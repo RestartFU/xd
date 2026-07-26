@@ -5,6 +5,8 @@
 #include "remote/terminal.h"
 #include "remote/turn.h"
 #include "settings/folder-settings.h"
+#include "util/git-info.h"
+#include "util/worktree.h"
 
 #include <json-glib/json-glib.h>
 #include <string.h>
@@ -1045,6 +1047,29 @@ start_daemon_turn (XdRemoteServer  *self,
   XdDaemonTurn *turn;
   Running *running;
 
+  {
+    g_autoptr (XdChat) chat =
+      xd_storage_get_chat (self->storage, chat_id, error);
+
+    if (chat == NULL)
+      return FALSE;
+
+    if (chat->new_worktree)
+      {
+        g_autoptr (XdDaemonTurn) resolver =
+          xd_daemon_turn_new (self->storage, self->root_path);
+        g_autofree char *source =
+          xd_daemon_turn_resolve_workdir (resolver, chat);
+        g_autofree char *worktree =
+          xd_worktree_create (source, chat_id, error);
+
+        if (worktree == NULL ||
+            !xd_storage_use_worktree (
+              self->storage, chat_id, worktree, error))
+          return FALSE;
+      }
+  }
+
   /*
    * An unnamed chat takes its name from what was asked first.
    *
@@ -1711,6 +1736,12 @@ handle_chat (Connection *connection,
       json_builder_add_string_value (builder, chat->access);
     }
 
+  json_builder_set_member_name (builder, "new_worktree");
+  json_builder_add_boolean_value (builder, chat->new_worktree);
+  json_builder_set_member_name (builder, "has_messages");
+  json_builder_add_boolean_value (
+    builder, xd_storage_last_message_id (self->storage, chat->id) > 0);
+
   /* Where it runs, resolved on this side: the folder chain that decides it is
    * here, and the client has no way to read it. */
   {
@@ -1722,8 +1753,13 @@ handle_chat (Connection *connection,
 
     if (workdir != NULL)
       {
+        g_autoptr (XdGitInfo) git = xd_git_info_for_path (workdir);
+
         json_builder_set_member_name (builder, "workdir");
         json_builder_add_string_value (builder, workdir);
+        json_builder_set_member_name (builder, "linked_worktree");
+        json_builder_add_boolean_value (
+          builder, git != NULL && git->linked_worktree);
       }
   }
 
@@ -1760,6 +1796,9 @@ handle_set_option (Connection *connection,
                               g_strcmp0 (value, "true") == 0, &error);
   else if (g_strcmp0 (option, "backend") == 0)
     ok = xd_storage_set_backend (self->storage, chat_id, value, &error);
+  else if (g_strcmp0 (option, "new-worktree") == 0)
+    ok = xd_storage_set_new_worktree (
+      self->storage, chat_id, g_strcmp0 (value, "true") == 0, &error);
   else
     {
       send_error (connection, "No such option.");

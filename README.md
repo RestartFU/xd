@@ -80,8 +80,8 @@ noise is cosmetic.
   directory, repository, backend, model and project instructions are set per
   folder and inherited by everything below; instructions accumulate from the
   root down, everything else is overridden by the nearest folder that sets it.
-- New chats pick their own working directory, so two chats in the same folder
-  can point at different checkouts.
+- New chats pick their own working directory and can stay in that checkout or
+  create an isolated `xd/<chat-id>` Git worktree before the first message.
 - The composer shows which assistant will answer and which branch, worktree and
   remote it is looking at.
 - Replies stream in and are rendered as Markdown. Stopping sends SIGINT first,

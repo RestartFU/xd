@@ -1311,6 +1311,71 @@ call_remote_request (XdRemoteClient *client,
     g_error ("terminal request failed: %s", waiting->wait.failure);
 }
 
+static void
+test_remote_workspace_choice_is_persisted (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (XdChat) stored = NULL;
+  g_autoptr (GError) error = NULL;
+  RemoteReply changed = { 0 };
+  RemoteReply options = { 0 };
+
+  daemon_start (&daemon);
+  chat_id = xd_storage_create_chat (
+    daemon.storage, "folder-1", "fresh", "claude",
+    NULL, NULL, daemon.root, &error);
+  g_assert_no_error (error);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "set-option");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, chat_id);
+    json_builder_set_member_name (builder, "option");
+    json_builder_add_string_value (builder, "new-worktree");
+    json_builder_set_member_name (builder, "value");
+    json_builder_add_string_value (builder, "true");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &changed);
+  }
+
+  stored = xd_storage_get_chat (daemon.storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_true (stored->new_worktree);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "chat");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &options);
+  }
+
+  g_assert_true (json_object_get_boolean_member (options.reply, "new_worktree"));
+  g_assert_false (json_object_get_boolean_member (options.reply, "has_messages"));
+
+  json_object_unref (changed.reply);
+  json_object_unref (options.reply);
+  g_free (changed.wait.failure);
+  g_free (options.wait.failure);
+  daemon_stop (&daemon);
+}
+
 /*
  * A pty lives on the daemon, accepts input over the authenticated line, and
  * keeps enough output for a second device joining after the command ran.
@@ -2104,6 +2169,7 @@ main (int argc, char *argv[])
   ADD ("/remote/local-changes-reach-the-devices", test_local_changes_reach_the_devices);
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
+  ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
