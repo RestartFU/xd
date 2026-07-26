@@ -364,6 +364,7 @@ append_choices (HyChatView  *self,
     {
       GtkWidget *button = gtk_button_new_with_label (ask->options[i]);
 
+      gtk_widget_add_css_class (button, "hy-choice");
       gtk_label_set_wrap (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (button))), TRUE);
       g_object_set_data_full (G_OBJECT (button), "answer",
                               g_strdup (ask->options[i]), g_free);

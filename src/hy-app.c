@@ -263,6 +263,20 @@ static const char *HY_STYLE =
   " margin: 2px; border-radius: 4px; background: alpha(#ffffff, 0.14); }\n"
   "scrollbar slider:hover { background: alpha(#ffffff, 0.28); }\n"
 
+  /*
+   * The options under a question: outlined, not filled.
+   *
+   * As solid slabs they carried more visual weight than the reply above
+   * them; a choice is an offer, and an offer reads better as a quiet
+   * outline that lifts when approached.
+   */
+  ".hy-choice { background: none; border: 1px solid alpha(#ffffff, 0.10);"
+  " border-radius: 10px; padding: 7px 14px; }\n"
+  ".hy-choice label { color: alpha(#ffffff, 0.65); }\n"
+  ".hy-choice:hover { background: alpha(#ffffff, 0.05);"
+  " border-color: alpha(#ffffff, 0.18); }\n"
+  ".hy-choice:hover label { color: alpha(#ffffff, 0.95); }\n"
+
   /* A chat waiting to be answered, in a tree the user may not be looking at.
    * Slow enough to notice without being the thing you look at. */
   "@keyframes hy-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
