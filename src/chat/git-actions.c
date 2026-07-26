@@ -28,7 +28,6 @@ struct _HyGitActions
   GitAction suggested;
 
   GtkButton *primary;
-  GtkWidget *menu_button;
 };
 
 G_DEFINE_FINAL_TYPE (HyGitActions, hy_git_actions, ADW_TYPE_BIN)
@@ -308,16 +307,6 @@ on_primary_clicked (GtkButton *button,
   run_action (self, self->suggested);
 }
 
-static void
-on_menu_action (GtkWidget  *widget,
-                const char *name,
-                GVariant   *parameter)
-{
-  HyGitActions *self = HY_GIT_ACTIONS (widget);
-
-  run_action (self, (GitAction) g_variant_get_int32 (parameter));
-}
-
 HyGitActions *
 hy_git_actions_new (void)
 {
@@ -339,20 +328,12 @@ hy_git_actions_dispose (GObject *object)
 static void
 hy_git_actions_class_init (HyGitActionsClass *klass)
 {
-  GObjectClass *object_class = G_OBJECT_CLASS (klass);
-  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
-
-  object_class->dispose = hy_git_actions_dispose;
-
-  gtk_widget_class_install_action (widget_class, "git.run", "i", on_menu_action);
+  G_OBJECT_CLASS (klass)->dispose = hy_git_actions_dispose;
 }
 
 static void
 hy_git_actions_init (HyGitActions *self)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  GMenu *menu = g_menu_new ();
-
   /* Words, no icon. An icon the theme does not carry draws as a broken-image
    * box, and there is no icon for "create a pull request" that is clearer
    * than saying so. */
@@ -360,34 +341,15 @@ hy_git_actions_init (HyGitActions *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->primary), "flat");
   g_signal_connect (self->primary, "clicked", G_CALLBACK (on_primary_clicked), self);
 
-  /* All three stay reachable: the suggestion is what usually comes next, not
-   * a rule about what may be done. */
-  {
-    static const struct { const char *label; GitAction action; } entries[] = {
-      { "Commit",    ACTION_COMMIT },
-      { "Push",      ACTION_PUSH },
-      { "Create PR", ACTION_PULL_REQUEST },
-    };
-
-    for (gsize i = 0; i < G_N_ELEMENTS (entries); i++)
-      {
-        g_autofree char *action = g_strdup_printf ("git.run(%d)", entries[i].action);
-
-        g_menu_append (menu, entries[i].label, action);
-      }
-  }
-
-  self->menu_button = gtk_menu_button_new ();
-  gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (self->menu_button),
-                                  G_MENU_MODEL (menu));
-  gtk_widget_add_css_class (self->menu_button, "flat");
-  g_object_unref (menu);
-
-  gtk_widget_add_css_class (box, "linked");
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->primary));
-  gtk_box_append (GTK_BOX (box), self->menu_button);
-
+  /*
+   * One button, no menu behind it.
+   *
+   * The three actions are a sequence, not a choice: work is committed, then
+   * pushed, then asked to be merged, and the repository already says which
+   * one is next. A menu offering the other two offered doing them out of
+   * order, which git would refuse anyway.
+   */
   gtk_widget_set_visible (GTK_WIDGET (self), FALSE);
 
-  adw_bin_set_child (ADW_BIN (self), box);
+  adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->primary));
 }
