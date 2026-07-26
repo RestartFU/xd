@@ -33,6 +33,14 @@ struct _HyFsTree
   GCancellable *cancellable;
 };
 
+enum
+{
+  SIGNAL_CHAT_REMOVED,
+  N_SIGNALS,
+};
+
+static guint signals[N_SIGNALS];
+
 G_DEFINE_FINAL_TYPE (HyFsTree, hy_fs_tree, G_TYPE_OBJECT)
 
 /* The icon of the assistant a chat is set to, so the tree says at a glance
@@ -837,6 +845,11 @@ hy_fs_tree_delete_chat (HyFsTree    *self,
     return FALSE;
 
   parent = hy_node_get_parent (chat);
+
+  /* Announced before the store drops it, so whoever is showing the chat is
+   * still holding a node rather than being handed a dead one. */
+  g_signal_emit (self, signals[SIGNAL_CHAT_REMOVED], 0, chat);
+
   if (parent != NULL &&
       g_list_store_find (hy_node_get_children (parent), chat, &position))
     g_list_store_remove (hy_node_get_children (parent), position);
@@ -943,6 +956,13 @@ hy_fs_tree_class_init (HyFsTreeClass *klass)
 
   object_class->dispose = hy_fs_tree_dispose;
   object_class->finalize = hy_fs_tree_finalize;
+
+  /* Whoever is showing a chat has to hear that it is gone; there is nothing
+   * left to show and anything typed into it would be written to a row that
+   * no longer exists. */
+  signals[SIGNAL_CHAT_REMOVED] =
+    g_signal_new ("chat-removed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, HY_TYPE_NODE);
 }
 
 static void

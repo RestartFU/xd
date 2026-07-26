@@ -48,6 +48,23 @@ on_node_selected (HySidebar *sidebar,
     hy_chat_view_set_chat (self->chat_view, node);
 }
 
+/*
+ * The chat on screen has been deleted.
+ *
+ * Without this the view keeps showing a chat that is no longer in the
+ * database -- readable, and worse, still able to be typed into.
+ */
+static void
+on_chat_removed (HyFsTree *tree,
+                 HyNode   *chat,
+                 gpointer  user_data)
+{
+  HyWindow *self = user_data;
+
+  if (hy_chat_view_get_chat (self->chat_view) == chat)
+    hy_chat_view_set_chat (self->chat_view, NULL);
+}
+
 static void
 on_node_activated (HySidebar *sidebar,
                    HyNode    *node,
@@ -145,6 +162,7 @@ hy_window_new (HyApplication *app)
   g_signal_connect (sidebar, "node-activated", G_CALLBACK (on_node_activated), self);
 
   self->chat_view = hy_chat_view_new (self->storage, self->tree);
+  g_signal_connect (self->tree, "chat-removed", G_CALLBACK (on_chat_removed), self);
 
   gtk_paned_set_start_child (self->split_view, GTK_WIDGET (sidebar));
   gtk_paned_set_end_child (self->split_view, GTK_WIDGET (self->chat_view));
