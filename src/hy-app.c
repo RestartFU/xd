@@ -245,8 +245,17 @@ static const char *HY_STYLE =
   "frame > box { padding: 4px; }\n"
   "textview, textview text { background: transparent; }\n"
 
-  "popover > contents { border-radius: 12px; padding: 4px; }\n"
-  "popover menuitem { border-radius: 8px; }\n"
+  /* An explicit fill: the popover colour was being asked of libadwaita's
+   * palette names, which this stylesheet no longer trusts. */
+  "popover > contents { border-radius: 14px; padding: 6px;"
+  " background-color: #141419; border: 1px solid alpha(#ffffff, 0.08); }\n"
+  "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
+  /* The dropdown's open list: room for the two lines, a rounded hover, and
+   * no band of selection colour behind the one already chosen. */
+  "popover listview > row { border-radius: 10px; padding: 8px 12px; }\n"
+  "popover listview > row:selected { background: alpha(#ffffff, 0.07); }\n"
+  "popover listview > row:hover:not(:selected)"
+  " { background: alpha(#ffffff, 0.05); }\n"
 
   /* Nothing has a scrollbar except the transcript, and that one is a thin
    * overlay: everywhere else the content says how long it is. */

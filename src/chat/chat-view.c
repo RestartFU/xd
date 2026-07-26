@@ -107,6 +107,78 @@ static const AiEffort effort_choices[] = {
   AI_EFFORT_XHIGH, AI_EFFORT_MAX,
 };
 
+/* What each option means, one line, shown under its name in the dropdown.
+ * Same order as the choice arrays above. */
+static const char *const access_descriptions[] = {
+  "Look at anything, change nothing.",
+  "Edit the working tree; ask before commands.",
+  "Run commands and edit without asking.",
+};
+static const char *const effort_descriptions[] = {
+  "Quick answers, little deliberation.",
+  "Balanced speed and depth.",
+  "Thinks longer before answering.",
+  "Extended reasoning for hard problems.",
+  "Everything the model has.",
+};
+
+/* --- two-line dropdown rows ------------------------------------------------ */
+
+static void
+on_option_setup (GtkSignalListItemFactory *factory,
+                 GtkListItem              *item,
+                 gpointer                  user_data)
+{
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+  GtkWidget *title = gtk_label_new (NULL);
+  GtkWidget *detail = gtk_label_new (NULL);
+
+  gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
+  gtk_label_set_xalign (GTK_LABEL (detail), 0.0f);
+  gtk_widget_add_css_class (detail, "caption");
+  gtk_widget_add_css_class (detail, "dim-label");
+
+  gtk_box_append (GTK_BOX (box), title);
+  gtk_box_append (GTK_BOX (box), detail);
+  gtk_list_item_set_child (item, box);
+}
+
+static void
+on_option_bind (GtkSignalListItemFactory *factory,
+                GtkListItem              *item,
+                gpointer                  user_data)
+{
+  const char *const *descriptions = user_data;
+  GtkWidget *box = gtk_list_item_get_child (item);
+  GtkWidget *title = gtk_widget_get_first_child (box);
+  GtkWidget *detail = gtk_widget_get_next_sibling (title);
+  GtkStringObject *string = gtk_list_item_get_item (item);
+
+  gtk_label_set_label (GTK_LABEL (title),
+                       gtk_string_object_get_string (string));
+  gtk_label_set_label (GTK_LABEL (detail),
+                       descriptions[gtk_list_item_get_position (item)]);
+}
+
+/*
+ * The open list explains each option; the closed button only names the one
+ * chosen. A description worth a line in the menu would be clutter in the
+ * composer bar.
+ */
+static void
+add_option_descriptions (GtkDropDown       *chooser,
+                         const char *const *descriptions)
+{
+  GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
+
+  g_signal_connect (factory, "setup", G_CALLBACK (on_option_setup), NULL);
+  g_signal_connect (factory, "bind", G_CALLBACK (on_option_bind),
+                    (gpointer) descriptions);
+
+  gtk_drop_down_set_list_factory (chooser, factory);
+  g_object_unref (factory);
+}
+
 G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (HyChatView *self);
@@ -2062,6 +2134,7 @@ build_composer (HyChatView *self)
       gtk_string_list_append (accesses, ai_access_label (access_choices[i]));
 
     self->effort_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (efforts), NULL));
+    add_option_descriptions (self->effort_chooser, effort_descriptions);
     gtk_widget_add_css_class (GTK_WIDGET (self->effort_chooser), "flat");
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->effort_chooser),
                                  "How hard the model is asked to think");
@@ -2069,6 +2142,7 @@ build_composer (HyChatView *self)
                       G_CALLBACK (on_effort_selected), self);
 
     self->access_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (accesses), NULL));
+    add_option_descriptions (self->access_chooser, access_descriptions);
     gtk_widget_add_css_class (GTK_WIDGET (self->access_chooser), "flat");
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->access_chooser),
                                  "What the assistant may do in the working "
