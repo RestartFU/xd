@@ -1,0 +1,86 @@
+# A runnable xd for every commit on master.
+#
+# The bundle is the same one scripts/build.sh produces locally: a binary with
+# its whole library closure beside it, so it runs on any glibc x86_64 host
+# without a GTK stack of its own. Published under a rolling "nightly" tag, so
+# the download link never changes:
+#
+#   https://github.com/<owner>/<repo>/releases/download/nightly/xd-linux-x86_64.tar.gz
+#
+# The headless suite runs first and the release only happens if it passes: a
+# nightly that does not work is worse than no nightly.
+
+name: nightly
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# One at a time, newest wins. Two commits landing together would otherwise race
+# to replace the same release, and the loser could be the newer one.
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Everything is built in Docker, so the runner needs nothing else. Both
+      # builds share layers, which is why the tests are cheap to gate on.
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the bundle
+        run: ./scripts/build.sh
+
+      - name: Pack it
+        run: |
+          set -euo pipefail
+          # Named so it unpacks into a directory rather than over the one it
+          # was unpacked in.
+          mv dist xd
+          tar -czf xd-linux-x86_64.tar.gz xd
+          sha256sum xd-linux-x86_64.tar.gz > xd-linux-x86_64.tar.gz.sha256
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          subject=$(git log -1 --format=%s)
+          notes=$(cat <<EOF
+          Built from \`${GITHUB_SHA:0:7}\` — $subject
+
+          Unpack and run:
+
+          \`\`\`
+          tar -xzf xd-linux-x86_64.tar.gz
+          ./xd/xd.sh
+          \`\`\`
+
+          Self-contained: no GTK, glib or VTE needed on the host. The daemon is
+          the same binary — \`./xd/bin/xd serve --pair\`.
+          EOF
+          )
+
+          # Replaced rather than edited: the tag has to move to this commit,
+          # and a release whose tag points somewhere else is a lie about what
+          # is in it.
+          gh release delete nightly --cleanup-tag --yes || true
+
+          gh release create nightly \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Nightly $(date -u +%Y-%m-%d)" \
+            --notes "$notes" \
+            xd-linux-x86_64.tar.gz \
+            xd-linux-x86_64.tar.gz.sha256
