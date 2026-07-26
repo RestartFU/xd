@@ -113,6 +113,10 @@ struct _XdChatView
   GtkStack *stack;
   GtkBox *transcript;
   GtkScrolledWindow *scroller;
+  guint scroll_tick;
+  double scroll_upper;
+  double scroll_page_size;
+  guint scroll_stable_frames;
   GtkTextView *composer;
   GtkButton *send_button;
   GtkWidget *composer_area;
@@ -354,26 +358,53 @@ worked_for_row (gint64 seconds)
 /* --- transcript ----------------------------------------------------------- */
 
 static gboolean
-scroll_to_bottom (gpointer data)
+scroll_to_bottom (GtkWidget     *widget,
+                  GdkFrameClock *frame_clock,
+                  gpointer       user_data)
 {
-  XdChatView *self = data;
+  XdChatView *self = user_data;
   GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (self->scroller);
+  double upper = gtk_adjustment_get_upper (adjustment);
+  double page_size = gtk_adjustment_get_page_size (adjustment);
 
   gtk_adjustment_set_value (adjustment,
-                            gtk_adjustment_get_upper (adjustment) -
-                            gtk_adjustment_get_page_size (adjustment));
+                            MAX (gtk_adjustment_get_lower (adjustment),
+                                 upper - page_size));
 
-  g_object_unref (self);
+  if (upper == self->scroll_upper && page_size == self->scroll_page_size)
+    self->scroll_stable_frames++;
+  else
+    self->scroll_stable_frames = 0;
 
-  return G_SOURCE_REMOVE;
+  self->scroll_upper = upper;
+  self->scroll_page_size = page_size;
+
+  /*
+   * Row allocation can update the adjustment after this frame's callback.
+   * Wait until a later frame sees the same range before letting go, so joining
+   * a live chat lands below both its stored transcript and its in-flight rows.
+   */
+  if (self->scroll_stable_frames >= 1)
+    {
+      self->scroll_tick = 0;
+      return G_SOURCE_REMOVE;
+    }
+
+  return G_SOURCE_CONTINUE;
 }
 
-/* A freshly appended row has no allocation yet, so the adjustment only knows
- * its final extent once layout has run. */
+/* Follow layout until a freshly appended row is part of the scroll range. */
 static void
 queue_scroll_to_bottom (XdChatView *self)
 {
-  g_idle_add_full (G_PRIORITY_LOW, scroll_to_bottom, g_object_ref (self), NULL);
+  self->scroll_upper = -1;
+  self->scroll_page_size = -1;
+  self->scroll_stable_frames = 0;
+
+  if (self->scroll_tick == 0)
+    self->scroll_tick =
+      gtk_widget_add_tick_callback (GTK_WIDGET (self->scroller),
+                                    scroll_to_bottom, self, NULL);
 }
 
 static XdMessageRow *
@@ -3466,6 +3497,13 @@ xd_chat_view_dispose (GObject *object)
 
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
+
+  if (self->scroll_tick != 0)
+    {
+      gtk_widget_remove_tick_callback (GTK_WIDGET (self->scroller),
+                                       self->scroll_tick);
+      self->scroll_tick = 0;
+    }
 
   g_clear_handle_id (&self->working_timer, g_source_remove);
   self->working_label = NULL;
