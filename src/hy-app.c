@@ -155,9 +155,12 @@ static const char *HY_STYLE =
   /* A hairline, not a gutter. Two pixels rather than one so it can still be
    * grabbed -- the separator is its own drag handle, and a line you cannot
    * catch would mean the panes stop being resizable. */
+  /* Invisible until reached for. The panes already end where they end; the
+   * line only mattered as somewhere to grab, so it appears when hovered and
+   * keeps its width the rest of the time. */
   "paned > separator { min-width: 2px; min-height: 2px; border: none;"
-  " background: alpha(#ffffff, 0.06); }\n"
-  "paned > separator:hover { background: alpha(#ffffff, 0.16); }\n"
+  " background: none; }\n"
+  "paned > separator:hover { background: alpha(#ffffff, 0.14); }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */

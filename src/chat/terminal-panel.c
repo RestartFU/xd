@@ -55,7 +55,7 @@ apply_colours (HyTerminalPanel *self)
    * as a surface. Matched by hand because VTE takes a colour rather than
    * following the stylesheet.
    */
-  gdk_rgba_parse (&background, dark ? "#17171c" : "#ffffff");
+  gdk_rgba_parse (&background, dark ? "#1c1c22" : "#ffffff");
 
   vte_terminal_set_colors (self->terminal, &foreground, &background, NULL, 0);
 }
