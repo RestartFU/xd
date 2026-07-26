@@ -159,12 +159,12 @@ static const char *HY_STYLE =
    * line only mattered as somewhere to grab, so it appears when hovered and
    * keeps its width the rest of the time. */
   /*
-   * A visible hairline at every pane boundary: sidebar, git panel, terminal.
-   * The theme's own border grey at one pixel, controlled through opacity
-   * because the separator's background survives background overrides.
+   * A visible line at every pane boundary, running the full height of the
+   * split -- past the composer and down the terminal, so the division stays
+   * clear where the panes are darkest.
    */
   "paned > separator { min-width: 1px; min-height: 1px; border: none;"
-  " opacity: 1; }\n"
+  " background: #35353a; opacity: 1; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */

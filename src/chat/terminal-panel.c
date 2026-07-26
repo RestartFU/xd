@@ -69,9 +69,9 @@ apply_colours (HyTerminalPanel *self)
    * as a surface. Matched by hand because VTE takes a colour rather than
    * following the stylesheet.
    */
-  /* Neutral: the blue-purple cast of a tinted grey is louder than the
-   * lightness it buys. A step over the window, no hue of its own. */
-  gdk_rgba_parse (&background, dark ? "#151516" : "#ffffff");
+  /* Just above the window, like the reference: the terminal is allowed to be
+   * dark because the full-height divider does the separating, not the fill. */
+  gdk_rgba_parse (&background, dark ? "#0f0f12" : "#ffffff");
 
   vte_terminal_set_colors (self->terminal, &foreground, &background,
                            palette, G_N_ELEMENTS (palette));
