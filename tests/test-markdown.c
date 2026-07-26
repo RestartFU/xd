@@ -95,6 +95,26 @@ test_heading (void)
 }
 
 static void
+test_hash_prefixed_prose_is_not_a_heading (void)
+{
+  const char *lines[] = {
+    "#1 fixed. Moving to #2.",
+    "#include <stdio.h>",
+    "####### too many hashes",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (lines); i++)
+    {
+      g_autofree char *result = xd_markdown_to_pango (lines[i]);
+
+      g_assert_null (strstr (result, "size="));
+      g_assert_null (strstr (result, "<b>"));
+      g_assert_true (g_str_has_prefix (result, "#"));
+      assert_valid_markup (result);
+    }
+}
+
+static void
 test_empty_and_null (void)
 {
   g_autofree char *empty = xd_markdown_to_pango ("");
@@ -142,6 +162,8 @@ main (int   argc,
   g_test_add_func ("/markdown/underscores", test_underscores_are_literal);
   g_test_add_func ("/markdown/fence", test_fenced_block);
   g_test_add_func ("/markdown/heading", test_heading);
+  g_test_add_func ("/markdown/hash-prefixed-prose",
+                   test_hash_prefixed_prose_is_not_a_heading);
   g_test_add_func ("/markdown/empty", test_empty_and_null);
 
   g_test_add_func ("/markdown/links", test_links);

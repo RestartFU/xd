@@ -120,6 +120,27 @@ is_fence (const char *line)
 }
 
 /*
+ * CommonMark ATX headings need one to six hashes followed by whitespace or
+ * end-of-line. Without that boundary, issue references such as "#1 fixed"
+ * become giant headings.
+ */
+static gboolean
+is_heading (const char *line)
+{
+  const char *text = line;
+  guint level = 0;
+
+  while (*text == '#')
+    {
+      level++;
+      text++;
+    }
+
+  return level >= 1 && level <= 6 &&
+         (*text == '\0' || *text == ' ' || *text == '\t');
+}
+
+/*
  * A heading, at a size that says which level it is.
  *
  * Bold alone made every heading in a long answer look like every emphasised
@@ -138,7 +159,7 @@ append_heading (GString    *out,
       level++;
       text++;
     }
-  while (*text == ' ')
+  while (*text == ' ' || *text == '\t')
     text++;
 
   g_string_append_printf (out, "<span size=\"%s\"><b>",
@@ -182,7 +203,7 @@ xd_markdown_to_pango (const char *text)
 
       if (in_fence)
         append_escaped (out, line, -1);
-      else if (line[0] == '#')
+      else if (is_heading (line))
         append_heading (out, line);
       else
         {
