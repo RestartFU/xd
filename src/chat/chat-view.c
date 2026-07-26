@@ -1484,6 +1484,14 @@ on_diff_toggled (GtkToggleButton *button,
   hy_diff_pane_refresh (self->diff);
 }
 
+/* The panel asked to go away; the button has to agree, or it would take two
+ * clicks to open it again. */
+static void
+close_terminal (HyChatView *self)
+{
+  gtk_toggle_button_set_active (self->terminal_button, FALSE);
+}
+
 static int
 terminal_height (HyChatView *self)
 {
@@ -2172,6 +2180,8 @@ hy_chat_view_init (HyChatView *self)
    * said, which means reading both at once. */
   self->terminal = hy_terminal_panel_new ();
   gtk_widget_set_visible (GTK_WIDGET (self->terminal), FALSE);
+  g_signal_connect_swapped (self->terminal, "close-requested",
+                            G_CALLBACK (close_terminal), self);
 
   self->split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_VERTICAL));
   g_signal_connect (self->split, "notify::position",

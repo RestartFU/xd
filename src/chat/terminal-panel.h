@@ -30,6 +30,11 @@ void             hy_terminal_panel_set_workdir (HyTerminalPanel *self,
  */
 void             hy_terminal_panel_start       (HyTerminalPanel *self);
 
+/*
+ * Emits "close-requested" when the user asks for the panel to go away, so
+ * whoever put it on screen can take it off and keep its button in step.
+ */
+
 /* Starts the shell if none is running, and takes the keyboard. */
 void             hy_terminal_panel_activate    (HyTerminalPanel *self);
 

@@ -19,7 +19,16 @@ struct _HyTerminalPanel
   VteTerminal *terminal;
   char *workdir;
   gboolean running;
+  gboolean restarting;
 };
+
+enum
+{
+  SIGNAL_CLOSE_REQUESTED,
+  N_SIGNALS,
+};
+
+static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, ADW_TYPE_BIN)
 
@@ -57,10 +66,20 @@ on_child_exited (VteTerminal *terminal,
 {
   HyTerminalPanel *self = user_data;
 
-  /* Left as it was rather than restarted: a shell that exits immediately
-   * would otherwise respawn in a loop with nothing to show for it. The next
-   * time the panel is opened starts a fresh one. */
   self->running = FALSE;
+
+  /* Asked for: clear what the old shell left and start again. */
+  if (self->restarting)
+    {
+      self->restarting = FALSE;
+      vte_terminal_reset (terminal, TRUE, TRUE);
+      hy_terminal_panel_start (self);
+      return;
+    }
+
+  /* Otherwise left as it was rather than restarted: a shell that exits
+   * immediately would respawn in a loop with nothing to show for it. The next
+   * time the panel is opened starts a fresh one. */
   vte_terminal_feed (terminal, "\r\n\033[2m[exited]\033[0m\r\n", -1);
 }
 
@@ -169,6 +188,41 @@ hy_terminal_panel_activate (HyTerminalPanel *self)
   gtk_widget_grab_focus (GTK_WIDGET (self->terminal));
 }
 
+/*
+ * Replaces the shell with a fresh one.
+ *
+ * A shell that has been cd'd around, or left inside something, is quicker to
+ * replace than to unpick. The old one is killed rather than left running: it
+ * has no window to appear in.
+ */
+static void
+on_restart_clicked (GtkButton *button,
+                    gpointer   user_data)
+{
+  HyTerminalPanel *self = user_data;
+
+  if (!self->running)
+    {
+      vte_terminal_reset (self->terminal, TRUE, TRUE);
+      hy_terminal_panel_start (self);
+      return;
+    }
+
+  /* One child per terminal, so the new shell waits for the old one to be
+   * gone rather than racing it. */
+  self->restarting = TRUE;
+  vte_terminal_feed_child (self->terminal, "\004", -1);
+}
+
+static void
+on_close_clicked (GtkButton *button,
+                  gpointer   user_data)
+{
+  HyTerminalPanel *self = user_data;
+
+  g_signal_emit (self, signals[SIGNAL_CLOSE_REQUESTED], 0);
+}
+
 HyTerminalPanel *
 hy_terminal_panel_new (void)
 {
@@ -190,6 +244,12 @@ static void
 hy_terminal_panel_class_init (HyTerminalPanelClass *klass)
 {
   G_OBJECT_CLASS (klass)->finalize = hy_terminal_panel_finalize;
+
+  /* The panel cannot take itself off screen: whoever put it there decides
+   * that, and has a button to keep in step. */
+  signals[SIGNAL_CLOSE_REQUESTED] =
+    g_signal_new ("close-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void
@@ -219,6 +279,36 @@ hy_terminal_panel_init (HyTerminalPanel *self)
 
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->terminal));
   gtk_box_append (GTK_BOX (box), scrollbar);
+
+  /* Over the terminal rather than above it, so the buttons cost no height
+   * and the shell keeps the whole panel. */
+  {
+    GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *restart = gtk_button_new_from_icon_name ("list-add-symbolic");
+    GtkWidget *close = gtk_button_new_from_icon_name ("user-trash-symbolic");
+    GtkWidget *overlay = gtk_overlay_new ();
+
+    gtk_widget_add_css_class (restart, "flat");
+    gtk_widget_set_tooltip_text (restart, "Start a fresh shell");
+    g_signal_connect (restart, "clicked", G_CALLBACK (on_restart_clicked), self);
+
+    gtk_widget_add_css_class (close, "flat");
+    gtk_widget_set_tooltip_text (close, "Close the terminal");
+    g_signal_connect (close, "clicked", G_CALLBACK (on_close_clicked), self);
+
+    gtk_box_append (GTK_BOX (controls), restart);
+    gtk_box_append (GTK_BOX (controls), close);
+    gtk_widget_set_halign (controls, GTK_ALIGN_END);
+    gtk_widget_set_valign (controls, GTK_ALIGN_START);
+    gtk_widget_set_margin_top (controls, 4);
+    gtk_widget_set_margin_end (controls, 16);
+
+    gtk_overlay_set_child (GTK_OVERLAY (overlay), box);
+    gtk_overlay_add_overlay (GTK_OVERLAY (overlay), controls);
+
+    adw_bin_set_child (ADW_BIN (self), overlay);
+    return;
+  }
 
   g_signal_connect (self->terminal, "child-exited",
                     G_CALLBACK (on_child_exited), self);

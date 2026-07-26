@@ -112,12 +112,22 @@ static const char *HY_STYLE =
    * not the one the selector names. A class on a widget hy created is the one
    * thing neither can move out from under.
    */
-  ".hy-surface, .hy-surface > * { background-color: #000000; }\n"
-  ".hy-sidebar, .hy-sidebar > * { background-color: #060607; }\n"
-  "window, .background, headerbar, .toolbar { background-color: #000000; }\n"
+  /*
+   * Layered rather than uniformly black.
+   *
+   * Everything at #000 leaves nothing to tell the panes apart, and the
+   * borders end up doing work that a change of shade does better. Each
+   * surface sits a little above the one behind it, with a hairline edge
+   * where they meet -- which is what reads as glass.
+   */
+  ".hy-surface, .hy-surface > * { background-color: #0b0b0e; }\n"
+  ".hy-sidebar, .hy-sidebar > * { background-color: #08080a; }\n"
+  "window, .background, headerbar, .toolbar { background-color: #08080a; }\n"
+  ".hy-raised { background-color: alpha(#ffffff, 0.035);"
+  " border: 1px solid alpha(#ffffff, 0.07); }\n"
 
   /* The bar under the composer: what is being worked on, not a control. */
-  ".hy-context { background-color: #070709; border-radius: 0 0 14px 14px;"
+  ".hy-context { background-color: alpha(#ffffff, 0.02); border-radius: 0 0 14px 14px;"
   " padding: 4px 12px; }\n"
   ".hy-context label { font-size: 0.85em; }\n"
 
@@ -170,9 +180,11 @@ static const char *HY_STYLE =
 
   /* What the user typed, and the box they type into: the same rounded shape,
    * so a message looks like what the composer produces. */
-  ".card { border-radius: 12px; }\n"
-  "frame, frame > border { border-radius: 16px; border-color:"
-  " alpha(currentColor, 0.08); }\n"
+  ".card { border-radius: 12px; background-color: alpha(#ffffff, 0.05);"
+  " border: 1px solid alpha(#ffffff, 0.06); }\n"
+  "frame, frame > border { border-radius: 16px;"
+  " background-color: alpha(#ffffff, 0.035);"
+  " border-color: alpha(#ffffff, 0.09); }\n"
   /* The composer is the one thing on screen the user acts on, so it gets
    * room rather than being another thin bar. */
   "frame > box { padding: 4px; }\n"
