@@ -402,6 +402,12 @@ on_choice_clicked (GtkButton *button,
   if (answer == NULL || self->chat == NULL)
     return;
 
+  /* Before the buttons are torn down: when the focused button disappears,
+   * focus falls to the first focusable widget -- a selectable message label,
+   * which selects its whole text on focus-in. Parking focus on the composer
+   * first means it never lands there. */
+  gtk_widget_grab_focus (GTK_WIDGET (self->composer));
+
   send_message (self, answer);
 }
 

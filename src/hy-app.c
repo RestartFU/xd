@@ -158,7 +158,8 @@ static const char *HY_STYLE =
    * not the chat's. The height is fixed and the children are kept small
    * enough to fit inside it.
    */
-  "headerbar { min-height: 42px; background: transparent; box-shadow: none;"
+  "headerbar { min-height: 42px; padding-top: 5px; padding-bottom: 5px;"
+  " background: transparent; box-shadow: none;"
   " border: none; border-bottom: 1px solid #2a2a2d; }\n"
   "headerbar button, headerbar menubutton > button { min-height: 26px;"
   " min-width: 26px; padding: 2px 6px; margin-top: 0; margin-bottom: 0; }\n"

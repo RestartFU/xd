@@ -17,6 +17,7 @@ typedef enum
   ACTION_COMMIT,
   ACTION_PUSH,
   ACTION_PULL_REQUEST,
+  ACTION_VIEW_PULL_REQUEST,
 } GitAction;
 
 struct _HyGitActions
@@ -48,7 +49,8 @@ static const char *STATE_SCRIPT =
   "  [ -n \"$ref\" ] || continue; "
   "  git rev-parse --verify --quiet \"$ref\" >/dev/null && "
   "    { echo \"${ref##*/}\"; break; }; "
-  "done";
+  "done; "
+  "gh pr view --json url --jq .url 2>/dev/null || true";
 
 static const char *
 action_label (GitAction action)
@@ -57,8 +59,9 @@ action_label (GitAction action)
     {
     case ACTION_COMMIT:       return "Commit";
     case ACTION_PUSH:         return "Push";
-    case ACTION_PULL_REQUEST: return "Create PR";
-    default:                  return "Up to date";
+    case ACTION_PULL_REQUEST:      return "Create PR";
+    case ACTION_VIEW_PULL_REQUEST: return "View PR";
+    default:                       return "Up to date";
     }
 }
 
@@ -147,7 +150,7 @@ on_state_read (GObject      *source,
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) lines = NULL;
-  const char *dirty, *branch, *upstream, *base;
+  const char *dirty, *branch, *upstream, *base, *pr_url;
   int ahead;
 
   if (!g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result,
@@ -166,6 +169,7 @@ on_state_read (GObject      *source,
   upstream = lines[2];
   ahead    = atoi (lines[3]);
   base     = lines[4];
+  pr_url   = g_strv_length (lines) > 5 ? lines[5] : "";
 
   /* Not a repository, or one with no commits to speak of. */
   if (*branch == '\0')
@@ -181,9 +185,10 @@ on_state_read (GObject      *source,
   else if (ahead > 0 || *upstream == '\0')
     self->suggested = ACTION_PUSH;
   else if (g_strcmp0 (branch, base) != 0)
-    /* On a branch of its own, with everything pushed: what is left is to ask
-     * for it to be merged. */
-    self->suggested = ACTION_PULL_REQUEST;
+    /* On a branch of its own, with everything pushed. If the ask has already
+     * been made, the useful thing is the conversation happening on it. */
+    self->suggested = *pr_url != '\0' ? ACTION_VIEW_PULL_REQUEST
+                                       : ACTION_PULL_REQUEST;
   else
     self->suggested = ACTION_NONE;
 
@@ -291,6 +296,10 @@ run_action (HyGitActions *self,
       /* --web rather than creating it outright: the title and body are worth
        * seeing before it exists, and gh knows how to open a browser. */
       run_script (self, "gh pr create --web", NULL, on_action_finished);
+      break;
+
+    case ACTION_VIEW_PULL_REQUEST:
+      run_script (self, "gh pr view --web", NULL, on_action_finished);
       break;
 
     default:
