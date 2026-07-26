@@ -232,8 +232,10 @@ static void append_tool_line (XdChatView *self, const char *name);
 static char *describe_context (const char *workdir);
 static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data);
 static void show_queued (XdChatView *self);
+static void set_queued_text (XdChatView *self, const char *text);
 static Turn *current_turn (XdChatView *self);
 static void send_remote_message (XdChatView *self, const char *text);
+static void cancel_remote_turn (XdChatView *self);
 static void send_queued (XdChatView *self);
 static void send_message (XdChatView *self,
                           const char *text);
@@ -842,6 +844,12 @@ on_remote_event (XdRemoteClient *client,
       return;
     }
 
+  if (g_strcmp0 (name, "queued") == 0)
+    {
+      set_queued_text (self, text);
+      return;
+    }
+
   if (g_strcmp0 (name, "text") == 0 && text != NULL)
     {
       if (self->remote_said == NULL)
@@ -877,16 +885,6 @@ on_remote_event (XdRemoteClient *client,
       /* Read back rather than assembled from what arrived: the daemon has
        * written the turn down, and what it wrote is the transcript. */
       load_remote_transcript (self);
-
-      /* Anything typed while it was working waits for exactly this, the way
-       * the composer does for a chat running here. */
-      if (self->queued != NULL)
-        {
-          g_autofree char *queued = g_steal_pointer (&self->queued);
-
-          show_queued (self);
-          send_remote_message (self, queued);
-        }
 
       return;
     }
@@ -968,9 +966,11 @@ on_remote_options_received (GObject      *source,
   chat.effort = (char *) member_string (reply, "effort", NULL);
   chat.access = (char *) member_string (reply, "access", NULL);
   chat.workdir = (char *) member_string (reply, "workdir", NULL);
+  chat.queued = (char *) member_string (reply, "queued", NULL);
   chat.plan = json_object_get_boolean_member_with_default (reply, "plan", FALSE);
 
   update_remote_options (self, &chat);
+  set_queued_text (self, chat.queued);
 
   /*
    * A turn already running when the chat was opened.
@@ -1148,12 +1148,27 @@ on_storage_changed (XdStorage *storage,
                     gpointer   user_data)
 {
   XdChatView *self = user_data;
+  g_autoptr (XdChat) chat = NULL;
   const char *chat_id;
 
-  if (self->chat == NULL || self->remote != NULL || current_turn (self) != NULL)
+  if (self->chat == NULL || self->remote != NULL)
     return;
 
   chat_id = xd_node_get_chat_id (self->chat);
+  chat = xd_storage_get_chat (self->storage, chat_id, NULL);
+  if (chat != NULL)
+    set_queued_text (self, chat->queued);
+
+  if (current_turn (self) != NULL)
+    return;
+
+  /* Another window may have queued this while this one owned the turn. Once
+   * that turn is gone, the persisted instruction still runs. */
+  if (self->queued != NULL)
+    {
+      send_queued (self);
+      return;
+    }
 
   if (xd_storage_last_message_id (self->storage, chat_id) ==
       self->rendered_message_id)
@@ -1876,15 +1891,86 @@ show_queued (XdChatView *self)
 }
 
 static void
+set_queued_text (XdChatView *self,
+                 const char *text)
+{
+  g_free (self->queued);
+  self->queued = g_strdup (text);
+  show_queued (self);
+}
+
+static void
+on_remote_queue_set (GObject      *source,
+                     GAsyncResult *result,
+                     gpointer      user_data)
+{
+  g_autoptr (XdChatView) self = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+  if (reply != NULL || g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    return;
+
+  append_row (self, XD_MESSAGE_ERROR, error->message);
+
+  /* Optimistic display failed; read daemon's persisted value back. */
+  if (self->remote != NULL && self->chat != NULL)
+    load_remote_options (self);
+}
+
+static void
+set_remote_queue (XdChatView *self,
+                  const char *text)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, text != NULL ? "queue" : "drop-queue");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
+  if (text != NULL)
+    {
+      json_builder_set_member_name (builder, "text");
+      json_builder_add_string_value (builder, text);
+    }
+  json_builder_end_object (builder);
+
+  request = json_builder_get_root (builder);
+  xd_remote_client_call_async (self->remote, request, NULL,
+                               on_remote_queue_set, g_object_ref (self));
+}
+
+static gboolean
+set_local_queue (XdChatView *self,
+                 const char *text)
+{
+  g_autoptr (GError) error = NULL;
+
+  if (!xd_storage_set_queued (self->storage,
+                              xd_node_get_chat_id (self->chat), text, &error))
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static void
 queue_message (XdChatView *self,
                const char *text)
 {
   /* A second message replaces the first rather than piling up: what is meant
    * is the latest instruction, not a list of them to be answered in turn. */
-  g_free (self->queued);
-  self->queued = g_strdup (text);
+  if (self->remote != NULL)
+    set_remote_queue (self, text);
+  else if (!set_local_queue (self, text))
+    return;
 
-  show_queued (self);
+  set_queued_text (self, text);
 }
 
 /*
@@ -1896,12 +1982,13 @@ queue_message (XdChatView *self,
 static void
 send_queued (XdChatView *self)
 {
-  g_autofree char *text = g_steal_pointer (&self->queued);
+  g_autofree char *text = g_strdup (self->queued);
 
-  show_queued (self);
+  if (text == NULL || !set_local_queue (self, NULL))
+    return;
 
-  if (text != NULL)
-    send_message (self, text);
+  set_queued_text (self, NULL);
+  send_message (self, text);
 }
 
 /*
@@ -1919,8 +2006,12 @@ on_steer_clicked (GtkButton *button,
   XdChatView *self = user_data;
   Turn *turn = current_turn (self);
 
-  if (turn != NULL)
+  if (self->remote != NULL && self->remote_working)
+    cancel_remote_turn (self);
+  else if (turn != NULL)
     xd_chat_session_cancel (turn->session);
+  else if (self->remote == NULL)
+    send_queued (self);
   /* The queued text goes out when the turn reports that it has stopped. */
 }
 
@@ -1930,8 +2021,12 @@ on_queued_dropped (GtkButton *button,
 {
   XdChatView *self = user_data;
 
-  g_clear_pointer (&self->queued, g_free);
-  show_queued (self);
+  if (self->remote != NULL)
+    set_remote_queue (self, NULL);
+  else if (!set_local_queue (self, NULL))
+    return;
+
+  set_queued_text (self, NULL);
 }
 
 /* A refusal -- the chat already working, the daemon gone -- is the only part of
@@ -2640,6 +2735,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   if (turn != NULL)
     turn->row = NULL;
 
+  set_queued_text (self, NULL);
   g_set_object (&self->chat, chat);
   set_remote (self, client);
 
@@ -2684,6 +2780,7 @@ xd_chat_view_set_chat (XdChatView *self,
   g_clear_object (&self->fetching);
   set_remote (self, NULL);
   end_remote_turn (self);
+  set_queued_text (self, NULL);
   self->working_row = NULL;
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
@@ -2711,7 +2808,10 @@ xd_chat_view_set_chat (XdChatView *self,
                                                      NULL);
 
     if (record != NULL)
-      update_context_bar (self, record);
+      {
+        update_context_bar (self, record);
+        set_queued_text (self, record->queued);
+      }
   }
 
   load_transcript (self);
@@ -2738,6 +2838,11 @@ xd_chat_view_set_chat (XdChatView *self,
 
       /* The transcript was rebuilt, and the marker went with it. */
       set_working (self, TRUE);
+    }
+  else if (self->queued != NULL)
+    {
+      /* A restart ended the process, not the instruction waiting behind it. */
+      send_queued (self);
     }
 
   update_send_button (self);

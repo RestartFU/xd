@@ -14,6 +14,7 @@ typedef struct
   char *model;        /* NULL: the backend's default */
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
+  char *queued;       /* next message, kept until its turn starts */
   gboolean plan;      /* think it through, change nothing */
   gboolean terminal_open;  /* the panes this chat was left with */
   gboolean diff_open;
@@ -108,6 +109,12 @@ gboolean    xd_storage_set_effort      (XdStorage   *self,
 gboolean    xd_storage_set_access      (XdStorage   *self,
                                         const char  *chat_id,
                                         const char  *access,
+                                        GError     **error);
+
+/* @text may be NULL to discard or consume the queued message. */
+gboolean    xd_storage_set_queued      (XdStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *text,
                                         GError     **error);
 
 /* Plan mode rides alongside the access level rather than replacing it, so

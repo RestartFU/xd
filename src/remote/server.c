@@ -999,18 +999,7 @@ on_turn_tool (XdDaemonTurn *turn,
   broadcast_event (running->server, "tool", running->chat_id, "text", name);
 }
 
-/* The turn is over, but it is over inside one of its own signals: dropping it
- * here would take the session down while it is still emitting. */
-static gboolean
-forget_turn (gpointer user_data)
-{
-  Running *running = user_data;
-
-  g_hash_table_remove (running->server->turns, running->chat_id);
-  running_free (running);
-
-  return G_SOURCE_REMOVE;
-}
+static gboolean forget_turn (gpointer user_data);
 
 static void
 on_turn_finished (XdDaemonTurn *turn,
@@ -1040,30 +1029,21 @@ on_turn_finished (XdDaemonTurn *turn,
   g_idle_add (forget_turn, running);
 }
 
-static void
-handle_send (Connection *connection,
-             JsonObject *request)
+/*
+ * Starts one daemon-owned turn.
+ *
+ * Used by a direct send and by the persistent queue. Keeping both on this path
+ * makes naming, storage and broadcasts identical whichever device supplied
+ * the message.
+ */
+static gboolean
+start_daemon_turn (XdRemoteServer  *self,
+                   const char      *chat_id,
+                   const char      *text,
+                   GError         **error)
 {
-  XdRemoteServer *self = connection->server;
-  const char *chat_id = member_string (request, "chat");
-  const char *text = member_string (request, "text");
-  g_autoptr (GError) error = NULL;
   XdDaemonTurn *turn;
   Running *running;
-
-  if (chat_id == NULL || text == NULL || *text == '\0')
-    {
-      send_error (connection, "A message needs a chat and something to say.");
-      return;
-    }
-
-  /* One turn per chat, enforced here rather than by each client: two devices
-   * sending at once would otherwise be two agents in the same directory. */
-  if (g_hash_table_contains (self->turns, chat_id))
-    {
-      send_error (connection, "That chat is already working.");
-      return;
-    }
 
   /*
    * An unnamed chat takes its name from what was asked first.
@@ -1097,25 +1077,111 @@ handle_send (Connection *connection,
   g_signal_connect (turn, "tool", G_CALLBACK (on_turn_tool), running);
   g_signal_connect (turn, "finished", G_CALLBACK (on_turn_finished), running);
 
-  if (!xd_daemon_turn_start (turn, chat_id, text, &error))
+  if (!xd_daemon_turn_start (turn, chat_id, text, error))
     {
-      send_error (connection, error->message);
       running_free (running);
       g_object_unref (turn);
 
       /* The message and the failure are both in the transcript now. */
       broadcast_event (self, "changed", chat_id, NULL, NULL);
-      return;
+      return FALSE;
     }
 
   g_hash_table_insert (self->turns, g_strdup (chat_id), turn);
-
-  send_done (connection, NULL);
 
   /* Everyone watching sees the message arrive and the work start, including
    * the device that sent it -- one path, so every screen agrees. */
   broadcast_event (self, "turn-started", chat_id, "label",
                    xd_daemon_turn_get_label (turn));
+
+  return TRUE;
+}
+
+static void
+broadcast_queued (XdRemoteServer *self,
+                  const char     *chat_id,
+                  const char     *text)
+{
+  broadcast_event (self, "queued", chat_id,
+                   text != NULL ? "text" : NULL, text);
+}
+
+/* Consumes the persisted message before starting it, so reconnecting devices
+ * cannot race each other into running it twice. */
+static gboolean
+start_queued (XdRemoteServer *self,
+              const char     *chat_id)
+{
+  g_autoptr (XdChat) chat = xd_storage_get_chat (self->storage, chat_id, NULL);
+  g_autoptr (GError) error = NULL;
+  g_autofree char *text = NULL;
+
+  if (chat == NULL || chat->queued == NULL || *chat->queued == '\0' ||
+      g_hash_table_contains (self->turns, chat_id))
+    return FALSE;
+
+  text = g_strdup (chat->queued);
+  if (!xd_storage_set_queued (self->storage, chat_id, NULL, &error))
+    {
+      g_warning ("cannot consume the queued message: %s", error->message);
+      return FALSE;
+    }
+
+  broadcast_queued (self, chat_id, NULL);
+
+  if (!start_daemon_turn (self, chat_id, text, &error))
+    {
+      g_warning ("cannot start the queued message: %s", error->message);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+/* The turn is over, but it is over inside one of its own signals: dropping it
+ * there would take the session down while it was still emitting. */
+static gboolean
+forget_turn (gpointer user_data)
+{
+  Running *running = user_data;
+
+  g_hash_table_remove (running->server->turns, running->chat_id);
+  start_queued (running->server, running->chat_id);
+  running_free (running);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+handle_send (Connection *connection,
+             JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *text = member_string (request, "text");
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL || text == NULL || *text == '\0')
+    {
+      send_error (connection, "A message needs a chat and something to say.");
+      return;
+    }
+
+  /* One turn per chat, enforced here rather than by each client: two devices
+   * sending at once would otherwise be two agents in the same directory. */
+  if (g_hash_table_contains (self->turns, chat_id))
+    {
+      send_error (connection, "That chat is already working.");
+      return;
+    }
+
+  if (!start_daemon_turn (self, chat_id, text, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
 }
 
 static void
@@ -1136,6 +1202,40 @@ handle_cancel (Connection *connection,
     xd_daemon_turn_cancel (turn);
 
   send_done (connection, NULL);
+}
+
+static void
+handle_queue (Connection *connection,
+              JsonObject *request,
+              gboolean    drop)
+{
+  const char *chat_id = member_string (request, "chat");
+  const char *text = drop ? NULL : member_string (request, "text");
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL || (!drop && (text == NULL || *text == '\0')))
+    {
+      send_error (connection, drop ? "drop-queue needs a chat id"
+                                   : "A queued message needs a chat and text.");
+      return;
+    }
+
+  chat = xd_storage_get_chat (connection->server->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  if (!xd_storage_set_queued (connection->server->storage, chat_id, text, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+  broadcast_queued (connection->server, chat_id, text);
 }
 
 /* --- terminals ------------------------------------------------------------ */
@@ -1515,6 +1615,21 @@ handle_chat (Connection *connection,
       return;
     }
 
+  /* A daemon restart ends the old process, not the user's next instruction.
+   * Opening the chat is enough to resume its persisted queue. */
+  if (chat->queued != NULL &&
+      !g_hash_table_contains (self->turns, chat_id) &&
+      start_queued (self, chat_id))
+    {
+      g_clear_pointer (&chat, xd_chat_free);
+      chat = xd_storage_get_chat (self->storage, chat_id, &error);
+      if (chat == NULL)
+        {
+          send_error (connection, error != NULL ? error->message : "No such chat.");
+          return;
+        }
+    }
+
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "ok");
   json_builder_add_boolean_value (builder, TRUE);
@@ -1525,6 +1640,11 @@ handle_chat (Connection *connection,
   json_builder_add_string_value (builder, chat->backend);
   json_builder_set_member_name (builder, "plan");
   json_builder_add_boolean_value (builder, chat->plan);
+  if (chat->queued != NULL)
+    {
+      json_builder_set_member_name (builder, "queued");
+      json_builder_add_string_value (builder, chat->queued);
+    }
   {
     XdDaemonTurn *turn = g_hash_table_lookup (self->turns, chat_id);
 
@@ -1795,6 +1915,10 @@ dispatch (Connection *connection,
     handle_set_option (connection, request);
   else if (g_strcmp0 (op, "send") == 0)
     handle_send (connection, request);
+  else if (g_strcmp0 (op, "queue") == 0)
+    handle_queue (connection, request, FALSE);
+  else if (g_strcmp0 (op, "drop-queue") == 0)
+    handle_queue (connection, request, TRUE);
   else if (g_strcmp0 (op, "cancel") == 0)
     handle_cancel (connection, request);
   else if (g_strcmp0 (op, "terminal-list") == 0)

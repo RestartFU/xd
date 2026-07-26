@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 10
+#define XD_STORAGE_SCHEMA_VERSION 11
 
 struct _XdStorage
 {
@@ -99,6 +99,7 @@ xd_chat_free (XdChat *self)
   g_free (self->model);
   g_free (self->effort);
   g_free (self->access);
+  g_free (self->queued);
   g_free (self);
 }
 
@@ -314,6 +315,12 @@ migrate (XdStorage  *self,
                  error))
     return FALSE;
 
+  /* A message typed during a turn belongs to the chat, not the window that
+   * happened to be showing it. */
+  if (version < 11 &&
+      !exec_sql (self, "ALTER TABLE chats ADD COLUMN queued TEXT;", error))
+    return FALSE;
+
   if (version < 9 &&
       (!exec_sql (self, "ALTER TABLE chats ADD COLUMN terminal_open INTEGER NOT NULL DEFAULT 0;", error) ||
        !exec_sql (self, "ALTER TABLE chats ADD COLUMN diff_open INTEGER NOT NULL DEFAULT 0;", error)))
@@ -452,13 +459,14 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->updated_at = sqlite3_column_int64 (stmt, 10);
   chat->terminal_open = sqlite3_column_int (stmt, 11) != 0;
   chat->diff_open     = sqlite3_column_int (stmt, 12) != 0;
+  chat->queued        = column_text (stmt, 13);
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
   "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
-  " created_at, updated_at, terminal_open, diff_open"
+  " created_at, updated_at, terminal_open, diff_open, queued"
 
 XdChat *
 xd_storage_get_chat (XdStorage   *self,
@@ -671,6 +679,20 @@ xd_storage_set_workdir (XdStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
                              workdir, chat_id, "Cannot change the working directory",
+                             error);
+}
+
+gboolean
+xd_storage_set_queued (XdStorage   *self,
+                       const char  *chat_id,
+                       const char  *text,
+                       GError     **error)
+{
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  return update_chat_column (self,
+                             "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?;",
+                             text, chat_id, "Cannot update the queued message",
                              error);
 }
 

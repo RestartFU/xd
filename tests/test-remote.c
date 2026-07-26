@@ -1569,6 +1569,42 @@ test_remote_terminal_is_shared_and_replayable (void)
   daemon_stop (&daemon);
 }
 
+typedef struct
+{
+  const char *chat_id;
+  char *text;
+  guint changes;
+} QueueEvents;
+
+static void
+on_queue_event (XdRemoteClient *client,
+                JsonObject     *event,
+                gpointer        user_data)
+{
+  QueueEvents *seen = user_data;
+  const char *name =
+    json_object_get_string_member_with_default (event, "event", NULL);
+  const char *chat_id =
+    json_object_get_string_member_with_default (event, "chat", NULL);
+
+  if (g_strcmp0 (name, "queued") != 0 ||
+      g_strcmp0 (chat_id, seen->chat_id) != 0)
+    return;
+
+  g_free (seen->text);
+  seen->text = g_strdup (
+    json_object_get_string_member_with_default (event, "text", NULL));
+  seen->changes++;
+}
+
+static gboolean
+both_queues_changed (gpointer user_data)
+{
+  QueueEvents *seen = user_data;
+
+  return seen[0].changes > 0 && seen[1].changes > 0;
+}
+
 /*
  * A device joining after work started must learn that state from the tree
  * snapshot. It never saw the earlier turn-started event.
@@ -1586,9 +1622,12 @@ test_a_joining_device_sees_an_active_turn (void)
   g_autofree char *old_path = NULL;
   g_autofree char *test_path = NULL;
   RemoteReply started = { 0 };
+  QueueEvents queues[2] = { 0 };
   XdNode *chat;
 
   daemon_start (&daemon);
+  queues[0].chat_id = daemon.chat_id;
+  queues[1].chat_id = daemon.chat_id;
 
   /* Keep a real daemon turn alive without requiring an installed CLI. */
   bin_dir = g_build_filename (daemon.dir, "bin", NULL);
@@ -1640,6 +1679,60 @@ test_a_joining_device_sees_an_active_turn (void)
   g_assert_nonnull (chat);
   g_assert_cmpint (xd_node_get_state (chat), ==, XD_NODE_WORKING);
 
+  /* Queue belongs to daemon's chat: both devices receive the same update and
+   * a fresh chat snapshot carries it too. */
+  g_signal_connect (sender, "event", G_CALLBACK (on_queue_event), &queues[0]);
+  g_signal_connect (joining, "event", G_CALLBACK (on_queue_event), &queues[1]);
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    RemoteReply queued = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "queue");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "follow up");
+    json_builder_end_object (builder);
+
+    call_remote_request (sender, builder, &queued);
+    json_object_unref (queued.reply);
+    g_free (queued.wait.failure);
+  }
+  wait_until (both_queues_changed, queues);
+  g_assert_cmpstr (queues[0].text, ==, "follow up");
+  g_assert_cmpstr (queues[1].text, ==, "follow up");
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    RemoteReply options = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "chat");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (joining, builder, &options);
+    g_assert_cmpstr (json_object_get_string_member (options.reply, "queued"),
+                     ==, "follow up");
+    json_object_unref (options.reply);
+    g_free (options.wait.failure);
+  }
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_cmpstr (stored->queued, ==, "follow up");
+  }
+
+  g_signal_handlers_disconnect_by_data (sender, &queues[0]);
+  g_signal_handlers_disconnect_by_data (joining, &queues[1]);
+  g_free (queues[0].text);
+  g_free (queues[1].text);
   json_object_unref (started.reply);
   g_free (started.wait.failure);
   daemon_stop (&daemon);

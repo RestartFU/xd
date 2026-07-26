@@ -392,6 +392,7 @@ test_reopening_keeps_data (Fixture       *fixture,
 {
   g_autoptr (GError) error = NULL;
   g_autoptr (XdStorage) reopened = NULL;
+  g_autoptr (XdChat) chat = NULL;
   g_autoptr (GPtrArray) messages = NULL;
   g_autofree char *db_path = NULL;
   g_autofree char *chat_id = NULL;
@@ -400,6 +401,7 @@ test_reopening_keeps_data (Fixture       *fixture,
                                     "claude", NULL, NULL, NULL, &error);
   xd_storage_append_message (fixture->storage, chat_id, "user", "persist me",
                              NULL, NULL, &error);
+  xd_storage_set_queued (fixture->storage, chat_id, "send me next", &error);
   g_assert_no_error (error);
 
   g_clear_object (&fixture->storage);
@@ -413,6 +415,16 @@ test_reopening_keeps_data (Fixture       *fixture,
   g_assert_cmpuint (messages->len, ==, 1);
   g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 0))->content, ==,
                    "persist me");
+
+  chat = xd_storage_get_chat (reopened, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (chat->queued, ==, "send me next");
+
+  g_assert_true (xd_storage_set_queued (reopened, chat_id, NULL, &error));
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (reopened, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_null (chat->queued);
 
   fixture->storage = g_object_ref (reopened);
 }
