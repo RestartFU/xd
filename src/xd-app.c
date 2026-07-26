@@ -388,6 +388,10 @@ static const char *XD_STYLE =
    * may sit in for hours, and nothing is being waited on. */
   ".xd-offline { color: @error_color; }\n"
 
+  /* The first row sits directly under the header, and on a desktop with larger
+   * text its ascenders met that edge. A row of clearance costs nothing. */
+  ".xd-sidebar listview { padding-top: 4px; }\n"
+
   /* In a chat the dots stand where the reply will be, so they are sized like
    * one rather than like the small marker a sidebar row can afford. */
   ".xd-dots-large { font-size: 200%; letter-spacing: 2px; }\n"
