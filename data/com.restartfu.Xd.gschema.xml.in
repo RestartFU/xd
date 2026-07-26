@@ -45,6 +45,15 @@
       </description>
     </key>
 
+    <key name="active-chat" type="s">
+      <default>''</default>
+      <summary>Chat shown when the window closed</summary>
+      <description>
+        The local or remote chat id that was on screen, including its location,
+        so it can be selected again after the asynchronous tree loads.
+      </description>
+    </key>
+
     <key name="remote-host" type="s">
       <default>''</default>
       <summary>Remote daemon address</summary>

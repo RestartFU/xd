@@ -41,6 +41,11 @@ struct _XdSidebar
   GHashTable *closing;
   guint save_expanded_id;
   guint restore_expanded_id;
+
+  /* A chat saved by the window, waiting for its asynchronous tree rows. */
+  char *restore_chat_id;
+  gboolean restore_chat_remote;
+  gboolean restoring_chat;
 };
 
 enum
@@ -80,6 +85,7 @@ show_error (XdSidebar  *self,
 /* --- naming a row in place ------------------------------------------------- */
 
 static gboolean restore_expanded (gpointer user_data);
+static void queue_restore (XdSidebar *self);
 static void create_folder (XdSidebar *self, XdNode *parent, const char *name);
 static void create_chat   (XdSidebar *self, XdNode *folder, const char *title);
 static void rename_folder (XdSidebar *self, XdNode *node, const char *name);
@@ -945,8 +951,33 @@ restore_expanded (gpointer user_data)
 {
   XdSidebar *self = user_data;
   GListModel *rows = G_LIST_MODEL (self->tree_model);
+  XdNode *restore_chat = NULL;
 
   self->restore_expanded_id = 0;
+
+  if (self->restore_chat_id != NULL)
+    {
+      restore_chat = self->restore_chat_remote
+        ? (self->remote != NULL
+             ? xd_remote_tree_lookup_chat (self->remote, self->restore_chat_id)
+             : NULL)
+        : xd_fs_tree_lookup_chat (self->tree, self->restore_chat_id);
+
+      /*
+       * Search can open a chat whose sidebar branch was closed. Make every
+       * ancestor eligible for the normal expansion pass before selecting it.
+       */
+      for (XdNode *node = restore_chat != NULL
+                            ? xd_node_get_parent (restore_chat) : NULL;
+           node != NULL;
+           node = xd_node_get_parent (node))
+        {
+          const char *folder_id = xd_node_get_folder_id (node);
+
+          if (folder_id != NULL)
+            g_hash_table_add (self->expanded, g_strdup (folder_id));
+        }
+    }
 
   /* Read afresh each time round: opening one row is what puts the rows under
    * it in the model, and those have to be looked at too. */
@@ -967,7 +998,32 @@ restore_expanded (gpointer user_data)
         gtk_tree_list_row_set_expanded (row, TRUE);
     }
 
+  if (restore_chat != NULL)
+    {
+      for (guint i = 0; i < g_list_model_get_n_items (rows); i++)
+        {
+          g_autoptr (GtkTreeListRow) row = g_list_model_get_item (rows, i);
+          g_autoptr (XdNode) node = gtk_tree_list_row_get_item (row);
+
+          if (node != restore_chat)
+            continue;
+
+          self->restoring_chat = TRUE;
+          gtk_single_selection_set_selected (self->selection, i);
+          self->restoring_chat = FALSE;
+          g_clear_pointer (&self->restore_chat_id, g_free);
+          break;
+        }
+    }
+
   return G_SOURCE_REMOVE;
+}
+
+static void
+queue_restore (XdSidebar *self)
+{
+  if (self->restore_expanded_id == 0)
+    self->restore_expanded_id = g_idle_add (restore_expanded, self);
 }
 
 /* Rows arriving is the only reason to look: a tree that finished loading, a
@@ -981,10 +1037,10 @@ on_rows_changed (GListModel *model,
 {
   XdSidebar *self = user_data;
 
-  if (added == 0 || self->restore_expanded_id != 0)
+  if (added == 0)
     return;
 
-  self->restore_expanded_id = g_idle_add (restore_expanded, self);
+  queue_restore (self);
 }
 
 static gboolean
@@ -1584,6 +1640,11 @@ on_selection_changed (GtkSingleSelection *selection,
   if (node == self->selected)
     return;
 
+  /* A real selection made while a remote is still connecting wins over what
+   * the previous process saved. */
+  if (!self->restoring_chat)
+    g_clear_pointer (&self->restore_chat_id, g_free);
+
   g_set_object (&self->selected, node);
 
   g_signal_emit (self, signals[SIGNAL_NODE_SELECTED], 0, node);
@@ -1712,6 +1773,20 @@ xd_sidebar_set_remote (XdSidebar    *self,
   g_list_store_append (self->roots, xd_remote_tree_get_model (remote));
 }
 
+void
+xd_sidebar_restore_chat (XdSidebar  *self,
+                         const char *chat_id,
+                         gboolean    remote)
+{
+  g_return_if_fail (XD_IS_SIDEBAR (self));
+  g_return_if_fail (chat_id != NULL && *chat_id != '\0');
+
+  g_free (self->restore_chat_id);
+  self->restore_chat_id = g_strdup (chat_id);
+  self->restore_chat_remote = remote;
+  queue_restore (self);
+}
+
 static void
 xd_sidebar_dispose (GObject *object)
 {
@@ -1733,6 +1808,7 @@ xd_sidebar_dispose (GObject *object)
   g_clear_object (&self->pending_edit);
   g_clear_object (&self->pending_parent);
   g_clear_object (&self->selected);
+  g_clear_pointer (&self->restore_chat_id, g_free);
   g_clear_pointer (&self->closing, g_hash_table_unref);
   g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);

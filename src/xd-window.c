@@ -1,5 +1,7 @@
 #include "xd-window.h"
 
+#include <string.h>
+
 #include "chat/chat-view.h"
 #include "chat/search-dialog.h"
 #include "remote/pair-dialog.h"
@@ -29,6 +31,9 @@ struct _XdWindow
 
 G_DEFINE_FINAL_TYPE (XdWindow, xd_window, ADW_TYPE_APPLICATION_WINDOW)
 
+#define ACTIVE_CHAT_LOCAL  "local:"
+#define ACTIVE_CHAT_REMOTE "remote:"
+
 /* An empty setting means "use the default", which keeps this user's home
  * directory out of the stored configuration. */
 static char *
@@ -54,13 +59,24 @@ static void
 show_chat (XdWindow *self,
            XdNode   *node)
 {
+  gboolean remote;
+  g_autofree char *saved = NULL;
+
   if (node == NULL || xd_node_get_kind (node) != XD_NODE_CHAT)
     return;
 
-  if (self->remote_tree != NULL && xd_remote_tree_owns (self->remote_tree, node))
+  remote =
+    self->remote_tree != NULL && xd_remote_tree_owns (self->remote_tree, node);
+
+  if (remote)
     xd_chat_view_show_remote_chat (self->chat_view, node, self->remote_client);
   else
     xd_chat_view_set_chat (self->chat_view, node);
+
+  saved = g_strdup_printf ("%s%s",
+                           remote ? ACTIVE_CHAT_REMOTE : ACTIVE_CHAT_LOCAL,
+                           xd_node_get_chat_id (node));
+  g_settings_set_string (self->settings, "active-chat", saved);
 }
 
 /* Selecting a chat opens it; selecting a folder leaves the current chat alone,
@@ -89,7 +105,10 @@ on_chat_removed (gpointer  tree,
   XdWindow *self = user_data;
 
   if (xd_chat_view_get_chat (self->chat_view) == chat)
-    xd_chat_view_set_chat (self->chat_view, NULL);
+    {
+      xd_chat_view_set_chat (self->chat_view, NULL);
+      g_settings_set_string (self->settings, "active-chat", "");
+    }
 }
 
 static void
@@ -192,7 +211,34 @@ on_search_result_chosen (XdNode   *chat,
 {
   XdWindow *self = user_data;
 
-  xd_chat_view_set_chat (self->chat_view, chat);
+  show_chat (self, chat);
+}
+
+static void
+restore_active_chat (XdWindow *self)
+{
+  g_autofree char *saved =
+    g_settings_get_string (self->settings, "active-chat");
+  const char *chat_id;
+  gboolean remote;
+
+  if (g_str_has_prefix (saved, ACTIVE_CHAT_LOCAL))
+    {
+      chat_id = saved + strlen (ACTIVE_CHAT_LOCAL);
+      remote = FALSE;
+    }
+  else if (g_str_has_prefix (saved, ACTIVE_CHAT_REMOTE))
+    {
+      chat_id = saved + strlen (ACTIVE_CHAT_REMOTE);
+      remote = TRUE;
+    }
+  else
+    {
+      return;
+    }
+
+  if (*chat_id != '\0')
+    xd_sidebar_restore_chat (self->sidebar, chat_id, remote);
 }
 
 static void
@@ -321,6 +367,7 @@ xd_window_new (XdApplication *app)
   }
 
   connect_stored_remote (self);
+  restore_active_chat (self);
 
   return self;
 }

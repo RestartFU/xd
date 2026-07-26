@@ -28,4 +28,12 @@ XdSidebar *xd_sidebar_new        (XdFsTree *tree);
 void       xd_sidebar_set_remote (XdSidebar    *self,
                                   XdRemoteTree *remote);
 
+/*
+ * Selects a saved chat once its asynchronous local or remote tree arrives.
+ * Any selection made before then cancels the restore.
+ */
+void       xd_sidebar_restore_chat (XdSidebar *self,
+                                    const char *chat_id,
+                                    gboolean    remote);
+
 G_END_DECLS
