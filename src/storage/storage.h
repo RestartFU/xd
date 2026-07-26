@@ -180,6 +180,14 @@ GPtrArray  *hy_storage_list_messages   (HyStorage   *self,
                                         const char  *chat_id,
                                         GError     **error);
 
+/* Paired remote devices: only the token's hash is kept. */
+gboolean    hy_storage_add_device      (HyStorage   *self,
+                                        const char  *token_hash,
+                                        const char  *name,
+                                        GError     **error);
+char       *hy_storage_device_name     (HyStorage  *self,
+                                        const char *token_hash);
+
 /* Full-text search across every message. Elements are HyMessage*. */
 GPtrArray  *hy_storage_search          (HyStorage   *self,
                                         const char  *query,

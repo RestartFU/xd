@@ -11,6 +11,7 @@ hy_tests = {
   'settings': 'test-settings.c',
   'markdown': 'test-markdown.c',
   'ask': 'test-ask.c',
+  'remote': 'test-remote.c',
 }
 
 foreach name, source : hy_tests

@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-jetbrains-mono \
       fonts-dejavu-core \
       fontconfig \
+      openssl \
+      glib-networking \
+      ca-certificates \
       file \
       patchelf \
     && rm -rf /var/lib/apt/lists/*

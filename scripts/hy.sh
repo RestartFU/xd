@@ -57,6 +57,7 @@ export XLOCALEDIR="$HERE/share/X11/locale"
 # locale-specific number and date formatting.
 export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
+export LOCPATH="$HERE/share/locale-data"
 
 export GDK_PIXBUF_MODULE_FILE="$RUNTIME/loaders.cache"
 export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"

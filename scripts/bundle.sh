@@ -83,6 +83,25 @@ mkdir -p "$OUT/share/X11"
 cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 [ -d /usr/share/X11/locale ] && cp -a /usr/share/X11/locale "$OUT/share/X11/locale"
 
+# --- locale -----------------------------------------------------------------
+# This glibc looks C.UTF-8 up as locale data rather than answering from
+# within itself; without the file, setlocale falls back to plain C and UTF-8
+# handling goes with it.
+mkdir -p "$OUT/share/locale-data"
+cp -a /usr/lib/locale/C.utf8 "$OUT/share/locale-data/"
+
+# --- TLS --------------------------------------------------------------------
+# GIO loads TLS from a module, not from itself; without this the daemon's
+# sockets exist but cannot speak TLS on any machine.
+mkdir -p "$OUT/lib/gio/modules"
+cp -a "$ARCH_DIR"/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/" 2>/dev/null || \
+  cp -a /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/"
+for extra in $(ldd /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so \
+                 | awk '/=> \//{print $3}'); do
+  base=$(basename "$extra")
+  [ -e "$OUT/lib/$base" ] || cp -a "$extra" "$OUT/lib/"
+done
+
 # --- software GL ------------------------------------------------------------
 # Mesa's own llvmpipe, carried whole: rendering is then identical on every
 # machine, and GTK's GL renderer never depends on what the host has. The

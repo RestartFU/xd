@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 9
+#define HY_STORAGE_SCHEMA_VERSION 10
 
 struct _HyStorage
 {
@@ -227,6 +227,19 @@ migrate (HyStorage  *self,
   if (version < 7 &&
       !exec_sql (self,
                  "ALTER TABLE chats ADD COLUMN plan INTEGER NOT NULL DEFAULT 0;",
+                 error))
+    return FALSE;
+
+  /* Paired devices for the remote daemon. The token itself is never stored,
+   * only its hash: the database is not where a bearer credential belongs. */
+  if (version < 10 &&
+      !exec_sql (self,
+                 "CREATE TABLE IF NOT EXISTS devices ("
+                 "  token_hash TEXT PRIMARY KEY,"
+                 "  name       TEXT NOT NULL,"
+                 "  created_at INTEGER NOT NULL,"
+                 "  last_seen  INTEGER NOT NULL"
+                 ");",
                  error))
     return FALSE;
 
@@ -1045,4 +1058,68 @@ hy_storage_class_init (HyStorageClass *klass)
 static void
 hy_storage_init (HyStorage *self)
 {
+}
+
+gboolean
+hy_storage_add_device (HyStorage   *self,
+                       const char  *token_hash,
+                       const char  *name,
+                       GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (token_hash != NULL, FALSE);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "INSERT INTO devices (token_hash, name, created_at, last_seen)"
+                          " VALUES (?, ?, ?, ?);",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot pair the device");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, token_hash);
+  bind_text (stmt, 2, name != NULL ? name : "device");
+  sqlite3_bind_int64 (stmt, 3, now);
+  sqlite3_bind_int64 (stmt, 4, now);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot pair the device");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
+}
+
+/* The device's name when the hash is known, NULL otherwise; a successful
+ * lookup also counts as having seen the device. */
+char *
+hy_storage_device_name (HyStorage  *self,
+                        const char *token_hash)
+{
+  sqlite3_stmt *stmt = NULL;
+  char *name = NULL;
+
+  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "UPDATE devices SET last_seen = ? WHERE token_hash = ?"
+                          " RETURNING name;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    return NULL;
+
+  sqlite3_bind_int64 (stmt, 1, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 2, token_hash);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    name = column_text (stmt, 0);
+
+  sqlite3_finalize (stmt);
+
+  return name;
 }

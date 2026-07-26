@@ -7,6 +7,7 @@ hy_core_sources = files(
   'util/ask-block.c',
   'util/git-info.c',
   'util/host-launch.c',
+  'remote/server.c',
   'tree/hy-node.c',
   'storage/storage.c',
   'backend/backend.c',
