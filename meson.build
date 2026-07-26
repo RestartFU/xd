@@ -44,8 +44,27 @@ pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
 vte_dep       = dependency('vte-2.91-gtk4')
 
+#
+# What --version says.
+#
+# The project version alone cannot answer "is this the build I just
+# installed?", which is the only question anyone asks a nightly -- so it
+# carries the commit it was built from. Passed in rather than read here: the
+# build happens in a container with the sources but no repository.
+#
+version_string = meson.project_version()
+
+if profile == 'nightly'
+  version_string += '-nightly'
+endif
+
+if get_option('commit') != ''
+  version_string += ' (' + get_option('commit') + ')'
+endif
+
 add_project_arguments([
   '-DG_LOG_DOMAIN="xd"',
+  '-DXD_VERSION_STRING="' + version_string + '"',
   '-DXD_APP_ID="' + app_id + '"',
   '-DXD_APP_NAME="' + app_name + '"',
   '-DXD_DATA_NAME="' + app_data_name + '"',

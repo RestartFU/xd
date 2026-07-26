@@ -5,3 +5,10 @@ option('profile',
   description: 'Which build this is. A nightly installs beside a release: ' +
                'its own application id, settings, data directory and workspaces.',
 )
+
+option('commit',
+  type: 'string',
+  value: '',
+  description: 'The commit this was built from, shown by --version. Empty ' +
+               'when built outside a checkout.',
+)

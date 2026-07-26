@@ -43,6 +43,12 @@ ensure_certificate (GError **error)
   return g_tls_certificate_new_from_files (cert_path, key_path, error);
 }
 
+static void
+print_version (void)
+{
+  printf ("xd %s\n", XD_VERSION_STRING);
+}
+
 static int
 run_serve (int argc, char *argv[])
 {
@@ -96,8 +102,8 @@ run_serve (int argc, char *argv[])
       return 1;
     }
 
-  printf ("xd serve: listening on %u, workspaces at %s\n",
-          xd_remote_server_get_port (server), root);
+  printf ("xd serve: %s, listening on %u, workspaces at %s\n",
+          XD_VERSION_STRING, xd_remote_server_get_port (server), root);
 
   if (pair)
     {
@@ -117,7 +123,18 @@ run_serve (int argc, char *argv[])
 int
 main (int argc, char *argv[])
 {
-  /* Before GTK sees argv: the daemon must run without a display at all. */
+  /*
+   * Before GTK sees argv: the daemon must run without a display at all, and
+   * neither must saying which build this is -- the usual reason to ask is that
+   * something is not working.
+   */
+  if (argc > 1 && (g_strcmp0 (argv[1], "--version") == 0 ||
+                   g_strcmp0 (argv[1], "-v") == 0))
+    {
+      print_version ();
+      return 0;
+    }
+
   if (argc > 1 && g_strcmp0 (argv[1], "serve") == 0)
     return run_serve (argc, argv);
 

@@ -49,13 +49,18 @@ FROM deps AS build
 # it. See meson_options.txt.
 ARG PROFILE=default
 
+# The commit being built, so the binary can say which one it is. scripts/build.sh
+# fills it in from the checkout; there is no repository in here to read.
+ARG COMMIT=
+
 WORKDIR /src
 COPY meson.build meson_options.txt ./
 COPY data ./data
 COPY src ./src
 COPY tests ./tests
 
-RUN meson setup /build --prefix=/usr --buildtype=release -Dprofile="$PROFILE" \
+RUN meson setup /build --prefix=/usr --buildtype=release \
+      -Dprofile="$PROFILE" -Dcommit="$COMMIT" \
  && meson compile -C /build
 
 # --- stage 3: headless tests (CI gate: docker build --target test .) --------
