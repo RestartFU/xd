@@ -248,8 +248,12 @@ static const char *HY_STYLE =
 
   /* An explicit fill: the popover colour was being asked of libadwaita's
    * palette names, which this stylesheet no longer trusts. */
+  /* A step lighter than the composer frame, with a firmer edge: when panel
+   * and background share a tone, the rounded corners disappear against it
+   * and the panel reads as a square. Contrast is what draws the rounding,
+   * since blurred shadows are off the table under cairo. */
   "popover > contents { border-radius: 14px; padding: 6px;"
-  " background-color: #141419; border: 1px solid alpha(#ffffff, 0.08); }\n"
+  " background-color: #18181e; border: 1px solid alpha(#ffffff, 0.13); }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
