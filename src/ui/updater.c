@@ -97,29 +97,38 @@ find_install_dir (void)
 static void
 show_state (XdUpdater *self)
 {
-  const char *label = NULL;
+  const char *icon = NULL;
+  const char *accessible_label = NULL;
   const char *tip = NULL;
+  gboolean fades = FALSE;
 
   switch (self->state)
     {
     case STATE_AVAILABLE:
-      label = "Update";
+      icon = "software-update-available-symbolic";
+      accessible_label = "Download update";
       tip = "A newer build is available. Click to install it.";
+      fades = TRUE;
       break;
 
     case STATE_UPDATING:
-      label = "Updating…";
+      icon = "software-update-available-symbolic";
+      accessible_label = "Downloading update";
       tip = "Downloading and installing.";
+      fades = TRUE;
       break;
 
     case STATE_DONE:
-      label = "Restart";
+      icon = "view-refresh-symbolic";
+      accessible_label = "Restart";
       tip = "The new build is installed. Click to restart into it.";
       break;
 
     case STATE_FAILED:
-      label = "Update failed";
+      icon = "software-update-available-symbolic";
+      accessible_label = "Retry update";
       tip = self->trouble;
+      fades = TRUE;
       break;
 
     case STATE_QUIET:
@@ -127,15 +136,26 @@ show_state (XdUpdater *self)
       break;
     }
 
-  gtk_widget_set_visible (GTK_WIDGET (self), label != NULL);
+  gtk_widget_set_visible (GTK_WIDGET (self), icon != NULL);
 
-  if (label == NULL)
+  if (icon == NULL)
     return;
 
-  gtk_button_set_label (self->button, label);
+  gtk_button_set_icon_name (self->button, icon);
+  gtk_accessible_update_property (
+    GTK_ACCESSIBLE (self->button),
+    GTK_ACCESSIBLE_PROPERTY_LABEL, accessible_label,
+    -1);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->button), tip);
   gtk_widget_set_sensitive (GTK_WIDGET (self->button),
                             self->state != STATE_UPDATING);
+
+  if (fades)
+    gtk_widget_add_css_class (GTK_WIDGET (self->button),
+                              "xd-update-fade");
+  else
+    gtk_widget_remove_css_class (GTK_WIDGET (self->button),
+                                 "xd-update-fade");
 }
 
 static void
@@ -460,7 +480,7 @@ xd_updater_init (XdUpdater *self)
   self->state = STATE_QUIET;
 
   self->button = GTK_BUTTON (gtk_button_new ());
-  gtk_widget_add_css_class (GTK_WIDGET (self->button), "suggested-action");
+  gtk_widget_add_css_class (GTK_WIDGET (self->button), "flat");
   gtk_widget_add_css_class (GTK_WIDGET (self->button), "xd-update");
   g_signal_connect (self->button, "clicked", G_CALLBACK (on_clicked), self);
 
