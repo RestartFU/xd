@@ -10,8 +10,8 @@ build:
 test:
 	@./scripts/test.sh
 
-## run: build if needed, then launch on the host
-run: dist/hy.sh
+## run: rebuild (cached, so cheap when nothing changed) and launch
+run: build
 	@./dist/hy.sh
 
 dist/hy.sh:

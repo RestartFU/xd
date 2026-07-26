@@ -71,6 +71,7 @@ export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
 # Forcing cairo here was guarding against a mix that cannot happen, and it
 # cost popover transparency and every blurred shadow. GTK falls back to
 # cairo by itself where GL is genuinely absent.
+export GSK_RENDERER="${GSK_RENDERER:-ngl}"
 
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \

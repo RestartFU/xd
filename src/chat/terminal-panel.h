@@ -8,34 +8,35 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, HY, TERMINAL_PANEL, AdwBin)
 
+/*
+ * A stack of shell sessions, grouped per chat.
+ *
+ * Each chat keeps its own tabs of terminals, alive across chat switches for
+ * as long as the app runs. Closing a tab kills its session outright: the
+ * terminal's pty goes with it, and the kernel hangs up the shell.
+ *
+ * Emits "close-requested" when the last session of the current chat is
+ * killed, so whoever owns the toggle can take the panel off screen.
+ */
+
 HyTerminalPanel *hy_terminal_panel_new         (void);
 
-/*
- * Points the terminal at @workdir.
- *
- * One shell is shared by every chat, so a shell that is already running is
- * walked over with cd rather than restarted -- restarting would discard
- * whatever is in it.
- */
+/* Which chat's sessions are on screen. NULL shows none. */
+void             hy_terminal_panel_set_chat    (HyTerminalPanel *self,
+                                                const char      *chat_id);
+
+/* Where new sessions start. Existing sessions are left where they are. */
 void             hy_terminal_panel_set_workdir (HyTerminalPanel *self,
                                                 const char      *workdir);
 
-/*
- * Starts the shell if none is running.
- *
- * Separate from taking the keyboard so a panel restored at startup can come
- * back with its shell running without stealing focus from the composer. Does
- * nothing until a working directory is known, so the shell never starts in
- * whichever directory hy happened to be launched from.
- */
+/* Ensures the current chat has at least one session running. */
 void             hy_terminal_panel_start       (HyTerminalPanel *self);
 
-/*
- * Emits "close-requested" when the user asks for the panel to go away, so
- * whoever put it on screen can take it off and keep its button in step.
- */
-
-/* Starts the shell if none is running, and takes the keyboard. */
+/* Starts if needed, and takes the keyboard. */
 void             hy_terminal_panel_activate    (HyTerminalPanel *self);
+
+/* Kills every session the chat has; for when the chat itself is deleted. */
+void             hy_terminal_panel_forget_chat (HyTerminalPanel *self,
+                                                const char      *chat_id);
 
 G_END_DECLS
