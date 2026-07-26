@@ -25,6 +25,12 @@
  */
 typedef struct
 {
+  gboolean tool;
+  char *text;
+} TurnItem;
+
+typedef struct
+{
   XdChatView *view;         /* unowned; the view outlives its turns */
   XdChatSession *session;
   char *chat_id;
@@ -36,10 +42,11 @@ typedef struct
   XdNode *node;             /* the row in the tree, so it can show the state */
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
-  GPtrArray *said;          /* finished messages, held until the turn ends */
+  GPtrArray *items;         /* finished speech and tools, in timeline order */
   XdMessageRow *row;        /* NULL until the segment has somewhere to go */
   gboolean resumed;
   gboolean is_retry;
+  gboolean had_tool;
 } Turn;
 
 /* Wide enough for code and a diff line, narrow enough that a line of prose
@@ -602,6 +609,22 @@ append_reply (XdChatView *self,
     append_choices (self, ask, answerable);
 }
 
+/* Duration is turn metadata, not a later answer to a question. */
+static gboolean
+reply_is_answerable (GPtrArray *messages,
+                     guint      position)
+{
+  for (guint i = position + 1; i < messages->len; i++)
+    {
+      const XdMessage *message = g_ptr_array_index (messages, i);
+
+      if (g_strcmp0 (message->role, "duration") != 0)
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
 static void
 clear_transcript (XdChatView *self)
 {
@@ -721,36 +744,67 @@ render_transcript (XdChatView *self,
   for (guint i = 0; i < messages->len; i++)
     {
       const XdMessage *message = g_ptr_array_index (messages, i);
-      gboolean starts_run = g_strcmp0 (message->role, "assistant") == 0 &&
-        (i == 0 || g_strcmp0 (((XdMessage *) g_ptr_array_index (messages, i - 1))->role,
-                              "assistant") != 0);
 
-      /* The work's cost goes above the work: replies are stamped when the
-       * turn ends and the user's message when it was sent, so the span
-       * between them is how long the agent worked. */
-      if (starts_run && i > 0)
+      /*
+       * New turns store their measured duration explicitly. It lives after
+       * the turn's output in the database because that is when it becomes
+       * known, but belongs above that output on screen.
+       *
+       * Older transcripts have no duration row, so retain the timestamp
+       * estimate for their assistant-only turns.
+       */
+      if (i > 0 &&
+          g_strcmp0 (((XdMessage *) g_ptr_array_index (messages, i - 1))->role,
+                     "user") == 0)
         {
           const XdMessage *before = g_ptr_array_index (messages, i - 1);
-          const XdMessage *last = message;
-          gint64 seconds;
+          gint64 seconds = -1;
 
           for (guint j = i; j < messages->len; j++)
             {
               const XdMessage *at = g_ptr_array_index (messages, j);
+              char *end = NULL;
+              gint64 stored;
 
-              if (g_strcmp0 (at->role, "assistant") != 0)
+              if (g_strcmp0 (at->role, "user") == 0)
                 break;
-              last = at;
+
+              if (g_strcmp0 (at->role, "duration") != 0)
+                continue;
+
+              stored = g_ascii_strtoll (at->content, &end, 10);
+              if (end != at->content && *end == '\0' && stored >= 0)
+                seconds = stored;
+              break;
             }
 
-          seconds = last->created_at - before->created_at;
-          if (g_strcmp0 (before->role, "user") == 0 && seconds >= 1)
+          if (seconds < 0 && g_strcmp0 (message->role, "assistant") == 0)
+            {
+              const XdMessage *last = message;
+
+              for (guint j = i; j < messages->len; j++)
+                {
+                  const XdMessage *at = g_ptr_array_index (messages, j);
+
+                  if (g_strcmp0 (at->role, "assistant") != 0)
+                    break;
+                  last = at;
+                }
+
+              seconds = last->created_at - before->created_at;
+            }
+
+          if (seconds >= 1)
             gtk_box_append (self->transcript, worked_for_row (seconds));
         }
 
-      if (g_strcmp0 (message->role, "assistant") == 0)
+      if (g_strcmp0 (message->role, "duration") == 0)
+        continue;
+      else if (g_strcmp0 (message->role, "assistant") == 0)
         append_reply (self, message->content, message->label,
-                      i + 1 == messages->len);
+                      reply_is_answerable (messages, i));
+      else if (g_strcmp0 (message->role, "tool") == 0)
+        append_tool_line (self, message->content);
       else
         append_row (self, xd_message_kind_from_role (message->role), message->content);
     }
@@ -1283,6 +1337,25 @@ current_turn (XdChatView *self)
 }
 
 static void
+turn_item_free (TurnItem *item)
+{
+  g_free (item->text);
+  g_free (item);
+}
+
+static void
+remember_turn_item (Turn       *turn,
+                    gboolean    tool,
+                    const char *text)
+{
+  TurnItem *item = g_new0 (TurnItem, 1);
+
+  item->tool = tool;
+  item->text = g_strdup (text);
+  g_ptr_array_add (turn->items, item);
+}
+
+static void
 turn_free (gpointer data)
 {
   Turn *turn = data;
@@ -1294,10 +1367,11 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->label, g_free);
   g_clear_object (&turn->node);
   if (turn->anchor != NULL)
-    g_object_remove_weak_pointer (G_OBJECT (turn->anchor), (gpointer *) &turn->anchor);
+    g_object_remove_weak_pointer (G_OBJECT (turn->anchor),
+                                  (gpointer *) &turn->anchor);
   g_string_free (turn->text, TRUE);
   g_string_free (turn->segment, TRUE);
-  g_clear_pointer (&turn->said, g_ptr_array_unref);
+  g_clear_pointer (&turn->items, g_ptr_array_unref);
   g_free (turn);
 }
 
@@ -1368,9 +1442,9 @@ close_segment (Turn *turn)
   if (turn->segment->len == 0)
     return;
 
-  /* Held rather than written: a message is worth storing once it is what it
-   * is going to be, and the turn is still running. */
-  g_ptr_array_add (turn->said, g_strdup (turn->segment->str));
+  /* Held rather than written until the turn ends, alongside its tool calls,
+   * so interruption can store the exact order that happened. */
+  remember_turn_item (turn, FALSE, turn->segment->str);
 
   if (turn->row != NULL)
     {
@@ -1389,21 +1463,35 @@ close_segment (Turn *turn)
   turn->row = NULL;
 }
 
-/* Writes what the turn said, in the order it said it. */
+/* Writes everything the turn produced, in the order it happened. */
 static void
-store_what_was_said (Turn *turn)
+store_turn_items (Turn *turn)
 {
-  for (guint i = 0; i < turn->said->len; i++)
+  for (guint i = 0; i < turn->items->len; i++)
     {
+      TurnItem *item = g_ptr_array_index (turn->items, i);
       g_autoptr (GError) error = NULL;
 
       if (!xd_storage_append_message (turn->view->storage, turn->chat_id,
-                                      "assistant", g_ptr_array_index (turn->said, i),
-                                      NULL, turn->label, &error))
-        g_warning ("cannot store the reply: %s", error->message);
+                                      item->tool ? "tool" : "assistant",
+                                      item->text, NULL,
+                                      item->tool ? NULL : turn->label, &error))
+        g_warning ("cannot store turn output: %s", error->message);
     }
 
-  g_ptr_array_set_size (turn->said, 0);
+  g_ptr_array_set_size (turn->items, 0);
+}
+
+static void
+store_turn_duration (Turn   *turn,
+                     gint64  seconds)
+{
+  g_autofree char *content = g_strdup_printf ("%" G_GINT64_FORMAT, seconds);
+  g_autoptr (GError) error = NULL;
+
+  if (!xd_storage_append_message (turn->view->storage, turn->chat_id,
+                                  "duration", content, NULL, NULL, &error))
+    g_warning ("cannot store turn duration: %s", error->message);
 }
 
 static void
@@ -1414,6 +1502,8 @@ on_tool_use (XdChatSession *session,
   Turn *turn = user_data;
 
   close_segment (turn);
+  remember_turn_item (turn, TRUE, name);
+  turn->had_tool = TRUE;
 
   if (turn_is_visible (turn))
     show_tool_use (turn->view, name);
@@ -1431,6 +1521,8 @@ on_turn_finished (XdChatSession *session,
   g_autofree char *chat_id = g_strdup (turn->chat_id);
   g_autofree char *retry_prompt = NULL;
   gboolean visible = turn_is_visible (turn);
+  gint64 seconds =
+    MAX ((g_get_monotonic_time () - turn->started_at) / G_USEC_PER_SEC, 0);
 
   /*
    * A resumed turn that failed without producing a single token is almost
@@ -1439,7 +1531,8 @@ on_turn_finished (XdChatSession *session,
    * making the user retype it. Checked by outcome rather than by matching the
    * CLI's error text, which neither CLI promises to keep stable.
    */
-  if (!success && turn->resumed && !turn->is_retry && turn->text->len == 0)
+  if (!success && turn->resumed && !turn->is_retry &&
+      turn->text->len == 0 && !turn->had_tool)
     {
       retry_prompt = g_strdup (turn->prompt);
 
@@ -1499,7 +1592,8 @@ on_turn_finished (XdChatSession *session,
    * any other. Only now, with all of them final, do they reach the database.
    */
   close_segment (turn);
-  store_what_was_said (turn);
+  store_turn_items (turn);
+  store_turn_duration (turn, seconds);
 
   /* This backend has now been told everything up to and including its own
    * reply, so the next turn only has to replay what comes after. Read after
@@ -1525,8 +1619,6 @@ on_turn_finished (XdChatSession *session,
 
   if (visible)
     {
-      gint64 seconds = (g_get_monotonic_time () - turn->started_at) / G_USEC_PER_SEC;
-
       if (seconds >= 1)
         {
           GtkWidget *row = worked_for_row (seconds);
@@ -1659,7 +1751,8 @@ start_turn (XdChatView *self,
   turn->resumed = resume_session_id != NULL;
   turn->text = g_string_new (NULL);
   turn->segment = g_string_new (NULL);
-  turn->said = g_ptr_array_new_with_free_func (g_free);
+  turn->items =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) turn_item_free);
   turn->session = xd_chat_session_new (backend);
   /* Taken now rather than when the reply lands: the model can be changed
    * while the agent is still working, and what answered is whatever was
@@ -2916,13 +3009,21 @@ xd_chat_view_set_chat (XdChatView *self,
       /* The finished parts of this turn live only in memory until it ends,
        * so the rebuilt transcript has to replay them or they vanish until
        * the chat is next reopened. */
-      for (guint i = 0; i < turn->said->len; i++)
+      for (guint i = 0; i < turn->items->len; i++)
         {
-          XdMessageRow *said =
-            append_row (self, XD_MESSAGE_ASSISTANT,
-                        g_ptr_array_index (turn->said, i));
+          TurnItem *item = g_ptr_array_index (turn->items, i);
 
-          xd_message_row_set_source (said, turn->label);
+          if (item->tool)
+            {
+              append_tool_line (self, item->text);
+            }
+          else
+            {
+              XdMessageRow *said =
+                append_row (self, XD_MESSAGE_ASSISTANT, item->text);
+
+              xd_message_row_set_source (said, turn->label);
+            }
         }
 
       turn->row = append_row (self, XD_MESSAGE_ASSISTANT, turn->segment->str);

@@ -1,6 +1,7 @@
 #include "remote/client.h"
 #include "remote/remote-tree.h"
 #include "remote/server.h"
+#include "remote/turn.h"
 #include "storage/storage.h"
 
 #include <json-glib/json-glib.h>
@@ -1741,6 +1742,164 @@ test_a_joining_device_sees_an_active_turn (void)
   daemon_stop (&daemon);
 }
 
+typedef struct
+{
+  Wait tool;
+  Wait text;
+  Wait finished;
+  char *tool_summary;
+  GString *said;
+} InterruptedTurn;
+
+static void
+on_interrupted_turn_tool (XdDaemonTurn *turn,
+                          const char   *summary,
+                          gpointer      user_data)
+{
+  InterruptedTurn *seen = user_data;
+
+  g_free (seen->tool_summary);
+  seen->tool_summary = g_strdup (summary);
+  seen->tool.done = TRUE;
+}
+
+static void
+on_interrupted_turn_text (XdDaemonTurn *turn,
+                          const char   *delta,
+                          gpointer      user_data)
+{
+  InterruptedTurn *seen = user_data;
+
+  g_string_append (seen->said, delta);
+  if (strstr (seen->said->str, "after tool") != NULL)
+    seen->text.done = TRUE;
+}
+
+static void
+on_interrupted_turn_finished (XdDaemonTurn *turn,
+                              gboolean      success,
+                              const char   *message,
+                              gpointer      user_data)
+{
+  InterruptedTurn *seen = user_data;
+
+  seen->finished.ok = success;
+  seen->finished.failure = g_strdup (message);
+  seen->finished.done = TRUE;
+}
+
+/*
+ * Interrupting is still a completed timeline. Speech, tools, and measured
+ * duration must all survive reopening the database in the order they happened.
+ */
+static void
+test_an_interrupted_turn_keeps_its_timeline (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdDaemonTurn) turn = NULL;
+  g_autoptr (XdStorage) reopened = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  g_autofree char *db_path = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (GError) error = NULL;
+  InterruptedTurn seen = { 0 };
+
+  daemon_start (&daemon);
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-interrupted\"}'\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"assistant\",\"message\":{\"content\":["
+    "{\"type\":\"text\",\"text\":\"before tool\"}]}}'\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"assistant\",\"message\":{\"content\":["
+    "{\"type\":\"tool_use\",\"name\":\"Read\","
+    "\"input\":{\"file_path\":\"src/main.c\"}}]}}'\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"assistant\",\"message\":{\"content\":["
+    "{\"type\":\"text\",\"text\":\"after tool\"}]}}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  seen.said = g_string_new (NULL);
+  turn = xd_daemon_turn_new (daemon.storage, daemon.root);
+  g_signal_connect (turn, "tool",
+                    G_CALLBACK (on_interrupted_turn_tool), &seen);
+  g_signal_connect (turn, "text",
+                    G_CALLBACK (on_interrupted_turn_text), &seen);
+  g_signal_connect (turn, "finished",
+                    G_CALLBACK (on_interrupted_turn_finished), &seen);
+
+  g_assert_true (xd_daemon_turn_start (turn, daemon.chat_id,
+                                       "inspect it", &error));
+  g_assert_no_error (error);
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  wait_for (&seen.tool);
+  wait_for (&seen.text);
+  g_assert_nonnull (strstr (seen.tool_summary, "src/main.c"));
+
+  xd_daemon_turn_cancel (turn);
+  wait_for (&seen.finished);
+  g_assert_true (seen.finished.ok);
+
+  db_path = g_build_filename (daemon.dir, "chats.db", NULL);
+  chat_id = g_strdup (daemon.chat_id);
+  g_clear_object (&turn);
+  daemon_stop (&daemon);
+
+  reopened = xd_storage_new (db_path, &error);
+  g_assert_no_error (error);
+  messages = xd_storage_list_messages (reopened, chat_id, &error);
+  g_assert_no_error (error);
+
+  g_assert_cmpuint (messages->len, ==, 7);
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 2))->role,
+                   ==, "user");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 3))->role,
+                   ==, "assistant");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 3))->content,
+                   ==, "before tool");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 4))->role,
+                   ==, "tool");
+  g_assert_nonnull (strstr (
+    ((XdMessage *) g_ptr_array_index (messages, 4))->content, "src/main.c"));
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 5))->role,
+                   ==, "assistant");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 5))->content,
+                   ==, "after tool");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 6))->role,
+                   ==, "duration");
+  g_assert_cmpint (g_ascii_strtoll (
+                     ((XdMessage *) g_ptr_array_index (messages, 6))->content,
+                     NULL, 10), >=, 0);
+
+  g_free (seen.tool_summary);
+  g_free (seen.finished.failure);
+  g_string_free (seen.said, TRUE);
+}
+
 /*
  * Which test is running, and a watchdog that says so.
  *
@@ -1810,6 +1969,7 @@ main (int argc, char *argv[])
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
+  ADD ("/remote/an-interrupted-turn-keeps-its-timeline", test_an_interrupted_turn_keeps_its_timeline);
 
   return g_test_run ();
 }

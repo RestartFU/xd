@@ -24,8 +24,9 @@ G_DECLARE_FINAL_TYPE (XdDaemonTurn, xd_daemon_turn, XD, DAEMON_TURN, GObject)
  *   tool     (name)           the agent reached for something
  *   finished (ok, message)    the turn ended; message explains a failure
  *
- * Everything the turn produces is in the database by the time ::finished is
- * emitted, so a client that missed the stream only has to read the chat again.
+ * Everything the turn produces, including tool calls and elapsed time, is in
+ * the database by the time ::finished is emitted, so a client that missed the
+ * stream only has to read the chat again.
  */
 
 XdDaemonTurn *xd_daemon_turn_new       (XdStorage    *storage,

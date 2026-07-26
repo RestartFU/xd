@@ -32,10 +32,9 @@ struct _XdDaemonTurn
   char *label;
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
-  GPtrArray *said;          /* finished messages, held until the turn ends */
 
-  /* The same, plus the tools, in the order they happened: what a device that
-   * joins mid-turn is shown. XdTurnItem*. */
+  /* Speech and tools in the order they happened: held until the turn ends for
+   * storage, and shown to any device that joins mid-turn. XdTurnItem*. */
   GPtrArray *items;
   gint64 started_at;           /* monotonic usec */
   gboolean resumed;
@@ -220,7 +219,6 @@ close_segment (XdDaemonTurn *self)
   if (self->segment->len == 0)
     return;
 
-  g_ptr_array_add (self->said, g_strdup (self->segment->str));
   remember (self, FALSE, self->segment->str);
   g_string_truncate (self->segment, 0);
 }
@@ -239,19 +237,31 @@ on_tool_use (XdChatSession *session,
 }
 
 static void
-store_what_was_said (XdDaemonTurn *self)
+store_turn_items (XdDaemonTurn *self)
 {
-  for (guint i = 0; i < self->said->len; i++)
+  for (guint i = 0; i < self->items->len; i++)
     {
+      XdTurnItem *item = g_ptr_array_index (self->items, i);
       g_autoptr (GError) error = NULL;
 
-      if (!xd_storage_append_message (self->storage, self->chat_id, "assistant",
-                                      g_ptr_array_index (self->said, i),
-                                      NULL, self->label, &error))
-        g_warning ("cannot store the reply: %s", error->message);
+      if (!xd_storage_append_message (self->storage, self->chat_id,
+                                      item->tool ? "tool" : "assistant",
+                                      item->text, NULL,
+                                      item->tool ? NULL : self->label, &error))
+        g_warning ("cannot store turn output: %s", error->message);
     }
+}
 
-  g_ptr_array_set_size (self->said, 0);
+static void
+store_turn_duration (XdDaemonTurn *self)
+{
+  g_autofree char *content =
+    g_strdup_printf ("%" G_GINT64_FORMAT, xd_daemon_turn_get_elapsed (self));
+  g_autoptr (GError) error = NULL;
+
+  if (!xd_storage_append_message (self->storage, self->chat_id, "duration",
+                                  content, NULL, NULL, &error))
+    g_warning ("cannot store turn duration: %s", error->message);
 }
 
 static void
@@ -264,7 +274,8 @@ on_finished (XdChatSession *session,
   g_autoptr (GError) error = NULL;
 
   close_segment (self);
-  store_what_was_said (self);
+  store_turn_items (self);
+  store_turn_duration (self);
 
   if (!success && message != NULL)
     {
@@ -399,7 +410,6 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   self->resumed = resume_session_id != NULL;
   self->text = g_string_new (NULL);
   self->segment = g_string_new (NULL);
-  self->said = g_ptr_array_new_with_free_func (g_free);
   self->items = g_ptr_array_new_with_free_func ((GDestroyNotify) item_free);
   self->session = xd_chat_session_new (backend);
 
@@ -521,7 +531,6 @@ xd_daemon_turn_finalize (GObject *object)
   g_clear_pointer (&self->chat_id, g_free);
   g_clear_pointer (&self->backend_id, g_free);
   g_clear_pointer (&self->label, g_free);
-  g_clear_pointer (&self->said, g_ptr_array_unref);
   g_clear_pointer (&self->items, g_ptr_array_unref);
 
   if (self->text != NULL)
