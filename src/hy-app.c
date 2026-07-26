@@ -252,6 +252,10 @@ static const char *HY_STYLE =
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
+  /* The list widget inside paints its own lighter slab over the popover's
+   * fill unless told not to; the rows should sit on the popover itself. */
+  "popover listview, popover scrolledwindow, popover viewport"
+  " { background: none; }\n"
   "popover listview > row { border-radius: 10px; padding: 8px 12px; }\n"
   "popover listview > row:selected { background: alpha(#ffffff, 0.07); }\n"
   "popover listview > row:hover:not(:selected)"
