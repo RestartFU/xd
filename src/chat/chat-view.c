@@ -752,6 +752,9 @@ on_remote_messages (GObject      *source,
                                  : NULL);
   render_transcript (self, messages);
 
+  /* And whatever is happening now, which goes after it. */
+  load_remote_options (self);
+
   queue_scroll_to_bottom (self);
 }
 
@@ -945,7 +948,7 @@ on_remote_options_received (GObject      *source,
   XdChat chat = { 0 };
 
   reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
-  if (reply == NULL)
+  if (reply == NULL || self->chat == NULL || self->remote == NULL)
     return;
 
   /* Borrowed from the reply, which outlives this call: nothing here is kept. */
@@ -1066,9 +1069,7 @@ on_remote_opened (XdRemoteClient *client,
   if (self->chat == NULL || self->remote == NULL)
     return;
 
-  end_remote_turn (self);
   load_remote_transcript (self);
-  load_remote_options (self);
   update_send_button (self);
 }
 
@@ -1093,10 +1094,21 @@ set_remote (XdChatView     *self,
     }
 }
 
+/*
+ * Reads the chat back: what has been stored, then what is happening now.
+ *
+ * Always both, and in that order. A turn is only written down when it ends, so
+ * the stored messages are half the picture while one is running -- and every
+ * reason to reread the transcript (coming back to the chat, a change made
+ * elsewhere, a turn ending) is equally a reason to ask again what the chat is
+ * doing. Asking for one without the other is how a reply in progress
+ * disappeared: the messages arrived, and nothing put the live part back.
+ */
 static void
 load_remote_transcript (XdChatView *self)
 {
   clear_transcript (self);
+  end_remote_turn (self);
 
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
@@ -2632,9 +2644,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   adw_window_title_set_title (self->title, xd_node_get_name (chat));
   adw_window_title_set_subtitle (self->title, xd_remote_client_get_host (client));
 
-  end_remote_turn (self);
   load_remote_transcript (self);
-  load_remote_options (self);
   update_send_button (self);
   gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 }
@@ -2709,6 +2719,9 @@ xd_chat_view_set_chat (XdChatView *self,
       turn->row = append_row (self, XD_MESSAGE_ASSISTANT, turn->segment->str);
       xd_message_row_set_source (turn->row, turn->label);
       xd_message_row_set_waiting (turn->row, TRUE);
+
+      /* The transcript was rebuilt, and the marker went with it. */
+      set_working (self, TRUE);
     }
 
   update_send_button (self);
