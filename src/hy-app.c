@@ -253,10 +253,19 @@ static const char *HY_STYLE =
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
-  /* The list widget inside paints its own lighter slab over the popover's
-   * fill unless told not to; the rows should sit on the popover itself. */
-  "popover listview, popover scrolledwindow, popover viewport"
-  " { background: none; }\n"
+  /* The list widgets inside paint their own lighter slab over the popover's
+   * fill unless told not to; the rows should sit on the popover itself. The
+   * model picker is a GtkListBox, whose node is "list", beside the
+   * GtkListView the dropdowns use. */
+  "popover listview, popover list, popover scrolledwindow, popover viewport,"
+  " popover boxlayout, popover box { background: none; }\n"
+  /* Chosen with the pointer, so the keyboard focus ring is drawn where no
+   * keyboard is involved; hover and selection already say where you are. */
+  "popover listview > row, popover list > row { outline: none; }\n"
+  "popover list > row { border-radius: 10px; }\n"
+  "popover list > row:selected { background: alpha(#ffffff, 0.07); }\n"
+  "popover list > row:hover:not(:selected)"
+  " { background: alpha(#ffffff, 0.05); }\n"
   "popover listview > row { border-radius: 10px; padding: 8px 12px; }\n"
   "popover listview > row:selected { background: alpha(#ffffff, 0.07); }\n"
   "popover listview > row:hover:not(:selected)"
