@@ -205,27 +205,57 @@ make_code_card (HyMessageRow *self,
   return card;
 }
 
-/* The pasted image's preview, drawn when the chip is hovered. */
-static gboolean
-on_image_tooltip (GtkWidget  *widget,
-                  int         x,
-                  int         y,
-                  gboolean    keyboard,
-                  GtkTooltip *tooltip,
-                  gpointer    user_data)
+/* The preview popover opens above the chip, sized to the image's own shape
+ * rather than a fixed box that would stretch or letterbox it. */
+static void
+on_chip_enter (GtkEventControllerMotion *controller,
+               double                    x,
+               double                    y,
+               gpointer                  user_data)
 {
-  const char *path = g_object_get_data (G_OBJECT (widget), "image-path");
-  GtkWidget *picture;
+  GtkPopover *popover = user_data;
+  GtkWidget *chip = gtk_widget_get_parent (GTK_WIDGET (popover));
+  const char *path = g_object_get_data (G_OBJECT (chip), "image-path");
 
-  if (path == NULL || !g_file_test (path, G_FILE_TEST_EXISTS))
-    return FALSE;
+  if (gtk_popover_get_child (popover) == NULL)
+    {
+      g_autoptr (GdkTexture) texture = NULL;
+      GtkWidget *picture;
+      int w, h;
+      double scale;
 
-  picture = gtk_picture_new_for_filename (path);
-  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
-  gtk_widget_set_size_request (picture, 360, 220);
-  gtk_tooltip_set_custom (tooltip, picture);
+      if (path == NULL)
+        return;
 
-  return TRUE;
+      texture = gdk_texture_new_from_filename (path, NULL);
+      if (texture == NULL)
+        return;
+
+      w = gdk_texture_get_width (GDK_TEXTURE (texture));
+      h = gdk_texture_get_height (GDK_TEXTURE (texture));
+      scale = MIN (1.0, MIN (440.0 / w, 300.0 / h));
+
+      picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (texture));
+      gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
+      gtk_widget_set_size_request (picture, (int) (w * scale), (int) (h * scale));
+      gtk_popover_set_child (popover, picture);
+    }
+
+  gtk_popover_popup (popover);
+}
+
+static void
+on_chip_leave (GtkEventControllerMotion *controller,
+               gpointer                  user_data)
+{
+  gtk_popover_popdown (GTK_POPOVER (user_data));
+}
+
+static void
+on_chip_destroyed (GtkWidget *chip,
+                   gpointer   user_data)
+{
+  gtk_widget_unparent (GTK_WIDGET (user_data));
 }
 
 /*
@@ -251,8 +281,22 @@ make_image_chip (HyMessageRow *self,
   g_signal_connect (label, "activate-link", G_CALLBACK (on_link_activated), NULL);
 
   g_object_set_data_full (G_OBJECT (label), "image-path", g_strdup (path), g_free);
-  gtk_widget_set_has_tooltip (label, TRUE);
-  g_signal_connect (label, "query-tooltip", G_CALLBACK (on_image_tooltip), NULL);
+
+  {
+    GtkWidget *popover = gtk_popover_new ();
+    GtkEventController *motion = gtk_event_controller_motion_new ();
+
+    gtk_popover_set_position (GTK_POPOVER (popover), GTK_POS_TOP);
+    gtk_popover_set_autohide (GTK_POPOVER (popover), FALSE);
+    gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
+    gtk_widget_set_parent (popover, label);
+    gtk_widget_add_css_class (popover, "hy-preview");
+
+    g_signal_connect (motion, "enter", G_CALLBACK (on_chip_enter), popover);
+    g_signal_connect (motion, "leave", G_CALLBACK (on_chip_leave), popover);
+    gtk_widget_add_controller (label, motion);
+    g_signal_connect (label, "destroy", G_CALLBACK (on_chip_destroyed), popover);
+  }
 
   return label;
 }

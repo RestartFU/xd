@@ -255,6 +255,8 @@ static const char *HY_STYLE =
   "popover > contents { border-radius: 12px; padding: 6px;"
   " background-color: #16161b; border: 1px solid alpha(#ffffff, 0.10); }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
+  ".hy-preview > contents { padding: 0; }\n"
+  ".hy-preview picture { border-radius: 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
   /* The list widgets inside paint their own lighter slab over the popover's
@@ -321,6 +323,10 @@ static const char *HY_STYLE =
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
   " { background: alpha(#ffffff, 0.10); }\n"
+  /* No X on the tabs: the trash can kills the selected session, and one way
+   * to do a destructive thing is enough. */
+  "tabbar tab button { opacity: 0; min-width: 0; min-height: 0;"
+  " padding: 0; margin: 0; border: none; }\n"
 
   /* Code blocks: a card of their own, since Pango cannot draw a padded
    * rounded background behind a run of text. */

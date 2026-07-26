@@ -18,6 +18,7 @@ mkdir -p "$RUNTIME"
 # @BUNDLE@ templates; that is what keeps the bundle relocatable.
 sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/loaders.cache.in" > "$RUNTIME/loaders.cache"
 sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/fonts.conf.in"    > "$RUNTIME/fonts.conf"
+sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/egl_vendor.json.in" > "$RUNTIME/egl_vendor.json"
 
 # Anything hy launches for the user -- a terminal, an editor -- must run in the
 # host's environment, not the bundle's. Remember the values before they are
@@ -72,6 +73,12 @@ export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
 # cost popover transparency and every blurred shadow. GTK falls back to
 # cairo by itself where GL is genuinely absent.
 export GSK_RENDERER="${GSK_RENDERER:-ngl}"
+
+# The bundle's own Mesa, rendering in software: the same GL on every machine,
+# instead of an EGL that works or fails with the host's driver layout.
+export __EGL_VENDOR_LIBRARY_FILENAMES="$RUNTIME/egl_vendor.json"
+export LIBGL_DRIVERS_PATH="$HERE/lib/dri"
+export LIBGL_ALWAYS_SOFTWARE=1
 
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \

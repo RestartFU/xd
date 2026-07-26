@@ -83,6 +83,32 @@ mkdir -p "$OUT/share/X11"
 cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 [ -d /usr/share/X11/locale ] && cp -a /usr/share/X11/locale "$OUT/share/X11/locale"
 
+# --- software GL ------------------------------------------------------------
+# Mesa's own llvmpipe, carried whole: rendering is then identical on every
+# machine, and GTK's GL renderer never depends on what the host has. The
+# vendor file needs an absolute path, so it is a template rewritten per
+# launch like the caches above.
+ARCH_LIB=/usr/lib/x86_64-linux-gnu
+for lib in "$ARCH_LIB"/libEGL.so.1* "$ARCH_LIB"/libEGL_mesa.so.0* \
+           "$ARCH_LIB"/libGLdispatch.so.0* "$ARCH_LIB"/libgbm.so.1* \
+           "$ARCH_LIB"/libglapi.so.0* "$ARCH_LIB"/libGLESv2.so.2* \
+           "$ARCH_LIB"/libGL.so.1* "$ARCH_LIB"/libGLX.so.0*; do
+  [ -e "$lib" ] && cp -a "$lib" "$OUT/lib/"
+done
+mkdir -p "$OUT/lib/dri"
+cp -aL "$ARCH_LIB"/dri/*.so "$OUT/lib/dri/" 2>/dev/null || true
+for extra in $(ldd "$ARCH_LIB"/libEGL_mesa.so.0 "$OUT"/lib/dri/*.so 2>/dev/null \
+                 | awk '/=> \//{print $3}' | sort -u); do
+  base=$(basename "$extra")
+  [ -e "$OUT/lib/$base" ] || cp -a "$extra" "$OUT/lib/"
+done
+cat > "$OUT/etc/egl_vendor.json.in" <<'JSON'
+{
+    "file_format_version" : "1.0.0",
+    "ICD" : { "library_path" : "@BUNDLE@/lib/libEGL_mesa.so.0" }
+}
+JSON
+
 # --- fonts + fontconfig -----------------------------------------------------
 # FONTCONFIG_SYSROOT would isolate the config more thoroughly, but fontconfig
 # reports FC_FILE without the sysroot prefix, so cairo then fails to open every

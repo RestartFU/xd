@@ -22,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libjson-glib-dev \
       libsqlite3-dev \
       libvte-2.91-gtk4-dev \
+      libegl1 \
+      libgl1-mesa-dri \
+      libegl-mesa0 \
       librsvg2-common \
       xkb-data \
       libx11-data \
