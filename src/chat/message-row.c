@@ -115,6 +115,7 @@ xd_message_row_new (XdMessageKind  kind,
 
   self->working = GTK_WIDGET (xd_dots_new ());
   gtk_widget_set_visible (self->working, FALSE);
+  gtk_widget_add_css_class (self->working, "xd-dots-large");
   gtk_widget_set_halign (self->working, GTK_ALIGN_START);
 
   self->body = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);

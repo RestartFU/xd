@@ -34,6 +34,7 @@ struct _XdSidebar
    * closed them or something above them did. GtkTreeListRow* -> folder id. */
   GHashTable *closing;
   guint save_expanded_id;
+  guint restore_expanded_id;
 };
 
 enum
@@ -983,6 +984,65 @@ forget_closed_folders (XdSidebar *self)
   g_hash_table_remove_all (self->closing);
 }
 
+/*
+ * Opens the folders that were left open, over the whole tree.
+ *
+ * Rows restore themselves as they are bound, which covers a tree that is all
+ * there when the window opens. A remote's is not: it arrives over a connection
+ * some time after the sidebar has drawn, and rows that were never on screen
+ * were never bound to restore anything -- so the branch comes back closed, and
+ * the folders under it come back empty until they are opened by hand.
+ *
+ * Only ever opens. A folder the user closed is not in the table to be found,
+ * so nothing here can undo that.
+ */
+static gboolean
+restore_expanded (gpointer user_data)
+{
+  XdSidebar *self = user_data;
+  GListModel *rows = G_LIST_MODEL (self->tree_model);
+
+  self->restore_expanded_id = 0;
+
+  /* Read afresh each time round: opening one row is what puts the rows under
+   * it in the model, and those have to be looked at too. */
+  for (guint i = 0; i < g_list_model_get_n_items (rows); i++)
+    {
+      g_autoptr (GtkTreeListRow) row = g_list_model_get_item (rows, i);
+      g_autoptr (XdNode) node = gtk_tree_list_row_get_item (row);
+      const char *folder_id;
+
+      if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER)
+        continue;
+
+      if (gtk_tree_list_row_get_expanded (row))
+        continue;
+
+      folder_id = xd_node_get_folder_id (node);
+      if (folder_id != NULL && g_hash_table_contains (self->expanded, folder_id))
+        gtk_tree_list_row_set_expanded (row, TRUE);
+    }
+
+  return G_SOURCE_REMOVE;
+}
+
+/* Rows arriving is the only reason to look: a tree that finished loading, a
+ * folder that appeared on another device. */
+static void
+on_rows_changed (GListModel *model,
+                 guint       position,
+                 guint       removed,
+                 guint       added,
+                 gpointer    user_data)
+{
+  XdSidebar *self = user_data;
+
+  if (added == 0 || self->restore_expanded_id != 0)
+    return;
+
+  self->restore_expanded_id = g_idle_add (restore_expanded, self);
+}
+
 static gboolean
 save_expanded (gpointer user_data)
 {
@@ -1597,6 +1657,9 @@ xd_sidebar_new (XdFsTree *tree)
   self->tree_model = gtk_tree_list_model_new (G_LIST_MODEL (top_level),
                                               FALSE, FALSE,
                                               create_child_model, NULL, NULL);
+  g_signal_connect (self->tree_model, "items-changed",
+                    G_CALLBACK (on_rows_changed), self);
+
   self->selection = gtk_single_selection_new (g_object_ref (G_LIST_MODEL (self->tree_model)));
   gtk_single_selection_set_autoselect (self->selection, FALSE);
   gtk_single_selection_set_can_unselect (self->selection, TRUE);
@@ -1672,6 +1735,8 @@ static void
 xd_sidebar_dispose (GObject *object)
 {
   XdSidebar *self = XD_SIDEBAR (object);
+
+  g_clear_handle_id (&self->restore_expanded_id, g_source_remove);
 
   if (self->save_expanded_id != 0)
     {
