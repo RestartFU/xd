@@ -714,7 +714,7 @@ test_folders_and_chats_are_managed_from_the_client (void)
     g_autofree char *chat_id = NULL;
 
     g_signal_connect (tree, "chat-created", G_CALLBACK (on_chat_signal), &created);
-    xd_remote_tree_create_chat (tree, zeno, "from the client");
+    xd_remote_tree_create_chat (tree, zeno, "from the client", NULL);
     wait_for (&created.wait);
     g_signal_handlers_disconnect_by_data (tree, &created);
 
@@ -1006,6 +1006,57 @@ test_a_first_message_names_the_chat (void)
   daemon_stop (&daemon);
 }
 
+typedef struct
+{
+  Wait wait;
+  char *path;
+  GStrv entries;
+} Listed;
+
+static void
+on_dir_listed (const char        *path,
+               const char *const *entries,
+               gpointer           user_data)
+{
+  Listed *listed = user_data;
+
+  listed->path = g_strdup (path);
+  listed->entries = g_strdupv ((char **) entries);
+  listed->wait.done = TRUE;
+}
+
+/*
+ * Browsing the daemon's directories.
+ *
+ * A chat that runs over there has to be pointed at a directory over there, and
+ * only that side can say what is on it -- so choosing where a chat works needs
+ * the daemon to answer for its own disk.
+ */
+static void
+test_the_daemon_lists_its_directories (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  Listed listed = { 0 };
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  xd_remote_tree_list_dir (tree, daemon.root, on_dir_listed, &listed);
+  wait_for (&listed.wait);
+
+  g_assert_cmpstr (listed.path, ==, daemon.root);
+  g_assert_nonnull (listed.entries);
+  g_assert_true (g_strv_contains ((const char * const *) listed.entries, "Zeno"));
+
+  g_free (listed.path);
+  g_strfreev (listed.entries);
+  daemon_stop (&daemon);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1028,6 +1079,8 @@ main (int argc, char *argv[])
                    test_local_changes_reach_the_devices);
   g_test_add_func ("/remote/a-first-message-names-the-chat",
                    test_a_first_message_names_the_chat);
+  g_test_add_func ("/remote/the-daemon-lists-its-directories",
+                   test_the_daemon_lists_its_directories);
 
   return g_test_run ();
 }

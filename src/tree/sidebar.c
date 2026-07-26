@@ -4,6 +4,7 @@
 #include "settings/folder-settings-dialog.h"
 #include "settings/settings-resolver.h"
 #include "chat/chat-title.h"
+#include "ui/dir-browser.h"
 #include "ui/dots.h"
 
 struct _XdSidebar
@@ -559,10 +560,26 @@ chat_from_target (XdSidebar *self,
  * the folder chain has already said it; asking again in a dialog was asking
  * the user to repeat something they had configured.
  */
+typedef struct
+{
+  XdSidebar *self;
+  XdNode *folder;         /* unowned; owned by the tree */
+  char *title;
+} PlannedChat;
+
 static void
-create_chat (XdSidebar  *self,
-             XdNode     *folder,
-             const char *title)
+planned_chat_free (PlannedChat *planned)
+{
+  g_object_unref (planned->self);
+  g_free (planned->title);
+  g_free (planned);
+}
+
+static void
+create_chat_in (XdSidebar  *self,
+                XdNode     *folder,
+                const char *title,
+                const char *workdir)
 {
   g_autoptr (GError) error = NULL;
   g_autofree char *backend = NULL;
@@ -577,7 +594,7 @@ create_chat (XdSidebar  *self,
    * answer: the daemon fills all of this in and hands back the row. */
   if (is_remote_row (folder))
     {
-      xd_remote_tree_create_chat (self->remote, folder, title);
+      xd_remote_tree_create_chat (self->remote, folder, title, workdir);
       return;
     }
 
@@ -604,14 +621,72 @@ create_chat (XdSidebar  *self,
       effort = g_strdup (ai_effort_to_string (ai_backend_default_effort (definition)));
   }
 
-  /* No working directory of its own: it runs where its folder does, which is
-   * what a chat made without being asked should do. */
+  /* NULL means it runs where its folder does. */
   chat = xd_fs_tree_create_chat (self->tree, folder, title, backend, model,
-                                 effort, NULL, &error);
+                                 effort, workdir, &error);
   if (chat == NULL)
     show_error (self, "Could not start the chat", error);
   else
     g_signal_emit (self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
+}
+
+static void
+on_workdir_chosen (const char *path,
+                   gpointer    user_data)
+{
+  PlannedChat *planned = user_data;
+
+  /* NULL is the browser being dismissed, which means the folder's own
+   * directory -- the same thing as never having been asked. */
+  create_chat_in (planned->self, planned->folder, planned->title, path);
+
+  planned_chat_free (planned);
+}
+
+/*
+ * Where a chat runs is asked once, when it is made.
+ *
+ * A folder is an organisational thing: "Lunar / Proxy" may mean the proxy
+ * repository today and a scratch checkout tomorrow, and neither of them is
+ * inside the workspace tree. The browser reads the directories of whichever
+ * machine will run the agent, so a chat on a daemon is pointed at a directory
+ * on the daemon.
+ */
+static void
+create_chat (XdSidebar  *self,
+             XdNode     *folder,
+             const char *title)
+{
+  PlannedChat *planned;
+  XdRemoteTree *remote = NULL;
+  g_autofree char *start = NULL;
+
+  if (folder == NULL)
+    return;
+
+  planned = g_new0 (PlannedChat, 1);
+  planned->self = g_object_ref (self);
+  planned->folder = folder;
+  planned->title = g_strdup (title);
+
+  /* Starting where the folder already points, so the common answer is one
+   * keystroke away and the uncommon one is a few. */
+  if (is_remote_row (folder))
+    {
+      remote = self->remote;
+    }
+  else
+    {
+      g_autofree char *fallback =
+        g_settings_get_string (self->settings, "default-backend");
+      g_autoptr (XdEffectiveSettings) resolved =
+        xd_settings_resolve (folder, fallback);
+
+      start = g_strdup (resolved->workdir);
+    }
+
+  xd_dir_browser_present (GTK_WIDGET (self), remote, start,
+                          on_workdir_chosen, planned);
 }
 
 static void

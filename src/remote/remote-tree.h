@@ -69,11 +69,30 @@ void            xd_remote_tree_move_folder   (XdRemoteTree *self,
 void            xd_remote_tree_trash_folder  (XdRemoteTree *self,
                                               XdNode       *folder);
 
-/* The backend, model and working directory are the daemon's to decide: they
- * come from the folder chain, which lives over there. */
+/*
+ * The backend, model and effort are the daemon's to decide -- they come from
+ * the folder chain, which lives over there. @workdir may be NULL to inherit
+ * the folder's; anything else must be a directory on the daemon, which is why
+ * there is an op for listing them.
+ */
 void            xd_remote_tree_create_chat   (XdRemoteTree *self,
                                               XdNode       *folder,
-                                              const char   *title);
+                                              const char   *title,
+                                              const char   *workdir);
+
+/*
+ * The directories inside @path on the daemon, for choosing where a chat runs.
+ * NULL asks for its home. The callback gets the path listed and a NULL
+ * terminated array of names, or NULL when it could not be read.
+ */
+typedef void (*XdRemoteDirFunc) (const char         *path,
+                                 const char *const  *entries,
+                                 gpointer            user_data);
+
+void            xd_remote_tree_list_dir      (XdRemoteTree    *self,
+                                              const char      *path,
+                                              XdRemoteDirFunc  callback,
+                                              gpointer         user_data);
 void            xd_remote_tree_rename_chat   (XdRemoteTree *self,
                                               XdNode       *chat,
                                               const char   *title);

@@ -623,7 +623,8 @@ xd_remote_tree_trash_folder (XdRemoteTree *self,
 void
 xd_remote_tree_create_chat (XdRemoteTree *self,
                             XdNode       *folder,
-                            const char   *title)
+                            const char   *title,
+                            const char   *workdir)
 {
   g_autoptr (JsonBuilder) builder = NULL;
 
@@ -633,9 +634,76 @@ xd_remote_tree_create_chat (XdRemoteTree *self,
   builder = intent_for ("new-chat", "folder", folder);
   json_builder_set_member_name (builder, "title");
   json_builder_add_string_value (builder, title != NULL ? title : "New Chat");
+
+  if (workdir != NULL && *workdir != '\0')
+    {
+      json_builder_set_member_name (builder, "workdir");
+      json_builder_add_string_value (builder, workdir);
+    }
+
   json_builder_end_object (builder);
 
   send_intent (self, builder, "Could not start the chat", TRUE);
+}
+
+/* --- browsing the daemon's directories -------------------------------------- */
+
+typedef struct
+{
+  XdRemoteDirFunc callback;
+  gpointer user_data;
+} Listing;
+
+static void
+on_dir_listed (GObject      *source,
+               GAsyncResult *result,
+               gpointer      user_data)
+{
+  Listing *listing = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) entries = g_ptr_array_new_with_free_func (g_free);
+  JsonArray *rows;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+  if (reply == NULL)
+    {
+      listing->callback (NULL, NULL, listing->user_data);
+      g_free (listing);
+      return;
+    }
+
+  rows = json_object_has_member (reply, "entries")
+    ? json_object_get_array_member (reply, "entries") : NULL;
+
+  for (guint i = 0; rows != NULL && i < json_array_get_length (rows); i++)
+    g_ptr_array_add (entries, g_strdup (json_array_get_string_element (rows, i)));
+
+  g_ptr_array_add (entries, NULL);
+
+  listing->callback (member_string (reply, "path"),
+                     (const char *const *) entries->pdata, listing->user_data);
+
+  g_free (listing);
+}
+
+void
+xd_remote_tree_list_dir (XdRemoteTree    *self,
+                         const char      *path,
+                         XdRemoteDirFunc  callback,
+                         gpointer         user_data)
+{
+  Listing *listing;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (callback != NULL);
+
+  listing = g_new0 (Listing, 1);
+  listing->callback = callback;
+  listing->user_data = user_data;
+
+  xd_remote_client_call_op_async (self->client, "list-dir", "path", path,
+                                  self->cancellable, on_dir_listed, listing);
 }
 
 void

@@ -750,6 +750,7 @@ handle_new_chat (Connection *connection,
   XdRemoteServer *self = connection->server;
   const char *folder_id = member_string (request, "folder");
   const char *title = member_string (request, "title");
+  const char *workdir = member_string (request, "workdir");
   g_autofree char *path = NULL;
   g_autofree char *backend = NULL;
   g_autofree char *model = NULL;
@@ -771,11 +772,12 @@ handle_new_chat (Connection *connection,
       effort = ai_effort_to_string (ai_backend_default_effort (definition));
   }
 
-  /* No working directory: the chat inherits the folder's, which is resolved
-   * on this side too. */
+  /* Without one it inherits the folder's, which is resolved on this side
+   * too -- and the one it is given was picked from this machine's own
+   * directories, so it means something here. */
   chat_id = xd_storage_create_chat (self->storage, folder_id,
                                     title != NULL ? title : XD_CHAT_UNTITLED,
-                                    backend, model, effort, NULL, &error);
+                                    backend, model, effort, workdir, &error);
   if (chat_id == NULL)
     {
       send_error (connection, error->message);
@@ -831,6 +833,67 @@ handle_delete_chat (Connection *connection,
 
   send_done (connection, NULL);
   broadcast_tree (connection->server);
+}
+
+/*
+ * The directories under a path on this machine.
+ *
+ * So a client can say where a chat runs: the directory it picks has to exist
+ * on the side that will run the agent, and only that side can list it. Names
+ * only, directories only, hidden ones left out -- it is a place-picker, not a
+ * file browser, and a device that can start an agent here can already read far
+ * more than this.
+ *
+ * An absent path means the daemon's home, which is where browsing starts.
+ */
+static void
+handle_list_dir (Connection *connection,
+                 JsonObject *request)
+{
+  const char *path = member_string (request, "path");
+  g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GDir) dir = NULL;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (GError) error = NULL;
+  const char *entry;
+
+  if (path == NULL || *path == '\0')
+    path = g_get_home_dir ();
+
+  dir = g_dir_open (path, 0, &error);
+  if (dir == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  while ((entry = g_dir_read_name (dir)) != NULL)
+    {
+      g_autofree char *child = g_build_filename (path, entry, NULL);
+
+      if (entry[0] == '.' || !g_file_test (child, G_FILE_TEST_IS_DIR))
+        continue;
+
+      g_ptr_array_add (names, g_strdup (entry));
+    }
+
+  g_ptr_array_sort_values (names, (GCompareFunc) g_strcmp0);
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, TRUE);
+  json_builder_set_member_name (builder, "path");
+  json_builder_add_string_value (builder, path);
+
+  json_builder_set_member_name (builder, "entries");
+  json_builder_begin_array (builder);
+  for (guint i = 0; i < names->len; i++)
+    json_builder_add_string_value (builder, g_ptr_array_index (names, i));
+  json_builder_end_array (builder);
+
+  json_builder_end_object (builder);
+
+  send_json (connection, builder);
 }
 
 static void
@@ -1310,6 +1373,8 @@ dispatch (Connection *connection,
     handle_tree (connection);
   else if (g_strcmp0 (op, "messages") == 0)
     handle_messages (connection, request);
+  else if (g_strcmp0 (op, "list-dir") == 0)
+    handle_list_dir (connection, request);
   /* The daemon is the only writer: a client sends what it wants done and this
    * is where it is done, so two of them acting at once are ordered here rather
    * than racing in the database. */
