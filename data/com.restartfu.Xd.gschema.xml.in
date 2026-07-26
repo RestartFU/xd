@@ -117,6 +117,15 @@
       <summary>Width of the changed-files pane</summary>
     </key>
 
+    <key name="auto-show-file-diffs" type="b">
+      <default>false</default>
+      <summary>Show changed files when an agent edits them</summary>
+      <description>
+        Open and refresh the changed-files pane when a file_change tool
+        completes, instead of showing only its tool name.
+      </description>
+    </key>
+
     <key name="sidebar-width" type="i">
       <default>280</default>
       <summary>Sidebar width</summary>

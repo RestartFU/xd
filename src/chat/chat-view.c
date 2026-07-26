@@ -122,6 +122,7 @@ struct _XdChatView
   GtkToggleButton *terminal_button;
   XdTerminalPanel *terminal;
   GtkToggleButton *diff_button;
+  GtkToggleButton *auto_diff_toggle;
   XdGitActions *git_actions;
   XdDiffPane *diff;
   GtkPaned *split;
@@ -229,6 +230,7 @@ static void on_storage_changed (XdStorage *storage, gpointer user_data);
 static void load_remote_transcript (XdChatView *self);
 static void load_remote_options (XdChatView *self);
 static void append_tool_line (XdChatView *self, const char *name);
+static void show_tool_use (XdChatView *self, const char *summary);
 static char *describe_context (const char *workdir);
 static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data);
 static void show_queued (XdChatView *self);
@@ -423,6 +425,31 @@ append_tool_line (XdChatView *self,
 
   keep_working_last (self);
   queue_scroll_to_bottom (self);
+}
+
+/*
+ * file_change normally says nothing beyond its machine-facing event name.
+ * When asked, replace that dead line with the live working-tree diff.
+ */
+static void
+show_tool_use (XdChatView *self,
+               const char *summary)
+{
+  gboolean file_change =
+    g_strcmp0 (summary, "file_change") == 0 ||
+    (summary != NULL && g_str_has_prefix (summary, "file_change  "));
+
+  if (file_change && self->remote == NULL &&
+      gtk_toggle_button_get_active (self->auto_diff_toggle))
+    {
+      if (!gtk_toggle_button_get_active (self->diff_button))
+        gtk_toggle_button_set_active (self->diff_button, TRUE);
+      else
+        xd_diff_pane_refresh (self->diff);
+      return;
+    }
+
+  append_tool_line (self, summary);
 }
 
 /*
@@ -871,7 +898,7 @@ on_remote_event (XdRemoteClient *client,
   if (g_strcmp0 (name, "tool") == 0 && text != NULL)
     {
       close_remote_segment (self);
-      append_tool_line (self, text);
+      show_tool_use (self, text);
       queue_scroll_to_bottom (self);
       return;
     }
@@ -1003,7 +1030,7 @@ on_remote_options_received (GObject      *source,
 
           if (json_object_get_boolean_member_with_default (item, "tool", FALSE))
             {
-              append_tool_line (self, text);
+              show_tool_use (self, text);
             }
           else
             {
@@ -1323,7 +1350,7 @@ on_tool_use (XdChatSession *session,
   close_segment (turn);
 
   if (turn_is_visible (turn))
-    append_tool_line (turn->view, name);
+    show_tool_use (turn->view, name);
 }
 
 static void
@@ -2708,6 +2735,7 @@ set_local_controls_visible (XdChatView *self,
                             gboolean    visible)
 {
   gtk_widget_set_visible (GTK_WIDGET (self->diff_button), visible);
+  gtk_widget_set_visible (GTK_WIDGET (self->auto_diff_toggle), visible);
   gtk_widget_set_visible (GTK_WIDGET (self->git_actions), visible);
 
   if (visible)
@@ -3058,6 +3086,27 @@ build_composer (XdChatView *self)
 
     gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   }
+
+  self->auto_diff_toggle = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
+  {
+    GtkWidget *content = adw_button_content_new ();
+
+    adw_button_content_set_icon_name (ADW_BUTTON_CONTENT (content),
+                                      "document-edit-symbolic");
+    adw_button_content_set_label (ADW_BUTTON_CONTENT (content), "Diffs");
+    gtk_button_set_child (GTK_BUTTON (self->auto_diff_toggle), content);
+  }
+  gtk_widget_add_css_class (GTK_WIDGET (self->auto_diff_toggle), "flat");
+  gtk_widget_set_tooltip_text (
+    GTK_WIDGET (self->auto_diff_toggle),
+    "Show changed files when a file_change tool completes");
+  g_settings_bind (self->settings, "auto-show-file-diffs",
+                   self->auto_diff_toggle, "active",
+                   G_SETTINGS_BIND_DEFAULT);
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->auto_diff_toggle));
+  gtk_box_append (GTK_BOX (toolbar),
+                  gtk_separator_new (GTK_ORIENTATION_VERTICAL));
+
   self->terminal_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
   gtk_button_set_icon_name (GTK_BUTTON (self->terminal_button), "utilities-terminal-symbolic");
   gtk_widget_add_css_class (GTK_WIDGET (self->terminal_button), "flat");

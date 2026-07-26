@@ -351,6 +351,7 @@ test_tool_summary_names_the_work (void)
   g_autoptr (JsonParser) parser = json_parser_new ();
   g_autofree char *bash = NULL;
   g_autofree char *bare = NULL;
+  g_autofree char *file_change = NULL;
 
   g_assert_true (json_parser_load_from_data (
     parser, "{\"command\":\"git status\",\"file_path\":\"ignored\"}", -1, NULL));
@@ -378,6 +379,11 @@ test_tool_summary_names_the_work (void)
   /* Nothing identifying: the name alone, never a dangling separator. */
   bare = ai_tool_summary ("Think", NULL);
   g_assert_cmpstr (bare, ==, "Think");
+
+  /* file_change has structured changes rather than one path. Its stable name
+   * is what the chat uses to replace the dead tool line with the diff pane. */
+  file_change = ai_tool_summary ("file_change", NULL);
+  g_assert_cmpstr (file_change, ==, "file_change");
 }
 
 static void
