@@ -779,6 +779,8 @@ on_item_setup (GtkSignalListItemFactory *factory,
   GtkWidget *spinner = gtk_spinner_new ();
   GtkWidget *label = gtk_label_new (NULL);
   GtkWidget *popover = gtk_popover_menu_new_from_model (NULL);
+
+  gtk_widget_add_css_class (popover, "hy-menu-popover");
   GtkGesture *gesture;
 
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);

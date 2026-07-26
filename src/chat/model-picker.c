@@ -554,7 +554,14 @@ hy_model_picker_init (HyModelPicker *self)
   gtk_menu_button_set_child (self->button, content);
   gtk_widget_add_css_class (GTK_WIDGET (self->button), "flat");
 
-  gtk_popover_set_child (GTK_POPOVER (popover), build_popover_content (self));
+  {
+    GtkWidget *content = build_popover_content (self);
+
+    /* The visible panel is this child, not the popover's own chrome; see the
+     * stylesheet's note on popover surfaces. */
+    gtk_widget_add_css_class (content, "hy-menu");
+    gtk_popover_set_child (GTK_POPOVER (popover), content);
+  }
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
   g_signal_connect (popover, "show", G_CALLBACK (on_popover_shown), self);
   gtk_menu_button_set_popover (self->button, popover);

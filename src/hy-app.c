@@ -313,6 +313,23 @@ static const char *HY_STYLE =
   " border-color: alpha(#ffffff, 0.18); }\n"
   ".hy-choice:hover label { color: alpha(#ffffff, 0.95); }\n"
 
+  /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
+   * enough width that the title and its close button stop fighting. */
+  "tabbar { background: none; box-shadow: none; }\n"
+  "tabbar tabbox { background: none; }\n"
+  "tabbar tab { border-radius: 8px; margin: 3px 2px; padding: 2px 8px;"
+  " min-width: 110px; }\n"
+  "tabbar tab:selected, tabbar tab:checked"
+  " { background: alpha(#ffffff, 0.10); }\n"
+
+  /* Code blocks: a card of their own, since Pango cannot draw a padded
+   * rounded background behind a run of text. */
+  ".hy-code { background-color: alpha(#ffffff, 0.04);"
+  " border: 1px solid alpha(#ffffff, 0.06); border-radius: 10px;"
+  " padding: 10px 12px; }\n"
+  ".hy-code label { font-family: \"JetBrains Mono\", monospace;"
+  " font-size: 0.88em; }\n"
+
   /* Selectable, but not editable-looking: a caret blinking in a message
    * suggests typing somewhere nothing can be typed. Selection keeps its
    * colour; only the caret goes. */
