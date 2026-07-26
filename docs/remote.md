@@ -32,6 +32,43 @@ tree, chats and messages; a subscription pushes turn events (text-delta,
 tool-use, finished) to every connected client, so two machines watching one
 chat both see it stream.
 
+## Many clients at once
+
+Every paired device may be connected at the same time, and they stay in step
+without polling.
+
+The daemon is the only writer. A client never edits state directly: it sends
+an intent -- send this message, rename this folder, switch this chat's model
+-- and the daemon applies it and broadcasts what happened. Two devices acting
+at once are therefore ordered by the daemon rather than racing in the
+database, and neither can end up holding a version of the truth the other
+does not have.
+
+Every change is an entry in an append-only event log with a monotonic id:
+messages, folder and chat edits, model and effort changes, turn events. On
+connecting, a client takes a snapshot and the id it was taken at; from then
+on it applies events as they arrive. Reconnecting resumes from the last id it
+saw, so a device that was closed, asleep or off the network catches up on
+exactly what it missed instead of reloading everything or silently drifting.
+
+Turn output fans out to every subscriber, not only the device that sent the
+message. Watching a chat from a second machine shows the same reply arriving
+in the same order.
+
+One turn per chat stays the rule, enforced by the daemon. A second device
+sending into a chat that is already working queues its message the way the
+composer already does locally, and the queued message is itself broadcast --
+so both devices can see what is waiting, and either can steer it.
+
+Terminal sessions are shared rather than per-device: the pty lives on the
+daemon, and every device attached to that chat sees the same screen and can
+type into it. A terminal that only one device could see would not be the same
+machine's terminal.
+
+What stays local to a device is what describes that device rather than the
+work: which panes are open, how wide they are, window size. Those are read
+from the device's own settings, not the daemon.
+
 ## Why TLS is not optional
 
 The daemon runs agents at whatever access their chat allows, including one
