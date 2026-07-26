@@ -19,10 +19,20 @@ remote tree implementation in place of the filesystem one.
 
 ## Pairing
 
-The daemon prints a code (`4F2K-9QX1`) good for sixty seconds and one use. A
-client sends it once and receives a long-lived device token, kept in its
-settings. The daemon keeps paired devices in a table with names and last-seen
-times, each revocable on its own.
+Pairing happens once per device. The daemon prints a code (`4F2K-9QX1`) good
+for sixty seconds and one use; a client sends it once and receives a device
+token, which it keeps in its settings.
+
+The device token does not expire. Reconnecting is the token and nothing else
+-- no code to fetch from the other machine, no prompt -- so a laptop opening
+in the morning is connected before the window has finished drawing. The short
+life belongs to the pairing code, which is a secret said out loud between two
+machines; the token that replaces it is a secret only the device holds.
+
+A token ends when it is revoked, and only then. The daemon keeps paired
+devices in a table with names and last-seen times, each revocable on its own,
+which is the thing to reach for when a machine is lost rather than an expiry
+that would have logged everything out on a schedule to no one's benefit.
 
 ## Transport
 
