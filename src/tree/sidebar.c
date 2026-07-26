@@ -34,16 +34,24 @@ G_DEFINE_FINAL_TYPE (XdSidebar, xd_sidebar, ADW_TYPE_BIN)
 /* --- small dialog helpers ------------------------------------------------- */
 
 static void
+show_error_message (XdSidebar  *self,
+                    const char *heading,
+                    const char *message)
+{
+  AdwAlertDialog *dialog;
+
+  dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new (heading, message));
+  adw_alert_dialog_add_response (dialog, "close", "Close");
+  adw_alert_dialog_set_default_response (dialog, "close");
+  adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
+}
+
+static void
 show_error (XdSidebar  *self,
             const char *heading,
             GError     *error)
 {
-  AdwAlertDialog *dialog;
-
-  dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new (heading, error->message));
-  adw_alert_dialog_add_response (dialog, "close", "Close");
-  adw_alert_dialog_set_default_response (dialog, "close");
-  adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
+  show_error_message (self, heading, error->message);
 }
 
 typedef void (*NameCallback) (XdSidebar  *self,
@@ -140,7 +148,8 @@ is_remote_row (XdNode *node)
 }
 
 /* Menu items carry the folder path, which is the only stable handle a GVariant
- * can hold; the node itself is looked up from it. */
+ * can hold; the node itself is looked up from it. A remote's paths are URIs,
+ * so which tree to ask is written on the target. */
 static XdNode *
 node_from_target (XdSidebar *self,
                   GVariant  *target)
@@ -152,6 +161,9 @@ node_from_target (XdSidebar *self,
 
   path = g_variant_get_string (target, NULL);
 
+  if (xd_remote_tree_is_remote_path (path))
+    return self->remote != NULL ? xd_remote_tree_lookup (self->remote, path) : NULL;
+
   return xd_fs_tree_lookup (self->tree, path);
 }
 
@@ -161,6 +173,12 @@ create_folder (XdSidebar  *self,
                const char *name)
 {
   g_autoptr (GError) error = NULL;
+
+  if (parent != NULL && is_remote_row (parent))
+    {
+      xd_remote_tree_create_folder (self->remote, parent, name);
+      return;
+    }
 
   if (xd_fs_tree_create_folder (self->tree, parent, name, &error) == NULL)
     show_error (self, "Could not create the folder", error);
@@ -201,6 +219,12 @@ rename_folder (XdSidebar  *self,
 {
   g_autoptr (GError) error = NULL;
 
+  if (is_remote_row (node))
+    {
+      xd_remote_tree_rename_folder (self->remote, node, name);
+      return;
+    }
+
   if (!xd_fs_tree_rename_folder (self->tree, node, name, &error))
     show_error (self, "Could not rename the folder", error);
 }
@@ -222,14 +246,25 @@ on_rename (GtkWidget  *widget,
 
 /* --- chats ---------------------------------------------------------------- */
 
+/* A chat id says nothing about where the chat is, so the local tree is asked
+ * first and the remote answers for what it does not have. */
 static XdNode *
 chat_from_target (XdSidebar *self,
                   GVariant  *target)
 {
+  const char *chat_id;
+  XdNode *chat;
+
   if (target == NULL)
     return NULL;
 
-  return xd_fs_tree_lookup_chat (self->tree, g_variant_get_string (target, NULL));
+  chat_id = g_variant_get_string (target, NULL);
+
+  chat = xd_fs_tree_lookup_chat (self->tree, chat_id);
+  if (chat == NULL && self->remote != NULL)
+    chat = xd_remote_tree_lookup_chat (self->remote, chat_id);
+
+  return chat;
 }
 
 /*
@@ -350,6 +385,16 @@ on_new_chat_response (GObject      *source,
   if (*title == '\0')
     title = "New Chat";
 
+  /* On a remote the folder chain that decides all of this lives over there,
+   * and so does the CLI that will answer: the daemon fills it in, and the new
+   * chat comes back as a row to open. */
+  if (is_remote_row (prompt->folder))
+    {
+      xd_remote_tree_create_chat (prompt->self->remote, prompt->folder, title);
+      new_chat_prompt_free (prompt);
+      return;
+    }
+
   /* The backend is fixed when the chat is created, because the session id the
    * CLI hands back only means something to that CLI. */
   {
@@ -424,33 +469,46 @@ on_new_chat (GtkWidget  *widget,
   g_object_set (title_row, "activates-default", TRUE, NULL);
   prompt->title_entry = GTK_EDITABLE (title_row);
 
-  prompt->dir_row = ADW_ACTION_ROW (adw_action_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (prompt->dir_row), "Runs in");
-  adw_action_row_set_subtitle_lines (prompt->dir_row, 2);
-
-  choose = gtk_button_new_from_icon_name ("folder-open-symbolic");
-  gtk_widget_add_css_class (choose, "flat");
-  gtk_widget_set_valign (choose, GTK_ALIGN_CENTER);
-  gtk_widget_set_tooltip_text (choose, "Choose a directory…");
-  g_signal_connect (choose, "clicked", G_CALLBACK (on_choose_directory), prompt);
-
-  clear = gtk_button_new_from_icon_name ("edit-clear-symbolic");
-  gtk_widget_add_css_class (clear, "flat");
-  gtk_widget_set_valign (clear, GTK_ALIGN_CENTER);
-  gtk_widget_set_tooltip_text (clear, "Use the folder's own directory");
-  g_signal_connect (clear, "clicked", G_CALLBACK (on_clear_directory), prompt);
-
-  buttons = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
-  gtk_box_append (GTK_BOX (buttons), choose);
-  gtk_box_append (GTK_BOX (buttons), clear);
-  adw_action_row_add_suffix (prompt->dir_row, buttons);
-
-  update_dir_row (prompt);
-
   group = adw_preferences_group_new ();
   adw_preferences_group_add (ADW_PREFERENCES_GROUP (group), title_row);
-  adw_preferences_group_add (ADW_PREFERENCES_GROUP (group),
-                             GTK_WIDGET (prompt->dir_row));
+
+  /*
+   * Only a name for a remote chat.
+   *
+   * The picker below chooses a directory on this machine, and the chat will
+   * run on another one -- so there is nothing here worth offering. The daemon
+   * takes the working directory from the folder, which is where a local chat
+   * gets it too when nothing is picked.
+   */
+  if (!is_remote_row (folder))
+    {
+      prompt->dir_row = ADW_ACTION_ROW (adw_action_row_new ());
+      adw_preferences_row_set_title (ADW_PREFERENCES_ROW (prompt->dir_row), "Runs in");
+      adw_action_row_set_subtitle_lines (prompt->dir_row, 2);
+
+      choose = gtk_button_new_from_icon_name ("folder-open-symbolic");
+      gtk_widget_add_css_class (choose, "flat");
+      gtk_widget_set_valign (choose, GTK_ALIGN_CENTER);
+      gtk_widget_set_tooltip_text (choose, "Choose a directory…");
+      g_signal_connect (choose, "clicked", G_CALLBACK (on_choose_directory), prompt);
+
+      clear = gtk_button_new_from_icon_name ("edit-clear-symbolic");
+      gtk_widget_add_css_class (clear, "flat");
+      gtk_widget_set_valign (clear, GTK_ALIGN_CENTER);
+      gtk_widget_set_tooltip_text (clear, "Use the folder's own directory");
+      g_signal_connect (clear, "clicked", G_CALLBACK (on_clear_directory), prompt);
+
+      buttons = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+      gtk_box_append (GTK_BOX (buttons), choose);
+      gtk_box_append (GTK_BOX (buttons), clear);
+      adw_action_row_add_suffix (prompt->dir_row, buttons);
+
+      update_dir_row (prompt);
+
+      adw_preferences_group_add (ADW_PREFERENCES_GROUP (group),
+                                 GTK_WIDGET (prompt->dir_row));
+    }
+
   adw_alert_dialog_set_extra_child (dialog, group);
 
   adw_alert_dialog_choose (dialog, GTK_WIDGET (self), NULL,
@@ -463,6 +521,12 @@ rename_chat (XdSidebar  *self,
              const char *title)
 {
   g_autoptr (GError) error = NULL;
+
+  if (is_remote_row (chat))
+    {
+      xd_remote_tree_rename_chat (self->remote, chat, title);
+      return;
+    }
 
   if (!xd_fs_tree_rename_chat (self->tree, chat, title, &error))
     show_error (self, "Could not rename the chat", error);
@@ -495,8 +559,33 @@ on_delete_chat (GtkWidget  *widget,
   if (chat == NULL)
     return;
 
+  if (is_remote_row (chat))
+    {
+      xd_remote_tree_delete_chat (self->remote, chat);
+      return;
+    }
+
   if (!xd_fs_tree_delete_chat (self->tree, chat, &error))
     show_error (self, "Could not delete the chat", error);
+}
+
+/*
+ * Reads the remote's tree again.
+ *
+ * It is read on its own whenever the connection comes up, and every change
+ * made from here is followed by another read -- but a change made on the other
+ * machine, or from a third one, arrives nowhere until the daemon can say so.
+ * Until it can, this is how to ask.
+ */
+static void
+on_refresh_remote (GtkWidget  *widget,
+                   const char *action_name,
+                   GVariant   *target)
+{
+  XdSidebar *self = XD_SIDEBAR (widget);
+
+  if (self->remote != NULL)
+    xd_remote_tree_refresh (self->remote);
 }
 
 static void
@@ -530,8 +619,16 @@ on_trash_response (GObject      *source,
 
   response = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), result);
 
-  if (g_strcmp0 (response, "trash") == 0 &&
-      !xd_fs_tree_trash_folder (prompt->self->tree, prompt->node, &error))
+  if (g_strcmp0 (response, "trash") != 0)
+    {
+      g_object_unref (prompt->self);
+      g_free (prompt);
+      return;
+    }
+
+  if (is_remote_row (prompt->node))
+    xd_remote_tree_trash_folder (prompt->self->remote, prompt->node);
+  else if (!xd_fs_tree_trash_folder (prompt->self->tree, prompt->node, &error))
     show_error (prompt->self, "Could not move the folder to the trash", error);
 
   g_object_unref (prompt->self);
@@ -719,11 +816,8 @@ on_drag_prepare (GtkDragSource *source,
 {
   XdNode *node = node_for_row (user_data);
 
-  /* Chats belong to whichever folder they were made in; only folders move.
-   * A remote's folders are directories on another machine, which this window
-   * does not get to rearrange. */
-  if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER ||
-      is_remote_row (node))
+  /* Chats belong to whichever folder they were made in; only folders move. */
+  if (node == NULL || xd_node_get_kind (node) != XD_NODE_FOLDER)
     return NULL;
 
   return gdk_content_provider_new_typed (XD_TYPE_NODE, node);
@@ -760,10 +854,24 @@ on_drop (GtkDropTarget *target,
   if (onto != NULL && xd_node_get_kind (onto) != XD_NODE_FOLDER)
     onto = xd_node_get_parent (onto);
 
-  /* Moving a local folder into a remote would mean sending a directory to
-   * another machine, which is not what dragging a row promises. */
-  if (onto != NULL && is_remote_row (onto))
+  /*
+   * Each side stays on its own machine.
+   *
+   * Dragging a row moves a directory, and a directory cannot be moved to
+   * another computer by moving it: that would be a copy, over the wire, of
+   * something that may be a repository. Refused rather than half-done.
+   *
+   * The empty space below the tree is the local top level, so a remote folder
+   * dropped there is a folder dragged out of the remote entirely.
+   */
+  if (is_remote_row (dropped) != (onto != NULL && is_remote_row (onto)))
     return FALSE;
+
+  if (is_remote_row (dropped))
+    {
+      xd_remote_tree_move_folder (self->remote, dropped, onto);
+      return TRUE;
+    }
 
   if (!xd_fs_tree_move_folder (self->tree, dropped, onto, &error))
     {
@@ -861,6 +969,7 @@ build_row_menu (XdNode *node)
 {
   g_autoptr (GVariant) target =
     g_variant_ref_sink (g_variant_new_string (xd_node_get_path (node)));
+  gboolean remote = is_remote_row (node);
   GMenu *menu = g_menu_new ();
   GMenu *section = g_menu_new ();
   g_autoptr (GMenuItem) new_chat = NULL;
@@ -881,15 +990,46 @@ build_row_menu (XdNode *node)
   g_menu_item_set_action_and_target_value (rename, "sidebar.rename", target);
   g_menu_append_item (menu, rename);
 
-  settings = g_menu_item_new ("Folder Settings…", NULL);
-  g_menu_item_set_action_and_target_value (settings, "sidebar.settings", target);
-  g_menu_append_item (menu, settings);
+  /* The settings dialog edits the dotfile inside the folder, which for a
+   * remote is a file on the other machine that nothing here can write. */
+  if (!remote)
+    {
+      settings = g_menu_item_new ("Folder Settings…", NULL);
+      g_menu_item_set_action_and_target_value (settings, "sidebar.settings", target);
+      g_menu_append_item (menu, settings);
+    }
 
   trash = g_menu_item_new ("Move to Trash", NULL);
   g_menu_item_set_action_and_target_value (trash, "sidebar.trash", target);
   g_menu_append_item (section, trash);
   g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
   g_object_unref (section);
+
+  return G_MENU_MODEL (menu);
+}
+
+/*
+ * The remote's own row, which is the machine rather than a folder on it.
+ *
+ * It can hold new workspaces and it can be refreshed; it cannot be renamed or
+ * thrown away, because neither means anything to do to a computer.
+ */
+static GMenuModel *
+build_remote_menu (XdNode *node)
+{
+  g_autoptr (GVariant) target =
+    g_variant_ref_sink (g_variant_new_string (xd_node_get_path (node)));
+  GMenu *menu = g_menu_new ();
+  g_autoptr (GMenuItem) new_folder = NULL;
+  g_autoptr (GMenuItem) refresh = NULL;
+
+  new_folder = g_menu_item_new ("New Workspace", NULL);
+  g_menu_item_set_action_and_target_value (new_folder, "sidebar.new-folder", target);
+  g_menu_append_item (menu, new_folder);
+
+  refresh = g_menu_item_new ("Refresh", NULL);
+  g_menu_item_set_action_and_target_value (refresh, "sidebar.refresh-remote", target);
+  g_menu_append_item (menu, refresh);
 
   return G_MENU_MODEL (menu);
 }
@@ -956,13 +1096,16 @@ on_item_bind (GtkSignalListItemFactory *factory,
 
   {
     gboolean is_folder = xd_node_get_kind (node) == XD_NODE_FOLDER;
+    gboolean is_remote_root = self->remote != NULL &&
+      node == xd_remote_tree_get_root (self->remote);
     GtkWidget *popover = g_object_get_data (G_OBJECT (item), "context-menu");
     g_autoptr (GMenuModel) menu = NULL;
 
-    /* A remote's rows get no menu at all: every item on it renames, creates or
-     * deletes something on this machine, and the daemon owns that tree. An
-     * empty menu is better than one that quietly does nothing. */
-    if (!is_remote_row (node))
+    /* The same menu wherever the row lives: what each item does is settled
+     * when it is chosen, by which tree the row came from. */
+    if (is_remote_root)
+      menu = build_remote_menu (node);
+    else
       menu = is_folder ? build_row_menu (node) : build_chat_menu (node);
 
     /* Right-click is the only way in, for folders as for chats: a button on
@@ -1107,6 +1250,29 @@ xd_sidebar_new (XdFsTree *tree)
   return self;
 }
 
+/* The daemon would not do what was asked. Nothing changed on either side, so
+ * saying so is the whole of it. */
+static void
+on_remote_failed (XdRemoteTree *remote,
+                  const char   *heading,
+                  const char   *message,
+                  gpointer      user_data)
+{
+  show_error_message (user_data, heading, message);
+}
+
+/* A chat made on the daemon has arrived in the tree; opening it is the rest of
+ * what "New Chat" meant. */
+static void
+on_remote_chat_created (XdRemoteTree *remote,
+                        XdNode       *chat,
+                        gpointer      user_data)
+{
+  XdSidebar *self = user_data;
+
+  g_signal_emit (self, signals[SIGNAL_NODE_ACTIVATED], 0, chat);
+}
+
 void
 xd_sidebar_set_remote (XdSidebar    *self,
                        XdRemoteTree *remote)
@@ -1118,17 +1284,27 @@ xd_sidebar_set_remote (XdSidebar    *self,
   if (self->remote == remote)
     return;
 
-  if (self->remote != NULL &&
-      g_list_store_find (self->roots, xd_remote_tree_get_model (self->remote),
-                         &position))
-    g_list_store_remove (self->roots, position);
+  if (self->remote != NULL)
+    {
+      g_signal_handlers_disconnect_by_data (self->remote, self);
+
+      if (g_list_store_find (self->roots,
+                             xd_remote_tree_get_model (self->remote), &position))
+        g_list_store_remove (self->roots, position);
+    }
 
   g_set_object (&self->remote, remote);
 
+  if (remote == NULL)
+    return;
+
+  g_signal_connect (remote, "failed", G_CALLBACK (on_remote_failed), self);
+  g_signal_connect (remote, "chat-created",
+                    G_CALLBACK (on_remote_chat_created), self);
+
   /* After the local workspaces, so the tree reads as "what is here, then what
    * is over there". */
-  if (remote != NULL)
-    g_list_store_append (self->roots, xd_remote_tree_get_model (remote));
+  g_list_store_append (self->roots, xd_remote_tree_get_model (remote));
 }
 
 static void
@@ -1141,6 +1317,9 @@ xd_sidebar_dispose (GObject *object)
       g_clear_handle_id (&self->save_expanded_id, g_source_remove);
       save_expanded (self);
     }
+
+  if (self->remote != NULL)
+    g_signal_handlers_disconnect_by_data (self->remote, self);
 
   g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);
@@ -1185,6 +1364,8 @@ xd_sidebar_class_init (XdSidebarClass *klass)
                                    on_delete_chat);
   gtk_widget_class_install_action (widget_class, "sidebar.settings", "s",
                                    on_folder_settings);
+  gtk_widget_class_install_action (widget_class, "sidebar.refresh-remote", "s",
+                                   on_refresh_remote);
 }
 
 static void

@@ -1,5 +1,8 @@
 #include "server.h"
 
+#include "backend/backend.h"
+#include "settings/folder-settings.h"
+
 #include <json-glib/json-glib.h>
 #include <string.h>
 
@@ -78,6 +81,27 @@ send_error (Connection *connection,
   json_builder_add_boolean_value (builder, FALSE);
   json_builder_set_member_name (builder, "error");
   json_builder_add_string_value (builder, message);
+  json_builder_end_object (builder);
+
+  send_json (connection, builder);
+}
+
+/* What a request that changed something answers with: that it worked, and the
+ * id of whatever was made, for a client that wants to open it. */
+static void
+send_done (Connection *connection,
+           const char *id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, TRUE);
+  if (id != NULL)
+    {
+      json_builder_set_member_name (builder, "id");
+      json_builder_add_string_value (builder, id);
+    }
   json_builder_end_object (builder);
 
   send_json (connection, builder);
@@ -321,6 +345,390 @@ handle_tree (Connection *connection)
   send_json (connection, builder);
 }
 
+/* --- changing the tree ----------------------------------------------------- */
+
+/*
+ * The directory a folder id names, searched from the workspace root.
+ *
+ * A folder's id lives in a dotfile inside it, which is what lets it be renamed
+ * and moved without the chats written against it noticing -- and is why an id
+ * has to be looked for rather than computed.
+ */
+static char *
+find_folder (const char *path,
+             const char *id)
+{
+  g_autofree char *here = folder_id_for (path);
+  g_autoptr (GDir) dir = NULL;
+  const char *entry;
+
+  if (here != NULL && g_strcmp0 (here, id) == 0)
+    return g_strdup (path);
+
+  dir = g_dir_open (path, 0, NULL);
+  while (dir != NULL && (entry = g_dir_read_name (dir)) != NULL)
+    {
+      g_autofree char *child = g_build_filename (path, entry, NULL);
+      char *found;
+
+      if (entry[0] == '.' || !g_file_test (child, G_FILE_TEST_IS_DIR))
+        continue;
+
+      found = find_folder (child, id);
+      if (found != NULL)
+        return found;
+    }
+
+  return NULL;
+}
+
+/*
+ * Resolves a folder argument to a place on disk.
+ *
+ * An absent id means the workspace root, which is where a new workspace goes.
+ * Anything else that does not resolve is answered rather than ignored: the
+ * client is looking at a tree that has moved on.
+ */
+static char *
+folder_argument (Connection *connection,
+                 JsonObject *request,
+                 const char *name,
+                 gboolean    root_allowed)
+{
+  XdRemoteServer *self = connection->server;
+  const char *id = member_string (request, name);
+  char *path;
+
+  if (id == NULL)
+    {
+      if (root_allowed)
+        return g_strdup (self->root_path);
+
+      send_error (connection, "That request needs a folder.");
+      return NULL;
+    }
+
+  path = find_folder (self->root_path, id);
+  if (path == NULL)
+    send_error (connection, "No such folder on the daemon.");
+
+  return path;
+}
+
+/*
+ * A name that can be a directory in the workspace tree.
+ *
+ * Hidden names are refused along with separators: the tree skips anything
+ * beginning with a dot, so a folder called ".x" would be made and then never
+ * appear -- and "." and ".." would be something else entirely.
+ */
+static gboolean
+valid_folder_name (Connection *connection,
+                   const char *name)
+{
+  if (name == NULL || *name == '\0' || *name == '.' ||
+      strchr (name, G_DIR_SEPARATOR) != NULL)
+    {
+      send_error (connection, "A folder name cannot be empty or hidden, or "
+                              "contain a path separator.");
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static void
+handle_new_folder (Connection *connection,
+                   JsonObject *request)
+{
+  const char *name = member_string (request, "name");
+  g_autofree char *parent = NULL;
+  g_autofree char *path = NULL;
+  g_autoptr (XdFolderSettings) settings = NULL;
+  g_autoptr (GFile) file = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (!valid_folder_name (connection, name))
+    return;
+
+  parent = folder_argument (connection, request, "parent", TRUE);
+  if (parent == NULL)
+    return;
+
+  path = g_build_filename (parent, name, NULL);
+  file = g_file_new_for_path (path);
+
+  if (!g_file_make_directory (file, NULL, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  /* Minted here rather than left for the next scan, so the answer can name
+   * the folder that was just made. */
+  settings = xd_folder_settings_ensure (path, &error);
+  if (settings == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, settings->id);
+}
+
+static void
+handle_rename_folder (Connection *connection,
+                      JsonObject *request)
+{
+  const char *name = member_string (request, "name");
+  g_autofree char *path = NULL;
+  g_autoptr (GFile) file = NULL;
+  g_autoptr (GFile) renamed = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (!valid_folder_name (connection, name))
+    return;
+
+  path = folder_argument (connection, request, "folder", FALSE);
+  if (path == NULL)
+    return;
+
+  file = g_file_new_for_path (path);
+  renamed = g_file_set_display_name (file, name, NULL, &error);
+  if (renamed == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
+static void
+handle_move_folder (Connection *connection,
+                    JsonObject *request)
+{
+  g_autofree char *path = NULL;
+  g_autofree char *parent = NULL;
+  g_autofree char *name = NULL;
+  g_autofree char *destination_path = NULL;
+  g_autofree char *inside = NULL;
+  g_autoptr (GFile) source = NULL;
+  g_autoptr (GFile) destination = NULL;
+  g_autoptr (GError) error = NULL;
+
+  path = folder_argument (connection, request, "folder", FALSE);
+  if (path == NULL)
+    return;
+
+  parent = folder_argument (connection, request, "parent", TRUE);
+  if (parent == NULL)
+    return;
+
+  /* A folder cannot hold itself, and moving one into its own subtree would
+   * take the destination along with it. */
+  inside = g_strconcat (path, G_DIR_SEPARATOR_S, NULL);
+  if (g_strcmp0 (path, parent) == 0 || g_str_has_prefix (parent, inside))
+    {
+      send_error (connection, "A folder cannot be moved inside itself.");
+      return;
+    }
+
+  name = g_path_get_basename (path);
+  destination_path = g_build_filename (parent, name, NULL);
+
+  source = g_file_new_for_path (path);
+  destination = g_file_new_for_path (destination_path);
+
+  if (g_file_query_exists (destination, NULL))
+    {
+      send_error (connection, "There is already a folder of that name there.");
+      return;
+    }
+
+  /* A plain rename, since everything is under one root. Across filesystems
+   * this fails rather than copying, which is the honest outcome. */
+  if (!g_file_move (source, destination, G_FILE_COPY_NONE, NULL, NULL, NULL, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
+static void
+handle_trash_folder (Connection *connection,
+                     JsonObject *request)
+{
+  g_autofree char *path = NULL;
+  g_autoptr (GFile) file = NULL;
+  g_autoptr (GError) error = NULL;
+
+  path = folder_argument (connection, request, "folder", FALSE);
+  if (path == NULL)
+    return;
+
+  file = g_file_new_for_path (path);
+
+  /* The trash rather than a delete, as the local tree does: the daemon runs
+   * unattended, and a mistaken click from another machine should be something
+   * the person at this one can undo. */
+  if (!g_file_trash (file, NULL, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
+/*
+ * What a new chat in @path answers with.
+ *
+ * Resolved here rather than sent by the client, because the folder chain that
+ * decides it lives on this machine: a client would be guessing at settings it
+ * cannot read.
+ */
+static void
+resolve_backend (XdRemoteServer  *self,
+                 const char      *path,
+                 char           **backend,
+                 char           **model)
+{
+  g_autofree char *at = g_strdup (path);
+
+  while (at != NULL)
+    {
+      g_autoptr (XdFolderSettings) settings = xd_folder_settings_load (at, NULL);
+      char *parent;
+
+      if (settings != NULL)
+        {
+          if (*backend == NULL && settings->backend != NULL)
+            *backend = g_strdup (settings->backend);
+          if (*model == NULL && settings->model != NULL)
+            *model = g_strdup (settings->model);
+        }
+
+      if (g_strcmp0 (at, self->root_path) == 0)
+        break;
+
+      parent = g_path_get_dirname (at);
+
+      /* The filesystem root is its own parent, and a workspace root written
+       * with a trailing slash never matches the check above -- so the walk
+       * stops when it stops moving rather than only where it is meant to. */
+      if (g_strcmp0 (parent, at) == 0)
+        {
+          g_free (parent);
+          break;
+        }
+
+      g_free (at);
+      at = parent;
+    }
+
+  if (*backend == NULL)
+    *backend = g_strdup ("claude");
+
+  if (*model == NULL)
+    {
+      const AiBackend *definition = ai_backend_lookup (*backend);
+
+      if (definition != NULL)
+        *model = g_strdup (definition->default_model);
+    }
+}
+
+static void
+handle_new_chat (Connection *connection,
+                 JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *folder_id = member_string (request, "folder");
+  const char *title = member_string (request, "title");
+  g_autofree char *path = NULL;
+  g_autofree char *backend = NULL;
+  g_autofree char *model = NULL;
+  g_autofree char *chat_id = NULL;
+  const char *effort = NULL;
+  g_autoptr (GError) error = NULL;
+
+  path = folder_argument (connection, request, "folder", FALSE);
+  if (path == NULL)
+    return;
+
+  resolve_backend (self, path, &backend, &model);
+
+  {
+    const AiBackend *definition = ai_backend_lookup (backend);
+
+    /* What the CLI on this machine would do if nothing said otherwise. */
+    if (definition != NULL)
+      effort = ai_effort_to_string (ai_backend_default_effort (definition));
+  }
+
+  /* No working directory: the chat inherits the folder's, which is resolved
+   * on this side too. */
+  chat_id = xd_storage_create_chat (self->storage, folder_id,
+                                    title != NULL ? title : "New Chat",
+                                    backend, model, effort, NULL, &error);
+  if (chat_id == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, chat_id);
+}
+
+static void
+handle_rename_chat (Connection *connection,
+                    JsonObject *request)
+{
+  const char *chat_id = member_string (request, "chat");
+  const char *title = member_string (request, "title");
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL || title == NULL || *title == '\0')
+    {
+      send_error (connection, "A chat needs an id and a title.");
+      return;
+    }
+
+  if (!xd_storage_set_chat_title (connection->server->storage, chat_id, title,
+                                  &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
+static void
+handle_delete_chat (Connection *connection,
+                    JsonObject *request)
+{
+  const char *chat_id = member_string (request, "chat");
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL)
+    {
+      send_error (connection, "delete-chat needs a chat id");
+      return;
+    }
+
+  if (!xd_storage_delete_chat (connection->server->storage, chat_id, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
 static void
 handle_messages (Connection *connection,
                  JsonObject *request)
@@ -419,6 +827,23 @@ dispatch (Connection *connection,
     handle_tree (connection);
   else if (g_strcmp0 (op, "messages") == 0)
     handle_messages (connection, request);
+  /* The daemon is the only writer: a client sends what it wants done and this
+   * is where it is done, so two of them acting at once are ordered here rather
+   * than racing in the database. */
+  else if (g_strcmp0 (op, "new-folder") == 0)
+    handle_new_folder (connection, request);
+  else if (g_strcmp0 (op, "rename-folder") == 0)
+    handle_rename_folder (connection, request);
+  else if (g_strcmp0 (op, "move-folder") == 0)
+    handle_move_folder (connection, request);
+  else if (g_strcmp0 (op, "trash-folder") == 0)
+    handle_trash_folder (connection, request);
+  else if (g_strcmp0 (op, "new-chat") == 0)
+    handle_new_chat (connection, request);
+  else if (g_strcmp0 (op, "rename-chat") == 0)
+    handle_rename_chat (connection, request);
+  else if (g_strcmp0 (op, "delete-chat") == 0)
+    handle_delete_chat (connection, request);
   else if (g_strcmp0 (op, "ping") == 0)
     {
       g_autoptr (JsonBuilder) builder = json_builder_new ();

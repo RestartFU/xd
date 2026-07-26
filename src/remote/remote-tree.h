@@ -39,6 +39,47 @@ void            xd_remote_tree_refresh     (XdRemoteTree *self);
 XdNode         *xd_remote_tree_lookup_chat (XdRemoteTree *self,
                                             const char   *chat_id);
 
+/* A folder by the URI it is drawn with; the remote's own root included. */
+XdNode         *xd_remote_tree_lookup      (XdRemoteTree *self,
+                                            const char   *path);
+
+/*
+ * Things to be done to the daemon's tree.
+ *
+ * None of them touch the nodes here. A client never edits the tree it is
+ * showing: it says what it wants done, the daemon does it and the tree is read
+ * again -- so what is on screen is always what the daemon has, rather than a
+ * guess that has to be taken back when it turns out to be wrong.
+ *
+ * They therefore return nothing. A daemon that refuses raises ::failed with
+ * something to show the user, and a new chat arrives as ::chat-created once
+ * the tree it is in has caught up.
+ *
+ * @parent may be NULL to mean the top level of the remote.
+ */
+void            xd_remote_tree_create_folder (XdRemoteTree *self,
+                                              XdNode       *parent,
+                                              const char   *name);
+void            xd_remote_tree_rename_folder (XdRemoteTree *self,
+                                              XdNode       *folder,
+                                              const char   *name);
+void            xd_remote_tree_move_folder   (XdRemoteTree *self,
+                                              XdNode       *folder,
+                                              XdNode       *new_parent);
+void            xd_remote_tree_trash_folder  (XdRemoteTree *self,
+                                              XdNode       *folder);
+
+/* The backend, model and working directory are the daemon's to decide: they
+ * come from the folder chain, which lives over there. */
+void            xd_remote_tree_create_chat   (XdRemoteTree *self,
+                                              XdNode       *folder,
+                                              const char   *title);
+void            xd_remote_tree_rename_chat   (XdRemoteTree *self,
+                                              XdNode       *chat,
+                                              const char   *title);
+void            xd_remote_tree_delete_chat   (XdRemoteTree *self,
+                                              XdNode       *chat);
+
 /* True when @node is this remote's own row or lives under it. */
 gboolean        xd_remote_tree_owns        (XdRemoteTree *self,
                                             XdNode       *node);

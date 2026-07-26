@@ -26,12 +26,19 @@ struct _XdRemoteTree
   GHashTable *folders;      /* folder id -> XdNode*, owning a reference */
   GHashTable *chats;        /* chat id   -> XdNode*, owning a reference */
 
+  /* A chat just made on the daemon, to be handed over once the tree it lives
+   * in has been read back and there is a node to hand over. */
+  char *opening;
+
   GCancellable *cancellable;
 };
 
 enum
 {
   SIGNAL_LOADED,
+  SIGNAL_FAILED,
+  SIGNAL_CHAT_CREATED,
+  SIGNAL_CHAT_REMOVED,
   N_SIGNALS,
 };
 
@@ -92,6 +99,10 @@ typedef struct
   XdRemoteTree *tree;
   GHashTable *folders;      /* folder id -> XdNode*, this reply's folders */
   GHashTable *children;     /* XdNode* parent -> GPtrArray* of children */
+
+  /* Chats the daemon no longer has, held alive long enough to say so: whoever
+   * is reading one has to hear that it is gone. */
+  GPtrArray *removed;
 } Reload;
 
 static GPtrArray *
@@ -243,8 +254,11 @@ read_chats (Reload    *reload,
   g_hash_table_iter_init (&iter, self->chats);
   while (g_hash_table_iter_next (&iter, &id, &node))
     {
-      if (!g_hash_table_contains (seen, id))
-        g_hash_table_iter_remove (&iter);
+      if (g_hash_table_contains (seen, id))
+        continue;
+
+      g_ptr_array_add (reload->removed, g_object_ref (node));
+      g_hash_table_iter_remove (&iter);
     }
 }
 
@@ -272,6 +286,7 @@ apply_tree (XdRemoteTree *self,
     .folders = g_hash_table_new (g_str_hash, g_str_equal),
     .children = g_hash_table_new_full (NULL, NULL, NULL,
                                        (GDestroyNotify) g_ptr_array_unref),
+    .removed = g_ptr_array_new_with_free_func (g_object_unref),
   };
   GHashTableIter iter;
   gpointer folder_id, folder;
@@ -316,10 +331,29 @@ apply_tree (XdRemoteTree *self,
     reconcile_children (xd_node_get_children (folder),
                         children_of (&reload, folder));
 
+  /* Out of the tree by now, and still alive because this array holds them:
+   * whoever is showing one is holding a node, not being handed a dead one. */
+  for (guint i = 0; i < reload.removed->len; i++)
+    g_signal_emit (self, signals[SIGNAL_CHAT_REMOVED], 0,
+                   g_ptr_array_index (reload.removed, i));
+
   g_hash_table_unref (reload.folders);
   g_hash_table_unref (reload.children);
+  g_ptr_array_unref (reload.removed);
 
   xd_node_set_state (self->root, XD_NODE_IDLE);
+
+  /* The chat that was just made now has a row, which is the first moment it
+   * can be opened. */
+  if (self->opening != NULL)
+    {
+      g_autofree char *chat_id = g_steal_pointer (&self->opening);
+      XdNode *chat = g_hash_table_lookup (self->chats, chat_id);
+
+      if (chat != NULL)
+        g_signal_emit (self, signals[SIGNAL_CHAT_CREATED], 0, chat);
+    }
+
   g_signal_emit (self, signals[SIGNAL_LOADED], 0);
 }
 
@@ -365,6 +399,253 @@ xd_remote_tree_refresh (XdRemoteTree *self)
   xd_remote_client_call_op_async (self->client, "tree", NULL, NULL,
                                   self->cancellable, on_tree_received,
                                   g_object_ref (self));
+}
+
+/* --- asking the daemon to change something --------------------------------- */
+
+typedef struct
+{
+  XdRemoteTree *tree;
+  char *heading;        /* what to say if the daemon says no */
+  gboolean opens_chat;  /* the answer names a chat that should be opened */
+} Intent;
+
+static void
+intent_free (Intent *intent)
+{
+  g_clear_object (&intent->tree);
+  g_free (intent->heading);
+  g_free (intent);
+}
+
+static void
+on_intent_answered (GObject      *source,
+                    GAsyncResult *result,
+                    gpointer      user_data)
+{
+  Intent *intent = user_data;
+  XdRemoteTree *self = intent->tree;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+
+  if (reply == NULL)
+    {
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        g_signal_emit (self, signals[SIGNAL_FAILED], 0, intent->heading,
+                       error->message);
+
+      intent_free (intent);
+      return;
+    }
+
+  if (intent->opens_chat)
+    {
+      g_free (self->opening);
+      self->opening = g_strdup (member_string (reply, "id"));
+    }
+
+  /* Done over there; what is shown here comes from asking again rather than
+   * from imagining what the answer would have been. */
+  xd_remote_tree_refresh (self);
+
+  intent_free (intent);
+}
+
+static void
+send_intent (XdRemoteTree *self,
+             JsonBuilder  *builder,
+             const char   *heading,
+             gboolean      opens_chat)
+{
+  g_autoptr (JsonNode) request = json_builder_get_root (builder);
+  Intent *intent;
+
+  if (!xd_remote_client_is_connected (self->client))
+    {
+      g_signal_emit (self, signals[SIGNAL_FAILED], 0, heading,
+                     "The daemon is not connected.");
+      return;
+    }
+
+  intent = g_new0 (Intent, 1);
+  intent->tree = g_object_ref (self);
+  intent->heading = g_strdup (heading);
+  intent->opens_chat = opens_chat;
+
+  xd_remote_client_call_async (self->client, request, self->cancellable,
+                               on_intent_answered, intent);
+}
+
+/* An op naming the folder or chat it acts on, which is most of them. A NULL
+ * @subject means the top level of the remote. */
+static JsonBuilder *
+intent_for (const char *op,
+            const char *subject_name,
+            XdNode     *subject)
+{
+  JsonBuilder *builder = json_builder_new ();
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, op);
+
+  if (subject != NULL && xd_node_get_kind (subject) == XD_NODE_FOLDER &&
+      xd_node_get_folder_id (subject) != NULL)
+    {
+      json_builder_set_member_name (builder, subject_name);
+      json_builder_add_string_value (builder, xd_node_get_folder_id (subject));
+    }
+  else if (subject != NULL && xd_node_get_kind (subject) == XD_NODE_CHAT)
+    {
+      json_builder_set_member_name (builder, subject_name);
+      json_builder_add_string_value (builder, xd_node_get_chat_id (subject));
+    }
+
+  return builder;
+}
+
+/*
+ * The remote's own root stands for the top level, not for a folder.
+ *
+ * Its id is the URI it is drawn with rather than anything the daemon knows, so
+ * passing it on would name a folder that does not exist. Left out instead,
+ * which is how the daemon spells "the workspace root".
+ */
+static XdNode *
+folder_argument (XdRemoteTree *self,
+                 XdNode       *folder)
+{
+  return folder == self->root ? NULL : folder;
+}
+
+void
+xd_remote_tree_create_folder (XdRemoteTree *self,
+                              XdNode       *parent,
+                              const char   *name)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (name != NULL && *name != '\0');
+
+  builder = intent_for ("new-folder", "parent", folder_argument (self, parent));
+  json_builder_set_member_name (builder, "name");
+  json_builder_add_string_value (builder, name);
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Could not create the folder", FALSE);
+}
+
+void
+xd_remote_tree_rename_folder (XdRemoteTree *self,
+                              XdNode       *folder,
+                              const char   *name)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (folder));
+  g_return_if_fail (name != NULL && *name != '\0');
+
+  builder = intent_for ("rename-folder", "folder", folder);
+  json_builder_set_member_name (builder, "name");
+  json_builder_add_string_value (builder, name);
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Could not rename the folder", FALSE);
+}
+
+void
+xd_remote_tree_move_folder (XdRemoteTree *self,
+                            XdNode       *folder,
+                            XdNode       *new_parent)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+  XdNode *parent = folder_argument (self, new_parent);
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (folder));
+
+  builder = intent_for ("move-folder", "folder", folder);
+
+  if (parent != NULL)
+    {
+      json_builder_set_member_name (builder, "parent");
+      json_builder_add_string_value (builder, xd_node_get_folder_id (parent));
+    }
+
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Cannot Move the Folder", FALSE);
+}
+
+void
+xd_remote_tree_trash_folder (XdRemoteTree *self,
+                             XdNode       *folder)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (folder));
+
+  builder = intent_for ("trash-folder", "folder", folder);
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Could not move the folder to the trash", FALSE);
+}
+
+void
+xd_remote_tree_create_chat (XdRemoteTree *self,
+                            XdNode       *folder,
+                            const char   *title)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (folder));
+
+  builder = intent_for ("new-chat", "folder", folder);
+  json_builder_set_member_name (builder, "title");
+  json_builder_add_string_value (builder, title != NULL ? title : "New Chat");
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Could not start the chat", TRUE);
+}
+
+void
+xd_remote_tree_rename_chat (XdRemoteTree *self,
+                            XdNode       *chat,
+                            const char   *title)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (chat));
+  g_return_if_fail (title != NULL && *title != '\0');
+
+  builder = intent_for ("rename-chat", "chat", chat);
+  json_builder_set_member_name (builder, "title");
+  json_builder_add_string_value (builder, title);
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Could not rename the chat", FALSE);
+}
+
+void
+xd_remote_tree_delete_chat (XdRemoteTree *self,
+                            XdNode       *chat)
+{
+  g_autoptr (JsonBuilder) builder = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (chat));
+
+  builder = intent_for ("delete-chat", "chat", chat);
+  json_builder_end_object (builder);
+
+  send_intent (self, builder, "Could not delete the chat", FALSE);
 }
 
 static void
@@ -458,6 +739,29 @@ xd_remote_tree_lookup_chat (XdRemoteTree *self,
   return g_hash_table_lookup (self->chats, chat_id);
 }
 
+XdNode *
+xd_remote_tree_lookup (XdRemoteTree *self,
+                       const char   *path)
+{
+  GHashTableIter iter;
+  gpointer id, node;
+
+  g_return_val_if_fail (XD_IS_REMOTE_TREE (self), NULL);
+  g_return_val_if_fail (path != NULL, NULL);
+
+  if (g_strcmp0 (xd_node_get_path (self->root), path) == 0)
+    return self->root;
+
+  g_hash_table_iter_init (&iter, self->folders);
+  while (g_hash_table_iter_next (&iter, &id, &node))
+    {
+      if (g_strcmp0 (xd_node_get_path (node), path) == 0)
+        return node;
+    }
+
+  return NULL;
+}
+
 gboolean
 xd_remote_tree_owns (XdRemoteTree *self,
                      XdNode       *node)
@@ -491,6 +795,7 @@ xd_remote_tree_dispose (GObject *object)
   if (self->client != NULL)
     g_signal_handlers_disconnect_by_data (self->client, self);
 
+  g_clear_pointer (&self->opening, g_free);
   g_clear_pointer (&self->folders, g_hash_table_unref);
   g_clear_pointer (&self->chats, g_hash_table_unref);
   g_clear_object (&self->roots);
@@ -510,6 +815,25 @@ xd_remote_tree_class_init (XdRemoteTreeClass *klass)
   signals[SIGNAL_LOADED] =
     g_signal_new ("loaded", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+
+  /* The daemon would not do something that was asked of it, with a heading and
+   * what it said. Nothing here changed, so this is the whole outcome. */
+  signals[SIGNAL_FAILED] =
+    g_signal_new ("failed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_STRING, G_TYPE_STRING);
+
+  /* A chat made here now exists in the tree, and is the one to open: making a
+   * chat is only ever the first half of starting one. */
+  signals[SIGNAL_CHAT_CREATED] =
+    g_signal_new ("chat-created", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, XD_TYPE_NODE);
+
+  /* A chat the daemon no longer has -- deleted from here, or from another
+   * device. Whoever is showing it is showing something that is gone. */
+  signals[SIGNAL_CHAT_REMOVED] =
+    g_signal_new ("chat-removed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, XD_TYPE_NODE);
 }
 
 static void

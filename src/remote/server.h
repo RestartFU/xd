@@ -13,8 +13,10 @@ G_DECLARE_FINAL_TYPE (XdRemoteServer, xd_remote_server, XD, REMOTE_SERVER, GObje
  * The daemon side of remote xd: TLS on a port, newline-delimited JSON.
  *
  * Pairing trades a short-lived code for a device token that never expires;
- * only the token's hash touches the database. Everything a client reads
- * comes through here -- the daemon is the only writer.
+ * only the token's hash touches the database. Everything a client reads comes
+ * through here, and so does everything it changes: a client sends what it
+ * wants done -- make this folder, delete this chat -- and this side does it,
+ * which is what makes the daemon the only writer.
  */
 
 XdRemoteServer *xd_remote_server_new       (XdStorage        *storage,

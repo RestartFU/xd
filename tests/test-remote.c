@@ -364,15 +364,28 @@ on_messages (GObject      *source,
   wait->done = TRUE;
 }
 
-/* The one child of @folder that is a chat, or NULL. */
+/*
+ * The row at @position under @folder, borrowed: the folder's own list is what
+ * keeps it alive, which is how every other holder of a node treats it.
+ */
 static XdNode *
-first_child (XdNode *folder)
+child_at (XdNode *folder,
+          guint   position)
 {
   GListModel *children = G_LIST_MODEL (xd_node_get_children (folder));
+  g_autoptr (XdNode) child = NULL;
 
-  g_assert_cmpuint (g_list_model_get_n_items (children), >, 0);
+  g_assert_cmpuint (g_list_model_get_n_items (children), >, position);
 
-  return g_list_model_get_item (children, 0);
+  child = g_list_model_get_item (children, position);
+
+  return child;
+}
+
+static guint
+child_count (XdNode *folder)
+{
+  return g_list_model_get_n_items (G_LIST_MODEL (xd_node_get_children (folder)));
 }
 
 /*
@@ -389,8 +402,8 @@ test_client_pairs_and_reads_the_tree (void)
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
   g_autofree char *code = NULL;
-  g_autoptr (XdNode) folder = NULL;
-  g_autoptr (XdNode) chat = NULL;
+  XdNode *folder;
+  XdNode *chat;
   Wait pairing = { 0 };
   Wait loading = { 0 };
   Wait messages = { 0 };
@@ -418,12 +431,12 @@ test_client_pairs_and_reads_the_tree (void)
   g_assert_cmpstr (xd_node_get_name (xd_remote_tree_get_root (tree)), ==,
                    "127.0.0.1");
 
-  folder = first_child (xd_remote_tree_get_root (tree));
+  folder = child_at (xd_remote_tree_get_root (tree), 0);
   g_assert_cmpint (xd_node_get_kind (folder), ==, XD_NODE_FOLDER);
   g_assert_cmpstr (xd_node_get_name (folder), ==, "Zeno");
   g_assert_cmpstr (xd_node_get_folder_id (folder), ==, "folder-1");
 
-  chat = first_child (folder);
+  chat = child_at (folder, 0);
   g_assert_cmpint (xd_node_get_kind (chat), ==, XD_NODE_CHAT);
   g_assert_cmpstr (xd_node_get_name (chat), ==, "remote chat");
   g_assert_cmpstr (xd_node_get_chat_id (chat), ==, daemon.chat_id);
@@ -514,6 +527,263 @@ test_token_reconnects_and_strangers_are_turned_away (void)
   daemon_stop (&daemon);
 }
 
+typedef struct
+{
+  Wait wait;
+  XdNode *chat;         /* whatever the signal handed over; held */
+} Created;
+
+/*
+ * Answers for ::chat-created and ::chat-removed alike.
+ *
+ * The node is referenced rather than borrowed: a chat that has been deleted is
+ * alive only for as long as the tree is saying so, which is exactly this call.
+ */
+static void
+on_chat_signal (XdRemoteTree *tree,
+                XdNode       *chat,
+                gpointer      user_data)
+{
+  Created *created = user_data;
+
+  g_set_object (&created->chat, chat);
+  created->wait.done = TRUE;
+}
+
+static void
+on_failed (XdRemoteTree *tree,
+           const char   *heading,
+           const char   *message,
+           gpointer      user_data)
+{
+  Wait *wait = user_data;
+
+  wait->failure = g_strdup_printf ("%s: %s", heading, message);
+  wait->done = TRUE;
+}
+
+/* Pairs, and hands back a tree that has been read once. */
+static XdRemoteTree *
+paired_tree (Daemon         *daemon,
+             XdRemoteClient *client)
+{
+  g_autofree char *code = xd_remote_server_arm_pairing (daemon->server, 60);
+  XdRemoteTree *tree;
+  Wait pairing = { 0 };
+  Wait loading = { 0 };
+
+  xd_remote_client_pair_async (client, code, "test-device", NULL,
+                               on_paired, &pairing);
+  wait_for (&pairing);
+  if (!pairing.ok)
+    g_error ("pairing failed: %s", pairing.failure);
+
+  tree = xd_remote_tree_new (client);
+  g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &loading);
+  wait_for (&loading);
+  g_signal_handlers_disconnect_by_data (tree, &loading);
+
+  return tree;
+}
+
+/*
+ * Waits for the tree to be read back, which is what every change ends with.
+ *
+ * A refusal ends the wait too, and says so: without that the test would sit
+ * out its whole timeout and report only that nothing happened.
+ */
+static void
+wait_for_reload (XdRemoteTree *tree)
+{
+  Wait wait = { 0 };
+
+  g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &wait);
+  g_signal_connect (tree, "failed", G_CALLBACK (on_failed), &wait);
+
+  wait_for (&wait);
+
+  g_signal_handlers_disconnect_by_data (tree, &wait);
+
+  if (wait.failure != NULL)
+    g_error ("the daemon refused: %s", wait.failure);
+}
+
+/*
+ * Managing the daemon's tree from a client.
+ *
+ * Every one of these goes the same way: the client says what it wants done,
+ * the daemon does it, and the tree comes back read from the daemon rather than
+ * imagined here -- so what is asserted is what the daemon actually has.
+ */
+static void
+test_folders_and_chats_are_managed_from_the_client (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  XdNode *root;
+  XdNode *zeno;
+  XdNode *made;
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  root = xd_remote_tree_get_root (tree);
+
+  /* A workspace at the top level of the remote. */
+  xd_remote_tree_create_folder (tree, NULL, "Lunar");
+  wait_for_reload (tree);
+
+  g_assert_cmpuint (child_count (root), ==, 2);
+  made = child_at (root, 0);
+  g_assert_cmpstr (xd_node_get_name (made), ==, "Lunar");
+  g_assert_nonnull (xd_node_get_folder_id (made));
+  {
+    g_autofree char *path = g_build_filename (daemon.root, "Lunar", NULL);
+
+    g_assert_true (g_file_test (path, G_FILE_TEST_IS_DIR));
+  }
+
+  /* A folder inside one, then renamed. */
+  xd_remote_tree_create_folder (tree, made, "Proxy");
+  wait_for_reload (tree);
+  g_assert_cmpuint (child_count (made), ==, 1);
+
+  {
+    XdNode *proxy = child_at (made, 0);
+
+    g_assert_cmpstr (xd_node_get_name (proxy), ==, "Proxy");
+
+    xd_remote_tree_rename_folder (tree, proxy, "Gateway");
+    wait_for_reload (tree);
+
+    /* The same node, because the folder's id travelled with the directory. */
+    g_assert_true (child_at (made, 0) == proxy);
+    g_assert_cmpstr (xd_node_get_name (proxy), ==, "Gateway");
+
+    /* Moved under the workspace that was there from the start. */
+    zeno = child_at (root, 1);
+    g_assert_cmpstr (xd_node_get_name (zeno), ==, "Zeno");
+
+    xd_remote_tree_move_folder (tree, proxy, zeno);
+    wait_for_reload (tree);
+
+    g_assert_cmpuint (child_count (made), ==, 0);
+    g_assert_true (child_at (zeno, 0) == proxy);
+    {
+      g_autofree char *path = g_build_filename (daemon.root, "Zeno", "Gateway", NULL);
+
+      g_assert_true (g_file_test (path, G_FILE_TEST_IS_DIR));
+    }
+  }
+
+  /* A chat in it, which the tree hands over once it exists. */
+  {
+    Created created = { 0 };
+    g_autofree char *chat_id = NULL;
+
+    g_signal_connect (tree, "chat-created", G_CALLBACK (on_chat_signal), &created);
+    xd_remote_tree_create_chat (tree, zeno, "from the client");
+    wait_for (&created.wait);
+    g_signal_handlers_disconnect_by_data (tree, &created);
+
+    g_assert_nonnull (created.chat);
+    g_assert_cmpstr (xd_node_get_name (created.chat), ==, "from the client");
+    g_assert_true (xd_remote_tree_owns (tree, created.chat));
+
+    chat_id = g_strdup (xd_node_get_chat_id (created.chat));
+
+    /* The backend came from the daemon, which is the side that can read the
+     * folder chain and knows which CLIs are installed. */
+    {
+      g_autoptr (XdChat) record =
+        xd_storage_get_chat (daemon.storage, chat_id, NULL);
+
+      g_assert_nonnull (record);
+      g_assert_cmpstr (record->backend, ==, "claude");
+      g_assert_nonnull (record->model);
+    }
+
+    xd_remote_tree_rename_chat (tree, created.chat, "renamed from the client");
+    wait_for_reload (tree);
+    g_assert_cmpstr (xd_node_get_name (created.chat), ==, "renamed from the client");
+
+    /* Deleting it takes the row away, and says so for whoever is reading it. */
+    {
+      Created removed = { 0 };
+
+      g_signal_connect (tree, "chat-removed", G_CALLBACK (on_chat_signal), &removed);
+      xd_remote_tree_delete_chat (tree, created.chat);
+      wait_for (&removed.wait);
+      g_signal_handlers_disconnect_by_data (tree, &removed);
+
+      g_assert_true (removed.chat == created.chat);
+      g_assert_null (xd_remote_tree_lookup_chat (tree, chat_id));
+
+      /* What is left is the folder moved in and the chat Zeno started with:
+       * the delete took one row, not the folder's contents. */
+      g_assert_cmpuint (child_count (zeno), ==, 2);
+
+      g_clear_object (&removed.chat);
+    }
+
+    g_clear_object (&created.chat);
+  }
+
+  /* And a folder into the trash, gone from the daemon's disk. */
+  xd_remote_tree_trash_folder (tree, made);
+  wait_for_reload (tree);
+
+  g_assert_cmpuint (child_count (root), ==, 1);
+  {
+    g_autofree char *path = g_build_filename (daemon.root, "Lunar", NULL);
+
+    g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  }
+
+  daemon_stop (&daemon);
+}
+
+/*
+ * A daemon that will not do something says why, and nothing moves.
+ *
+ * The client cannot know in advance -- the tree it is looking at may have been
+ * changed from another device a moment ago -- so a refusal has to arrive as an
+ * answer rather than as a client-side guess that got lucky.
+ */
+static void
+test_a_refused_change_is_reported (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  XdNode *zeno;
+  Wait failure = { 0 };
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  zeno = child_at (xd_remote_tree_get_root (tree), 0);
+  g_signal_connect (tree, "failed", G_CALLBACK (on_failed), &failure);
+
+  /* A second folder of the same name, in the same place. */
+  xd_remote_tree_create_folder (tree, NULL, "Zeno");
+  wait_for (&failure);
+
+  g_assert_nonnull (failure.failure);
+  g_assert_true (g_str_has_prefix (failure.failure, "Could not create the folder"));
+
+  /* And the tree is as it was. */
+  g_assert_cmpuint (child_count (xd_remote_tree_get_root (tree)), ==, 1);
+  g_assert_cmpstr (xd_node_get_name (zeno), ==, "Zeno");
+
+  g_free (failure.failure);
+  daemon_stop (&daemon);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -524,6 +794,10 @@ main (int argc, char *argv[])
                    test_client_pairs_and_reads_the_tree);
   g_test_add_func ("/remote/token-reconnects-and-strangers-are-turned-away",
                    test_token_reconnects_and_strangers_are_turned_away);
+  g_test_add_func ("/remote/folders-and-chats-are-managed-from-the-client",
+                   test_folders_and_chats_are_managed_from_the_client);
+  g_test_add_func ("/remote/a-refused-change-is-reported",
+                   test_a_refused_change_is_reported);
 
   return g_test_run ();
 }

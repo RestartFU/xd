@@ -77,10 +77,12 @@ on_node_selected (XdSidebar *sidebar,
  * The chat on screen has been deleted.
  *
  * Without this the view keeps showing a chat that is no longer in the
- * database -- readable, and worse, still able to be typed into.
+ * database -- readable, and worse, still able to be typed into. Either tree
+ * answers here: a remote chat can be deleted from this window, or from another
+ * device entirely, and neither is different to look at.
  */
 static void
-on_chat_removed (XdFsTree *tree,
+on_chat_removed (gpointer  tree,
                  XdNode   *chat,
                  gpointer  user_data)
 {
@@ -117,6 +119,9 @@ use_remote (XdWindow       *self,
   g_set_object (&self->remote_client, client);
   g_clear_object (&self->remote_tree);
   self->remote_tree = xd_remote_tree_new (client);
+
+  g_signal_connect (self->remote_tree, "chat-removed",
+                    G_CALLBACK (on_chat_removed), self);
 
   xd_sidebar_set_remote (self->sidebar, self->remote_tree);
 }
