@@ -141,8 +141,8 @@ prepare_macos_runtime (void)
   gio_modules = g_build_filename (resources, "lib", "gio", "modules", NULL);
   schemas = g_build_filename (share, "glib-2.0", "schemas", NULL);
   fontconfig_path = g_build_filename (resources, "etc", "fonts", NULL);
-  pixbuf_cache = expand_macos_template (
-    resources, "gdk-pixbuf-loaders.cache.in", "gdk-pixbuf-loaders.cache");
+  pixbuf_cache = g_build_filename (
+    resources, "lib", "gdk-pixbuf-2.0", "2.10.0", "loaders.cache", NULL);
   fontconfig_file = expand_macos_template (
     resources, "fonts.conf.in", "fonts.conf");
 
@@ -155,7 +155,7 @@ prepare_macos_runtime (void)
   g_setenv ("GTK_PATH", resources, TRUE);
   g_setenv ("GTK_IM_MODULE", "gtk-im-context-simple", TRUE);
 
-  if (pixbuf_cache != NULL)
+  if (g_file_test (pixbuf_cache, G_FILE_TEST_IS_REGULAR))
     g_setenv ("GDK_PIXBUF_MODULE_FILE", pixbuf_cache, TRUE);
   if (fontconfig_file != NULL)
     {

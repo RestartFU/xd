@@ -87,6 +87,21 @@ RESOURCES="$APP/Contents/Resources"
   exit 1
 }
 
+# ICU loads its data library through @loader_path. gtk-mac-bundler does not
+# discover that dependency, so put the matching Homebrew library beside
+# libicuuc wherever the bundler chose to relocate it.
+ICU_LIBDIR="$(pkg-config --variable=libdir icu-uc)"
+ICU_BUNDLE_DIR=
+while IFS= read -r library; do
+  ICU_BUNDLE_DIR="${library%/*}"
+  break
+done < <(find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print)
+[ -n "$ICU_BUNDLE_DIR" ] || {
+  echo "bundle-macos: bundled libicuuc was not found" >&2
+  exit 1
+}
+cp -L "$ICU_LIBDIR"/libicudata*.dylib "$ICU_BUNDLE_DIR/"
+
 # Data not modeled by gtk-mac-bundler itself.
 for directory in gtk-4.0 libadwaita-1 themes; do
   if [ -d "$HOMEBREW_PREFIX/share/$directory" ]; then
@@ -103,14 +118,6 @@ cp installer/macos/fonts.conf.in "$RESOURCES/etc/fonts.conf.in"
 
 glib-compile-schemas "$RESOURCES/share/glib-2.0/schemas"
 gio-querymodules "$RESOURCES/lib/gio/modules"
-
-# Cache paths must follow the .app after installation. main.c expands this
-# template against Contents/Resources before GTK starts.
-PIXBUF_LOADERS="$RESOURCES/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-QUERY_LOADERS="$(pkg-config --variable=gdk_pixbuf_query_loaders gdk-pixbuf-2.0)"
-GDK_PIXBUF_MODULEDIR="$PIXBUF_LOADERS" "$QUERY_LOADERS" |
-  sed "s|$RESOURCES|@BUNDLE@|g" \
-  > "$RESOURCES/etc/gdk-pixbuf-loaders.cache.in"
 
 # Ad-hoc signing catches malformed bundles and keeps every nested Mach-O under
 # one consistent identity. Release notarization can replace this later.
