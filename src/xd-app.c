@@ -225,7 +225,6 @@ static const char *XD_STYLE =
   ".xd-composer button:hover, .xd-composer togglebutton:hover,"
   " .xd-composer dropdown > button:hover"
   " { background: alpha(currentColor, 0.08); }\n"
-  ".xd-composer separator { margin: 6px 2px; }\n"
 
   /* Except the one that sends, which is the action rather than a setting. */
   ".xd-composer button.suggested-action { background: #3584e4; color: #ffffff;"

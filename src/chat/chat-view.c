@@ -3329,13 +3329,9 @@ build_composer (XdChatView *self)
   }
 
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->workspace_chooser));
-  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->model_picker));
-  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->effort_chooser));
-  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->access_chooser));
-  gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
 
   /* Build and Plan are two states of one choice, so they read as one control
    * rather than two independent buttons. */
@@ -3375,8 +3371,6 @@ build_composer (XdChatView *self)
     gtk_box_append (GTK_BOX (modes), GTK_WIDGET (self->plan_toggle));
     gtk_widget_add_css_class (modes, "linked");
     gtk_box_append (GTK_BOX (toolbar), modes);
-
-    gtk_box_append (GTK_BOX (toolbar), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   }
 
   self->auto_diff_toggle = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
@@ -3396,8 +3390,6 @@ build_composer (XdChatView *self)
                    self->auto_diff_toggle, "active",
                    G_SETTINGS_BIND_DEFAULT);
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->auto_diff_toggle));
-  gtk_box_append (GTK_BOX (toolbar),
-                  gtk_separator_new (GTK_ORIENTATION_VERTICAL));
 
   self->terminal_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
   gtk_button_set_icon_name (GTK_BUTTON (self->terminal_button), "utilities-terminal-symbolic");
