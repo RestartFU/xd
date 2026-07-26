@@ -37,6 +37,20 @@ void                 xd_effective_settings_free (XdEffectiveSettings *self);
 XdEffectiveSettings *xd_settings_resolve        (XdNode     *folder,
                                                  const char *default_backend);
 
+/*
+ * Where a chat is, for the assistant answering it.
+ *
+ * A folder in this tree is an organisational thing -- often an empty directory
+ * whose whole content is the dotfile that gives it an id -- so an agent
+ * started in one and told nothing else reasonably concludes it has been
+ * pointed at the wrong place, and goes looking. Saying which folder it is in
+ * and what that directory is costs one line and answers the question.
+ *
+ * NULL when there is no folder to describe.
+ */
+char                *xd_settings_describe_place (XdNode     *folder,
+                                                 const char *workdir);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdEffectiveSettings, xd_effective_settings_free)
 
 G_END_DECLS

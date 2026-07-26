@@ -1365,12 +1365,18 @@ start_turn (XdChatView *self,
   /* The chat's own pick wins; the folder chain is the fallback. */
   spec.model = chat->model != NULL ? chat->model : resolved->model;
   {
+    g_autofree char *place =
+      xd_settings_describe_place (xd_node_get_parent (self->chat),
+                                  workdir_for (chat, resolved));
     g_autofree char *instructions =
       resolved->instructions != NULL
         ? g_strdup_printf ("%s\n\n%s", resolved->instructions, xd_ask_instructions ())
         : g_strdup (xd_ask_instructions ());
 
-    spec.system_prompt = g_strdup (instructions);
+    spec.system_prompt = place != NULL
+      ? g_strdup_printf ("%s\n\n%s", place, instructions)
+      : g_strdup (instructions);
+
     g_free (system_prompt);
     system_prompt = (char *) spec.system_prompt;
   }

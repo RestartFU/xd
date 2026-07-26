@@ -215,9 +215,29 @@ test_codex_argv (void)
   g_assert_nonnull (strstr (plain, "exec --json"));
   g_assert_nonnull (strstr (plain, "-s read-only"));
 
+  /*
+   * Resuming is a different command with different options.
+   *
+   * "codex exec resume" takes neither -s nor -C, and refuses the whole run if
+   * it is given one -- so the sandbox travels as the config override it does
+   * take, and the session id goes after the options, where its usage puts it.
+   * Every message after the first goes through here.
+   */
   spec.resume_session_id = "thread-1";
+  spec.workdir = "/tmp/somewhere";
   resumed = argv_to_string (backend, &spec);
-  g_assert_nonnull (strstr (resumed, "exec resume thread-1"));
+
+  g_assert_nonnull (strstr (resumed, "exec resume --json"));
+  g_assert_nonnull (strstr (resumed, "sandbox_mode=\"read-only\""));
+  g_assert_nonnull (strstr (resumed, "thread-1"));
+  g_assert_null (strstr (resumed, "-s read-only"));
+  g_assert_null (strstr (resumed, "-C "));
+
+  /* The id goes after the options, which is the order its usage gives. */
+  g_assert_true (strstr (resumed, "thread-1") >
+                 strstr (resumed, "sandbox_mode="));
+
+  spec.workdir = NULL;
 
   /* Codex has no --append-system-prompt, so instructions must reach it by
    * riding in front of the prompt. */

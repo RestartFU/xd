@@ -350,6 +350,20 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
     ? g_strdup_printf ("%s\n\n%s", resolved->instructions, xd_ask_instructions ())
     : g_strdup (xd_ask_instructions ());
 
+  {
+    g_autofree char *place =
+      xd_settings_describe_place (folder_chain (self, chat->folder_id, chain),
+                                  workdir);
+
+    if (place != NULL)
+      {
+        char *with_place = g_strdup_printf ("%s\n\n%s", place, instructions);
+
+        g_free (instructions);
+        instructions = with_place;
+      }
+  }
+
   self->chat_id = g_strdup (chat_id);
   self->backend_id = g_strdup (backend->id);
   self->label = reply_label (chat, backend, model);

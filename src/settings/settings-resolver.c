@@ -119,3 +119,41 @@ xd_settings_resolve (XdNode     *folder,
 
   return self;
 }
+
+char *
+xd_settings_describe_place (XdNode     *folder,
+                            const char *workdir)
+{
+  g_autoptr (GPtrArray) names = g_ptr_array_new ();
+  g_autofree char *chain = NULL;
+
+  if (folder == NULL || !XD_IS_NODE (folder))
+    return NULL;
+
+  /* Leaf first walking up, so the array is filled backwards and read out the
+   * way the sidebar shows it. */
+  for (XdNode *at = folder; at != NULL; at = xd_node_get_parent (at))
+    {
+      if (xd_node_get_kind (at) == XD_NODE_FOLDER &&
+          xd_node_get_folder_id (at) != NULL)
+        g_ptr_array_insert (names, 0, (gpointer) xd_node_get_name (at));
+    }
+
+  if (names->len == 0)
+    return NULL;
+
+  g_ptr_array_add (names, NULL);
+  chain = g_strjoinv (" / ", (char **) names->pdata);
+
+  if (workdir == NULL || *workdir == '\0')
+    return g_strdup_printf ("[This conversation belongs to the folder \u201c%s\u201d "
+                            "in the user\u2019s xd workspace tree.]", chain);
+
+  return g_strdup_printf ("[This conversation belongs to the folder \u201c%s\u201d "
+                          "in the user\u2019s xd workspace tree, and you are "
+                          "running in %s. If that directory holds nothing but a "
+                          "dotfile, it is the folder itself rather than a "
+                          "checkout: say so and ask which repository is meant, "
+                          "instead of searching the machine for one.]",
+                          chain, workdir);
+}

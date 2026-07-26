@@ -4,7 +4,12 @@
  * Codex, driven non-interactively.
  *
  *   codex exec --json [-m MODEL] [-C DIR] -s read-only <prompt>
- *   codex exec resume <THREAD> --json [...] <prompt>
+ *   codex exec resume [OPTIONS] <THREAD> <prompt>
+ *
+ * Those two do not take the same options. "exec resume" has neither -s nor -C:
+ * the sandbox goes through the config override it does take, and the directory
+ * is the one the process is started in -- which the session sets anyway, so
+ * -C was only ever saying it twice.
  *
  * Output is one JSON object per line: "thread.started" carries the id used to
  * resume, "item.completed" delivers finished items -- the agent's reply among
@@ -57,19 +62,29 @@ codex_build_argv (const AiBackend *self,
 {
   GPtrArray *argv = g_ptr_array_new_with_free_func (g_free);
 
+  gboolean resuming = spec->resume_session_id != NULL;
+
   g_ptr_array_add (argv, g_strdup (self->program));
   g_ptr_array_add (argv, g_strdup ("exec"));
 
-  if (spec->resume_session_id != NULL)
-    {
-      g_ptr_array_add (argv, g_strdup ("resume"));
-      g_ptr_array_add (argv, g_strdup (spec->resume_session_id));
-    }
+  if (resuming)
+    g_ptr_array_add (argv, g_strdup ("resume"));
 
   g_ptr_array_add (argv, g_strdup ("--json"));
 
-  g_ptr_array_add (argv, g_strdup ("-s"));
-  g_ptr_array_add (argv, g_strdup (codex_sandbox (spec->access)));
+  /* The sandbox: a flag when starting, the same thing as a config override
+   * when resuming, which is the option resume actually has. */
+  if (resuming)
+    {
+      g_ptr_array_add (argv, g_strdup ("-c"));
+      g_ptr_array_add (argv, g_strdup_printf ("sandbox_mode=\"%s\"",
+                                              codex_sandbox (spec->access)));
+    }
+  else
+    {
+      g_ptr_array_add (argv, g_strdup ("-s"));
+      g_ptr_array_add (argv, g_strdup (codex_sandbox (spec->access)));
+    }
 
   /* Codex takes effort as a config override rather than a flag. */
   g_ptr_array_add (argv, g_strdup ("-c"));
@@ -82,11 +97,17 @@ codex_build_argv (const AiBackend *self,
       g_ptr_array_add (argv, g_strdup (spec->model));
     }
 
-  if (spec->workdir != NULL)
+  /* Only when starting: resume has no -C, and does not need one -- the turn
+   * runs in the directory the session was started in. */
+  if (spec->workdir != NULL && !resuming)
     {
       g_ptr_array_add (argv, g_strdup ("-C"));
       g_ptr_array_add (argv, g_strdup (spec->workdir));
     }
+
+  /* After the options, where the usage says it goes. */
+  if (resuming)
+    g_ptr_array_add (argv, g_strdup (spec->resume_session_id));
 
   /* Codex has no --append-system-prompt, so folder instructions ride along in
    * front of the prompt itself -- as does the plan-only instruction, which it
