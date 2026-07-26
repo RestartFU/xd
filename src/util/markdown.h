@@ -15,4 +15,7 @@ G_BEGIN_DECLS
  */
 char *xd_markdown_to_pango (const char *text);
 
+/* Escapes plain text and turns bare HTTP(S) URLs into GtkLabel links. */
+char *xd_urls_to_pango     (const char *text);
+
 G_END_DECLS

@@ -22,6 +22,92 @@ append_escaped (GString    *out,
   g_string_append (out, escaped);
 }
 
+static gboolean
+starts_url (const char *text)
+{
+  return g_str_has_prefix (text, "https://") ||
+         g_str_has_prefix (text, "http://");
+}
+
+static guint
+count_byte (const char *text,
+            gsize       length,
+            char        byte)
+{
+  guint count = 0;
+
+  for (gsize i = 0; i < length; i++)
+    count += text[i] == byte;
+
+  return count;
+}
+
+/*
+ * Stops before prose punctuation while preserving punctuation that belongs to
+ * the URL. A closing parenthesis stays when the URL opened one, but the one
+ * around "(https://example.com)" does not.
+ */
+static gsize
+url_length (const char *text)
+{
+  gsize length = 0;
+
+  while (text[length] != '\0' &&
+         !g_ascii_isspace (text[length]) &&
+         strchr ("<>\"'", text[length]) == NULL)
+    length++;
+
+  while (length > 0)
+    {
+      char last = text[length - 1];
+
+      if (strchr (".,;:!?", last) != NULL)
+        {
+          length--;
+          continue;
+        }
+
+      if ((last == ')' &&
+           count_byte (text, length, ')') > count_byte (text, length, '(')) ||
+          (last == ']' &&
+           count_byte (text, length, ']') > count_byte (text, length, '[')) ||
+          (last == '}' &&
+           count_byte (text, length, '}') > count_byte (text, length, '{')))
+        {
+          length--;
+          continue;
+        }
+
+      break;
+    }
+
+  return length;
+}
+
+static gboolean
+append_url (GString    *out,
+            const char *text,
+            gsize      *consumed)
+{
+  g_autofree char *url = NULL;
+  g_autofree char *escaped = NULL;
+  gsize length;
+
+  if (!starts_url (text))
+    return FALSE;
+
+  length = url_length (text);
+  if (length <= strlen ("http://"))
+    return FALSE;
+
+  url = g_strndup (text, length);
+  escaped = g_markup_escape_text (url, -1);
+  g_string_append_printf (out, "<a href=\"%s\">%s</a>", escaped, escaped);
+  *consumed = length;
+
+  return TRUE;
+}
+
 /*
  * Inline spans, in precedence order: code first (nothing nests inside it),
  * then strong, then emphasis.
@@ -31,7 +117,8 @@ append_escaped (GString    *out,
  */
 static void
 append_inline (GString    *out,
-               const char *text)
+               const char *text,
+               gboolean    autolink)
 {
   const char *p = text;
 
@@ -59,7 +146,7 @@ append_inline (GString    *out,
               g_autofree char *inner = g_strndup (p + 2, close - (p + 2));
 
               g_string_append (out, "<b>");
-              append_inline (out, inner);
+              append_inline (out, inner, autolink);
               g_string_append (out, "</b>");
               p = close + 2;
               continue;
@@ -84,7 +171,7 @@ append_inline (GString    *out,
                   g_autofree char *href = g_markup_escape_text (url, -1);
 
                   g_string_append_printf (out, "<a href=\"%s\">", href);
-                  append_inline (out, label);
+                  append_inline (out, label, FALSE);
                   g_string_append (out, "</a>");
                   p = end + 1;
                   continue;
@@ -100,9 +187,20 @@ append_inline (GString    *out,
               g_autofree char *inner = g_strndup (p + 1, close - (p + 1));
 
               g_string_append (out, "<i>");
-              append_inline (out, inner);
+              append_inline (out, inner, autolink);
               g_string_append (out, "</i>");
               p = close + 1;
+              continue;
+            }
+        }
+
+      if (autolink)
+        {
+          gsize consumed = 0;
+
+          if (append_url (out, p, &consumed))
+            {
+              p += consumed;
               continue;
             }
         }
@@ -164,7 +262,7 @@ append_heading (GString    *out,
 
   g_string_append_printf (out, "<span size=\"%s\"><b>",
                           level <= 2 ? "large" : "medium");
-  append_inline (out, text);
+  append_inline (out, text, TRUE);
   g_string_append (out, "</b></span>");
 }
 
@@ -218,11 +316,11 @@ xd_markdown_to_pango (const char *text)
             {
               append_escaped (out, line, item - line);
               g_string_append (out, "\xe2\x80\xa2 ");
-              append_inline (out, item + 2);
+              append_inline (out, item + 2, TRUE);
             }
           else
             {
-              append_inline (out, line);
+              append_inline (out, line, TRUE);
             }
         }
     }
@@ -256,6 +354,29 @@ xd_markdown_to_pango (const char *text)
         return g_markup_escape_text (text, -1);
       }
   }
+
+  return g_string_free (g_steal_pointer (&out), FALSE);
+}
+
+char *
+xd_urls_to_pango (const char *text)
+{
+  g_autoptr (GString) out = g_string_new (NULL);
+  const char *p = text != NULL ? text : "";
+
+  while (*p != '\0')
+    {
+      gsize consumed = 0;
+
+      if (append_url (out, p, &consumed))
+        {
+          p += consumed;
+          continue;
+        }
+
+      append_escaped (out, p, 1);
+      p++;
+    }
 
   return g_string_free (g_steal_pointer (&out), FALSE);
 }

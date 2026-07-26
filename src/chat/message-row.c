@@ -305,7 +305,7 @@ clear_body (XdMessageRow *self)
     gtk_box_remove (GTK_BOX (self->body), child);
 }
 
-/* Replies are Markdown; what the user typed is shown exactly as typed. */
+/* Replies are Markdown; other rows stay literal except that URLs are links. */
 static void
 render_body (XdMessageRow *self)
 {
@@ -329,8 +329,9 @@ render_body (XdMessageRow *self)
               if (prose->len > 0)
                 {
                   GtkWidget *label = make_text_label (self);
+                  g_autofree char *markup = xd_urls_to_pango (prose->str);
 
-                  gtk_label_set_text (GTK_LABEL (label), prose->str);
+                  gtk_label_set_markup (GTK_LABEL (label), markup);
                   gtk_box_append (GTK_BOX (self->body), label);
                   g_string_truncate (prose, 0);
                 }
@@ -348,8 +349,9 @@ render_body (XdMessageRow *self)
       if (prose->len > 0)
         {
           GtkWidget *label = make_text_label (self);
+          g_autofree char *markup = xd_urls_to_pango (prose->str);
 
-          gtk_label_set_text (GTK_LABEL (label), prose->str);
+          gtk_label_set_markup (GTK_LABEL (label), markup);
           gtk_box_append (GTK_BOX (self->body), label);
         }
 

@@ -138,6 +138,30 @@ test_links (void)
   g_assert_nonnull (strstr (amp, "b=1&amp;c=2"));
 }
 
+static void
+test_bare_urls (void)
+{
+  g_autofree char *out = xd_markdown_to_pango (
+    "see https://github.com/RestartFU/xd/issues/5 now");
+  g_autofree char *punctuation = xd_markdown_to_pango (
+    "(https://example.com/a_(b)). Next.");
+  g_autofree char *plain = xd_urls_to_pango (
+    "**literal** https://example.com/a?b=1&c=2");
+
+  g_assert_nonnull (strstr (
+    out,
+    "<a href=\"https://github.com/RestartFU/xd/issues/5\">"
+    "https://github.com/RestartFU/xd/issues/5</a>"));
+  g_assert_nonnull (strstr (
+    punctuation,
+    "<a href=\"https://example.com/a_(b)\">https://example.com/a_(b)</a>)"));
+  g_assert_nonnull (strstr (plain, "**literal**"));
+  g_assert_nonnull (strstr (
+    plain,
+    "<a href=\"https://example.com/a?b=1&amp;c=2\">"
+    "https://example.com/a?b=1&amp;c=2</a>"));
+}
+
 /* List markers render as the dots they stand for. */
 static void
 test_list_bullets (void)
@@ -167,6 +191,7 @@ main (int   argc,
   g_test_add_func ("/markdown/empty", test_empty_and_null);
 
   g_test_add_func ("/markdown/links", test_links);
+  g_test_add_func ("/markdown/bare-urls", test_bare_urls);
   g_test_add_func ("/markdown/bullets", test_list_bullets);
 
   return g_test_run ();
