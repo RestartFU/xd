@@ -24,6 +24,10 @@ hy_message_kind_from_role (const char *role)
     return HY_MESSAGE_ASSISTANT;
   if (g_strcmp0 (role, "tool") == 0)
     return HY_MESSAGE_TOOL;
+  /* Things that happened rather than things said: model switches and the
+   * like read as dim asides, the same register as tool calls. */
+  if (g_strcmp0 (role, "event") == 0)
+    return HY_MESSAGE_TOOL;
   if (g_strcmp0 (role, "error") == 0)
     return HY_MESSAGE_ERROR;
 

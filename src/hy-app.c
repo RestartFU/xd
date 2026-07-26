@@ -132,10 +132,10 @@ static const char *HY_STYLE =
    * with everything else a percentage of white over it cannot clash with
    * itself, and stays right if the base moves.
    */
-  "button, togglebutton, dropdown > button, entry, .osd"
+  "button, dropdown > button, entry, .osd"
   " { background-color: alpha(#ffffff, 0.05); border-color:"
   " alpha(#ffffff, 0.07); }\n"
-  "button:hover, togglebutton:hover, dropdown > button:hover"
+  "button:hover, dropdown > button:hover"
   " { background-color: alpha(#ffffff, 0.09); }\n"
 
   /* The bar under the composer: what is being worked on, not a control. */
@@ -143,9 +143,10 @@ static const char *HY_STYLE =
   " padding: 4px 12px; }\n"
   ".hy-context label { font-size: 0.85em; }\n"
 
-  /* Inter, which is what interfaces of this kind are set in and what the
-   * bundle now carries; Cantarell is the fallback it shipped with. */
-  "window { font-family: \"Inter\", \"Cantarell\", sans-serif; font-size: 0.9em; }\n"
+  /* DM Sans, which is what t3code itself is set in; Inter and Cantarell
+   * behind it as the fallbacks the bundle already carried. */
+  "window { font-family: \"DM Sans\", \"Inter\", \"Cantarell\", sans-serif;"
+  " font-size: 0.95em; }\n"
 
   /* Flat: the window is one surface, so the bars that divide it are told
    * apart by spacing rather than by lines and shading. */
@@ -195,12 +196,20 @@ static const char *HY_STYLE =
   " box-shadow: none; padding: 4px 10px; }\n"
   /* Settings, not statements: they say how the next message will be handled,
    * which is worth reading once and then ignoring. */
-  ".hy-composer button label, .hy-composer togglebutton label,"
-  " .hy-composer dropdown label { color: alpha(#ffffff, 0.6); }\n"
-  ".hy-composer button:hover label, .hy-composer togglebutton:hover label"
-  " { color: alpha(#ffffff, 0.85); }\n"
-  ".hy-composer togglebutton:checked { background: alpha(#3584e4, 0.20); }\n"
-  ".hy-composer togglebutton:checked label { color: #8ab8f2; }\n"
+  ".hy-composer button label, .hy-composer dropdown label"
+  " { color: alpha(#ffffff, 0.6); }\n"
+  ".hy-composer button:hover label { color: alpha(#ffffff, 0.85); }\n"
+  /* The active mode in blue, like t3: a GtkToggleButton's CSS node is named
+   * plain "button", so earlier togglebutton selectors matched nothing at
+   * all -- pressed state included. */
+  ".hy-composer button:checked { background: alpha(#3584e4, 0.22);"
+  " border-radius: 8px; }\n"
+  ".hy-composer button:checked label, .hy-composer button:checked image"
+  " { color: #6bb2f8; }\n"
+  /* Elsewhere -- the terminal and diff toggles in the header -- checked is a
+   * plain lift, which the flat background rules above would otherwise
+   * swallow. */
+  "button:checked { background-color: alpha(#ffffff, 0.14); }\n"
   ".hy-composer button:hover, .hy-composer togglebutton:hover,"
   " .hy-composer dropdown > button:hover"
   " { background: alpha(currentColor, 0.08); }\n"
@@ -211,10 +220,8 @@ static const char *HY_STYLE =
   " border-radius: 9999px; min-width: 28px; min-height: 28px; padding: 4px; }\n"
 
   /* Controls: pills, sized for a toolbar rather than a dialog. */
-  "button, dropdown > button, togglebutton { border-radius: 8px; }\n"
-  "button.flat, dropdown > button, togglebutton { min-height: 24px; }\n"
-  "togglebutton:checked { background: alpha(@accent_bg_color, 0.22);"
-  " color: @accent_fg_color; }\n"
+  "button, dropdown > button { border-radius: 8px; }\n"
+  "button.flat, dropdown > button { min-height: 24px; }\n"
   "button.circular { border-radius: 9999px; }\n"
 
   /* What the user typed, and the box they type into: the same rounded shape,

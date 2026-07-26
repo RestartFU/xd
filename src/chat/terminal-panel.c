@@ -291,9 +291,9 @@ hy_terminal_panel_init (HyTerminalPanel *self)
   vte_terminal_set_mouse_autohide (self->terminal, TRUE);
   vte_terminal_set_cursor_blink_mode (self->terminal, VTE_CURSOR_BLINK_ON);
 
-  /* The bundle carries DejaVu Sans Mono; "Monospace" resolves to it there and
-   * to whatever the host prefers when one is installed. */
-  font = pango_font_description_from_string ("Monospace 10");
+  /* JetBrains Mono, which is the terminal face of the reference; the bundle
+   * carries it, and "Monospace" stays as the fallback resolution. */
+  font = pango_font_description_from_string ("JetBrains Mono, Monospace 10");
   vte_terminal_set_font (self->terminal, font);
 
   gtk_widget_set_hexpand (GTK_WIDGET (self->terminal), TRUE);

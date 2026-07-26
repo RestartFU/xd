@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       adwaita-icon-theme \
       fonts-cantarell \
       fonts-inter \
+      fonts-jetbrains-mono \
       fonts-dejavu-core \
       fontconfig \
       file \

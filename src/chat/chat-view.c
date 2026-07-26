@@ -27,6 +27,8 @@ typedef struct
   char *backend_id;         /* the backend this turn's session id belongs to */
   char *prompt;             /* kept so a dead session can be retried */
   char *label;              /* the model and effort this turn actually ran on */
+  gint64 started_at;        /* monotonic; how long the work took */
+  GtkWidget *anchor;        /* weak: the row just above the turn's output */
   HyNode *node;             /* the row in the tree, so it can show the state */
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
@@ -157,6 +159,40 @@ reply_title (const HyChat *chat)
   return g_strdup_printf ("%s · %s",
                           ai_backend_model_label (backend, chat->model),
                           ai_effort_label (effort_for (chat)));
+}
+
+/*
+ * "Worked for 9m 31s", the way t3 puts it.
+ *
+ * Shown above the turn's output rather than after it, so a long stretch of
+ * tools and replies reads as one unit of work with its cost at the top.
+ */
+static char *
+format_worked_for (gint64 seconds)
+{
+  if (seconds >= 3600)
+    return g_strdup_printf ("Worked for %dh %02dm", (int) (seconds / 3600),
+                            (int) ((seconds % 3600) / 60));
+  if (seconds >= 60)
+    return g_strdup_printf ("Worked for %dm %02ds", (int) (seconds / 60),
+                            (int) (seconds % 60));
+
+  return g_strdup_printf ("Worked for %ds", (int) seconds);
+}
+
+static GtkWidget *
+worked_for_row (gint64 seconds)
+{
+  g_autofree char *text = format_worked_for (seconds);
+  GtkWidget *row = gtk_label_new (text);
+
+  gtk_label_set_xalign (GTK_LABEL (row), 0.0f);
+  gtk_widget_add_css_class (row, "caption");
+  gtk_widget_add_css_class (row, "dim-label");
+  gtk_widget_set_margin_start (row, 24);
+  gtk_widget_set_margin_top (row, 6);
+
+  return row;
 }
 
 /* --- transcript ----------------------------------------------------------- */
@@ -418,6 +454,32 @@ load_transcript (HyChatView *self)
   for (guint i = 0; i < messages->len; i++)
     {
       const HyMessage *message = g_ptr_array_index (messages, i);
+      gboolean starts_run = g_strcmp0 (message->role, "assistant") == 0 &&
+        (i == 0 || g_strcmp0 (((HyMessage *) g_ptr_array_index (messages, i - 1))->role,
+                              "assistant") != 0);
+
+      /* The work's cost goes above the work: replies are stamped when the
+       * turn ends and the user's message when it was sent, so the span
+       * between them is how long the agent worked. */
+      if (starts_run && i > 0)
+        {
+          const HyMessage *before = g_ptr_array_index (messages, i - 1);
+          const HyMessage *last = message;
+          gint64 seconds;
+
+          for (guint j = i; j < messages->len; j++)
+            {
+              const HyMessage *at = g_ptr_array_index (messages, j);
+
+              if (g_strcmp0 (at->role, "assistant") != 0)
+                break;
+              last = at;
+            }
+
+          seconds = last->created_at - before->created_at;
+          if (g_strcmp0 (before->role, "user") == 0 && seconds >= 1)
+            gtk_box_append (self->transcript, worked_for_row (seconds));
+        }
 
       if (g_strcmp0 (message->role, "assistant") == 0)
         append_reply (self, message->content, message->label,
@@ -449,6 +511,8 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->prompt, g_free);
   g_clear_pointer (&turn->label, g_free);
   g_clear_object (&turn->node);
+  if (turn->anchor != NULL)
+    g_object_remove_weak_pointer (G_OBJECT (turn->anchor), (gpointer *) &turn->anchor);
   g_string_free (turn->text, TRUE);
   g_string_free (turn->segment, TRUE);
   g_clear_pointer (&turn->said, g_ptr_array_unref);
@@ -677,6 +741,21 @@ on_turn_finished (HyChatSession *session,
         append_row (self, HY_MESSAGE_ERROR, text);
     }
 
+  if (visible)
+    {
+      gint64 seconds = (g_get_monotonic_time () - turn->started_at) / G_USEC_PER_SEC;
+
+      if (seconds >= 1)
+        {
+          GtkWidget *row = worked_for_row (seconds);
+
+          if (turn->anchor != NULL)
+            gtk_box_insert_child_after (self->transcript, row, turn->anchor);
+          else
+            gtk_box_append (self->transcript, row);
+        }
+    }
+
   /* An agent that edited anything has finished doing so. */
   hy_diff_pane_refresh (self->diff);
   hy_git_actions_refresh (self->git_actions);
@@ -845,6 +924,14 @@ start_turn (HyChatView *self,
   turn = g_new0 (Turn, 1);
   turn->view = self;
   turn->node = g_object_ref (self->chat);
+  turn->started_at = g_get_monotonic_time ();
+
+  /* Whatever is last right now sits just above this turn's output, which is
+   * where the "worked for" line belongs when the turn ends. Weak, since the
+   * transcript can be rebuilt while the turn runs. */
+  turn->anchor = gtk_widget_get_last_child (GTK_WIDGET (self->transcript));
+  if (turn->anchor != NULL)
+    g_object_add_weak_pointer (G_OBJECT (turn->anchor), (gpointer *) &turn->anchor);
 
   hy_node_set_state (turn->node, HY_NODE_WORKING);
   turn->chat_id = g_strdup (chat->id);
@@ -1712,6 +1799,27 @@ on_model_chosen (HyModelPicker *picker,
 
       if (backend != NULL)
         hy_node_set_icon_name (self->chat, backend->icon_name);
+    }
+
+  /* Said in the chat, and stored with it: a transcript where the voice
+   * changes mid-way should say so where it happened. */
+  if (backend_changed || g_strcmp0 (chat->model, model_id) != 0)
+    {
+      const AiBackend *backend = ai_backend_lookup (backend_id);
+      g_autofree char *event = NULL;
+
+      if (backend != NULL)
+        event = g_strdup_printf ("Switched to %s",
+                                 ai_backend_model_label (backend, model_id));
+
+      if (event != NULL)
+        {
+          if (!hy_storage_append_message (self->storage, chat_id, "event",
+                                          event, NULL, NULL, &error))
+            g_warning ("cannot store the switch: %s", error->message);
+
+          append_row (self, HY_MESSAGE_TOOL, event);
+        }
     }
 
   /* Nothing is discarded here. Sessions are kept per backend, so switching

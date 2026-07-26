@@ -89,12 +89,18 @@ cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 # font. Pointing FONTCONFIG_FILE/PATH at the bundle is the workable option.
 mkdir -p "$OUT/share/fonts"
 for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu \
-           /usr/share/fonts/truetype/inter /usr/share/fonts/opentype/inter; do
+           /usr/share/fonts/truetype/inter /usr/share/fonts/opentype/inter \
+           /usr/share/fonts/truetype/jetbrains-mono; do
   [ -d "$dir" ] && cp -a "$dir" "$OUT/share/fonts/"
 done
 
 # conf.d entries are symlinks into conf.avail; -L flattens them so the bundle
 # stays self-contained.
+# The face the interface is set in; vendored because Debian does not package
+# it, licence alongside.
+mkdir -p "$OUT/share/fonts/dmsans"
+cp /src/data/fonts/* "$OUT/share/fonts/dmsans/"
+
 mkdir -p "$OUT/etc/fonts"
 cp -rL /etc/fonts/conf.d "$OUT/etc/fonts/conf.d"
 
