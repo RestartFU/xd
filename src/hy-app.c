@@ -212,6 +212,14 @@ static const char *HY_STYLE =
 
   /* Nothing has a scrollbar except the transcript, and that one is a thin
    * overlay: everywhere else the content says how long it is. */
+  /* GTK fades the edge of a scrolled view to say there is more past it. The
+   * transcript already ends in the composer, so the fade only ever appeared
+   * as a smear across the last line. */
+  "scrolledwindow > undershoot.top, scrolledwindow > undershoot.bottom,"
+  " scrolledwindow > undershoot.left, scrolledwindow > undershoot.right,"
+  " scrolledwindow > overshoot.top, scrolledwindow > overshoot.bottom"
+  " { background: none; box-shadow: none; }\n"
+
   "scrollbar { background: transparent; border: none; }\n"
   "scrollbar slider { min-width: 5px; min-height: 5px; border: none;"
   " background: alpha(#ffffff, 0.16); }\n"
