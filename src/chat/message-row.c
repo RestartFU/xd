@@ -90,11 +90,15 @@ on_link_activated (GtkLabel   *label,
                    const char *uri,
                    gpointer    user_data)
 {
+#ifdef G_OS_WIN32
+  g_app_info_launch_default_for_uri (uri, NULL, NULL);
+#else
   g_auto (GStrv) env = xd_host_environ ();
   const char *argv[] = { "xdg-open", uri, NULL };
 
   g_spawn_async (NULL, (char **) argv, env, G_SPAWN_SEARCH_PATH,
                  NULL, NULL, NULL, NULL);
+#endif
 
   return TRUE;
 }

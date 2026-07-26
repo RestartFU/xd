@@ -23,7 +23,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -44,6 +44,94 @@ jobs:
           tar -czf xd-linux-x86_64.tar.gz xd
           sha256sum xd-linux-x86_64.tar.gz > xd-linux-x86_64.tar.gz.sha256
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            xd-linux-x86_64.tar.gz
+            xd-linux-x86_64.tar.gz.sha256
+            scripts/install.sh
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-json-glib
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-librsvg
+
+      - name: Build and test the Windows client
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          meson setup build-windows \
+            --prefix="$MINGW_PREFIX" \
+            --buildtype=release \
+            -Dcommit="${GITHUB_SHA:0:7}"
+          meson compile -C build-windows
+          meson test -C build-windows --print-errorlogs
+          DESTDIR="$PWD/stage-windows" \
+            meson install -C build-windows --no-rebuild
+          bash scripts/bundle-windows.sh \
+            "$PWD/stage-windows" "$PWD/windows-dist"
+          ./windows-dist/bin/xd.exe --version
+
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          $payload = (Resolve-Path windows-dist).Path
+          wix build installer/windows/xd.wxs `
+            -arch x64 `
+            -d "Payload=$payload" `
+            -d "Version=0.1.0" `
+            -d "ProductName=xd" `
+            -d "InstallName=xd" `
+            -d "UpgradeCode=CDE5479B-9093-4E3C-8144-FCE8C86BEA18" `
+            -d "ShortcutGuid=4E2C6D60-BBC8-4E6F-B230-C9824E0D1715" `
+            -o xd-windows-x86_64.msi
+          $hash = (Get-FileHash xd-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
+          "$hash  xd-windows-x86_64.msi" |
+            Set-Content xd-windows-x86_64.msi.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            xd-windows-x86_64.msi
+            xd-windows-x86_64.msi.sha256
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: .
+          merge-multiple: true
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,8 +148,12 @@ jobs:
           ./xd/xd.sh
           \`\`\`
 
-          Self-contained: no GTK, glib or VTE needed on the host. The daemon is
-          the same binary — \`./xd/bin/xd serve --pair\`.
+          Windows x86_64: download and run \`xd-windows-x86_64.msi\`.
+          This first Windows build omits the embedded terminal and Windows
+          daemon hosting.
+
+          Both downloads are self-contained. On Linux, the daemon is the same
+          binary — \`./xd/bin/xd serve --pair\`.
           EOF
           )
 
@@ -71,6 +163,7 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
+              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
               scripts/install.sh
           else
             gh release create "$tag" \
@@ -78,5 +171,7 @@ jobs:
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
               xd-linux-x86_64.tar.gz.sha256 \
+              xd-windows-x86_64.msi \
+              xd-windows-x86_64.msi.sha256 \
               scripts/install.sh
           fi

@@ -39,6 +39,18 @@ own — it installs beside a release rather than over it, and neither edits the
 other's work. `sh -s -- --uninstall` takes it away again and leaves that
 directory alone.
 
+Windows, x86_64:
+
+Download `xd-nightly-windows-x86_64.msi` from the
+[nightly release](https://github.com/RestartFU/xd/releases/tag/nightly) and run
+it. The MSI carries GTK and the rest of its runtime; MSYS2 is not required on
+the installed machine.
+
+This first Windows client supports local chats and connecting to a paired Linux
+daemon. Embedded terminals and hosting the daemon on Windows are not available
+yet. The terminal button is omitted instead of exposing a control that cannot
+work.
+
 ## Build
 
 Docker is the only requirement. Nothing is installed on the host.

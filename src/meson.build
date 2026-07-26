@@ -9,11 +9,8 @@ xd_core_sources = files(
   'util/worktree.c',
   'util/host-launch.c',
   'util/app-paths.c',
-  'remote/server.c',
   'remote/client.c',
   'remote/remote-tree.c',
-  'remote/turn.c',
-  'remote/terminal.c',
   'tree/xd-node.c',
   'storage/storage.c',
   'backend/backend.c',
@@ -25,9 +22,20 @@ xd_core_sources = files(
   'chat/chat-title.c',
 )
 
+if not is_windows
+  xd_core_sources += files(
+    'remote/server.c',
+    'remote/turn.c',
+    'remote/terminal.c',
+  )
+endif
+
 # Pango, but not GTK: the Markdown converter validates the markup it produces,
 # which needs the parser and nothing else.
-xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep, util_dep]
+xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
+if not is_windows
+  xd_core_deps += util_dep
+endif
 
 xd_core_inc = include_directories('.')
 
@@ -57,16 +65,27 @@ xd_sources = files(
   'chat/option-picker.c',
   'chat/diff-pane.c',
   'chat/git-actions.c',
-  'chat/terminal-panel.c',
   'chat/message-row.c',
   'chat/chat-view.c',
   'chat/search-dialog.c',
 )
 
+if is_windows
+  xd_sources += files('chat/terminal-panel-stub.c')
+else
+  xd_sources += files('chat/terminal-panel.c')
+endif
+
+xd_app_deps = [glib_dep, gio_dep, gtk_dep, adw_dep, json_dep, sqlite_dep]
+if not is_windows
+  xd_app_deps += [gio_unix_dep, vte_dep]
+endif
+
 executable('xd',
   xd_sources,
-  dependencies: [glib_dep, gio_dep, gio_unix_dep, gtk_dep, adw_dep, json_dep, sqlite_dep, vte_dep],
+  dependencies: xd_app_deps,
   include_directories: xd_core_inc,
   link_with: xd_core_lib,
+  win_subsystem: is_windows ? 'windows' : 'console',
   install: true,
 )

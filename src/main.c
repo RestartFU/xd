@@ -1,8 +1,56 @@
 #include "xd-app.h"
-#include "remote/server.h"
 #include "util/app-paths.h"
 
 #include <stdio.h>
+
+#ifdef G_OS_WIN32
+#include <glib/gstdio.h>
+#include <glib/gwin32.h>
+#else
+#include "remote/server.h"
+#endif
+
+#ifdef G_OS_WIN32
+/*
+ * Dynamic GTK modules are not linked into the executable. Point their caches
+ * at the MSI payload before GIO or GTK first asks for one.
+ */
+static void
+prepare_windows_runtime (void)
+{
+  g_autofree char *prefix =
+    g_win32_get_package_installation_directory_of_module (NULL);
+  g_autofree char *gio_modules = NULL;
+  g_autofree char *cache_template = NULL;
+  g_autofree char *cache_dir = NULL;
+  g_autofree char *cache_path = NULL;
+  g_autofree char *template_text = NULL;
+  g_autoptr (GString) cache = NULL;
+
+  if (prefix == NULL)
+    return;
+
+  gio_modules = g_build_filename (prefix, "lib", "gio", "modules", NULL);
+  g_setenv ("GIO_MODULE_DIR", gio_modules, TRUE);
+
+  cache_template =
+    g_build_filename (prefix, "etc", "gdk-pixbuf-loaders.cache.in", NULL);
+  if (!g_file_get_contents (cache_template, &template_text, NULL, NULL))
+    return;
+
+  /* Cache syntax accepts forward slashes and then needs no escaping for a
+   * normal Windows installation path. */
+  g_strdelimit (prefix, "\\", '/');
+  cache = g_string_new (template_text);
+  g_string_replace (cache, "@BUNDLE@", prefix, 0);
+
+  cache_dir = g_build_filename (g_get_user_cache_dir (), XD_DATA_NAME, NULL);
+  cache_path = g_build_filename (cache_dir, "gdk-pixbuf-loaders.cache", NULL);
+  if (g_mkdir_with_parents (cache_dir, 0700) == 0 &&
+      g_file_set_contents (cache_path, cache->str, cache->len, NULL))
+    g_setenv ("GDK_PIXBUF_MODULE_FILE", cache_path, TRUE);
+}
+#endif
 
 /*
  * Loads the daemon's certificate, minting one the first time.
@@ -52,6 +100,10 @@ print_version (void)
 static int
 run_serve (int argc, char *argv[])
 {
+#ifdef G_OS_WIN32
+  fprintf (stderr, "xd serve is not available in the Windows build yet.\n");
+  return 1;
+#else
   g_autoptr (GError) error = NULL;
   g_autoptr (XdStorage) storage = NULL;
   g_autoptr (GTlsCertificate) certificate = NULL;
@@ -118,11 +170,16 @@ run_serve (int argc, char *argv[])
   g_main_loop_run (loop);
 
   return 0;
+#endif
 }
 
 int
 main (int argc, char *argv[])
 {
+#ifdef G_OS_WIN32
+  prepare_windows_runtime ();
+#endif
+
   /*
    * Before GTK sees argv: the daemon must run without a display at all, and
    * neither must saying which build this is -- the usual reason to ask is that

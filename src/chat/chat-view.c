@@ -3359,6 +3359,7 @@ build_composer (XdChatView *self)
   self->terminal_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
   gtk_button_set_icon_name (GTK_BUTTON (self->terminal_button), "utilities-terminal-symbolic");
   gtk_widget_add_css_class (GTK_WIDGET (self->terminal_button), "flat");
+  gtk_widget_set_visible (GTK_WIDGET (self->terminal_button), XD_HAS_TERMINAL);
   g_signal_connect (self->terminal_button, "toggled",
                     G_CALLBACK (on_terminal_toggled), self);
 

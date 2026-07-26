@@ -1,6 +1,8 @@
 #include "chat-session.h"
 
+#ifndef G_OS_WIN32
 #include <signal.h>
+#endif
 
 /* How long a polite SIGINT gets before the process is killed outright. */
 #define STOP_GRACE_SECONDS 2
@@ -312,12 +314,18 @@ xd_chat_session_cancel (XdChatSession *self)
 
   self->stopping = TRUE;
 
+#ifdef G_OS_WIN32
+  /* GSubprocess has no signal delivery on Windows. Force-exit is the only
+   * portable cancellation primitive until a console-control bridge exists. */
+  g_subprocess_force_exit (self->process);
+#else
   /* SIGINT first: both CLIs treat it as "wrap up", which leaves their own
    * session file intact so the conversation can still be resumed. */
   g_subprocess_send_signal (self->process, SIGINT);
 
   self->kill_timeout_id = g_timeout_add_seconds (STOP_GRACE_SECONDS,
                                                  on_grace_elapsed, self);
+#endif
 }
 
 gboolean

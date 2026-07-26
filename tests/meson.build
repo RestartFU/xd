@@ -12,8 +12,11 @@ xd_tests = {
   'markdown': 'test-markdown.c',
   'ask': 'test-ask.c',
   'worktree': 'test-worktree.c',
-  'remote': 'test-remote.c',
 }
+
+if not is_windows
+  xd_tests += {'remote': 'test-remote.c'}
+endif
 
 foreach name, source : xd_tests
   exe = executable('test-' + name,

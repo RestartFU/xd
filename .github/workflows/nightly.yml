@@ -35,7 +35,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -58,6 +58,91 @@ jobs:
           mv dist xd-nightly
           tar -czf xd-nightly-linux-x86_64.tar.gz xd-nightly
           sha256sum xd-nightly-linux-x86_64.tar.gz > xd-nightly-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            xd-nightly-linux-x86_64.tar.gz
+            xd-nightly-linux-x86_64.tar.gz.sha256
+            scripts/install.sh
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-json-glib
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-librsvg
+
+      - name: Build and test the Windows client
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          meson setup build-windows \
+            --prefix="$MINGW_PREFIX" \
+            --buildtype=release \
+            -Dprofile=nightly \
+            -Dcommit="${GITHUB_SHA:0:7}"
+          meson compile -C build-windows
+          meson test -C build-windows --print-errorlogs
+          DESTDIR="$PWD/stage-windows" \
+            meson install -C build-windows --no-rebuild
+          bash scripts/bundle-windows.sh \
+            "$PWD/stage-windows" "$PWD/windows-dist"
+          ./windows-dist/bin/xd.exe --version
+
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          $payload = (Resolve-Path windows-dist).Path
+          wix build installer/windows/xd.wxs `
+            -arch x64 `
+            -d "Payload=$payload" `
+            -d "Version=0.1.0" `
+            -d "ProductName=xd (Nightly)" `
+            -d "InstallName=xd-nightly" `
+            -d "UpgradeCode=5A04BCF5-0C4A-43DE-B8F4-B5D64E8E4F93" `
+            -d "ShortcutGuid=E7E776D9-E605-4AE2-BAD8-6350E845A1DE" `
+            -o xd-nightly-windows-x86_64.msi
+          $hash = (Get-FileHash xd-nightly-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
+          "$hash  xd-nightly-windows-x86_64.msi" |
+            Set-Content xd-nightly-windows-x86_64.msi.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            xd-nightly-windows-x86_64.msi
+            xd-nightly-windows-x86_64.msi.sha256
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: .
+          merge-multiple: true
 
       - name: Publish
         env:
@@ -82,9 +167,13 @@ jobs:
           ./xd-nightly/xd.sh
           \`\`\`
 
-          Self-contained: no GTK, glib or VTE needed on the host. Installs beside
-          a release rather than over it -- its own settings, chats and
-          workspaces. The daemon is the same binary —
+          Windows x86_64: download and run
+          \`xd-nightly-windows-x86_64.msi\`. This first Windows build omits
+          the embedded terminal and Windows daemon hosting.
+
+          Both downloads are self-contained. Installs beside a release rather
+          than over it -- its own settings, chats and workspaces. On Linux, the
+          daemon is the same binary —
           \`./xd-nightly/bin/xd serve --pair\`.
           EOF
           )
@@ -101,4 +190,6 @@ jobs:
             --notes "$notes" \
             xd-nightly-linux-x86_64.tar.gz \
             xd-nightly-linux-x86_64.tar.gz.sha256 \
+            xd-nightly-windows-x86_64.msi \
+            xd-nightly-windows-x86_64.msi.sha256 \
             scripts/install.sh
