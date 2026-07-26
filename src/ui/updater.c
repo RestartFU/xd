@@ -17,10 +17,12 @@
  * environment back -- curl is the host's, and must load the host's OpenSSL.
  */
 
-/* Often enough to notice the same day, rarely enough to be no one's business.
- * The first check waits a moment: starting up is busy, and this is not. */
+/* Often enough that a build pushed while the window is open turns up in it.
+ * One request every five minutes is nothing to GitHub and nothing to a
+ * network; the first waits a moment, because starting up is busy and this is
+ * not. */
 #define FIRST_CHECK_SECONDS 8
-#define EVERY_SECONDS       (60 * 30)
+#define EVERY_SECONDS       (60 * 5)
 
 typedef enum
 {
