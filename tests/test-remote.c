@@ -4,7 +4,9 @@
 #include "storage/storage.h"
 
 #include <json-glib/json-glib.h>
+#include <signal.h>
 #include <string.h>
+#include <unistd.h>
 
 /*
  * Both halves of remote xd, over a real socket and real TLS.
@@ -28,7 +30,14 @@ typedef struct
   guint16 port;
 } Daemon;
 
-/* Throwaway and self-signed, which is what the daemon mints for itself. */
+/*
+ * Throwaway and self-signed, which is what the daemon mints for itself.
+ *
+ * An elliptic key rather than RSA: it is the same thing to everything here,
+ * and it costs a fraction of the work -- which matters because generating one
+ * is the only thing these tests do that they cannot interrupt, and they do it
+ * for every daemon.
+ */
 static GTlsCertificate *
 make_certificate (const char *dir,
                   const char *name)
@@ -39,7 +48,8 @@ make_certificate (const char *dir,
   g_autoptr (GError) error = NULL;
   GTlsCertificate *certificate;
 
-  command = g_strdup_printf ("openssl req -x509 -newkey rsa:2048 -keyout %s "
+  command = g_strdup_printf ("openssl req -x509 -newkey ec "
+                             "-pkeyopt ec_paramgen_curve:prime256v1 -keyout %s "
                              "-out %s -days 1 -nodes -subj /CN=%s",
                              key_path, cert_path, name);
   g_assert_true (g_spawn_command_line_sync (command, NULL, NULL, NULL, NULL));
@@ -48,6 +58,19 @@ make_certificate (const char *dir,
   g_assert_no_error (error);
 
   return certificate;
+}
+
+/* Every daemon can use the same one; only the test about a certificate that
+ * changed needs a second. */
+static GTlsCertificate *
+daemon_certificate (const char *dir)
+{
+  static GTlsCertificate *shared = NULL;
+
+  if (shared == NULL)
+    shared = make_certificate (dir, "daemon");
+
+  return g_object_ref (shared);
 }
 
 /* A workspace with one folder and one chat with two messages, served. */
@@ -81,7 +104,7 @@ daemon_start (Daemon *daemon)
                                             "assistant", "hello from the daemon",
                                             NULL, "Claude · High", &error));
 
-  daemon->certificate = make_certificate (daemon->dir, "daemon");
+  daemon->certificate = daemon_certificate (daemon->dir);
   daemon->server = xd_remote_server_new (daemon->storage, daemon->root, 0,
                                          daemon->certificate, &error);
   g_assert_no_error (error);
@@ -1064,30 +1087,73 @@ test_the_daemon_lists_its_directories (void)
   daemon_stop (&daemon);
 }
 
+/*
+ * Which test is running, and a watchdog that says so.
+ *
+ * These talk over real sockets to a real daemon, and a wedged one on a machine
+ * nobody can reach is otherwise a timeout with nothing in it: the whole
+ * binary is killed and the log says only that it took too long. This turns
+ * that into the name of the test it was in.
+ */
+static const char *running_test = "(none)";
+
+static void
+on_stuck (int signal_number)
+{
+  /* Only what is safe to call from a signal handler. */
+  const char *prefix = "\n*** test-remote is stuck in: ";
+
+  (void) !write (STDERR_FILENO, prefix, strlen (prefix));
+  (void) !write (STDERR_FILENO, running_test, strlen (running_test));
+  (void) !write (STDERR_FILENO, "\n", 1);
+
+  _exit (99);
+}
+
+typedef struct
+{
+  const char *name;
+  void (*run) (void);
+} Test;
+
+static void
+run_test (gconstpointer data)
+{
+  const Test *test = data;
+
+  running_test = test->name;
+  test->run ();
+}
+
+/* Registered through the trampoline above, so the watchdog knows the name. */
+#define ADD(path, fn) G_STMT_START {           \
+    static const Test test = { path, fn };     \
+    g_test_add_data_func (path, &test, run_test); \
+  } G_STMT_END
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
 
-  g_test_add_func ("/remote/pair-hello-tree", test_pair_hello_tree);
-  g_test_add_func ("/remote/client-pairs-and-reads-the-tree",
-                   test_client_pairs_and_reads_the_tree);
-  g_test_add_func ("/remote/token-reconnects-and-strangers-are-turned-away",
-                   test_token_reconnects_and_strangers_are_turned_away);
-  g_test_add_func ("/remote/folders-and-chats-are-managed-from-the-client",
-                   test_folders_and_chats_are_managed_from_the_client);
-  g_test_add_func ("/remote/a-refused-change-is-reported",
-                   test_a_refused_change_is_reported);
-  g_test_add_func ("/remote/a-remote-that-is-not-answering-shows-offline",
-                   test_a_remote_that_is_not_answering_shows_offline);
-  g_test_add_func ("/remote/two-devices-stay-in-step",
-                   test_two_devices_stay_in_step);
-  g_test_add_func ("/remote/local-changes-reach-the-devices",
-                   test_local_changes_reach_the_devices);
-  g_test_add_func ("/remote/a-first-message-names-the-chat",
-                   test_a_first_message_names_the_chat);
-  g_test_add_func ("/remote/the-daemon-lists-its-directories",
-                   test_the_daemon_lists_its_directories);
+  /* Under meson's own 180; overridable so the watchdog itself can be tried. */
+  {
+    const char *seconds = g_getenv ("XD_TEST_WATCHDOG");
+
+    signal (SIGALRM, on_stuck);
+    alarm (seconds != NULL ? (guint) g_ascii_strtoull (seconds, NULL, 10) : 150);
+  }
+
+  ADD ("/remote/pair-hello-tree", test_pair_hello_tree);
+  ADD ("/remote/client-pairs-and-reads-the-tree", test_client_pairs_and_reads_the_tree);
+  ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
+  ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
+  ADD ("/remote/a-refused-change-is-reported", test_a_refused_change_is_reported);
+  ADD ("/remote/a-remote-that-is-not-answering-shows-offline", test_a_remote_that_is_not_answering_shows_offline);
+  ADD ("/remote/two-devices-stay-in-step", test_two_devices_stay_in_step);
+  ADD ("/remote/local-changes-reach-the-devices", test_local_changes_reach_the_devices);
+  ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
+  ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
 
   return g_test_run ();
 }
