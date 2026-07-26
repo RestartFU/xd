@@ -24,6 +24,11 @@ struct _XdSidebar
   XdNode *editing_parent;
   gboolean creating;
 
+  /* The same, waiting for the menu that asked for it to finish closing. */
+  XdNode *pending_edit;
+  XdNode *pending_parent;
+  gboolean pending_creating;
+
   /* Rows that reported themselves closed, until it is known whether the user
    * closed them or something above them did. GtkTreeListRow* -> folder id. */
   GHashTable *closing;
@@ -217,11 +222,67 @@ end_editing (XdSidebar *self,
     rename_folder (self, node, name);
 }
 
+static void begin_renaming (XdSidebar *self, XdNode *node);
+static void begin_creating_folder (XdSidebar *self, XdNode *parent);
+
+static void
+on_menu_closed (GtkPopover *menu,
+                gpointer    user_data)
+{
+  XdSidebar *self = user_data;
+  g_autoptr (XdNode) node = g_steal_pointer (&self->pending_edit);
+  g_autoptr (XdNode) parent = g_steal_pointer (&self->pending_parent);
+  gboolean creating = self->pending_creating;
+
+  g_signal_handlers_disconnect_by_func (menu, on_menu_closed, self);
+
+  self->pending_creating = FALSE;
+
+  if (creating && parent != NULL)
+    begin_creating_folder (self, parent);
+  else if (node != NULL)
+    begin_renaming (self, node);
+}
+
+/*
+ * Waits for the menu that asked for this to be gone.
+ *
+ * A menu item runs while its menu is still on screen, and a menu closing takes
+ * the keyboard back to where it was -- which, a moment after an entry has
+ * appeared and taken focus, means the entry losing it again and the row going
+ * back to being a name. So the entry does not appear until the menu has.
+ */
+static gboolean
+waiting_for_menu (XdSidebar *self,
+                  XdNode    *row_node,
+                  XdNode    *node,
+                  XdNode    *parent,
+                  gboolean   creating)
+{
+  GtkWidget *box = row_box_for_node (self, row_node);
+  GtkWidget *menu = box != NULL ? g_object_get_data (G_OBJECT (box), "menu") : NULL;
+
+  if (menu == NULL || !gtk_widget_get_visible (menu))
+    return FALSE;
+
+  g_set_object (&self->pending_edit, node);
+  g_set_object (&self->pending_parent, parent);
+  self->pending_creating = creating;
+
+  g_signal_connect (menu, "closed", G_CALLBACK (on_menu_closed), self);
+  gtk_popover_popdown (GTK_POPOVER (menu));
+
+  return TRUE;
+}
+
 static void
 begin_renaming (XdSidebar *self,
                 XdNode    *node)
 {
   GtkWidget *box;
+
+  if (waiting_for_menu (self, node, node, NULL, FALSE))
+    return;
 
   /* Anything already being named is settled first, and kept: starting on
    * another row is not a way of taking back what was typed on this one. */
@@ -249,6 +310,9 @@ begin_creating_folder (XdSidebar *self,
 {
   g_autoptr (XdNode) placeholder = NULL;
   GtkWidget *parent_box;
+
+  if (waiting_for_menu (self, parent, NULL, parent, TRUE))
+    return;
 
   end_editing (self, TRUE);
 
@@ -1207,6 +1271,10 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_widget_set_halign (popover, GTK_ALIGN_START);
   g_object_set_data (G_OBJECT (item), "context-menu", popover);
 
+  /* Read back when a menu item starts a rename: the entry has to wait for its
+   * own menu to finish closing. */
+  g_object_set_data (G_OBJECT (box), "menu", popover);
+
   gesture = gtk_gesture_click_new ();
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (gesture), GDK_BUTTON_SECONDARY);
   g_signal_connect (gesture, "pressed", G_CALLBACK (on_row_right_clicked), popover);
@@ -1614,6 +1682,8 @@ xd_sidebar_dispose (GObject *object)
 
   g_clear_object (&self->editing);
   g_clear_object (&self->editing_parent);
+  g_clear_object (&self->pending_edit);
+  g_clear_object (&self->pending_parent);
   g_clear_pointer (&self->closing, g_hash_table_unref);
   g_clear_pointer (&self->expanded, g_hash_table_unref);
   g_clear_object (&self->selection);

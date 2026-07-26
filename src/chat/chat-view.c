@@ -1,6 +1,7 @@
 #include "chat-view.h"
 
 #include "chat-session.h"
+#include "handover.h"
 #include "message-row.h"
 #include "model-picker.h"
 #include "diff-pane.h"
@@ -66,6 +67,19 @@ struct _XdChatView
    */
   XdRemoteClient *remote;
   GCancellable *fetching;       /* the transcript request in flight, if any */
+
+  /*
+   * A turn running on the daemon, as far as this window can see it.
+   *
+   * The text arrives in pieces like a local one's, and is held the same way --
+   * shown when the message is what it is going to be rather than reflowing on
+   * every token. What is not held here is the truth: the daemon has written it
+   * down by the time the turn ends, and the transcript is read again then.
+   */
+  gboolean remote_working;
+  XdMessageRow *remote_row;
+  GString *remote_said;
+  char *remote_label;
 
   GHashTable *turns;            /* chat id -> Turn* */
 
@@ -192,6 +206,13 @@ add_option_descriptions (GtkDropDown       *chooser,
 G_DEFINE_FINAL_TYPE (XdChatView, xd_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (XdChatView *self);
+static void load_remote_transcript (XdChatView *self);
+static void load_remote_options (XdChatView *self);
+static void append_tool_line (XdChatView *self, const char *name);
+static char *describe_context (const char *workdir);
+static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data);
+static void show_queued (XdChatView *self);
+static void send_remote_message (XdChatView *self, const char *text);
 static void send_queued (XdChatView *self);
 static void send_message (XdChatView *self,
                           const char *text);
@@ -681,6 +702,260 @@ on_remote_messages (GObject      *source,
   queue_scroll_to_bottom (self);
 }
 
+/* --- a turn running on the daemon ------------------------------------------ */
+
+/*
+ * Ends the message being streamed, if there is one.
+ *
+ * The same rule as a local turn: text is shown when the message is finished
+ * rather than as it arrives, because Markdown read character by character
+ * renders as its own source until the syntax closes.
+ */
+static void
+close_remote_segment (XdChatView *self)
+{
+  if (self->remote_row == NULL)
+    return;
+
+  if (self->remote_said != NULL && self->remote_said->len > 0)
+    {
+      gsize visible = xd_ask_visible_length (self->remote_said->str);
+      g_autofree char *prose = g_strndup (self->remote_said->str, visible);
+
+      g_strchomp (prose);
+      xd_message_row_set_text (self->remote_row, prose);
+    }
+
+  xd_message_row_set_waiting (self->remote_row, FALSE);
+  self->remote_row = NULL;
+
+  if (self->remote_said != NULL)
+    g_string_truncate (self->remote_said, 0);
+}
+
+static void
+end_remote_turn (XdChatView *self)
+{
+  self->remote_working = FALSE;
+  self->remote_row = NULL;
+  g_clear_pointer (&self->remote_label, g_free);
+
+  if (self->remote_said != NULL)
+    g_string_truncate (self->remote_said, 0);
+}
+
+static void
+on_remote_event (XdRemoteClient *client,
+                 JsonObject     *event,
+                 gpointer        user_data)
+{
+  XdChatView *self = user_data;
+  const char *name = json_object_get_string_member_with_default (event, "event",
+                                                                 NULL);
+  const char *chat_id = json_object_get_string_member_with_default (event, "chat",
+                                                                    NULL);
+  const char *text = json_object_get_string_member_with_default (event, "text",
+                                                                 NULL);
+
+  /* Events are broadcast to every device for every chat; this window is
+   * showing one of them. */
+  if (self->chat == NULL || self->remote == NULL || chat_id == NULL ||
+      g_strcmp0 (chat_id, xd_node_get_chat_id (self->chat)) != 0)
+    return;
+
+  if (g_strcmp0 (name, "turn-started") == 0)
+    {
+      /* Started here or on another device -- there is no difference to draw. */
+      self->remote_working = TRUE;
+      g_free (self->remote_label);
+      self->remote_label =
+        g_strdup (json_object_get_string_member_with_default (event, "label", NULL));
+
+      load_remote_transcript (self);
+      update_send_button (self);
+      return;
+    }
+
+  if (g_strcmp0 (name, "text") == 0 && text != NULL)
+    {
+      if (self->remote_said == NULL)
+        self->remote_said = g_string_new (NULL);
+
+      g_string_append (self->remote_said, text);
+
+      if (self->remote_row == NULL)
+        {
+          self->remote_row = append_row (self, XD_MESSAGE_ASSISTANT, NULL);
+          xd_message_row_set_source (self->remote_row, self->remote_label);
+          xd_message_row_set_waiting (self->remote_row, TRUE);
+          queue_scroll_to_bottom (self);
+        }
+
+      return;
+    }
+
+  if (g_strcmp0 (name, "tool") == 0 && text != NULL)
+    {
+      close_remote_segment (self);
+      append_tool_line (self, text);
+      queue_scroll_to_bottom (self);
+      return;
+    }
+
+  if (g_strcmp0 (name, "turn-finished") == 0)
+    {
+      end_remote_turn (self);
+      update_send_button (self);
+
+      /* Read back rather than assembled from what arrived: the daemon has
+       * written the turn down, and what it wrote is the transcript. */
+      load_remote_transcript (self);
+
+      /* Anything typed while it was working waits for exactly this, the way
+       * the composer does for a chat running here. */
+      if (self->queued != NULL)
+        {
+          g_autofree char *queued = g_steal_pointer (&self->queued);
+
+          show_queued (self);
+          send_remote_message (self, queued);
+        }
+
+      return;
+    }
+
+  /* Something changed about the chat itself -- edited here, on another device,
+   * or in the window open on the daemon's own screen. */
+  if (g_strcmp0 (name, "changed") == 0 && !self->remote_working)
+    load_remote_transcript (self);
+}
+
+/*
+ * The run options of a chat on a daemon.
+ *
+ * Read from over there rather than out of the database: which model answers,
+ * how hard it thinks and what it is allowed to touch are the chat's, and the
+ * chat is not here. Shown in the same row as a local chat's, because from the
+ * composer there is nothing to tell apart.
+ */
+static void
+update_remote_options (XdChatView   *self,
+                       const XdChat *chat)
+{
+  g_autofree char *description = describe_context (chat->workdir);
+
+  gtk_label_set_label (self->context_label, description);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
+
+  xd_model_picker_set_selected (self->model_picker, chat->backend, chat->model);
+
+  self->syncing_run_options = TRUE;
+
+  for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
+    {
+      if (effort_choices[i] == effort_for (chat))
+        gtk_drop_down_set_selected (self->effort_chooser, i);
+    }
+
+  for (guint i = 0; i < G_N_ELEMENTS (access_choices); i++)
+    {
+      if (access_choices[i] == ai_access_from_string (chat->access))
+        gtk_drop_down_set_selected (self->access_chooser, i);
+    }
+
+  gtk_toggle_button_set_active (chat->plan ? self->plan_toggle : self->build_toggle,
+                                TRUE);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->access_chooser), !chat->plan);
+
+  self->syncing_run_options = FALSE;
+}
+
+static void
+on_remote_options_received (GObject      *source,
+                            GAsyncResult *result,
+                            gpointer      user_data)
+{
+  g_autoptr (XdChatView) self = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+  XdChat chat = { 0 };
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+  if (reply == NULL)
+    return;
+
+  /* Borrowed from the reply, which outlives this call: nothing here is kept. */
+  chat.backend = (char *) member_string (reply, "backend", NULL);
+  chat.model = (char *) member_string (reply, "model", NULL);
+  chat.effort = (char *) member_string (reply, "effort", NULL);
+  chat.access = (char *) member_string (reply, "access", NULL);
+  chat.workdir = (char *) member_string (reply, "workdir", NULL);
+  chat.plan = json_object_get_boolean_member_with_default (reply, "plan", FALSE);
+
+  update_remote_options (self, &chat);
+
+  /* A turn already running when the chat was opened -- started before this
+   * window was looking, or from another device entirely. */
+  if (json_object_get_boolean_member_with_default (reply, "working", FALSE))
+    {
+      self->remote_working = TRUE;
+      update_send_button (self);
+    }
+}
+
+static void
+load_remote_options (XdChatView *self)
+{
+  xd_remote_client_call_op_async (self->remote, "chat", "chat",
+                                  xd_node_get_chat_id (self->chat),
+                                  self->fetching, on_remote_options_received,
+                                  g_object_ref (self));
+}
+
+/* One of the run options, changed on the daemon rather than here. */
+static void
+set_remote_option (XdChatView *self,
+                   const char *option,
+                   const char *value)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "set-option");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
+  json_builder_set_member_name (builder, "option");
+  json_builder_add_string_value (builder, option);
+  json_builder_set_member_name (builder, "value");
+  json_builder_add_string_value (builder, value);
+  json_builder_end_object (builder);
+
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->remote, request, NULL, on_remote_sent,
+                               g_object_ref (self));
+}
+
+/* Connecting is what makes a turn on the daemon visible here: the events are
+ * the same for every device watching. */
+static void
+set_remote (XdChatView     *self,
+            XdRemoteClient *client)
+{
+  if (self->remote == client)
+    return;
+
+  if (self->remote != NULL)
+    g_signal_handlers_disconnect_by_func (self->remote, on_remote_event, self);
+
+  g_set_object (&self->remote, client);
+
+  if (client != NULL)
+    g_signal_connect (client, "event", G_CALLBACK (on_remote_event), self);
+}
+
 static void
 load_remote_transcript (XdChatView *self)
 {
@@ -1017,72 +1292,6 @@ workdir_for (const XdChat              *chat,
   return resolved->workdir;
 }
 
-/* Roughly how much earlier conversation to hand to a backend that has no
- * session of its own. Enough to carry the thread, not so much that it crowds
- * out the message the user actually asked. */
-#define HANDOVER_LIMIT_BYTES 12000
-
-/*
- * Retells whatever this backend has not been told.
- *
- * Resuming a session restores only what *that* assistant was sent, so
- * anything said to the other one in between is missing from it. Replaying
- * those messages is what keeps one conversation coherent across two CLIs --
- * and it matters on every turn, not only the first after a switch. The
- * message being sent right now is already stored, so the last entry is
- * skipped; it travels as the prompt.
- */
-static char *
-build_handover (XdChatView *self,
-                const char *chat_id,
-                gint64      last_seen)
-{
-  g_autoptr (GPtrArray) messages = NULL;
-  g_autoptr (GString) text = NULL;
-  gsize budget = 0;
-  guint first;
-
-  messages = xd_storage_list_messages_since (self->storage, chat_id, last_seen, NULL);
-  if (messages == NULL || messages->len < 2)
-    return NULL;
-
-  /* Walk back from the most recent, keeping what fits. */
-  for (first = messages->len - 1; first > 0; first--)
-    {
-      const XdMessage *message = g_ptr_array_index (messages, first - 1);
-
-      budget += strlen (message->content) + 16;
-      if (budget > HANDOVER_LIMIT_BYTES)
-        break;
-    }
-
-  text = g_string_new ("[Part of this conversation happened with a different "
-                       "assistant, so you have not seen it. It is reproduced "
-                       "below verbatim. Treat it as part of the conversation "
-                       "you are already in: continue from it, and do not greet "
-                       "the user again or re-introduce yourself.]\n\n");
-
-  for (guint i = first; i + 1 < messages->len; i++)
-    {
-      const XdMessage *message = g_ptr_array_index (messages, i);
-      const char *who;
-
-      if (g_strcmp0 (message->role, "user") == 0)
-        who = "User";
-      else if (g_strcmp0 (message->role, "assistant") == 0)
-        who = "Assistant";
-      else
-        continue;   /* errors and tool notes are ours, not the conversation */
-
-      g_string_append_printf (text, "%s: %s\n\n", who, message->content);
-    }
-
-  g_string_append (text, "[End of earlier conversation. The user's new message "
-                         "follows.]");
-
-  return g_string_free (g_steal_pointer (&text), FALSE);
-}
-
 static void
 start_turn (XdChatView *self,
             const char *prompt)
@@ -1121,9 +1330,9 @@ start_turn (XdChatView *self,
 
   /* Whatever this backend has not been told -- because the chat is new, or
    * because those turns went to the other assistant. */
-  handover = build_handover (self, chat->id,
-                             xd_storage_get_last_seen (self->storage, chat->id,
-                                                       backend->id));
+  handover = xd_handover_build (self->storage, chat->id,
+                                xd_storage_get_last_seen (self->storage, chat->id,
+                                                          backend->id));
 
   full_prompt = handover != NULL ? g_strdup_printf ("%s\n\n%s", handover, prompt)
                                  : g_strdup (prompt);
@@ -1540,17 +1749,85 @@ on_queued_dropped (GtkButton *button,
   show_queued (self);
 }
 
+/* A refusal -- the chat already working, the daemon gone -- is the only part of
+ * this worth showing: what worked comes back as an event. */
+static void
+on_remote_sent (GObject      *source,
+                GAsyncResult *result,
+                gpointer      user_data)
+{
+  g_autoptr (XdChatView) self = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+
+  if (reply == NULL && !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    append_row (self, XD_MESSAGE_ERROR, error->message);
+}
+
+/*
+ * Sends to the daemon, which is where the agent runs.
+ *
+ * Nothing is written here and nothing is drawn: the daemon stores the message
+ * and broadcasts what it did, and this window redraws from that like every
+ * other device watching -- including the one the daemon is running on.
+ */
+static void
+send_remote_message (XdChatView *self,
+                     const char *text)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "send");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
+  json_builder_set_member_name (builder, "text");
+  json_builder_add_string_value (builder, text);
+  json_builder_end_object (builder);
+
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->remote, request, NULL,
+                               on_remote_sent, g_object_ref (self));
+}
+
+static void
+cancel_remote_turn (XdChatView *self)
+{
+  xd_remote_client_call_op_async (self->remote, "cancel", "chat",
+                                  xd_node_get_chat_id (self->chat),
+                                  NULL, on_remote_sent, g_object_ref (self));
+}
+
 static void
 send_current_message (XdChatView *self)
 {
   g_autofree char *text = take_composer_text (self);
   g_autoptr (GString) message = NULL;
 
-  /* The composer is hidden for a remote chat, but a keyboard shortcut does not
-   * know that: sending here would start a session on this machine against a
-   * chat that lives on another one. */
+  /*
+   * A chat on a daemon takes the same composer and the same Enter.
+   *
+   * Attachments do not travel: they are files on this machine, and the agent
+   * reading them is on another one.
+   */
   if (self->remote != NULL)
-    return;
+    {
+      if (self->remote_working)
+        {
+          if (text != NULL)
+            queue_message (self, text);
+          return;
+        }
+
+      if (text != NULL)
+        send_remote_message (self, text);
+      return;
+    }
 
   if (self->attachments->len == 0)
     {
@@ -1595,7 +1872,7 @@ send_current_message (XdChatView *self)
 static void
 update_send_button (XdChatView *self)
 {
-  gboolean running = current_turn (self) != NULL;
+  gboolean running = current_turn (self) != NULL || self->remote_working;
 
   gtk_button_set_icon_name (self->send_button,
                             running ? "media-playback-stop-symbolic"
@@ -1931,6 +2208,13 @@ on_plan_toggled (GtkToggleButton *toggle,
   if (self->syncing_run_options || self->chat == NULL)
     return;
 
+  if (self->remote != NULL)
+    {
+      set_remote_option (self, "plan", plan ? "true" : "false");
+      gtk_widget_set_sensitive (GTK_WIDGET (self->access_chooser), !plan);
+      return;
+    }
+
   if (!xd_storage_set_plan (self->storage, xd_node_get_chat_id (self->chat),
                             plan, &error))
     {
@@ -1954,6 +2238,13 @@ on_effort_selected (GtkDropDown *chooser,
       selected >= G_N_ELEMENTS (effort_choices))
     return;
 
+  if (self->remote != NULL)
+    {
+      set_remote_option (self, "effort",
+                         ai_effort_to_string (effort_choices[selected]));
+      return;
+    }
+
   if (!xd_storage_set_effort (self->storage, xd_node_get_chat_id (self->chat),
                               ai_effort_to_string (effort_choices[selected]),
                               &error))
@@ -1972,6 +2263,13 @@ on_access_selected (GtkDropDown *chooser,
   if (self->syncing_run_options || self->chat == NULL ||
       selected >= G_N_ELEMENTS (access_choices))
     return;
+
+  if (self->remote != NULL)
+    {
+      set_remote_option (self, "access",
+                         ai_access_to_string (access_choices[selected]));
+      return;
+    }
 
   if (!xd_storage_set_access (self->storage, xd_node_get_chat_id (self->chat),
                               ai_access_to_string (access_choices[selected]),
@@ -1993,6 +2291,15 @@ on_model_chosen (XdModelPicker *picker,
 
   if (self->chat == NULL)
     return;
+
+  if (self->remote != NULL)
+    {
+      /* Both, and in that order: the backend decides which models mean
+       * anything, so a model set against the old one would be nonsense. */
+      set_remote_option (self, "backend", backend_id);
+      set_remote_option (self, "model", model_id);
+      return;
+    }
 
   chat_id = xd_node_get_chat_id (self->chat);
   chat = xd_storage_get_chat (self->storage, chat_id, NULL);
@@ -2064,7 +2371,9 @@ on_send_clicked (GtkButton *button,
   XdChatView *self = user_data;
   Turn *turn = current_turn (self);
 
-  if (turn != NULL)
+  if (self->remote != NULL && self->remote_working)
+    cancel_remote_turn (self);
+  else if (turn != NULL)
     xd_chat_session_cancel (turn->session);
   else
     send_current_message (self);
@@ -2142,16 +2451,20 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
     turn->row = NULL;
 
   g_set_object (&self->chat, chat);
-  g_set_object (&self->remote, client);
+  set_remote (self, client);
 
   set_local_controls_visible (self, FALSE);
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
-  gtk_widget_set_visible (self->composer_area, FALSE);
+  gtk_widget_set_visible (self->composer_area, TRUE);
   adw_window_title_set_title (self->title, xd_node_get_name (chat));
   adw_window_title_set_subtitle (self->title, xd_remote_client_get_host (client));
 
+  end_remote_turn (self);
   load_remote_transcript (self);
+  load_remote_options (self);
+  update_send_button (self);
+  gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 }
 
 void
@@ -2171,7 +2484,8 @@ xd_chat_view_set_chat (XdChatView *self,
    * about anything on screen. */
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
-  g_clear_object (&self->remote);
+  set_remote (self, NULL);
+  end_remote_turn (self);
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
 

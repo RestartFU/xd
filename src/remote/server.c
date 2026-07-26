@@ -1,6 +1,7 @@
 #include "server.h"
 
 #include "backend/backend.h"
+#include "remote/turn.h"
 #include "settings/folder-settings.h"
 
 #include <json-glib/json-glib.h>
@@ -34,9 +35,27 @@ struct _XdRemoteServer
   GTlsCertificate *certificate;
   guint16 port;
 
+  /* Every connection currently open, so a turn can be shown to all of them.
+   * Unowned: a connection takes itself out when its socket goes. */
+  GPtrArray *connections;
+
+  /* Turns in flight, by chat. One per chat is the rule, and this is what
+   * enforces it. chat id -> XdDaemonTurn*. */
+  GHashTable *turns;
+
+  /* Changes made by anything else on this machine -- the window open here,
+   * most of the time -- and the delay that coalesces them. */
+  GFileMonitor *database_watch;
+  GFileMonitor *tree_watch;
+  guint local_change_id;
+
   char *pairing_code;
   gint64 pairing_expires;      /* monotonic microseconds */
 };
+
+/* SQLite writes several times per statement, and a checkout touches everything
+ * at once; one event out the far side is enough. */
+#define LOCAL_CHANGE_DEBOUNCE_MS 400
 
 G_DEFINE_FINAL_TYPE (XdRemoteServer, xd_remote_server, G_TYPE_OBJECT)
 
@@ -68,6 +87,85 @@ send_json (Connection  *connection,
 
   g_output_stream_write_all (connection->out, text, length, NULL, NULL, NULL);
   g_output_stream_write_all (connection->out, "\n", 1, NULL, NULL, NULL);
+}
+
+/* --- telling every device ---------------------------------------------------
+ *
+ * A turn belongs to the chat, not to whoever started it: a reply is shown on
+ * every device watching, in the order it arrives, because that is what makes
+ * two machines the same machine. Connections that have not proven a token hear
+ * nothing.
+ */
+
+static void
+broadcast (XdRemoteServer *self,
+           JsonBuilder    *builder)
+{
+  g_autoptr (JsonGenerator) generator = json_generator_new ();
+  g_autoptr (JsonNode) root = json_builder_get_root (builder);
+  g_autofree char *text = NULL;
+  gsize length;
+
+  json_generator_set_root (generator, root);
+  text = json_generator_to_data (generator, &length);
+
+  for (guint i = 0; i < self->connections->len; i++)
+    {
+      Connection *connection = g_ptr_array_index (self->connections, i);
+
+      if (!connection->authed)
+        continue;
+
+      /* Errors are ignored on purpose: a connection that cannot be written to
+       * is one whose read side is about to notice the same thing and clean
+       * itself up. */
+      g_output_stream_write_all (connection->out, text, length, NULL, NULL, NULL);
+      g_output_stream_write_all (connection->out, "\n", 1, NULL, NULL, NULL);
+    }
+}
+
+/* An event about one chat, carrying at most one string of its own. */
+static void
+broadcast_event (XdRemoteServer *self,
+                 const char     *event,
+                 const char     *chat_id,
+                 const char     *name,
+                 const char     *value)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, event);
+
+  if (chat_id != NULL)
+    {
+      json_builder_set_member_name (builder, "chat");
+      json_builder_add_string_value (builder, chat_id);
+    }
+
+  if (name != NULL)
+    {
+      json_builder_set_member_name (builder, name);
+      json_builder_add_string_value (builder, value);
+    }
+
+  json_builder_end_object (builder);
+
+  broadcast (self, builder);
+}
+
+/*
+ * The tree has changed shape.
+ *
+ * Sent after anything that adds, removes, renames or moves: the device that
+ * asked hears it along with everyone else, so there is one path to being up to
+ * date rather than one for the client that acted and another for the rest.
+ */
+static void
+broadcast_tree (XdRemoteServer *self)
+{
+  broadcast_event (self, "tree", NULL, NULL, NULL);
 }
 
 static void
@@ -502,6 +600,7 @@ handle_rename_folder (Connection *connection,
     }
 
   send_done (connection, NULL);
+  broadcast_tree (connection->server);
 }
 
 static void
@@ -555,6 +654,7 @@ handle_move_folder (Connection *connection,
     }
 
   send_done (connection, NULL);
+  broadcast_tree (connection->server);
 }
 
 static void
@@ -581,6 +681,7 @@ handle_trash_folder (Connection *connection,
     }
 
   send_done (connection, NULL);
+  broadcast_tree (connection->server);
 }
 
 /*
@@ -705,6 +806,7 @@ handle_rename_chat (Connection *connection,
     }
 
   send_done (connection, NULL);
+  broadcast_tree (connection->server);
 }
 
 static void
@@ -727,6 +829,7 @@ handle_delete_chat (Connection *connection,
     }
 
   send_done (connection, NULL);
+  broadcast_tree (connection->server);
 }
 
 static void
@@ -776,11 +879,368 @@ handle_messages (Connection *connection,
   send_json (connection, builder);
 }
 
+/* --- running a turn -------------------------------------------------------- */
+
+typedef struct
+{
+  XdRemoteServer *server;   /* unowned; the server outlives its turns */
+  char *chat_id;
+} Running;
+
+static void
+running_free (Running *running)
+{
+  g_free (running->chat_id);
+  g_free (running);
+}
+
+static void
+on_turn_text (XdDaemonTurn *turn,
+              const char   *delta,
+              gpointer      user_data)
+{
+  Running *running = user_data;
+
+  broadcast_event (running->server, "text", running->chat_id, "text", delta);
+}
+
+static void
+on_turn_tool (XdDaemonTurn *turn,
+              const char   *name,
+              gpointer      user_data)
+{
+  Running *running = user_data;
+
+  broadcast_event (running->server, "tool", running->chat_id, "text", name);
+}
+
+/* The turn is over, but it is over inside one of its own signals: dropping it
+ * here would take the session down while it is still emitting. */
+static gboolean
+forget_turn (gpointer user_data)
+{
+  Running *running = user_data;
+
+  g_hash_table_remove (running->server->turns, running->chat_id);
+  running_free (running);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_turn_finished (XdDaemonTurn *turn,
+                  gboolean      ok,
+                  const char   *message,
+                  gpointer      user_data)
+{
+  Running *running = user_data;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "turn-finished");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, running->chat_id);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, ok);
+  if (message != NULL)
+    {
+      json_builder_set_member_name (builder, "error");
+      json_builder_add_string_value (builder, message);
+    }
+  json_builder_end_object (builder);
+
+  broadcast (running->server, builder);
+
+  g_idle_add (forget_turn, running);
+}
+
+static void
+handle_send (Connection *connection,
+             JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *text = member_string (request, "text");
+  g_autoptr (GError) error = NULL;
+  XdDaemonTurn *turn;
+  Running *running;
+
+  if (chat_id == NULL || text == NULL || *text == '\0')
+    {
+      send_error (connection, "A message needs a chat and something to say.");
+      return;
+    }
+
+  /* One turn per chat, enforced here rather than by each client: two devices
+   * sending at once would otherwise be two agents in the same directory. */
+  if (g_hash_table_contains (self->turns, chat_id))
+    {
+      send_error (connection, "That chat is already working.");
+      return;
+    }
+
+  turn = xd_daemon_turn_new (self->storage, self->root_path);
+
+  running = g_new0 (Running, 1);
+  running->server = self;
+  running->chat_id = g_strdup (chat_id);
+
+  g_signal_connect (turn, "text", G_CALLBACK (on_turn_text), running);
+  g_signal_connect (turn, "tool", G_CALLBACK (on_turn_tool), running);
+  g_signal_connect (turn, "finished", G_CALLBACK (on_turn_finished), running);
+
+  if (!xd_daemon_turn_start (turn, chat_id, text, &error))
+    {
+      send_error (connection, error->message);
+      running_free (running);
+      g_object_unref (turn);
+
+      /* The message and the failure are both in the transcript now. */
+      broadcast_event (self, "changed", chat_id, NULL, NULL);
+      return;
+    }
+
+  g_hash_table_insert (self->turns, g_strdup (chat_id), turn);
+
+  send_done (connection, NULL);
+
+  /* Everyone watching sees the message arrive and the work start, including
+   * the device that sent it -- one path, so every screen agrees. */
+  broadcast_event (self, "turn-started", chat_id, "label",
+                   xd_daemon_turn_get_label (turn));
+}
+
+static void
+handle_cancel (Connection *connection,
+               JsonObject *request)
+{
+  const char *chat_id = member_string (request, "chat");
+  XdDaemonTurn *turn;
+
+  if (chat_id == NULL)
+    {
+      send_error (connection, "cancel needs a chat id");
+      return;
+    }
+
+  turn = g_hash_table_lookup (connection->server->turns, chat_id);
+  if (turn != NULL)
+    xd_daemon_turn_cancel (turn);
+
+  send_done (connection, NULL);
+}
+
+/* --- one chat's settings ---------------------------------------------------- */
+
+static void
+handle_chat (Connection *connection,
+             JsonObject *request)
+{
+  const char *chat_id = member_string (request, "chat");
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  XdRemoteServer *self = connection->server;
+
+  if (chat_id == NULL)
+    {
+      send_error (connection, "chat needs a chat id");
+      return;
+    }
+
+  chat = xd_storage_get_chat (self->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error != NULL ? error->message : "No such chat.");
+      return;
+    }
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, TRUE);
+
+  json_builder_set_member_name (builder, "title");
+  json_builder_add_string_value (builder, chat->title);
+  json_builder_set_member_name (builder, "backend");
+  json_builder_add_string_value (builder, chat->backend);
+  json_builder_set_member_name (builder, "plan");
+  json_builder_add_boolean_value (builder, chat->plan);
+  json_builder_set_member_name (builder, "working");
+  json_builder_add_boolean_value (builder,
+                                  g_hash_table_contains (self->turns, chat_id));
+
+  if (chat->model != NULL)
+    {
+      json_builder_set_member_name (builder, "model");
+      json_builder_add_string_value (builder, chat->model);
+    }
+  if (chat->effort != NULL)
+    {
+      json_builder_set_member_name (builder, "effort");
+      json_builder_add_string_value (builder, chat->effort);
+    }
+  if (chat->access != NULL)
+    {
+      json_builder_set_member_name (builder, "access");
+      json_builder_add_string_value (builder, chat->access);
+    }
+
+  /* Where it runs, resolved on this side: the folder chain that decides it is
+   * here, and the client has no way to read it. */
+  {
+    g_autoptr (XdDaemonTurn) resolver = NULL;
+    g_autofree char *workdir = NULL;
+
+    resolver = xd_daemon_turn_new (self->storage, self->root_path);
+    workdir = xd_daemon_turn_resolve_workdir (resolver, chat);
+
+    if (workdir != NULL)
+      {
+        json_builder_set_member_name (builder, "workdir");
+        json_builder_add_string_value (builder, workdir);
+      }
+  }
+
+  json_builder_end_object (builder);
+
+  send_json (connection, builder);
+}
+
+static void
+handle_set_option (Connection *connection,
+                   JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *option = member_string (request, "option");
+  const char *value = member_string (request, "value");
+  g_autoptr (GError) error = NULL;
+  gboolean ok;
+
+  if (chat_id == NULL || option == NULL)
+    {
+      send_error (connection, "set-option needs a chat and an option.");
+      return;
+    }
+
+  if (g_strcmp0 (option, "model") == 0)
+    ok = xd_storage_set_model (self->storage, chat_id, value, &error);
+  else if (g_strcmp0 (option, "effort") == 0)
+    ok = xd_storage_set_effort (self->storage, chat_id, value, &error);
+  else if (g_strcmp0 (option, "access") == 0)
+    ok = xd_storage_set_access (self->storage, chat_id, value, &error);
+  else if (g_strcmp0 (option, "plan") == 0)
+    ok = xd_storage_set_plan (self->storage, chat_id,
+                              g_strcmp0 (value, "true") == 0, &error);
+  else if (g_strcmp0 (option, "backend") == 0)
+    ok = xd_storage_set_backend (self->storage, chat_id, value, &error);
+  else
+    {
+      send_error (connection, "No such option.");
+      return;
+    }
+
+  if (!ok)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+
+  /* Which model answers is part of what a chat is, so every device showing it
+   * has to hear that it changed. */
+  broadcast_event (self, "changed", chat_id, NULL, NULL);
+}
+
+/* --- changes made on this machine ------------------------------------------- */
+
+/*
+ * The daemon is not the only thing writing here.
+ *
+ * A window open on this machine works on the same database and the same
+ * directories, and a message sent there is as real as one sent from a phone.
+ * Watching for it is what keeps the two the same: the database is watched for
+ * writes, the tree for folders coming and going, and anything either of them
+ * shows becomes an event like any other.
+ *
+ * Coalesced, because SQLite writes several times per statement and a git
+ * checkout can touch a thousand directories.
+ */
+static gboolean
+on_local_change_settled (gpointer user_data)
+{
+  XdRemoteServer *self = user_data;
+
+  self->local_change_id = 0;
+
+  broadcast_tree (self);
+  broadcast_event (self, "changed", NULL, NULL, NULL);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_local_change (GFileMonitor      *monitor,
+                 GFile             *file,
+                 GFile             *other_file,
+                 GFileMonitorEvent  event,
+                 gpointer           user_data)
+{
+  XdRemoteServer *self = user_data;
+
+  g_clear_handle_id (&self->local_change_id, g_source_remove);
+  self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
+                                         on_local_change_settled, self);
+}
+
+static void
+watch_for_local_changes (XdRemoteServer *self)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *db_dir = NULL;
+
+  /* The database directory rather than the file: in WAL mode the writes land
+   * beside it, in a journal the file itself never mentions. */
+  db_dir = g_path_get_dirname (xd_storage_get_path (self->storage));
+
+  {
+    g_autoptr (GFile) file = g_file_new_for_path (db_dir);
+
+    self->database_watch = g_file_monitor_directory (file, G_FILE_MONITOR_NONE,
+                                                     NULL, &error);
+    if (self->database_watch == NULL)
+      g_warning ("cannot watch the database: %s", error->message);
+    else
+      g_signal_connect (self->database_watch, "changed",
+                        G_CALLBACK (on_local_change), self);
+  }
+
+  g_clear_error (&error);
+
+  {
+    g_autoptr (GFile) file = g_file_new_for_path (self->root_path);
+
+    self->tree_watch = g_file_monitor_directory (file, G_FILE_MONITOR_WATCH_MOVES,
+                                                 NULL, &error);
+    if (self->tree_watch == NULL)
+      g_warning ("cannot watch the workspaces: %s", error->message);
+    else
+      g_signal_connect (self->tree_watch, "changed",
+                        G_CALLBACK (on_local_change), self);
+  }
+}
+
 /* --- the conversation ------------------------------------------------------ */
 
 static void
 connection_free (Connection *connection)
 {
+  /* NULL when the server went first and let its connections know. */
+  if (connection->server != NULL)
+    g_ptr_array_remove_fast (connection->server->connections, connection);
+
   g_clear_object (&connection->in);
   g_clear_object (&connection->stream);
   g_free (connection);
@@ -844,6 +1304,14 @@ dispatch (Connection *connection,
     handle_rename_chat (connection, request);
   else if (g_strcmp0 (op, "delete-chat") == 0)
     handle_delete_chat (connection, request);
+  else if (g_strcmp0 (op, "chat") == 0)
+    handle_chat (connection, request);
+  else if (g_strcmp0 (op, "set-option") == 0)
+    handle_set_option (connection, request);
+  else if (g_strcmp0 (op, "send") == 0)
+    handle_send (connection, request);
+  else if (g_strcmp0 (op, "cancel") == 0)
+    handle_cancel (connection, request);
   else if (g_strcmp0 (op, "ping") == 0)
     {
       g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -868,7 +1336,10 @@ on_line_read (GObject      *source,
 
   line = g_data_input_stream_read_line_finish_utf8 (G_DATA_INPUT_STREAM (source),
                                                     result, NULL, NULL);
-  if (line == NULL)
+
+  /* The daemon is going, or this socket is: either way there is nobody left to
+   * answer for, and reading on would be reading for a server that is gone. */
+  if (line == NULL || connection->server == NULL)
     {
       connection_free (connection);
       return;
@@ -920,6 +1391,7 @@ on_incoming (GSocketService    *service,
 
   connection = g_new0 (Connection, 1);
   connection->server = self;
+  g_ptr_array_add (self->connections, connection);
   connection->stream = g_object_ref (tls);
   connection->in = g_data_input_stream_new (g_io_stream_get_input_stream (tls));
   connection->out = g_io_stream_get_output_stream (tls);
@@ -969,6 +1441,8 @@ xd_remote_server_new (XdStorage        *storage,
   g_signal_connect (self->service, "incoming", G_CALLBACK (on_incoming), self);
   g_socket_service_start (self->service);
 
+  watch_for_local_changes (self);
+
   return g_steal_pointer (&self);
 }
 
@@ -987,6 +1461,34 @@ xd_remote_server_dispose (GObject *object)
 
   if (self->service != NULL)
     g_socket_service_stop (self->service);
+
+  /*
+   * The connections outlive this object otherwise.
+   *
+   * Each one is owned by the read it has in flight, which finishes long after
+   * the server has been let go -- and answers by reaching back into it. Closing
+   * the stream ends that read, and the missing server is how the connection
+   * knows not to look for one.
+   */
+  if (self->connections != NULL)
+    {
+      for (guint i = 0; i < self->connections->len; i++)
+        {
+          Connection *connection = g_ptr_array_index (self->connections, i);
+
+          connection->server = NULL;
+          connection->authed = FALSE;
+
+          if (connection->stream != NULL)
+            g_io_stream_close (connection->stream, NULL, NULL);
+        }
+    }
+
+  g_clear_handle_id (&self->local_change_id, g_source_remove);
+  g_clear_object (&self->database_watch);
+  g_clear_object (&self->tree_watch);
+  g_clear_pointer (&self->turns, g_hash_table_unref);
+  g_clear_pointer (&self->connections, g_ptr_array_unref);
   g_clear_object (&self->service);
   g_clear_object (&self->certificate);
   g_clear_object (&self->storage);
@@ -1005,4 +1507,7 @@ xd_remote_server_class_init (XdRemoteServerClass *klass)
 static void
 xd_remote_server_init (XdRemoteServer *self)
 {
+  self->connections = g_ptr_array_new ();
+  self->turns = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                       g_free, g_object_unref);
 }

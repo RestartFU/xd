@@ -836,6 +836,86 @@ test_a_remote_that_is_not_answering_shows_offline (void)
   daemon_stop (&daemon);
 }
 
+/*
+ * Two devices on one daemon, without either asking.
+ *
+ * What one changes the other is told about: the daemon says what it did to
+ * everything connected, so being up to date is not something a client has to
+ * remember to do. Nothing here polls -- the second tree is waited on, and it
+ * reloads because it was told to.
+ */
+static void
+test_two_devices_stay_in_step (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) first = NULL;
+  g_autoptr (XdRemoteClient) second = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autoptr (XdRemoteTree) watching = NULL;
+  XdNode *root;
+
+  daemon_start (&daemon);
+
+  first = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, first);
+
+  second = xd_remote_client_new ("127.0.0.1", daemon.port);
+  watching = paired_tree (&daemon, second);
+
+  root = xd_remote_tree_get_root (watching);
+  g_assert_cmpuint (child_count (root), ==, 1);
+
+  /* One device acts... */
+  xd_remote_tree_create_folder (tree, NULL, "Lunar");
+
+  /* ...and the other finds out on its own. */
+  wait_for_reload (watching);
+
+  g_assert_cmpuint (child_count (root), ==, 2);
+  g_assert_cmpstr (xd_node_get_name (child_at (root, 0)), ==, "Lunar");
+
+  daemon_stop (&daemon);
+}
+
+/*
+ * A change made on the daemon's own machine reaches the devices watching it.
+ *
+ * The window open there writes to the same database and the same directories,
+ * and a folder made in it is as real as one made from a phone -- so the daemon
+ * watches its own disk and says what it sees. Here that is stood in for by
+ * making the folder directly, which is all the local window does.
+ */
+static void
+test_local_changes_reach_the_devices (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  XdNode *root;
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  root = xd_remote_tree_get_root (tree);
+
+  g_assert_cmpuint (child_count (root), ==, 1);
+
+  {
+    g_autofree char *folder = g_build_filename (daemon.root, "Made Here", NULL);
+    g_autofree char *dotfile = g_build_filename (folder, ".xd.json", NULL);
+
+    g_assert_cmpint (g_mkdir_with_parents (folder, 0700), ==, 0);
+    g_assert_true (g_file_set_contents (dotfile, "{\"id\": \"folder-2\"}", -1, NULL));
+  }
+
+  wait_for_reload (tree);
+
+  g_assert_cmpuint (child_count (root), ==, 2);
+
+  daemon_stop (&daemon);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -852,6 +932,10 @@ main (int argc, char *argv[])
                    test_a_refused_change_is_reported);
   g_test_add_func ("/remote/a-remote-that-is-not-answering-shows-offline",
                    test_a_remote_that_is_not_answering_shows_offline);
+  g_test_add_func ("/remote/two-devices-stay-in-step",
+                   test_two_devices_stay_in_step);
+  g_test_add_func ("/remote/local-changes-reach-the-devices",
+                   test_local_changes_reach_the_devices);
 
   return g_test_run ();
 }

@@ -10,6 +10,7 @@ xd_core_sources = files(
   'remote/server.c',
   'remote/client.c',
   'remote/remote-tree.c',
+  'remote/turn.c',
   'tree/xd-node.c',
   'storage/storage.c',
   'backend/backend.c',
@@ -17,6 +18,7 @@ xd_core_sources = files(
   'backend/codex-backend.c',
   # No GTK here either, so the subprocess plumbing can be tested headlessly.
   'chat/chat-session.c',
+  'chat/handover.c',
 )
 
 # Pango, but not GTK: the Markdown converter validates the markup it produces,

@@ -77,6 +77,7 @@ enum
 {
   SIGNAL_OPENED,
   SIGNAL_CLOSED,
+  SIGNAL_EVENT,
   N_SIGNALS,
 };
 
@@ -355,15 +356,27 @@ on_line_read (GObject      *source,
     }
 
   reply = json_node_get_object (json_parser_get_root (parser));
-  call = g_queue_pop_head (self->pending);
 
-  /* A line nobody asked for is not an answer, so it must not be handed to the
-   * next call in the queue. The daemon sends none today; pushed turn events
-   * arrive here when it grows a subscription to send them over. */
-  if (call == NULL)
-    g_debug ("unsolicited line from %s: %s", self->host, line);
+  /*
+   * What the daemon says without being asked.
+   *
+   * It must not be handed to the call at the head of the queue: an event
+   * arriving between a request and its answer would otherwise be read as that
+   * answer, and every reply after it would belong to the wrong caller.
+   */
+  if (json_object_has_member (reply, "event"))
+    {
+      g_signal_emit (self, signals[SIGNAL_EVENT], 0, reply);
+    }
   else
-    complete_call (self, call, reply);
+    {
+      call = g_queue_pop_head (self->pending);
+
+      if (call == NULL)
+        g_debug ("unanswerable line from %s: %s", self->host, line);
+      else
+        complete_call (self, call, reply);
+    }
 
   /* Answering may have ended the connection -- a refused greeting does -- and
    * there is nothing left to read from when it has. */
@@ -799,6 +812,12 @@ xd_remote_client_class_init (XdRemoteClientClass *klass)
   signals[SIGNAL_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  /* Something happened over there: a turn saying something, a tree that
+   * changed, a chat that was edited. Carries the daemon's own object. */
+  signals[SIGNAL_EVENT] =
+    g_signal_new ("event", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, JSON_TYPE_OBJECT);
 }
 
 static void

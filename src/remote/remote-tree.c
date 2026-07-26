@@ -471,10 +471,9 @@ on_intent_answered (GObject      *source,
       self->opening = g_strdup (member_string (reply, "id"));
     }
 
-  /* Done over there; what is shown here comes from asking again rather than
-   * from imagining what the answer would have been. */
-  xd_remote_tree_refresh (self);
-
+  /* Nothing is read back here: the daemon broadcasts what changed, and this
+   * client hears it on the same connection like every other device. Doing it
+   * both ways would be two answers to the same question. */
   intent_free (intent);
 }
 
@@ -673,6 +672,41 @@ xd_remote_tree_delete_chat (XdRemoteTree *self,
   send_intent (self, builder, "Could not delete the chat", FALSE);
 }
 
+/*
+ * What the daemon says while nobody asked.
+ *
+ * The tree is read again when it says it changed -- by another device, or by
+ * the window open on the daemon's own screen, which writes to the same
+ * database and is no different from here. A chat that is working says so on
+ * its row, the way a local one does, because from the sidebar there is no
+ * difference worth drawing.
+ */
+static void
+on_client_event (XdRemoteClient *client,
+                 JsonObject     *event,
+                 gpointer        user_data)
+{
+  XdRemoteTree *self = user_data;
+  const char *name = member_string (event, "event");
+  const char *chat_id = member_string (event, "chat");
+  XdNode *chat = chat_id != NULL
+    ? g_hash_table_lookup (self->chats, chat_id) : NULL;
+
+  if (g_strcmp0 (name, "tree") == 0)
+    {
+      xd_remote_tree_refresh (self);
+      return;
+    }
+
+  if (chat == NULL)
+    return;
+
+  if (g_strcmp0 (name, "turn-started") == 0)
+    xd_node_set_state (chat, XD_NODE_WORKING);
+  else if (g_strcmp0 (name, "turn-finished") == 0)
+    xd_node_set_state (chat, XD_NODE_IDLE);
+}
+
 static void
 on_client_opened (XdRemoteClient *client,
                   gpointer        user_data)
@@ -721,6 +755,7 @@ xd_remote_tree_new (XdRemoteClient *client)
 
   g_signal_connect (client, "opened", G_CALLBACK (on_client_opened), self);
   g_signal_connect (client, "closed", G_CALLBACK (on_client_closed), self);
+  g_signal_connect (client, "event", G_CALLBACK (on_client_event), self);
 
   /* Already up, when the tree is made for a client that has been paired this
    * moment rather than one about to connect. Otherwise the remote starts the

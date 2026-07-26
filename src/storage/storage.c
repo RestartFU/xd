@@ -10,6 +10,7 @@ struct _XdStorage
   GObject parent_instance;
 
   sqlite3 *db;
+  char *path;
 };
 
 G_DEFINE_FINAL_TYPE (XdStorage, xd_storage, G_TYPE_OBJECT)
@@ -285,6 +286,8 @@ xd_storage_new (const char  *db_path,
     }
 
   self = g_object_new (XD_TYPE_STORAGE, NULL);
+
+  self->path = g_strdup (db_path);
 
   if (sqlite3_open (db_path, &self->db) != SQLITE_OK)
     {
@@ -1046,6 +1049,8 @@ xd_storage_finalize (GObject *object)
       self->db = NULL;
     }
 
+  g_clear_pointer (&self->path, g_free);
+
   G_OBJECT_CLASS (xd_storage_parent_class)->finalize (object);
 }
 
@@ -1058,6 +1063,14 @@ xd_storage_class_init (XdStorageClass *klass)
 static void
 xd_storage_init (XdStorage *self)
 {
+}
+
+const char *
+xd_storage_get_path (XdStorage *self)
+{
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
+
+  return self->path;
 }
 
 gboolean

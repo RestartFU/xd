@@ -32,7 +32,9 @@ G_DECLARE_FINAL_TYPE (XdRemoteClient, xd_remote_client, XD, REMOTE_CLIENT, GObje
  *
  * The wire has no request ids, so the daemon's replies come back in the order
  * the requests went out: calls queue, and each reply answers the head of that
- * queue.
+ * queue. What the daemon says unprompted -- a turn's text arriving, a tree that
+ * changed under it -- carries an "event" instead of an "ok", and is handed to
+ * ::event rather than to whoever is waiting for a reply.
  */
 
 XdRemoteClient *xd_remote_client_new   (const char *host,

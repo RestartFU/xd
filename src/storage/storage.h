@@ -51,6 +51,10 @@ G_DECLARE_FINAL_TYPE (XdStorage, xd_storage, XD, STORAGE, GObject)
 XdStorage  *xd_storage_new             (const char  *db_path,
                                         GError     **error);
 
+/* The file it was opened from. Anything watching for writes made by another
+ * process on this machine needs it; SQLite says nothing about those. */
+const char *xd_storage_get_path        (XdStorage   *self);
+
 /* Returns the new chat's id. @workdir may be NULL to inherit the folder's. */
 char       *xd_storage_create_chat     (XdStorage   *self,
                                         const char  *folder_id,
