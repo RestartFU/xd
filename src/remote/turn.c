@@ -426,6 +426,14 @@ xd_daemon_turn_get_label (XdDaemonTurn *self)
   return self->label;
 }
 
+const char *
+xd_daemon_turn_get_text (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
+
+  return self->text != NULL ? self->text->str : NULL;
+}
+
 XdDaemonTurn *
 xd_daemon_turn_new (XdStorage  *storage,
                     const char *root_path)

@@ -1151,9 +1151,28 @@ handle_chat (Connection *connection,
   json_builder_add_string_value (builder, chat->backend);
   json_builder_set_member_name (builder, "plan");
   json_builder_add_boolean_value (builder, chat->plan);
-  json_builder_set_member_name (builder, "working");
-  json_builder_add_boolean_value (builder,
-                                  g_hash_table_contains (self->turns, chat_id));
+  {
+    XdDaemonTurn *turn = g_hash_table_lookup (self->turns, chat_id);
+
+    json_builder_set_member_name (builder, "working");
+    json_builder_add_boolean_value (builder, turn != NULL);
+
+    /* What it has said so far, which is nowhere else yet: a device opening
+     * this chat now joins the reply in progress. */
+    if (turn != NULL)
+      {
+        const char *said = xd_daemon_turn_get_text (turn);
+
+        json_builder_set_member_name (builder, "label");
+        json_builder_add_string_value (builder, xd_daemon_turn_get_label (turn));
+
+        if (said != NULL)
+          {
+            json_builder_set_member_name (builder, "said");
+            json_builder_add_string_value (builder, said);
+          }
+      }
+  }
 
   if (chat->model != NULL)
     {

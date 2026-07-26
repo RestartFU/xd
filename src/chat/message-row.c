@@ -1,7 +1,5 @@
 #include "message-row.h"
 
-#include "ui/dots.h"
-
 #include <string.h>
 
 #include "util/markdown.h"
@@ -15,7 +13,6 @@ struct _XdMessageRow
   GString *text;
 
   GtkWidget *body;          /* a column of prose labels and code cards */
-  GtkWidget *working;
 };
 
 G_DEFINE_FINAL_TYPE (XdMessageRow, xd_message_row, ADW_TYPE_BIN)
@@ -113,15 +110,10 @@ xd_message_row_new (XdMessageKind  kind,
   self->kind = kind;
   self->text = g_string_new (text != NULL ? text : "");
 
-  self->working = GTK_WIDGET (xd_dots_new ());
-  gtk_widget_set_visible (self->working, FALSE);
-  gtk_widget_add_css_class (self->working, "xd-dots-large");
-  gtk_widget_set_halign (self->working, GTK_ALIGN_START);
 
   self->body = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   render_body (self);
 
-  gtk_box_append (GTK_BOX (card), self->working);
   gtk_box_append (GTK_BOX (card), self->body);
 
   gtk_widget_set_margin_top (card, 6);
@@ -481,10 +473,13 @@ xd_message_row_set_waiting (XdMessageRow *self,
 {
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
-  gtk_widget_set_visible (self->working, waiting);
-
-  /* An empty label collapses to nothing, which makes the row look broken
-   * while waiting; the dots carry the state instead. */
+  /*
+   * Only whether there is anything to show.
+   *
+   * The marker for a turn in progress is on the transcript now, one for the
+   * whole turn: a row that carried its own showed nothing for the stretches
+   * between messages, which are exactly the ones worth marking.
+   */
   gtk_widget_set_visible (self->body, self->text->len > 0);
 }
 

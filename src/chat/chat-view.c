@@ -2,6 +2,7 @@
 
 #include "chat-session.h"
 #include "chat-title.h"
+#include "ui/dots.h"
 #include "handover.h"
 #include "message-row.h"
 #include "model-picker.h"
@@ -77,6 +78,16 @@ struct _XdChatView
    * every token. What is not held here is the truth: the daemon has written it
    * down by the time the turn ends, and the transcript is read again then.
    */
+  /*
+   * The dots at the foot of the transcript while a turn is running.
+   *
+   * On the transcript rather than on the row being written: a turn spends most
+   * of its time between messages -- reading, running a command, deciding --
+   * and a marker that lived on the row vanished for exactly those stretches,
+   * which are the ones where "is it still going?" is the question.
+   */
+  GtkWidget *working_row;
+
   gboolean remote_working;
   XdMessageRow *remote_row;
   GString *remote_said;
@@ -211,6 +222,8 @@ add_option_descriptions (GtkDropDown       *chooser,
 G_DEFINE_FINAL_TYPE (XdChatView, xd_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (XdChatView *self);
+static void keep_working_last (XdChatView *self);
+static void set_working (XdChatView *self, gboolean working);
 static void on_storage_changed (XdStorage *storage, gpointer user_data);
 static void load_remote_transcript (XdChatView *self);
 static void load_remote_options (XdChatView *self);
@@ -338,6 +351,7 @@ append_row (XdChatView    *self,
   XdMessageRow *row = xd_message_row_new (kind, text);
 
   gtk_box_append (self->transcript, GTK_WIDGET (row));
+  keep_working_last (self);
   queue_scroll_to_bottom (self);
 
   return row;
@@ -360,6 +374,10 @@ append_tool_line (XdChatView *self,
   GtkWidget *expander;
   g_autofree char *title = NULL;
   int count;
+
+  /* Past the dots, which sit at the end while the turn runs. */
+  if (last == self->working_row && last != NULL)
+    last = gtk_widget_get_prev_sibling (last);
 
   if (last != NULL && GTK_IS_EXPANDER (last))
     {
@@ -400,6 +418,7 @@ append_tool_line (XdChatView *self,
                      : g_strdup_printf ("%d tool calls", count);
   gtk_expander_set_label (GTK_EXPANDER (expander), title);
 
+  keep_working_last (self);
   queue_scroll_to_bottom (self);
 }
 
@@ -548,8 +567,54 @@ clear_transcript (XdChatView *self)
 {
   GtkWidget *child;
 
+  /* It is about to be taken out with everything else. */
+  self->working_row = NULL;
+
   while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript))) != NULL)
     gtk_box_remove (self->transcript, child);
+}
+
+/* Whatever was just added went in under it; the dots belong at the end. */
+static void
+keep_working_last (XdChatView *self)
+{
+  if (self->working_row == NULL)
+    return;
+
+  g_object_ref (self->working_row);
+  gtk_box_remove (self->transcript, self->working_row);
+  gtk_box_append (self->transcript, self->working_row);
+  g_object_unref (self->working_row);
+}
+
+/*
+ * Shows that the turn is still going, for as long as it is.
+ *
+ * One marker for the whole turn rather than one per message: what is being
+ * waited for is the turn, and between two things it says there is nothing else
+ * on screen that says it has not stopped.
+ */
+static void
+set_working (XdChatView *self,
+             gboolean    working)
+{
+  if (working == (self->working_row != NULL))
+    return;
+
+  if (!working)
+    {
+      gtk_box_remove (self->transcript, self->working_row);
+      self->working_row = NULL;
+      return;
+    }
+
+  self->working_row = GTK_WIDGET (xd_dots_new ());
+  gtk_widget_add_css_class (self->working_row, "xd-dots-large");
+  gtk_widget_set_halign (self->working_row, GTK_ALIGN_START);
+  gtk_widget_set_margin_start (self->working_row, 24);
+  gtk_widget_set_margin_top (self->working_row, 4);
+
+  gtk_box_append (self->transcript, self->working_row);
 }
 
 /*
@@ -744,9 +809,18 @@ on_remote_event (XdRemoteClient *client,
   const char *text = json_object_get_string_member_with_default (event, "text",
                                                                  NULL);
 
-  /* Events are broadcast to every device for every chat; this window is
-   * showing one of them. */
-  if (self->chat == NULL || self->remote == NULL || chat_id == NULL ||
+  if (self->chat == NULL || self->remote == NULL)
+    return;
+
+  /*
+   * Events are broadcast to every device for every chat.
+   *
+   * One that names a chat is only interesting if it is this one. One that
+   * names none -- the daemon noticing its own database was written to -- is
+   * about everything, and dropping those was how a change made anywhere else
+   * failed to reach an open transcript.
+   */
+  if (chat_id != NULL &&
       g_strcmp0 (chat_id, xd_node_get_chat_id (self->chat)) != 0)
     return;
 
@@ -759,6 +833,7 @@ on_remote_event (XdRemoteClient *client,
         g_strdup (json_object_get_string_member_with_default (event, "label", NULL));
 
       load_remote_transcript (self);
+      set_working (self, TRUE);
       update_send_button (self);
       return;
     }
@@ -792,6 +867,7 @@ on_remote_event (XdRemoteClient *client,
   if (g_strcmp0 (name, "turn-finished") == 0)
     {
       end_remote_turn (self);
+      set_working (self, FALSE);
       update_send_button (self);
 
       /* Read back rather than assembled from what arrived: the daemon has
@@ -881,11 +957,42 @@ on_remote_options_received (GObject      *source,
 
   update_remote_options (self, &chat);
 
-  /* A turn already running when the chat was opened -- started before this
-   * window was looking, or from another device entirely. */
+  /*
+   * A turn already running when the chat was opened.
+   *
+   * Started before this window was looking, or on another device entirely.
+   * What it has said so far is not in the database yet -- a turn is written
+   * down when it ends -- so the daemon hands it over here, and this window
+   * joins the reply already in progress rather than showing the message that
+   * started it and nothing else.
+   */
   if (json_object_get_boolean_member_with_default (reply, "working", FALSE))
     {
+      const char *said = member_string (reply, "said", NULL);
+
       self->remote_working = TRUE;
+
+      g_free (self->remote_label);
+      self->remote_label = g_strdup (member_string (reply, "label", NULL));
+
+      set_working (self, TRUE);
+
+      if (said != NULL && *said != '\0')
+        {
+          if (self->remote_said == NULL)
+            self->remote_said = g_string_new (NULL);
+
+          g_string_assign (self->remote_said, said);
+
+          if (self->remote_row == NULL)
+            self->remote_row = append_row (self, XD_MESSAGE_ASSISTANT, NULL);
+
+          xd_message_row_set_source (self->remote_row, self->remote_label);
+          xd_message_row_set_text (self->remote_row, said);
+          xd_message_row_set_waiting (self->remote_row, TRUE);
+          queue_scroll_to_bottom (self);
+        }
+
       update_send_button (self);
     }
 }
@@ -1280,6 +1387,9 @@ on_turn_finished (XdChatSession *session,
         }
     }
 
+  if (visible)
+    set_working (self, FALSE);
+
   /* An agent that edited anything has finished doing so. */
   xd_diff_pane_refresh (self->diff);
   xd_git_actions_refresh (self->git_actions);
@@ -1408,6 +1518,8 @@ start_turn (XdChatView *self,
   xd_message_row_set_source (turn->row, turn->label);
   xd_message_row_set_waiting (turn->row, TRUE);
 
+  set_working (self, TRUE);
+
   g_signal_connect (turn->session, "session-started",
                     G_CALLBACK (on_session_started), turn);
   g_signal_connect (turn->session, "text-delta",
@@ -1457,6 +1569,7 @@ start_turn (XdChatView *self,
       xd_storage_append_message (self->storage, chat->id, "error",
                                  error->message, NULL, NULL, NULL);
       g_hash_table_remove (self->turns, chat->id);
+      set_working (self, FALSE);
     }
 
   update_send_button (self);
@@ -2526,6 +2639,7 @@ xd_chat_view_set_chat (XdChatView *self,
   g_clear_object (&self->fetching);
   set_remote (self, NULL);
   end_remote_turn (self);
+  self->working_row = NULL;
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
 

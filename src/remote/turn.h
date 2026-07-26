@@ -58,4 +58,13 @@ char         *xd_daemon_turn_resolve_workdir (XdDaemonTurn *self,
 /* Who is answering: the model and effort the turn actually started on. */
 const char   *xd_daemon_turn_get_label (XdDaemonTurn *self);
 
+/*
+ * Everything the turn has said so far.
+ *
+ * A turn is written to the database when it ends, so until then this is the
+ * only copy -- and it is what a device that joins the chat halfway through has
+ * to be given, or it sees the message that started the turn and nothing else.
+ */
+const char   *xd_daemon_turn_get_text  (XdDaemonTurn *self);
+
 G_END_DECLS
