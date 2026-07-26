@@ -54,6 +54,7 @@ static const char *TERMINAL_PALETTE[16] = {
 
 static char *view_key (XdTerminalPanel *self, const char *chat_id);
 static AdwTabView *ensure_view (XdTerminalPanel *self, const char *chat_id);
+static void load_remote_sessions (XdTerminalPanel *self);
 
 static VteTerminal *
 terminal_for_page (AdwTabPage *page)
@@ -113,6 +114,18 @@ current_terminal (XdTerminalPanel *self)
   page = adw_tab_view_get_selected_page (view);
 
   return terminal_for_page (page);
+}
+
+static gboolean
+view_has_terminal (AdwTabView *view)
+{
+  for (int i = 0; i < adw_tab_view_get_n_pages (view); i++)
+    {
+      if (terminal_for_page (adw_tab_view_get_nth_page (view, i)) != NULL)
+        return TRUE;
+    }
+
+  return FALSE;
 }
 
 static char *
@@ -227,6 +240,65 @@ find_remote_terminal (AdwTabView *view,
     }
 
   return NULL;
+}
+
+static AdwStatusPage *
+remote_status_page (AdwTabView *view)
+{
+  for (int i = 0; i < adw_tab_view_get_n_pages (view); i++)
+    {
+      AdwTabPage *page = adw_tab_view_get_nth_page (view, i);
+      GtkWidget *child = adw_tab_page_get_child (page);
+
+      if (g_object_get_data (G_OBJECT (child), "remote-terminal-status") != NULL)
+        return ADW_STATUS_PAGE (child);
+    }
+
+  return NULL;
+}
+
+static void
+show_remote_status (XdTerminalPanel *self,
+                    const char      *title,
+                    const char      *description)
+{
+  AdwTabView *view = ensure_view (self, self->chat_id);
+  AdwStatusPage *status = remote_status_page (view);
+
+  if (status == NULL)
+    {
+      AdwTabPage *page;
+
+      status = ADW_STATUS_PAGE (adw_status_page_new ());
+      g_object_set_data (G_OBJECT (status), "remote-terminal-status",
+                         GINT_TO_POINTER (TRUE));
+      adw_status_page_set_icon_name (status, "utilities-terminal-symbolic");
+      page = adw_tab_view_append (view, GTK_WIDGET (status));
+      adw_tab_page_set_title (page, "Terminal");
+      adw_tab_view_set_selected_page (view, page);
+    }
+
+  adw_status_page_set_title (status, title);
+  adw_status_page_set_description (status, description);
+}
+
+/*
+ * Called only after a real terminal exists, so removing the selected status
+ * page cannot leave the panel empty or trigger its last-page close path.
+ */
+static void
+clear_remote_status (AdwTabView *view)
+{
+  AdwStatusPage *status = remote_status_page (view);
+
+  if (status != NULL)
+    {
+      AdwTabPage *page =
+        adw_tab_view_get_page (view, GTK_WIDGET (status));
+
+      if (page != NULL)
+        adw_tab_view_close_page (view, page);
+    }
 }
 
 static void
@@ -608,6 +680,9 @@ on_remote_listed (GObject      *source,
       g_hash_table_add (seen, g_strdup (id));
     }
 
+  if (g_hash_table_size (seen) > 0)
+    clear_remote_status (view);
+
   /* Anything absent from daemon's list ended while this device was away. */
   for (gint i = (gint) adw_tab_view_get_n_pages (view) - 1; i >= 0; i--)
     {
@@ -632,6 +707,48 @@ on_remote_listed (GObject      *source,
         {
           self->focus_next_remote = FALSE;
           gtk_widget_grab_focus (GTK_WIDGET (terminal));
+        }
+    }
+
+  remote_load_free (load);
+}
+
+static void
+on_remote_opened_reply (GObject      *source,
+                        GAsyncResult *result,
+                        gpointer      user_data)
+{
+  RemoteLoad *load = user_data;
+  XdTerminalPanel *self = load->panel;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+
+  if (self->remote == XD_REMOTE_CLIENT (source) &&
+      g_strcmp0 (self->chat_id, load->chat_id) == 0)
+    {
+      if (reply != NULL)
+        {
+          /*
+           * The event normally made the tab already. Listing as well makes
+           * the request's own answer authoritative if that event was missed,
+           * and replays prompt bytes emitted immediately after the open.
+           */
+          load_remote_sessions (self);
+        }
+      else if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          const char *message = error != NULL
+            ? error->message : "The remote machine did not answer.";
+          const char *description =
+            g_strcmp0 (message, "Unknown op") == 0
+              ? "Update and restart xd on the remote machine, then try again."
+              : message;
+
+          self->focus_next_remote = FALSE;
+          show_remote_status (self, "Could Not Open Remote Terminal",
+                              description);
         }
     }
 
@@ -694,6 +811,7 @@ on_remote_terminal_event (XdRemoteClient *client,
         json_object_get_int_member_with_default (event, "rows", 24);
 
       terminal = add_remote_session (self, view, id, title, columns, rows, NULL);
+      clear_remote_status (view);
       if (self->focus_next_remote)
         {
           self->focus_next_remote = FALSE;
@@ -881,9 +999,16 @@ open_remote_session (XdTerminalPanel *self,
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (JsonNode) request = NULL;
+  g_autofree char *description = NULL;
+  RemoteLoad *load;
 
   if (self->remote == NULL || self->chat_id == NULL)
     return;
+
+  description =
+    g_strdup_printf ("Waiting for %s",
+                     xd_remote_client_get_host (self->remote));
+  show_remote_status (self, "Opening Remote Terminal…", description);
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "op");
@@ -899,8 +1024,12 @@ open_remote_session (XdTerminalPanel *self,
   json_builder_end_object (builder);
   request = json_builder_get_root (builder);
 
+  load = g_new0 (RemoteLoad, 1);
+  load->panel = g_object_ref (self);
+  load->chat_id = g_strdup (self->chat_id);
+
   xd_remote_client_call_async (self->remote, request, NULL,
-                               finish_remote_call, g_object_ref (self));
+                               on_remote_opened_reply, load);
 }
 
 void
@@ -914,7 +1043,7 @@ xd_terminal_panel_start (XdTerminalPanel *self)
     return;
 
   view = ensure_view (self, self->chat_id);
-  if (adw_tab_view_get_n_pages (view) == 0)
+  if (!view_has_terminal (view))
     {
       if (self->remote == NULL)
         add_session (self, view);
