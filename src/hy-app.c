@@ -152,9 +152,16 @@ static const char *HY_STYLE =
    * apart by spacing rather than by lines and shading. */
   /* The line under the title runs the full width, which is what lets the
    * vertical dividers stop at it instead of looking cut short. */
-  "headerbar { min-height: 38px; background: transparent; box-shadow: none;"
+  /*
+   * One height for every header bar, or their bottom borders land on
+   * different rows: each bar sizes to its own content, and the sidebar's is
+   * not the chat's. The height is fixed and the children are kept small
+   * enough to fit inside it.
+   */
+  "headerbar { min-height: 42px; background: transparent; box-shadow: none;"
   " border: none; border-bottom: 1px solid #2a2a2d; }\n"
-  "headerbar button { min-height: 26px; min-width: 26px; padding: 2px 6px; }\n"
+  "headerbar button, headerbar menubutton > button { min-height: 26px;"
+  " min-width: 26px; padding: 2px 6px; margin-top: 0; margin-bottom: 0; }\n"
   /* A hairline, not a gutter. Two pixels rather than one so it can still be
    * grabbed -- the separator is its own drag handle, and a line you cannot
    * catch would mean the panes stop being resizable. */
