@@ -150,8 +150,10 @@ static const char *HY_STYLE =
 
   /* Flat: the window is one surface, so the bars that divide it are told
    * apart by spacing rather than by lines and shading. */
+  /* The line under the title runs the full width, which is what lets the
+   * vertical dividers stop at it instead of looking cut short. */
   "headerbar { min-height: 38px; background: transparent; box-shadow: none;"
-  " border: none; }\n"
+  " border: none; border-bottom: 1px solid #2a2a2d; }\n"
   "headerbar button { min-height: 26px; min-width: 26px; padding: 2px 6px; }\n"
   /* A hairline, not a gutter. Two pixels rather than one so it can still be
    * grabbed -- the separator is its own drag handle, and a line you cannot
