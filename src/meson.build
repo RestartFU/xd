@@ -45,6 +45,7 @@ xd_sources = files(
   'xd-window.c',
   'tree/fs-tree.c',
   'tree/sidebar.c',
+  'ui/dots.c',
   'remote/pair-dialog.c',
   'settings/folder-settings-dialog.c',
   'chat/model-picker.c',

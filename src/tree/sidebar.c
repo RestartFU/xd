@@ -3,6 +3,7 @@
 #include "backend/backend.h"
 #include "settings/folder-settings-dialog.h"
 #include "settings/settings-resolver.h"
+#include "ui/dots.h"
 
 struct _XdSidebar
 {
@@ -1068,8 +1069,8 @@ on_row_right_clicked (GtkGestureClick *gesture,
 /*
  * Draws what a row is doing.
  *
- * A spinner while it is working, since that is the one state that is going to
- * end on its own and a still picture cannot say "still going". A chat waiting
+ * Dots while it is working, since that is the one state that is going to end
+ * on its own and a still picture cannot say "still going". A chat waiting
  * to be answered keeps its own icon but is marked as needing attention, which
  * the stylesheet pulses -- it is waiting for the user, so it should catch the
  * eye rather than sit still. Otherwise the assistant's icon, which is the
@@ -1086,11 +1087,10 @@ show_state (XdNode     *node,
 {
   GtkWidget *box = user_data;
   GtkWidget *icon = g_object_get_data (G_OBJECT (box), "icon");
-  GtkWidget *spinner = g_object_get_data (G_OBJECT (box), "spinner");
+  GtkWidget *working = g_object_get_data (G_OBJECT (box), "working");
   XdNodeState state = xd_node_get_state (node);
 
-  gtk_widget_set_visible (spinner, state == XD_NODE_WORKING);
-  gtk_spinner_set_spinning (GTK_SPINNER (spinner), state == XD_NODE_WORKING);
+  gtk_widget_set_visible (working, state == XD_NODE_WORKING);
   gtk_widget_set_visible (icon, state != XD_NODE_WORKING);
 
   if (state == XD_NODE_WAITING)
@@ -1226,7 +1226,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
   GtkWidget *expander = gtk_tree_expander_new ();
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *icon = gtk_image_new ();
-  GtkWidget *spinner = gtk_spinner_new ();
+  GtkWidget *working = GTK_WIDGET (xd_dots_new ());
   GtkWidget *label = gtk_label_new (NULL);
   GtkWidget *entry = gtk_entry_new ();
   GtkWidget *popover = gtk_popover_menu_new_from_model (NULL);
@@ -1245,8 +1245,10 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_widget_set_valign (entry, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class (entry, "xd-inline-entry");
 
+  gtk_widget_set_visible (working, FALSE);
+
   gtk_box_append (GTK_BOX (box), icon);
-  gtk_box_append (GTK_BOX (box), spinner);
+  gtk_box_append (GTK_BOX (box), working);
   gtk_box_append (GTK_BOX (box), label);
   gtk_box_append (GTK_BOX (box), entry);
 
@@ -1422,8 +1424,8 @@ on_item_bind (GtkSignalListItemFactory *factory,
   GtkWidget *expander = gtk_list_item_get_child (item);
   GtkWidget *box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
   GtkWidget *icon = gtk_widget_get_first_child (box);
-  GtkWidget *spinner = gtk_widget_get_next_sibling (icon);
-  GtkWidget *label = gtk_widget_get_next_sibling (spinner);
+  GtkWidget *working = gtk_widget_get_next_sibling (icon);
+  GtkWidget *label = gtk_widget_get_next_sibling (working);
   g_autoptr (XdNode) node = gtk_tree_list_row_get_item (row);
 
   gtk_tree_expander_set_list_row (GTK_TREE_EXPANDER (expander), row);
@@ -1434,7 +1436,7 @@ on_item_bind (GtkSignalListItemFactory *factory,
                                              G_BINDING_SYNC_CREATE));
 
   g_object_set_data (G_OBJECT (box), "icon", icon);
-  g_object_set_data (G_OBJECT (box), "spinner", spinner);
+  g_object_set_data (G_OBJECT (box), "working", working);
   show_state (node, NULL, box);
   g_signal_connect (node, "notify::state", G_CALLBACK (show_state), box);
   g_object_set_data_full (G_OBJECT (item), "state-watch", g_object_ref (node),

@@ -38,7 +38,7 @@ void          xd_message_row_set_text   (XdMessageRow  *self,
 void          xd_message_row_set_source (XdMessageRow  *self,
                                          const char    *source);
 
-/* Shows a spinner while the row is still waiting for its first token. */
+/* Shows the working dots while the row is waiting for its first token. */
 void          xd_message_row_set_waiting (XdMessageRow *self,
                                           gboolean      waiting);
 
