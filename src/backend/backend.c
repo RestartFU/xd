@@ -1,11 +1,11 @@
 #include "backend.h"
 
-extern const AiBackend hy_claude_backend;
-extern const AiBackend hy_codex_backend;
+extern const AiBackend xd_claude_backend;
+extern const AiBackend xd_codex_backend;
 
 static const AiBackend *const backends[] = {
-  &hy_claude_backend,
-  &hy_codex_backend,
+  &xd_claude_backend,
+  &xd_codex_backend,
 };
 
 const AiBackend *

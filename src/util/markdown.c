@@ -136,7 +136,7 @@ append_heading (GString    *out,
 }
 
 char *
-hy_markdown_to_pango (const char *text)
+xd_markdown_to_pango (const char *text)
 {
   g_autoptr (GString) out = NULL;
   g_auto (GStrv) lines = NULL;

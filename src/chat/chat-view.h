@@ -7,20 +7,20 @@
 
 G_BEGIN_DECLS
 
-#define HY_TYPE_CHAT_VIEW (hy_chat_view_get_type ())
-G_DECLARE_FINAL_TYPE (HyChatView, hy_chat_view, HY, CHAT_VIEW, AdwBin)
+#define XD_TYPE_CHAT_VIEW (xd_chat_view_get_type ())
+G_DECLARE_FINAL_TYPE (XdChatView, xd_chat_view, XD, CHAT_VIEW, AdwBin)
 
 /*
  * The transcript of one chat, plus the composer.
  *
- * Passing NULL to hy_chat_view_set_chat() shows the empty state.
+ * Passing NULL to xd_chat_view_set_chat() shows the empty state.
  */
-HyChatView *hy_chat_view_new      (HyStorage  *storage,
-                                   HyFsTree   *tree);
+XdChatView *xd_chat_view_new      (XdStorage  *storage,
+                                   XdFsTree   *tree);
 
-void        hy_chat_view_set_chat (HyChatView *self,
-                                   HyNode     *chat);
+void        xd_chat_view_set_chat (XdChatView *self,
+                                   XdNode     *chat);
 
-HyNode     *hy_chat_view_get_chat (HyChatView *self);
+XdNode     *xd_chat_view_get_chat (XdChatView *self);
 
 G_END_DECLS

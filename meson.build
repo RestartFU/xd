@@ -1,4 +1,4 @@
-project('hy', 'c',
+project('xd', 'c',
   version: '0.1.0',
   license: 'MIT',
   meson_version: '>= 1.0.0',
@@ -8,7 +8,7 @@ project('hy', 'c',
   ],
 )
 
-app_id = 'com.restartfu.Hy'
+app_id = 'com.restartfu.Xd'
 
 gnome = import('gnome')
 cc = meson.get_compiler('c')
@@ -24,9 +24,9 @@ sqlite_dep    = dependency('sqlite3')
 vte_dep       = dependency('vte-2.91-gtk4')
 
 add_project_arguments([
-  '-DG_LOG_DOMAIN="hy"',
-  '-DHY_APP_ID="' + app_id + '"',
-  '-DHY_VERSION="' + meson.project_version() + '"',
+  '-DG_LOG_DOMAIN="xd"',
+  '-DXD_APP_ID="' + app_id + '"',
+  '-DXD_VERSION="' + meson.project_version() + '"',
   '-D_GNU_SOURCE',
 ], language: 'c')
 

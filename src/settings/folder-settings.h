@@ -5,7 +5,7 @@
 G_BEGIN_DECLS
 
 /* Name of the per-folder settings file, stored inside each workspace folder. */
-#define HY_FOLDER_SETTINGS_FILE ".hy.json"
+#define XD_FOLDER_SETTINGS_FILE ".xd.json"
 
 /*
  * Settings attached to one folder.
@@ -22,23 +22,23 @@ typedef struct
   char *workdir;
   char *repo;
   char *instructions;
-} HyFolderSettings;
+} XdFolderSettings;
 
-HyFolderSettings *hy_folder_settings_new       (void);
-void              hy_folder_settings_free      (HyFolderSettings *self);
+XdFolderSettings *xd_folder_settings_new       (void);
+void              xd_folder_settings_free      (XdFolderSettings *self);
 
-/* Reads .hy.json. Returns NULL and sets @error when it is missing or invalid. */
-HyFolderSettings *hy_folder_settings_load      (const char        *folder_path,
+/* Reads .xd.json. Returns NULL and sets @error when it is missing or invalid. */
+XdFolderSettings *xd_folder_settings_load      (const char        *folder_path,
                                                 GError           **error);
 
 /* Like load(), but writes a fresh file with a new UUID when none exists. */
-HyFolderSettings *hy_folder_settings_ensure    (const char        *folder_path,
+XdFolderSettings *xd_folder_settings_ensure    (const char        *folder_path,
                                                 GError           **error);
 
-gboolean          hy_folder_settings_save      (const HyFolderSettings *self,
+gboolean          xd_folder_settings_save      (const XdFolderSettings *self,
                                                 const char             *folder_path,
                                                 GError                **error);
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (HyFolderSettings, hy_folder_settings_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdFolderSettings, xd_folder_settings_free)
 
 G_END_DECLS

@@ -5,9 +5,9 @@
 
 typedef struct
 {
-  HyStorage *storage;
-  HyFsTree *tree;
-  HySearchActivateFunc on_activate;
+  XdStorage *storage;
+  XdFsTree *tree;
+  XdSearchActivateFunc on_activate;
   gpointer user_data;
 
   AdwDialog *dialog;
@@ -92,12 +92,12 @@ on_result_activated (GtkListBox    *box,
 {
   Search *search = user_data;
   const char *chat_id = g_object_get_data (G_OBJECT (row), "chat-id");
-  HyNode *chat;
+  XdNode *chat;
 
   if (chat_id == NULL)
     return;
 
-  chat = hy_fs_tree_lookup_chat (search->tree, chat_id);
+  chat = xd_fs_tree_lookup_chat (search->tree, chat_id);
   if (chat == NULL)
     return;
 
@@ -144,7 +144,7 @@ on_search_changed (GtkSearchEntry *entry,
       return;
     }
 
-  hits = hy_storage_search (search->storage, query, MAX_RESULTS, &error);
+  hits = xd_storage_search (search->storage, query, MAX_RESULTS, &error);
   if (hits == NULL)
     {
       show_placeholder (search, "Search Failed", error->message);
@@ -159,12 +159,12 @@ on_search_changed (GtkSearchEntry *entry,
 
   for (guint i = 0; i < hits->len; i++)
     {
-      const HyMessage *message = g_ptr_array_index (hits, i);
-      g_autoptr (HyChat) chat = NULL;
+      const XdMessage *message = g_ptr_array_index (hits, i);
+      g_autoptr (XdChat) chat = NULL;
       g_autofree char *snippet = NULL;
       GtkWidget *row;
 
-      chat = hy_storage_get_chat (search->storage, message->chat_id, NULL);
+      chat = xd_storage_get_chat (search->storage, message->chat_id, NULL);
       if (chat == NULL)
         continue;
 
@@ -187,10 +187,10 @@ on_search_changed (GtkSearchEntry *entry,
 }
 
 void
-hy_search_dialog_present (GtkWidget            *parent,
-                          HyStorage            *storage,
-                          HyFsTree             *tree,
-                          HySearchActivateFunc  on_activate,
+xd_search_dialog_present (GtkWidget            *parent,
+                          XdStorage            *storage,
+                          XdFsTree             *tree,
+                          XdSearchActivateFunc  on_activate,
                           gpointer              user_data)
 {
   Search *search;
@@ -199,8 +199,8 @@ hy_search_dialog_present (GtkWidget            *parent,
   GtkWidget *scroller;
   GtkWidget *content;
 
-  g_return_if_fail (HY_IS_STORAGE (storage));
-  g_return_if_fail (HY_IS_FS_TREE (tree));
+  g_return_if_fail (XD_IS_STORAGE (storage));
+  g_return_if_fail (XD_IS_FS_TREE (tree));
 
   search = g_new0 (Search, 1);
   search->storage = g_object_ref (storage);

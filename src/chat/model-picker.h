@@ -4,8 +4,8 @@
 
 G_BEGIN_DECLS
 
-#define HY_TYPE_MODEL_PICKER (hy_model_picker_get_type ())
-G_DECLARE_FINAL_TYPE (HyModelPicker, hy_model_picker, HY, MODEL_PICKER, AdwBin)
+#define XD_TYPE_MODEL_PICKER (xd_model_picker_get_type ())
+G_DECLARE_FINAL_TYPE (XdModelPicker, xd_model_picker, XD, MODEL_PICKER, AdwBin)
 
 /*
  * Chooses which assistant and model answers a chat.
@@ -14,9 +14,9 @@ G_DECLARE_FINAL_TYPE (HyModelPicker, hy_model_picker, HY, MODEL_PICKER, AdwBin)
  * belongs to. Emits ::model-chosen with the backend id and the model id, the
  * latter NULL for "whatever the CLI is configured to use".
  */
-HyModelPicker *hy_model_picker_new          (void);
+XdModelPicker *xd_model_picker_new          (void);
 
-void           hy_model_picker_set_selected (HyModelPicker *self,
+void           xd_model_picker_set_selected (XdModelPicker *self,
                                              const char    *backend_id,
                                              const char    *model_id);
 

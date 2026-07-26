@@ -5,7 +5,7 @@
 #   bundle.sh <staging-dir> <out-dir> <launcher-template>
 #
 # The result is a directory that can be copied to any x86_64 Linux host and run
-# via ./hy.sh, with zero dependency on the host's own GTK/glib stack.
+# via ./xd.sh, with zero dependency on the host's own GTK/glib stack.
 #
 # Paths that must be absolute at runtime are written as @BUNDLE@ placeholders
 # and substituted by the launcher, which is what makes the tree relocatable.
@@ -22,10 +22,10 @@ PIXBUF_LOADERS="$ARCH_DIR/gdk-pixbuf-2.0/2.10.0/loaders"
 mkdir -p "$OUT"/{bin,lib,share,etc}
 
 # Deliberately empty: GIO_MODULE_DIR points here so the app cannot pick up the
-# host's GIO modules. See scripts/hy.sh.
+# host's GIO modules. See scripts/xd.sh.
 mkdir -p "$OUT/lib/gio/modules"
 
-install -Dm755 "$STAGE/usr/bin/hy" "$OUT/bin/hy"
+install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
 
 # --- gdk-pixbuf loaders (dlopened, so they are extra closure roots) ---------
 mkdir -p "$OUT/lib/gdk-pixbuf-2.0/loaders"
@@ -43,7 +43,7 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 # ldd already resolves transitively, so one pass over every dlopen root is
 # enough. NSS modules are added by hand: they are opened by name, never linked.
 mapfile -t roots < <(printf '%s\n' \
-  "$OUT/bin/hy" \
+  "$OUT/bin/xd" \
   "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \
   "$ARCH_DIR"/libnss_dns.so.2)
@@ -154,7 +154,7 @@ cat > "$OUT/etc/fonts.conf.in" <<'EOF'
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
   <dir>@BUNDLE@/share/fonts</dir>
-  <cachedir prefix="xdg">hy/fontconfig</cachedir>
+  <cachedir prefix="xdg">xd/fontconfig</cachedir>
   <include ignore_missing="yes">@BUNDLE@/etc/fonts/conf.d</include>
 </fontconfig>
 EOF
@@ -163,7 +163,7 @@ EOF
 mkdir -p "$OUT/share/applications"
 cp -a "$STAGE/usr/share/applications/." "$OUT/share/applications/" 2>/dev/null || true
 
-install -Dm755 "$LAUNCHER" "$OUT/hy.sh"
+install -Dm755 "$LAUNCHER" "$OUT/xd.sh"
 
 printf 'bundle: %s libs, %s\n' \
   "$(find "$OUT/lib" -maxdepth 1 -name '*.so*' | wc -l)" \

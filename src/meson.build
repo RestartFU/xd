@@ -1,6 +1,6 @@
 # Backend / storage / settings logic that must stay free of GTK so it can be
 # exercised by the headless tests in tests/.
-hy_core_sources = files(
+xd_core_sources = files(
   'settings/folder-settings.c',
   'settings/settings-resolver.c',
   'util/markdown.c',
@@ -8,7 +8,7 @@ hy_core_sources = files(
   'util/git-info.c',
   'util/host-launch.c',
   'remote/server.c',
-  'tree/hy-node.c',
+  'tree/xd-node.c',
   'storage/storage.c',
   'backend/backend.c',
   'backend/claude-backend.c',
@@ -19,25 +19,25 @@ hy_core_sources = files(
 
 # Pango, but not GTK: the Markdown converter validates the markup it produces,
 # which needs the parser and nothing else.
-hy_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
+xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
 
-hy_core_inc = include_directories('.')
+xd_core_inc = include_directories('.')
 
-if hy_core_sources.length() > 0
-  hy_core = static_library('hy-core',
-    hy_core_sources,
-    dependencies: hy_core_deps,
-    include_directories: hy_core_inc,
+if xd_core_sources.length() > 0
+  xd_core = static_library('xd-core',
+    xd_core_sources,
+    dependencies: xd_core_deps,
+    include_directories: xd_core_inc,
   )
-  hy_core_lib = hy_core
+  xd_core_lib = xd_core
 else
-  hy_core_lib = []
+  xd_core_lib = []
 endif
 
-hy_sources = files(
+xd_sources = files(
   'main.c',
-  'hy-app.c',
-  'hy-window.c',
+  'xd-app.c',
+  'xd-window.c',
   'tree/fs-tree.c',
   'tree/sidebar.c',
   'settings/folder-settings-dialog.c',
@@ -50,10 +50,10 @@ hy_sources = files(
   'chat/search-dialog.c',
 )
 
-executable('hy',
-  hy_sources,
+executable('xd',
+  xd_sources,
   dependencies: [glib_dep, gio_dep, gio_unix_dep, gtk_dep, adw_dep, json_dep, sqlite_dep, vte_dep],
-  include_directories: hy_core_inc,
-  link_with: hy_core_lib,
+  include_directories: xd_core_inc,
+  link_with: xd_core_lib,
   install: true,
 )

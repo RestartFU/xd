@@ -12,9 +12,9 @@ test:
 
 ## run: rebuild (cached, so cheap when nothing changed) and launch
 run: build
-	@./dist/hy.sh
+	@./dist/xd.sh
 
-dist/hy.sh:
+dist/xd.sh:
 	@./scripts/build.sh
 
 clean:

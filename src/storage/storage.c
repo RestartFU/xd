@@ -3,19 +3,19 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define HY_STORAGE_SCHEMA_VERSION 10
+#define XD_STORAGE_SCHEMA_VERSION 10
 
-struct _HyStorage
+struct _XdStorage
 {
   GObject parent_instance;
 
   sqlite3 *db;
 };
 
-G_DEFINE_FINAL_TYPE (HyStorage, hy_storage, G_TYPE_OBJECT)
+G_DEFINE_FINAL_TYPE (XdStorage, xd_storage, G_TYPE_OBJECT)
 
 void
-hy_chat_free (HyChat *self)
+xd_chat_free (XdChat *self)
 {
   if (self == NULL)
     return;
@@ -32,7 +32,7 @@ hy_chat_free (HyChat *self)
 }
 
 void
-hy_message_free (HyMessage *self)
+xd_message_free (XdMessage *self)
 {
   if (self == NULL)
     return;
@@ -57,7 +57,7 @@ set_sqlite_error (GError    **error,
 }
 
 static gboolean
-exec_sql (HyStorage   *self,
+exec_sql (XdStorage   *self,
           const char  *sql,
           GError     **error)
 {
@@ -156,7 +156,7 @@ static const char *SCHEMA_SQL =
   "END;";
 
 static int
-read_schema_version (HyStorage *self)
+read_schema_version (XdStorage *self)
 {
   sqlite3_stmt *stmt = NULL;
   int version = 0;
@@ -175,7 +175,7 @@ read_schema_version (HyStorage *self)
 }
 
 static gboolean
-migrate (HyStorage  *self,
+migrate (XdStorage  *self,
          GError    **error)
 {
   g_autofree char *sql = NULL;
@@ -262,16 +262,16 @@ migrate (HyStorage  *self,
 
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
-                         HY_STORAGE_SCHEMA_VERSION);
+                         XD_STORAGE_SCHEMA_VERSION);
 
   return exec_sql (self, sql, error);
 }
 
-HyStorage *
-hy_storage_new (const char  *db_path,
+XdStorage *
+xd_storage_new (const char  *db_path,
                 GError     **error)
 {
-  g_autoptr (HyStorage) self = NULL;
+  g_autoptr (XdStorage) self = NULL;
   g_autofree char *dir = NULL;
 
   g_return_val_if_fail (db_path != NULL, NULL);
@@ -284,7 +284,7 @@ hy_storage_new (const char  *db_path,
       return NULL;
     }
 
-  self = g_object_new (HY_TYPE_STORAGE, NULL);
+  self = g_object_new (XD_TYPE_STORAGE, NULL);
 
   if (sqlite3_open (db_path, &self->db) != SQLITE_OK)
     {
@@ -308,7 +308,7 @@ hy_storage_new (const char  *db_path,
 /* --- chats ---------------------------------------------------------------- */
 
 char *
-hy_storage_create_chat (HyStorage   *self,
+xd_storage_create_chat (XdStorage   *self,
                         const char  *folder_id,
                         const char  *title,
                         const char  *backend,
@@ -321,7 +321,7 @@ hy_storage_create_chat (HyStorage   *self,
   g_autofree char *id = NULL;
   gint64 now;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
   g_return_val_if_fail (folder_id != NULL, NULL);
   g_return_val_if_fail (backend != NULL, NULL);
 
@@ -361,10 +361,10 @@ hy_storage_create_chat (HyStorage   *self,
   return g_steal_pointer (&id);
 }
 
-static HyChat *
+static XdChat *
 chat_from_row (sqlite3_stmt *stmt)
 {
-  HyChat *chat = g_new0 (HyChat, 1);
+  XdChat *chat = g_new0 (XdChat, 1);
 
   chat->id         = column_text (stmt, 0);
   chat->folder_id  = column_text (stmt, 1);
@@ -387,15 +387,15 @@ chat_from_row (sqlite3_stmt *stmt)
   "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
   " created_at, updated_at, terminal_open, diff_open"
 
-HyChat *
-hy_storage_get_chat (HyStorage   *self,
+XdChat *
+xd_storage_get_chat (XdStorage   *self,
                      const char  *chat_id,
                      GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
-  HyChat *chat = NULL;
+  XdChat *chat = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT " CHAT_COLUMNS " FROM chats WHERE id = ?;",
@@ -418,14 +418,14 @@ hy_storage_get_chat (HyStorage   *self,
 }
 
 GPtrArray *
-hy_storage_list_chats (HyStorage   *self,
+xd_storage_list_chats (XdStorage   *self,
                        const char  *folder_id,
                        GError     **error)
 {
   GPtrArray *chats;
   sqlite3_stmt *stmt = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT " CHAT_COLUMNS " FROM chats"
@@ -438,7 +438,7 @@ hy_storage_list_chats (HyStorage   *self,
 
   bind_text (stmt, 1, folder_id);
 
-  chats = g_ptr_array_new_with_free_func ((GDestroyNotify) hy_chat_free);
+  chats = g_ptr_array_new_with_free_func ((GDestroyNotify) xd_chat_free);
   while (sqlite3_step (stmt) == SQLITE_ROW)
     g_ptr_array_add (chats, chat_from_row (stmt));
 
@@ -449,7 +449,7 @@ hy_storage_list_chats (HyStorage   *self,
 
 /* Every chat mutation also bumps updated_at, which is what orders the list. */
 static gboolean
-update_chat_column (HyStorage   *self,
+update_chat_column (XdStorage   *self,
                     const char  *sql,
                     const char  *value,
                     const char  *chat_id,
@@ -479,12 +479,12 @@ update_chat_column (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_chat_title (HyStorage   *self,
+xd_storage_set_chat_title (XdStorage   *self,
                            const char  *chat_id,
                            const char  *title,
                            GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   return update_chat_column (self,
                              "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?;",
@@ -492,7 +492,7 @@ hy_storage_set_chat_title (HyStorage   *self,
 }
 
 char *
-hy_storage_get_session_id (HyStorage   *self,
+xd_storage_get_session_id (XdStorage   *self,
                            const char  *chat_id,
                            const char  *backend,
                            GError     **error)
@@ -500,7 +500,7 @@ hy_storage_get_session_id (HyStorage   *self,
   sqlite3_stmt *stmt = NULL;
   char *session_id = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT session_id FROM chat_sessions"
@@ -523,7 +523,7 @@ hy_storage_get_session_id (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_session_id (HyStorage   *self,
+xd_storage_set_session_id (XdStorage   *self,
                            const char  *chat_id,
                            const char  *backend,
                            const char  *session_id,
@@ -532,7 +532,7 @@ hy_storage_set_session_id (HyStorage   *self,
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
   g_return_val_if_fail (backend != NULL, FALSE);
 
   /* A session that cannot be resumed remembers nothing, so forgetting it also
@@ -575,12 +575,12 @@ hy_storage_set_session_id (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_backend (HyStorage   *self,
+xd_storage_set_backend (XdStorage   *self,
                         const char  *chat_id,
                         const char  *backend,
                         GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   return update_chat_column (self,
                              "UPDATE chats SET backend = ?, updated_at = ? WHERE id = ?;",
@@ -588,12 +588,12 @@ hy_storage_set_backend (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_workdir (HyStorage   *self,
+xd_storage_set_workdir (XdStorage   *self,
                         const char  *chat_id,
                         const char  *workdir,
                         GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   return update_chat_column (self,
                              "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
@@ -602,14 +602,14 @@ hy_storage_set_workdir (HyStorage   *self,
 }
 
 gint64
-hy_storage_get_last_seen (HyStorage  *self,
+xd_storage_get_last_seen (XdStorage  *self,
                           const char *chat_id,
                           const char *backend)
 {
   sqlite3_stmt *stmt = NULL;
   gint64 last_seen = 0;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), 0);
+  g_return_val_if_fail (XD_IS_STORAGE (self), 0);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT last_message_id FROM chat_sessions"
@@ -629,7 +629,7 @@ hy_storage_get_last_seen (HyStorage  *self,
 }
 
 gboolean
-hy_storage_set_last_seen (HyStorage   *self,
+xd_storage_set_last_seen (XdStorage   *self,
                           const char  *chat_id,
                           const char  *backend,
                           gint64       message_id,
@@ -638,7 +638,7 @@ hy_storage_set_last_seen (HyStorage   *self,
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   /* The row may not exist yet: a backend can be brought up to date before it
    * has ever reported a session id. */
@@ -667,13 +667,13 @@ hy_storage_set_last_seen (HyStorage   *self,
 }
 
 gint64
-hy_storage_last_message_id (HyStorage  *self,
+xd_storage_last_message_id (XdStorage  *self,
                             const char *chat_id)
 {
   sqlite3_stmt *stmt = NULL;
   gint64 id = 0;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), 0);
+  g_return_val_if_fail (XD_IS_STORAGE (self), 0);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?;",
@@ -691,12 +691,12 @@ hy_storage_last_message_id (HyStorage  *self,
 }
 
 gboolean
-hy_storage_set_model (HyStorage   *self,
+xd_storage_set_model (XdStorage   *self,
                       const char  *chat_id,
                       const char  *model,
                       GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   return update_chat_column (self,
                              "UPDATE chats SET model = ?, updated_at = ? WHERE id = ?;",
@@ -704,12 +704,12 @@ hy_storage_set_model (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_effort (HyStorage   *self,
+xd_storage_set_effort (XdStorage   *self,
                        const char  *chat_id,
                        const char  *effort,
                        GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   return update_chat_column (self,
                              "UPDATE chats SET effort = ?, updated_at = ? WHERE id = ?;",
@@ -717,12 +717,12 @@ hy_storage_set_effort (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_access (HyStorage   *self,
+xd_storage_set_access (XdStorage   *self,
                        const char  *chat_id,
                        const char  *access,
                        GError     **error)
 {
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   return update_chat_column (self,
                              "UPDATE chats SET access = ?, updated_at = ? WHERE id = ?;",
@@ -730,7 +730,7 @@ hy_storage_set_access (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_panes (HyStorage   *self,
+xd_storage_set_panes (XdStorage   *self,
                       const char  *chat_id,
                       gboolean     terminal_open,
                       gboolean     diff_open,
@@ -739,7 +739,7 @@ hy_storage_set_panes (HyStorage   *self,
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   /* updated_at is left alone: opening a pane is not work on the chat, and
    * bumping it would reorder the sidebar for looking at something. */
@@ -766,7 +766,7 @@ hy_storage_set_panes (HyStorage   *self,
 }
 
 gboolean
-hy_storage_set_plan (HyStorage   *self,
+xd_storage_set_plan (XdStorage   *self,
                      const char  *chat_id,
                      gboolean     plan,
                      GError     **error)
@@ -774,7 +774,7 @@ hy_storage_set_plan (HyStorage   *self,
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   if (sqlite3_prepare_v2 (self->db,
                           "UPDATE chats SET plan = ?, updated_at = ? WHERE id = ?;",
@@ -798,14 +798,14 @@ hy_storage_set_plan (HyStorage   *self,
 }
 
 gboolean
-hy_storage_delete_chat (HyStorage   *self,
+xd_storage_delete_chat (XdStorage   *self,
                         const char  *chat_id,
                         GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
 
   /* Messages go with it: the foreign key cascades. */
   if (sqlite3_prepare_v2 (self->db, "DELETE FROM chats WHERE id = ?;",
@@ -829,7 +829,7 @@ hy_storage_delete_chat (HyStorage   *self,
 /* --- messages ------------------------------------------------------------- */
 
 static void
-touch_chat (HyStorage  *self,
+touch_chat (XdStorage  *self,
             const char *chat_id)
 {
   sqlite3_stmt *stmt = NULL;
@@ -845,7 +845,7 @@ touch_chat (HyStorage  *self,
 }
 
 gboolean
-hy_storage_append_message (HyStorage   *self,
+xd_storage_append_message (XdStorage   *self,
                            const char  *chat_id,
                            const char  *role,
                            const char  *content,
@@ -856,7 +856,7 @@ hy_storage_append_message (HyStorage   *self,
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
   g_return_val_if_fail (chat_id != NULL, FALSE);
   g_return_val_if_fail (role != NULL, FALSE);
 
@@ -889,10 +889,10 @@ hy_storage_append_message (HyStorage   *self,
   return ok;
 }
 
-static HyMessage *
+static XdMessage *
 message_from_row (sqlite3_stmt *stmt)
 {
-  HyMessage *message = g_new0 (HyMessage, 1);
+  XdMessage *message = g_new0 (XdMessage, 1);
 
   message->id         = sqlite3_column_int64 (stmt, 0);
   message->chat_id    = column_text (stmt, 1);
@@ -908,14 +908,14 @@ message_from_row (sqlite3_stmt *stmt)
 #define MESSAGE_COLUMNS "id, chat_id, role, content, raw_json, created_at, label"
 
 GPtrArray *
-hy_storage_list_messages (HyStorage   *self,
+xd_storage_list_messages (XdStorage   *self,
                           const char  *chat_id,
                           GError     **error)
 {
   GPtrArray *messages;
   sqlite3_stmt *stmt = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT " MESSAGE_COLUMNS " FROM messages"
@@ -928,7 +928,7 @@ hy_storage_list_messages (HyStorage   *self,
 
   bind_text (stmt, 1, chat_id);
 
-  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) hy_message_free);
+  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) xd_message_free);
   while (sqlite3_step (stmt) == SQLITE_ROW)
     g_ptr_array_add (messages, message_from_row (stmt));
 
@@ -938,7 +938,7 @@ hy_storage_list_messages (HyStorage   *self,
 }
 
 GPtrArray *
-hy_storage_list_messages_since (HyStorage   *self,
+xd_storage_list_messages_since (XdStorage   *self,
                                 const char  *chat_id,
                                 gint64       after_id,
                                 GError     **error)
@@ -946,7 +946,7 @@ hy_storage_list_messages_since (HyStorage   *self,
   GPtrArray *messages;
   sqlite3_stmt *stmt = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT " MESSAGE_COLUMNS " FROM messages"
@@ -960,7 +960,7 @@ hy_storage_list_messages_since (HyStorage   *self,
   bind_text (stmt, 1, chat_id);
   sqlite3_bind_int64 (stmt, 2, after_id);
 
-  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) hy_message_free);
+  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) xd_message_free);
   while (sqlite3_step (stmt) == SQLITE_ROW)
     g_ptr_array_add (messages, message_from_row (stmt));
 
@@ -970,7 +970,7 @@ hy_storage_list_messages_since (HyStorage   *self,
 }
 
 GPtrArray *
-hy_storage_search (HyStorage   *self,
+xd_storage_search (XdStorage   *self,
                    const char  *query,
                    guint        limit,
                    GError     **error)
@@ -978,7 +978,7 @@ hy_storage_search (HyStorage   *self,
   GPtrArray *messages;
   sqlite3_stmt *stmt = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
   g_return_val_if_fail (query != NULL, NULL);
 
   /* Every column needs qualifying: messages and messages_fts both have a
@@ -999,7 +999,7 @@ hy_storage_search (HyStorage   *self,
   bind_text (stmt, 1, query);
   sqlite3_bind_int (stmt, 2, (int) limit);
 
-  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) hy_message_free);
+  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) xd_message_free);
   while (sqlite3_step (stmt) == SQLITE_ROW)
     g_ptr_array_add (messages, message_from_row (stmt));
 
@@ -1009,13 +1009,13 @@ hy_storage_search (HyStorage   *self,
 }
 
 GPtrArray *
-hy_storage_list_folder_ids (HyStorage  *self,
+xd_storage_list_folder_ids (XdStorage  *self,
                             GError    **error)
 {
   GPtrArray *ids;
   sqlite3_stmt *stmt = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db, "SELECT DISTINCT folder_id FROM chats;",
                           -1, &stmt, NULL) != SQLITE_OK)
@@ -1036,9 +1036,9 @@ hy_storage_list_folder_ids (HyStorage  *self,
 /* --- GObject -------------------------------------------------------------- */
 
 static void
-hy_storage_finalize (GObject *object)
+xd_storage_finalize (GObject *object)
 {
-  HyStorage *self = HY_STORAGE (object);
+  XdStorage *self = XD_STORAGE (object);
 
   if (self->db != NULL)
     {
@@ -1046,22 +1046,22 @@ hy_storage_finalize (GObject *object)
       self->db = NULL;
     }
 
-  G_OBJECT_CLASS (hy_storage_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_storage_parent_class)->finalize (object);
 }
 
 static void
-hy_storage_class_init (HyStorageClass *klass)
+xd_storage_class_init (XdStorageClass *klass)
 {
-  G_OBJECT_CLASS (klass)->finalize = hy_storage_finalize;
+  G_OBJECT_CLASS (klass)->finalize = xd_storage_finalize;
 }
 
 static void
-hy_storage_init (HyStorage *self)
+xd_storage_init (XdStorage *self)
 {
 }
 
 gboolean
-hy_storage_add_device (HyStorage   *self,
+xd_storage_add_device (XdStorage   *self,
                        const char  *token_hash,
                        const char  *name,
                        GError     **error)
@@ -1070,7 +1070,7 @@ hy_storage_add_device (HyStorage   *self,
   gboolean ok;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
   g_return_val_if_fail (token_hash != NULL, FALSE);
 
   if (sqlite3_prepare_v2 (self->db,
@@ -1099,13 +1099,13 @@ hy_storage_add_device (HyStorage   *self,
 /* The device's name when the hash is known, NULL otherwise; a successful
  * lookup also counts as having seen the device. */
 char *
-hy_storage_device_name (HyStorage  *self,
+xd_storage_device_name (XdStorage  *self,
                         const char *token_hash)
 {
   sqlite3_stmt *stmt = NULL;
   char *name = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
 
   if (sqlite3_prepare_v2 (self->db,
                           "UPDATE devices SET last_seen = ? WHERE token_hash = ?"

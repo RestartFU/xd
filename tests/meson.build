@@ -4,7 +4,7 @@ test_env = environment()
 test_env.set('G_TEST_SRCDIR', meson.current_source_dir())
 test_env.set('G_DEBUG', 'gc-friendly')
 
-hy_tests = {
+xd_tests = {
   'storage': 'test-storage.c',
   'backend': 'test-backend.c',
   'session': 'test-session.c',
@@ -14,12 +14,12 @@ hy_tests = {
   'remote': 'test-remote.c',
 }
 
-foreach name, source : hy_tests
+foreach name, source : xd_tests
   exe = executable('test-' + name,
     files(source),
-    dependencies: hy_core_deps,
-    include_directories: hy_core_inc,
-    link_with: hy_core_lib,
+    dependencies: xd_core_deps,
+    include_directories: xd_core_inc,
+    link_with: xd_core_lib,
   )
 
   test(name, exe, env: test_env, args: ['--tap'], protocol: 'tap')

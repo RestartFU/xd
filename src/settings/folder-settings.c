@@ -3,14 +3,14 @@
 #include <gio/gio.h>
 #include <json-glib/json-glib.h>
 
-HyFolderSettings *
-hy_folder_settings_new (void)
+XdFolderSettings *
+xd_folder_settings_new (void)
 {
-  return g_new0 (HyFolderSettings, 1);
+  return g_new0 (XdFolderSettings, 1);
 }
 
 void
-hy_folder_settings_free (HyFolderSettings *self)
+xd_folder_settings_free (XdFolderSettings *self)
 {
   if (self == NULL)
     return;
@@ -24,10 +24,25 @@ hy_folder_settings_free (HyFolderSettings *self)
   g_free (self);
 }
 
+/*
+ * The folder's metadata file.
+ *
+ * The project was called hy first, and a folder's id lives in this file --
+ * lose it and every chat in that folder is orphaned. So a workspace written
+ * before the rename is still read from its old name.
+ */
 static char *
 settings_path_for (const char *folder_path)
 {
-  return g_build_filename (folder_path, HY_FOLDER_SETTINGS_FILE, NULL);
+  g_autofree char *legacy = g_build_filename (folder_path, ".hy.json", NULL);
+  g_autofree char *current = g_build_filename (folder_path,
+                                               XD_FOLDER_SETTINGS_FILE, NULL);
+
+  if (!g_file_test (current, G_FILE_TEST_EXISTS) &&
+      g_file_test (legacy, G_FILE_TEST_EXISTS))
+    return g_steal_pointer (&legacy);
+
+  return g_steal_pointer (&current);
 }
 
 /* Returns a copy of a member, or NULL for both "absent" and JSON null. */
@@ -47,13 +62,13 @@ dup_member (JsonObject *object,
   return json_node_dup_string (node);
 }
 
-HyFolderSettings *
-hy_folder_settings_load (const char  *folder_path,
+XdFolderSettings *
+xd_folder_settings_load (const char  *folder_path,
                          GError     **error)
 {
   g_autoptr (JsonParser) parser = json_parser_new ();
   g_autofree char *path = settings_path_for (folder_path);
-  HyFolderSettings *self;
+  XdFolderSettings *self;
   JsonObject *object;
   JsonNode *root;
 
@@ -70,7 +85,7 @@ hy_folder_settings_load (const char  *folder_path,
 
   object = json_node_get_object (root);
 
-  self = hy_folder_settings_new ();
+  self = xd_folder_settings_new ();
   self->id           = dup_member (object, "id");
   self->backend      = dup_member (object, "backend");
   self->model        = dup_member (object, "model");
@@ -84,18 +99,18 @@ hy_folder_settings_load (const char  *folder_path,
   return self;
 }
 
-HyFolderSettings *
-hy_folder_settings_ensure (const char  *folder_path,
+XdFolderSettings *
+xd_folder_settings_ensure (const char  *folder_path,
                            GError     **error)
 {
   g_autofree char *path = settings_path_for (folder_path);
-  HyFolderSettings *self;
+  XdFolderSettings *self;
 
   if (g_file_test (path, G_FILE_TEST_EXISTS))
     {
       g_autoptr (GError) local_error = NULL;
 
-      self = hy_folder_settings_load (folder_path, &local_error);
+      self = xd_folder_settings_load (folder_path, &local_error);
       if (self != NULL)
         return self;
 
@@ -104,12 +119,12 @@ hy_folder_settings_ensure (const char  *folder_path,
       g_warning ("ignoring unreadable %s: %s", path, local_error->message);
     }
 
-  self = hy_folder_settings_new ();
+  self = xd_folder_settings_new ();
   self->id = g_uuid_string_random ();
 
-  if (!hy_folder_settings_save (self, folder_path, error))
+  if (!xd_folder_settings_save (self, folder_path, error))
     {
-      hy_folder_settings_free (self);
+      xd_folder_settings_free (self);
       return NULL;
     }
 
@@ -130,7 +145,7 @@ add_member (JsonBuilder *builder,
 }
 
 gboolean
-hy_folder_settings_save (const HyFolderSettings  *self,
+xd_folder_settings_save (const XdFolderSettings  *self,
                          const char              *folder_path,
                          GError                 **error)
 {

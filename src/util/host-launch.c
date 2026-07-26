@@ -1,6 +1,6 @@
 #include "host-launch.h"
 
-/* Overridden by the launcher, and recorded there as HY_HOST_<name>. */
+/* Overridden by the launcher, and recorded there as XD_HOST_<name>. */
 static const char *rewritten[] = {
   "XDG_DATA_DIRS", "LANG", "LC_ALL",
   "GIO_EXTRA_MODULES", "GTK_IM_MODULE", "GTK_PATH",
@@ -14,13 +14,13 @@ static const char *bundle_only[] = {
 };
 
 GStrv
-hy_host_environ (void)
+xd_host_environ (void)
 {
   GStrv env = g_get_environ ();
 
   for (gsize i = 0; i < G_N_ELEMENTS (rewritten); i++)
     {
-      g_autofree char *key = g_strconcat ("HY_HOST_", rewritten[i], NULL);
+      g_autofree char *key = g_strconcat ("XD_HOST_", rewritten[i], NULL);
       const char *value = g_environ_getenv (env, key);
 
       /* An empty recorded value means the host did not set it either. */

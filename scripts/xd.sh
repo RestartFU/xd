@@ -1,17 +1,17 @@
 #!/bin/sh
 #
-# Launcher for the relocatable hy bundle.
+# Launcher for the relocatable xd bundle.
 #
 # Everything the app needs is loaded out of this directory. The bundled loader
 # is invoked with --library-path rather than exporting LD_LIBRARY_PATH on
-# purpose: hy spawns the host's `claude` and `codex` binaries, and those must
+# purpose: xd spawns the host's `claude` and `codex` binaries, and those must
 # keep using the host's own libraries.
 
 set -e
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
-RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/hy-$(id -u)"
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/xd-$(id -u)"
 mkdir -p "$RUNTIME"
 
 # These caches store absolute paths, so they are rewritten per launch from
@@ -20,19 +20,19 @@ sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/loaders.cache.in" > "$RUNTIME/loaders.cache"
 sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/fonts.conf.in"    > "$RUNTIME/fonts.conf"
 sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/egl_vendor.json.in" > "$RUNTIME/egl_vendor.json"
 
-# Anything hy launches for the user -- a terminal, an editor -- must run in the
+# Anything xd launches for the user -- a terminal, an editor -- must run in the
 # host's environment, not the bundle's. Remember the values before they are
 # overridden so they can be handed back; see src/util/host-launch.c.
-export HY_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
-export HY_HOST_LANG="${LANG-}"
-export HY_HOST_LC_ALL="${LC_ALL-}"
-export HY_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
-export HY_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
-export HY_HOST_GTK_PATH="${GTK_PATH-}"
+export XD_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
+export XD_HOST_LANG="${LANG-}"
+export XD_HOST_LC_ALL="${LC_ALL-}"
+export XD_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
+export XD_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
+export XD_HOST_GTK_PATH="${GTK_PATH-}"
 
 # GNOME sessions export these to point GTK/GIO at host plugins (ibus, dconf,
 # gvfs). Those .so files are built against the host's glib and GTK; dlopening
-# them into the bundled stack mixes ABIs. hy needs none of them: it only
+# them into the bundled stack mixes ABIs. xd needs none of them: it only
 # touches local files and stores settings in the keyfile backend.
 unset GIO_EXTRA_MODULES GTK_PATH GTK_MODULES GTK_IM_MODULE_FILE
 unset GTK_EXE_PREFIX GTK_DATA_PREFIX LOCALE_ARCHIVE
@@ -80,11 +80,11 @@ export GSK_RENDERER="${GSK_RENDERER:-ngl}"
 # userland is ever consulted. Where there is no GPU (or an NVIDIA card that
 # only the proprietary driver speaks for), Mesa falls back to its own
 # software rasterizer by itself, and the picture stays identical either way.
-# HY_SOFTWARE_GL=1 forces the software path for comparison.
+# XD_SOFTWARE_GL=1 forces the software path for comparison.
 export __EGL_VENDOR_LIBRARY_FILENAMES="$RUNTIME/egl_vendor.json"
 export LIBGL_DRIVERS_PATH="$HERE/lib/dri"
-if [ -n "${HY_SOFTWARE_GL-}" ]; then export LIBGL_ALWAYS_SOFTWARE=1; fi
+if [ -n "${XD_SOFTWARE_GL-}" ]; then export LIBGL_ALWAYS_SOFTWARE=1; fi
 
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \
-     "$HERE/bin/hy" "$@"
+     "$HERE/bin/xd" "$@"

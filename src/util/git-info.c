@@ -4,7 +4,7 @@
 #include <string.h>
 
 void
-hy_git_info_free (HyGitInfo *self)
+xd_git_info_free (XdGitInfo *self)
 {
   if (self == NULL)
     return;
@@ -86,7 +86,7 @@ resolve_git_dir (const char *root,
 }
 
 static void
-read_head (HyGitInfo  *self,
+read_head (XdGitInfo  *self,
            const char *git_dir)
 {
   g_autofree char *head_path = g_build_filename (git_dir, "HEAD", NULL);
@@ -115,7 +115,7 @@ read_head (HyGitInfo  *self,
  * writes sections as [remote "origin"], neither of which GKeyFile handles.
  */
 static void
-read_origin_url (HyGitInfo  *self,
+read_origin_url (XdGitInfo  *self,
                  const char *git_dir)
 {
   g_autofree char *config_path = g_build_filename (git_dir, "config", NULL);
@@ -153,12 +153,12 @@ read_origin_url (HyGitInfo  *self,
     }
 }
 
-HyGitInfo *
-hy_git_info_for_path (const char *path)
+XdGitInfo *
+xd_git_info_for_path (const char *path)
 {
   g_autofree char *root = NULL;
   g_autofree char *git_dir = NULL;
-  HyGitInfo *self;
+  XdGitInfo *self;
   gboolean linked = FALSE;
 
   if (path == NULL)
@@ -172,7 +172,7 @@ hy_git_info_for_path (const char *path)
   if (git_dir == NULL)
     return NULL;
 
-  self = g_new0 (HyGitInfo, 1);
+  self = g_new0 (XdGitInfo, 1);
   self->root = g_strdup (root);
   self->name = g_path_get_basename (root);
   self->linked_worktree = linked;

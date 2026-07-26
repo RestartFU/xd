@@ -1,4 +1,4 @@
-#include "hy-window.h"
+#include "xd-window.h"
 
 #include "chat/chat-view.h"
 #include "chat/search-dialog.h"
@@ -6,19 +6,19 @@
 #include "tree/fs-tree.h"
 #include "tree/sidebar.h"
 
-struct _HyWindow
+struct _XdWindow
 {
   AdwApplicationWindow parent_instance;
 
   GSettings *settings;
-  HyStorage *storage;
-  HyFsTree *tree;
+  XdStorage *storage;
+  XdFsTree *tree;
 
   GtkPaned *split_view;
-  HyChatView *chat_view;
+  XdChatView *chat_view;
 };
 
-G_DEFINE_FINAL_TYPE (HyWindow, hy_window, ADW_TYPE_APPLICATION_WINDOW)
+G_DEFINE_FINAL_TYPE (XdWindow, xd_window, ADW_TYPE_APPLICATION_WINDOW)
 
 /* An empty setting means "use the default", which keeps this user's home
  * directory out of the stored configuration. */
@@ -38,14 +38,14 @@ resolve_root (GSettings  *settings,
 /* Selecting a chat opens it; selecting a folder leaves the current chat alone,
  * so browsing the tree does not throw away what you were reading. */
 static void
-on_node_selected (HySidebar *sidebar,
-                  HyNode    *node,
+on_node_selected (XdSidebar *sidebar,
+                  XdNode    *node,
                   gpointer   user_data)
 {
-  HyWindow *self = user_data;
+  XdWindow *self = user_data;
 
-  if (node != NULL && hy_node_get_kind (node) == HY_NODE_CHAT)
-    hy_chat_view_set_chat (self->chat_view, node);
+  if (node != NULL && xd_node_get_kind (node) == XD_NODE_CHAT)
+    xd_chat_view_set_chat (self->chat_view, node);
 }
 
 /*
@@ -55,34 +55,34 @@ on_node_selected (HySidebar *sidebar,
  * database -- readable, and worse, still able to be typed into.
  */
 static void
-on_chat_removed (HyFsTree *tree,
-                 HyNode   *chat,
+on_chat_removed (XdFsTree *tree,
+                 XdNode   *chat,
                  gpointer  user_data)
 {
-  HyWindow *self = user_data;
+  XdWindow *self = user_data;
 
-  if (hy_chat_view_get_chat (self->chat_view) == chat)
-    hy_chat_view_set_chat (self->chat_view, NULL);
+  if (xd_chat_view_get_chat (self->chat_view) == chat)
+    xd_chat_view_set_chat (self->chat_view, NULL);
 }
 
 static void
-on_node_activated (HySidebar *sidebar,
-                   HyNode    *node,
+on_node_activated (XdSidebar *sidebar,
+                   XdNode    *node,
                    gpointer   user_data)
 {
-  HyWindow *self = user_data;
+  XdWindow *self = user_data;
 
-  if (node != NULL && hy_node_get_kind (node) == HY_NODE_CHAT)
-    hy_chat_view_set_chat (self->chat_view, node);
+  if (node != NULL && xd_node_get_kind (node) == XD_NODE_CHAT)
+    xd_chat_view_set_chat (self->chat_view, node);
 }
 
 static void
-on_search_result_chosen (HyNode   *chat,
+on_search_result_chosen (XdNode   *chat,
                          gpointer  user_data)
 {
-  HyWindow *self = user_data;
+  XdWindow *self = user_data;
 
-  hy_chat_view_set_chat (self->chat_view, chat);
+  xd_chat_view_set_chat (self->chat_view, chat);
 }
 
 static void
@@ -90,12 +90,12 @@ on_search_action (GtkWidget  *widget,
                   const char *action_name,
                   GVariant   *parameter)
 {
-  HyWindow *self = HY_WINDOW (widget);
+  XdWindow *self = XD_WINDOW (widget);
 
   if (self->storage == NULL)
     return;
 
-  hy_search_dialog_present (widget, self->storage, self->tree,
+  xd_search_dialog_present (widget, self->storage, self->tree,
                             on_search_result_chosen, self);
 }
 
@@ -119,7 +119,7 @@ on_press_anywhere (GtkGestureClick *gesture,
   GtkWidget *target;
 
   if (focus == NULL || !GTK_IS_LABEL (focus) ||
-      !gtk_widget_has_css_class (focus, "hy-body"))
+      !gtk_widget_has_css_class (focus, "xd-body"))
     return;
 
   target = gtk_widget_pick (GTK_WIDGET (window), x, y, GTK_PICK_DEFAULT);
@@ -131,7 +131,7 @@ static gboolean
 on_close_request (GtkWindow *window,
                   gpointer   user_data)
 {
-  HyWindow *self = HY_WINDOW (window);
+  XdWindow *self = XD_WINDOW (window);
   int width, height;
 
   gtk_window_get_default_size (window, &width, &height);
@@ -145,19 +145,19 @@ on_close_request (GtkWindow *window,
   return GDK_EVENT_PROPAGATE;
 }
 
-HyWindow *
-hy_window_new (HyApplication *app)
+XdWindow *
+xd_window_new (XdApplication *app)
 {
   g_autofree char *workspaces_root = NULL;
   g_autofree char *db_path = NULL;
   g_autoptr (GError) error = NULL;
-  HySidebar *sidebar;
-  HyWindow *self;
+  XdSidebar *sidebar;
+  XdWindow *self;
 
-  g_return_val_if_fail (HY_IS_APPLICATION (app), NULL);
+  g_return_val_if_fail (XD_IS_APPLICATION (app), NULL);
 
-  self = g_object_new (HY_TYPE_WINDOW, "application", app, NULL);
-  self->settings = g_object_ref (hy_application_get_settings (app));
+  self = g_object_new (XD_TYPE_WINDOW, "application", app, NULL);
+  self->settings = g_object_ref (xd_application_get_settings (app));
 
   gtk_window_set_default_size (GTK_WINDOW (self),
                                g_settings_get_int (self->settings, "window-width"),
@@ -165,8 +165,8 @@ hy_window_new (HyApplication *app)
   if (g_settings_get_boolean (self->settings, "window-maximized"))
     gtk_window_maximize (GTK_WINDOW (self));
 
-  db_path = g_build_filename (g_get_user_data_dir (), "hy", "chats.db", NULL);
-  self->storage = hy_storage_new (db_path, &error);
+  db_path = g_build_filename (g_get_user_data_dir (), "xd", "chats.db", NULL);
+  self->storage = xd_storage_new (db_path, &error);
   if (self->storage == NULL)
     {
       /* Without storage there is nothing to show, so say so plainly rather
@@ -183,14 +183,14 @@ hy_window_new (HyApplication *app)
     }
 
   workspaces_root = resolve_root (self->settings, "workspaces-root", "Workspaces");
-  self->tree = hy_fs_tree_new (workspaces_root, self->storage);
+  self->tree = xd_fs_tree_new (workspaces_root, self->storage);
 
-  sidebar = hy_sidebar_new (self->tree);
+  sidebar = xd_sidebar_new (self->tree);
   g_signal_connect (sidebar, "node-selected", G_CALLBACK (on_node_selected), self);
   g_signal_connect (sidebar, "node-activated", G_CALLBACK (on_node_activated), self);
 
-  self->chat_view = hy_chat_view_new (self->storage, self->tree);
-  gtk_widget_add_css_class (GTK_WIDGET (self->chat_view), "hy-divider-left");
+  self->chat_view = xd_chat_view_new (self->storage, self->tree);
+  gtk_widget_add_css_class (GTK_WIDGET (self->chat_view), "xd-divider-left");
   g_signal_connect (self->tree, "chat-removed", G_CALLBACK (on_chat_removed), self);
 
   gtk_paned_set_start_child (self->split_view, GTK_WIDGET (sidebar));
@@ -213,24 +213,24 @@ hy_window_new (HyApplication *app)
 }
 
 static void
-hy_window_dispose (GObject *object)
+xd_window_dispose (GObject *object)
 {
-  HyWindow *self = HY_WINDOW (object);
+  XdWindow *self = XD_WINDOW (object);
 
   g_clear_object (&self->tree);
   g_clear_object (&self->storage);
   g_clear_object (&self->settings);
 
-  G_OBJECT_CLASS (hy_window_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_window_parent_class)->dispose (object);
 }
 
 static void
-hy_window_class_init (HyWindowClass *klass)
+xd_window_class_init (XdWindowClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
 
-  object_class->dispose = hy_window_dispose;
+  object_class->dispose = xd_window_dispose;
 
   gtk_widget_class_install_action (widget_class, "win.search", NULL,
                                    on_search_action);
@@ -241,15 +241,15 @@ hy_window_class_init (HyWindowClass *klass)
 }
 
 static void
-hy_window_init (HyWindow *self)
+xd_window_init (XdWindow *self)
 {
-  gtk_window_set_title (GTK_WINDOW (self), "hy");
+  gtk_window_set_title (GTK_WINDOW (self), "xd");
 
   /*
    * A paned rather than AdwNavigationSplitView, which sizes the sidebar by a
    * fraction of the window and cannot be dragged. The cost is the split
    * view's narrow-window behaviour, where the sidebar becomes a page of its
-   * own; hy is a desktop window with a tree that is worth widening.
+   * own; xd is a desktop window with a tree that is worth widening.
    */
   self->split_view = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
   gtk_paned_set_resize_start_child (self->split_view, FALSE);

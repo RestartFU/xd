@@ -11,7 +11,7 @@
  * just do to my files".
  */
 
-struct _HyDiffPane
+struct _XdDiffPane
 {
   AdwBin parent_instance;
 
@@ -27,11 +27,11 @@ struct _HyDiffPane
   GtkWidget *changes;
 };
 
-G_DEFINE_FINAL_TYPE (HyDiffPane, hy_diff_pane, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (XdDiffPane, xd_diff_pane, ADW_TYPE_BIN)
 
 typedef struct
 {
-  HyDiffPane *pane;
+  XdDiffPane *pane;
   char *path;
   gboolean untracked;
 } DiffRequest;
@@ -51,7 +51,7 @@ static const char *BASE_SCRIPT =
   "  git rev-parse --verify --quiet \"$ref\" >/dev/null && { echo \"$ref\"; exit 0; }; "
   "done";
 
-static void load_diff (HyDiffPane *self, const char *path, gboolean untracked);
+static void load_diff (XdDiffPane *self, const char *path, gboolean untracked);
 
 static void
 diff_request_free (DiffRequest *request)
@@ -63,12 +63,12 @@ diff_request_free (DiffRequest *request)
 /*
  * Runs git in the working directory and hands back its output.
  *
- * git is spawned rather than a library being linked: hy already depends on
+ * git is spawned rather than a library being linked: xd already depends on
  * the user's git for everything else it reports, and the plumbing commands
  * used here have output formats git keeps stable on purpose.
  */
 static void
-run_git (HyDiffPane          *self,
+run_git (XdDiffPane          *self,
          const char *const   *argv,
          GAsyncReadyCallback  callback,
          gpointer             user_data)
@@ -152,7 +152,7 @@ on_diff_read (GObject      *source,
 }
 
 static void
-load_diff (HyDiffPane *self,
+load_diff (XdDiffPane *self,
            const char *path,
            gboolean    untracked)
 {
@@ -203,7 +203,7 @@ on_file_selected (GtkListBox    *box,
                   GtkListBoxRow *row,
                   gpointer       user_data)
 {
-  HyDiffPane *self = user_data;
+  XdDiffPane *self = user_data;
 
   if (row == NULL)
     return;
@@ -225,7 +225,7 @@ status_label (const char *code)
 }
 
 static void
-add_file_row (HyDiffPane *self,
+add_file_row (XdDiffPane *self,
               const char *code,
               const char *path)
 {
@@ -261,7 +261,7 @@ on_status_read (GObject      *source,
                 GAsyncResult *result,
                 gpointer      user_data)
 {
-  HyDiffPane *self = user_data;
+  XdDiffPane *self = user_data;
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) lines = NULL;
@@ -336,7 +336,7 @@ on_status_read (GObject      *source,
 }
 
 static void
-read_changed_files (HyDiffPane *self)
+read_changed_files (XdDiffPane *self)
 {
   if (self->branch_mode)
     {
@@ -359,7 +359,7 @@ on_base_read (GObject      *source,
               GAsyncResult *result,
               gpointer      user_data)
 {
-  HyDiffPane *self = user_data;
+  XdDiffPane *self = user_data;
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
 
@@ -386,9 +386,9 @@ on_base_read (GObject      *source,
 }
 
 void
-hy_diff_pane_refresh (HyDiffPane *self)
+xd_diff_pane_refresh (XdDiffPane *self)
 {
-  g_return_if_fail (HY_IS_DIFF_PANE (self));
+  g_return_if_fail (XD_IS_DIFF_PANE (self));
 
   if (!gtk_widget_get_visible (GTK_WIDGET (self)))
     return;
@@ -419,10 +419,10 @@ hy_diff_pane_refresh (HyDiffPane *self)
 }
 
 void
-hy_diff_pane_set_workdir (HyDiffPane *self,
+xd_diff_pane_set_workdir (XdDiffPane *self,
                           const char *workdir)
 {
-  g_return_if_fail (HY_IS_DIFF_PANE (self));
+  g_return_if_fail (XD_IS_DIFF_PANE (self));
 
   if (g_strcmp0 (self->workdir, workdir) == 0)
     return;
@@ -430,47 +430,47 @@ hy_diff_pane_set_workdir (HyDiffPane *self,
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
 
-  hy_diff_pane_refresh (self);
+  xd_diff_pane_refresh (self);
 }
 
-HyDiffPane *
-hy_diff_pane_new (void)
+XdDiffPane *
+xd_diff_pane_new (void)
 {
-  return g_object_new (HY_TYPE_DIFF_PANE, NULL);
+  return g_object_new (XD_TYPE_DIFF_PANE, NULL);
 }
 
 static void
 on_scope_changed (GtkToggleButton *button,
                   gpointer         user_data)
 {
-  HyDiffPane *self = user_data;
+  XdDiffPane *self = user_data;
 
   self->branch_mode = gtk_toggle_button_get_active (button);
 
-  hy_diff_pane_refresh (self);
+  xd_diff_pane_refresh (self);
 }
 
 static void
-hy_diff_pane_dispose (GObject *object)
+xd_diff_pane_dispose (GObject *object)
 {
-  HyDiffPane *self = HY_DIFF_PANE (object);
+  XdDiffPane *self = XD_DIFF_PANE (object);
 
   g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->workdir, g_free);
   g_clear_pointer (&self->base, g_free);
 
-  G_OBJECT_CLASS (hy_diff_pane_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_diff_pane_parent_class)->dispose (object);
 }
 
 static void
-hy_diff_pane_class_init (HyDiffPaneClass *klass)
+xd_diff_pane_class_init (XdDiffPaneClass *klass)
 {
-  G_OBJECT_CLASS (klass)->dispose = hy_diff_pane_dispose;
+  G_OBJECT_CLASS (klass)->dispose = xd_diff_pane_dispose;
 }
 
 static void
-hy_diff_pane_init (HyDiffPane *self)
+xd_diff_pane_init (XdDiffPane *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
@@ -489,7 +489,7 @@ hy_diff_pane_init (HyDiffPane *self)
   gtk_widget_add_css_class (refresh, "flat");
   gtk_widget_set_tooltip_text (refresh, "Read again");
   g_signal_connect_swapped (refresh, "clicked",
-                            G_CALLBACK (hy_diff_pane_refresh), self);
+                            G_CALLBACK (xd_diff_pane_refresh), self);
 
   /*
    * Two questions, both worth asking here: what has changed since the last

@@ -30,7 +30,7 @@ stub_build_argv (const AiBackend *self,
   return argv;
 }
 
-extern const AiBackend hy_claude_backend;
+extern const AiBackend xd_claude_backend;
 
 static void
 stub_parse_object (AiParser    *parser,
@@ -38,7 +38,7 @@ stub_parse_object (AiParser    *parser,
                    AiEventFunc  callback,
                    gpointer     user_data)
 {
-  hy_claude_backend.parse_object (parser, root, callback, user_data);
+  xd_claude_backend.parse_object (parser, root, callback, user_data);
 }
 
 static const AiBackend stub_backend = {
@@ -52,13 +52,13 @@ static const AiBackend stub_backend = {
 static const AiBackend missing_backend = {
   .id = "missing",
   .display_name = "Missing",
-  .program = "hy-definitely-not-installed",
+  .program = "xd-definitely-not-installed",
   .build_argv = stub_build_argv,
   .parse_object = stub_parse_object,
 };
 
 static void
-on_session_started (HyChatSession *session,
+on_session_started (XdChatSession *session,
                     const char    *session_id,
                     gpointer       user_data)
 {
@@ -69,7 +69,7 @@ on_session_started (HyChatSession *session,
 }
 
 static void
-on_text_delta (HyChatSession *session,
+on_text_delta (XdChatSession *session,
                const char    *delta,
                gpointer       user_data)
 {
@@ -79,7 +79,7 @@ on_text_delta (HyChatSession *session,
 }
 
 static void
-on_finished (HyChatSession *session,
+on_finished (XdChatSession *session,
              gboolean       success,
              const char    *message,
              gpointer       user_data)
@@ -95,7 +95,7 @@ on_finished (HyChatSession *session,
 
 static void
 run_init (Run           *run,
-          HyChatSession *session)
+          XdChatSession *session)
 {
   run->loop = g_main_loop_new (NULL, FALSE);
   run->text = g_string_new (NULL);
@@ -128,7 +128,7 @@ on_timeout (gpointer user_data)
 static void
 test_streams_a_transcript (void)
 {
-  g_autoptr (HyChatSession) session = hy_chat_session_new (&stub_backend);
+  g_autoptr (XdChatSession) session = xd_chat_session_new (&stub_backend);
   g_autoptr (GError) error = NULL;
   g_autofree char *fixture = NULL;
   AiRunSpec spec = { 0 };
@@ -140,7 +140,7 @@ test_streams_a_transcript (void)
 
   run_init (&run, session);
 
-  g_assert_true (hy_chat_session_start (session, &spec, &error));
+  g_assert_true (xd_chat_session_start (session, &spec, &error));
   g_assert_no_error (error);
 
   g_timeout_add_seconds (10, on_timeout, &run);
@@ -159,11 +159,11 @@ test_streams_a_transcript (void)
 static void
 test_missing_program_explains_itself (void)
 {
-  g_autoptr (HyChatSession) session = hy_chat_session_new (&missing_backend);
+  g_autoptr (XdChatSession) session = xd_chat_session_new (&missing_backend);
   g_autoptr (GError) error = NULL;
   AiRunSpec spec = { .prompt = "hello" };
 
-  g_assert_false (hy_chat_session_start (session, &spec, &error));
+  g_assert_false (xd_chat_session_start (session, &spec, &error));
   g_assert_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_NOENT);
   g_assert_nonnull (strstr (error->message, "not in PATH"));
 }
@@ -171,7 +171,7 @@ test_missing_program_explains_itself (void)
 static void
 test_nonzero_exit_is_a_failure (void)
 {
-  g_autoptr (HyChatSession) session = NULL;
+  g_autoptr (XdChatSession) session = NULL;
   g_autoptr (GError) error = NULL;
   AiRunSpec spec = { 0 };
   Run run = { 0 };
@@ -183,12 +183,12 @@ test_nonzero_exit_is_a_failure (void)
     .parse_object = stub_parse_object,
   };
 
-  session = hy_chat_session_new (&failing);
+  session = xd_chat_session_new (&failing);
   spec.prompt = "/definitely/not/a/file";
 
   run_init (&run, session);
 
-  g_assert_true (hy_chat_session_start (session, &spec, &error));
+  g_assert_true (xd_chat_session_start (session, &spec, &error));
   g_assert_no_error (error);
 
   g_timeout_add_seconds (10, on_timeout, &run);

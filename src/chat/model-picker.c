@@ -12,7 +12,7 @@ typedef struct
 } Entry;
 
 /* GtkMenuButton is final, so the picker wraps one rather than deriving it. */
-struct _HyModelPicker
+struct _XdModelPicker
 {
   AdwBin parent_instance;
 
@@ -47,9 +47,9 @@ enum
 
 static guint signals[N_SIGNALS];
 
-G_DEFINE_FINAL_TYPE (HyModelPicker, hy_model_picker, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (XdModelPicker, xd_model_picker, ADW_TYPE_BIN)
 
-static void rebuild_list (HyModelPicker *self);
+static void rebuild_list (XdModelPicker *self);
 
 /* --- favorites ------------------------------------------------------------ */
 
@@ -63,7 +63,7 @@ favorite_key (const AiBackend *backend,
 }
 
 static gboolean
-is_favorite (HyModelPicker   *self,
+is_favorite (XdModelPicker   *self,
              const AiBackend *backend,
              const char      *model_id)
 {
@@ -73,7 +73,7 @@ is_favorite (HyModelPicker   *self,
 }
 
 static void
-save_favorites (HyModelPicker *self)
+save_favorites (XdModelPicker *self)
 {
   g_autoptr (GPtrArray) keys = g_ptr_array_new ();
   GHashTableIter iter;
@@ -89,7 +89,7 @@ save_favorites (HyModelPicker *self)
 }
 
 static void
-toggle_favorite (HyModelPicker   *self,
+toggle_favorite (XdModelPicker   *self,
                  const AiBackend *backend,
                  const char      *model_id)
 {
@@ -107,7 +107,7 @@ toggle_favorite (HyModelPicker   *self,
 /* --- the button ----------------------------------------------------------- */
 
 static void
-update_button (HyModelPicker *self)
+update_button (XdModelPicker *self)
 {
   const AiBackend *backend = ai_backend_lookup (self->backend_id);
 
@@ -129,14 +129,14 @@ static void
 on_star_toggled (GtkButton *button,
                  gpointer   user_data)
 {
-  HyModelPicker *self = user_data;
+  XdModelPicker *self = user_data;
   const Entry *entry = g_object_get_data (G_OBJECT (button), "entry");
 
   toggle_favorite (self, entry->backend, entry->model->id);
 }
 
 static GtkWidget *
-build_row (HyModelPicker *self,
+build_row (XdModelPicker *self,
            const Entry   *entry,
            int            index)
 {
@@ -213,7 +213,7 @@ matches_search (const Entry *entry,
 }
 
 static void
-rebuild_list (HyModelPicker *self)
+rebuild_list (XdModelPicker *self)
 {
   g_autofree char *needle = NULL;
   const AiBackend *const *backends;
@@ -267,7 +267,7 @@ rebuild_list (HyModelPicker *self)
 }
 
 static void
-choose_entry (HyModelPicker *self,
+choose_entry (XdModelPicker *self,
               const Entry   *entry)
 {
   g_free (self->backend_id);
@@ -287,7 +287,7 @@ on_row_activated (GtkListBox    *list,
                   GtkListBoxRow *row,
                   gpointer       user_data)
 {
-  HyModelPicker *self = user_data;
+  XdModelPicker *self = user_data;
   int index = gtk_list_box_row_get_index (row);
 
   if (index >= 0 && (guint) index < self->visible->len)
@@ -307,7 +307,7 @@ on_choose_action (GtkWidget  *widget,
                   const char *action_name,
                   GVariant   *parameter)
 {
-  HyModelPicker *self = HY_MODEL_PICKER (widget);
+  XdModelPicker *self = XD_MODEL_PICKER (widget);
   gint32 index = g_variant_get_int32 (parameter);
 
   if (index >= 0 && (guint) index < self->visible->len)
@@ -320,7 +320,7 @@ static void
 on_rail_toggled (GtkToggleButton *button,
                  gpointer         user_data)
 {
-  HyModelPicker *self = user_data;
+  XdModelPicker *self = user_data;
   const AiBackend *backend;
 
   if (self->syncing_rail || !gtk_toggle_button_get_active (button))
@@ -334,7 +334,7 @@ on_rail_toggled (GtkToggleButton *button,
 }
 
 static void
-sync_rail (HyModelPicker *self)
+sync_rail (XdModelPicker *self)
 {
   GtkWidget *child;
 
@@ -355,7 +355,7 @@ sync_rail (HyModelPicker *self)
 }
 
 static GtkWidget *
-build_rail_button (HyModelPicker   *self,
+build_rail_button (XdModelPicker   *self,
                    const AiBackend *backend,
                    GtkWidget       *group)
 {
@@ -380,11 +380,11 @@ build_rail_button (HyModelPicker   *self,
 /* --- public API ----------------------------------------------------------- */
 
 void
-hy_model_picker_set_selected (HyModelPicker *self,
+xd_model_picker_set_selected (XdModelPicker *self,
                               const char    *backend_id,
                               const char    *model_id)
 {
-  g_return_if_fail (HY_IS_MODEL_PICKER (self));
+  g_return_if_fail (XD_IS_MODEL_PICKER (self));
 
   g_free (self->backend_id);
   g_free (self->model_id);
@@ -401,16 +401,16 @@ hy_model_picker_set_selected (HyModelPicker *self,
   rebuild_list (self);
 }
 
-HyModelPicker *
-hy_model_picker_new (void)
+XdModelPicker *
+xd_model_picker_new (void)
 {
-  return g_object_new (HY_TYPE_MODEL_PICKER, NULL);
+  return g_object_new (XD_TYPE_MODEL_PICKER, NULL);
 }
 
 /* --- construction --------------------------------------------------------- */
 
 static GtkWidget *
-build_popover_content (HyModelPicker *self)
+build_popover_content (XdModelPicker *self)
 {
   GtkWidget *columns = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *right = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
@@ -474,7 +474,7 @@ static void
 on_popover_shown (GtkPopover *popover,
                   gpointer    user_data)
 {
-  HyModelPicker *self = user_data;
+  XdModelPicker *self = user_data;
 
   gtk_editable_set_text (GTK_EDITABLE (self->search), "");
   rebuild_list (self);
@@ -482,36 +482,36 @@ on_popover_shown (GtkPopover *popover,
 }
 
 static void
-hy_model_picker_dispose (GObject *object)
+xd_model_picker_dispose (GObject *object)
 {
-  HyModelPicker *self = HY_MODEL_PICKER (object);
+  XdModelPicker *self = XD_MODEL_PICKER (object);
 
   g_clear_pointer (&self->visible, g_ptr_array_unref);
   g_clear_pointer (&self->favorites, g_hash_table_unref);
   g_clear_object (&self->settings);
 
-  G_OBJECT_CLASS (hy_model_picker_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_model_picker_parent_class)->dispose (object);
 }
 
 static void
-hy_model_picker_finalize (GObject *object)
+xd_model_picker_finalize (GObject *object)
 {
-  HyModelPicker *self = HY_MODEL_PICKER (object);
+  XdModelPicker *self = XD_MODEL_PICKER (object);
 
   g_clear_pointer (&self->backend_id, g_free);
   g_clear_pointer (&self->model_id, g_free);
 
-  G_OBJECT_CLASS (hy_model_picker_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_model_picker_parent_class)->finalize (object);
 }
 
 static void
-hy_model_picker_class_init (HyModelPickerClass *klass)
+xd_model_picker_class_init (XdModelPickerClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
 
-  object_class->dispose = hy_model_picker_dispose;
-  object_class->finalize = hy_model_picker_finalize;
+  object_class->dispose = xd_model_picker_dispose;
+  object_class->finalize = xd_model_picker_finalize;
 
   signals[SIGNAL_MODEL_CHOSEN] =
     g_signal_new ("model-chosen", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
@@ -528,13 +528,13 @@ hy_model_picker_class_init (HyModelPickerClass *klass)
 }
 
 static void
-hy_model_picker_init (HyModelPicker *self)
+xd_model_picker_init (XdModelPicker *self)
 {
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget *popover = gtk_popover_new ();
   g_auto (GStrv) favorites = NULL;
 
-  self->settings = g_settings_new (HY_APP_ID);
+  self->settings = g_settings_new (XD_APP_ID);
   self->favorites = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   self->visible = g_ptr_array_new_with_free_func (g_free);
 
@@ -559,7 +559,7 @@ hy_model_picker_init (HyModelPicker *self)
 
     /* The visible panel is this child, not the popover's own chrome; see the
      * stylesheet's note on popover surfaces. */
-    gtk_widget_add_css_class (content, "hy-menu");
+    gtk_widget_add_css_class (content, "xd-menu");
     gtk_popover_set_child (GTK_POPOVER (popover), content);
   }
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);

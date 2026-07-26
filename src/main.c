@@ -1,4 +1,4 @@
-#include "hy-app.h"
+#include "xd-app.h"
 #include "remote/server.h"
 
 #include <stdio.h>
@@ -15,7 +15,7 @@
 static GTlsCertificate *
 ensure_certificate (GError **error)
 {
-  g_autofree char *dir = g_build_filename (g_get_user_data_dir (), "hy", NULL);
+  g_autofree char *dir = g_build_filename (g_get_user_data_dir (), "xd", NULL);
   g_autofree char *cert_path = g_build_filename (dir, "server-cert.pem", NULL);
   g_autofree char *key_path = g_build_filename (dir, "server-key.pem", NULL);
 
@@ -26,7 +26,7 @@ ensure_certificate (GError **error)
       const char *argv[] = {
         "openssl", "req", "-x509", "-newkey", "rsa:2048",
         "-keyout", key_path, "-out", cert_path,
-        "-days", "3650", "-nodes", "-subj", "/CN=hy",
+        "-days", "3650", "-nodes", "-subj", "/CN=xd",
         NULL,
       };
       g_autoptr (GSubprocess) process = NULL;
@@ -48,9 +48,9 @@ static int
 run_serve (int argc, char *argv[])
 {
   g_autoptr (GError) error = NULL;
-  g_autoptr (HyStorage) storage = NULL;
+  g_autoptr (XdStorage) storage = NULL;
   g_autoptr (GTlsCertificate) certificate = NULL;
-  g_autoptr (HyRemoteServer) server = NULL;
+  g_autoptr (XdRemoteServer) server = NULL;
   g_autofree char *db_path = NULL;
   g_autofree char *root = NULL;
   GMainLoop *loop;
@@ -67,7 +67,7 @@ run_serve (int argc, char *argv[])
         root = g_strdup (argv[++i]);
       else
         {
-          fprintf (stderr, "usage: hy serve [--port N] [--pair] [--root DIR]\n");
+          fprintf (stderr, "usage: xd serve [--port N] [--pair] [--root DIR]\n");
           return 1;
         }
     }
@@ -75,34 +75,34 @@ run_serve (int argc, char *argv[])
   if (root == NULL)
     root = g_build_filename (g_get_home_dir (), "Workspaces", NULL);
 
-  db_path = g_build_filename (g_get_user_data_dir (), "hy", "chats.db", NULL);
-  storage = hy_storage_new (db_path, &error);
+  db_path = g_build_filename (g_get_user_data_dir (), "xd", "chats.db", NULL);
+  storage = xd_storage_new (db_path, &error);
   if (storage == NULL)
     {
-      fprintf (stderr, "hy serve: %s\n", error->message);
+      fprintf (stderr, "xd serve: %s\n", error->message);
       return 1;
     }
 
   certificate = ensure_certificate (&error);
   if (certificate == NULL)
     {
-      fprintf (stderr, "hy serve: %s\n", error->message);
+      fprintf (stderr, "xd serve: %s\n", error->message);
       return 1;
     }
 
-  server = hy_remote_server_new (storage, root, port, certificate, &error);
+  server = xd_remote_server_new (storage, root, port, certificate, &error);
   if (server == NULL)
     {
-      fprintf (stderr, "hy serve: %s\n", error->message);
+      fprintf (stderr, "xd serve: %s\n", error->message);
       return 1;
     }
 
-  printf ("hy serve: listening on %u, workspaces at %s\n",
-          hy_remote_server_get_port (server), root);
+  printf ("xd serve: listening on %u, workspaces at %s\n",
+          xd_remote_server_get_port (server), root);
 
   if (pair)
     {
-      g_autofree char *code = hy_remote_server_arm_pairing (server, 300);
+      g_autofree char *code = xd_remote_server_arm_pairing (server, 300);
 
       printf ("pairing code (5 minutes, one use): %s\n", code);
     }
@@ -123,7 +123,7 @@ main (int argc, char *argv[])
     return run_serve (argc, argv);
 
   {
-    g_autoptr (HyApplication) app = hy_application_new ();
+    g_autoptr (XdApplication) app = xd_application_new ();
 
     return g_application_run (G_APPLICATION (app), argc, argv);
   }

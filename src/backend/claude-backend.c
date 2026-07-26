@@ -292,11 +292,11 @@ static const AiModel claude_models[] = {
   { "claude-opus-4-8",  "Claude Opus 4.8" },
 };
 
-const AiBackend hy_claude_backend = {
+const AiBackend xd_claude_backend = {
   .id = "claude",
   .display_name = "Claude Code",
   .program = "claude",
-  .icon_name = "hy-backend-claude",
+  .icon_name = "xd-backend-claude",
   .default_model = "claude-opus-5",
   .models = claude_models,
   .n_models = G_N_ELEMENTS (claude_models),

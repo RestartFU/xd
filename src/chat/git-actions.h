@@ -4,13 +4,13 @@
 
 G_BEGIN_DECLS
 
-#define HY_TYPE_GIT_ACTIONS (hy_git_actions_get_type ())
+#define XD_TYPE_GIT_ACTIONS (xd_git_actions_get_type ())
 
-G_DECLARE_FINAL_TYPE (HyGitActions, hy_git_actions, HY, GIT_ACTIONS, AdwBin)
+G_DECLARE_FINAL_TYPE (XdGitActions, xd_git_actions, XD, GIT_ACTIONS, AdwBin)
 
-HyGitActions *hy_git_actions_new         (void);
+XdGitActions *xd_git_actions_new         (void);
 
-void          hy_git_actions_set_workdir (HyGitActions *self,
+void          xd_git_actions_set_workdir (XdGitActions *self,
                                           const char   *workdir);
 
 /*
@@ -19,6 +19,6 @@ void          hy_git_actions_set_workdir (HyGitActions *self,
  * Called when a turn ends and when the pane it sits in changes, since those
  * are the moments the answer can have changed without the user doing it.
  */
-void          hy_git_actions_refresh     (HyGitActions *self);
+void          xd_git_actions_refresh     (XdGitActions *self);
 
 G_END_DECLS

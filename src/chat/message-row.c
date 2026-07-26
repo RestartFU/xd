@@ -5,47 +5,47 @@
 #include "util/markdown.h"
 #include "util/host-launch.h"
 
-struct _HyMessageRow
+struct _XdMessageRow
 {
   AdwBin parent_instance;
 
-  HyMessageKind kind;
+  XdMessageKind kind;
   GString *text;
 
   GtkWidget *body;          /* a column of prose labels and code cards */
   GtkWidget *spinner;
 };
 
-G_DEFINE_FINAL_TYPE (HyMessageRow, hy_message_row, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (XdMessageRow, xd_message_row, ADW_TYPE_BIN)
 
-static void render_body (HyMessageRow *self);
+static void render_body (XdMessageRow *self);
 
-HyMessageKind
-hy_message_kind_from_role (const char *role)
+XdMessageKind
+xd_message_kind_from_role (const char *role)
 {
   if (g_strcmp0 (role, "assistant") == 0)
-    return HY_MESSAGE_ASSISTANT;
+    return XD_MESSAGE_ASSISTANT;
   if (g_strcmp0 (role, "tool") == 0)
-    return HY_MESSAGE_TOOL;
+    return XD_MESSAGE_TOOL;
   /* Things that happened rather than things said: model switches and the
    * like read as dim asides, the same register as tool calls. */
   if (g_strcmp0 (role, "event") == 0)
-    return HY_MESSAGE_TOOL;
+    return XD_MESSAGE_TOOL;
   if (g_strcmp0 (role, "error") == 0)
-    return HY_MESSAGE_ERROR;
+    return XD_MESSAGE_ERROR;
 
-  return HY_MESSAGE_USER;
+  return XD_MESSAGE_USER;
 }
 
 const char *
-hy_message_kind_to_role (HyMessageKind kind)
+xd_message_kind_to_role (XdMessageKind kind)
 {
   switch (kind)
     {
-    case HY_MESSAGE_ASSISTANT: return "assistant";
-    case HY_MESSAGE_TOOL:      return "tool";
-    case HY_MESSAGE_ERROR:     return "error";
-    case HY_MESSAGE_USER:
+    case XD_MESSAGE_ASSISTANT: return "assistant";
+    case XD_MESSAGE_TOOL:      return "tool";
+    case XD_MESSAGE_ERROR:     return "error";
+    case XD_MESSAGE_USER:
     default:                   return "user";
     }
 }
@@ -59,9 +59,9 @@ hy_message_kind_to_role (HyMessageKind kind)
  * the user, plain text on the left is everything else.
  */
 static gboolean
-kind_is_bubble (HyMessageKind kind)
+kind_is_bubble (XdMessageKind kind)
 {
-  return kind == HY_MESSAGE_USER;
+  return kind == XD_MESSAGE_USER;
 }
 
 /* Roughly the width of the reply column, so a bubble wraps well before it
@@ -69,12 +69,12 @@ kind_is_bubble (HyMessageKind kind)
 #define BUBBLE_MAX_WIDTH_CHARS 60
 
 static const char *
-kind_css_class (HyMessageKind kind)
+kind_css_class (XdMessageKind kind)
 {
   switch (kind)
     {
-    case HY_MESSAGE_TOOL:  return "dim-label";
-    case HY_MESSAGE_ERROR: return "error";
+    case XD_MESSAGE_TOOL:  return "dim-label";
+    case XD_MESSAGE_ERROR: return "error";
     default:               return NULL;
     }
 }
@@ -82,7 +82,7 @@ kind_css_class (HyMessageKind kind)
 /*
  * Opens the link with the host's browser, not the bundle's environment.
  *
- * GTK's own handler would spawn xdg-open under hy's rewritten environment,
+ * GTK's own handler would spawn xdg-open under xd's rewritten environment,
  * and a browser launched with the bundle's GTK and schemas is a different
  * program than the one configured.
  */
@@ -91,7 +91,7 @@ on_link_activated (GtkLabel   *label,
                    const char *uri,
                    gpointer    user_data)
 {
-  g_auto (GStrv) env = hy_host_environ ();
+  g_auto (GStrv) env = xd_host_environ ();
   const char *argv[] = { "xdg-open", uri, NULL };
 
   g_spawn_async (NULL, (char **) argv, env, G_SPAWN_SEARCH_PATH,
@@ -100,11 +100,11 @@ on_link_activated (GtkLabel   *label,
   return TRUE;
 }
 
-HyMessageRow *
-hy_message_row_new (HyMessageKind  kind,
+XdMessageRow *
+xd_message_row_new (XdMessageKind  kind,
                     const char    *text)
 {
-  HyMessageRow *self = g_object_new (HY_TYPE_MESSAGE_ROW, NULL);
+  XdMessageRow *self = g_object_new (XD_TYPE_MESSAGE_ROW, NULL);
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   gboolean bubble = kind_is_bubble (kind);
 
@@ -157,7 +157,7 @@ hy_message_row_new (HyMessageKind  kind,
 
 /* One prose label, configured the way every piece of message text is. */
 static GtkWidget *
-make_text_label (HyMessageRow *self)
+make_text_label (XdMessageRow *self)
 {
   GtkWidget *label = gtk_label_new (NULL);
   const char *css_class = kind_css_class (self->kind);
@@ -166,7 +166,7 @@ make_text_label (HyMessageRow *self)
   gtk_label_set_wrap_mode (GTK_LABEL (label), PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
   gtk_label_set_selectable (GTK_LABEL (label), TRUE);
-  gtk_widget_add_css_class (label, "hy-body");
+  gtk_widget_add_css_class (label, "xd-body");
   g_signal_connect (label, "activate-link", G_CALLBACK (on_link_activated), NULL);
 
   if (kind_is_bubble (self->kind))
@@ -186,7 +186,7 @@ make_text_label (HyMessageRow *self)
  * monospace prose. As a widget it can look like what it is.
  */
 static GtkWidget *
-make_code_card (HyMessageRow *self,
+make_code_card (XdMessageRow *self,
                 const char   *code)
 {
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
@@ -196,10 +196,10 @@ make_code_card (HyMessageRow *self,
   gtk_label_set_wrap_mode (GTK_LABEL (label), PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
   gtk_label_set_selectable (GTK_LABEL (label), TRUE);
-  gtk_widget_add_css_class (label, "hy-body");
+  gtk_widget_add_css_class (label, "xd-body");
   gtk_widget_set_hexpand (label, TRUE);
 
-  gtk_widget_add_css_class (card, "hy-code");
+  gtk_widget_add_css_class (card, "xd-code");
   gtk_box_append (GTK_BOX (card), label);
 
   return card;
@@ -266,7 +266,7 @@ on_chip_destroyed (GtkWidget *chip,
  * with a click, and previews on hover.
  */
 static GtkWidget *
-make_image_chip (HyMessageRow *self,
+make_image_chip (XdMessageRow *self,
                  const char   *path,
                  int           number)
 {
@@ -290,7 +290,7 @@ make_image_chip (HyMessageRow *self,
     gtk_popover_set_autohide (GTK_POPOVER (popover), FALSE);
     gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
     gtk_widget_set_parent (popover, label);
-    gtk_widget_add_css_class (popover, "hy-preview");
+    gtk_widget_add_css_class (popover, "xd-preview");
 
     g_signal_connect (motion, "enter", G_CALLBACK (on_chip_enter), popover);
     g_signal_connect (motion, "leave", G_CALLBACK (on_chip_leave), popover);
@@ -302,7 +302,7 @@ make_image_chip (HyMessageRow *self,
 }
 
 static void
-clear_body (HyMessageRow *self)
+clear_body (XdMessageRow *self)
 {
   GtkWidget *child;
 
@@ -312,11 +312,11 @@ clear_body (HyMessageRow *self)
 
 /* Replies are Markdown; what the user typed is shown exactly as typed. */
 static void
-render_body (HyMessageRow *self)
+render_body (XdMessageRow *self)
 {
   clear_body (self);
 
-  if (self->kind != HY_MESSAGE_ASSISTANT)
+  if (self->kind != XD_MESSAGE_ASSISTANT)
     {
       g_auto (GStrv) lines = g_strsplit (self->text->str, "\n", -1);
       g_autoptr (GString) prose = g_string_new (NULL);
@@ -381,7 +381,7 @@ render_body (HyMessageRow *self)
                   piece = make_code_card (self, chunk->str);
                 else
                   {
-                    g_autofree char *markup = hy_markdown_to_pango (chunk->str);
+                    g_autofree char *markup = xd_markdown_to_pango (chunk->str);
 
                     piece = make_text_label (self);
                     gtk_label_set_markup (GTK_LABEL (piece), markup);
@@ -408,7 +408,7 @@ render_body (HyMessageRow *self)
           piece = make_code_card (self, chunk->str);
         else
           {
-            g_autofree char *markup = hy_markdown_to_pango (chunk->str);
+            g_autofree char *markup = xd_markdown_to_pango (chunk->str);
 
             piece = make_text_label (self);
             gtk_label_set_markup (GTK_LABEL (piece), markup);
@@ -420,10 +420,10 @@ render_body (HyMessageRow *self)
 }
 
 void
-hy_message_row_append (HyMessageRow *self,
+xd_message_row_append (XdMessageRow *self,
                        const char   *delta)
 {
-  g_return_if_fail (HY_IS_MESSAGE_ROW (self));
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
   if (delta == NULL || *delta == '\0')
     return;
@@ -431,14 +431,14 @@ hy_message_row_append (HyMessageRow *self,
   g_string_append (self->text, delta);
   render_body (self);
 
-  hy_message_row_set_waiting (self, FALSE);
+  xd_message_row_set_waiting (self, FALSE);
 }
 
 void
-hy_message_row_set_text (HyMessageRow *self,
+xd_message_row_set_text (XdMessageRow *self,
                          const char   *text)
 {
-  g_return_if_fail (HY_IS_MESSAGE_ROW (self));
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
   g_string_assign (self->text, text != NULL ? text : "");
   render_body (self);
@@ -455,28 +455,28 @@ hy_message_row_set_text (HyMessageRow *self,
  * this? -- so they are kept within reach rather than dropped.
  */
 void
-hy_message_row_set_source (HyMessageRow *self,
+xd_message_row_set_source (XdMessageRow *self,
                            const char   *source)
 {
-  g_return_if_fail (HY_IS_MESSAGE_ROW (self));
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
   if (source != NULL && *source != '\0')
     gtk_widget_set_tooltip_text (GTK_WIDGET (self), source);
 }
 
 const char *
-hy_message_row_get_text (HyMessageRow *self)
+xd_message_row_get_text (XdMessageRow *self)
 {
-  g_return_val_if_fail (HY_IS_MESSAGE_ROW (self), NULL);
+  g_return_val_if_fail (XD_IS_MESSAGE_ROW (self), NULL);
 
   return self->text->str;
 }
 
 void
-hy_message_row_set_waiting (HyMessageRow *self,
+xd_message_row_set_waiting (XdMessageRow *self,
                             gboolean      waiting)
 {
-  g_return_if_fail (HY_IS_MESSAGE_ROW (self));
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
   gtk_widget_set_visible (self->spinner, waiting);
   gtk_spinner_set_spinning (GTK_SPINNER (self->spinner), waiting);
@@ -487,22 +487,22 @@ hy_message_row_set_waiting (HyMessageRow *self,
 }
 
 static void
-hy_message_row_finalize (GObject *object)
+xd_message_row_finalize (GObject *object)
 {
-  HyMessageRow *self = HY_MESSAGE_ROW (object);
+  XdMessageRow *self = XD_MESSAGE_ROW (object);
 
   g_string_free (self->text, TRUE);
 
-  G_OBJECT_CLASS (hy_message_row_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_message_row_parent_class)->finalize (object);
 }
 
 static void
-hy_message_row_class_init (HyMessageRowClass *klass)
+xd_message_row_class_init (XdMessageRowClass *klass)
 {
-  G_OBJECT_CLASS (klass)->finalize = hy_message_row_finalize;
+  G_OBJECT_CLASS (klass)->finalize = xd_message_row_finalize;
 }
 
 static void
-hy_message_row_init (HyMessageRow *self)
+xd_message_row_init (XdMessageRow *self)
 {
 }

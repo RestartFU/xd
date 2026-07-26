@@ -8,7 +8,7 @@
 /* Enough stderr to explain a failure without holding a runaway log in memory. */
 #define STDERR_LIMIT 8192
 
-struct _HyChatSession
+struct _XdChatSession
 {
   GObject parent_instance;
 
@@ -37,14 +37,14 @@ enum
 
 static guint signals[N_SIGNALS];
 
-G_DEFINE_FINAL_TYPE (HyChatSession, hy_chat_session, G_TYPE_OBJECT)
+G_DEFINE_FINAL_TYPE (XdChatSession, xd_chat_session, G_TYPE_OBJECT)
 
-static void read_next_line (HyChatSession *self);
+static void read_next_line (XdChatSession *self);
 
 /* --- finishing ------------------------------------------------------------ */
 
 static void
-finish (HyChatSession *self,
+finish (XdChatSession *self,
         gboolean       success,
         const char    *message)
 {
@@ -60,7 +60,7 @@ finish (HyChatSession *self,
 
 /* The tail of stderr is what actually explains a non-zero exit. */
 static const char *
-stderr_tail (HyChatSession *self)
+stderr_tail (XdChatSession *self)
 {
   g_strstrip (self->stderr_text->str);
 
@@ -72,7 +72,7 @@ on_process_waited (GObject      *source,
                    GAsyncResult *result,
                    gpointer      user_data)
 {
-  g_autoptr (HyChatSession) self = user_data;
+  g_autoptr (XdChatSession) self = user_data;
   g_autoptr (GError) error = NULL;
 
   if (g_subprocess_wait_check_finish (G_SUBPROCESS (source), result, &error))
@@ -96,7 +96,7 @@ on_process_waited (GObject      *source,
 }
 
 static void
-reap_process (HyChatSession *self)
+reap_process (XdChatSession *self)
 {
   g_subprocess_wait_check_async (self->process, NULL, on_process_waited,
                                  g_object_ref (self));
@@ -108,7 +108,7 @@ static void
 on_event (const AiEvent *event,
           gpointer       user_data)
 {
-  HyChatSession *self = user_data;
+  XdChatSession *self = user_data;
 
   switch (event->type)
     {
@@ -149,7 +149,7 @@ on_line_read (GObject      *source,
               GAsyncResult *result,
               gpointer      user_data)
 {
-  g_autoptr (HyChatSession) self = user_data;
+  g_autoptr (XdChatSession) self = user_data;
   g_autoptr (GError) error = NULL;
   g_autofree char *line = NULL;
   gsize length = 0;
@@ -179,7 +179,7 @@ on_line_read (GObject      *source,
 }
 
 static void
-read_next_line (HyChatSession *self)
+read_next_line (XdChatSession *self)
 {
   g_data_input_stream_read_line_async (self->stdout_stream, G_PRIORITY_DEFAULT,
                                        self->cancellable, on_line_read,
@@ -191,7 +191,7 @@ on_stderr_line (GObject      *source,
                 GAsyncResult *result,
                 gpointer      user_data)
 {
-  g_autoptr (HyChatSession) self = user_data;
+  g_autoptr (XdChatSession) self = user_data;
   g_autofree char *line = NULL;
 
   line = g_data_input_stream_read_line_finish_utf8 (G_DATA_INPUT_STREAM (source),
@@ -209,14 +209,14 @@ on_stderr_line (GObject      *source,
 
 /* --- lifecycle ------------------------------------------------------------ */
 
-HyChatSession *
-hy_chat_session_new (const AiBackend *backend)
+XdChatSession *
+xd_chat_session_new (const AiBackend *backend)
 {
-  HyChatSession *self;
+  XdChatSession *self;
 
   g_return_val_if_fail (backend != NULL, NULL);
 
-  self = g_object_new (HY_TYPE_CHAT_SESSION, NULL);
+  self = g_object_new (XD_TYPE_CHAT_SESSION, NULL);
   self->backend = backend;
   self->parser = ai_parser_new (backend);
 
@@ -224,7 +224,7 @@ hy_chat_session_new (const AiBackend *backend)
 }
 
 gboolean
-hy_chat_session_start (HyChatSession    *self,
+xd_chat_session_start (XdChatSession    *self,
                        const AiRunSpec  *spec,
                        GError          **error)
 {
@@ -232,7 +232,7 @@ hy_chat_session_start (HyChatSession    *self,
   g_autoptr (GPtrArray) argv = NULL;
   g_autoptr (GError) local_error = NULL;
 
-  g_return_val_if_fail (HY_IS_CHAT_SESSION (self), FALSE);
+  g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
   g_return_val_if_fail (spec != NULL, FALSE);
   g_return_val_if_fail (self->process == NULL, FALSE);
 
@@ -254,7 +254,7 @@ hy_chat_session_start (HyChatSession    *self,
     {
       if (g_error_matches (local_error, G_SPAWN_ERROR, G_SPAWN_ERROR_NOENT))
         g_set_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_NOENT,
-                     "%s is not in PATH. hy runs the CLI you already have "
+                     "%s is not in PATH. xd runs the CLI you already have "
                      "installed and signed in.", self->backend->program);
       else
         g_propagate_error (error, g_steal_pointer (&local_error));
@@ -289,7 +289,7 @@ hy_chat_session_start (HyChatSession    *self,
 static gboolean
 on_grace_elapsed (gpointer user_data)
 {
-  HyChatSession *self = user_data;
+  XdChatSession *self = user_data;
 
   self->kill_timeout_id = 0;
 
@@ -303,9 +303,9 @@ on_grace_elapsed (gpointer user_data)
 }
 
 void
-hy_chat_session_cancel (HyChatSession *self)
+xd_chat_session_cancel (XdChatSession *self)
 {
-  g_return_if_fail (HY_IS_CHAT_SESSION (self));
+  g_return_if_fail (XD_IS_CHAT_SESSION (self));
 
   if (self->process == NULL || self->finished || self->stopping)
     return;
@@ -321,17 +321,17 @@ hy_chat_session_cancel (HyChatSession *self)
 }
 
 gboolean
-hy_chat_session_is_running (HyChatSession *self)
+xd_chat_session_is_running (XdChatSession *self)
 {
-  g_return_val_if_fail (HY_IS_CHAT_SESSION (self), FALSE);
+  g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
 
   return self->process != NULL && !self->finished;
 }
 
 static void
-hy_chat_session_dispose (GObject *object)
+xd_chat_session_dispose (GObject *object)
 {
-  HyChatSession *self = HY_CHAT_SESSION (object);
+  XdChatSession *self = XD_CHAT_SESSION (object);
 
   g_clear_handle_id (&self->kill_timeout_id, g_source_remove);
 
@@ -345,27 +345,27 @@ hy_chat_session_dispose (GObject *object)
   g_clear_object (&self->process);
   g_clear_object (&self->cancellable);
 
-  G_OBJECT_CLASS (hy_chat_session_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_chat_session_parent_class)->dispose (object);
 }
 
 static void
-hy_chat_session_finalize (GObject *object)
+xd_chat_session_finalize (GObject *object)
 {
-  HyChatSession *self = HY_CHAT_SESSION (object);
+  XdChatSession *self = XD_CHAT_SESSION (object);
 
   g_clear_pointer (&self->parser, ai_parser_free);
   g_string_free (self->stderr_text, TRUE);
 
-  G_OBJECT_CLASS (hy_chat_session_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_chat_session_parent_class)->finalize (object);
 }
 
 static void
-hy_chat_session_class_init (HyChatSessionClass *klass)
+xd_chat_session_class_init (XdChatSessionClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
-  object_class->dispose = hy_chat_session_dispose;
-  object_class->finalize = hy_chat_session_finalize;
+  object_class->dispose = xd_chat_session_dispose;
+  object_class->finalize = xd_chat_session_finalize;
 
   signals[SIGNAL_SESSION_STARTED] =
     g_signal_new ("session-started", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
@@ -386,7 +386,7 @@ hy_chat_session_class_init (HyChatSessionClass *klass)
 }
 
 static void
-hy_chat_session_init (HyChatSession *self)
+xd_chat_session_init (XdChatSession *self)
 {
   self->cancellable = g_cancellable_new ();
   self->stderr_text = g_string_new (NULL);

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="com.restartfu.Hy" path="/com/restartfu/Hy/">
+  <schema id="com.restartfu.Xd" path="/com/restartfu/Hy/">
 
     <key name="workspaces-root" type="s">
       <default>''</default>
@@ -39,7 +39,7 @@
       <default>[]</default>
       <summary>Folders left open in the sidebar</summary>
       <description>
-        Folder ids (from each folder's .hy.json) that were expanded when the
+        Folder ids (from each folder's .xd.json) that were expanded when the
         window was last used, so the tree comes back the way it was left.
       </description>
     </key>

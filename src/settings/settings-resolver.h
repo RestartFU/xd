@@ -2,7 +2,7 @@
 
 #include <glib.h>
 
-#include "tree/hy-node.h"
+#include "tree/xd-node.h"
 
 G_BEGIN_DECLS
 
@@ -29,14 +29,14 @@ typedef struct
   char *model_from;
   char *workdir_from;
   char *repo_from;
-} HyEffectiveSettings;
+} XdEffectiveSettings;
 
-void                 hy_effective_settings_free (HyEffectiveSettings *self);
+void                 xd_effective_settings_free (XdEffectiveSettings *self);
 
 /* @default_backend is the last resort when no folder in the chain names one. */
-HyEffectiveSettings *hy_settings_resolve        (HyNode     *folder,
+XdEffectiveSettings *xd_settings_resolve        (XdNode     *folder,
                                                  const char *default_backend);
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (HyEffectiveSettings, hy_effective_settings_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdEffectiveSettings, xd_effective_settings_free)
 
 G_END_DECLS

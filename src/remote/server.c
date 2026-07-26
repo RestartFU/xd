@@ -14,18 +14,18 @@
 
 typedef struct
 {
-  HyRemoteServer *server;      /* unowned; the server outlives connections */
+  XdRemoteServer *server;      /* unowned; the server outlives connections */
   GDataInputStream *in;
   GOutputStream *out;
   GIOStream *stream;
   gboolean authed;
 } Connection;
 
-struct _HyRemoteServer
+struct _XdRemoteServer
 {
   GObject parent_instance;
 
-  HyStorage *storage;
+  XdStorage *storage;
   char *root_path;
   GSocketService *service;
   GTlsCertificate *certificate;
@@ -35,7 +35,7 @@ struct _HyRemoteServer
   gint64 pairing_expires;      /* monotonic microseconds */
 };
 
-G_DEFINE_FINAL_TYPE (HyRemoteServer, hy_remote_server, G_TYPE_OBJECT)
+G_DEFINE_FINAL_TYPE (XdRemoteServer, xd_remote_server, G_TYPE_OBJECT)
 
 static void read_next_request (Connection *connection);
 
@@ -86,13 +86,13 @@ send_error (Connection *connection,
 /* --- pairing --------------------------------------------------------------- */
 
 char *
-hy_remote_server_arm_pairing (HyRemoteServer *self,
+xd_remote_server_arm_pairing (XdRemoteServer *self,
                               guint           seconds)
 {
   static const char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   GString *code = g_string_new (NULL);
 
-  g_return_val_if_fail (HY_IS_REMOTE_SERVER (self), NULL);
+  g_return_val_if_fail (XD_IS_REMOTE_SERVER (self), NULL);
 
   for (int i = 0; i < 8; i++)
     {
@@ -120,7 +120,7 @@ static void
 handle_pair (Connection *connection,
              JsonObject *request)
 {
-  HyRemoteServer *self = connection->server;
+  XdRemoteServer *self = connection->server;
   const char *code = member_string (request, "code");
   const char *name = member_string (request, "name");
   g_autofree char *token = NULL;
@@ -144,7 +144,7 @@ handle_pair (Connection *connection,
   token = g_base64_encode (raw, sizeof raw);
   hash = token_hash (token);
 
-  if (!hy_storage_add_device (self->storage, hash, name, &error))
+  if (!xd_storage_add_device (self->storage, hash, name, &error))
     {
       send_error (connection, error->message);
       return;
@@ -181,7 +181,7 @@ handle_hello (Connection *connection,
     }
 
   hash = token_hash (token);
-  name = hy_storage_device_name (connection->server->storage, hash);
+  name = xd_storage_device_name (connection->server->storage, hash);
   if (name == NULL)
     {
       send_error (connection, "Unknown device. Pair first.");
@@ -212,11 +212,13 @@ handle_hello (Connection *connection,
 static char *
 folder_id_for (const char *path)
 {
-  g_autofree char *dotfile = g_build_filename (path, ".hy.json", NULL);
+  g_autofree char *dotfile = g_build_filename (path, ".xd.json", NULL);
+  g_autofree char *legacy = g_build_filename (path, ".hy.json", NULL);
   g_autoptr (JsonParser) parser = json_parser_new ();
   JsonObject *root;
 
-  if (!json_parser_load_from_file (parser, dotfile, NULL))
+  if (!json_parser_load_from_file (parser, dotfile, NULL) &&
+      !json_parser_load_from_file (parser, legacy, NULL))
     return NULL;
 
   root = json_node_get_object (json_parser_get_root (parser));
@@ -225,7 +227,7 @@ folder_id_for (const char *path)
 }
 
 static void
-add_folder (HyRemoteServer *self,
+add_folder (XdRemoteServer *self,
             JsonBuilder    *folders,
             JsonBuilder    *chats,
             const char     *path,
@@ -253,11 +255,11 @@ add_folder (HyRemoteServer *self,
 
   {
     g_autoptr (GPtrArray) rows =
-      hy_storage_list_chats (self->storage, id, NULL);
+      xd_storage_list_chats (self->storage, id, NULL);
 
     for (guint i = 0; rows != NULL && i < rows->len; i++)
       {
-        const HyChat *chat = g_ptr_array_index (rows, i);
+        const XdChat *chat = g_ptr_array_index (rows, i);
 
         json_builder_begin_object (chats);
         json_builder_set_member_name (chats, "id");
@@ -285,7 +287,7 @@ add_folder (HyRemoteServer *self,
 static void
 handle_tree (Connection *connection)
 {
-  HyRemoteServer *self = connection->server;
+  XdRemoteServer *self = connection->server;
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (JsonBuilder) folders = json_builder_new ();
   g_autoptr (JsonBuilder) chats = json_builder_new ();
@@ -333,7 +335,7 @@ handle_messages (Connection *connection,
       return;
     }
 
-  rows = hy_storage_list_messages (connection->server->storage, chat_id, NULL);
+  rows = xd_storage_list_messages (connection->server->storage, chat_id, NULL);
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "ok");
@@ -343,7 +345,7 @@ handle_messages (Connection *connection,
 
   for (guint i = 0; rows != NULL && i < rows->len; i++)
     {
-      const HyMessage *message = g_ptr_array_index (rows, i);
+      const XdMessage *message = g_ptr_array_index (rows, i);
 
       json_builder_begin_object (builder);
       json_builder_set_member_name (builder, "role");
@@ -482,7 +484,7 @@ on_incoming (GSocketService    *service,
              GObject           *source_object,
              gpointer           user_data)
 {
-  HyRemoteServer *self = user_data;
+  XdRemoteServer *self = user_data;
   Connection *connection;
   g_autoptr (GIOStream) tls = NULL;
 
@@ -505,20 +507,20 @@ on_incoming (GSocketService    *service,
 
 /* --- lifecycle ------------------------------------------------------------- */
 
-HyRemoteServer *
-hy_remote_server_new (HyStorage        *storage,
+XdRemoteServer *
+xd_remote_server_new (XdStorage        *storage,
                       const char       *root_path,
                       guint16           port,
                       GTlsCertificate  *certificate,
                       GError          **error)
 {
-  g_autoptr (HyRemoteServer) self = NULL;
+  g_autoptr (XdRemoteServer) self = NULL;
 
-  g_return_val_if_fail (HY_IS_STORAGE (storage), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (storage), NULL);
   g_return_val_if_fail (root_path != NULL, NULL);
   g_return_val_if_fail (G_IS_TLS_CERTIFICATE (certificate), NULL);
 
-  self = g_object_new (HY_TYPE_REMOTE_SERVER, NULL);
+  self = g_object_new (XD_TYPE_REMOTE_SERVER, NULL);
   self->storage = g_object_ref (storage);
   self->root_path = g_strdup (root_path);
   self->certificate = g_object_ref (certificate);
@@ -546,17 +548,17 @@ hy_remote_server_new (HyStorage        *storage,
 }
 
 guint16
-hy_remote_server_get_port (HyRemoteServer *self)
+xd_remote_server_get_port (XdRemoteServer *self)
 {
-  g_return_val_if_fail (HY_IS_REMOTE_SERVER (self), 0);
+  g_return_val_if_fail (XD_IS_REMOTE_SERVER (self), 0);
 
   return self->port;
 }
 
 static void
-hy_remote_server_dispose (GObject *object)
+xd_remote_server_dispose (GObject *object)
 {
-  HyRemoteServer *self = HY_REMOTE_SERVER (object);
+  XdRemoteServer *self = XD_REMOTE_SERVER (object);
 
   if (self->service != NULL)
     g_socket_service_stop (self->service);
@@ -566,16 +568,16 @@ hy_remote_server_dispose (GObject *object)
   g_clear_pointer (&self->root_path, g_free);
   g_clear_pointer (&self->pairing_code, g_free);
 
-  G_OBJECT_CLASS (hy_remote_server_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_remote_server_parent_class)->dispose (object);
 }
 
 static void
-hy_remote_server_class_init (HyRemoteServerClass *klass)
+xd_remote_server_class_init (XdRemoteServerClass *klass)
 {
-  G_OBJECT_CLASS (klass)->dispose = hy_remote_server_dispose;
+  G_OBJECT_CLASS (klass)->dispose = xd_remote_server_dispose;
 }
 
 static void
-hy_remote_server_init (HyRemoteServer *self)
+xd_remote_server_init (XdRemoteServer *self)
 {
 }

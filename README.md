@@ -1,4 +1,4 @@
-# hy
+# xd
 
 Workspace-organized AI conversations. A GTK4/libadwaita desktop app in C.
 
@@ -38,7 +38,7 @@ system GTK such as NixOS.
 ## Run
 
 ```sh
-./dist/hy.sh
+./dist/xd.sh
 ```
 
 The app itself is deliberately *not* run inside Docker: it spawns the host's
@@ -56,7 +56,7 @@ noise is cosmetic.
 ## What it does
 
 - Workspaces and folders are real directories under `~/Workspaces`, nested to
-  any depth. Each carries a `.hy.json` with a UUID, so a folder can be renamed
+  any depth. Each carries a `.xd.json` with a UUID, so a folder can be renamed
   or moved without its chats losing track of it.
 - A folder *refers* to a repository rather than containing one. Working
   directory, repository, backend, model and project instructions are set per
@@ -77,11 +77,11 @@ noise is cosmetic.
 | `src/tree/`     | Workspace tree: nodes, disk scanner, sidebar          |
 | `src/chat/`     | Chat view, message rows, subprocess session           |
 | `src/backend/`  | `claude` / `codex` argv building and JSONL parsing    |
-| `src/settings/` | Per-folder `.hy.json` settings and inheritance        |
+| `src/settings/` | Per-folder `.xd.json` settings and inheritance        |
 | `src/storage/`  | SQLite: chats, messages, full-text search             |
 | `tests/`        | Headless tests, no GTK required                       |
 
 Workspace folders are real directories (default `~/Workspaces`), so they can be
 browsed, moved and synced with ordinary tools. Chat messages live in SQLite at
-`~/.local/share/hy/chats.db`, keyed by a stable folder UUID so renaming or
+`~/.local/share/xd/chats.db`, keyed by a stable folder UUID so renaming or
 moving a folder never breaks its chats.

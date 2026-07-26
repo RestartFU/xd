@@ -4,9 +4,9 @@
 
 G_BEGIN_DECLS
 
-#define HY_TYPE_TERMINAL_PANEL (hy_terminal_panel_get_type ())
+#define XD_TYPE_TERMINAL_PANEL (xd_terminal_panel_get_type ())
 
-G_DECLARE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, HY, TERMINAL_PANEL, AdwBin)
+G_DECLARE_FINAL_TYPE (XdTerminalPanel, xd_terminal_panel, XD, TERMINAL_PANEL, AdwBin)
 
 /*
  * A stack of shell sessions, grouped per chat.
@@ -19,24 +19,24 @@ G_DECLARE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, HY, TERMINAL_PANEL, Ad
  * killed, so whoever owns the toggle can take the panel off screen.
  */
 
-HyTerminalPanel *hy_terminal_panel_new         (void);
+XdTerminalPanel *xd_terminal_panel_new         (void);
 
 /* Which chat's sessions are on screen. NULL shows none. */
-void             hy_terminal_panel_set_chat    (HyTerminalPanel *self,
+void             xd_terminal_panel_set_chat    (XdTerminalPanel *self,
                                                 const char      *chat_id);
 
 /* Where new sessions start. Existing sessions are left where they are. */
-void             hy_terminal_panel_set_workdir (HyTerminalPanel *self,
+void             xd_terminal_panel_set_workdir (XdTerminalPanel *self,
                                                 const char      *workdir);
 
 /* Ensures the current chat has at least one session running. */
-void             hy_terminal_panel_start       (HyTerminalPanel *self);
+void             xd_terminal_panel_start       (XdTerminalPanel *self);
 
 /* Starts if needed, and takes the keyboard. */
-void             hy_terminal_panel_activate    (HyTerminalPanel *self);
+void             xd_terminal_panel_activate    (XdTerminalPanel *self);
 
 /* Kills every session the chat has; for when the chat itself is deleted. */
-void             hy_terminal_panel_forget_chat (HyTerminalPanel *self,
+void             xd_terminal_panel_forget_chat (XdTerminalPanel *self,
                                                 const char      *chat_id);
 
 G_END_DECLS

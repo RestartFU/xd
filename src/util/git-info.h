@@ -19,13 +19,13 @@ typedef struct
   char *remote_url;   /* origin's URL, when there is one */
   gboolean detached;
   gboolean linked_worktree;   /* a `git worktree`, not the main checkout */
-} HyGitInfo;
+} XdGitInfo;
 
-void       hy_git_info_free     (HyGitInfo *self);
+void       xd_git_info_free     (XdGitInfo *self);
 
 /* NULL when @path is not inside a repository. */
-HyGitInfo *hy_git_info_for_path (const char *path);
+XdGitInfo *xd_git_info_for_path (const char *path);
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (HyGitInfo, hy_git_info_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdGitInfo, xd_git_info_free)
 
 G_END_DECLS

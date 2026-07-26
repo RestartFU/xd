@@ -205,11 +205,11 @@ static const AiModel codex_models[] = {
   { "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark" },
 };
 
-const AiBackend hy_codex_backend = {
+const AiBackend xd_codex_backend = {
   .id = "codex",
   .display_name = "Codex",
   .program = "codex",
-  .icon_name = "hy-backend-codex-symbolic",
+  .icon_name = "xd-backend-codex-symbolic",
   .default_model = "gpt-5.6-sol",
   .models = codex_models,
   .n_models = G_N_ELEMENTS (codex_models),

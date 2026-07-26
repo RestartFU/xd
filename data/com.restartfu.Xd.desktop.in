@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=hy
+Name=xd
 Comment=Workspace-organized AI conversations
-Exec=hy
+Exec=xd
 Icon=@APP_ID@
 Terminal=false
 Type=Application

@@ -5,7 +5,7 @@
 typedef struct
 {
   char *dir;
-  HyStorage *storage;
+  XdStorage *storage;
 } Fixture;
 
 static void
@@ -15,11 +15,11 @@ fixture_set_up (Fixture       *fixture,
   g_autoptr (GError) error = NULL;
   g_autofree char *db_path = NULL;
 
-  fixture->dir = g_dir_make_tmp ("hy-storage-XXXXXX", &error);
+  fixture->dir = g_dir_make_tmp ("xd-storage-XXXXXX", &error);
   g_assert_no_error (error);
 
   db_path = g_build_filename (fixture->dir, "chats.db", NULL);
-  fixture->storage = hy_storage_new (db_path, &error);
+  fixture->storage = xd_storage_new (db_path, &error);
   g_assert_no_error (error);
   g_assert_nonnull (fixture->storage);
 }
@@ -55,18 +55,18 @@ test_create_and_list (Fixture       *fixture,
   g_autoptr (GPtrArray) chats = NULL;
   g_autofree char *first = NULL;
   g_autofree char *second = NULL;
-  const HyChat *chat;
+  const XdChat *chat;
 
-  first = hy_storage_create_chat (fixture->storage, "folder-a", "Rate limiting",
+  first = xd_storage_create_chat (fixture->storage, "folder-a", "Rate limiting",
                                   "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
   g_assert_nonnull (first);
 
-  second = hy_storage_create_chat (fixture->storage, "folder-b", "Elsewhere",
+  second = xd_storage_create_chat (fixture->storage, "folder-b", "Elsewhere",
                                    "codex", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
 
-  chats = hy_storage_list_chats (fixture->storage, "folder-a", &error);
+  chats = xd_storage_list_chats (fixture->storage, "folder-a", &error);
   g_assert_no_error (error);
   g_assert_cmpuint (chats->len, ==, 1);
 
@@ -86,14 +86,14 @@ test_chats_follow_folder_id (Fixture       *fixture,
   g_autoptr (GPtrArray) chats = NULL;
   g_autofree char *chat_id = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "stable-uuid", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "stable-uuid", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
 
-  chats = hy_storage_list_chats (fixture->storage, "stable-uuid", &error);
+  chats = xd_storage_list_chats (fixture->storage, "stable-uuid", &error);
   g_assert_no_error (error);
   g_assert_cmpuint (chats->len, ==, 1);
-  g_assert_cmpstr (((HyChat *) g_ptr_array_index (chats, 0))->id, ==, chat_id);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, chat_id);
 }
 
 static void
@@ -104,44 +104,44 @@ test_messages_round_trip (Fixture       *fixture,
   g_autoptr (GPtrArray) messages = NULL;
   g_autofree char *chat_id = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
 
-  g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
+  g_assert_true (xd_storage_append_message (fixture->storage, chat_id, "user",
                                             "how do I add a rate limiter?",
                                             NULL, NULL, &error));
   g_assert_no_error (error);
 
-  g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "assistant",
+  g_assert_true (xd_storage_append_message (fixture->storage, chat_id, "assistant",
                                             "Use a token bucket.",
                                             "{\"type\":\"result\"}",
                                             "Claude Opus 5 · High", &error));
   g_assert_no_error (error);
 
-  messages = hy_storage_list_messages (fixture->storage, chat_id, &error);
+  messages = xd_storage_list_messages (fixture->storage, chat_id, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (messages->len, ==, 2);
 
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 0))->role, ==, "user");
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->content, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 0))->role, ==, "user");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 1))->content, ==,
                    "Use a token bucket.");
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->raw_json, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 1))->raw_json, ==,
                    "{\"type\":\"result\"}");
 
   /* What produced a reply belongs to the reply. Changing the chat's model
    * afterwards must not rewrite what the earlier ones were answered by. */
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->label, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 1))->label, ==,
                    "Claude Opus 5 · High");
-  g_assert_null (((HyMessage *) g_ptr_array_index (messages, 0))->label);
+  g_assert_null (((XdMessage *) g_ptr_array_index (messages, 0))->label);
 
-  g_assert_true (hy_storage_set_model (fixture->storage, chat_id, "claude-haiku-4-5", &error));
+  g_assert_true (xd_storage_set_model (fixture->storage, chat_id, "claude-haiku-4-5", &error));
   g_assert_no_error (error);
 
   g_ptr_array_unref (messages);
-  messages = hy_storage_list_messages (fixture->storage, chat_id, &error);
+  messages = xd_storage_list_messages (fixture->storage, chat_id, &error);
   g_assert_no_error (error);
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 1))->label, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 1))->label, ==,
                    "Claude Opus 5 · High");
 }
 
@@ -160,26 +160,26 @@ test_sessions_are_per_backend (Fixture       *fixture,
   g_autofree char *codex_session = NULL;
   g_autofree char *missing = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
 
-  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
+  g_assert_true (xd_storage_set_session_id (fixture->storage, chat_id,
                                             "claude", "sess-claude", &error));
-  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
+  g_assert_true (xd_storage_set_session_id (fixture->storage, chat_id,
                                             "codex", "sess-codex", &error));
   g_assert_no_error (error);
 
-  claude_session = hy_storage_get_session_id (fixture->storage, chat_id,
+  claude_session = xd_storage_get_session_id (fixture->storage, chat_id,
                                               "claude", &error);
-  codex_session = hy_storage_get_session_id (fixture->storage, chat_id,
+  codex_session = xd_storage_get_session_id (fixture->storage, chat_id,
                                              "codex", &error);
   g_assert_no_error (error);
   g_assert_cmpstr (claude_session, ==, "sess-claude");
   g_assert_cmpstr (codex_session, ==, "sess-codex");
 
   /* A backend the chat has never used has nothing to resume. */
-  missing = hy_storage_get_session_id (fixture->storage, chat_id, "nobody", &error);
+  missing = xd_storage_get_session_id (fixture->storage, chat_id, "nobody", &error);
   g_assert_no_error (error);
   g_assert_null (missing);
 }
@@ -194,19 +194,19 @@ test_forgetting_one_session (Fixture       *fixture,
   g_autofree char *claude_session = NULL;
   g_autofree char *codex_session = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
-  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "sess-a", &error);
-  hy_storage_set_session_id (fixture->storage, chat_id, "codex", "sess-b", &error);
+  xd_storage_set_session_id (fixture->storage, chat_id, "claude", "sess-a", &error);
+  xd_storage_set_session_id (fixture->storage, chat_id, "codex", "sess-b", &error);
   g_assert_no_error (error);
 
-  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id,
+  g_assert_true (xd_storage_set_session_id (fixture->storage, chat_id,
                                             "claude", NULL, &error));
   g_assert_no_error (error);
 
-  claude_session = hy_storage_get_session_id (fixture->storage, chat_id,
+  claude_session = xd_storage_get_session_id (fixture->storage, chat_id,
                                               "claude", &error);
-  codex_session = hy_storage_get_session_id (fixture->storage, chat_id,
+  codex_session = xd_storage_get_session_id (fixture->storage, chat_id,
                                              "codex", &error);
   g_assert_null (claude_session);
   g_assert_cmpstr (codex_session, ==, "sess-b");
@@ -226,36 +226,36 @@ test_each_backend_tracks_what_it_has_seen (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
   gint64 after_claude;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
 
   /* Claude answers the first exchange. */
-  hy_storage_append_message (fixture->storage, chat_id, "user", "who are you", NULL, NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Claude here", NULL, NULL, &error);
+  xd_storage_append_message (fixture->storage, chat_id, "user", "who are you", NULL, NULL, &error);
+  xd_storage_append_message (fixture->storage, chat_id, "assistant", "Claude here", NULL, NULL, &error);
   g_assert_no_error (error);
 
-  after_claude = hy_storage_last_message_id (fixture->storage, chat_id);
-  g_assert_true (hy_storage_set_last_seen (fixture->storage, chat_id, "claude",
+  after_claude = xd_storage_last_message_id (fixture->storage, chat_id);
+  g_assert_true (xd_storage_set_last_seen (fixture->storage, chat_id, "claude",
                                            after_claude, &error));
 
   /* Then the user switches to Codex for a turn. */
-  hy_storage_append_message (fixture->storage, chat_id, "user", "and you?", NULL, NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "assistant", "Codex here", NULL, NULL, &error);
+  xd_storage_append_message (fixture->storage, chat_id, "user", "and you?", NULL, NULL, &error);
+  xd_storage_append_message (fixture->storage, chat_id, "assistant", "Codex here", NULL, NULL, &error);
   g_assert_no_error (error);
 
   /* Claude has never been told about that exchange. */
-  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"),
+  g_assert_cmpint (xd_storage_get_last_seen (fixture->storage, chat_id, "claude"),
                    ==, after_claude);
-  unseen = hy_storage_list_messages_since (fixture->storage, chat_id,
+  unseen = xd_storage_list_messages_since (fixture->storage, chat_id,
                                            after_claude, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (unseen->len, ==, 2);
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (unseen, 1))->content, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (unseen, 1))->content, ==,
                    "Codex here");
 
   /* Codex, which has answered but never been given a starting point, is owed
    * the whole conversation. */
-  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "codex"), ==, 0);
+  g_assert_cmpint (xd_storage_get_last_seen (fixture->storage, chat_id, "codex"), ==, 0);
 }
 
 /* A session that cannot be resumed remembers nothing, so forgetting it must
@@ -267,19 +267,19 @@ test_forgetting_a_session_replays_everything (Fixture       *fixture,
   g_autoptr (GError) error = NULL;
   g_autofree char *chat_id = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "user", "hello", NULL, NULL, &error);
-  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "sess", &error);
-  hy_storage_set_last_seen (fixture->storage, chat_id, "claude",
-                            hy_storage_last_message_id (fixture->storage, chat_id),
+  xd_storage_append_message (fixture->storage, chat_id, "user", "hello", NULL, NULL, &error);
+  xd_storage_set_session_id (fixture->storage, chat_id, "claude", "sess", &error);
+  xd_storage_set_last_seen (fixture->storage, chat_id, "claude",
+                            xd_storage_last_message_id (fixture->storage, chat_id),
                             &error);
   g_assert_no_error (error);
-  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"), >, 0);
+  g_assert_cmpint (xd_storage_get_last_seen (fixture->storage, chat_id, "claude"), >, 0);
 
-  g_assert_true (hy_storage_set_session_id (fixture->storage, chat_id, "claude",
+  g_assert_true (xd_storage_set_session_id (fixture->storage, chat_id, "claude",
                                             NULL, &error));
-  g_assert_cmpint (hy_storage_get_last_seen (fixture->storage, chat_id, "claude"), ==, 0);
+  g_assert_cmpint (xd_storage_get_last_seen (fixture->storage, chat_id, "claude"), ==, 0);
 }
 
 /*
@@ -292,21 +292,21 @@ test_plan_preserves_the_access_level (Fixture       *fixture,
 {
   g_autoptr (GError) error = NULL;
   g_autofree char *chat_id = NULL;
-  g_autoptr (HyChat) planning = NULL;
-  g_autoptr (HyChat) building = NULL;
+  g_autoptr (XdChat) planning = NULL;
+  g_autoptr (XdChat) building = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
-  g_assert_true (hy_storage_set_access (fixture->storage, chat_id, "full", &error));
-  g_assert_true (hy_storage_set_plan (fixture->storage, chat_id, TRUE, &error));
+  g_assert_true (xd_storage_set_access (fixture->storage, chat_id, "full", &error));
+  g_assert_true (xd_storage_set_plan (fixture->storage, chat_id, TRUE, &error));
   g_assert_no_error (error);
 
-  planning = hy_storage_get_chat (fixture->storage, chat_id, &error);
+  planning = xd_storage_get_chat (fixture->storage, chat_id, &error);
   g_assert_true (planning->plan);
   g_assert_cmpstr (planning->access, ==, "full");
 
-  g_assert_true (hy_storage_set_plan (fixture->storage, chat_id, FALSE, &error));
-  building = hy_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_true (xd_storage_set_plan (fixture->storage, chat_id, FALSE, &error));
+  building = xd_storage_get_chat (fixture->storage, chat_id, &error);
   g_assert_false (building->plan);
   g_assert_cmpstr (building->access, ==, "full");
 }
@@ -321,13 +321,13 @@ test_session_id_is_replaced (Fixture       *fixture,
   g_autofree char *chat_id = NULL;
   g_autofree char *session = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
-  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "first", &error);
-  hy_storage_set_session_id (fixture->storage, chat_id, "claude", "second", &error);
+  xd_storage_set_session_id (fixture->storage, chat_id, "claude", "first", &error);
+  xd_storage_set_session_id (fixture->storage, chat_id, "claude", "second", &error);
   g_assert_no_error (error);
 
-  session = hy_storage_get_session_id (fixture->storage, chat_id, "claude", &error);
+  session = xd_storage_get_session_id (fixture->storage, chat_id, "claude", &error);
   g_assert_cmpstr (session, ==, "second");
 }
 
@@ -339,16 +339,16 @@ test_deleting_a_chat_takes_its_messages (Fixture       *fixture,
   g_autoptr (GPtrArray) messages = NULL;
   g_autofree char *chat_id = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
 
-  g_assert_true (hy_storage_append_message (fixture->storage, chat_id, "user",
+  g_assert_true (xd_storage_append_message (fixture->storage, chat_id, "user",
                                             "hello", NULL, NULL, &error));
-  g_assert_true (hy_storage_delete_chat (fixture->storage, chat_id, &error));
+  g_assert_true (xd_storage_delete_chat (fixture->storage, chat_id, &error));
   g_assert_no_error (error);
 
-  messages = hy_storage_list_messages (fixture->storage, chat_id, &error);
+  messages = xd_storage_list_messages (fixture->storage, chat_id, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (messages->len, ==, 0);
 }
@@ -361,27 +361,27 @@ test_search_finds_messages (Fixture       *fixture,
   g_autoptr (GPtrArray) hits = NULL;
   g_autofree char *chat_id = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
 
-  hy_storage_append_message (fixture->storage, chat_id, "user",
+  xd_storage_append_message (fixture->storage, chat_id, "user",
                              "the websocket reconnect loop is wrong", NULL, NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "assistant",
+  xd_storage_append_message (fixture->storage, chat_id, "assistant",
                              "add exponential backoff", NULL, NULL, &error);
   g_assert_no_error (error);
 
-  hits = hy_storage_search (fixture->storage, "websocket", 10, &error);
+  hits = xd_storage_search (fixture->storage, "websocket", 10, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (hits->len, ==, 1);
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (hits, 0))->content, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (hits, 0))->content, ==,
                    "the websocket reconnect loop is wrong");
 
   /* The FTS index must forget deleted rows, or search returns dangling hits. */
   g_clear_pointer (&hits, g_ptr_array_unref);
-  g_assert_true (hy_storage_delete_chat (fixture->storage, chat_id, &error));
+  g_assert_true (xd_storage_delete_chat (fixture->storage, chat_id, &error));
 
-  hits = hy_storage_search (fixture->storage, "websocket", 10, &error);
+  hits = xd_storage_search (fixture->storage, "websocket", 10, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (hits->len, ==, 0);
 }
@@ -391,27 +391,27 @@ test_reopening_keeps_data (Fixture       *fixture,
                            gconstpointer  user_data)
 {
   g_autoptr (GError) error = NULL;
-  g_autoptr (HyStorage) reopened = NULL;
+  g_autoptr (XdStorage) reopened = NULL;
   g_autoptr (GPtrArray) messages = NULL;
   g_autofree char *db_path = NULL;
   g_autofree char *chat_id = NULL;
 
-  chat_id = hy_storage_create_chat (fixture->storage, "folder", "Chat",
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
                                     "claude", NULL, NULL, NULL, &error);
-  hy_storage_append_message (fixture->storage, chat_id, "user", "persist me",
+  xd_storage_append_message (fixture->storage, chat_id, "user", "persist me",
                              NULL, NULL, &error);
   g_assert_no_error (error);
 
   g_clear_object (&fixture->storage);
 
   db_path = g_build_filename (fixture->dir, "chats.db", NULL);
-  reopened = hy_storage_new (db_path, &error);
+  reopened = xd_storage_new (db_path, &error);
   g_assert_no_error (error);
 
-  messages = hy_storage_list_messages (reopened, chat_id, &error);
+  messages = xd_storage_list_messages (reopened, chat_id, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (messages->len, ==, 1);
-  g_assert_cmpstr (((HyMessage *) g_ptr_array_index (messages, 0))->content, ==,
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 0))->content, ==,
                    "persist me");
 
   fixture->storage = g_object_ref (reopened);

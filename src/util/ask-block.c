@@ -9,7 +9,7 @@
 #define MAX_OPTIONS 6
 
 void
-hy_ask_free (HyAsk *self)
+xd_ask_free (XdAsk *self)
 {
   if (self == NULL)
     return;
@@ -20,7 +20,7 @@ hy_ask_free (HyAsk *self)
 }
 
 const char *
-hy_ask_instructions (void)
+xd_ask_instructions (void)
 {
   return
     "<asking_the_user>\n"
@@ -66,7 +66,7 @@ clean_option (const char *line)
 }
 
 /* Reads the block starting at @open, or NULL if what is there is not one. */
-static HyAsk *
+static XdAsk *
 parse_at (const char  *text,
           const char  *open,
           char       **remainder)
@@ -76,7 +76,7 @@ parse_at (const char  *text,
   g_autofree char *body = NULL;
   g_autofree char *question = NULL;
   const char *close;
-  HyAsk *ask;
+  XdAsk *ask;
 
   close = strstr (open, ASK_CLOSE);
   if (close == NULL)
@@ -132,7 +132,7 @@ parse_at (const char  *text,
 
   g_ptr_array_add (options, NULL);
 
-  ask = g_new0 (HyAsk, 1);
+  ask = g_new0 (XdAsk, 1);
   ask->question = question != NULL ? g_steal_pointer (&question)
                                    : g_strdup ("Which one?");
   ask->options = (GStrv) g_ptr_array_free (g_steal_pointer (&options), FALSE);
@@ -151,21 +151,21 @@ parse_at (const char  *text,
  */
 static const char *
 find_block (const char  *text,
-            HyAsk      **out,
+            XdAsk      **out,
             char       **remainder)
 {
   const char *found = NULL;
-  HyAsk *ask = NULL;
+  XdAsk *ask = NULL;
 
   for (const char *open = strstr (text, ASK_OPEN);
        open != NULL;
        open = strstr (open + 1, ASK_OPEN))
     {
-      HyAsk *candidate = parse_at (text, open, NULL);
+      XdAsk *candidate = parse_at (text, open, NULL);
 
       if (candidate != NULL)
         {
-          g_clear_pointer (&ask, hy_ask_free);
+          g_clear_pointer (&ask, xd_ask_free);
           ask = candidate;
           found = open;
         }
@@ -173,23 +173,23 @@ find_block (const char  *text,
 
   if (found != NULL && remainder != NULL)
     {
-      g_clear_pointer (&ask, hy_ask_free);
+      g_clear_pointer (&ask, xd_ask_free);
       ask = parse_at (text, found, remainder);
     }
 
   if (out != NULL)
     *out = ask;
   else
-    g_clear_pointer (&ask, hy_ask_free);
+    g_clear_pointer (&ask, xd_ask_free);
 
   return found;
 }
 
-HyAsk *
-hy_ask_parse (const char  *text,
+XdAsk *
+xd_ask_parse (const char  *text,
               char       **remainder)
 {
-  HyAsk *ask = NULL;
+  XdAsk *ask = NULL;
 
   if (remainder != NULL)
     *remainder = NULL;
@@ -211,7 +211,7 @@ hy_ask_parse (const char  *text,
  * visible, since nothing is going to replace it.
  */
 gsize
-hy_ask_visible_length (const char *text)
+xd_ask_visible_length (const char *text)
 {
   const char *block;
   const char *tail;

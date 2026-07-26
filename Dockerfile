@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# hy is built entirely inside Docker and *run* on the host. The final `bundle`
+# xd is built entirely inside Docker and *run* on the host. The final `bundle`
 # stage emits a self-contained directory tree (binary + full library closure +
 # GTK support data + launcher) so the result runs on any glibc-based x86_64
 # host, including NixOS where there is no /lib64 loader and no system GTK.
@@ -62,10 +62,10 @@ RUN meson test -C /build --print-errorlogs
 FROM build AS staging
 
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
-COPY scripts/hy.sh /usr/local/share/hy-launcher.sh
+COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 
 RUN DESTDIR=/stage meson install -C /build --no-rebuild --quiet \
- && bash /usr/local/bin/bundle.sh /stage /out /usr/local/share/hy-launcher.sh
+ && bash /usr/local/bin/bundle.sh /stage /out /usr/local/share/xd-launcher.sh
 
 # --- stage 5: export --------------------------------------------------------
 FROM scratch AS bundle

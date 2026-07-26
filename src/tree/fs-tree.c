@@ -16,20 +16,20 @@
 
 typedef struct
 {
-  HyFsTree *tree;         /* unowned; the tree outlives its watches */
-  HyNode *node;           /* unowned; removed from the table before the node dies */
+  XdFsTree *tree;         /* unowned; the tree outlives its watches */
+  XdNode *node;           /* unowned; removed from the table before the node dies */
   GFileMonitor *monitor;
   guint debounce_id;
 } Watch;
 
-struct _HyFsTree
+struct _XdFsTree
 {
   GObject parent_instance;
 
   char *root_path;
-  HyNode *root;
-  HyStorage *storage;
-  GHashTable *watches;    /* HyNode* -> Watch* */
+  XdNode *root;
+  XdStorage *storage;
+  GHashTable *watches;    /* XdNode* -> Watch* */
   GCancellable *cancellable;
 };
 
@@ -41,7 +41,7 @@ enum
 
 static guint signals[N_SIGNALS];
 
-G_DEFINE_FINAL_TYPE (HyFsTree, hy_fs_tree, G_TYPE_OBJECT)
+G_DEFINE_FINAL_TYPE (XdFsTree, xd_fs_tree, G_TYPE_OBJECT)
 
 /* The icon of the assistant a chat is set to, so the tree says at a glance
  * which one has been answering. */
@@ -53,9 +53,9 @@ backend_icon (const char *backend_id)
   return backend != NULL ? backend->icon_name : NULL;
 }
 
-static void scan_node (HyFsTree *self, HyNode *node);
-static void watch_node (HyFsTree *self, HyNode *node);
-static void forget_subtree (HyFsTree *self, HyNode *node);
+static void scan_node (XdFsTree *self, XdNode *node);
+static void watch_node (XdFsTree *self, XdNode *node);
+static void forget_subtree (XdFsTree *self, XdNode *node);
 
 /* --- watches -------------------------------------------------------------- */
 
@@ -112,8 +112,8 @@ on_directory_changed (GFileMonitor      *monitor,
 }
 
 static void
-watch_node (HyFsTree *self,
-            HyNode   *node)
+watch_node (XdFsTree *self,
+            XdNode   *node)
 {
   g_autoptr (GError) error = NULL;
   g_autoptr (GFile) file = NULL;
@@ -123,13 +123,13 @@ watch_node (HyFsTree *self,
   if (g_hash_table_contains (self->watches, node))
     return;
 
-  file = g_file_new_for_path (hy_node_get_path (node));
+  file = g_file_new_for_path (xd_node_get_path (node));
   monitor = g_file_monitor_directory (file, G_FILE_MONITOR_WATCH_MOVES,
                                       self->cancellable, &error);
   if (monitor == NULL)
     {
       /* Not fatal: the folder simply will not update by itself. */
-      g_debug ("cannot watch %s: %s", hy_node_get_path (node), error->message);
+      g_debug ("cannot watch %s: %s", xd_node_get_path (node), error->message);
       return;
     }
 
@@ -143,10 +143,10 @@ watch_node (HyFsTree *self,
 }
 
 static void
-forget_subtree (HyFsTree *self,
-                HyNode   *node)
+forget_subtree (XdFsTree *self,
+                XdNode   *node)
 {
-  GListStore *children = hy_node_get_children (node);
+  GListStore *children = xd_node_get_children (node);
 
   g_hash_table_remove (self->watches, node);
 
@@ -155,9 +155,9 @@ forget_subtree (HyFsTree *self,
 
   for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
+      g_autoptr (XdNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
 
-      if (hy_node_get_kind (child) == HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) == XD_NODE_FOLDER)
         forget_subtree (self, child);
     }
 }
@@ -166,8 +166,8 @@ forget_subtree (HyFsTree *self,
 
 typedef struct
 {
-  HyFsTree *self;
-  HyNode *node;
+  XdFsTree *self;
+  XdNode *node;
   GFileEnumerator *enumerator;
   GPtrArray *names;      /* owned char* of subdirectory names found on disk */
 } ScanOp;
@@ -184,19 +184,19 @@ scan_op_free (ScanOp *op)
 
 /* Folders sort alphabetically ahead of chats, so a name search can stop early. */
 static int
-find_child_folder (HyNode     *parent,
+find_child_folder (XdNode     *parent,
                    const char *name)
 {
-  GListModel *model = G_LIST_MODEL (hy_node_get_children (parent));
+  GListModel *model = G_LIST_MODEL (xd_node_get_children (parent));
 
   for (guint i = 0; i < g_list_model_get_n_items (model); i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (model, i);
+      g_autoptr (XdNode) child = g_list_model_get_item (model, i);
 
-      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) != XD_NODE_FOLDER)
         break;
 
-      if (g_strcmp0 (hy_node_get_name (child), name) == 0)
+      if (g_strcmp0 (xd_node_get_name (child), name) == 0)
         return (int) i;
     }
 
@@ -204,21 +204,21 @@ find_child_folder (HyNode     *parent,
 }
 
 static guint
-folder_insert_position (HyNode     *parent,
+folder_insert_position (XdNode     *parent,
                         const char *name)
 {
-  GListModel *model = G_LIST_MODEL (hy_node_get_children (parent));
+  GListModel *model = G_LIST_MODEL (xd_node_get_children (parent));
   guint n_items = g_list_model_get_n_items (model);
   guint i;
 
   for (i = 0; i < n_items; i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (model, i);
+      g_autoptr (XdNode) child = g_list_model_get_item (model, i);
 
-      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) != XD_NODE_FOLDER)
         break;
 
-      if (g_utf8_collate (hy_node_get_name (child), name) > 0)
+      if (g_utf8_collate (xd_node_get_name (child), name) > 0)
         break;
     }
 
@@ -227,17 +227,17 @@ folder_insert_position (HyNode     *parent,
 
 /* Chats sort after every folder, so this is where the chat section starts. */
 static guint
-chat_section_start (HyNode *folder)
+chat_section_start (XdNode *folder)
 {
-  GListModel *model = G_LIST_MODEL (hy_node_get_children (folder));
+  GListModel *model = G_LIST_MODEL (xd_node_get_children (folder));
   guint n_items = g_list_model_get_n_items (model);
   guint i;
 
   for (i = 0; i < n_items; i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (model, i);
+      g_autoptr (XdNode) child = g_list_model_get_item (model, i);
 
-      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) != XD_NODE_FOLDER)
         break;
     }
 
@@ -245,21 +245,21 @@ chat_section_start (HyNode *folder)
 }
 
 static void
-load_chats (HyFsTree *self,
-            HyNode   *folder)
+load_chats (XdFsTree *self,
+            XdNode   *folder)
 {
   g_autoptr (GPtrArray) chats = NULL;
   g_autoptr (GError) error = NULL;
-  const char *folder_id = hy_node_get_folder_id (folder);
+  const char *folder_id = xd_node_get_folder_id (folder);
   guint position;
 
   if (self->storage == NULL || folder_id == NULL)
     return;
 
-  chats = hy_storage_list_chats (self->storage, folder_id, &error);
+  chats = xd_storage_list_chats (self->storage, folder_id, &error);
   if (chats == NULL)
     {
-      g_warning ("cannot list chats of %s: %s", hy_node_get_name (folder),
+      g_warning ("cannot list chats of %s: %s", xd_node_get_name (folder),
                  error->message);
       return;
     }
@@ -269,41 +269,41 @@ load_chats (HyFsTree *self,
   position = chat_section_start (folder);
   for (guint i = 0; i < chats->len; i++)
     {
-      const HyChat *chat = g_ptr_array_index (chats, i);
-      HyNode *node = hy_node_new_chat (chat->id, chat->title, folder);
+      const XdChat *chat = g_ptr_array_index (chats, i);
+      XdNode *node = xd_node_new_chat (chat->id, chat->title, folder);
 
-      hy_node_set_icon_name (node, backend_icon (chat->backend));
+      xd_node_set_icon_name (node, backend_icon (chat->backend));
 
-      g_list_store_insert (hy_node_get_children (folder), position + i, node);
+      g_list_store_insert (xd_node_get_children (folder), position + i, node);
       g_object_unref (node);
     }
 }
 
-static HyNode *
-add_folder_child (HyFsTree   *self,
-                  HyNode     *parent,
+static XdNode *
+add_folder_child (XdFsTree   *self,
+                  XdNode     *parent,
                   const char *name)
 {
   g_autoptr (GError) error = NULL;
-  g_autoptr (HyFolderSettings) settings = NULL;
+  g_autoptr (XdFolderSettings) settings = NULL;
   g_autofree char *path = NULL;
-  HyNode *child;
+  XdNode *child;
 
-  path = g_build_filename (hy_node_get_path (parent), name, NULL);
+  path = g_build_filename (xd_node_get_path (parent), name, NULL);
 
   /* Minting the folder id touches disk, but only the first time a folder is
    * seen, and the file is a few hundred bytes. */
-  settings = hy_folder_settings_ensure (path, &error);
+  settings = xd_folder_settings_ensure (path, &error);
   if (settings == NULL)
     {
       g_warning ("cannot initialise %s: %s", path, error->message);
       return NULL;
     }
 
-  child = hy_node_new_folder (path, name, settings->id);
-  hy_node_set_parent (child, parent);
+  child = xd_node_new_folder (path, name, settings->id);
+  xd_node_set_parent (child, parent);
 
-  g_list_store_insert (hy_node_get_children (parent),
+  g_list_store_insert (xd_node_get_children (parent),
                        folder_insert_position (parent, name), child);
   g_object_unref (child);
 
@@ -313,11 +313,11 @@ add_folder_child (HyFsTree   *self,
 }
 
 static void
-reconcile (HyFsTree *self,
-           HyNode   *node,
+reconcile (XdFsTree *self,
+           XdNode   *node,
            GPtrArray *names)
 {
-  GListStore *children = hy_node_get_children (node);
+  GListStore *children = xd_node_get_children (node);
   GListModel *model = G_LIST_MODEL (children);
   g_autoptr (GHashTable) on_disk = g_hash_table_new (g_str_hash, g_str_equal);
   guint i = 0;
@@ -328,12 +328,12 @@ reconcile (HyFsTree *self,
   /* Drop folders that disappeared. Chat leaves are not ours to touch. */
   while (i < g_list_model_get_n_items (model))
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (model, i);
+      g_autoptr (XdNode) child = g_list_model_get_item (model, i);
 
-      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) != XD_NODE_FOLDER)
         break;
 
-      if (!g_hash_table_contains (on_disk, hy_node_get_name (child)))
+      if (!g_hash_table_contains (on_disk, xd_node_get_name (child)))
         {
           forget_subtree (self, child);
           g_list_store_remove (children, i);
@@ -348,7 +348,7 @@ reconcile (HyFsTree *self,
   for (guint n = 0; n < names->len; n++)
     {
       const char *name = g_ptr_array_index (names, n);
-      HyNode *child;
+      XdNode *child;
 
       if (find_child_folder (node, name) >= 0)
         continue;
@@ -382,7 +382,7 @@ on_next_files (GObject      *source,
   if (error != NULL)
     {
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        g_warning ("cannot read %s: %s", hy_node_get_path (op->node), error->message);
+        g_warning ("cannot read %s: %s", xd_node_get_path (op->node), error->message);
       scan_op_free (op);
       return;
     }
@@ -428,9 +428,9 @@ on_enumerate_ready (GObject      *source,
        * it. Only unexpected failures are worth a warning. */
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
           !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
-        g_warning ("cannot open %s: %s", hy_node_get_path (op->node), error->message);
+        g_warning ("cannot open %s: %s", xd_node_get_path (op->node), error->message);
       else
-        g_debug ("scan of %s abandoned: %s", hy_node_get_path (op->node), error->message);
+        g_debug ("scan of %s abandoned: %s", xd_node_get_path (op->node), error->message);
 
       scan_op_free (op);
       return;
@@ -440,8 +440,8 @@ on_enumerate_ready (GObject      *source,
 }
 
 static void
-scan_node (HyFsTree *self,
-           HyNode   *node)
+scan_node (XdFsTree *self,
+           XdNode   *node)
 {
   g_autoptr (GFile) file = NULL;
   ScanOp *op;
@@ -451,7 +451,7 @@ scan_node (HyFsTree *self,
   op->node = g_object_ref (node);
   op->names = g_ptr_array_new_with_free_func (g_free);
 
-  file = g_file_new_for_path (hy_node_get_path (node));
+  file = g_file_new_for_path (xd_node_get_path (node));
   g_file_enumerate_children_async (file, ENUMERATE_ATTRS,
                                    G_FILE_QUERY_INFO_NONE, G_PRIORITY_DEFAULT,
                                    self->cancellable, on_enumerate_ready, op);
@@ -459,13 +459,13 @@ scan_node (HyFsTree *self,
 
 /* --- public API ----------------------------------------------------------- */
 
-HyFsTree *
-hy_fs_tree_new (const char *root_path,
-                HyStorage  *storage)
+XdFsTree *
+xd_fs_tree_new (const char *root_path,
+                XdStorage  *storage)
 {
   g_autoptr (GError) error = NULL;
   g_autoptr (GFile) root_file = NULL;
-  HyFsTree *self;
+  XdFsTree *self;
 
   g_return_val_if_fail (root_path != NULL, NULL);
 
@@ -474,10 +474,10 @@ hy_fs_tree_new (const char *root_path,
       !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_EXISTS))
     g_warning ("cannot create %s: %s", root_path, error->message);
 
-  self = g_object_new (HY_TYPE_FS_TREE, NULL);
+  self = g_object_new (XD_TYPE_FS_TREE, NULL);
   self->root_path = g_strdup (root_path);
   self->storage = storage != NULL ? g_object_ref (storage) : NULL;
-  self->root = hy_node_new_folder (root_path, "Workspaces", NULL);
+  self->root = xd_node_new_folder (root_path, "Workspaces", NULL);
 
   scan_node (self, self->root);
 
@@ -485,39 +485,39 @@ hy_fs_tree_new (const char *root_path,
 }
 
 const char *
-hy_fs_tree_get_root_path (HyFsTree *self)
+xd_fs_tree_get_root_path (XdFsTree *self)
 {
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
 
   return self->root_path;
 }
 
-HyNode *
-hy_fs_tree_get_root (HyFsTree *self)
+XdNode *
+xd_fs_tree_get_root (XdFsTree *self)
 {
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
 
   return self->root;
 }
 
 GListModel *
-hy_fs_tree_get_model (HyFsTree *self)
+xd_fs_tree_get_model (XdFsTree *self)
 {
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
 
-  return G_LIST_MODEL (hy_node_get_children (self->root));
+  return G_LIST_MODEL (xd_node_get_children (self->root));
 }
 
-HyNode *
-hy_fs_tree_create_folder (HyFsTree    *self,
-                          HyNode      *parent,
+XdNode *
+xd_fs_tree_create_folder (XdFsTree    *self,
+                          XdNode      *parent,
                           const char  *name,
                           GError     **error)
 {
   g_autoptr (GFile) file = NULL;
   g_autofree char *path = NULL;
 
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
   g_return_val_if_fail (name != NULL && *name != '\0', NULL);
 
   if (parent == NULL)
@@ -530,7 +530,7 @@ hy_fs_tree_create_folder (HyFsTree    *self,
       return NULL;
     }
 
-  path = g_build_filename (hy_node_get_path (parent), name, NULL);
+  path = g_build_filename (xd_node_get_path (parent), name, NULL);
   file = g_file_new_for_path (path);
 
   if (!g_file_make_directory (file, NULL, error))
@@ -543,36 +543,36 @@ hy_fs_tree_create_folder (HyFsTree    *self,
 
 /* A rename moves the whole subtree, so every descendant path needs rewriting. */
 static void
-rebase_subtree (HyNode     *node,
+rebase_subtree (XdNode     *node,
                 const char *new_path)
 {
   GListStore *children;
 
-  hy_node_set_path (node, new_path);
+  xd_node_set_path (node, new_path);
 
-  children = hy_node_get_children (node);
+  children = xd_node_get_children (node);
   if (children == NULL)
     return;
 
   for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
+      g_autoptr (XdNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
       g_autofree char *child_path = NULL;
 
-      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) != XD_NODE_FOLDER)
         continue;
 
-      child_path = g_build_filename (new_path, hy_node_get_name (child), NULL);
+      child_path = g_build_filename (new_path, xd_node_get_name (child), NULL);
       rebase_subtree (child, child_path);
     }
 }
 
 /* True when @folder is @node or lives somewhere inside it. */
 static gboolean
-is_within (HyNode *folder,
-           HyNode *node)
+is_within (XdNode *folder,
+           XdNode *node)
 {
-  for (HyNode *at = folder; at != NULL; at = hy_node_get_parent (at))
+  for (XdNode *at = folder; at != NULL; at = xd_node_get_parent (at))
     {
       if (at == node)
         return TRUE;
@@ -582,26 +582,26 @@ is_within (HyNode *folder,
 }
 
 gboolean
-hy_fs_tree_move_folder (HyFsTree    *self,
-                        HyNode      *node,
-                        HyNode      *new_parent,
+xd_fs_tree_move_folder (XdFsTree    *self,
+                        XdNode      *node,
+                        XdNode      *new_parent,
                         GError     **error)
 {
   g_autoptr (GFile) source = NULL;
   g_autoptr (GFile) destination = NULL;
   g_autofree char *new_path = NULL;
   const char *name;
-  HyNode *old_parent;
+  XdNode *old_parent;
 
-  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
-  g_return_val_if_fail (HY_IS_NODE (node), FALSE);
-  g_return_val_if_fail (hy_node_get_kind (node) == HY_NODE_FOLDER, FALSE);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (XD_IS_NODE (node), FALSE);
+  g_return_val_if_fail (xd_node_get_kind (node) == XD_NODE_FOLDER, FALSE);
 
   /* NULL means the top level, which is the root node's own children. */
   if (new_parent == NULL)
     new_parent = self->root;
 
-  old_parent = hy_node_get_parent (node);
+  old_parent = xd_node_get_parent (node);
   if (new_parent == old_parent)
     return TRUE;
 
@@ -614,17 +614,17 @@ hy_fs_tree_move_folder (HyFsTree    *self,
       return FALSE;
     }
 
-  name = hy_node_get_name (node);
-  new_path = g_build_filename (hy_node_get_path (new_parent), name, NULL);
+  name = xd_node_get_name (node);
+  new_path = g_build_filename (xd_node_get_path (new_parent), name, NULL);
 
-  source = g_file_new_for_path (hy_node_get_path (node));
+  source = g_file_new_for_path (xd_node_get_path (node));
   destination = g_file_new_for_path (new_path);
 
   if (g_file_query_exists (destination, NULL))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_EXISTS,
                    "\u201c%s\u201d already has a folder called \u201c%s\u201d.",
-                   new_parent == self->root ? "Workspaces" : hy_node_get_name (new_parent),
+                   new_parent == self->root ? "Workspaces" : xd_node_get_name (new_parent),
                    name);
       return FALSE;
     }
@@ -643,12 +643,12 @@ hy_fs_tree_move_folder (HyFsTree    *self,
     {
       guint position;
 
-      if (g_list_store_find (hy_node_get_children (old_parent), node, &position))
-        g_list_store_remove (hy_node_get_children (old_parent), position);
+      if (g_list_store_find (xd_node_get_children (old_parent), node, &position))
+        g_list_store_remove (xd_node_get_children (old_parent), position);
     }
 
-  hy_node_set_parent (node, new_parent);
-  g_list_store_insert (hy_node_get_children (new_parent),
+  xd_node_set_parent (node, new_parent);
+  g_list_store_insert (xd_node_get_children (new_parent),
                        folder_insert_position (new_parent, name), node);
 
   g_object_unref (node);
@@ -657,42 +657,42 @@ hy_fs_tree_move_folder (HyFsTree    *self,
 }
 
 gboolean
-hy_fs_tree_rename_folder (HyFsTree    *self,
-                          HyNode      *node,
+xd_fs_tree_rename_folder (XdFsTree    *self,
+                          XdNode      *node,
                           const char  *new_name,
                           GError     **error)
 {
   g_autoptr (GFile) file = NULL;
   g_autoptr (GFile) renamed = NULL;
   g_autofree char *new_path = NULL;
-  HyNode *parent;
+  XdNode *parent;
 
-  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
-  g_return_val_if_fail (HY_IS_NODE (node), FALSE);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (XD_IS_NODE (node), FALSE);
   g_return_val_if_fail (new_name != NULL && *new_name != '\0', FALSE);
 
-  file = g_file_new_for_path (hy_node_get_path (node));
+  file = g_file_new_for_path (xd_node_get_path (node));
   renamed = g_file_set_display_name (file, new_name, NULL, error);
   if (renamed == NULL)
     return FALSE;
 
-  /* The id lives in .hy.json inside the folder, so it travels with it and the
+  /* The id lives in .xd.json inside the folder, so it travels with it and the
    * folder's chats stay attached. */
   new_path = g_file_get_path (renamed);
   rebase_subtree (node, new_path);
-  hy_node_set_name (node, new_name);
+  xd_node_set_name (node, new_name);
 
   /* Re-sort by lifting the node out and letting the scan put it back. */
-  parent = hy_node_get_parent (node);
+  parent = xd_node_get_parent (node);
   if (parent != NULL)
     {
       guint position;
 
-      if (g_list_store_find (hy_node_get_children (parent), node, &position))
+      if (g_list_store_find (xd_node_get_children (parent), node, &position))
         {
           g_object_ref (node);
-          g_list_store_remove (hy_node_get_children (parent), position);
-          g_list_store_insert (hy_node_get_children (parent),
+          g_list_store_remove (xd_node_get_children (parent), position);
+          g_list_store_insert (xd_node_get_children (parent),
                                folder_insert_position (parent, new_name), node);
           g_object_unref (node);
         }
@@ -702,40 +702,40 @@ hy_fs_tree_rename_folder (HyFsTree    *self,
 }
 
 gboolean
-hy_fs_tree_trash_folder (HyFsTree    *self,
-                         HyNode      *node,
+xd_fs_tree_trash_folder (XdFsTree    *self,
+                         XdNode      *node,
                          GError     **error)
 {
   g_autoptr (GFile) file = NULL;
-  HyNode *parent;
+  XdNode *parent;
   guint position;
 
-  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
-  g_return_val_if_fail (HY_IS_NODE (node), FALSE);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (XD_IS_NODE (node), FALSE);
 
-  file = g_file_new_for_path (hy_node_get_path (node));
+  file = g_file_new_for_path (xd_node_get_path (node));
   if (!g_file_trash (file, NULL, error))
     return FALSE;
 
-  parent = hy_node_get_parent (node);
+  parent = xd_node_get_parent (node);
   if (parent == NULL)
     parent = self->root;
 
   forget_subtree (self, node);
 
-  if (g_list_store_find (hy_node_get_children (parent), node, &position))
-    g_list_store_remove (hy_node_get_children (parent), position);
+  if (g_list_store_find (xd_node_get_children (parent), node, &position))
+    g_list_store_remove (xd_node_get_children (parent), position);
 
   return TRUE;
 }
 
-static HyNode *
-lookup_in (HyNode     *node,
+static XdNode *
+lookup_in (XdNode     *node,
            const char *path)
 {
-  GListStore *children = hy_node_get_children (node);
+  GListStore *children = xd_node_get_children (node);
 
-  if (g_strcmp0 (hy_node_get_path (node), path) == 0)
+  if (g_strcmp0 (xd_node_get_path (node), path) == 0)
     return node;
 
   if (children == NULL)
@@ -743,14 +743,14 @@ lookup_in (HyNode     *node,
 
   for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
-      HyNode *found;
+      g_autoptr (XdNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
+      XdNode *found;
 
-      if (hy_node_get_kind (child) != HY_NODE_FOLDER)
+      if (xd_node_get_kind (child) != XD_NODE_FOLDER)
         continue;
 
       /* Only descend where the path can actually be. */
-      if (!g_str_has_prefix (path, hy_node_get_path (child)))
+      if (!g_str_has_prefix (path, xd_node_get_path (child)))
         continue;
 
       found = lookup_in (child, path);
@@ -761,11 +761,11 @@ lookup_in (HyNode     *node,
   return NULL;
 }
 
-HyNode *
-hy_fs_tree_lookup (HyFsTree   *self,
+XdNode *
+xd_fs_tree_lookup (XdFsTree   *self,
                    const char *path)
 {
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
   g_return_val_if_fail (path != NULL, NULL);
 
   return lookup_in (self->root, path);
@@ -773,9 +773,9 @@ hy_fs_tree_lookup (HyFsTree   *self,
 
 /* --- chats ---------------------------------------------------------------- */
 
-HyNode *
-hy_fs_tree_create_chat (HyFsTree    *self,
-                        HyNode      *folder,
+XdNode *
+xd_fs_tree_create_chat (XdFsTree    *self,
+                        XdNode      *folder,
                         const char  *title,
                         const char  *backend,
                         const char  *model,
@@ -784,28 +784,28 @@ hy_fs_tree_create_chat (HyFsTree    *self,
                         GError     **error)
 {
   g_autofree char *chat_id = NULL;
-  HyNode *node;
+  XdNode *node;
 
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
-  g_return_val_if_fail (HY_IS_NODE (folder), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (folder), NULL);
   g_return_val_if_fail (self->storage != NULL, NULL);
 
-  if (hy_node_get_folder_id (folder) == NULL)
+  if (xd_node_get_folder_id (folder) == NULL)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                    "Chats live in a folder; pick one first");
       return NULL;
     }
 
-  chat_id = hy_storage_create_chat (self->storage, hy_node_get_folder_id (folder),
+  chat_id = xd_storage_create_chat (self->storage, xd_node_get_folder_id (folder),
                                     title, backend, model, effort, workdir,
                                     error);
   if (chat_id == NULL)
     return NULL;
 
-  node = hy_node_new_chat (chat_id, title, folder);
-  hy_node_set_icon_name (node, backend_icon (backend));
-  g_list_store_insert (hy_node_get_children (folder),
+  node = xd_node_new_chat (chat_id, title, folder);
+  xd_node_set_icon_name (node, backend_icon (backend));
+  g_list_store_insert (xd_node_get_children (folder),
                        chat_section_start (folder), node);
   g_object_unref (node);
 
@@ -813,65 +813,65 @@ hy_fs_tree_create_chat (HyFsTree    *self,
 }
 
 gboolean
-hy_fs_tree_rename_chat (HyFsTree    *self,
-                        HyNode      *chat,
+xd_fs_tree_rename_chat (XdFsTree    *self,
+                        XdNode      *chat,
                         const char  *title,
                         GError     **error)
 {
-  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
-  g_return_val_if_fail (HY_IS_NODE (chat), FALSE);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (XD_IS_NODE (chat), FALSE);
 
-  if (!hy_storage_set_chat_title (self->storage, hy_node_get_chat_id (chat),
+  if (!xd_storage_set_chat_title (self->storage, xd_node_get_chat_id (chat),
                                   title, error))
     return FALSE;
 
-  hy_node_set_name (chat, title);
+  xd_node_set_name (chat, title);
 
   return TRUE;
 }
 
 gboolean
-hy_fs_tree_delete_chat (HyFsTree    *self,
-                        HyNode      *chat,
+xd_fs_tree_delete_chat (XdFsTree    *self,
+                        XdNode      *chat,
                         GError     **error)
 {
-  HyNode *parent;
+  XdNode *parent;
   guint position;
 
-  g_return_val_if_fail (HY_IS_FS_TREE (self), FALSE);
-  g_return_val_if_fail (HY_IS_NODE (chat), FALSE);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), FALSE);
+  g_return_val_if_fail (XD_IS_NODE (chat), FALSE);
 
-  if (!hy_storage_delete_chat (self->storage, hy_node_get_chat_id (chat), error))
+  if (!xd_storage_delete_chat (self->storage, xd_node_get_chat_id (chat), error))
     return FALSE;
 
-  parent = hy_node_get_parent (chat);
+  parent = xd_node_get_parent (chat);
 
   /* Announced before the store drops it, so whoever is showing the chat is
    * still holding a node rather than being handed a dead one. */
   g_signal_emit (self, signals[SIGNAL_CHAT_REMOVED], 0, chat);
 
   if (parent != NULL &&
-      g_list_store_find (hy_node_get_children (parent), chat, &position))
-    g_list_store_remove (hy_node_get_children (parent), position);
+      g_list_store_find (xd_node_get_children (parent), chat, &position))
+    g_list_store_remove (xd_node_get_children (parent), position);
 
   return TRUE;
 }
 
 void
-hy_fs_tree_bump_chat (HyFsTree *self,
-                      HyNode   *chat)
+xd_fs_tree_bump_chat (XdFsTree *self,
+                      XdNode   *chat)
 {
-  HyNode *parent;
+  XdNode *parent;
   guint position, target;
 
-  g_return_if_fail (HY_IS_FS_TREE (self));
-  g_return_if_fail (HY_IS_NODE (chat));
+  g_return_if_fail (XD_IS_FS_TREE (self));
+  g_return_if_fail (XD_IS_NODE (chat));
 
-  parent = hy_node_get_parent (chat);
+  parent = xd_node_get_parent (chat);
   if (parent == NULL)
     return;
 
-  if (!g_list_store_find (hy_node_get_children (parent), chat, &position))
+  if (!g_list_store_find (xd_node_get_children (parent), chat, &position))
     return;
 
   target = chat_section_start (parent);
@@ -879,28 +879,28 @@ hy_fs_tree_bump_chat (HyFsTree *self,
     return;
 
   g_object_ref (chat);
-  g_list_store_remove (hy_node_get_children (parent), position);
-  g_list_store_insert (hy_node_get_children (parent), target, chat);
+  g_list_store_remove (xd_node_get_children (parent), position);
+  g_list_store_insert (xd_node_get_children (parent), target, chat);
   g_object_unref (chat);
 }
 
-static HyNode *
-lookup_chat_in (HyNode     *node,
+static XdNode *
+lookup_chat_in (XdNode     *node,
                 const char *chat_id)
 {
-  GListStore *children = hy_node_get_children (node);
+  GListStore *children = xd_node_get_children (node);
 
   if (children == NULL)
     return NULL;
 
   for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (children)); i++)
     {
-      g_autoptr (HyNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
-      HyNode *found;
+      g_autoptr (XdNode) child = g_list_model_get_item (G_LIST_MODEL (children), i);
+      XdNode *found;
 
-      if (hy_node_get_kind (child) == HY_NODE_CHAT)
+      if (xd_node_get_kind (child) == XD_NODE_CHAT)
         {
-          if (g_strcmp0 (hy_node_get_chat_id (child), chat_id) == 0)
+          if (g_strcmp0 (xd_node_get_chat_id (child), chat_id) == 0)
             return child;
           continue;
         }
@@ -913,11 +913,11 @@ lookup_chat_in (HyNode     *node,
   return NULL;
 }
 
-HyNode *
-hy_fs_tree_lookup_chat (HyFsTree   *self,
+XdNode *
+xd_fs_tree_lookup_chat (XdFsTree   *self,
                         const char *chat_id)
 {
-  g_return_val_if_fail (HY_IS_FS_TREE (self), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (self), NULL);
   g_return_val_if_fail (chat_id != NULL, NULL);
 
   return lookup_chat_in (self->root, chat_id);
@@ -926,9 +926,9 @@ hy_fs_tree_lookup_chat (HyFsTree   *self,
 /* --- GObject -------------------------------------------------------------- */
 
 static void
-hy_fs_tree_dispose (GObject *object)
+xd_fs_tree_dispose (GObject *object)
 {
-  HyFsTree *self = HY_FS_TREE (object);
+  XdFsTree *self = XD_FS_TREE (object);
 
   g_cancellable_cancel (self->cancellable);
   g_clear_pointer (&self->watches, g_hash_table_unref);
@@ -936,37 +936,37 @@ hy_fs_tree_dispose (GObject *object)
   g_clear_object (&self->storage);
   g_clear_object (&self->cancellable);
 
-  G_OBJECT_CLASS (hy_fs_tree_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_fs_tree_parent_class)->dispose (object);
 }
 
 static void
-hy_fs_tree_finalize (GObject *object)
+xd_fs_tree_finalize (GObject *object)
 {
-  HyFsTree *self = HY_FS_TREE (object);
+  XdFsTree *self = XD_FS_TREE (object);
 
   g_clear_pointer (&self->root_path, g_free);
 
-  G_OBJECT_CLASS (hy_fs_tree_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_fs_tree_parent_class)->finalize (object);
 }
 
 static void
-hy_fs_tree_class_init (HyFsTreeClass *klass)
+xd_fs_tree_class_init (XdFsTreeClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
-  object_class->dispose = hy_fs_tree_dispose;
-  object_class->finalize = hy_fs_tree_finalize;
+  object_class->dispose = xd_fs_tree_dispose;
+  object_class->finalize = xd_fs_tree_finalize;
 
   /* Whoever is showing a chat has to hear that it is gone; there is nothing
    * left to show and anything typed into it would be written to a row that
    * no longer exists. */
   signals[SIGNAL_CHAT_REMOVED] =
     g_signal_new ("chat-removed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
-                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, HY_TYPE_NODE);
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, XD_TYPE_NODE);
 }
 
 static void
-hy_fs_tree_init (HyFsTree *self)
+xd_fs_tree_init (XdFsTree *self)
 {
   self->watches = g_hash_table_new_full (NULL, NULL, NULL, watch_free);
   self->cancellable = g_cancellable_new ();

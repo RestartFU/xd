@@ -1,39 +1,41 @@
-#include "hy-app.h"
-#include "hy-window.h"
+#include "xd-app.h"
 
-struct _HyApplication
+#include <glib/gstdio.h>
+#include "xd-window.h"
+
+struct _XdApplication
 {
   AdwApplication parent_instance;
 
   GSettings *settings;
 };
 
-G_DEFINE_FINAL_TYPE (HyApplication, hy_application, ADW_TYPE_APPLICATION)
+G_DEFINE_FINAL_TYPE (XdApplication, xd_application, ADW_TYPE_APPLICATION)
 
-HyApplication *
-hy_application_new (void)
+XdApplication *
+xd_application_new (void)
 {
-  return g_object_new (HY_TYPE_APPLICATION,
-                       "application-id", HY_APP_ID,
+  return g_object_new (XD_TYPE_APPLICATION,
+                       "application-id", XD_APP_ID,
                        "flags", G_APPLICATION_DEFAULT_FLAGS,
                        NULL);
 }
 
 GSettings *
-hy_application_get_settings (HyApplication *self)
+xd_application_get_settings (XdApplication *self)
 {
-  g_return_val_if_fail (HY_IS_APPLICATION (self), NULL);
+  g_return_val_if_fail (XD_IS_APPLICATION (self), NULL);
 
   return self->settings;
 }
 
 static void
-hy_application_activate (GApplication *app)
+xd_application_activate (GApplication *app)
 {
   GtkWindow *window = gtk_application_get_active_window (GTK_APPLICATION (app));
 
   if (window == NULL)
-    window = GTK_WINDOW (hy_window_new (HY_APPLICATION (app)));
+    window = GTK_WINDOW (xd_window_new (XD_APPLICATION (app)));
 
   gtk_window_present (window);
 }
@@ -43,13 +45,13 @@ on_about_action (GSimpleAction *action,
                  GVariant      *param,
                  gpointer       user_data)
 {
-  HyApplication *self = user_data;
+  XdApplication *self = user_data;
   GtkWindow *parent = gtk_application_get_active_window (GTK_APPLICATION (self));
 
   adw_show_about_dialog (GTK_WIDGET (parent),
-                         "application-name", "hy",
-                         "application-icon", HY_APP_ID,
-                         "version", HY_VERSION,
+                         "application-name", "xd",
+                         "application-icon", XD_APP_ID,
+                         "version", XD_VERSION,
                          "comments", "Workspace-organized AI conversations",
                          "developer-name", "restartfu",
                          "license-type", GTK_LICENSE_MIT_X11,
@@ -78,7 +80,7 @@ static const GActionEntry app_actions[] = {
  * without imposing a fixed pixel size on the text itself -- em keeps it
  * following whatever the desktop font is set to.
  */
-static const char *HY_STYLE =
+static const char *XD_STYLE =
   /*
    * A black palette rather than Adwaita's grey.
    *
@@ -105,11 +107,11 @@ static const char *HY_STYLE =
   "}\n"
 
   /*
-   * The surfaces, by a class hy puts on its own widgets.
+   * The surfaces, by a class xd puts on its own widgets.
    *
    * Overriding libadwaita's colours has now failed twice -- once because the
    * name it reads changed, once because the widget painting the background is
-   * not the one the selector names. A class on a widget hy created is the one
+   * not the one the selector names. A class on a widget xd created is the one
    * thing neither can move out from under.
    */
   /*
@@ -120,7 +122,7 @@ static const char *HY_STYLE =
    * surface sits a little above the one behind it, with a hairline edge
    * where they meet -- which is what reads as glass.
    */
-  ".hy-surface, .hy-surface > *, .hy-sidebar, .hy-sidebar > *,"
+  ".xd-surface, .xd-surface > *, .xd-sidebar, .xd-sidebar > *,"
   " window, .background, headerbar, .toolbar"
   " { background-color: #0a0a0c; }\n"
 
@@ -139,9 +141,9 @@ static const char *HY_STYLE =
   " { background-color: alpha(#ffffff, 0.09); }\n"
 
   /* The bar under the composer: what is being worked on, not a control. */
-  ".hy-context { background-color: alpha(#ffffff, 0.025); border-radius: 0 0 14px 14px;"
+  ".xd-context { background-color: alpha(#ffffff, 0.025); border-radius: 0 0 14px 14px;"
   " padding: 4px 12px; }\n"
-  ".hy-context label { font-size: 0.85em; }\n"
+  ".xd-context label { font-size: 0.85em; }\n"
 
   /* DM Sans, which is what t3code itself is set in; Inter and Cantarell
    * behind it as the fallbacks the bundle already carried. */
@@ -183,8 +185,8 @@ static const char *HY_STYLE =
    */
   "paned > separator { min-width: 1px; min-height: 1px; border: none;"
   " opacity: 0; }\n"
-  ".hy-divider-left { border-left: 1px solid #2a2a2d; }\n"
-  ".hy-divider-top { border-top: 1px solid #2a2a2d; }\n"
+  ".xd-divider-left { border-left: 1px solid #2a2a2d; }\n"
+  ".xd-divider-top { border-top: 1px solid #2a2a2d; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
@@ -201,32 +203,32 @@ static const char *HY_STYLE =
    * to decide; flat, they read as one line of settings with the send button
    * at the end of it.
    */
-  ".hy-composer button, .hy-composer togglebutton,"
-  " .hy-composer dropdown > button { background: none; border: none;"
+  ".xd-composer button, .xd-composer togglebutton,"
+  " .xd-composer dropdown > button { background: none; border: none;"
   " box-shadow: none; padding: 4px 10px; }\n"
   /* Settings, not statements: they say how the next message will be handled,
    * which is worth reading once and then ignoring. */
-  ".hy-composer button label, .hy-composer dropdown label"
+  ".xd-composer button label, .xd-composer dropdown label"
   " { color: alpha(#ffffff, 0.6); }\n"
-  ".hy-composer button:hover label { color: alpha(#ffffff, 0.85); }\n"
+  ".xd-composer button:hover label { color: alpha(#ffffff, 0.85); }\n"
   /* The active mode in blue, like t3: a GtkToggleButton's CSS node is named
    * plain "button", so earlier togglebutton selectors matched nothing at
    * all -- pressed state included. */
-  ".hy-composer button:checked { background: alpha(#3584e4, 0.22);"
+  ".xd-composer button:checked { background: alpha(#3584e4, 0.22);"
   " border-radius: 8px; }\n"
-  ".hy-composer button:checked label, .hy-composer button:checked image"
+  ".xd-composer button:checked label, .xd-composer button:checked image"
   " { color: #6bb2f8; }\n"
   /* Elsewhere -- the terminal and diff toggles in the header -- checked is a
    * plain lift, which the flat background rules above would otherwise
    * swallow. */
   "button:checked { background-color: alpha(#ffffff, 0.14); }\n"
-  ".hy-composer button:hover, .hy-composer togglebutton:hover,"
-  " .hy-composer dropdown > button:hover"
+  ".xd-composer button:hover, .xd-composer togglebutton:hover,"
+  " .xd-composer dropdown > button:hover"
   " { background: alpha(currentColor, 0.08); }\n"
-  ".hy-composer separator { margin: 6px 2px; }\n"
+  ".xd-composer separator { margin: 6px 2px; }\n"
 
   /* Except the one that sends, which is the action rather than a setting. */
-  ".hy-composer button.suggested-action { background: #3584e4; color: #ffffff;"
+  ".xd-composer button.suggested-action { background: #3584e4; color: #ffffff;"
   " border-radius: 9999px; min-width: 28px; min-height: 28px; padding: 4px; }\n"
 
   /* Controls: pills, sized for a toolbar rather than a dialog. */
@@ -261,15 +263,15 @@ static const char *HY_STYLE =
   "popover listview { background-color: #16161b;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
-  ".hy-menu { background-color: #16161b;"
+  ".xd-menu { background-color: #16161b;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 6px; }\n"
-  ".hy-menu-popover > contents { background-color: #16161b;"
+  ".xd-menu-popover > contents { background-color: #16161b;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
-  ".hy-preview > contents { padding: 0; }\n"
-  ".hy-preview picture { border-radius: 10px; }\n"
+  ".xd-preview > contents { padding: 0; }\n"
+  ".xd-preview picture { border-radius: 10px; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
   /* The list widgets inside paint their own lighter slab over the popover's
@@ -321,12 +323,12 @@ static const char *HY_STYLE =
    * them; a choice is an offer, and an offer reads better as a quiet
    * outline that lifts when approached.
    */
-  ".hy-choice { background: none; border: 1px solid alpha(#ffffff, 0.10);"
+  ".xd-choice { background: none; border: 1px solid alpha(#ffffff, 0.10);"
   " border-radius: 10px; padding: 7px 14px; }\n"
-  ".hy-choice label { color: alpha(#ffffff, 0.65); }\n"
-  ".hy-choice:hover { background: alpha(#ffffff, 0.05);"
+  ".xd-choice label { color: alpha(#ffffff, 0.65); }\n"
+  ".xd-choice:hover { background: alpha(#ffffff, 0.05);"
   " border-color: alpha(#ffffff, 0.18); }\n"
-  ".hy-choice:hover label { color: alpha(#ffffff, 0.95); }\n"
+  ".xd-choice:hover label { color: alpha(#ffffff, 0.95); }\n"
 
   /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
    * enough width that the title and its close button stop fighting. */
@@ -343,42 +345,54 @@ static const char *HY_STYLE =
 
   /* Code blocks: a card of their own, since Pango cannot draw a padded
    * rounded background behind a run of text. */
-  ".hy-code { background-color: alpha(#ffffff, 0.04);"
+  ".xd-code { background-color: alpha(#ffffff, 0.04);"
   " border: 1px solid alpha(#ffffff, 0.06); border-radius: 10px;"
   " padding: 10px 12px; }\n"
-  ".hy-code label { font-family: \"JetBrains Mono\", monospace;"
+  ".xd-code label { font-family: \"JetBrains Mono\", monospace;"
   " font-size: 0.88em; }\n"
 
   /* Selectable, but not editable-looking: a caret blinking in a message
    * suggests typing somewhere nothing can be typed. Selection keeps its
    * colour; only the caret goes. */
-  ".hy-body { caret-color: transparent; }\n"
+  ".xd-body { caret-color: transparent; }\n"
 
   /* A chat waiting to be answered, in a tree the user may not be looking at.
    * Slow enough to notice without being the thing you look at. */
-  "@keyframes hy-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
-  ".hy-waiting { color: @accent_color;"
-  " animation: hy-pulse 1.4s ease-in-out infinite alternate; }\n";
+  "@keyframes xd-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
+  ".xd-waiting { color: @accent_color;"
+  " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n";
 
 static void
 load_style (void)
 {
   g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
 
-  gtk_css_provider_load_from_string (provider, HY_STYLE);
+  gtk_css_provider_load_from_string (provider, XD_STYLE);
   gtk_style_context_add_provider_for_display (gdk_display_get_default (),
                                               GTK_STYLE_PROVIDER (provider),
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
 static void
-hy_application_startup (GApplication *app)
+xd_application_startup (GApplication *app)
 {
-  HyApplication *self = HY_APPLICATION (app);
+  XdApplication *self = XD_APPLICATION (app);
 
-  G_APPLICATION_CLASS (hy_application_parent_class)->startup (app);
+  G_APPLICATION_CLASS (xd_application_parent_class)->startup (app);
 
-  self->settings = g_settings_new (HY_APP_ID);
+  /*
+   * The project was called hy first. Anything it left behind is moved
+   * across rather than abandoned: a rename should not read as data loss.
+   */
+  {
+    g_autofree char *was = g_build_filename (g_get_user_data_dir (), "hy", NULL);
+    g_autofree char *now = g_build_filename (g_get_user_data_dir (), "xd", NULL);
+
+    if (g_file_test (was, G_FILE_TEST_IS_DIR) && !g_file_test (now, G_FILE_TEST_EXISTS))
+      g_rename (was, now);
+  }
+
+  self->settings = g_settings_new (XD_APP_ID);
 
   /* The palette above is hand-picked for a dark window; in light it would be
    * black text on black. */
@@ -395,27 +409,27 @@ hy_application_startup (GApplication *app)
 }
 
 static void
-hy_application_dispose (GObject *object)
+xd_application_dispose (GObject *object)
 {
-  HyApplication *self = HY_APPLICATION (object);
+  XdApplication *self = XD_APPLICATION (object);
 
   g_clear_object (&self->settings);
 
-  G_OBJECT_CLASS (hy_application_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_application_parent_class)->dispose (object);
 }
 
 static void
-hy_application_class_init (HyApplicationClass *klass)
+xd_application_class_init (XdApplicationClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GApplicationClass *app_class = G_APPLICATION_CLASS (klass);
 
-  object_class->dispose = hy_application_dispose;
-  app_class->activate = hy_application_activate;
-  app_class->startup = hy_application_startup;
+  object_class->dispose = xd_application_dispose;
+  app_class->activate = xd_application_activate;
+  app_class->startup = xd_application_startup;
 }
 
 static void
-hy_application_init (HyApplication *self)
+xd_application_init (XdApplication *self)
 {
 }

@@ -1,19 +1,19 @@
-#include "hy-node.h"
+#include "xd-node.h"
 
-struct _HyNode
+struct _XdNode
 {
   GObject parent_instance;
 
-  HyNodeKind kind;
+  XdNodeKind kind;
   char *name;
   char *path;
   char *folder_id;
   char *chat_id;
   char *icon_name;
-  HyNodeState state;
+  XdNodeState state;
 
   GListStore *children;   /* folders only */
-  HyNode *parent;         /* weak */
+  XdNode *parent;         /* weak */
 };
 
 enum
@@ -27,15 +27,15 @@ enum
 
 static GParamSpec *properties[N_PROPS];
 
-G_DEFINE_FINAL_TYPE (HyNode, hy_node, G_TYPE_OBJECT)
+G_DEFINE_FINAL_TYPE (XdNode, xd_node, G_TYPE_OBJECT)
 
 static void
-hy_node_get_property (GObject    *object,
+xd_node_get_property (GObject    *object,
                       guint       prop_id,
                       GValue     *value,
                       GParamSpec *pspec)
 {
-  HyNode *self = HY_NODE (object);
+  XdNode *self = XD_NODE (object);
 
   switch (prop_id)
     {
@@ -43,7 +43,7 @@ hy_node_get_property (GObject    *object,
       g_value_set_string (value, self->name);
       break;
     case PROP_ICON_NAME:
-      g_value_set_string (value, hy_node_get_icon_name (self));
+      g_value_set_string (value, xd_node_get_icon_name (self));
       break;
     case PROP_STATE:
       g_value_set_int (value, self->state);
@@ -54,9 +54,9 @@ hy_node_get_property (GObject    *object,
 }
 
 static void
-hy_node_finalize (GObject *object)
+xd_node_finalize (GObject *object)
 {
-  HyNode *self = HY_NODE (object);
+  XdNode *self = XD_NODE (object);
 
   if (self->parent != NULL)
     g_object_remove_weak_pointer (G_OBJECT (self->parent), (gpointer *) &self->parent);
@@ -68,16 +68,16 @@ hy_node_finalize (GObject *object)
   g_clear_pointer (&self->icon_name, g_free);
   g_clear_object (&self->children);
 
-  G_OBJECT_CLASS (hy_node_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_node_parent_class)->finalize (object);
 }
 
 static void
-hy_node_class_init (HyNodeClass *klass)
+xd_node_class_init (XdNodeClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
-  object_class->get_property = hy_node_get_property;
-  object_class->finalize = hy_node_finalize;
+  object_class->get_property = xd_node_get_property;
+  object_class->finalize = xd_node_finalize;
 
   properties[PROP_NAME] =
     g_param_spec_string ("name", NULL, NULL, NULL,
@@ -89,69 +89,69 @@ hy_node_class_init (HyNodeClass *klass)
 
   properties[PROP_STATE] =
     g_param_spec_int ("state", NULL, NULL,
-                      HY_NODE_IDLE, HY_NODE_WAITING, HY_NODE_IDLE,
+                      XD_NODE_IDLE, XD_NODE_WAITING, XD_NODE_IDLE,
                       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (object_class, N_PROPS, properties);
 }
 
 static void
-hy_node_init (HyNode *self)
+xd_node_init (XdNode *self)
 {
 }
 
-HyNode *
-hy_node_new_folder (const char *path,
+XdNode *
+xd_node_new_folder (const char *path,
                     const char *name,
                     const char *folder_id)
 {
-  HyNode *self = g_object_new (HY_TYPE_NODE, NULL);
+  XdNode *self = g_object_new (XD_TYPE_NODE, NULL);
 
-  self->kind = HY_NODE_FOLDER;
+  self->kind = XD_NODE_FOLDER;
   self->path = g_strdup (path);
   self->name = g_strdup (name);
   self->folder_id = g_strdup (folder_id);
-  self->children = g_list_store_new (HY_TYPE_NODE);
+  self->children = g_list_store_new (XD_TYPE_NODE);
 
   return self;
 }
 
-HyNode *
-hy_node_new_chat (const char *chat_id,
+XdNode *
+xd_node_new_chat (const char *chat_id,
                   const char *title,
-                  HyNode     *parent)
+                  XdNode     *parent)
 {
-  HyNode *self = g_object_new (HY_TYPE_NODE, NULL);
+  XdNode *self = g_object_new (XD_TYPE_NODE, NULL);
 
-  self->kind = HY_NODE_CHAT;
+  self->kind = XD_NODE_CHAT;
   self->chat_id = g_strdup (chat_id);
   self->name = g_strdup (title);
-  hy_node_set_parent (self, parent);
+  xd_node_set_parent (self, parent);
 
   return self;
 }
 
-HyNodeKind
-hy_node_get_kind (HyNode *self)
+XdNodeKind
+xd_node_get_kind (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), HY_NODE_FOLDER);
+  g_return_val_if_fail (XD_IS_NODE (self), XD_NODE_FOLDER);
 
   return self->kind;
 }
 
 const char *
-hy_node_get_name (HyNode *self)
+xd_node_get_name (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
   return self->name;
 }
 
 void
-hy_node_set_name (HyNode     *self,
+xd_node_set_name (XdNode     *self,
                   const char *name)
 {
-  g_return_if_fail (HY_IS_NODE (self));
+  g_return_if_fail (XD_IS_NODE (self));
 
   if (g_strcmp0 (self->name, name) == 0)
     return;
@@ -163,55 +163,55 @@ hy_node_set_name (HyNode     *self,
 }
 
 const char *
-hy_node_get_path (HyNode *self)
+xd_node_get_path (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
   return self->path;
 }
 
 void
-hy_node_set_path (HyNode     *self,
+xd_node_set_path (XdNode     *self,
                   const char *path)
 {
-  g_return_if_fail (HY_IS_NODE (self));
+  g_return_if_fail (XD_IS_NODE (self));
 
   g_free (self->path);
   self->path = g_strdup (path);
 }
 
 const char *
-hy_node_get_folder_id (HyNode *self)
+xd_node_get_folder_id (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
   return self->folder_id;
 }
 
 const char *
-hy_node_get_chat_id (HyNode *self)
+xd_node_get_chat_id (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
   return self->chat_id;
 }
 
 const char *
-hy_node_get_icon_name (HyNode *self)
+xd_node_get_icon_name (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
-  if (self->kind == HY_NODE_FOLDER)
+  if (self->kind == XD_NODE_FOLDER)
     return "folder-symbolic";
 
   return self->icon_name != NULL ? self->icon_name : "chat-bubble-text-symbolic";
 }
 
 void
-hy_node_set_icon_name (HyNode     *self,
+xd_node_set_icon_name (XdNode     *self,
                        const char *icon_name)
 {
-  g_return_if_fail (HY_IS_NODE (self));
+  g_return_if_fail (XD_IS_NODE (self));
 
   if (g_strcmp0 (self->icon_name, icon_name) == 0)
     return;
@@ -222,19 +222,19 @@ hy_node_set_icon_name (HyNode     *self,
   g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_ICON_NAME]);
 }
 
-HyNodeState
-hy_node_get_state (HyNode *self)
+XdNodeState
+xd_node_get_state (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), HY_NODE_IDLE);
+  g_return_val_if_fail (XD_IS_NODE (self), XD_NODE_IDLE);
 
   return self->state;
 }
 
 void
-hy_node_set_state (HyNode      *self,
-                   HyNodeState  state)
+xd_node_set_state (XdNode      *self,
+                   XdNodeState  state)
 {
-  g_return_if_fail (HY_IS_NODE (self));
+  g_return_if_fail (XD_IS_NODE (self));
 
   if (self->state == state)
     return;
@@ -245,26 +245,26 @@ hy_node_set_state (HyNode      *self,
 }
 
 GListStore *
-hy_node_get_children (HyNode *self)
+xd_node_get_children (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
   return self->children;
 }
 
-HyNode *
-hy_node_get_parent (HyNode *self)
+XdNode *
+xd_node_get_parent (XdNode *self)
 {
-  g_return_val_if_fail (HY_IS_NODE (self), NULL);
+  g_return_val_if_fail (XD_IS_NODE (self), NULL);
 
   return self->parent;
 }
 
 void
-hy_node_set_parent (HyNode *self,
-                    HyNode *parent)
+xd_node_set_parent (XdNode *self,
+                    XdNode *parent)
 {
-  g_return_if_fail (HY_IS_NODE (self));
+  g_return_if_fail (XD_IS_NODE (self));
 
   if (self->parent == parent)
     return;

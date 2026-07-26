@@ -21,19 +21,19 @@
  */
 typedef struct
 {
-  HyChatView *view;         /* unowned; the view outlives its turns */
-  HyChatSession *session;
+  XdChatView *view;         /* unowned; the view outlives its turns */
+  XdChatSession *session;
   char *chat_id;
   char *backend_id;         /* the backend this turn's session id belongs to */
   char *prompt;             /* kept so a dead session can be retried */
   char *label;              /* the model and effort this turn actually ran on */
   gint64 started_at;        /* monotonic; how long the work took */
   GtkWidget *anchor;        /* weak: the row just above the turn's output */
-  HyNode *node;             /* the row in the tree, so it can show the state */
+  XdNode *node;             /* the row in the tree, so it can show the state */
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
   GPtrArray *said;          /* finished messages, held until the turn ends */
-  HyMessageRow *row;        /* NULL until the segment has somewhere to go */
+  XdMessageRow *row;        /* NULL until the segment has somewhere to go */
   gboolean resumed;
   gboolean is_retry;
 } Turn;
@@ -42,12 +42,12 @@ typedef struct
  * is one glance. */
 #define CONTENT_WIDTH 860
 
-struct _HyChatView
+struct _XdChatView
 {
   AdwBin parent_instance;
 
-  HyStorage *storage;
-  HyFsTree *tree;
+  XdStorage *storage;
+  XdFsTree *tree;
   /*
    * Held, not borrowed.
    *
@@ -55,7 +55,7 @@ struct _HyChatView
    * and the view goes on using this one until it is told otherwise -- so
    * borrowing it means reading freed memory the moment the two disagree.
    */
-  HyNode *chat;
+  XdNode *chat;
 
   GHashTable *turns;            /* chat id -> Turn* */
 
@@ -72,17 +72,17 @@ struct _HyChatView
   char *queued;             /* typed while a turn was running */
   gboolean syncing_panes;   /* setting the toggles to match the chat */
   GPtrArray *attachments;   /* absolute paths of pasted images */
-  HyModelPicker *model_picker;
+  XdModelPicker *model_picker;
   GtkDropDown *effort_chooser;
   GtkDropDown *access_chooser;
   GtkToggleButton *build_toggle;
   GtkToggleButton *plan_toggle;
   GtkLabel *context_label;
   GtkToggleButton *terminal_button;
-  HyTerminalPanel *terminal;
+  XdTerminalPanel *terminal;
   GtkToggleButton *diff_button;
-  HyGitActions *git_actions;
-  HyDiffPane *diff;
+  XdGitActions *git_actions;
+  XdDiffPane *diff;
   GtkPaned *split;
   GtkPaned *side_split;
   GSettings *settings;
@@ -179,16 +179,16 @@ add_option_descriptions (GtkDropDown       *chooser,
   g_object_unref (factory);
 }
 
-G_DEFINE_FINAL_TYPE (HyChatView, hy_chat_view, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (XdChatView, xd_chat_view, ADW_TYPE_BIN)
 
-static void send_current_message (HyChatView *self);
-static void send_queued (HyChatView *self);
-static void send_message (HyChatView *self,
+static void send_current_message (XdChatView *self);
+static void send_queued (XdChatView *self);
+static void send_message (XdChatView *self,
                           const char *text);
-static void update_send_button (HyChatView *self);
-static void start_turn (HyChatView *self,
+static void update_send_button (XdChatView *self);
+static void start_turn (XdChatView *self,
                         const char *prompt);
-static void on_model_chosen (HyModelPicker *picker,
+static void on_model_chosen (XdModelPicker *picker,
                              const char    *backend_id,
                              const char    *model_id,
                              gpointer       user_data);
@@ -200,15 +200,15 @@ static void on_access_selected (GtkDropDown *chooser,
                                 gpointer     user_data);
 static void on_plan_toggled (GtkToggleButton *toggle,
                              gpointer         user_data);
-static HyMessageRow *append_row (HyChatView    *self,
-                                 HyMessageKind  kind,
+static XdMessageRow *append_row (XdChatView    *self,
+                                 XdMessageKind  kind,
                                  const char    *text);
-static const char *workdir_for (const HyChat              *chat,
-                                const HyEffectiveSettings *resolved);
+static const char *workdir_for (const XdChat              *chat,
+                                const XdEffectiveSettings *resolved);
 
 /* A chat with nothing stored runs at whatever the CLI is configured to use. */
 static AiEffort
-effort_for (const HyChat *chat)
+effort_for (const XdChat *chat)
 {
   const AiBackend *backend = ai_backend_lookup (chat->backend);
 
@@ -221,7 +221,7 @@ effort_for (const HyChat *chat)
 /* "Claude Opus 5 · High" rather than "Assistant": which model answered, and
  * how hard it was asked to think, are the two things worth knowing. */
 static char *
-reply_title (const HyChat *chat)
+reply_title (const XdChat *chat)
 {
   const AiBackend *backend = ai_backend_lookup (chat->backend);
 
@@ -272,7 +272,7 @@ worked_for_row (gint64 seconds)
 static gboolean
 scroll_to_bottom (gpointer data)
 {
-  HyChatView *self = data;
+  XdChatView *self = data;
   GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (self->scroller);
 
   gtk_adjustment_set_value (adjustment,
@@ -287,17 +287,17 @@ scroll_to_bottom (gpointer data)
 /* A freshly appended row has no allocation yet, so the adjustment only knows
  * its final extent once layout has run. */
 static void
-queue_scroll_to_bottom (HyChatView *self)
+queue_scroll_to_bottom (XdChatView *self)
 {
   g_idle_add_full (G_PRIORITY_LOW, scroll_to_bottom, g_object_ref (self), NULL);
 }
 
-static HyMessageRow *
-append_row (HyChatView    *self,
-            HyMessageKind  kind,
+static XdMessageRow *
+append_row (XdChatView    *self,
+            XdMessageKind  kind,
             const char    *text)
 {
-  HyMessageRow *row = hy_message_row_new (kind, text);
+  XdMessageRow *row = xd_message_row_new (kind, text);
 
   gtk_box_append (self->transcript, GTK_WIDGET (row));
   queue_scroll_to_bottom (self);
@@ -313,7 +313,7 @@ append_row (HyChatView    *self,
  * else closes it, so the grouping follows the shape of the turn.
  */
 static void
-append_tool_line (HyChatView *self,
+append_tool_line (XdChatView *self,
                   const char *summary)
 {
   GtkWidget *last = gtk_widget_get_last_child (GTK_WIDGET (self->transcript));
@@ -374,7 +374,7 @@ append_tool_line (HyChatView *self,
  * something nobody is asking any more.
  */
 static void
-retire_open_questions (HyChatView *self)
+retire_open_questions (XdChatView *self)
 {
   GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript));
 
@@ -385,7 +385,7 @@ retire_open_questions (HyChatView *self)
       /* Taken away rather than greyed out. The answer is about to appear as a
        * message of its own, so a row of dead buttons above it would only be
        * saying what was on offer at the time. */
-      if (g_object_get_data (G_OBJECT (child), "hy-choices") != NULL)
+      if (g_object_get_data (G_OBJECT (child), "xd-choices") != NULL)
         gtk_box_remove (self->transcript, child);
 
       child = next;
@@ -396,7 +396,7 @@ static void
 on_choice_clicked (GtkButton *button,
                    gpointer   user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   const char *answer = g_object_get_data (G_OBJECT (button), "answer");
 
   if (answer == NULL || self->chat == NULL)
@@ -418,8 +418,8 @@ on_choice_clicked (GtkButton *button,
  * the assistant did not think of is usually the interesting one.
  */
 static void
-append_choices (HyChatView  *self,
-                const HyAsk *ask,
+append_choices (XdChatView  *self,
+                const XdAsk *ask,
                 gboolean     answerable)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
@@ -442,14 +442,14 @@ append_choices (HyChatView  *self,
     {
       GtkWidget *button = gtk_button_new_with_label (ask->options[i]);
 
-      gtk_widget_add_css_class (button, "hy-choice");
+      gtk_widget_add_css_class (button, "xd-choice");
       gtk_label_set_wrap (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (button))), TRUE);
       g_object_set_data_full (G_OBJECT (button), "answer",
                               g_strdup (ask->options[i]), g_free);
       g_signal_connect (button, "clicked", G_CALLBACK (on_choice_clicked), self);
 
       /* No option is highlighted: which one is right is the user's call, and
-       * colouring one of them is hy putting a thumb on the scale. */
+       * colouring one of them is xd putting a thumb on the scale. */
       gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
     }
 
@@ -458,7 +458,7 @@ append_choices (HyChatView  *self,
   gtk_widget_set_sensitive (choices, answerable);
 
   /* Tagged so sending anything takes it away, however it was answered. */
-  g_object_set_data (G_OBJECT (box), "hy-choices", choices);
+  g_object_set_data (G_OBJECT (box), "xd-choices", choices);
 
   gtk_box_append (GTK_BOX (box), choices);
   gtk_widget_set_margin_top (box, 4);
@@ -477,16 +477,16 @@ append_choices (HyChatView  *self,
  * offer it again.
  */
 static void
-append_reply (HyChatView *self,
+append_reply (XdChatView *self,
               const char *text,
               const char *source,
               gboolean    answerable)
 {
-  g_autoptr (HyAsk) ask = NULL;
+  g_autoptr (XdAsk) ask = NULL;
   g_autofree char *prose = NULL;
-  HyMessageRow *row;
+  XdMessageRow *row;
 
-  ask = hy_ask_parse (text, &prose);
+  ask = xd_ask_parse (text, &prose);
 
   {
     g_autofree char *said = NULL;
@@ -497,8 +497,8 @@ append_reply (HyChatView *self,
       said = *prose != '\0' ? g_strdup_printf ("%s\n\n**%s**", prose, ask->question)
                             : g_strdup_printf ("**%s**", ask->question);
 
-    row = append_row (self, HY_MESSAGE_ASSISTANT, said != NULL ? said : text);
-    hy_message_row_set_source (row, source);
+    row = append_row (self, XD_MESSAGE_ASSISTANT, said != NULL ? said : text);
+    xd_message_row_set_source (row, source);
   }
 
   if (ask != NULL)
@@ -506,7 +506,7 @@ append_reply (HyChatView *self,
 }
 
 static void
-clear_transcript (HyChatView *self)
+clear_transcript (XdChatView *self)
 {
   GtkWidget *child;
 
@@ -515,26 +515,26 @@ clear_transcript (HyChatView *self)
 }
 
 static void
-load_transcript (HyChatView *self)
+load_transcript (XdChatView *self)
 {
   g_autoptr (GPtrArray) messages = NULL;
   g_autoptr (GError) error = NULL;
 
   clear_transcript (self);
 
-  messages = hy_storage_list_messages (self->storage,
-                                       hy_node_get_chat_id (self->chat), &error);
+  messages = xd_storage_list_messages (self->storage,
+                                       xd_node_get_chat_id (self->chat), &error);
   if (messages == NULL)
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
+      append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
   for (guint i = 0; i < messages->len; i++)
     {
-      const HyMessage *message = g_ptr_array_index (messages, i);
+      const XdMessage *message = g_ptr_array_index (messages, i);
       gboolean starts_run = g_strcmp0 (message->role, "assistant") == 0 &&
-        (i == 0 || g_strcmp0 (((HyMessage *) g_ptr_array_index (messages, i - 1))->role,
+        (i == 0 || g_strcmp0 (((XdMessage *) g_ptr_array_index (messages, i - 1))->role,
                               "assistant") != 0);
 
       /* The work's cost goes above the work: replies are stamped when the
@@ -542,13 +542,13 @@ load_transcript (HyChatView *self)
        * between them is how long the agent worked. */
       if (starts_run && i > 0)
         {
-          const HyMessage *before = g_ptr_array_index (messages, i - 1);
-          const HyMessage *last = message;
+          const XdMessage *before = g_ptr_array_index (messages, i - 1);
+          const XdMessage *last = message;
           gint64 seconds;
 
           for (guint j = i; j < messages->len; j++)
             {
-              const HyMessage *at = g_ptr_array_index (messages, j);
+              const XdMessage *at = g_ptr_array_index (messages, j);
 
               if (g_strcmp0 (at->role, "assistant") != 0)
                 break;
@@ -564,19 +564,19 @@ load_transcript (HyChatView *self)
         append_reply (self, message->content, message->label,
                       i + 1 == messages->len);
       else
-        append_row (self, hy_message_kind_from_role (message->role), message->content);
+        append_row (self, xd_message_kind_from_role (message->role), message->content);
     }
 }
 
 /* --- turns ---------------------------------------------------------------- */
 
 static Turn *
-current_turn (HyChatView *self)
+current_turn (XdChatView *self)
 {
   if (self->chat == NULL)
     return NULL;
 
-  return g_hash_table_lookup (self->turns, hy_node_get_chat_id (self->chat));
+  return g_hash_table_lookup (self->turns, xd_node_get_chat_id (self->chat));
 }
 
 static void
@@ -603,27 +603,27 @@ static gboolean
 turn_is_visible (Turn *turn)
 {
   return turn->view->chat != NULL &&
-         g_strcmp0 (hy_node_get_chat_id (turn->view->chat), turn->chat_id) == 0;
+         g_strcmp0 (xd_node_get_chat_id (turn->view->chat), turn->chat_id) == 0;
 }
 
 static void
-on_session_started (HyChatSession *session,
+on_session_started (XdChatSession *session,
                     const char    *session_id,
                     gpointer       user_data)
 {
   Turn *turn = user_data;
   g_autoptr (GError) error = NULL;
 
-  /* Stored immediately, and against the backend that issued it: if hy dies
+  /* Stored immediately, and against the backend that issued it: if xd dies
    * mid-reply the conversation can still be resumed from where the CLI left
    * it, and switching assistants does not overwrite the other's session. */
-  if (!hy_storage_set_session_id (turn->view->storage, turn->chat_id,
+  if (!xd_storage_set_session_id (turn->view->storage, turn->chat_id,
                                   turn->backend_id, session_id, &error))
     g_warning ("cannot store the session id: %s", error->message);
 }
 
 static void
-on_text_delta (HyChatSession *session,
+on_text_delta (XdChatSession *session,
                const char    *delta,
                gpointer       user_data)
 {
@@ -643,9 +643,9 @@ on_text_delta (HyChatSession *session,
    */
   if (turn->row == NULL && turn_is_visible (turn))
     {
-      turn->row = append_row (turn->view, HY_MESSAGE_ASSISTANT, NULL);
-      hy_message_row_set_source (turn->row, turn->label);
-      hy_message_row_set_waiting (turn->row, TRUE);
+      turn->row = append_row (turn->view, XD_MESSAGE_ASSISTANT, NULL);
+      xd_message_row_set_source (turn->row, turn->label);
+      xd_message_row_set_waiting (turn->row, TRUE);
       queue_scroll_to_bottom (turn->view);
     }
 }
@@ -673,12 +673,12 @@ close_segment (Turn *turn)
     {
       /* Show only what is safe to show: a question block becomes buttons when
        * the turn ends and must not appear as markup first. */
-      gsize visible = hy_ask_visible_length (turn->segment->str);
+      gsize visible = xd_ask_visible_length (turn->segment->str);
       g_autofree char *prose = g_strndup (turn->segment->str, visible);
 
       g_strchomp (prose);
-      hy_message_row_set_text (turn->row, prose);
-      hy_message_row_set_waiting (turn->row, FALSE);
+      xd_message_row_set_text (turn->row, prose);
+      xd_message_row_set_waiting (turn->row, FALSE);
       queue_scroll_to_bottom (turn->view);
     }
 
@@ -694,7 +694,7 @@ store_what_was_said (Turn *turn)
     {
       g_autoptr (GError) error = NULL;
 
-      if (!hy_storage_append_message (turn->view->storage, turn->chat_id,
+      if (!xd_storage_append_message (turn->view->storage, turn->chat_id,
                                       "assistant", g_ptr_array_index (turn->said, i),
                                       NULL, turn->label, &error))
         g_warning ("cannot store the reply: %s", error->message);
@@ -704,7 +704,7 @@ store_what_was_said (Turn *turn)
 }
 
 static void
-on_tool_use (HyChatSession *session,
+on_tool_use (XdChatSession *session,
              const char    *name,
              gpointer       user_data)
 {
@@ -717,13 +717,13 @@ on_tool_use (HyChatSession *session,
 }
 
 static void
-on_turn_finished (HyChatSession *session,
+on_turn_finished (XdChatSession *session,
                   gboolean       success,
                   const char    *message,
                   gpointer       user_data)
 {
   Turn *turn = user_data;
-  HyChatView *self = turn->view;
+  XdChatView *self = turn->view;
   g_autoptr (GError) error = NULL;
   g_autofree char *chat_id = g_strdup (turn->chat_id);
   g_autofree char *retry_prompt = NULL;
@@ -740,7 +740,7 @@ on_turn_finished (HyChatSession *session,
     {
       retry_prompt = g_strdup (turn->prompt);
 
-      if (!hy_storage_set_session_id (self->storage, chat_id, turn->backend_id,
+      if (!xd_storage_set_session_id (self->storage, chat_id, turn->backend_id,
                                       NULL, &error))
         g_warning ("cannot forget the stale session: %s", error->message);
 
@@ -749,7 +749,7 @@ on_turn_finished (HyChatSession *session,
 
       /* start_turn() marks it working again; without this the row would sit
        * idle for as long as the retry takes. */
-      hy_node_set_state (turn->node, HY_NODE_IDLE);
+      xd_node_set_state (turn->node, XD_NODE_IDLE);
 
       g_hash_table_remove (self->turns, chat_id);
 
@@ -761,13 +761,13 @@ on_turn_finished (HyChatSession *session,
 
   if (turn->row != NULL)
     {
-      g_autoptr (HyAsk) ask = hy_ask_parse (turn->segment->str, NULL);
+      g_autoptr (XdAsk) ask = xd_ask_parse (turn->segment->str, NULL);
 
-      hy_message_row_set_waiting (turn->row, FALSE);
+      xd_message_row_set_waiting (turn->row, FALSE);
 
       /* Nothing came back at all: say so rather than leaving a blank card. */
       if (turn->text->len == 0 && success)
-        hy_message_row_append (turn->row, "(no reply)");
+        xd_message_row_append (turn->row, "(no reply)");
 
       /* The block streamed in as text; re-render it as a question. */
       if (ask != NULL && visible)
@@ -787,9 +787,9 @@ on_turn_finished (HyChatSession *session,
    * draw them on, and is exactly the one worth marking.
    */
   {
-    g_autoptr (HyAsk) asked = hy_ask_parse (turn->segment->str, NULL);
+    g_autoptr (XdAsk) asked = xd_ask_parse (turn->segment->str, NULL);
 
-    hy_node_set_state (turn->node, asked != NULL ? HY_NODE_WAITING : HY_NODE_IDLE);
+    xd_node_set_state (turn->node, asked != NULL ? XD_NODE_WAITING : XD_NODE_IDLE);
   }
 
   /* Whatever was still being written when the turn ended is a message like
@@ -802,8 +802,8 @@ on_turn_finished (HyChatSession *session,
    * reply, so the next turn only has to replay what comes after. Read after
    * the reply is stored, or it would not count. */
   if (success &&
-      !hy_storage_set_last_seen (self->storage, chat_id, turn->backend_id,
-                                 hy_storage_last_message_id (self->storage, chat_id),
+      !xd_storage_set_last_seen (self->storage, chat_id, turn->backend_id,
+                                 xd_storage_last_message_id (self->storage, chat_id),
                                  &error))
     g_warning ("cannot record what the assistant has seen: %s", error->message);
 
@@ -812,12 +812,12 @@ on_turn_finished (HyChatSession *session,
       const char *text = message != NULL && *message != '\0'
                            ? message : "The backend stopped unexpectedly.";
 
-      if (!hy_storage_append_message (self->storage, chat_id, "error", text,
+      if (!xd_storage_append_message (self->storage, chat_id, "error", text,
                                       NULL, NULL, &error))
         g_warning ("cannot store the error: %s", error->message);
 
       if (visible)
-        append_row (self, HY_MESSAGE_ERROR, text);
+        append_row (self, XD_MESSAGE_ERROR, text);
     }
 
   if (visible)
@@ -836,8 +836,8 @@ on_turn_finished (HyChatSession *session,
     }
 
   /* An agent that edited anything has finished doing so. */
-  hy_diff_pane_refresh (self->diff);
-  hy_git_actions_refresh (self->git_actions);
+  xd_diff_pane_refresh (self->diff);
+  xd_git_actions_refresh (self->git_actions);
 
   /* Frees the turn, so nothing may touch it afterwards. */
   g_hash_table_remove (self->turns, chat_id);
@@ -853,7 +853,7 @@ on_turn_finished (HyChatSession *session,
 /* --- sending -------------------------------------------------------------- */
 
 static char *
-take_composer_text (HyChatView *self)
+take_composer_text (XdChatView *self)
 {
   GtkTextBuffer *buffer = gtk_text_view_get_buffer (self->composer);
   GtkTextIter start, end;
@@ -880,8 +880,8 @@ take_composer_text (HyChatView *self)
 /* Where the backend runs, which is how project context reaches the CLI. The
  * chat's own choice wins; otherwise the folder chain decides. */
 static const char *
-workdir_for (const HyChat              *chat,
-             const HyEffectiveSettings *resolved)
+workdir_for (const XdChat              *chat,
+             const XdEffectiveSettings *resolved)
 {
   if (chat->workdir != NULL && *chat->workdir != '\0')
     return chat->workdir;
@@ -905,7 +905,7 @@ workdir_for (const HyChat              *chat,
  * skipped; it travels as the prompt.
  */
 static char *
-build_handover (HyChatView *self,
+build_handover (XdChatView *self,
                 const char *chat_id,
                 gint64      last_seen)
 {
@@ -914,14 +914,14 @@ build_handover (HyChatView *self,
   gsize budget = 0;
   guint first;
 
-  messages = hy_storage_list_messages_since (self->storage, chat_id, last_seen, NULL);
+  messages = xd_storage_list_messages_since (self->storage, chat_id, last_seen, NULL);
   if (messages == NULL || messages->len < 2)
     return NULL;
 
   /* Walk back from the most recent, keeping what fits. */
   for (first = messages->len - 1; first > 0; first--)
     {
-      const HyMessage *message = g_ptr_array_index (messages, first - 1);
+      const XdMessage *message = g_ptr_array_index (messages, first - 1);
 
       budget += strlen (message->content) + 16;
       if (budget > HANDOVER_LIMIT_BYTES)
@@ -936,7 +936,7 @@ build_handover (HyChatView *self,
 
   for (guint i = first; i + 1 < messages->len; i++)
     {
-      const HyMessage *message = g_ptr_array_index (messages, i);
+      const XdMessage *message = g_ptr_array_index (messages, i);
       const char *who;
 
       if (g_strcmp0 (message->role, "user") == 0)
@@ -956,12 +956,12 @@ build_handover (HyChatView *self,
 }
 
 static void
-start_turn (HyChatView *self,
+start_turn (XdChatView *self,
             const char *prompt)
 {
-  g_autoptr (HyChat) chat = NULL;
+  g_autoptr (XdChat) chat = NULL;
   g_autoptr (GError) error = NULL;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
   g_autofree char *resume_session_id = NULL;
   g_autofree char *handover = NULL;
   g_autofree char *full_prompt = NULL;
@@ -970,11 +970,11 @@ start_turn (HyChatView *self,
   AiRunSpec spec = { 0 };
   Turn *turn;
 
-  chat = hy_storage_get_chat (self->storage, hy_node_get_chat_id (self->chat),
+  chat = xd_storage_get_chat (self->storage, xd_node_get_chat_id (self->chat),
                               &error);
   if (chat == NULL)
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
+      append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
@@ -984,17 +984,17 @@ start_turn (HyChatView *self,
       g_autofree char *text = g_strdup_printf ("Unknown backend “%s”.",
                                                chat->backend);
 
-      append_row (self, HY_MESSAGE_ERROR, text);
+      append_row (self, XD_MESSAGE_ERROR, text);
       return;
     }
 
-  resume_session_id = hy_storage_get_session_id (self->storage, chat->id,
+  resume_session_id = xd_storage_get_session_id (self->storage, chat->id,
                                                  backend->id, NULL);
 
   /* Whatever this backend has not been told -- because the chat is new, or
    * because those turns went to the other assistant. */
   handover = build_handover (self, chat->id,
-                             hy_storage_get_last_seen (self->storage, chat->id,
+                             xd_storage_get_last_seen (self->storage, chat->id,
                                                        backend->id));
 
   full_prompt = handover != NULL ? g_strdup_printf ("%s\n\n%s", handover, prompt)
@@ -1012,7 +1012,7 @@ start_turn (HyChatView *self,
   if (turn->anchor != NULL)
     g_object_add_weak_pointer (G_OBJECT (turn->anchor), (gpointer *) &turn->anchor);
 
-  hy_node_set_state (turn->node, HY_NODE_WORKING);
+  xd_node_set_state (turn->node, XD_NODE_WORKING);
   turn->chat_id = g_strdup (chat->id);
   turn->backend_id = g_strdup (backend->id);
   turn->prompt = g_strdup (prompt);
@@ -1020,14 +1020,14 @@ start_turn (HyChatView *self,
   turn->text = g_string_new (NULL);
   turn->segment = g_string_new (NULL);
   turn->said = g_ptr_array_new_with_free_func (g_free);
-  turn->session = hy_chat_session_new (backend);
+  turn->session = xd_chat_session_new (backend);
   /* Taken now rather than when the reply lands: the model can be changed
    * while the agent is still working, and what answered is whatever was
    * running when the turn started. */
   turn->label = reply_title (chat);
-  turn->row = append_row (self, HY_MESSAGE_ASSISTANT, NULL);
-  hy_message_row_set_source (turn->row, turn->label);
-  hy_message_row_set_waiting (turn->row, TRUE);
+  turn->row = append_row (self, XD_MESSAGE_ASSISTANT, NULL);
+  xd_message_row_set_source (turn->row, turn->label);
+  xd_message_row_set_waiting (turn->row, TRUE);
 
   g_signal_connect (turn->session, "session-started",
                     G_CALLBACK (on_session_started), turn);
@@ -1043,7 +1043,7 @@ start_turn (HyChatView *self,
   /* Resolved per turn rather than at creation, so editing a folder's
    * instructions or model takes effect on the next message instead of only on
    * chats made afterwards. */
-  resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
+  resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
 
   spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
@@ -1052,8 +1052,8 @@ start_turn (HyChatView *self,
   {
     g_autofree char *instructions =
       resolved->instructions != NULL
-        ? g_strdup_printf ("%s\n\n%s", resolved->instructions, hy_ask_instructions ())
-        : g_strdup (hy_ask_instructions ());
+        ? g_strdup_printf ("%s\n\n%s", resolved->instructions, xd_ask_instructions ())
+        : g_strdup (xd_ask_instructions ());
 
     spec.system_prompt = g_strdup (instructions);
     g_free (system_prompt);
@@ -1066,10 +1066,10 @@ start_turn (HyChatView *self,
   spec.access = chat->plan ? AI_ACCESS_PLAN
                            : ai_access_from_string (chat->access);
 
-  if (!hy_chat_session_start (turn->session, &spec, &error))
+  if (!xd_chat_session_start (turn->session, &spec, &error))
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
-      hy_storage_append_message (self->storage, chat->id, "error",
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      xd_storage_append_message (self->storage, chat->id, "error",
                                  error->message, NULL, NULL, NULL);
       g_hash_table_remove (self->turns, chat->id);
     }
@@ -1086,7 +1086,7 @@ start_turn (HyChatView *self,
  * whole extra round trip before the answer even starts.
  */
 static void
-name_chat_after_first_message (HyChatView *self,
+name_chat_after_first_message (XdChatView *self,
                                const char *prompt)
 {
   g_autoptr (GPtrArray) messages = NULL;
@@ -1095,11 +1095,11 @@ name_chat_after_first_message (HyChatView *self,
   const char *newline;
   glong length;
 
-  if (g_strcmp0 (hy_node_get_name (self->chat), "New Chat") != 0)
+  if (g_strcmp0 (xd_node_get_name (self->chat), "New Chat") != 0)
     return;
 
-  messages = hy_storage_list_messages (self->storage,
-                                       hy_node_get_chat_id (self->chat), &error);
+  messages = xd_storage_list_messages (self->storage,
+                                       xd_node_get_chat_id (self->chat), &error);
   if (messages == NULL || messages->len > 1)
     return;
 
@@ -1121,7 +1121,7 @@ name_chat_after_first_message (HyChatView *self,
   if (*title == '\0')
     return;
 
-  if (!hy_fs_tree_rename_chat (self->tree, self->chat, title, &error))
+  if (!xd_fs_tree_rename_chat (self->tree, self->chat, title, &error))
     {
       g_warning ("cannot name the chat: %s", error->message);
       return;
@@ -1131,7 +1131,7 @@ name_chat_after_first_message (HyChatView *self,
 }
 
 static void
-send_message (HyChatView *self,
+send_message (XdChatView *self,
               const char *text)
 {
   g_autoptr (GError) error = NULL;
@@ -1143,18 +1143,18 @@ send_message (HyChatView *self,
   if (current_turn (self) != NULL)
     return;
 
-  if (!hy_storage_append_message (self->storage, hy_node_get_chat_id (self->chat),
+  if (!xd_storage_append_message (self->storage, xd_node_get_chat_id (self->chat),
                                   "user", text, NULL, NULL, &error))
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
+      append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
   retire_open_questions (self);
-  hy_node_set_state (self->chat, HY_NODE_IDLE);
-  append_row (self, HY_MESSAGE_USER, text);
+  xd_node_set_state (self->chat, XD_NODE_IDLE);
+  append_row (self, XD_MESSAGE_USER, text);
   name_chat_after_first_message (self, text);
-  hy_fs_tree_bump_chat (self->tree, self->chat);
+  xd_fs_tree_bump_chat (self->tree, self->chat);
 
   start_turn (self, text);
 }
@@ -1167,7 +1167,7 @@ send_message (HyChatView *self,
 #define PREVIEW_MAX_WIDTH 168
 
 static void
-forget_attachments (HyChatView *self)
+forget_attachments (XdChatView *self)
 {
   g_ptr_array_set_size (self->attachments, 0);
 
@@ -1183,7 +1183,7 @@ static void
 on_attachment_removed (GtkButton *button,
                        gpointer   user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   GtkWidget *chip = gtk_widget_get_ancestor (GTK_WIDGET (button), GTK_TYPE_OVERLAY);
   const char *path = g_object_get_data (G_OBJECT (chip), "path");
 
@@ -1210,10 +1210,10 @@ on_attachment_removed (GtkButton *button,
  * nothing about whether the right thing was captured.
  */
 static void
-add_attachment (HyChatView *self,
+add_attachment (XdChatView *self,
                 GdkTexture *texture)
 {
-  g_autofree char *directory = g_build_filename (g_get_user_cache_dir (), "hy",
+  g_autofree char *directory = g_build_filename (g_get_user_cache_dir (), "xd",
                                                  "pasted", NULL);
   g_autofree char *name = NULL;
   g_autofree char *path = NULL;
@@ -1224,7 +1224,7 @@ add_attachment (HyChatView *self,
 
   if (g_mkdir_with_parents (directory, 0700) != 0)
     {
-      append_row (self, HY_MESSAGE_ERROR, "Cannot write the pasted image.");
+      append_row (self, XD_MESSAGE_ERROR, "Cannot write the pasted image.");
       return;
     }
 
@@ -1235,7 +1235,7 @@ add_attachment (HyChatView *self,
 
   if (!gdk_texture_save_to_png (texture, path))
     {
-      append_row (self, HY_MESSAGE_ERROR, "Cannot write the pasted image.");
+      append_row (self, XD_MESSAGE_ERROR, "Cannot write the pasted image.");
       return;
     }
 
@@ -1312,7 +1312,7 @@ on_texture_pasted (GObject      *source,
                    GAsyncResult *result,
                    gpointer      user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   g_autoptr (GdkTexture) texture = NULL;
   g_autoptr (GError) error = NULL;
 
@@ -1329,7 +1329,7 @@ on_texture_pasted (GObject      *source,
 
 /* True when the clipboard holds an image, which is pasted as one. */
 static gboolean
-paste_image (HyChatView *self)
+paste_image (XdChatView *self)
 {
   GdkClipboard *clipboard = gtk_widget_get_clipboard (GTK_WIDGET (self));
   GdkContentFormats *formats = gdk_clipboard_get_formats (clipboard);
@@ -1345,7 +1345,7 @@ paste_image (HyChatView *self)
 /* --- messages typed while the agent is working ------------------------------ */
 
 static void
-show_queued (HyChatView *self)
+show_queued (XdChatView *self)
 {
   gtk_widget_set_visible (self->queued_bar, self->queued != NULL);
 
@@ -1354,7 +1354,7 @@ show_queued (HyChatView *self)
 }
 
 static void
-queue_message (HyChatView *self,
+queue_message (XdChatView *self,
                const char *text)
 {
   /* A second message replaces the first rather than piling up: what is meant
@@ -1372,7 +1372,7 @@ queue_message (HyChatView *self,
  * it is stored, shown and answered like anything else.
  */
 static void
-send_queued (HyChatView *self)
+send_queued (XdChatView *self)
 {
   g_autofree char *text = g_steal_pointer (&self->queued);
 
@@ -1394,11 +1394,11 @@ static void
 on_steer_clicked (GtkButton *button,
                   gpointer   user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   Turn *turn = current_turn (self);
 
   if (turn != NULL)
-    hy_chat_session_cancel (turn->session);
+    xd_chat_session_cancel (turn->session);
   /* The queued text goes out when the turn reports that it has stopped. */
 }
 
@@ -1406,14 +1406,14 @@ static void
 on_queued_dropped (GtkButton *button,
                    gpointer   user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
 
   g_clear_pointer (&self->queued, g_free);
   show_queued (self);
 }
 
 static void
-send_current_message (HyChatView *self)
+send_current_message (XdChatView *self)
 {
   g_autofree char *text = take_composer_text (self);
   g_autoptr (GString) message = NULL;
@@ -1459,7 +1459,7 @@ send_current_message (HyChatView *self)
 }
 
 static void
-update_send_button (HyChatView *self)
+update_send_button (XdChatView *self)
 {
   gboolean running = current_turn (self) != NULL;
 
@@ -1490,7 +1490,7 @@ update_send_button (HyChatView *self)
 static char *
 describe_context (const char *workdir)
 {
-  g_autoptr (HyGitInfo) git = hy_git_info_for_path (workdir);
+  g_autoptr (XdGitInfo) git = xd_git_info_for_path (workdir);
   g_autoptr (GString) text = g_string_new (NULL);
 
   if (workdir == NULL)
@@ -1575,7 +1575,7 @@ set_end_child_size (GtkPaned *paned,
 }
 
 static void
-set_terminal_height (HyChatView *self,
+set_terminal_height (XdChatView *self,
                      int         height)
 {
   set_end_child_size (self->split, height, TRUE);
@@ -1589,14 +1589,14 @@ set_terminal_height (HyChatView *self,
  * worse, write it against whichever chat was open a moment ago.
  */
 static void
-remember_panes (HyChatView *self)
+remember_panes (XdChatView *self)
 {
   g_autoptr (GError) error = NULL;
 
   if (self->syncing_panes || self->chat == NULL)
     return;
 
-  if (!hy_storage_set_panes (self->storage, hy_node_get_chat_id (self->chat),
+  if (!xd_storage_set_panes (self->storage, xd_node_get_chat_id (self->chat),
                              gtk_toggle_button_get_active (self->terminal_button),
                              gtk_toggle_button_get_active (self->diff_button),
                              &error))
@@ -1618,7 +1618,7 @@ on_terminal_dragged (GtkPaned   *paned,
                      GParamSpec *pspec,
                      gpointer    user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   int height = gtk_widget_get_height (GTK_WIDGET (self->terminal));
 
   if (height > 0 && gtk_widget_get_visible (GTK_WIDGET (self->terminal)))
@@ -1630,7 +1630,7 @@ on_diff_dragged (GtkPaned   *paned,
                  GParamSpec *pspec,
                  gpointer    user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   int width = gtk_widget_get_width (GTK_WIDGET (self->diff));
 
   if (width > 0 && gtk_widget_get_visible (GTK_WIDGET (self->diff)))
@@ -1641,7 +1641,7 @@ static void
 on_diff_toggled (GtkToggleButton *button,
                  gpointer         user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   gboolean shown = gtk_toggle_button_get_active (button);
 
   remember_panes (self);
@@ -1662,27 +1662,27 @@ on_diff_toggled (GtkToggleButton *button,
   set_end_child_size (self->side_split,
                       g_settings_get_int (self->settings, "diff-width"), FALSE);
 
-  hy_diff_pane_refresh (self->diff);
+  xd_diff_pane_refresh (self->diff);
 }
 
 /* The panel asked to go away; the button has to agree, or it would take two
  * clicks to open it again. */
 static void
-close_terminal (HyChatView *self)
+close_terminal (XdChatView *self)
 {
   gtk_toggle_button_set_active (self->terminal_button, FALSE);
 }
 
 /* A chat that no longer exists has no business keeping shells alive. */
 static void
-forget_chat_sessions (HyChatView *self,
-                      HyNode     *chat)
+forget_chat_sessions (XdChatView *self,
+                      XdNode     *chat)
 {
-  hy_terminal_panel_forget_chat (self->terminal, hy_node_get_chat_id (chat));
+  xd_terminal_panel_forget_chat (self->terminal, xd_node_get_chat_id (chat));
 }
 
 static int
-terminal_height (HyChatView *self)
+terminal_height (XdChatView *self)
 {
   int height = gtk_widget_get_height (GTK_WIDGET (self->terminal));
 
@@ -1701,7 +1701,7 @@ static void
 on_terminal_toggled (GtkToggleButton *button,
                      gpointer         user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   gboolean shown = gtk_toggle_button_get_active (button);
 
   remember_panes (self);
@@ -1720,19 +1720,19 @@ on_terminal_toggled (GtkToggleButton *button,
   /* Only take the keyboard when the user asked for the panel, not when it is
    * being reopened because a chat had it open. */
   if (self->syncing_panes)
-    hy_terminal_panel_start (self->terminal);
+    xd_terminal_panel_start (self->terminal);
   else
-    hy_terminal_panel_activate (self->terminal);
+    xd_terminal_panel_activate (self->terminal);
 }
 
 static void
-update_context_bar (HyChatView   *self,
-                    const HyChat *chat)
+update_context_bar (XdChatView   *self,
+                    const XdChat *chat)
 {
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
   g_autofree char *description = NULL;
 
-  resolved = hy_settings_resolve (hy_node_get_parent (self->chat), chat->backend);
+  resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
   description = describe_context (workdir_for (chat, resolved));
 
   gtk_label_set_label (self->context_label, description);
@@ -1744,10 +1744,10 @@ update_context_bar (HyChatView   *self,
     g_autofree char *tooltip =
       have_workdir ? g_strdup_printf ("Terminal in %s", workdir) : NULL;
 
-    hy_terminal_panel_set_chat (self->terminal, hy_node_get_chat_id (self->chat));
-    hy_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
-    hy_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
-    hy_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
+    xd_terminal_panel_set_chat (self->terminal, xd_node_get_chat_id (self->chat));
+    xd_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
+    xd_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
+    xd_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
 
     /* The panes belong to the chat, so opening one brings them back. */
     self->syncing_panes = TRUE;
@@ -1760,7 +1760,7 @@ update_context_bar (HyChatView   *self,
                                  have_workdir ? tooltip : "This chat has no working directory");
   }
 
-  hy_model_picker_set_selected (self->model_picker, chat->backend,
+  xd_model_picker_set_selected (self->model_picker, chat->backend,
                                 chat->model != NULL ? chat->model : resolved->model);
 
   self->syncing_run_options = TRUE;
@@ -1790,17 +1790,17 @@ static void
 on_plan_toggled (GtkToggleButton *toggle,
                  gpointer         user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
   gboolean plan = gtk_toggle_button_get_active (self->plan_toggle);
 
   if (self->syncing_run_options || self->chat == NULL)
     return;
 
-  if (!hy_storage_set_plan (self->storage, hy_node_get_chat_id (self->chat),
+  if (!xd_storage_set_plan (self->storage, xd_node_get_chat_id (self->chat),
                             plan, &error))
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
+      append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
@@ -1812,7 +1812,7 @@ on_effort_selected (GtkDropDown *chooser,
                     GParamSpec  *pspec,
                     gpointer     user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
   guint selected = gtk_drop_down_get_selected (chooser);
 
@@ -1820,10 +1820,10 @@ on_effort_selected (GtkDropDown *chooser,
       selected >= G_N_ELEMENTS (effort_choices))
     return;
 
-  if (!hy_storage_set_effort (self->storage, hy_node_get_chat_id (self->chat),
+  if (!xd_storage_set_effort (self->storage, xd_node_get_chat_id (self->chat),
                               ai_effort_to_string (effort_choices[selected]),
                               &error))
-    append_row (self, HY_MESSAGE_ERROR, error->message);
+    append_row (self, XD_MESSAGE_ERROR, error->message);
 }
 
 static void
@@ -1831,7 +1831,7 @@ on_access_selected (GtkDropDown *chooser,
                     GParamSpec  *pspec,
                     gpointer     user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
   guint selected = gtk_drop_down_get_selected (chooser);
 
@@ -1839,44 +1839,44 @@ on_access_selected (GtkDropDown *chooser,
       selected >= G_N_ELEMENTS (access_choices))
     return;
 
-  if (!hy_storage_set_access (self->storage, hy_node_get_chat_id (self->chat),
+  if (!xd_storage_set_access (self->storage, xd_node_get_chat_id (self->chat),
                               ai_access_to_string (access_choices[selected]),
                               &error))
-    append_row (self, HY_MESSAGE_ERROR, error->message);
+    append_row (self, XD_MESSAGE_ERROR, error->message);
 }
 
 static void
-on_model_chosen (HyModelPicker *picker,
+on_model_chosen (XdModelPicker *picker,
                  const char    *backend_id,
                  const char    *model_id,
                  gpointer       user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
-  g_autoptr (HyChat) chat = NULL;
+  g_autoptr (XdChat) chat = NULL;
   const char *chat_id;
   gboolean backend_changed;
 
   if (self->chat == NULL)
     return;
 
-  chat_id = hy_node_get_chat_id (self->chat);
-  chat = hy_storage_get_chat (self->storage, chat_id, NULL);
+  chat_id = xd_node_get_chat_id (self->chat);
+  chat = xd_storage_get_chat (self->storage, chat_id, NULL);
   if (chat == NULL)
     return;
 
   backend_changed = g_strcmp0 (chat->backend, backend_id) != 0;
 
   if (backend_changed &&
-      !hy_storage_set_backend (self->storage, chat_id, backend_id, &error))
+      !xd_storage_set_backend (self->storage, chat_id, backend_id, &error))
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
+      append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
-  if (!hy_storage_set_model (self->storage, chat_id, model_id, &error))
+  if (!xd_storage_set_model (self->storage, chat_id, model_id, &error))
     {
-      append_row (self, HY_MESSAGE_ERROR, error->message);
+      append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
@@ -1886,7 +1886,7 @@ on_model_chosen (HyModelPicker *picker,
       const AiBackend *backend = ai_backend_lookup (backend_id);
 
       if (backend != NULL)
-        hy_node_set_icon_name (self->chat, backend->icon_name);
+        xd_node_set_icon_name (self->chat, backend->icon_name);
     }
 
   /* Said in the chat, and stored with it: a transcript where the voice
@@ -1902,11 +1902,11 @@ on_model_chosen (HyModelPicker *picker,
 
       if (event != NULL)
         {
-          if (!hy_storage_append_message (self->storage, chat_id, "event",
+          if (!xd_storage_append_message (self->storage, chat_id, "event",
                                           event, NULL, NULL, &error))
             g_warning ("cannot store the switch: %s", error->message);
 
-          append_row (self, HY_MESSAGE_TOOL, event);
+          append_row (self, XD_MESSAGE_TOOL, event);
         }
     }
 
@@ -1916,7 +1916,7 @@ on_model_chosen (HyModelPicker *picker,
    * conversation carries over. */
 
   {
-    g_autoptr (HyChat) updated = hy_storage_get_chat (self->storage, chat_id, NULL);
+    g_autoptr (XdChat) updated = xd_storage_get_chat (self->storage, chat_id, NULL);
 
     if (updated != NULL)
       update_context_bar (self, updated);
@@ -1927,11 +1927,11 @@ static void
 on_send_clicked (GtkButton *button,
                  gpointer   user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
   Turn *turn = current_turn (self);
 
   if (turn != NULL)
-    hy_chat_session_cancel (turn->session);
+    xd_chat_session_cancel (turn->session);
   else
     send_current_message (self);
 }
@@ -1943,7 +1943,7 @@ on_composer_key (GtkEventControllerKey *controller,
                  GdkModifierType        state,
                  gpointer               user_data)
 {
-  HyChatView *self = user_data;
+  XdChatView *self = user_data;
 
   /* An image in the clipboard is pasted as an image; anything else falls
    * through to the text view's own handling. */
@@ -1964,12 +1964,12 @@ on_composer_key (GtkEventControllerKey *controller,
 /* --- public API ----------------------------------------------------------- */
 
 void
-hy_chat_view_set_chat (HyChatView *self,
-                       HyNode     *chat)
+xd_chat_view_set_chat (XdChatView *self,
+                       XdNode     *chat)
 {
   Turn *turn;
 
-  g_return_if_fail (HY_IS_CHAT_VIEW (self));
+  g_return_if_fail (XD_IS_CHAT_VIEW (self));
 
   /* The outgoing chat's row is about to be destroyed with the transcript. */
   turn = current_turn (self);
@@ -1980,22 +1980,22 @@ hy_chat_view_set_chat (HyChatView *self,
 
   if (chat == NULL)
     {
-      hy_terminal_panel_set_chat (self->terminal, NULL);
+      xd_terminal_panel_set_chat (self->terminal, NULL);
       clear_transcript (self);
       gtk_stack_set_visible_child_name (self->stack, "empty");
       gtk_widget_set_visible (self->composer_area, FALSE);
-      adw_window_title_set_title (self->title, "hy");
+      adw_window_title_set_title (self->title, "xd");
       adw_window_title_set_subtitle (self->title, NULL);
       return;
     }
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
   gtk_widget_set_visible (self->composer_area, TRUE);
-  adw_window_title_set_title (self->title, hy_node_get_name (chat));
+  adw_window_title_set_title (self->title, xd_node_get_name (chat));
 
   {
-    g_autoptr (HyChat) record = hy_storage_get_chat (self->storage,
-                                                     hy_node_get_chat_id (chat),
+    g_autoptr (XdChat) record = xd_storage_get_chat (self->storage,
+                                                     xd_node_get_chat_id (chat),
                                                      NULL);
 
     if (record != NULL)
@@ -2013,40 +2013,40 @@ hy_chat_view_set_chat (HyChatView *self,
        * the chat is next reopened. */
       for (guint i = 0; i < turn->said->len; i++)
         {
-          HyMessageRow *said =
-            append_row (self, HY_MESSAGE_ASSISTANT,
+          XdMessageRow *said =
+            append_row (self, XD_MESSAGE_ASSISTANT,
                         g_ptr_array_index (turn->said, i));
 
-          hy_message_row_set_source (said, turn->label);
+          xd_message_row_set_source (said, turn->label);
         }
 
-      turn->row = append_row (self, HY_MESSAGE_ASSISTANT, turn->segment->str);
-      hy_message_row_set_source (turn->row, turn->label);
-      hy_message_row_set_waiting (turn->row, TRUE);
+      turn->row = append_row (self, XD_MESSAGE_ASSISTANT, turn->segment->str);
+      xd_message_row_set_source (turn->row, turn->label);
+      xd_message_row_set_waiting (turn->row, TRUE);
     }
 
   update_send_button (self);
   gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 }
 
-HyNode *
-hy_chat_view_get_chat (HyChatView *self)
+XdNode *
+xd_chat_view_get_chat (XdChatView *self)
 {
-  g_return_val_if_fail (HY_IS_CHAT_VIEW (self), NULL);
+  g_return_val_if_fail (XD_IS_CHAT_VIEW (self), NULL);
 
   return self->chat;
 }
 
-HyChatView *
-hy_chat_view_new (HyStorage *storage,
-                  HyFsTree  *tree)
+XdChatView *
+xd_chat_view_new (XdStorage *storage,
+                  XdFsTree  *tree)
 {
-  HyChatView *self;
+  XdChatView *self;
 
-  g_return_val_if_fail (HY_IS_STORAGE (storage), NULL);
-  g_return_val_if_fail (HY_IS_FS_TREE (tree), NULL);
+  g_return_val_if_fail (XD_IS_STORAGE (storage), NULL);
+  g_return_val_if_fail (XD_IS_FS_TREE (tree), NULL);
 
-  self = g_object_new (HY_TYPE_CHAT_VIEW, NULL);
+  self = g_object_new (XD_TYPE_CHAT_VIEW, NULL);
   self->storage = g_object_ref (storage);
   self->tree = g_object_ref (tree);
 
@@ -2054,7 +2054,7 @@ hy_chat_view_new (HyStorage *storage,
   g_signal_connect_swapped (self->tree, "chat-removed",
                             G_CALLBACK (forget_chat_sessions), self);
 
-  hy_chat_view_set_chat (self, NULL);
+  xd_chat_view_set_chat (self, NULL);
 
   return self;
 }
@@ -2067,7 +2067,7 @@ hy_chat_view_new (HyStorage *storage,
  * will be looking at, so both sit next to the text.
  */
 static GtkWidget *
-build_composer (HyChatView *self)
+build_composer (XdChatView *self)
 {
   GtkWidget *frame = gtk_frame_new (NULL);
   GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
@@ -2136,7 +2136,7 @@ build_composer (HyChatView *self)
   gtk_widget_set_margin_start (self->attachments_bar, 10);
   gtk_widget_set_margin_end (self->attachments_bar, 10);
 
-  self->model_picker = hy_model_picker_new ();
+  self->model_picker = xd_model_picker_new ();
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->model_picker),
                                "Which assistant and model answer in this chat");
   g_signal_connect (self->model_picker, "model-chosen",
@@ -2266,7 +2266,7 @@ build_composer (HyChatView *self)
   gtk_box_append (GTK_BOX (column), self->queued_bar);
   gtk_box_append (GTK_BOX (column), self->attachments_bar);
   gtk_box_append (GTK_BOX (column), scroller);
-  gtk_widget_add_css_class (toolbar, "hy-composer");
+  gtk_widget_add_css_class (toolbar, "xd-composer");
   gtk_box_append (GTK_BOX (column), toolbar);
 
   gtk_frame_set_child (GTK_FRAME (frame), column);
@@ -2286,7 +2286,7 @@ build_composer (HyChatView *self)
     GtkWidget *context = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
 
     gtk_box_append (GTK_BOX (context), GTK_WIDGET (self->context_label));
-    gtk_widget_add_css_class (context, "hy-context");
+    gtk_widget_add_css_class (context, "xd-context");
     gtk_widget_add_css_class (context, "dim-label");
     gtk_widget_set_margin_start (context, 26);
     gtk_widget_set_margin_end (context, 26);
@@ -2300,9 +2300,9 @@ build_composer (HyChatView *self)
 }
 
 static void
-hy_chat_view_dispose (GObject *object)
+xd_chat_view_dispose (GObject *object)
 {
-  HyChatView *self = HY_CHAT_VIEW (object);
+  XdChatView *self = XD_CHAT_VIEW (object);
 
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
@@ -2312,17 +2312,17 @@ hy_chat_view_dispose (GObject *object)
   g_clear_object (&self->storage);
   g_clear_object (&self->tree);
 
-  G_OBJECT_CLASS (hy_chat_view_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_chat_view_parent_class)->dispose (object);
 }
 
 static void
-hy_chat_view_class_init (HyChatViewClass *klass)
+xd_chat_view_class_init (XdChatViewClass *klass)
 {
-  G_OBJECT_CLASS (klass)->dispose = hy_chat_view_dispose;
+  G_OBJECT_CLASS (klass)->dispose = xd_chat_view_dispose;
 }
 
 static void
-hy_chat_view_init (HyChatView *self)
+xd_chat_view_init (XdChatView *self)
 {
   GtkWidget *toolbar = adw_toolbar_view_new ();
   GtkWidget *header = adw_header_bar_new ();
@@ -2330,10 +2330,10 @@ hy_chat_view_init (HyChatView *self)
   GtkWidget *empty = adw_status_page_new ();
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
-  self->settings = g_settings_new (HY_APP_ID);
+  self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
 
-  self->title = ADW_WINDOW_TITLE (adw_window_title_new ("hy", NULL));
+  self->title = ADW_WINDOW_TITLE (adw_window_title_new ("xd", NULL));
   adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));
 
   /* The sidebar is the leftmost header bar, so whatever the desktop puts on
@@ -2343,7 +2343,7 @@ hy_chat_view_init (HyChatView *self)
   /* At the top: these open and close parts of the window, which is what the
    * header bar is for. The row under the composer decides how the next
    * message is answered, which is a different question. */
-  self->git_actions = hy_git_actions_new ();
+  self->git_actions = xd_git_actions_new ();
   adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->git_actions));
 
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
@@ -2412,9 +2412,9 @@ hy_chat_view_init (HyChatView *self)
   /* The terminal shares the window with the conversation rather than covering
    * it: the reason to open one is usually to check something the agent just
    * said, which means reading both at once. */
-  self->terminal = hy_terminal_panel_new ();
+  self->terminal = xd_terminal_panel_new ();
   gtk_widget_set_visible (GTK_WIDGET (self->terminal), FALSE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->terminal), "hy-divider-top");
+  gtk_widget_add_css_class (GTK_WIDGET (self->terminal), "xd-divider-top");
   g_signal_connect_swapped (self->terminal, "close-requested",
                             G_CALLBACK (close_terminal), self);
 
@@ -2430,9 +2430,9 @@ hy_chat_view_init (HyChatView *self)
 
   /* The diff sits beside the conversation and the terminal together, since
    * it is about the repository rather than about either of them. */
-  self->diff = hy_diff_pane_new ();
+  self->diff = xd_diff_pane_new ();
   gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->diff), "hy-divider-left");
+  gtk_widget_add_css_class (GTK_WIDGET (self->diff), "xd-divider-left");
 
   self->side_split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
   g_signal_connect (self->side_split, "notify::position",
@@ -2444,11 +2444,11 @@ hy_chat_view_init (HyChatView *self)
   gtk_paned_set_resize_end_child (self->side_split, FALSE);
   gtk_paned_set_shrink_end_child (self->side_split, FALSE);
 
-  /* Named so the stylesheet can reach them; see HY_STYLE. */
-  gtk_widget_add_css_class (toolbar, "hy-surface");
-  gtk_widget_add_css_class (content, "hy-surface");
-  gtk_widget_add_css_class (GTK_WIDGET (self->scroller), "hy-surface");
-  gtk_widget_add_css_class (GTK_WIDGET (self->stack), "hy-surface");
+  /* Named so the stylesheet can reach them; see XD_STYLE. */
+  gtk_widget_add_css_class (toolbar, "xd-surface");
+  gtk_widget_add_css_class (content, "xd-surface");
+  gtk_widget_add_css_class (GTK_WIDGET (self->scroller), "xd-surface");
+  gtk_widget_add_css_class (GTK_WIDGET (self->stack), "xd-surface");
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), GTK_WIDGET (self->side_split));
 

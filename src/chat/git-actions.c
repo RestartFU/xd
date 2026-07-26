@@ -20,7 +20,7 @@ typedef enum
   ACTION_VIEW_PULL_REQUEST,
 } GitAction;
 
-struct _HyGitActions
+struct _XdGitActions
 {
   AdwBin parent_instance;
 
@@ -31,7 +31,7 @@ struct _HyGitActions
   GtkButton *primary;
 };
 
-G_DEFINE_FINAL_TYPE (HyGitActions, hy_git_actions, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (XdGitActions, xd_git_actions, ADW_TYPE_BIN)
 
 /*
  * Everything the decision needs, in one run.
@@ -72,7 +72,7 @@ on_action_finished (GObject      *source,
                     GAsyncResult *result,
                     gpointer      user_data)
 {
-  HyGitActions *self = user_data;
+  XdGitActions *self = user_data;
   g_autofree char *output = NULL;
   g_autofree char *errors = NULL;
   g_autoptr (GError) error = NULL;
@@ -92,7 +92,7 @@ on_action_finished (GObject      *source,
       adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
     }
 
-  hy_git_actions_refresh (self);
+  xd_git_actions_refresh (self);
 }
 
 /*
@@ -103,7 +103,7 @@ on_action_finished (GObject      *source,
  * one the user configured.
  */
 static void
-run_script (HyGitActions        *self,
+run_script (XdGitActions        *self,
             const char          *script,
             const char          *argument,
             GAsyncReadyCallback  callback)
@@ -111,7 +111,7 @@ run_script (HyGitActions        *self,
   g_autoptr (GSubprocessLauncher) launcher = NULL;
   g_autoptr (GSubprocess) process = NULL;
   g_autoptr (GError) error = NULL;
-  g_auto (GStrv) env = hy_host_environ ();
+  g_auto (GStrv) env = xd_host_environ ();
 
   if (self->workdir == NULL)
     return;
@@ -146,7 +146,7 @@ on_state_read (GObject      *source,
                GAsyncResult *result,
                gpointer      user_data)
 {
-  HyGitActions *self = user_data;
+  XdGitActions *self = user_data;
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) lines = NULL;
@@ -198,9 +198,9 @@ on_state_read (GObject      *source,
 }
 
 void
-hy_git_actions_refresh (HyGitActions *self)
+xd_git_actions_refresh (XdGitActions *self)
 {
-  g_return_if_fail (HY_IS_GIT_ACTIONS (self));
+  g_return_if_fail (XD_IS_GIT_ACTIONS (self));
 
   g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
@@ -216,10 +216,10 @@ hy_git_actions_refresh (HyGitActions *self)
 }
 
 void
-hy_git_actions_set_workdir (HyGitActions *self,
+xd_git_actions_set_workdir (XdGitActions *self,
                             const char   *workdir)
 {
-  g_return_if_fail (HY_IS_GIT_ACTIONS (self));
+  g_return_if_fail (XD_IS_GIT_ACTIONS (self));
 
   if (g_strcmp0 (self->workdir, workdir) == 0)
     return;
@@ -227,7 +227,7 @@ hy_git_actions_set_workdir (HyGitActions *self,
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
 
-  hy_git_actions_refresh (self);
+  xd_git_actions_refresh (self);
 }
 
 /* --- the actions themselves ------------------------------------------------ */
@@ -237,7 +237,7 @@ on_message_written (GObject      *source,
                     GAsyncResult *result,
                     gpointer      user_data)
 {
-  HyGitActions *self = user_data;
+  XdGitActions *self = user_data;
   AdwAlertDialog *dialog = ADW_ALERT_DIALOG (source);
   const char *response = adw_alert_dialog_choose_finish (dialog, result);
   GtkEditable *entry = g_object_get_data (G_OBJECT (dialog), "entry");
@@ -253,7 +253,7 @@ on_message_written (GObject      *source,
 }
 
 static void
-commit (HyGitActions *self)
+commit (XdGitActions *self)
 {
   AdwAlertDialog *dialog =
     ADW_ALERT_DIALOG (adw_alert_dialog_new ("Commit Everything Changed", NULL));
@@ -277,7 +277,7 @@ commit (HyGitActions *self)
 }
 
 static void
-run_action (HyGitActions *self,
+run_action (XdGitActions *self,
             GitAction     action)
 {
   switch (action)
@@ -311,37 +311,37 @@ static void
 on_primary_clicked (GtkButton *button,
                     gpointer   user_data)
 {
-  HyGitActions *self = user_data;
+  XdGitActions *self = user_data;
 
   run_action (self, self->suggested);
 }
 
-HyGitActions *
-hy_git_actions_new (void)
+XdGitActions *
+xd_git_actions_new (void)
 {
-  return g_object_new (HY_TYPE_GIT_ACTIONS, NULL);
+  return g_object_new (XD_TYPE_GIT_ACTIONS, NULL);
 }
 
 static void
-hy_git_actions_dispose (GObject *object)
+xd_git_actions_dispose (GObject *object)
 {
-  HyGitActions *self = HY_GIT_ACTIONS (object);
+  XdGitActions *self = XD_GIT_ACTIONS (object);
 
   g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->workdir, g_free);
 
-  G_OBJECT_CLASS (hy_git_actions_parent_class)->dispose (object);
+  G_OBJECT_CLASS (xd_git_actions_parent_class)->dispose (object);
 }
 
 static void
-hy_git_actions_class_init (HyGitActionsClass *klass)
+xd_git_actions_class_init (XdGitActionsClass *klass)
 {
-  G_OBJECT_CLASS (klass)->dispose = hy_git_actions_dispose;
+  G_OBJECT_CLASS (klass)->dispose = xd_git_actions_dispose;
 }
 
 static void
-hy_git_actions_init (HyGitActions *self)
+xd_git_actions_init (XdGitActions *self)
 {
   /* Words, no icon. An icon the theme does not carry draws as a broken-image
    * box, and there is no icon for "create a pull request" that is clearer

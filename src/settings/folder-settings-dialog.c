@@ -6,10 +6,10 @@
 
 typedef struct
 {
-  HyNode *folder;                 /* unowned; owned by the tree */
+  XdNode *folder;                 /* unowned; owned by the tree */
   GSettings *app_settings;
-  HyFolderSettings *settings;     /* the folder's own, being edited */
-  HyEffectiveSettings *inherited; /* the parent chain's, for the subtitles */
+  XdFolderSettings *settings;     /* the folder's own, being edited */
+  XdEffectiveSettings *inherited; /* the parent chain's, for the subtitles */
 
   AdwComboRow *backend_row;
   AdwEntryRow *model_row;
@@ -27,8 +27,8 @@ editor_free (gpointer data)
   Editor *editor = data;
 
   g_clear_object (&editor->app_settings);
-  g_clear_pointer (&editor->settings, hy_folder_settings_free);
-  g_clear_pointer (&editor->inherited, hy_effective_settings_free);
+  g_clear_pointer (&editor->settings, xd_folder_settings_free);
+  g_clear_pointer (&editor->inherited, xd_effective_settings_free);
   g_free (editor->workdir);
   g_free (editor->repo);
   g_free (editor);
@@ -249,7 +249,7 @@ on_dialog_closed (AdwDialog *dialog,
   g_clear_pointer (&editor->settings->instructions, g_free);
   editor->settings->instructions = text_view_take_text (editor->instructions);
 
-  if (!hy_folder_settings_save (editor->settings, hy_node_get_path (editor->folder),
+  if (!xd_folder_settings_save (editor->settings, xd_node_get_path (editor->folder),
                                 &error))
     g_warning ("cannot save folder settings: %s", error->message);
 }
@@ -257,8 +257,8 @@ on_dialog_closed (AdwDialog *dialog,
 /* --- construction --------------------------------------------------------- */
 
 void
-hy_folder_settings_dialog_present (GtkWidget *parent,
-                                   HyNode    *folder,
+xd_folder_settings_dialog_present (GtkWidget *parent,
+                                   XdNode    *folder,
                                    GSettings *app_settings)
 {
   g_autoptr (GError) error = NULL;
@@ -275,14 +275,14 @@ hy_folder_settings_dialog_present (GtkWidget *parent,
   guint n_backends;
   Editor *editor;
 
-  g_return_if_fail (HY_IS_NODE (folder));
-  g_return_if_fail (hy_node_get_kind (folder) == HY_NODE_FOLDER);
+  g_return_if_fail (XD_IS_NODE (folder));
+  g_return_if_fail (xd_node_get_kind (folder) == XD_NODE_FOLDER);
 
   editor = g_new0 (Editor, 1);
   editor->folder = folder;
   editor->app_settings = g_object_ref (app_settings);
 
-  editor->settings = hy_folder_settings_ensure (hy_node_get_path (folder), &error);
+  editor->settings = xd_folder_settings_ensure (xd_node_get_path (folder), &error);
   if (editor->settings == NULL)
     {
       g_warning ("cannot read folder settings: %s", error->message);
@@ -293,14 +293,14 @@ hy_folder_settings_dialog_present (GtkWidget *parent,
   /* Resolved from the parent up, so the subtitles describe what this folder
    * would get if it set nothing itself. */
   default_backend = g_settings_get_string (app_settings, "default-backend");
-  editor->inherited = hy_settings_resolve (hy_node_get_parent (folder),
+  editor->inherited = xd_settings_resolve (xd_node_get_parent (folder),
                                            default_backend);
 
   editor->workdir = g_strdup (editor->settings->workdir);
   editor->repo = g_strdup (editor->settings->repo);
 
   dialog = ADW_PREFERENCES_DIALOG (adw_preferences_dialog_new ());
-  adw_dialog_set_title (ADW_DIALOG (dialog), hy_node_get_name (folder));
+  adw_dialog_set_title (ADW_DIALOG (dialog), xd_node_get_name (folder));
 
   page = ADW_PREFERENCES_PAGE (adw_preferences_page_new ());
 

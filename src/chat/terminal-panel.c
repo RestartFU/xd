@@ -13,7 +13,7 @@
  * terminal, the pty goes with it, and the kernel hangs up the shell.
  */
 
-struct _HyTerminalPanel
+struct _XdTerminalPanel
 {
   AdwBin parent_instance;
 
@@ -25,7 +25,7 @@ struct _HyTerminalPanel
   GHashTable *views;        /* chat id -> AdwTabView, owned by the stack */
 };
 
-G_DEFINE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (XdTerminalPanel, xd_terminal_panel, ADW_TYPE_BIN)
 
 enum
 {
@@ -65,7 +65,7 @@ apply_colours (VteTerminal *terminal)
 }
 
 static AdwTabView *
-current_view (HyTerminalPanel *self)
+current_view (XdTerminalPanel *self)
 {
   if (self->chat_id == NULL)
     return NULL;
@@ -74,7 +74,7 @@ current_view (HyTerminalPanel *self)
 }
 
 static VteTerminal *
-current_terminal (HyTerminalPanel *self)
+current_terminal (XdTerminalPanel *self)
 {
   AdwTabView *view = current_view (self);
   AdwTabPage *page;
@@ -93,7 +93,7 @@ on_child_exited (VteTerminal *terminal,
                  int          status,
                  gpointer     user_data)
 {
-  HyTerminalPanel *self = user_data;
+  XdTerminalPanel *self = user_data;
   GHashTableIter iter;
   gpointer view;
 
@@ -112,10 +112,10 @@ on_child_exited (VteTerminal *terminal,
 }
 
 static void
-spawn_shell (HyTerminalPanel *self,
+spawn_shell (XdTerminalPanel *self,
              VteTerminal     *terminal)
 {
-  g_auto (GStrv) env = hy_host_environ ();
+  g_auto (GStrv) env = xd_host_environ ();
   g_autofree char *shell = vte_get_user_shell ();
   char *argv[] = { NULL, NULL };
 
@@ -133,7 +133,7 @@ spawn_shell (HyTerminalPanel *self,
 }
 
 static void
-add_session (HyTerminalPanel *self,
+add_session (XdTerminalPanel *self,
              AdwTabView      *view)
 {
   VteTerminal *terminal = VTE_TERMINAL (vte_terminal_new ());
@@ -172,14 +172,14 @@ on_page_closed (AdwTabView *view,
                 AdwTabPage *page,
                 gpointer    user_data)
 {
-  HyTerminalPanel *self = user_data;
+  XdTerminalPanel *self = user_data;
 
   if (view == current_view (self) && adw_tab_view_get_n_pages (view) == 1)
     g_signal_emit (self, signals[SIGNAL_CLOSE_REQUESTED], 0);
 }
 
 static AdwTabView *
-ensure_view (HyTerminalPanel *self,
+ensure_view (XdTerminalPanel *self,
              const char      *chat_id)
 {
   AdwTabView *view = g_hash_table_lookup (self->views, chat_id);
@@ -196,12 +196,12 @@ ensure_view (HyTerminalPanel *self,
 }
 
 void
-hy_terminal_panel_set_chat (HyTerminalPanel *self,
+xd_terminal_panel_set_chat (XdTerminalPanel *self,
                             const char      *chat_id)
 {
   AdwTabView *view;
 
-  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+  g_return_if_fail (XD_IS_TERMINAL_PANEL (self));
 
   if (g_strcmp0 (self->chat_id, chat_id) == 0)
     return;
@@ -221,21 +221,21 @@ hy_terminal_panel_set_chat (HyTerminalPanel *self,
 }
 
 void
-hy_terminal_panel_set_workdir (HyTerminalPanel *self,
+xd_terminal_panel_set_workdir (XdTerminalPanel *self,
                                const char      *workdir)
 {
-  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+  g_return_if_fail (XD_IS_TERMINAL_PANEL (self));
 
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
 }
 
 void
-hy_terminal_panel_start (HyTerminalPanel *self)
+xd_terminal_panel_start (XdTerminalPanel *self)
 {
   AdwTabView *view;
 
-  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+  g_return_if_fail (XD_IS_TERMINAL_PANEL (self));
 
   if (self->chat_id == NULL || self->workdir == NULL)
     return;
@@ -246,13 +246,13 @@ hy_terminal_panel_start (HyTerminalPanel *self)
 }
 
 void
-hy_terminal_panel_activate (HyTerminalPanel *self)
+xd_terminal_panel_activate (XdTerminalPanel *self)
 {
   VteTerminal *terminal;
 
-  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+  g_return_if_fail (XD_IS_TERMINAL_PANEL (self));
 
-  hy_terminal_panel_start (self);
+  xd_terminal_panel_start (self);
 
   terminal = current_terminal (self);
   if (terminal != NULL)
@@ -260,12 +260,12 @@ hy_terminal_panel_activate (HyTerminalPanel *self)
 }
 
 void
-hy_terminal_panel_forget_chat (HyTerminalPanel *self,
+xd_terminal_panel_forget_chat (XdTerminalPanel *self,
                                const char      *chat_id)
 {
   AdwTabView *view;
 
-  g_return_if_fail (HY_IS_TERMINAL_PANEL (self));
+  g_return_if_fail (XD_IS_TERMINAL_PANEL (self));
 
   view = g_hash_table_lookup (self->views, chat_id);
   if (view == NULL)
@@ -286,7 +286,7 @@ static void
 on_new_session (GtkButton *button,
                 gpointer   user_data)
 {
-  HyTerminalPanel *self = user_data;
+  XdTerminalPanel *self = user_data;
   AdwTabView *view;
 
   if (self->chat_id == NULL)
@@ -307,7 +307,7 @@ static void
 on_kill_session (GtkButton *button,
                  gpointer   user_data)
 {
-  HyTerminalPanel *self = user_data;
+  XdTerminalPanel *self = user_data;
   AdwTabView *view = current_view (self);
   AdwTabPage *page;
 
@@ -319,28 +319,28 @@ on_kill_session (GtkButton *button,
     adw_tab_view_close_page (view, page);
 }
 
-HyTerminalPanel *
-hy_terminal_panel_new (void)
+XdTerminalPanel *
+xd_terminal_panel_new (void)
 {
-  return g_object_new (HY_TYPE_TERMINAL_PANEL, NULL);
+  return g_object_new (XD_TYPE_TERMINAL_PANEL, NULL);
 }
 
 static void
-hy_terminal_panel_finalize (GObject *object)
+xd_terminal_panel_finalize (GObject *object)
 {
-  HyTerminalPanel *self = HY_TERMINAL_PANEL (object);
+  XdTerminalPanel *self = XD_TERMINAL_PANEL (object);
 
   g_clear_pointer (&self->views, g_hash_table_unref);
   g_free (self->chat_id);
   g_free (self->workdir);
 
-  G_OBJECT_CLASS (hy_terminal_panel_parent_class)->finalize (object);
+  G_OBJECT_CLASS (xd_terminal_panel_parent_class)->finalize (object);
 }
 
 static void
-hy_terminal_panel_class_init (HyTerminalPanelClass *klass)
+xd_terminal_panel_class_init (XdTerminalPanelClass *klass)
 {
-  G_OBJECT_CLASS (klass)->finalize = hy_terminal_panel_finalize;
+  G_OBJECT_CLASS (klass)->finalize = xd_terminal_panel_finalize;
 
   signals[SIGNAL_CLOSE_REQUESTED] =
     g_signal_new ("close-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
@@ -348,7 +348,7 @@ hy_terminal_panel_class_init (HyTerminalPanelClass *klass)
 }
 
 static void
-hy_terminal_panel_init (HyTerminalPanel *self)
+xd_terminal_panel_init (XdTerminalPanel *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);

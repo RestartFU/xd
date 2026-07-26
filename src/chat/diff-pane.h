@@ -4,14 +4,14 @@
 
 G_BEGIN_DECLS
 
-#define HY_TYPE_DIFF_PANE (hy_diff_pane_get_type ())
+#define XD_TYPE_DIFF_PANE (xd_diff_pane_get_type ())
 
-G_DECLARE_FINAL_TYPE (HyDiffPane, hy_diff_pane, HY, DIFF_PANE, AdwBin)
+G_DECLARE_FINAL_TYPE (XdDiffPane, xd_diff_pane, XD, DIFF_PANE, AdwBin)
 
-HyDiffPane *hy_diff_pane_new         (void);
+XdDiffPane *xd_diff_pane_new         (void);
 
 /* The repository to read. NULL, or a directory outside one, shows nothing. */
-void        hy_diff_pane_set_workdir (HyDiffPane *self,
+void        xd_diff_pane_set_workdir (XdDiffPane *self,
                                       const char *workdir);
 
 /*
@@ -20,6 +20,6 @@ void        hy_diff_pane_set_workdir (HyDiffPane *self,
  * Called when the pane is opened and when an agent finishes a turn, since
  * that is when the files it changed stop moving. Does nothing while hidden.
  */
-void        hy_diff_pane_refresh     (HyDiffPane *self);
+void        xd_diff_pane_refresh     (XdDiffPane *self);
 
 G_END_DECLS

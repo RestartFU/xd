@@ -13,6 +13,6 @@ G_BEGIN_DECLS
  * an unterminated one is shown literally rather than swallowing the rest of
  * the message.
  */
-char *hy_markdown_to_pango (const char *text);
+char *xd_markdown_to_pango (const char *text);
 
 G_END_DECLS

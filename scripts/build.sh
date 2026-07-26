@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build hy in Docker and export the runnable bundle to ./dist.
+# Build xd in Docker and export the runnable bundle to ./dist.
 # The only host requirement is Docker.
 
 set -euo pipefail
@@ -16,4 +16,4 @@ docker buildx build \
 
 echo
 echo "Bundle ready. Run it with:"
-echo "  ./dist/hy.sh"
+echo "  ./dist/xd.sh"

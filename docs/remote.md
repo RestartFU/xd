@@ -5,16 +5,16 @@ there is one copy of everything, on the machine the work happens on.
 
 ## Shape
 
-One binary, two modes. `hy serve` runs the daemon; `hy` with no arguments is
+One binary, two modes. `xd serve` runs the daemon; `xd` with no arguments is
 the client. The daemon owns the SQLite database, the workspace tree on disk,
 and the agent processes -- backends, folder inheritance and the ask-block
 parser are the same code either way, not a reimplementation.
 
-    hy serve                 # listens on 4001
-    hy serve --pair          # prints a short-lived pairing code
+    xd serve                 # listens on 4001
+    xd serve --pair          # prints a short-lived pairing code
 
 A remote appears in the sidebar as its own root beside the local workspaces,
-its folders and chats underneath, drawn from the same HyNode model with a
+its folders and chats underneath, drawn from the same XdNode model with a
 remote tree implementation in place of the filesystem one.
 
 ## Pairing

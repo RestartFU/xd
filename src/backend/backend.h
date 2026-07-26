@@ -6,13 +6,13 @@
 G_BEGIN_DECLS
 
 /*
- * hy never speaks to an AI API. It drives the CLIs already installed and
+ * xd never speaks to an AI API. It drives the CLIs already installed and
  * authenticated on the machine -- claude and codex -- and reads the JSONL they
  * write to stdout.
  *
  * A backend contributes two things: how to build the command line, and how to
  * turn one line of its output into events. Spawning, reading and cancelling
- * are the same for every backend and live in HyChatSession.
+ * are the same for every backend and live in XdChatSession.
  */
 
 typedef enum
@@ -39,7 +39,7 @@ typedef void (*AiEventFunc) (const AiEvent *event,
  * How much rope the assistant gets in the working directory.
  *
  * Ordered least to most permissive; the CLIs spell these differently but the
- * ladder is the same, and hy defaults to the bottom of it.
+ * ladder is the same, and xd defaults to the bottom of it.
  */
 typedef enum
 {
@@ -114,9 +114,9 @@ struct _AiBackend
 };
 
 /*
- * What the CLI would do if hy said nothing.
+ * What the CLI would do if xd said nothing.
  *
- * Read from the CLI's own configuration, so the value hy offers is the one
+ * Read from the CLI's own configuration, so the value xd offers is the one
  * the user already had rather than a guess baked in here.
  */
 AiEffort                ai_backend_default_effort (const AiBackend *self);

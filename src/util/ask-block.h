@@ -10,16 +10,16 @@ G_BEGIN_DECLS
  * Neither CLI can prompt for input when driven one-shot, so a question that
  * matters would otherwise arrive as prose the user has to retype an answer to.
  * Instead the assistant is asked to wrap such questions in an <ask> block,
- * which hy lifts out of the reply and renders as buttons -- the same trick
+ * which xd lifts out of the reply and renders as buttons -- the same trick
  * t3code uses for its <proposed_plan> blocks.
  */
 typedef struct
 {
   char *question;
   GStrv options;
-} HyAsk;
+} XdAsk;
 
-void  hy_ask_free (HyAsk *self);
+void  xd_ask_free (XdAsk *self);
 
 /*
  * Lifts the first <ask> block out of @text.
@@ -29,7 +29,7 @@ void  hy_ask_free (HyAsk *self);
  * success @remainder receives the reply with the block removed, so the block
  * markup is never shown.
  */
-HyAsk *hy_ask_parse (const char  *text,
+XdAsk *xd_ask_parse (const char  *text,
                      char       **remainder);
 
 /*
@@ -39,11 +39,11 @@ HyAsk *hy_ask_parse (const char  *text,
  * and the buttons replace it -- and the opening tag arrives in fragments, so
  * a trailing "<as" has to be held back too in case it becomes "<ask>".
  */
-gsize hy_ask_visible_length (const char *text);
+gsize xd_ask_visible_length (const char *text);
 
 /* Told to the assistant so it knows the block exists. */
-const char *hy_ask_instructions (void);
+const char *xd_ask_instructions (void);
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (HyAsk, hy_ask_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdAsk, xd_ask_free)
 
 G_END_DECLS

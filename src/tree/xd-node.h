@@ -6,9 +6,9 @@ G_BEGIN_DECLS
 
 typedef enum
 {
-  HY_NODE_FOLDER,
-  HY_NODE_CHAT,
-} HyNodeKind;
+  XD_NODE_FOLDER,
+  XD_NODE_CHAT,
+} XdNodeKind;
 
 /*
  * What a chat is doing, as far as the tree is concerned.
@@ -19,13 +19,13 @@ typedef enum
  */
 typedef enum
 {
-  HY_NODE_IDLE,
-  HY_NODE_WORKING,
-  HY_NODE_WAITING,   /* it asked something and nobody has answered */
-} HyNodeState;
+  XD_NODE_IDLE,
+  XD_NODE_WORKING,
+  XD_NODE_WAITING,   /* it asked something and nobody has answered */
+} XdNodeState;
 
-#define HY_TYPE_NODE (hy_node_get_type ())
-G_DECLARE_FINAL_TYPE (HyNode, hy_node, HY, NODE, GObject)
+#define XD_TYPE_NODE (xd_node_get_type ())
+G_DECLARE_FINAL_TYPE (XdNode, xd_node, XD, NODE, GObject)
 
 /*
  * One row of the workspace tree.
@@ -35,23 +35,23 @@ G_DECLARE_FINAL_TYPE (HyNode, hy_node, HY, NODE, GObject)
  * the sidebar reads like a file manager.
  */
 
-HyNode      *hy_node_new_folder     (const char *path,
+XdNode      *xd_node_new_folder     (const char *path,
                                      const char *name,
                                      const char *folder_id);
-HyNode      *hy_node_new_chat       (const char *chat_id,
+XdNode      *xd_node_new_chat       (const char *chat_id,
                                      const char *title,
-                                     HyNode     *parent);
+                                     XdNode     *parent);
 
-HyNodeKind   hy_node_get_kind       (HyNode *self);
-const char  *hy_node_get_name       (HyNode *self);
-void         hy_node_set_name       (HyNode     *self,
+XdNodeKind   xd_node_get_kind       (XdNode *self);
+const char  *xd_node_get_name       (XdNode *self);
+void         xd_node_set_name       (XdNode     *self,
                                      const char *name);
-const char  *hy_node_get_path       (HyNode *self);
-void         hy_node_set_path       (HyNode     *self,
+const char  *xd_node_get_path       (XdNode *self);
+void         xd_node_set_path       (XdNode     *self,
                                      const char *path);
-const char  *hy_node_get_folder_id  (HyNode *self);
-const char  *hy_node_get_chat_id    (HyNode *self);
-const char  *hy_node_get_icon_name  (HyNode *self);
+const char  *xd_node_get_folder_id  (XdNode *self);
+const char  *xd_node_get_chat_id    (XdNode *self);
+const char  *xd_node_get_icon_name  (XdNode *self);
 
 /*
  * The icon a chat rests at, which is the assistant that last answered it.
@@ -59,19 +59,19 @@ const char  *hy_node_get_icon_name  (HyNode *self);
  * Folders ignore this. Chats made before the icon was recorded, and any
  * backend that has since gone away, fall back to a plain chat bubble.
  */
-void         hy_node_set_icon_name  (HyNode     *self,
+void         xd_node_set_icon_name  (XdNode     *self,
                                      const char *icon_name);
 
-HyNodeState  hy_node_get_state      (HyNode *self);
-void         hy_node_set_state      (HyNode      *self,
-                                     HyNodeState  state);
+XdNodeState  xd_node_get_state      (XdNode *self);
+void         xd_node_set_state      (XdNode      *self,
+                                     XdNodeState  state);
 
 /* Folders only; chats return NULL. Owned by the node. */
-GListStore  *hy_node_get_children   (HyNode *self);
+GListStore  *xd_node_get_children   (XdNode *self);
 
 /* Weak: a child does not keep its parent alive. */
-HyNode      *hy_node_get_parent     (HyNode *self);
-void         hy_node_set_parent     (HyNode *self,
-                                     HyNode *parent);
+XdNode      *xd_node_get_parent     (XdNode *self);
+void         xd_node_set_parent     (XdNode *self,
+                                     XdNode *parent);
 
 G_END_DECLS

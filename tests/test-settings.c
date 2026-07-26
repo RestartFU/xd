@@ -14,7 +14,7 @@ fixture_set_up (Fixture       *fixture,
 {
   g_autoptr (GError) error = NULL;
 
-  fixture->root = g_dir_make_tmp ("hy-settings-XXXXXX", &error);
+  fixture->root = g_dir_make_tmp ("xd-settings-XXXXXX", &error);
   g_assert_no_error (error);
 }
 
@@ -48,9 +48,9 @@ fixture_tear_down (Fixture       *fixture,
     }
 }
 
-/* Creates a directory with a .hy.json and returns the node for it. */
-static HyNode *
-make_folder (HyNode      *parent,
+/* Creates a directory with a .xd.json and returns the node for it. */
+static XdNode *
+make_folder (XdNode      *parent,
              const char  *parent_path,
              const char  *name,
              const char  *backend,
@@ -58,25 +58,25 @@ make_folder (HyNode      *parent,
              const char  *workdir,
              const char  *instructions)
 {
-  g_autoptr (HyFolderSettings) settings = NULL;
+  g_autoptr (XdFolderSettings) settings = NULL;
   g_autoptr (GError) error = NULL;
   g_autofree char *path = g_build_filename (parent_path, name, NULL);
-  HyNode *node;
+  XdNode *node;
 
   g_assert_cmpint (g_mkdir_with_parents (path, 0700), ==, 0);
 
-  settings = hy_folder_settings_ensure (path, &error);
+  settings = xd_folder_settings_ensure (path, &error);
   g_assert_no_error (error);
 
   settings->backend = g_strdup (backend);
   settings->model = g_strdup (model);
   settings->workdir = g_strdup (workdir);
   settings->instructions = g_strdup (instructions);
-  g_assert_true (hy_folder_settings_save (settings, path, &error));
+  g_assert_true (xd_folder_settings_save (settings, path, &error));
   g_assert_no_error (error);
 
-  node = hy_node_new_folder (path, name, settings->id);
-  hy_node_set_parent (node, parent);
+  node = xd_node_new_folder (path, name, settings->id);
+  xd_node_set_parent (node, parent);
 
   return node;
 }
@@ -85,16 +85,16 @@ static void
 test_child_overrides_parent (Fixture       *fixture,
                              gconstpointer  user_data)
 {
-  g_autoptr (HyNode) workspace = NULL;
-  g_autoptr (HyNode) child = NULL;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdNode) workspace = NULL;
+  g_autoptr (XdNode) child = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   workspace = make_folder (NULL, fixture->root, "Lunar", "claude",
                            "claude-opus-5", NULL, NULL);
-  child = make_folder (workspace, hy_node_get_path (workspace), "Proxy",
+  child = make_folder (workspace, xd_node_get_path (workspace), "Proxy",
                        "codex", NULL, NULL, NULL);
 
-  resolved = hy_settings_resolve (child, "claude");
+  resolved = xd_settings_resolve (child, "claude");
 
   /* The child names a backend, so it wins. */
   g_assert_cmpstr (resolved->backend, ==, "codex");
@@ -114,19 +114,19 @@ static void
 test_instructions_accumulate (Fixture       *fixture,
                               gconstpointer  user_data)
 {
-  g_autoptr (HyNode) workspace = NULL;
-  g_autoptr (HyNode) child = NULL;
-  g_autoptr (HyNode) grandchild = NULL;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdNode) workspace = NULL;
+  g_autoptr (XdNode) child = NULL;
+  g_autoptr (XdNode) grandchild = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   workspace = make_folder (NULL, fixture->root, "Lunar", NULL, NULL, NULL,
                            "Always answer in French.");
-  child = make_folder (workspace, hy_node_get_path (workspace), "Proxy",
+  child = make_folder (workspace, xd_node_get_path (workspace), "Proxy",
                        NULL, NULL, NULL, "This is a Go codebase.");
-  grandchild = make_folder (child, hy_node_get_path (child), "Bugs",
+  grandchild = make_folder (child, xd_node_get_path (child), "Bugs",
                             NULL, NULL, NULL, NULL);
 
-  resolved = hy_settings_resolve (grandchild, "claude");
+  resolved = xd_settings_resolve (grandchild, "claude");
 
   g_assert_cmpstr (resolved->instructions, ==,
                    "Always answer in French.\n\nThis is a Go codebase.");
@@ -136,12 +136,12 @@ static void
 test_falls_back_to_default_backend (Fixture       *fixture,
                                     gconstpointer  user_data)
 {
-  g_autoptr (HyNode) workspace = NULL;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdNode) workspace = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   workspace = make_folder (NULL, fixture->root, "Personal", NULL, NULL, NULL, NULL);
 
-  resolved = hy_settings_resolve (workspace, "codex");
+  resolved = xd_settings_resolve (workspace, "codex");
 
   g_assert_cmpstr (resolved->backend, ==, "codex");
   g_assert_null (resolved->model);
@@ -153,14 +153,14 @@ static void
 test_workdir_defaults_to_the_folder (Fixture       *fixture,
                                      gconstpointer  user_data)
 {
-  g_autoptr (HyNode) workspace = NULL;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdNode) workspace = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   workspace = make_folder (NULL, fixture->root, "Personal", NULL, NULL, NULL, NULL);
 
-  resolved = hy_settings_resolve (workspace, "claude");
+  resolved = xd_settings_resolve (workspace, "claude");
 
-  g_assert_cmpstr (resolved->workdir, ==, hy_node_get_path (workspace));
+  g_assert_cmpstr (resolved->workdir, ==, xd_node_get_path (workspace));
 }
 
 /* Repositories live outside the workspace tree, so a folder can point at one
@@ -169,16 +169,16 @@ static void
 test_workdir_is_inherited (Fixture       *fixture,
                            gconstpointer  user_data)
 {
-  g_autoptr (HyNode) workspace = NULL;
-  g_autoptr (HyNode) child = NULL;
-  g_autoptr (HyEffectiveSettings) resolved = NULL;
+  g_autoptr (XdNode) workspace = NULL;
+  g_autoptr (XdNode) child = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   workspace = make_folder (NULL, fixture->root, "Lunar", NULL, NULL,
                            "/home/someone/code/proxy", NULL);
-  child = make_folder (workspace, hy_node_get_path (workspace), "Bugs",
+  child = make_folder (workspace, xd_node_get_path (workspace), "Bugs",
                        NULL, NULL, NULL, NULL);
 
-  resolved = hy_settings_resolve (child, "claude");
+  resolved = xd_settings_resolve (child, "claude");
 
   g_assert_cmpstr (resolved->workdir, ==, "/home/someone/code/proxy");
   g_assert_cmpstr (resolved->workdir_from, ==, "Lunar");

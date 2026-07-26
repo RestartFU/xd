@@ -156,16 +156,16 @@ client_thread (gpointer user_data)
 static void
 test_pair_hello_tree (void)
 {
-  g_autofree char *dir = g_dir_make_tmp ("hy-remote-XXXXXX", NULL);
+  g_autofree char *dir = g_dir_make_tmp ("xd-remote-XXXXXX", NULL);
   g_autofree char *db_path = g_build_filename (dir, "chats.db", NULL);
   g_autofree char *root = g_build_filename (dir, "Workspaces", NULL);
   g_autofree char *folder = g_build_filename (root, "Zeno", NULL);
-  g_autofree char *dotfile = g_build_filename (folder, ".hy.json", NULL);
+  g_autofree char *dotfile = g_build_filename (folder, ".xd.json", NULL);
   g_autofree char *cert_path = g_build_filename (dir, "cert.pem", NULL);
   g_autofree char *key_path = g_build_filename (dir, "key.pem", NULL);
-  g_autoptr (HyStorage) storage = NULL;
+  g_autoptr (XdStorage) storage = NULL;
   g_autoptr (GTlsCertificate) certificate = NULL;
-  g_autoptr (HyRemoteServer) server = NULL;
+  g_autoptr (XdRemoteServer) server = NULL;
   g_autoptr (GError) error = NULL;
   Exchange exchange = { 0 };
   GThread *thread;
@@ -175,15 +175,15 @@ test_pair_hello_tree (void)
   g_assert_true (g_file_set_contents (dotfile,
                                       "{\"id\": \"folder-1\"}", -1, NULL));
 
-  storage = hy_storage_new (db_path, &error);
+  storage = xd_storage_new (db_path, &error);
   g_assert_no_error (error);
 
-  exchange.chat_id = hy_storage_create_chat (storage, "folder-1", "remote chat",
+  exchange.chat_id = xd_storage_create_chat (storage, "folder-1", "remote chat",
                                              "claude", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
-  g_assert_true (hy_storage_append_message (storage, exchange.chat_id, "user",
+  g_assert_true (xd_storage_append_message (storage, exchange.chat_id, "user",
                                             "anyone there?", NULL, NULL, &error));
-  g_assert_true (hy_storage_append_message (storage, exchange.chat_id, "assistant",
+  g_assert_true (xd_storage_append_message (storage, exchange.chat_id, "assistant",
                                             "hello from the daemon", NULL,
                                             "Claude · High", &error));
 
@@ -197,11 +197,11 @@ test_pair_hello_tree (void)
   certificate = g_tls_certificate_new_from_files (cert_path, key_path, &error);
   g_assert_no_error (error);
 
-  server = hy_remote_server_new (storage, root, 0, certificate, &error);
+  server = xd_remote_server_new (storage, root, 0, certificate, &error);
   g_assert_no_error (error);
 
-  exchange.port = hy_remote_server_get_port (server);
-  exchange.code = hy_remote_server_arm_pairing (server, 60);
+  exchange.port = xd_remote_server_get_port (server);
+  exchange.code = xd_remote_server_arm_pairing (server, 60);
 
   thread = g_thread_new ("client", client_thread, &exchange);
   while (!exchange.done)
