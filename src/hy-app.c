@@ -309,6 +309,11 @@ static const char *HY_STYLE =
   " border-color: alpha(#ffffff, 0.18); }\n"
   ".hy-choice:hover label { color: alpha(#ffffff, 0.95); }\n"
 
+  /* Selectable, but not editable-looking: a caret blinking in a message
+   * suggests typing somewhere nothing can be typed. Selection keeps its
+   * colour; only the caret goes. */
+  ".hy-body { caret-color: transparent; }\n"
+
   /* A chat waiting to be answered, in a tree the user may not be looking at.
    * Slow enough to notice without being the thing you look at. */
   "@keyframes hy-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"

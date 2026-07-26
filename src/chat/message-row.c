@@ -122,6 +122,7 @@ hy_message_row_new (HyMessageKind  kind,
   gtk_label_set_wrap_mode (self->body, PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign (self->body, 0.0f);
   gtk_label_set_selectable (self->body, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->body), "hy-body");
 
   css_class = kind_css_class (kind);
   if (css_class != NULL)

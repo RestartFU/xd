@@ -69,9 +69,10 @@ apply_colours (HyTerminalPanel *self)
    * as a surface. Matched by hand because VTE takes a colour rather than
    * following the stylesheet.
    */
-  /* Just above the window, like the reference: the terminal is allowed to be
-   * dark because the full-height divider does the separating, not the fill. */
-  gdk_rgba_parse (&background, dark ? "#0f0f12" : "#ffffff");
+  /* The window's own base. The dividers do all the separating now, and any
+   * lighter fill showed as a grey patch wherever a popover corner floated
+   * over the boundary between panes. */
+  gdk_rgba_parse (&background, dark ? "#0a0a0c" : "#ffffff");
 
   vte_terminal_set_colors (self->terminal, &foreground, &background,
                            palette, G_N_ELEMENTS (palette));
