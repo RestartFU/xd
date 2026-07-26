@@ -36,16 +36,30 @@ G_DEFINE_FINAL_TYPE (HyTerminalPanel, hy_terminal_panel, ADW_TYPE_BIN)
  * cannot grow the process without limit. */
 #define SCROLLBACK_LINES 10000
 
+/* One Dark's hues, toned to sit on this window: VTE's stock palette is the
+ * primaries of a 1990s xterm, and one saturated #00ff00 prompt undoes a
+ * theme. */
+static const char *TERMINAL_PALETTE[16] = {
+  "#23232a", "#e06c75", "#98c379", "#d19a66",
+  "#61afef", "#c678dd", "#56b6c2", "#b8bcc8",
+  "#5c6370", "#e06c75", "#98c379", "#d19a66",
+  "#61afef", "#c678dd", "#56b6c2", "#e6e6ec",
+};
+
 static void
 apply_colours (HyTerminalPanel *self)
 {
   AdwStyleManager *style = adw_style_manager_get_default ();
   gboolean dark = adw_style_manager_get_dark (style);
   GdkRGBA foreground, background;
+  GdkRGBA palette[16];
+
+  for (gsize i = 0; i < 16; i++)
+    gdk_rgba_parse (&palette[i], TERMINAL_PALETTE[i]);
 
   /* VTE defaults to black on white whatever the rest of the window is doing,
    * so the theme has to be followed by hand. */
-  gdk_rgba_parse (&foreground, dark ? "#e4e4e8" : "#1d1d1d");
+  gdk_rgba_parse (&foreground, dark ? "#d6d6dd" : "#1d1d1d");
   /*
    * A step above the window, like every other raised surface.
    *
@@ -55,9 +69,10 @@ apply_colours (HyTerminalPanel *self)
    * as a surface. Matched by hand because VTE takes a colour rather than
    * following the stylesheet.
    */
-  gdk_rgba_parse (&background, dark ? "#1c1c22" : "#ffffff");
+  gdk_rgba_parse (&background, dark ? "#1d1d24" : "#ffffff");
 
-  vte_terminal_set_colors (self->terminal, &foreground, &background, NULL, 0);
+  vte_terminal_set_colors (self->terminal, &foreground, &background,
+                           palette, G_N_ELEMENTS (palette));
 }
 
 static void
@@ -313,7 +328,6 @@ hy_terminal_panel_init (HyTerminalPanel *self)
     gtk_overlay_add_overlay (GTK_OVERLAY (overlay), controls);
 
     adw_bin_set_child (ADW_BIN (self), overlay);
-    return;
   }
 
   g_signal_connect (self->terminal, "child-exited",
@@ -321,6 +335,4 @@ hy_terminal_panel_init (HyTerminalPanel *self)
   g_signal_connect (adw_style_manager_get_default (), "notify::dark",
                     G_CALLBACK (on_dark_changed), self);
   apply_colours (self);
-
-  adw_bin_set_child (ADW_BIN (self), box);
 }

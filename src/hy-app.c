@@ -158,9 +158,12 @@ static const char *HY_STYLE =
   /* Invisible until reached for. The panes already end where they end; the
    * line only mattered as somewhere to grab, so it appears when hovered and
    * keeps its width the rest of the time. */
+  /* opacity rather than background: the theme paints the separator with a
+   * background of its own that outlives a background override, and opacity
+   * removes whatever it is painted with. */
   "paned > separator { min-width: 2px; min-height: 2px; border: none;"
-  " background: none; }\n"
-  "paned > separator:hover { background: alpha(#ffffff, 0.14); }\n"
+  " background: alpha(#ffffff, 0.14); opacity: 0; }\n"
+  "paned > separator:hover { opacity: 1; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
