@@ -7,6 +7,7 @@
 #include "handover.h"
 #include "message-row.h"
 #include "model-picker.h"
+#include "option-picker.h"
 #include "diff-pane.h"
 #include "git-actions.h"
 #include "terminal-panel.h"
@@ -127,9 +128,9 @@ struct _XdChatView
   gboolean syncing_panes;   /* setting the toggles to match the chat */
   GPtrArray *attachments;   /* absolute paths of pasted images */
   XdModelPicker *model_picker;
-  GtkDropDown *workspace_chooser;
-  GtkDropDown *effort_chooser;
-  GtkDropDown *access_chooser;
+  XdOptionPicker *workspace_chooser;
+  XdOptionPicker *effort_chooser;
+  XdOptionPicker *access_chooser;
   GtkToggleButton *build_toggle;
   GtkToggleButton *plan_toggle;
   GtkLabel *context_label;
@@ -183,63 +184,6 @@ static const char *const workspace_descriptions[] = {
   "Create an isolated branch and checkout for this chat.",
 };
 
-/* --- two-line dropdown rows ------------------------------------------------ */
-
-static void
-on_option_setup (GtkSignalListItemFactory *factory,
-                 GtkListItem              *item,
-                 gpointer                  user_data)
-{
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
-  GtkWidget *title = gtk_label_new (NULL);
-  GtkWidget *detail = gtk_label_new (NULL);
-
-  gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
-  gtk_label_set_xalign (GTK_LABEL (detail), 0.0f);
-  gtk_widget_add_css_class (detail, "caption");
-  gtk_widget_add_css_class (detail, "dim-label");
-
-  gtk_box_append (GTK_BOX (box), title);
-  gtk_box_append (GTK_BOX (box), detail);
-  gtk_list_item_set_child (item, box);
-}
-
-static void
-on_option_bind (GtkSignalListItemFactory *factory,
-                GtkListItem              *item,
-                gpointer                  user_data)
-{
-  const char *const *descriptions = user_data;
-  GtkWidget *box = gtk_list_item_get_child (item);
-  GtkWidget *title = gtk_widget_get_first_child (box);
-  GtkWidget *detail = gtk_widget_get_next_sibling (title);
-  GtkStringObject *string = gtk_list_item_get_item (item);
-
-  gtk_label_set_label (GTK_LABEL (title),
-                       gtk_string_object_get_string (string));
-  gtk_label_set_label (GTK_LABEL (detail),
-                       descriptions[gtk_list_item_get_position (item)]);
-}
-
-/*
- * The open list explains each option; the closed button only names the one
- * chosen. A description worth a line in the menu would be clutter in the
- * composer bar.
- */
-static void
-add_option_descriptions (GtkDropDown       *chooser,
-                         const char *const *descriptions)
-{
-  GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
-
-  g_signal_connect (factory, "setup", G_CALLBACK (on_option_setup), NULL);
-  g_signal_connect (factory, "bind", G_CALLBACK (on_option_bind),
-                    (gpointer) descriptions);
-
-  gtk_drop_down_set_list_factory (chooser, factory);
-  g_object_unref (factory);
-}
-
 G_DEFINE_FINAL_TYPE (XdChatView, xd_chat_view, ADW_TYPE_BIN)
 
 static void send_current_message (XdChatView *self);
@@ -273,12 +217,12 @@ static void on_model_chosen (XdModelPicker *picker,
                              const char    *backend_id,
                              const char    *model_id,
                              gpointer       user_data);
-static void on_effort_selected (GtkDropDown *chooser,
-                                GParamSpec  *pspec,
-                                gpointer     user_data);
-static void on_access_selected (GtkDropDown *chooser,
-                                GParamSpec  *pspec,
-                                gpointer     user_data);
+static void on_effort_selected (XdOptionPicker *chooser,
+                                GParamSpec     *pspec,
+                                gpointer        user_data);
+static void on_access_selected (XdOptionPicker *chooser,
+                                GParamSpec     *pspec,
+                                gpointer        user_data);
 static void on_plan_toggled (GtkToggleButton *toggle,
                              gpointer         user_data);
 static XdMessageRow *append_row (XdChatView    *self,
@@ -1112,13 +1056,13 @@ update_remote_options (XdChatView   *self,
   for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
     {
       if (effort_choices[i] == effort_for (chat))
-        gtk_drop_down_set_selected (self->effort_chooser, i);
+        xd_option_picker_set_selected (self->effort_chooser, i);
     }
 
   for (guint i = 0; i < G_N_ELEMENTS (access_choices); i++)
     {
       if (access_choices[i] == ai_access_from_string (chat->access))
-        gtk_drop_down_set_selected (self->access_chooser, i);
+        xd_option_picker_set_selected (self->access_chooser, i);
     }
 
   gtk_toggle_button_set_active (chat->plan ? self->plan_toggle : self->build_toggle,
@@ -2493,17 +2437,12 @@ update_workspace_choice (XdChatView   *self,
                          gboolean      has_messages,
                          gboolean      linked_worktree)
 {
-  GtkStringList *options = GTK_STRING_LIST (
-    gtk_drop_down_get_model (self->workspace_chooser));
-  const char *current[] = {
-    linked_worktree ? "Current worktree" : "Current checkout",
-    NULL,
-  };
-
   self->syncing_workspace = TRUE;
-  gtk_string_list_splice (options, 0, 1, current);
-  gtk_drop_down_set_selected (self->workspace_chooser,
-                              chat->new_worktree ? 1 : 0);
+  xd_option_picker_set_label (
+    self->workspace_chooser, 0,
+    linked_worktree ? "Current worktree" : "Current checkout");
+  xd_option_picker_set_selected (self->workspace_chooser,
+                                 chat->new_worktree ? 1 : 0);
   gtk_widget_set_sensitive (GTK_WIDGET (self->workspace_chooser),
                             !has_messages);
   self->syncing_workspace = FALSE;
@@ -2770,13 +2709,13 @@ update_context_bar (XdChatView   *self,
   for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
     {
       if (effort_choices[i] == effort_for (chat))
-        gtk_drop_down_set_selected (self->effort_chooser, i);
+        xd_option_picker_set_selected (self->effort_chooser, i);
     }
 
   for (guint i = 0; i < G_N_ELEMENTS (access_choices); i++)
     {
       if (access_choices[i] == ai_access_from_string (chat->access))
-        gtk_drop_down_set_selected (self->access_chooser, i);
+        xd_option_picker_set_selected (self->access_chooser, i);
     }
 
   gtk_toggle_button_set_active (chat->plan ? self->plan_toggle : self->build_toggle,
@@ -2789,9 +2728,9 @@ update_context_bar (XdChatView   *self,
 }
 
 static void
-on_workspace_selected (GtkDropDown *chooser,
-                       GParamSpec  *pspec,
-                       gpointer     user_data)
+on_workspace_selected (XdOptionPicker *chooser,
+                       GParamSpec     *pspec,
+                       gpointer        user_data)
 {
   XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
@@ -2801,7 +2740,7 @@ on_workspace_selected (GtkDropDown *chooser,
   if (self->syncing_workspace || self->chat == NULL)
     return;
 
-  new_worktree = gtk_drop_down_get_selected (chooser) == 1;
+  new_worktree = xd_option_picker_get_selected (chooser) == 1;
 
   if (self->remote != NULL)
     {
@@ -2852,13 +2791,13 @@ on_plan_toggled (GtkToggleButton *toggle,
 }
 
 static void
-on_effort_selected (GtkDropDown *chooser,
-                    GParamSpec  *pspec,
-                    gpointer     user_data)
+on_effort_selected (XdOptionPicker *chooser,
+                    GParamSpec     *pspec,
+                    gpointer        user_data)
 {
   XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
-  guint selected = gtk_drop_down_get_selected (chooser);
+  guint selected = xd_option_picker_get_selected (chooser);
 
   if (self->syncing_run_options || self->chat == NULL ||
       selected >= G_N_ELEMENTS (effort_choices))
@@ -2878,13 +2817,13 @@ on_effort_selected (GtkDropDown *chooser,
 }
 
 static void
-on_access_selected (GtkDropDown *chooser,
-                    GParamSpec  *pspec,
-                    gpointer     user_data)
+on_access_selected (XdOptionPicker *chooser,
+                    GParamSpec     *pspec,
+                    gpointer        user_data)
 {
   XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
-  guint selected = gtk_drop_down_get_selected (chooser);
+  guint selected = xd_option_picker_get_selected (chooser);
 
   if (self->syncing_run_options || self->chat == NULL ||
       selected >= G_N_ELEMENTS (access_choices))
@@ -3305,11 +3244,8 @@ build_composer (XdChatView *self)
       NULL,
     };
 
-    self->workspace_chooser = GTK_DROP_DOWN (
-      gtk_drop_down_new_from_strings (workspaces));
-    add_option_descriptions (
-      self->workspace_chooser, workspace_descriptions);
-    gtk_widget_add_css_class (GTK_WIDGET (self->workspace_chooser), "flat");
+    self->workspace_chooser =
+      xd_option_picker_new (workspaces, workspace_descriptions);
     gtk_widget_set_tooltip_text (
       GTK_WIDGET (self->workspace_chooser),
       "Where this chat works; locked after the first message");
@@ -3332,26 +3268,24 @@ build_composer (XdChatView *self)
   g_signal_connect (self->send_button, "clicked", G_CALLBACK (on_send_clicked), self);
 
   {
-    GtkStringList *efforts = gtk_string_list_new (NULL);
-    GtkStringList *accesses = gtk_string_list_new (NULL);
+    const char *efforts[G_N_ELEMENTS (effort_choices) + 1] = { NULL };
+    const char *accesses[G_N_ELEMENTS (access_choices) + 1] = { NULL };
 
     for (guint i = 0; i < G_N_ELEMENTS (effort_choices); i++)
-      gtk_string_list_append (efforts, ai_effort_label (effort_choices[i]));
+      efforts[i] = ai_effort_label (effort_choices[i]);
 
     for (guint i = 0; i < G_N_ELEMENTS (access_choices); i++)
-      gtk_string_list_append (accesses, ai_access_label (access_choices[i]));
+      accesses[i] = ai_access_label (access_choices[i]);
 
-    self->effort_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (efforts), NULL));
-    add_option_descriptions (self->effort_chooser, effort_descriptions);
-    gtk_widget_add_css_class (GTK_WIDGET (self->effort_chooser), "flat");
+    self->effort_chooser =
+      xd_option_picker_new (efforts, effort_descriptions);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->effort_chooser),
                                  "How hard the model is asked to think");
     g_signal_connect (self->effort_chooser, "notify::selected",
                       G_CALLBACK (on_effort_selected), self);
 
-    self->access_chooser = GTK_DROP_DOWN (gtk_drop_down_new (G_LIST_MODEL (accesses), NULL));
-    add_option_descriptions (self->access_chooser, access_descriptions);
-    gtk_widget_add_css_class (GTK_WIDGET (self->access_chooser), "flat");
+    self->access_chooser =
+      xd_option_picker_new (accesses, access_descriptions);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->access_chooser),
                                  "What the assistant may do in the working "
                                  "directory");

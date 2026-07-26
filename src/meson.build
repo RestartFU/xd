@@ -54,6 +54,7 @@ xd_sources = files(
   'remote/pair-dialog.c',
   'settings/folder-settings-dialog.c',
   'chat/model-picker.c',
+  'chat/option-picker.c',
   'chat/diff-pane.c',
   'chat/git-actions.c',
   'chat/terminal-panel.c',
