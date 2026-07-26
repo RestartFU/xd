@@ -73,6 +73,7 @@ show_error (XdSidebar  *self,
 
 /* --- naming a row in place ------------------------------------------------- */
 
+static gboolean restore_expanded (gpointer user_data);
 static void create_folder (XdSidebar *self, XdNode *parent, const char *name);
 static void rename_folder (XdSidebar *self, XdNode *node, const char *name);
 static void rename_chat   (XdSidebar *self, XdNode *chat, const char *title);
@@ -1365,11 +1366,12 @@ on_item_teardown (GtkSignalListItemFactory *factory,
 {
   GtkWidget *popover = g_object_get_data (G_OBJECT (item), "context-menu");
 
-  if (popover != NULL)
-    {
-      gtk_widget_unparent (popover);
-      g_object_set_data (G_OBJECT (item), "context-menu", NULL);
-    }
+  /* The row may have been taken apart already, in which case its menu went
+   * with it and there is nothing here to detach. */
+  if (popover != NULL && GTK_IS_WIDGET (popover))
+    gtk_widget_unparent (popover);
+
+  g_object_set_data (G_OBJECT (item), "context-menu", NULL);
 }
 
 static GMenuModel *
@@ -1536,19 +1538,29 @@ on_item_bind (GtkSignalListItemFactory *factory,
 
   if (xd_node_get_kind (node) == XD_NODE_FOLDER)
     {
-      const char *folder_id = xd_node_get_folder_id (node);
       gulong handler;
 
-      /* Restore before listening, or restoring would itself be recorded. */
-      if (folder_id != NULL)
-        gtk_tree_list_row_set_expanded (row,
-                                        g_hash_table_contains (self->expanded,
-                                                               folder_id));
-
+      /*
+       * Opening the row is not done here.
+       *
+       * Binding a row happens while the list is inserting it, and opening one
+       * puts more rows in the list -- a change made to a list that is halfway
+       * through changing. GTK says so ("gtk_widget_insert_after: assertion
+       * 'previous_sibling == NULL || parent == ...' failed") and then loses
+       * the rows that were being added: their space is there and nothing is
+       * drawn in it, which is what "collapse and open it again to see the
+       * chats" was.
+       *
+       * So what is remembered is restored from an idle instead, once the list
+       * has finished with itself. See restore_expanded().
+       */
       handler = g_signal_connect (row, "notify::expanded",
                                   G_CALLBACK (on_row_expanded), self);
       g_object_set_data (G_OBJECT (item), "expanded-handler",
                          GSIZE_TO_POINTER (handler));
+
+      if (self->restore_expanded_id == 0)
+        self->restore_expanded_id = g_idle_add (restore_expanded, self);
     }
 }
 
