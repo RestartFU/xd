@@ -65,6 +65,9 @@ endif
 add_project_arguments([
   '-DG_LOG_DOMAIN="xd"',
   '-DXD_VERSION_STRING="' + version_string + '"',
+  '-DXD_COMMIT="' + get_option('commit') + '"',
+  '-DXD_CHANNEL="' + (profile == 'nightly' ? 'nightly' : 'release') + '"',
+  '-DXD_REPO="RestartFU/xd"',
   '-DXD_APP_ID="' + app_id + '"',
   '-DXD_APP_NAME="' + app_name + '"',
   '-DXD_DATA_NAME="' + app_data_name + '"',

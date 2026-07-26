@@ -70,11 +70,13 @@ jobs:
           # the same thing.
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber \
-              xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256
+              xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
+              scripts/install.sh
           else
             gh release create "$tag" \
               --title "$tag" \
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
-              xd-linux-x86_64.tar.gz.sha256
+              xd-linux-x86_64.tar.gz.sha256 \
+              scripts/install.sh
           fi

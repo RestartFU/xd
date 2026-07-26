@@ -4,7 +4,8 @@
 #
 #   curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 #
-# and takes it away again with:
+# "sh -s -- --release" installs the newest tagged release instead of the
+# nightly; the two live side by side. It takes itself away again with:
 #
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
 #
@@ -29,11 +30,28 @@ set -eu
 
 REPO=RestartFU/xd
 
-# Only the nightly is published so far, so there is nothing to choose between.
+# The nightly by default, since it is the one that is always there. --release
+# takes the newest tagged release instead; the two install side by side and
+# neither touches the other's chats.
 CHANNEL=nightly
-NAME=xd-nightly
-APP_ID=com.restartfu.Xd.Nightly
-ASSET=xd-nightly-linux-x86_64.tar.gz
+
+for argument in "$@"; do
+  case "$argument" in
+    --release|--stable) CHANNEL=release ;;
+  esac
+done
+
+if [ "$CHANNEL" = release ]; then
+  NAME=xd
+  APP_ID=com.restartfu.Xd
+  ASSET=xd-linux-x86_64.tar.gz
+  BASE="https://github.com/$REPO/releases/latest/download"
+else
+  NAME=xd-nightly
+  APP_ID=com.restartfu.Xd.Nightly
+  ASSET=xd-nightly-linux-x86_64.tar.gz
+  BASE="https://github.com/$REPO/releases/download/nightly"
+fi
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 OPT="$HOME/.local/opt/$NAME"
@@ -53,7 +71,9 @@ uninstall () {
   exit 0
 }
 
-[ "${1:-}" = "--uninstall" ] && uninstall
+for argument in "$@"; do
+  [ "$argument" = "--uninstall" ] && uninstall
+done
 
 # --- what this machine is ---------------------------------------------------
 
@@ -69,7 +89,6 @@ command -v tar  >/dev/null 2>&1 || die "tar is needed."
 
 # --- fetch ------------------------------------------------------------------
 
-BASE="https://github.com/$REPO/releases/download/$CHANNEL"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
 

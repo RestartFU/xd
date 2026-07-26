@@ -384,6 +384,10 @@ static const char *XD_STYLE =
   ".xd-waiting { color: @accent_color;"
   " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
 
+  /* Small, because it is not the point of the window; suggested, because when
+   * it is there it is the thing to press. */
+  ".xd-update { padding: 2px 10px; font-size: 90%; }\n"
+
   /* A remote that is not answering. Still, not pulsing: it is a state the row
    * may sit in for hours, and nothing is being waited on. */
   ".xd-offline { color: @error_color; }\n"
