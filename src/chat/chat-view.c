@@ -2199,6 +2199,7 @@ hy_chat_view_init (HyChatView *self)
    * said, which means reading both at once. */
   self->terminal = hy_terminal_panel_new ();
   gtk_widget_set_visible (GTK_WIDGET (self->terminal), FALSE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->terminal), "hy-divider-top");
   g_signal_connect_swapped (self->terminal, "close-requested",
                             G_CALLBACK (close_terminal), self);
 
@@ -2216,6 +2217,7 @@ hy_chat_view_init (HyChatView *self)
    * it is about the repository rather than about either of them. */
   self->diff = hy_diff_pane_new ();
   gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->diff), "hy-divider-left");
 
   self->side_split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
   g_signal_connect (self->side_split, "notify::position",

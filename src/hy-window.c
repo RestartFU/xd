@@ -162,6 +162,7 @@ hy_window_new (HyApplication *app)
   g_signal_connect (sidebar, "node-activated", G_CALLBACK (on_node_activated), self);
 
   self->chat_view = hy_chat_view_new (self->storage, self->tree);
+  gtk_widget_add_css_class (GTK_WIDGET (self->chat_view), "hy-divider-left");
   g_signal_connect (self->tree, "chat-removed", G_CALLBACK (on_chat_removed), self);
 
   gtk_paned_set_start_child (self->split_view, GTK_WIDGET (sidebar));

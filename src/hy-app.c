@@ -163,12 +163,17 @@ static const char *HY_STYLE =
    * split -- past the composer and down the terminal, so the division stays
    * clear where the panes are darkest.
    */
-  /* The theme composites its own gradient over any colour set here, so the
-   * final shade is dialled in with opacity over the measured composite --
-   * #444449 at full strength, ~#2a2a2e at this value, read from the harness
-   * rather than predicted. */
+  /*
+   * The separator itself is never drawn. It rendered differently across
+   * boundaries on some display stacks -- wide enough to read as a scrollbar
+   * -- and hiding it is the only rendering that proved consistent. The
+   * visible line is a border on the pane beside it instead, which nothing
+   * composites over and which scales like every other border.
+   */
   "paned > separator { min-width: 1px; min-height: 1px; border: none;"
-  " background-color: #26262b; background-image: none; opacity: 0.55; }\n"
+  " opacity: 0; }\n"
+  ".hy-divider-left { border-left: 1px solid #2a2a2d; }\n"
+  ".hy-divider-top { border-top: 1px solid #2a2a2d; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
