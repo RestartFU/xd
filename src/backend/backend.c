@@ -284,6 +284,7 @@ pending_tool_free (gpointer data)
 {
   AiPendingTool *pending = data;
 
+  g_free (pending->id);
   g_free (pending->name);
   g_string_free (pending->json, TRUE);
   g_free (pending);
@@ -399,7 +400,8 @@ ai_tool_summary (const char *tool_name,
     }
 
   if (detail == NULL || *detail == '\0')
-    return g_strdup (tool_name);
+    return g_strdup (ai_tool_changes_files (tool_name)
+                       ? "file_change" : tool_name);
 
   /*
    * A command is shown as a command.
@@ -435,10 +437,40 @@ ai_tool_summary (const char *tool_name,
     {
       g_autofree char *shortened = g_utf8_substring (trimmed, 0, TOOL_DETAIL_LIMIT);
 
-      return g_strdup_printf ("%s  %s…", tool_name, shortened);
+      return g_strdup_printf ("%s  %s…",
+                              ai_tool_changes_files (tool_name)
+                                ? "file_change" : tool_name,
+                              shortened);
     }
 
-  return g_strdup_printf ("%s  %s", tool_name, trimmed);
+  return g_strdup_printf ("%s  %s",
+                          ai_tool_changes_files (tool_name)
+                            ? "file_change" : tool_name,
+                          trimmed);
+}
+
+gboolean
+ai_tool_changes_files (const char *tool_name)
+{
+  static const char *const names[] = {
+    "edit",
+    "write",
+    "multiedit",
+    "notebookedit",
+    "apply_patch",
+    "edit_file",
+    "write_file",
+    "patch",
+  };
+
+  if (tool_name == NULL)
+    return FALSE;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (names); i++)
+    if (g_ascii_strcasecmp (tool_name, names[i]) == 0)
+      return TRUE;
+
+  return FALSE;
 }
 
 AiParser *
@@ -454,6 +486,8 @@ ai_parser_new (const AiBackend *backend)
   self->model = g_strdup (backend->default_model);
   self->pending_tools = g_hash_table_new_full (g_direct_hash, g_direct_equal,
                                                NULL, pending_tool_free);
+  self->deferred_file_tools =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   self->started_commands =
     g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
@@ -467,6 +501,7 @@ ai_parser_free (AiParser *self)
     return;
 
   g_clear_pointer (&self->pending_tools, g_hash_table_unref);
+  g_clear_pointer (&self->deferred_file_tools, g_hash_table_unref);
   g_clear_pointer (&self->started_commands, g_hash_table_unref);
   g_clear_object (&self->json);
   g_free (self->session_id);

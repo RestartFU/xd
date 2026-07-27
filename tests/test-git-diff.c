@@ -128,7 +128,8 @@ test_capture_only_change_since_previous_event (void)
   g_assert_nonnull (tracker);
 
   g_assert_true (g_file_set_contents (tracked, "first call\n", -1, &error));
-  first_message = xd_git_diff_tracker_capture (tracker, "file_change");
+  first_message =
+    xd_git_diff_tracker_capture (tracker, "file_change  tracked.txt");
   first_patch = xd_git_diff_from_tool (first_message);
   g_assert_nonnull (first_patch);
   g_assert_nonnull (strstr (first_patch, "-before turn"));

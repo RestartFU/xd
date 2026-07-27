@@ -9,6 +9,7 @@ typedef struct
 {
   GString *text;
   char *session_id;
+  char *last_tool;
   guint n_deltas;
   guint n_tools;
   guint n_usage;
@@ -38,6 +39,8 @@ collect (const AiEvent *event,
 
     case AI_EVENT_TOOL_USE:
       collected->n_tools++;
+      g_free (collected->last_tool);
+      collected->last_tool = g_strdup (event->text);
       break;
 
     case AI_EVENT_USAGE:
@@ -69,6 +72,7 @@ collected_clear (Collected *collected)
 {
   g_string_free (collected->text, TRUE);
   g_free (collected->session_id);
+  g_free (collected->last_tool);
 }
 
 /* Replays a captured CLI transcript through the backend's parser. */
@@ -490,6 +494,45 @@ test_tool_only_message_is_not_repeated (void)
   collected_clear (&collected);
 }
 
+/*
+ * Claude asks to edit first and executes afterwards. The file-change event
+ * must land after tool_result, when the diff tracker can see the new file.
+ */
+static void
+test_claude_defers_file_changes_until_tool_result (void)
+{
+  g_autoptr (AiParser) parser = ai_parser_new (ai_backend_lookup ("claude"));
+  Collected collected = { .text = g_string_new (NULL) };
+  const char *request[] = {
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\","
+      "\"index\":0,\"content_block\":{\"type\":\"tool_use\","
+      "\"id\":\"toolu_edit\",\"name\":\"Edit\",\"input\":{}}}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+      "\"index\":0,\"delta\":{\"type\":\"input_json_delta\","
+      "\"partial_json\":\"{\\\"file_path\\\":\\\"src/main.c\\\"}\"}}}",
+    "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\","
+      "\"id\":\"toolu_edit\",\"name\":\"Edit\","
+      "\"input\":{\"file_path\":\"src/main.c\"}}]}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_stop\","
+      "\"index\":0}}",
+  };
+  const char *result =
+    "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\","
+    "\"tool_use_id\":\"toolu_edit\",\"content\":\"updated\"}]}}";
+
+  for (gsize i = 0; i < G_N_ELEMENTS (request); i++)
+    ai_parser_feed_line (parser, request[i], collect, &collected);
+
+  g_assert_cmpuint (collected.n_tools, ==, 0);
+
+  ai_parser_feed_line (parser, result, collect, &collected);
+
+  g_assert_cmpuint (collected.n_tools, ==, 1);
+  g_assert_cmpstr (collected.last_tool, ==, "file_change  src/main.c");
+
+  collected_clear (&collected);
+}
+
 static void
 test_tool_summary_names_the_work (void)
 {
@@ -497,6 +540,8 @@ test_tool_summary_names_the_work (void)
   g_autofree char *bash = NULL;
   g_autofree char *bare = NULL;
   g_autofree char *file_change = NULL;
+  g_autofree char *edit = NULL;
+  g_autofree char *write = NULL;
   g_autofree char *subagent = NULL;
   g_autofree char *subagent_identity = NULL;
   g_autofree char *subagent_task = NULL;
@@ -532,6 +577,19 @@ test_tool_summary_names_the_work (void)
    * is what the chat uses to replace the dead tool line with the diff pane. */
   file_change = ai_tool_summary ("file_change", NULL);
   g_assert_cmpstr (file_change, ==, "file_change");
+
+  {
+    g_autoptr (JsonParser) file = json_parser_new ();
+
+    g_assert_true (json_parser_load_from_data (
+      file, "{\"file_path\":\"src/main.c\"}", -1, NULL));
+    edit = ai_tool_summary (
+      "Edit", json_node_get_object (json_parser_get_root (file)));
+    write = ai_tool_summary (
+      "write", json_node_get_object (json_parser_get_root (file)));
+    g_assert_cmpstr (edit, ==, "file_change  src/main.c");
+    g_assert_cmpstr (write, ==, "file_change  src/main.c");
+  }
 
   {
     g_autoptr (JsonParser) agent = json_parser_new ();
@@ -679,6 +737,8 @@ main (int   argc,
   g_test_add_func ("/backend/tools/order", test_tool_calls_are_reported_in_order);
   g_test_add_func ("/backend/tools/tool-only-once",
                    test_tool_only_message_is_not_repeated);
+  g_test_add_func ("/backend/tools/file-change-after-result",
+                   test_claude_defers_file_changes_until_tool_result);
   g_test_add_func ("/backend/tools/live", test_claude_reports_tool_use);
   g_test_add_func ("/backend/tools/summary", test_tool_summary_names_the_work);
 

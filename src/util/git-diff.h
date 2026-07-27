@@ -6,7 +6,7 @@ G_BEGIN_DECLS
 
 typedef struct _XdGitDiffTracker XdGitDiffTracker;
 
-/* True for the stable event emitted when Codex finishes editing files. */
+/* True for the stable event emitted after any backend finishes editing files. */
 gboolean    xd_tool_is_file_change       (const char *message);
 
 /*

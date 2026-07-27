@@ -173,6 +173,83 @@ emit_usage (AiParser    *parser,
     callback (&event, user_data);
 }
 
+static void
+emit_or_defer_tool (AiParser    *parser,
+                    const char  *tool_name,
+                    const char  *tool_id,
+                    JsonObject  *arguments,
+                    AiEventFunc  callback,
+                    gpointer     user_data)
+{
+  g_autofree char *summary = ai_tool_summary (tool_name, arguments);
+
+  /*
+   * Claude streams the assistant's tool request, then executes it, then emits
+   * a user/tool_result record. Capturing a diff from the request races the
+   * actual write and normally sees the old tree.
+   */
+  if (ai_tool_changes_files (tool_name) && tool_id != NULL)
+    {
+      g_hash_table_replace (parser->deferred_file_tools,
+                            g_strdup (tool_id),
+                            g_steal_pointer (&summary));
+      return;
+    }
+
+  emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+}
+
+static void
+emit_completed_file_tools (AiParser    *parser,
+                           JsonObject  *root,
+                           AiEventFunc  callback,
+                           gpointer     user_data)
+{
+  JsonObject *message = ai_json_get_object (root, "message");
+  JsonArray *content;
+
+  if (message == NULL || !json_object_has_member (message, "content"))
+    return;
+
+  content = json_object_get_array_member (message, "content");
+  for (guint i = 0;
+       content != NULL && i < json_array_get_length (content);
+       i++)
+    {
+      JsonObject *block = json_array_get_object_element (content, i);
+      const char *id;
+      const char *summary;
+
+      if (g_strcmp0 (ai_json_get_string (block, "type"), "tool_result") != 0)
+        continue;
+
+      id = ai_json_get_string (block, "tool_use_id");
+      summary = id != NULL
+        ? g_hash_table_lookup (parser->deferred_file_tools, id) : NULL;
+      if (summary == NULL)
+        continue;
+
+      emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+      g_hash_table_remove (parser->deferred_file_tools, id);
+    }
+}
+
+static void
+flush_deferred_file_tools (AiParser    *parser,
+                           AiEventFunc  callback,
+                           gpointer     user_data)
+{
+  GHashTableIter iter;
+  gpointer value;
+
+  g_hash_table_iter_init (&iter, parser->deferred_file_tools);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    {
+      emit (callback, user_data, AI_EVENT_TOOL_USE, value, NULL);
+      g_hash_table_iter_remove (&iter);
+    }
+}
+
 /* A "stream_event" wraps the raw Anthropic streaming event. */
 static void
 parse_stream_event (AiParser    *parser,
@@ -228,6 +305,7 @@ parse_stream_event (AiParser    *parser,
         {
           AiPendingTool *pending = g_new0 (AiPendingTool, 1);
 
+          pending->id = g_strdup (ai_json_get_string (block, "id"));
           pending->name = g_strdup (ai_json_get_string (block, "name"));
           pending->json = g_string_new (NULL);
           g_hash_table_insert (parser->pending_tools,
@@ -242,7 +320,6 @@ parse_stream_event (AiParser    *parser,
       AiPendingTool *pending = g_hash_table_lookup (parser->pending_tools,
                                                     GINT_TO_POINTER ((int) index));
       g_autoptr (JsonParser) input = NULL;
-      g_autofree char *summary = NULL;
       JsonObject *arguments = NULL;
 
       if (pending == NULL)
@@ -258,8 +335,8 @@ parse_stream_event (AiParser    *parser,
             arguments = json_node_get_object (root);
         }
 
-      summary = ai_tool_summary (pending->name, arguments);
-      emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+      emit_or_defer_tool (parser, pending->name, pending->id, arguments,
+                          callback, user_data);
 
       g_hash_table_remove (parser->pending_tools, GINT_TO_POINTER ((int) index));
     }
@@ -294,11 +371,12 @@ parse_assistant (AiParser    *parser,
         {
           if (g_hash_table_size (parser->pending_tools) == 0)
             {
-              g_autofree char *summary =
-                ai_tool_summary (ai_json_get_string (block, "name"),
-                                 ai_json_get_object (block, "input"));
-
-              emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+              emit_or_defer_tool (
+                parser,
+                ai_json_get_string (block, "name"),
+                ai_json_get_string (block, "id"),
+                ai_json_get_object (block, "input"),
+                callback, user_data);
             }
           continue;
         }
@@ -342,11 +420,21 @@ claude_parse_object (AiParser    *parser,
       return;
     }
 
+  if (g_strcmp0 (type, "user") == 0)
+    {
+      emit_completed_file_tools (parser, root, callback, user_data);
+      return;
+    }
+
   if (g_strcmp0 (type, "result") == 0)
     {
       const char *text = ai_json_get_string (root, "result");
       gboolean failed = json_object_has_member (root, "is_error") &&
                         json_object_get_boolean_member (root, "is_error");
+
+      /* Old or shortened transcripts can omit tool_result records. At turn
+       * completion the writes have definitely happened, so do not lose them. */
+      flush_deferred_file_tools (parser, callback, user_data);
 
       if (!failed)
         emit_usage (parser, root, callback, user_data);

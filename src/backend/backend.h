@@ -145,6 +145,7 @@ guint64                 ai_backend_context_window (const AiBackend *self,
 /* A tool call whose arguments are still streaming in. */
 typedef struct
 {
+  char *id;
   char *name;
   GString *json;
 } AiPendingTool;
@@ -160,6 +161,10 @@ struct _AiParser
   /* Block index -> AiPendingTool*. Tool arguments arrive in fragments after
    * the block opens, so the call cannot be described until it closes. */
   GHashTable *pending_tools;
+
+  /* Claude tool-use id -> summary. File-mutating calls are announced before
+   * Claude executes them, so their event waits for the matching tool result. */
+  GHashTable *deferred_file_tools;
 
   /* Codex command id -> present. Commands are useful while they are running,
    * so their start event is emitted and their completion is deduplicated. */
@@ -193,5 +198,6 @@ JsonObject *ai_json_get_object (JsonObject *object,
  */
 char       *ai_tool_summary    (const char *tool_name,
                                 JsonObject *input);
+gboolean    ai_tool_changes_files (const char *tool_name);
 
 G_END_DECLS
