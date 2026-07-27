@@ -370,3 +370,41 @@ xd_unified_diff_markup (GPtrArray *lines,
 
   return g_string_free (g_steal_pointer (&markup), FALSE);
 }
+
+char *
+xd_unified_diff_markup_slice (GPtrArray *lines,
+                              gboolean   show_file_headers,
+                              guint      start,
+                              guint      end)
+{
+  g_autoptr (GString) markup = g_string_new (NULL);
+  guint rendered = 0;
+
+  g_return_val_if_fail (lines != NULL, g_strdup (""));
+
+  end = MIN (end, lines->len);
+  for (guint i = MIN (start, end); i < end; i++)
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i);
+
+      if (line->kind == XD_DIFF_LINE_FILE)
+        {
+          if (!show_file_headers)
+            continue;
+          append_file_markup (markup, lines, i, line, rendered);
+        }
+      else if (line->kind == XD_DIFF_LINE_HUNK ||
+               line->kind == XD_DIFF_LINE_META)
+        {
+          append_full_line_markup (markup, line, rendered);
+        }
+      else
+        {
+          append_code_line_markup (markup, line, rendered);
+        }
+
+      rendered++;
+    }
+
+  return g_string_free (g_steal_pointer (&markup), FALSE);
+}

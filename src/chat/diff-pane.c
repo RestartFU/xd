@@ -24,7 +24,7 @@ struct _XdDiffPane
   gboolean branch_mode;
   GCancellable *cancellable;
 
-  GtkBox *diff_lines;
+  GtkListView *diff_lines;
   GtkLabel *summary;
   GtkWidget *stack;
 };
@@ -234,7 +234,8 @@ show_read_error (XdDiffPane *self,
 static void
 clear_diff (XdDiffPane *self)
 {
-  xd_diff_view_fill (self->diff_lines, "", TRUE, NULL, NULL);
+  xd_diff_view_fill_virtualized (
+    self->diff_lines, "", TRUE, NULL, NULL);
 }
 
 static void
@@ -280,8 +281,8 @@ on_diff_read (GObject      *source,
         at++;
     }
 
-  xd_diff_view_fill (self->diff_lines, output, TRUE,
-                     &additions, &deletions);
+  xd_diff_view_fill_virtualized (
+    self->diff_lines, output, TRUE, &additions, &deletions);
 
   {
     g_autofree char *summary = g_strdup_printf (
@@ -493,9 +494,8 @@ xd_diff_pane_init (XdDiffPane *self)
   gtk_widget_set_margin_top (header, 6);
   gtk_widget_set_margin_bottom (header, 6);
 
-  self->diff_lines = GTK_BOX (
-    gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
-  gtk_widget_set_valign (GTK_WIDGET (self->diff_lines), GTK_ALIGN_START);
+  self->diff_lines = GTK_LIST_VIEW (
+    xd_diff_view_new_virtualized ());
   gtk_widget_set_hexpand (GTK_WIDGET (self->diff_lines), TRUE);
 
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (diff_window),

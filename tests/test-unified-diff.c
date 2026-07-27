@@ -123,6 +123,39 @@ test_colours_complete_changed_lines (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#57e389\">added line"));
 }
 
+static void
+test_formats_independent_slices (void)
+{
+  static const char *patch =
+    "diff --git a/src/a.c b/src/a.c\n"
+    "@@ -1,2 +1,2 @@\n"
+    "-old\n"
+    "+new\n"
+    " same\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *first =
+    xd_unified_diff_markup_slice (lines, TRUE, 0, 2);
+  g_autofree char *second =
+    xd_unified_diff_markup_slice (lines, TRUE, 2, 5);
+  g_autofree char *plain = NULL;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (
+    pango_parse_markup (first, -1, 0, NULL, &plain, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (plain, "src/a.c  +1  −1"));
+  g_assert_null (strstr (plain, "old"));
+
+  g_clear_pointer (&plain, g_free);
+  g_assert_true (
+    pango_parse_markup (second, -1, 0, NULL, &plain, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (plain, "old"));
+  g_assert_nonnull (strstr (plain, "new"));
+  g_assert_null (strstr (plain, "Showing first"));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -137,6 +170,8 @@ main (int   argc,
                    test_formats_one_safe_layout);
   g_test_add_func ("/unified-diff/colours-complete-changed-lines",
                    test_colours_complete_changed_lines);
+  g_test_add_func ("/unified-diff/formats-independent-slices",
+                   test_formats_independent_slices);
 
   return g_test_run ();
 }

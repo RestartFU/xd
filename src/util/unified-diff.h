@@ -48,4 +48,15 @@ char      *xd_unified_diff_markup  (GPtrArray *lines,
                                     gboolean   show_file_headers,
                                     guint      limit);
 
+/*
+ * Formats one raw parsed-line range without a truncation footer.
+ *
+ * Used by the virtualized Git pane: only ranges represented by visible list
+ * items become Pango layouts.
+ */
+char      *xd_unified_diff_markup_slice (GPtrArray *lines,
+                                         gboolean   show_file_headers,
+                                         guint      start,
+                                         guint      end);
+
 G_END_DECLS

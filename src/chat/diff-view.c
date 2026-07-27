@@ -4,6 +4,20 @@
 
 #define INLINE_EAGER_ROWS 60
 #define INLINE_PREVIEW_ROWS 120
+#define VIRTUAL_DIFF_ROWS 80
+
+typedef struct
+{
+  GPtrArray *lines;
+  gboolean show_file_headers;
+} VirtualDiff;
+
+static void
+virtual_diff_free (VirtualDiff *diff)
+{
+  g_clear_pointer (&diff->lines, g_ptr_array_unref);
+  g_free (diff);
+}
 
 static void
 clear_box (GtkBox *box)
@@ -133,4 +147,130 @@ xd_diff_view_new (const char *patch,
     }
 
   return box;
+}
+
+static void
+setup_virtual_chunk (GtkSignalListItemFactory *factory,
+                     GtkListItem              *item,
+                     gpointer                  user_data)
+{
+  GtkWidget *label = diff_label ("");
+
+  gtk_widget_add_css_class (label, "xd-diff-chunk");
+  gtk_list_item_set_child (item, label);
+}
+
+static void
+bind_virtual_chunk (GtkSignalListItemFactory *factory,
+                    GtkListItem              *item,
+                    gpointer                  user_data)
+{
+  VirtualDiff *diff = user_data;
+  GtkStringObject *descriptor =
+    GTK_STRING_OBJECT (gtk_list_item_get_item (item));
+  const char *value = gtk_string_object_get_string (descriptor);
+  char *at = NULL;
+  guint64 start = g_ascii_strtoull (value, &at, 10);
+  guint64 end = at != NULL && *at == ':'
+    ? g_ascii_strtoull (at + 1, NULL, 10) : start;
+  g_autofree char *markup = xd_unified_diff_markup_slice (
+    diff->lines, diff->show_file_headers,
+    (guint) MIN (start, G_MAXUINT), (guint) MIN (end, G_MAXUINT));
+
+  gtk_label_set_markup (
+    GTK_LABEL (gtk_list_item_get_child (item)), markup);
+}
+
+static void
+unbind_virtual_chunk (GtkSignalListItemFactory *factory,
+                      GtkListItem              *item,
+                      gpointer                  user_data)
+{
+  gtk_label_set_text (GTK_LABEL (gtk_list_item_get_child (item)), "");
+}
+
+GtkWidget *
+xd_diff_view_new_virtualized (void)
+{
+  g_autoptr (GtkListItemFactory) factory =
+    gtk_signal_list_item_factory_new ();
+  GtkWidget *view = gtk_list_view_new (NULL, NULL);
+  VirtualDiff *diff = g_new0 (VirtualDiff, 1);
+
+  diff->lines =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) xd_diff_line_free);
+  g_object_set_data_full (
+    G_OBJECT (factory), "xd-virtual-diff", diff,
+    (GDestroyNotify) virtual_diff_free);
+  g_signal_connect (factory, "setup",
+                    G_CALLBACK (setup_virtual_chunk), diff);
+  g_signal_connect (factory, "bind",
+                    G_CALLBACK (bind_virtual_chunk), diff);
+  g_signal_connect (factory, "unbind",
+                    G_CALLBACK (unbind_virtual_chunk), diff);
+
+  gtk_list_view_set_factory (
+    GTK_LIST_VIEW (view), GTK_LIST_ITEM_FACTORY (factory));
+  gtk_widget_add_css_class (view, "xd-diff-list");
+
+  return view;
+}
+
+void
+xd_diff_view_fill_virtualized (GtkListView *view,
+                               const char  *patch,
+                               gboolean     show_file_headers,
+                               guint       *additions,
+                               guint       *deletions)
+{
+  GtkListItemFactory *factory;
+  VirtualDiff *diff;
+  g_autoptr (GtkStringList) chunks = gtk_string_list_new (NULL);
+  g_autoptr (GtkNoSelection) selection = NULL;
+  guint start = 0;
+  guint rows = 0;
+
+  g_return_if_fail (GTK_IS_LIST_VIEW (view));
+
+  factory = gtk_list_view_get_factory (view);
+  diff = g_object_get_data (G_OBJECT (factory), "xd-virtual-diff");
+
+  /* Unbind old rows before replacing the parsed data they reference. */
+  gtk_list_view_set_model (view, NULL);
+  g_clear_pointer (&diff->lines, g_ptr_array_unref);
+  diff->lines = xd_unified_diff_parse (patch, additions, deletions);
+  diff->show_file_headers = show_file_headers;
+
+  for (guint i = 0; i < diff->lines->len; i++)
+    {
+      XdDiffLine *line = g_ptr_array_index (diff->lines, i);
+
+      if (line->kind == XD_DIFF_LINE_FILE && !show_file_headers)
+        continue;
+
+      if (rows == 0)
+        start = i;
+      rows++;
+
+      if (rows == VIRTUAL_DIFF_ROWS)
+        {
+          g_autofree char *descriptor =
+            g_strdup_printf ("%u:%u", start, i + 1);
+
+          gtk_string_list_append (chunks, descriptor);
+          rows = 0;
+        }
+    }
+
+  if (rows > 0)
+    {
+      g_autofree char *descriptor =
+        g_strdup_printf ("%u:%u", start, diff->lines->len);
+
+      gtk_string_list_append (chunks, descriptor);
+    }
+
+  selection = gtk_no_selection_new (
+    G_LIST_MODEL (g_object_ref (chunks)));
+  gtk_list_view_set_model (view, GTK_SELECTION_MODEL (selection));
 }

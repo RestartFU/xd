@@ -426,6 +426,12 @@ static const char *XD_STYLE =
   ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
   " font-family: \"JetBrains Mono\", monospace; font-size: 1em;"
   " line-height: 1; }\n"
+  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px; }\n"
+  ".xd-diff-text.xd-diff-chunk { padding-top: 0; padding-bottom: 0; }\n"
+  "listview.xd-diff-list > row { min-height: 0; margin: 0; padding: 0;"
+  " border-radius: 0; }\n"
+  "listview.xd-diff-list > row:hover"
+  " { background: none; }\n"
   ".xd-diff-expander > title { padding: 9px 12px; }\n"
 
   /* Repository browser: the list and preview share the same quiet side pane
