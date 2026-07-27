@@ -61,9 +61,10 @@ typedef struct
   guint64 context_window;
 } Turn;
 
-/* Wide enough for code and a diff line, narrow enough that a line of prose
- * is one glance. */
-#define CONTENT_WIDTH 860
+/* Code and paired diffs need more room than prose. Keep the column bounded so
+ * it still reads as a conversation, but use the space available on a desktop
+ * instead of shrinking two diff sides into a narrow card. */
+#define CONTENT_WIDTH 1040
 #define TRANSCRIPT_PAGE_SIZE 100
 
 struct _XdChatView
