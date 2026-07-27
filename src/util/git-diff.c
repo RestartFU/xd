@@ -54,8 +54,9 @@ run_git (const char        *workdir,
       !g_subprocess_communicate_utf8 (
         process, NULL, NULL, &output, &stderr_text, &error))
     {
-      g_debug ("cannot capture file diff: %s",
-               error != NULL ? error->message : "git did not start");
+      g_printerr ("xd: cannot run git %s: %s\n",
+                  argv[1] != NULL ? argv[1] : "",
+                  error != NULL ? error->message : "git did not start");
       g_free (output);
       return NULL;
     }
@@ -63,11 +64,10 @@ run_git (const char        *workdir,
   if (!g_subprocess_get_successful (process) &&
       !(accept_difference && g_subprocess_get_exit_status (process) == 1))
     {
-      if (index_path != NULL)
-        g_warning ("git %s failed (%d): %s",
-                   argv[1] != NULL ? argv[1] : "",
-                   g_subprocess_get_exit_status (process),
-                   stderr_text != NULL ? stderr_text : "no error output");
+      g_printerr ("xd: git %s failed (%d): %s",
+                  argv[1] != NULL ? argv[1] : "",
+                  g_subprocess_get_exit_status (process),
+                  stderr_text != NULL ? stderr_text : "no error output\n");
       g_free (output);
       return NULL;
     }
