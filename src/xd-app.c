@@ -153,7 +153,7 @@ static const char *XD_STYLE =
    * font for glyphs these text faces do not cover.
    */
   "window { font-family: \"DM Sans\", \"Inter\", \"Cantarell\", sans-serif;"
-  " font-size: 0.95em; }\n"
+  " font-size: 0.95em; line-height: 1.15; }\n"
 
   /* Flat: the window is one surface, so the bars that divide it are told
    * apart by spacing rather than by lines and shading. */
