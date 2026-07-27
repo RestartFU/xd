@@ -430,6 +430,9 @@ static const char *XD_STYLE =
   " color: #78aeed; }\n"
   ".xd-diff-meta { color: alpha(#ffffff, 0.55);"
   " background: alpha(#ffffff, 0.025); }\n"
+  ".xd-diff-expander > title { padding: 9px 12px; }\n"
+  ".xd-diff-truncated { padding: 9px 12px;"
+  " background: alpha(#ffffff, 0.025); }\n"
 
   /* Selectable, but not editable-looking: a caret blinking in a message
    * suggests typing somewhere nothing can be typed. Selection keeps its

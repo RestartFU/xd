@@ -2,6 +2,13 @@
 
 #include "util/unified-diff.h"
 
+#include <string.h>
+
+#define INLINE_EAGER_ROWS 60
+#define INLINE_PREVIEW_ROWS 120
+#define PANE_PREVIEW_ROWS 250
+#define DISPLAY_LINE_BYTES 4096
+
 static void
 clear_box (GtkBox *box)
 {
@@ -9,6 +16,26 @@ clear_box (GtkBox *box)
 
   while ((child = gtk_widget_get_first_child (GTK_WIDGET (box))) != NULL)
     gtk_box_remove (box, child);
+}
+
+static char *
+display_text (const char *text)
+{
+  gsize length;
+  gsize cut;
+
+  if (text == NULL)
+    return g_strdup ("");
+
+  length = strlen (text);
+  if (length <= DISPLAY_LINE_BYTES)
+    return g_strdup (text);
+
+  cut = DISPLAY_LINE_BYTES;
+  while (cut > 0 && (((guchar) text[cut]) & 0xc0) == 0x80)
+    cut--;
+
+  return g_strdup_printf ("%.*s…", (int) cut, text);
 }
 
 static GtkWidget *
@@ -28,7 +55,8 @@ line_number (guint number)
 static GtkWidget *
 code_label (const char *text)
 {
-  GtkWidget *label = gtk_label_new (text != NULL ? text : "");
+  g_autofree char *shown = display_text (text);
+  GtkWidget *label = gtk_label_new (shown);
 
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
   gtk_label_set_selectable (GTK_LABEL (label), TRUE);
@@ -142,7 +170,9 @@ append_pair (GtkBox           *box,
 static guint
 append_changes (GtkBox    *box,
                 GPtrArray *lines,
-                guint      start)
+                guint      start,
+                guint      limit,
+                guint     *rendered)
 {
   g_autoptr (GPtrArray) removed = g_ptr_array_new ();
   g_autoptr (GPtrArray) added = g_ptr_array_new ();
@@ -162,27 +192,101 @@ append_changes (GtkBox    *box,
     }
 
   for (guint i = 0; i < MAX (removed->len, added->len); i++)
-    append_pair (box,
-                 i < removed->len ? g_ptr_array_index (removed, i) : NULL,
-                 i < added->len ? g_ptr_array_index (added, i) : NULL);
+    {
+      if (limit > 0 && *rendered >= limit)
+        break;
+
+      append_pair (box,
+                   i < removed->len ? g_ptr_array_index (removed, i) : NULL,
+                   i < added->len ? g_ptr_array_index (added, i) : NULL);
+      (*rendered)++;
+    }
 
   return at;
 }
 
-void
-xd_diff_view_fill (GtkBox     *box,
-                   const char *patch,
-                   gboolean    show_file_headers,
-                   guint      *additions,
-                   guint      *deletions)
+static guint
+display_row_count (GPtrArray *lines,
+                   gboolean   show_file_headers)
+{
+  guint rows = 0;
+
+  for (guint i = 0; i < lines->len; )
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i);
+
+      if (line->kind == XD_DIFF_LINE_FILE)
+        {
+          if (show_file_headers)
+            rows++;
+          i++;
+        }
+      else if (line->kind == XD_DIFF_LINE_REMOVED ||
+               line->kind == XD_DIFF_LINE_ADDED)
+        {
+          guint removed = 0;
+          guint added = 0;
+
+          while (i < lines->len)
+            {
+              line = g_ptr_array_index (lines, i);
+              if (line->kind == XD_DIFF_LINE_REMOVED)
+                removed++;
+              else if (line->kind == XD_DIFF_LINE_ADDED)
+                added++;
+              else
+                break;
+              i++;
+            }
+
+          rows += MAX (removed, added);
+        }
+      else
+        {
+          rows++;
+          i++;
+        }
+    }
+
+  return rows;
+}
+
+static void
+append_truncation (GtkBox *box,
+                   guint   rendered,
+                   guint   total)
+{
+  g_autofree char *text = g_strdup_printf (
+    "Showing first %u of %u rows", rendered, total);
+  GtkWidget *label = gtk_label_new (text);
+
+  gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
+  gtk_widget_add_css_class (label, "caption");
+  gtk_widget_add_css_class (label, "dim-label");
+  gtk_widget_add_css_class (label, "xd-diff-truncated");
+  gtk_box_append (box, label);
+}
+
+static void
+fill_rows (GtkBox     *box,
+           const char *patch,
+           gboolean    show_file_headers,
+           guint       limit,
+           guint      *additions,
+           guint      *deletions)
 {
   g_autoptr (GPtrArray) lines = NULL;
+  guint rendered = 0;
+  guint total;
 
   g_return_if_fail (GTK_IS_BOX (box));
 
   clear_box (box);
   lines = xd_unified_diff_parse (patch, additions, deletions);
-  for (guint i = 0; i < lines->len; )
+  total = display_row_count (lines, show_file_headers);
+
+  for (guint i = 0;
+       i < lines->len && (limit == 0 || rendered < limit); )
     {
       XdDiffLine *line = g_ptr_array_index (lines, i);
 
@@ -208,24 +312,60 @@ xd_diff_view_fill (GtkBox     *box,
 
               append_file (
                 box, line, file_additions, file_deletions);
+              rendered++;
             }
           i++;
           break;
         case XD_DIFF_LINE_HUNK:
         case XD_DIFF_LINE_META:
           append_full_line (box, line);
+          rendered++;
           i++;
           break;
         case XD_DIFF_LINE_CONTEXT:
           append_pair (box, line, line);
+          rendered++;
           i++;
           break;
         case XD_DIFF_LINE_REMOVED:
         case XD_DIFF_LINE_ADDED:
-          i = append_changes (box, lines, i);
+          i = append_changes (box, lines, i, limit, &rendered);
           break;
         }
     }
+
+  if (rendered < total)
+    append_truncation (box, rendered, total);
+}
+
+void
+xd_diff_view_fill (GtkBox     *box,
+                   const char *patch,
+                   gboolean    show_file_headers,
+                   guint      *additions,
+                   guint      *deletions)
+{
+  fill_rows (box, patch, show_file_headers, PANE_PREVIEW_ROWS,
+             additions, deletions);
+}
+
+static void
+on_large_diff_expanded (GtkExpander *expander,
+                        GParamSpec  *pspec,
+                        gpointer     user_data)
+{
+  GtkWidget *box;
+  const char *patch;
+
+  if (!gtk_expander_get_expanded (expander) ||
+      g_object_get_data (G_OBJECT (expander), "xd-diff-loaded") != NULL)
+    return;
+
+  box = gtk_expander_get_child (expander);
+  patch = g_object_get_data (G_OBJECT (expander), "xd-diff-patch");
+  fill_rows (GTK_BOX (box), patch, TRUE, INLINE_PREVIEW_ROWS, NULL, NULL);
+  g_object_set_data (G_OBJECT (expander), "xd-diff-loaded",
+                     GINT_TO_POINTER (TRUE));
 }
 
 GtkWidget *
@@ -235,11 +375,42 @@ xd_diff_view_new (const char *patch,
                   guint      *deletions)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  g_autoptr (GPtrArray) lines = NULL;
+  guint added = 0;
+  guint removed = 0;
+  guint rows;
 
   gtk_widget_set_valign (box, GTK_ALIGN_START);
   gtk_widget_set_hexpand (box, TRUE);
   gtk_widget_add_css_class (box, "xd-diff-view");
-  xd_diff_view_fill (
-    GTK_BOX (box), patch, show_file_headers, additions, deletions);
+
+  lines = xd_unified_diff_parse (patch, &added, &removed);
+  rows = display_row_count (lines, show_file_headers);
+  if (additions != NULL)
+    *additions = added;
+  if (deletions != NULL)
+    *deletions = removed;
+
+  if (!show_file_headers || rows <= INLINE_EAGER_ROWS)
+    {
+      fill_rows (GTK_BOX (box), patch, show_file_headers,
+                 INLINE_PREVIEW_ROWS, NULL, NULL);
+    }
+  else
+    {
+      g_autofree char *summary = g_strdup_printf (
+        "Large diff · %u rows · +%u  −%u", rows, added, removed);
+      GtkWidget *expander = gtk_expander_new (summary);
+      GtkWidget *preview = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+
+      gtk_expander_set_child (GTK_EXPANDER (expander), preview);
+      gtk_widget_add_css_class (expander, "xd-diff-expander");
+      g_object_set_data_full (G_OBJECT (expander), "xd-diff-patch",
+                              g_strdup (patch), g_free);
+      g_signal_connect (expander, "notify::expanded",
+                        G_CALLBACK (on_large_diff_expanded), NULL);
+      gtk_box_append (GTK_BOX (box), expander);
+    }
+
   return box;
 }
