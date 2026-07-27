@@ -1,4 +1,6 @@
 {"type":"thread.started","thread_id":"019f9b16-df5f-7182-bdc6-1cce26148979"}
 {"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_command","type":"command_execution","command":"gh run watch 30230367515 --repo RestartFU/xd --exit-status"}}
+{"type":"item.completed","item":{"id":"item_command","type":"command_execution","command":"gh run watch 30230367515 --repo RestartFU/xd --exit-status","aggregated_output":"run completed with 'success'","exit_code":0,"status":"completed"}}
 {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello from hy"}}
 {"type":"turn.completed","usage":{"input_tokens":16941,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":7,"reasoning_output_tokens":0}}

@@ -23,8 +23,9 @@ G_DECLARE_FINAL_TYPE (XdMessageRow, xd_message_row, XD, MESSAGE_ROW, AdwBin)
  * Rows represent complete messages. Turn progress belongs to the transcript's
  * working marker, so incomplete assistant text does not allocate blank space.
  */
-XdMessageRow *xd_message_row_new        (XdMessageKind  kind,
-                                         const char    *text);
+XdMessageRow *xd_message_row_new         (XdMessageKind  kind,
+                                          const char    *text);
+void          xd_message_row_make_status (XdMessageRow *self);
 
 /* Records what produced the message -- model and effort -- as a tooltip. */
 void          xd_message_row_set_source (XdMessageRow  *self,

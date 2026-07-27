@@ -12,8 +12,9 @@
  * -C was only ever saying it twice.
  *
  * Output is one JSON object per line: "thread.started" carries the id used to
- * resume, "item.completed" delivers finished items -- the agent's reply among
- * them -- and "turn.completed" ends the turn.
+ * resume, command "item.started" events make long-running work visible,
+ * "item.completed" delivers finished items -- the agent's reply among them --
+ * and "turn.completed" ends the turn.
  *
  * Unlike claude, this mode reports no token-level deltas, so a reply arrives
  * in one piece. The event names are also less settled than claude's, which is
@@ -373,8 +374,39 @@ codex_parse_object (AiParser    *parser,
       return;
     }
 
+  if (g_strcmp0 (type, "item.started") == 0)
+    {
+      JsonObject *item = ai_json_get_object (root, "item");
+      const char *item_type = ai_json_get_string (item, "type");
+      const char *item_id = ai_json_get_string (item, "id");
+
+      /*
+       * Commands can take minutes. Reporting them only after completion hides
+       * exactly the workflow watch the user needs to follow alongside the
+       * agent. File changes stay completion-only: capturing their diff before
+       * the edit lands would preserve an empty or stale patch.
+       */
+      if (g_strcmp0 (item_type, "command_execution") == 0)
+        {
+          g_autofree char *summary = ai_tool_summary (item_type, item);
+
+          emit (callback, user_data, AI_EVENT_TOOL_USE, summary, NULL);
+          if (item_id != NULL)
+            g_hash_table_add (parser->started_commands, g_strdup (item_id));
+        }
+
+      return;
+    }
+
   if (g_strcmp0 (type, "item.completed") == 0)
     {
+      JsonObject *item = ai_json_get_object (root, "item");
+      const char *item_id = ai_json_get_string (item, "id");
+
+      if (item_id != NULL &&
+          g_hash_table_remove (parser->started_commands, item_id))
+        return;
+
       parse_item (parser, root, callback, user_data);
       return;
     }

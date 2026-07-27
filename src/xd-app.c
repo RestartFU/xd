@@ -378,6 +378,10 @@ static const char *XD_STYLE =
   ".xd-code { background-color: alpha(#ffffff, 0.04);"
   " border: 1px solid alpha(#ffffff, 0.06); border-radius: 10px;"
   " padding: 10px 12px; }\n"
+  /* Durable external work: visibly separate from agent prose, but quiet
+   * enough to stay in the timeline after the run has finished. */
+  ".xd-status { background-color: alpha(#3584e4, 0.08);"
+  " border: 1px solid alpha(#3584e4, 0.22); border-radius: 10px; }\n"
   ".xd-code label { font-family: \"JetBrains Mono\", monospace;"
   " font-size: 0.88em; }\n"
   ".xd-code textview.xd-diff, .xd-code textview.xd-diff text"

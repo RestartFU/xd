@@ -16,6 +16,7 @@
 #include "util/ask-block.h"
 #include "util/git-diff.h"
 #include "util/git-info.h"
+#include "util/workflow-run.h"
 #include "util/worktree.h"
 
 /*
@@ -455,12 +456,26 @@ show_tool_use (XdChatView *self,
                const char *summary)
 {
   const char *diff = xd_git_diff_from_tool (summary);
+  g_autofree char *run_id = NULL;
+  g_autofree char *url = NULL;
 
   if (diff != NULL)
     {
       g_autofree char *block = g_strdup_printf ("```diff\n%s\n```", diff);
 
       append_row (self, XD_MESSAGE_ASSISTANT, block);
+      return;
+    }
+
+  if (xd_workflow_run_from_tool (summary, &run_id, &url))
+    {
+      g_autofree char *block = g_strdup_printf (
+        "**GitHub Actions · Run #%s**\n\n"
+        "[Open live status and logs](%s)", run_id, url);
+      XdMessageRow *row =
+        append_row (self, XD_MESSAGE_ASSISTANT, block);
+
+      xd_message_row_make_status (row);
       return;
     }
 
@@ -1556,8 +1571,10 @@ on_tool_use (XdChatSession *session,
              gpointer       user_data)
 {
   Turn *turn = user_data;
-  g_autofree char *tool =
+  g_autofree char *diff =
     xd_git_diff_capture_tool (name, turn->workdir);
+  g_autofree char *tool =
+    xd_workflow_run_capture_tool (diff, turn->workdir);
 
   close_segment (turn, FALSE);
   remember_turn_item (turn, TRUE, tool);

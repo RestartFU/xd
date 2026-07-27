@@ -431,6 +431,8 @@ ai_parser_new (const AiBackend *backend)
   self->model = g_strdup (backend->default_model);
   self->pending_tools = g_hash_table_new_full (g_direct_hash, g_direct_equal,
                                                NULL, pending_tool_free);
+  self->started_commands =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
   return self;
 }
@@ -442,6 +444,7 @@ ai_parser_free (AiParser *self)
     return;
 
   g_clear_pointer (&self->pending_tools, g_hash_table_unref);
+  g_clear_pointer (&self->started_commands, g_hash_table_unref);
   g_clear_object (&self->json);
   g_free (self->session_id);
   g_free (self->model);

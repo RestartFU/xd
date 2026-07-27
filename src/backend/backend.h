@@ -160,6 +160,10 @@ struct _AiParser
   /* Block index -> AiPendingTool*. Tool arguments arrive in fragments after
    * the block opens, so the call cannot be described until it closes. */
   GHashTable *pending_tools;
+
+  /* Codex command id -> present. Commands are useful while they are running,
+   * so their start event is emitted and their completion is deduplicated. */
+  GHashTable *started_commands;
 };
 
 AiParser *ai_parser_new       (const AiBackend *backend);

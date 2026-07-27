@@ -7,6 +7,7 @@
 #include "tree/xd-node.h"
 #include "util/ask-block.h"
 #include "util/git-diff.h"
+#include "util/workflow-run.h"
 
 #include <string.h>
 
@@ -234,8 +235,10 @@ on_tool_use (XdChatSession *session,
              gpointer       user_data)
 {
   XdDaemonTurn *self = user_data;
-  g_autofree char *tool =
+  g_autofree char *diff =
     xd_git_diff_capture_tool (name, self->workdir);
+  g_autofree char *tool =
+    xd_workflow_run_capture_tool (diff, self->workdir);
 
   close_segment (self);
   remember (self, TRUE, tool);

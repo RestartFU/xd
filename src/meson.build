@@ -7,6 +7,7 @@ xd_core_sources = files(
   'util/ask-block.c',
   'util/git-diff.c',
   'util/git-info.c',
+  'util/workflow-run.c',
   'util/worktree.c',
   'util/host-launch.c',
   'util/app-paths.c',

@@ -16,6 +16,7 @@ struct _XdMessageRow
   XdRemoteClient *remote;
   GCancellable *image_cancellable;
 
+  GtkWidget *card;
   GtkWidget *body;          /* a column of prose labels and code cards */
 };
 
@@ -117,6 +118,7 @@ xd_message_row_new (XdMessageKind  kind,
 
   self->kind = kind;
   self->text = g_string_new (text != NULL ? text : "");
+  self->card = card;
 
 
   self->body = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
@@ -156,6 +158,18 @@ xd_message_row_new (XdMessageKind  kind,
   adw_bin_set_child (ADW_BIN (self), card);
 
   return self;
+}
+
+void
+xd_message_row_make_status (XdMessageRow *self)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+
+  gtk_widget_add_css_class (self->card, "xd-status");
+  gtk_widget_set_margin_top (self->body, 12);
+  gtk_widget_set_margin_bottom (self->body, 12);
+  gtk_widget_set_margin_start (self->body, 14);
+  gtk_widget_set_margin_end (self->body, 14);
 }
 
 /* One prose label, configured the way every piece of message text is. */

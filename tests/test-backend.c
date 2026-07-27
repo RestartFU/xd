@@ -172,6 +172,7 @@ test_codex_stream (void)
   g_assert_cmpuint (collected.context_window, ==, 258400);
   g_assert_cmpuint (collected.n_results, ==, 1);
   g_assert_cmpuint (collected.n_errors, ==, 0);
+  g_assert_cmpuint (collected.n_tools, ==, 1);
 
   collected_clear (&collected);
   if (old_home != NULL)
