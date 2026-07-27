@@ -129,6 +129,8 @@ int
 main (int   argc,
       char *argv[])
 {
+  /* Preserve Git's stderr in failed CI logs without making normal runs noisy. */
+  g_setenv ("G_MESSAGES_DEBUG", "xd", TRUE);
   g_test_init (&argc, &argv, NULL);
 
   g_test_add_func ("/git-diff/captures-only-current-call",

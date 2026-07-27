@@ -23,13 +23,14 @@ run_git (const char        *workdir,
   g_autoptr (GSubprocessLauncher) launcher = NULL;
   g_autoptr (GSubprocess) process = NULL;
   g_autoptr (GError) error = NULL;
+  g_autofree char *stderr_text = NULL;
   char *output = NULL;
 
   if (workdir == NULL || *workdir == '\0')
     return NULL;
 
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                        G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+                                        G_SUBPROCESS_FLAGS_STDERR_PIPE);
   g_subprocess_launcher_set_cwd (launcher, workdir);
   if (index_path != NULL)
     {
@@ -51,7 +52,7 @@ run_git (const char        *workdir,
     g_subprocess_launcher_spawnv (launcher, argv, &error);
   if (process == NULL ||
       !g_subprocess_communicate_utf8 (
-        process, NULL, NULL, &output, NULL, &error))
+        process, NULL, NULL, &output, &stderr_text, &error))
     {
       g_debug ("cannot capture file diff: %s",
                error != NULL ? error->message : "git did not start");
@@ -62,6 +63,10 @@ run_git (const char        *workdir,
   if (!g_subprocess_get_successful (process) &&
       !(accept_difference && g_subprocess_get_exit_status (process) == 1))
     {
+      g_debug ("git %s failed (%d): %s",
+               argv[1] != NULL ? argv[1] : "",
+               g_subprocess_get_exit_status (process),
+               stderr_text != NULL ? stderr_text : "no error output");
       g_free (output);
       return NULL;
     }
