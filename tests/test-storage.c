@@ -199,6 +199,42 @@ test_messages_round_trip (Fixture       *fixture,
                    "Claude Opus 5 · High");
 }
 
+static void
+test_recent_messages_are_bounded (Fixture       *fixture,
+                                  gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autofree char *chat_id = NULL;
+  guint total = 0;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  for (guint i = 0; i < 5; i++)
+    {
+      g_autofree char *content = g_strdup_printf ("message-%u", i);
+
+      g_assert_true (xd_storage_append_message (
+        fixture->storage, chat_id, i % 2 == 0 ? "user" : "assistant",
+        content, "{\"large\":\"backend event\"}", NULL, &error));
+    }
+  g_assert_no_error (error);
+
+  messages = xd_storage_list_recent_messages (
+    fixture->storage, chat_id, 2, &total, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (total, ==, 5);
+  g_assert_cmpuint (messages->len, ==, 2);
+  g_assert_cmpstr (
+    ((XdMessage *) g_ptr_array_index (messages, 0))->content, ==, "message-3");
+  g_assert_cmpstr (
+    ((XdMessage *) g_ptr_array_index (messages, 1))->content, ==, "message-4");
+  g_assert_null (((XdMessage *) g_ptr_array_index (messages, 0))->raw_json);
+  g_assert_null (((XdMessage *) g_ptr_array_index (messages, 1))->raw_json);
+}
+
 /*
  * A session id only means something to the CLI that issued it, so a chat that
  * has talked to both keeps one of each. Switching assistants and back must
@@ -569,6 +605,7 @@ main (int   argc,
   ADD ("/storage/new-chats-inherit-agent", test_new_chats_inherit_last_changed_agent);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
+  ADD ("/storage/recent-messages-bounded", test_recent_messages_are_bounded);
   ADD ("/storage/sessions-per-backend", test_sessions_are_per_backend);
   ADD ("/storage/forget-one-session", test_forgetting_one_session);
   ADD ("/storage/session-id-replaced", test_session_id_is_replaced);

@@ -1346,6 +1346,78 @@ xd_storage_list_messages (XdStorage   *self,
 }
 
 GPtrArray *
+xd_storage_list_recent_messages (XdStorage   *self,
+                                 const char  *chat_id,
+                                 guint        limit,
+                                 guint       *total,
+                                 GError     **error)
+{
+  GPtrArray *messages;
+  sqlite3_stmt *stmt = NULL;
+  gint64 count;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
+  g_return_val_if_fail (chat_id != NULL, NULL);
+  g_return_val_if_fail (limit > 0, NULL);
+
+  if (total != NULL)
+    *total = 0;
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot count the conversation");
+      return NULL;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  count = sqlite3_step (stmt) == SQLITE_ROW ? sqlite3_column_int64 (stmt, 0) : 0;
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+
+  if (total != NULL)
+    *total = (guint) MIN (MAX (count, 0), G_MAXUINT);
+
+  /*
+   * Descending order lets SQLite stop at @limit using messages_chat. Reverse
+   * in memory so callers still receive chronological rows. NULL stands in for
+   * raw_json: transcript rendering has no reason to copy backend event blobs.
+   */
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "SELECT id, chat_id, role, content, NULL, created_at, label"
+        " FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot read recent conversation");
+      return NULL;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  sqlite3_bind_int64 (stmt, 2, limit);
+
+  messages = g_ptr_array_new_with_free_func ((GDestroyNotify) xd_message_free);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    g_ptr_array_add (messages, message_from_row (stmt));
+
+  sqlite3_finalize (stmt);
+
+  for (guint left = 0, right = messages->len > 0 ? messages->len - 1 : 0;
+       left < right;
+       left++, right--)
+    {
+      gpointer swap = messages->pdata[left];
+
+      messages->pdata[left] = messages->pdata[right];
+      messages->pdata[right] = swap;
+    }
+
+  return messages;
+}
+
+GPtrArray *
 xd_storage_list_messages_since (XdStorage   *self,
                                 const char  *chat_id,
                                 gint64       after_id,

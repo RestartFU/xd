@@ -1402,6 +1402,9 @@ handle_messages (Connection *connection,
   const char *chat_id = member_string (request, "chat");
   g_autoptr (GPtrArray) rows = NULL;
   g_autoptr (JsonBuilder) builder = json_builder_new ();
+  gint64 requested =
+    json_object_get_int_member_with_default (request, "limit", 0);
+  guint total = 0;
 
   if (chat_id == NULL)
     {
@@ -1409,11 +1412,22 @@ handle_messages (Connection *connection,
       return;
     }
 
-  rows = xd_storage_list_messages (connection->server->storage, chat_id, NULL);
+  if (requested > 0)
+    rows = xd_storage_list_recent_messages (
+      connection->server->storage, chat_id,
+      (guint) MIN (requested, G_MAXUINT), &total, NULL);
+  else
+    {
+      rows = xd_storage_list_messages (
+        connection->server->storage, chat_id, NULL);
+      total = rows != NULL ? rows->len : 0;
+    }
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "ok");
   json_builder_add_boolean_value (builder, TRUE);
+  json_builder_set_member_name (builder, "total_messages");
+  json_builder_add_int_value (builder, total);
   json_builder_set_member_name (builder, "last_message_id");
   json_builder_add_int_value (
     builder, xd_storage_last_message_id (connection->server->storage, chat_id));

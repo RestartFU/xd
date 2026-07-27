@@ -120,6 +120,7 @@ struct _XdChatView
   XdRemoteClient *remote;
   GCancellable *fetching;       /* the transcript request in flight, if any */
   GPtrArray *pending_remote_messages; /* held until live state arrives */
+  guint pending_remote_message_total;
   gint64 pending_remote_message_id;
   gint64 remote_rendered_message_id;
   gboolean restore_remote_panes;
@@ -1332,15 +1333,18 @@ append_history_button (XdChatView *self,
  */
 static void
 render_transcript (XdChatView *self,
-                   GPtrArray  *messages)
+                   GPtrArray  *messages,
+                   guint       total)
 {
   guint start =
     messages->len > self->transcript_limit
       ? messages->len - self->transcript_limit : 0;
+  guint displayed = messages->len - start;
+  guint hidden = total > displayed ? total - displayed : 0;
 
   self->rendering_transcript = TRUE;
-  if (start > 0)
-    append_history_button (self, start);
+  if (hidden > 0)
+    append_history_button (self, hidden);
 
   for (guint i = start; i < messages->len; i++)
     {
@@ -1421,21 +1425,26 @@ load_transcript (XdChatView *self)
 {
   g_autoptr (GPtrArray) messages = NULL;
   g_autoptr (GError) error = NULL;
+  guint query_limit =
+    self->transcript_limit < G_MAXUINT
+      ? self->transcript_limit + 1 : self->transcript_limit;
+  guint total = 0;
 
   clear_transcript (self);
 
   self->rendered_message_id =
     xd_storage_last_message_id (self->storage, xd_node_get_chat_id (self->chat));
 
-  messages = xd_storage_list_messages (self->storage,
-                                       xd_node_get_chat_id (self->chat), &error);
+  messages = xd_storage_list_recent_messages (
+    self->storage, xd_node_get_chat_id (self->chat),
+    query_limit, &total, &error);
   if (messages == NULL)
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
-  render_transcript (self, messages);
+  render_transcript (self, messages, total);
 }
 
 /* --- transcripts from a daemon -------------------------------------------- */
@@ -1500,6 +1509,10 @@ on_remote_messages (GObject      *source,
                                  ? json_object_get_array_member (reply, "messages")
                                  : NULL);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+  self->pending_remote_message_total = (guint) MIN (
+    MAX (json_object_get_int_member_with_default (
+           reply, "total_messages", messages->len), 0),
+    G_MAXUINT);
   self->pending_remote_message_id =
     json_object_get_int_member_with_default (reply, "last_message_id", 0);
 
@@ -1854,7 +1867,8 @@ on_remote_options_received (GObject      *source,
       begin_bottom_jump (self);
       clear_transcript (self);
       end_remote_turn (self);
-      render_transcript (self, self->pending_remote_messages);
+      render_transcript (self, self->pending_remote_messages,
+                         self->pending_remote_message_total);
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
       self->remote_rendered_message_id = self->pending_remote_message_id;
     }
@@ -2059,15 +2073,30 @@ set_remote (XdChatView     *self,
 static void
 load_remote_transcript (XdChatView *self)
 {
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+  guint query_limit =
+    self->transcript_limit < G_MAXUINT
+      ? self->transcript_limit + 1 : self->transcript_limit;
+
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   self->fetching = g_cancellable_new ();
 
-  xd_remote_client_call_op_async (self->remote, "messages", "chat",
-                                  xd_node_get_chat_id (self->chat),
-                                  self->fetching, on_remote_messages,
-                                  g_object_ref (self));
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "messages");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
+  json_builder_set_member_name (builder, "limit");
+  json_builder_add_int_value (builder, query_limit);
+  json_builder_end_object (builder);
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->remote, request,
+                               self->fetching, on_remote_messages,
+                               g_object_ref (self));
 }
 
 /*

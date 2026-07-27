@@ -743,6 +743,83 @@ load_remote_preview (XdMessageRow *self,
                                on_remote_preview, request);
 }
 
+static void
+load_local_preview_thread (GTask        *task,
+                           gpointer      source_object,
+                           gpointer      task_data,
+                           GCancellable *cancellable)
+{
+  const char *path = task_data;
+  g_autoptr (GError) error = NULL;
+  GdkPixbuf *thumbnail;
+
+  if (g_task_return_error_if_cancelled (task))
+    return;
+
+  thumbnail = gdk_pixbuf_new_from_file_at_scale (
+    path, INLINE_PREVIEW_MAX_WIDTH, INLINE_PREVIEW_HEIGHT, TRUE, &error);
+
+  if (thumbnail == NULL)
+    {
+      g_task_return_error (task, g_steal_pointer (&error));
+      return;
+    }
+
+  if (g_task_return_error_if_cancelled (task))
+    {
+      g_object_unref (thumbnail);
+      return;
+    }
+
+  g_task_return_pointer (task, thumbnail, g_object_unref);
+}
+
+static void
+on_local_preview (GObject      *source,
+                  GAsyncResult *result,
+                  gpointer      user_data)
+{
+  PreviewRequest *request = user_data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GdkPixbuf) thumbnail =
+    g_task_propagate_pointer (G_TASK (result), &error);
+  g_autoptr (GdkTexture) texture = thumbnail != NULL
+    ? gdk_texture_new_for_pixbuf (thumbnail) : NULL;
+  g_autoptr (GtkWidget) stack = g_weak_ref_get (&request->stack);
+  g_autoptr (GtkWidget) picture = g_weak_ref_get (&request->picture);
+
+  if (texture != NULL && stack != NULL && picture != NULL)
+    {
+      show_inline_preview (GTK_PICTURE (picture), texture);
+      gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
+    }
+  else if (stack != NULL &&
+           !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    {
+      gtk_stack_set_visible_child_name (GTK_STACK (stack), "unavailable");
+    }
+
+  preview_request_free (request);
+}
+
+static void
+load_local_preview (XdMessageRow *self,
+                    GtkStack     *stack,
+                    GtkPicture   *picture,
+                    const char   *path)
+{
+  g_autoptr (GTask) task = NULL;
+  PreviewRequest *request = g_new0 (PreviewRequest, 1);
+
+  g_weak_ref_init (&request->stack, stack);
+  g_weak_ref_init (&request->picture, picture);
+
+  task = g_task_new (NULL, self->image_cancellable,
+                     on_local_preview, request);
+  g_task_set_task_data (task, g_strdup (path), g_free);
+  g_task_run_in_thread (task, load_local_preview_thread);
+}
+
 /*
  * "[image: /path]" becomes a small inline preview.
  *
@@ -756,8 +833,6 @@ make_image_preview (XdMessageRow *self,
                     int           number)
 {
   g_autofree char *uri = g_filename_to_uri (path, NULL, NULL);
-  g_autoptr (GdkPixbuf) thumbnail = NULL;
-  g_autoptr (GdkTexture) texture = NULL;
   GtkWidget *preview = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
   GtkWidget *stack = gtk_stack_new ();
   GtkWidget *picture = gtk_picture_new ();
@@ -796,20 +871,8 @@ make_image_preview (XdMessageRow *self,
       gtk_label_set_markup (GTK_LABEL (label), markup);
       g_signal_connect (label, "activate-link",
                         G_CALLBACK (on_link_activated), NULL);
-
-      thumbnail = gdk_pixbuf_new_from_file_at_scale (
-        path, INLINE_PREVIEW_MAX_WIDTH, INLINE_PREVIEW_HEIGHT, TRUE, NULL);
-      if (thumbnail != NULL)
-        texture = gdk_texture_new_for_pixbuf (thumbnail);
-      if (texture != NULL)
-        {
-          show_inline_preview (GTK_PICTURE (picture), texture);
-          gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
-        }
-      else
-        {
-          gtk_stack_set_visible_child_name (GTK_STACK (stack), "unavailable");
-        }
+      load_local_preview (
+        self, GTK_STACK (stack), GTK_PICTURE (picture), path);
     }
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
   gtk_widget_add_css_class (label, "caption");

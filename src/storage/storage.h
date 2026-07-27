@@ -261,6 +261,20 @@ GPtrArray  *xd_storage_list_messages   (XdStorage   *self,
                                         const char  *chat_id,
                                         GError     **error);
 
+/*
+ * Recent display rows only, oldest first.
+ *
+ * Unlike list_messages(), this deliberately leaves raw_json unread: backend
+ * events can be much larger than their visible text and the transcript never
+ * consumes them. @total receives the complete row count so the UI can offer
+ * older history without loading it.
+ */
+GPtrArray  *xd_storage_list_recent_messages (XdStorage   *self,
+                                             const char  *chat_id,
+                                             guint        limit,
+                                             guint       *total,
+                                             GError     **error);
+
 /* Paired remote devices: only the token's hash is kept. */
 gboolean    xd_storage_add_device      (XdStorage   *self,
                                         const char  *token_hash,

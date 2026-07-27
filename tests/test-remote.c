@@ -338,7 +338,7 @@ client_thread (gpointer user_data)
 
   {
     g_autofree char *messages = g_strdup_printf (
-      "{\"op\":\"messages\",\"chat\":\"%s\"}", exchange->chat_id);
+      "{\"op\":\"messages\",\"chat\":\"%s\",\"limit\":1}", exchange->chat_id);
     JsonArray *rows;
 
     reply = round_trip (in, out, messages, parser);
@@ -347,11 +347,14 @@ client_thread (gpointer user_data)
     if (json_object_get_int_member_with_default (
           reply, "last_message_id", 0) != 2)
       FAIL ("message revision wrong");
+    if (json_object_get_int_member_with_default (
+          reply, "total_messages", 0) != 2)
+      FAIL ("total message count wrong");
     rows = json_object_get_array_member (reply, "messages");
-    if (json_array_get_length (rows) != 2)
-      FAIL ("message count wrong");
+    if (json_array_get_length (rows) != 1)
+      FAIL ("message limit ignored");
     if (g_strcmp0 (json_object_get_string_member (
-                     json_array_get_object_element (rows, 1), "content"),
+                     json_array_get_object_element (rows, 0), "content"),
                    "hello from the daemon") != 0)
       FAIL ("message content wrong");
   }
