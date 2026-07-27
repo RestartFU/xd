@@ -88,6 +88,7 @@ jobs:
             mingw-w64-ucrt-x86_64-sqlite3
             mingw-w64-ucrt-x86_64-glib-networking
             mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-cmark
 
       - name: Build and test the Windows client
         shell: msys2 {0}
@@ -161,6 +162,7 @@ jobs:
           vte3
           glib-networking
           librsvg
+          cmark
 
       - name: Build and test the Apple Silicon app
         run: |

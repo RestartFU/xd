@@ -59,14 +59,15 @@ test_partial_input_stays_valid (void)
     }
 }
 
-/* Underscores are left alone: some_function_name is far more common in a chat
- * about code than italics are. */
+/* CommonMark understands underscore emphasis without corrupting identifiers. */
 static void
-test_underscores_are_literal (void)
+test_underscore_emphasis (void)
 {
-  g_autofree char *result = xd_markdown_to_pango ("call some_long_name here");
+  g_autofree char *result =
+    xd_markdown_to_pango ("call some_long_name and _stress this_");
 
-  g_assert_cmpstr (result, ==, "call some_long_name here");
+  g_assert_cmpstr (
+    result, ==, "call some_long_name and <i>stress this</i>");
 }
 
 static void
@@ -174,6 +175,59 @@ test_list_bullets (void)
   g_assert_null (strstr (out, "- first"));
 }
 
+static void
+test_commonmark_blocks (void)
+{
+  g_autofree char *out = xd_markdown_to_pango (
+    "> quoted **text**\n>\n> continued\n\n"
+    "3. third\n4. fourth\n\n---\n\n"
+    "    indented <code>");
+
+  g_assert_nonnull (strstr (out, "\xe2\x94\x82 quoted <b>text</b>"));
+  g_assert_nonnull (strstr (out, "3. third\n4. fourth"));
+  g_assert_nonnull (strstr (out, "\xe2\x94\x80\xe2\x94\x80"));
+  g_assert_nonnull (strstr (
+    out, "<tt><span background=\"#181818\">indented &lt;code&gt;"));
+  assert_valid_markup (out);
+}
+
+static void
+test_commonmark_inline_nesting (void)
+{
+  g_autofree char *out = xd_markdown_to_pango (
+    "***bold italic***, ~~literal~~, and \\*literal\\*");
+
+  g_assert_nonnull (strstr (out, "<i><b>bold italic</b></i>"));
+  g_assert_nonnull (strstr (out, "~~literal~~"));
+  g_assert_nonnull (strstr (out, "*literal*"));
+  assert_valid_markup (out);
+}
+
+static void
+test_images_and_unsafe_links (void)
+{
+  g_autofree char *image =
+    xd_markdown_to_pango ("![diagram](https://example.com/image.png)");
+  g_autofree char *unsafe =
+    xd_markdown_to_pango ("[do not run](javascript:alert(1))");
+
+  g_assert_nonnull (strstr (
+    image,
+    "Image: <a href=\"https://example.com/image.png\">diagram</a>"));
+  g_assert_cmpstr (unsafe, ==, "do not run");
+}
+
+static void
+test_raw_html_stays_literal (void)
+{
+  g_autofree char *out =
+    xd_markdown_to_pango ("<span size=\"999999\">small</span>");
+
+  g_assert_nonnull (strstr (
+    out, "&lt;span size=&quot;999999&quot;&gt;small&lt;/span&gt;"));
+  assert_valid_markup (out);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -183,7 +237,7 @@ main (int   argc,
   g_test_add_func ("/markdown/inline", test_inline_spans);
   g_test_add_func ("/markdown/escaping", test_escapes_markup_characters);
   g_test_add_func ("/markdown/partial", test_partial_input_stays_valid);
-  g_test_add_func ("/markdown/underscores", test_underscores_are_literal);
+  g_test_add_func ("/markdown/underscores", test_underscore_emphasis);
   g_test_add_func ("/markdown/fence", test_fenced_block);
   g_test_add_func ("/markdown/heading", test_heading);
   g_test_add_func ("/markdown/hash-prefixed-prose",
@@ -193,6 +247,11 @@ main (int   argc,
   g_test_add_func ("/markdown/links", test_links);
   g_test_add_func ("/markdown/bare-urls", test_bare_urls);
   g_test_add_func ("/markdown/bullets", test_list_bullets);
+  g_test_add_func ("/markdown/commonmark-blocks", test_commonmark_blocks);
+  g_test_add_func ("/markdown/commonmark-inline", test_commonmark_inline_nesting);
+  g_test_add_func ("/markdown/images-and-unsafe-links",
+                   test_images_and_unsafe_links);
+  g_test_add_func ("/markdown/raw-html", test_raw_html_stays_literal);
 
   return g_test_run ();
 }

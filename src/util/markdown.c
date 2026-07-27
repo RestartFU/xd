@@ -1,23 +1,16 @@
 #include "markdown.h"
 
+#include <cmark.h>
 #include <pango/pango.h>
 #include <string.h>
-
-/* Finds @needle after @from, or NULL. Used to decide whether a span is
- * actually closed before opening a tag for it. */
-static const char *
-find_close (const char *from,
-            const char *needle)
-{
-  return strstr (from, needle);
-}
 
 static void
 append_escaped (GString    *out,
                 const char *text,
                 gssize      length)
 {
-  g_autofree char *escaped = g_markup_escape_text (text, length);
+  g_autofree char *escaped =
+    g_markup_escape_text (text != NULL ? text : "", length);
 
   g_string_append (out, escaped);
 }
@@ -27,6 +20,13 @@ starts_url (const char *text)
 {
   return g_str_has_prefix (text, "https://") ||
          g_str_has_prefix (text, "http://");
+}
+
+static gboolean
+safe_link (const char *url)
+{
+  return starts_url (url != NULL ? url : "") ||
+         g_str_has_prefix (url != NULL ? url : "", "mailto:");
 }
 
 static guint
@@ -109,251 +109,350 @@ append_url (GString    *out,
 }
 
 /*
- * Inline spans, in precedence order: code first (nothing nests inside it),
- * then strong, then emphasis.
- *
- * Only '*' marks emphasis. Underscores are left alone on purpose: they turn up
- * in identifiers like some_function far more often than as italics.
+ * cmark deliberately leaves bare URLs as text. Chats use them constantly, so
+ * add links after parsing while preserving cmark's handling of every other
+ * inline construct.
  */
 static void
-append_inline (GString    *out,
-               const char *text,
+append_text (GString    *out,
+             const char *text,
+             gboolean    autolink)
+{
+  const char *at = text != NULL ? text : "";
+
+  while (*at != '\0')
+    {
+      gsize consumed = 0;
+      const char *next;
+
+      if (autolink && append_url (out, at, &consumed))
+        {
+          at += consumed;
+          continue;
+        }
+
+      next = g_utf8_next_char (at);
+      append_escaped (out, at, next - at);
+      at = next;
+    }
+}
+
+static void render_inline_children (GString    *out,
+                                    cmark_node *parent,
+                                    gboolean    autolink);
+
+static void
+render_inline (GString    *out,
+               cmark_node *node,
                gboolean    autolink)
 {
-  const char *p = text;
+  cmark_node_type type = cmark_node_get_type (node);
 
-  while (*p != '\0')
+  switch (type)
     {
-      if (*p == '`')
-        {
-          const char *close = find_close (p + 1, "`");
+    case CMARK_NODE_TEXT:
+      append_text (out, cmark_node_get_literal (node), autolink);
+      break;
 
-          if (close != NULL)
-            {
-              g_string_append (out, "<tt>");
-              append_escaped (out, p + 1, close - (p + 1));
-              g_string_append (out, "</tt>");
-              p = close + 1;
-              continue;
-            }
-        }
-      else if (p[0] == '*' && p[1] == '*')
-        {
-          const char *close = find_close (p + 2, "**");
+    case CMARK_NODE_SOFTBREAK:
+    case CMARK_NODE_LINEBREAK:
+      g_string_append_c (out, '\n');
+      break;
 
-          if (close != NULL)
-            {
-              g_autofree char *inner = g_strndup (p + 2, close - (p + 2));
+    case CMARK_NODE_CODE:
+      g_string_append (out, "<tt>");
+      append_escaped (out, cmark_node_get_literal (node), -1);
+      g_string_append (out, "</tt>");
+      break;
 
-              g_string_append (out, "<b>");
-              append_inline (out, inner, autolink);
-              g_string_append (out, "</b>");
-              p = close + 2;
-              continue;
-            }
-        }
-      else if (p[0] == '[')
-        {
-          /* [text](url): a link, rendered as one. Both halves have to close
-             on the same line for it to count; anything else is prose that
-             happens to start with a bracket. */
-          const char *close = find_close (p + 1, "]");
+    case CMARK_NODE_HTML_INLINE:
+      /* Markdown must never become arbitrary Pango markup. */
+      append_escaped (out, cmark_node_get_literal (node), -1);
+      break;
 
-          if (close != NULL && close[1] == '(')
-            {
-              const char *end = find_close (close + 2, ")");
+    case CMARK_NODE_EMPH:
+      g_string_append (out, "<i>");
+      render_inline_children (out, node, autolink);
+      g_string_append (out, "</i>");
+      break;
 
-              if (end != NULL && end > close + 2 &&
-                  memchr (p, '\n', end - p) == NULL)
-                {
-                  g_autofree char *label = g_strndup (p + 1, close - (p + 1));
-                  g_autofree char *url = g_strndup (close + 2, end - (close + 2));
-                  g_autofree char *href = g_markup_escape_text (url, -1);
+    case CMARK_NODE_STRONG:
+      g_string_append (out, "<b>");
+      render_inline_children (out, node, autolink);
+      g_string_append (out, "</b>");
+      break;
 
-                  g_string_append_printf (out, "<a href=\"%s\">", href);
-                  append_inline (out, label, FALSE);
-                  g_string_append (out, "</a>");
-                  p = end + 1;
-                  continue;
-                }
-            }
-        }
-      else if (p[0] == '*')
-        {
-          const char *close = find_close (p + 1, "*");
+    case CMARK_NODE_LINK:
+      {
+        const char *url = cmark_node_get_url (node);
 
-          if (close != NULL && close > p + 1)
-            {
-              g_autofree char *inner = g_strndup (p + 1, close - (p + 1));
+        if (safe_link (url))
+          {
+            g_autofree char *href = g_markup_escape_text (url, -1);
 
-              g_string_append (out, "<i>");
-              append_inline (out, inner, autolink);
-              g_string_append (out, "</i>");
-              p = close + 1;
-              continue;
-            }
-        }
+            g_string_append_printf (out, "<a href=\"%s\">", href);
+            render_inline_children (out, node, FALSE);
+            g_string_append (out, "</a>");
+          }
+        else
+          {
+            render_inline_children (out, node, FALSE);
+          }
+      }
+      break;
 
-      if (autolink)
-        {
-          gsize consumed = 0;
+    case CMARK_NODE_IMAGE:
+      {
+        const char *url = cmark_node_get_url (node);
 
-          if (append_url (out, p, &consumed))
-            {
-              p += consumed;
-              continue;
-            }
-        }
+        g_string_append (out, "Image: ");
+        if (safe_link (url))
+          {
+            g_autofree char *href = g_markup_escape_text (url, -1);
 
-      /* Either an ordinary character or an unclosed marker; show it as-is. */
-      append_escaped (out, p, 1);
-      p++;
+            g_string_append_printf (out, "<a href=\"%s\">", href);
+          }
+        render_inline_children (out, node, FALSE);
+        if (safe_link (url))
+          g_string_append (out, "</a>");
+      }
+      break;
+
+    case CMARK_NODE_CUSTOM_INLINE:
+      append_escaped (out, cmark_node_get_on_enter (node), -1);
+      render_inline_children (out, node, autolink);
+      append_escaped (out, cmark_node_get_on_exit (node), -1);
+      break;
+
+    default:
+      render_inline_children (out, node, autolink);
+      break;
     }
 }
 
-static gboolean
-is_fence (const char *line)
-{
-  return g_str_has_prefix (line, "```") || g_str_has_prefix (line, "~~~");
-}
-
-/*
- * CommonMark ATX headings need one to six hashes followed by whitespace or
- * end-of-line. Without that boundary, issue references such as "#1 fixed"
- * become giant headings.
- */
-static gboolean
-is_heading (const char *line)
-{
-  const char *text = line;
-  guint level = 0;
-
-  while (*text == '#')
-    {
-      level++;
-      text++;
-    }
-
-  return level >= 1 && level <= 6 &&
-         (*text == '\0' || *text == ' ' || *text == '\t');
-}
-
-/*
- * A heading, at a size that says which level it is.
- *
- * Bold alone made every heading in a long answer look like every emphasised
- * phrase in it, so a plan with sections read as one unbroken column of text.
- * Two sizes are enough: the top of a document, and everything under it.
- */
 static void
-append_heading (GString    *out,
-                const char *line)
+render_inline_children (GString    *out,
+                        cmark_node *parent,
+                        gboolean    autolink)
 {
-  const char *text = line;
-  int level = 0;
+  for (cmark_node *child = cmark_node_first_child (parent);
+       child != NULL;
+       child = cmark_node_next (child))
+    render_inline (out, child, autolink);
+}
 
-  while (*text == '#')
+static void render_block (GString    *out,
+                          cmark_node *node,
+                          guint       depth);
+
+static void
+render_block_children (GString    *out,
+                       cmark_node *parent,
+                       guint       depth,
+                       const char *separator)
+{
+  for (cmark_node *child = cmark_node_first_child (parent);
+       child != NULL;
+       child = cmark_node_next (child))
     {
-      level++;
-      text++;
-    }
-  while (*text == ' ' || *text == '\t')
-    text++;
+      g_autoptr (GString) block = g_string_new (NULL);
 
-  g_string_append_printf (out, "<span size=\"%s\"><b>",
-                          level <= 2 ? "large" : "medium");
-  append_inline (out, text, TRUE);
-  g_string_append (out, "</b></span>");
+      render_block (block, child, depth);
+      if (block->len == 0)
+        continue;
+      if (out->len > 0)
+        g_string_append (out, separator);
+      g_string_append_len (out, block->str, block->len);
+    }
+}
+
+static void
+append_prefixed_lines (GString    *out,
+                       const char *text,
+                       const char *first,
+                       const char *rest)
+{
+  const char *line = text;
+
+  g_string_append (out, first);
+  while (*line != '\0')
+    {
+      const char *newline = strchr (line, '\n');
+
+      if (newline == NULL)
+        {
+          g_string_append (out, line);
+          break;
+        }
+
+      g_string_append_len (out, line, newline - line + 1);
+      g_string_append (out, rest);
+      line = newline + 1;
+    }
+}
+
+static void
+render_list (GString    *out,
+             cmark_node *node,
+             guint       depth)
+{
+  gboolean ordered =
+    cmark_node_get_list_type (node) == CMARK_ORDERED_LIST;
+  int number = ordered ? cmark_node_get_list_start (node) : 1;
+  guint index = 0;
+
+  for (cmark_node *item = cmark_node_first_child (node);
+       item != NULL;
+       item = cmark_node_next (item), index++, number++)
+    {
+      g_autoptr (GString) contents = g_string_new (NULL);
+      g_autofree char *indent = g_strnfill (depth * 2, ' ');
+      g_autofree char *marker =
+        ordered ? g_strdup_printf ("%d. ", number) : g_strdup ("\xe2\x80\xa2 ");
+      g_autofree char *first = g_strconcat (indent, marker, NULL);
+      g_autofree char *rest =
+        g_strnfill (strlen (indent) + g_utf8_strlen (marker, -1), ' ');
+
+      render_block_children (contents, item, depth + 1, "\n");
+      if (contents->len == 0)
+        continue;
+      if (index > 0)
+        g_string_append_c (out, '\n');
+      append_prefixed_lines (out, contents->str, first, rest);
+    }
+}
+
+static void
+render_block (GString    *out,
+              cmark_node *node,
+              guint       depth)
+{
+  cmark_node_type type = cmark_node_get_type (node);
+
+  switch (type)
+    {
+    case CMARK_NODE_DOCUMENT:
+      render_block_children (out, node, depth, "\n\n");
+      break;
+
+    case CMARK_NODE_PARAGRAPH:
+      render_inline_children (out, node, TRUE);
+      break;
+
+    case CMARK_NODE_HEADING:
+      g_string_append_printf (
+        out, "<span size=\"%s\"><b>",
+        cmark_node_get_heading_level (node) <= 2 ? "large" : "medium");
+      render_inline_children (out, node, TRUE);
+      g_string_append (out, "</b></span>");
+      break;
+
+    case CMARK_NODE_BLOCK_QUOTE:
+      {
+        g_autoptr (GString) contents = g_string_new (NULL);
+
+        render_block_children (contents, node, depth, "\n\n");
+        append_prefixed_lines (out, contents->str, "\xe2\x94\x82 ",
+                               "\xe2\x94\x82 ");
+      }
+      break;
+
+    case CMARK_NODE_LIST:
+      render_list (out, node, depth);
+      break;
+
+    case CMARK_NODE_ITEM:
+      render_block_children (out, node, depth + 1, "\n");
+      break;
+
+    case CMARK_NODE_CODE_BLOCK:
+      {
+        const char *literal = cmark_node_get_literal (node);
+        gsize length = literal != NULL ? strlen (literal) : 0;
+
+        if (length > 0 && literal[length - 1] == '\n')
+          length--;
+        g_string_append (out, "<tt><span background=\"#181818\">");
+        append_escaped (out, literal, length);
+        g_string_append (out, "</span></tt>");
+      }
+      break;
+
+    case CMARK_NODE_HTML_BLOCK:
+      {
+        const char *literal = cmark_node_get_literal (node);
+        gsize length = literal != NULL ? strlen (literal) : 0;
+
+        if (length > 0 && literal[length - 1] == '\n')
+          length--;
+        append_escaped (out, literal, length);
+      }
+      break;
+
+    case CMARK_NODE_THEMATIC_BREAK:
+      g_string_append (out, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                            "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                            "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
+      break;
+
+    case CMARK_NODE_CUSTOM_BLOCK:
+      append_escaped (out, cmark_node_get_on_enter (node), -1);
+      render_block_children (out, node, depth, "\n\n");
+      append_escaped (out, cmark_node_get_on_exit (node), -1);
+      break;
+
+    default:
+      render_inline (out, node, TRUE);
+      break;
+    }
+}
+
+static gboolean
+valid_pango_markup (const char *markup)
+{
+  g_autoptr (GString) check = g_string_new (markup);
+  const char *open;
+
+  /* GtkLabel adds links on top of Pango markup; Pango's validator does not
+   * know the <a> tag, so remove only those wrappers for validation. */
+  while ((open = strstr (check->str, "<a href=\"")) != NULL)
+    {
+      const char *end = strchr (open, '>');
+
+      if (end == NULL)
+        return FALSE;
+      g_string_erase (check, open - check->str, end - open + 1);
+    }
+
+  while ((open = strstr (check->str, "</a>")) != NULL)
+    g_string_erase (check, open - check->str, strlen ("</a>"));
+
+  return pango_parse_markup (
+    check->str, -1, 0, NULL, NULL, NULL, NULL);
 }
 
 char *
 xd_markdown_to_pango (const char *text)
 {
-  g_autoptr (GString) out = NULL;
-  g_auto (GStrv) lines = NULL;
-  gboolean in_fence = FALSE;
+  cmark_node *document;
+  g_autoptr (GString) out = g_string_new (NULL);
 
-  if (text == NULL)
+  if (text == NULL || *text == '\0')
     return g_strdup ("");
 
-  out = g_string_new (NULL);
-  lines = g_strsplit (text, "\n", -1);
+  document = cmark_parse_document (
+    text, strlen (text), CMARK_OPT_VALIDATE_UTF8);
+  if (document == NULL)
+    return g_markup_escape_text (text, -1);
 
-  for (gsize i = 0; lines[i] != NULL; i++)
+  render_block (out, document, 0);
+  cmark_node_free (document);
+
+  if (!valid_pango_markup (out->str))
     {
-      const char *line = lines[i];
-
-      if (is_fence (line))
-        {
-          /* The tag closes even if the block never does, which is the normal
-           * state of affairs while a reply is still streaming.
-           *
-           * Monospace and a darker ground: a block of commands surrounded by
-           * prose has to be seen to be one before it is read. */
-          g_string_append (out, in_fence ? "</span></tt>"
-                                         : "<tt><span background=\"#181818\">");
-          in_fence = !in_fence;
-          continue;
-        }
-
-      if (i > 0)
-        g_string_append_c (out, '\n');
-
-      if (in_fence)
-        append_escaped (out, line, -1);
-      else if (is_heading (line))
-        append_heading (out, line);
-      else
-        {
-          const char *item = line;
-
-          while (*item == ' ')
-            item++;
-
-          /* A list marker becomes the dot it stands for; the indentation in
-           * front of it survives, so nested lists keep their shape. */
-          if ((item[0] == '-' || item[0] == '*') && item[1] == ' ')
-            {
-              append_escaped (out, line, item - line);
-              g_string_append (out, "\xe2\x80\xa2 ");
-              append_inline (out, item + 2, TRUE);
-            }
-          else
-            {
-              append_inline (out, line, TRUE);
-            }
-        }
+      g_debug ("markdown produced invalid markup; falling back to plain text");
+      return g_markup_escape_text (text, -1);
     }
-
-  if (in_fence)
-    g_string_append (out, "</span></tt>");
-
-  /* Last line of defence: anything Pango will not accept is shown as plain
-   * text rather than as nothing at all. Links are stripped first -- <a> is
-   * GtkLabel's extension, and Pango's own parser rejects it, which silently
-   * vetoed every message containing one. */
-  {
-    g_autoptr (GString) check = g_string_new (out->str);
-    const char *open;
-
-    while ((open = strstr (check->str, "<a href=\"")) != NULL)
-      {
-        const char *end = strchr (open, '>');
-
-        if (end == NULL)
-          break;
-        g_string_erase (check, open - check->str, end - open + 1);
-      }
-
-    while ((open = strstr (check->str, "</a>")) != NULL)
-      g_string_erase (check, open - check->str, 4);
-
-    if (!pango_parse_markup (check->str, -1, 0, NULL, NULL, NULL, NULL))
-      {
-        g_debug ("markdown produced invalid markup; falling back to plain text");
-        return g_markup_escape_text (text, -1);
-      }
-  }
 
   return g_string_free (g_steal_pointer (&out), FALSE);
 }
@@ -362,21 +461,7 @@ char *
 xd_urls_to_pango (const char *text)
 {
   g_autoptr (GString) out = g_string_new (NULL);
-  const char *p = text != NULL ? text : "";
 
-  while (*p != '\0')
-    {
-      gsize consumed = 0;
-
-      if (append_url (out, p, &consumed))
-        {
-          p += consumed;
-          continue;
-        }
-
-      append_escaped (out, p, 1);
-      p++;
-    }
-
+  append_text (out, text, TRUE);
   return g_string_free (g_steal_pointer (&out), FALSE);
 }

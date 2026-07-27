@@ -38,7 +38,7 @@ endif
 
 # Pango, but not GTK: the Markdown converter validates the markup it produces,
 # which needs the parser and nothing else.
-xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep]
+xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep, cmark_dep]
 if has_server
   xd_core_deps += util_dep
 endif

@@ -44,6 +44,7 @@ adw_dep       = dependency('libadwaita-1', version: '>= 1.4')
 json_dep      = dependency('json-glib-1.0')
 pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
+cmark_dep     = dependency('libcmark', version: '>= 0.30')
 
 if is_windows
   gio_unix_dep = declare_dependency()
