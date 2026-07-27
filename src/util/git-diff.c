@@ -32,7 +32,20 @@ run_git (const char        *workdir,
                                         G_SUBPROCESS_FLAGS_STDERR_SILENCE);
   g_subprocess_launcher_set_cwd (launcher, workdir);
   if (index_path != NULL)
-    g_subprocess_launcher_setenv (launcher, "GIT_INDEX_FILE", index_path, TRUE);
+    {
+      g_autofree char *git_index_path = g_strdup (index_path);
+
+#ifdef G_OS_WIN32
+      /*
+       * MSYS2 Git accepts drive-letter paths, but its environment parser
+       * expects forward slashes.  GLib's temporary-file APIs return native
+       * backslashes.
+       */
+      g_strdelimit (git_index_path, "\\", '/');
+#endif
+      g_subprocess_launcher_setenv (launcher, "GIT_INDEX_FILE",
+                                    git_index_path, TRUE);
+    }
 
   process =
     g_subprocess_launcher_spawnv (launcher, argv, &error);
@@ -75,22 +88,26 @@ repository_root (const char *workdir)
   return *root != '\0' ? g_steal_pointer (&root) : NULL;
 }
 
-static gboolean
-seed_from_user_index (const char *root,
-                      const char *temporary)
+static char *
+user_index_path (const char *root)
 {
   const char *argv[] = { "git", "rev-parse", "--git-path", "index", NULL };
   g_autofree char *reported = run_git (root, NULL, argv, FALSE);
-  g_autofree char *index_path = NULL;
-  g_autofree char *contents = NULL;
-  gsize length = 0;
 
   if (reported == NULL)
-    return FALSE;
+    return NULL;
 
   g_strchomp (reported);
-  index_path = g_path_is_absolute (reported)
-    ? g_strdup (reported) : g_build_filename (root, reported, NULL);
+  return g_path_is_absolute (reported)
+    ? g_steal_pointer (&reported) : g_build_filename (root, reported, NULL);
+}
+
+static gboolean
+seed_from_user_index (const char *index_path,
+                      const char *temporary)
+{
+  g_autofree char *contents = NULL;
+  gsize length = 0;
 
   return g_file_get_contents (index_path, &contents, &length, NULL) &&
          g_file_set_contents (temporary, contents, length, NULL);
@@ -109,17 +126,29 @@ snapshot_tree (const char *root)
   const char *read_argv[] = { "git", "read-tree", "HEAD", NULL };
   const char *add_argv[] = { "git", "add", "-A", "--", ".", NULL };
   const char *write_argv[] = { "git", "write-tree", NULL };
+  g_autofree char *user_index = NULL;
+  g_autofree char *index_dir = NULL;
   g_autofree char *index_path = NULL;
   g_autofree char *ignored = NULL;
   g_autofree char *tree = NULL;
-  g_autoptr (GError) error = NULL;
   gboolean seeded;
   int descriptor;
 
-  descriptor = g_file_open_tmp ("xd-diff-index-XXXXXX", &index_path, &error);
+  /*
+   * Keep the alternate index beside the real index.  Apart from avoiding a
+   * cross-filesystem lock/rename, this gives Git a repository-native path on
+   * Windows rather than a GLib system-temp path.
+   */
+  user_index = user_index_path (root);
+  if (user_index == NULL)
+    return NULL;
+
+  index_dir = g_path_get_dirname (user_index);
+  index_path = g_build_filename (index_dir, "xd-diff-index-XXXXXX", NULL);
+  descriptor = g_mkstemp (index_path);
   if (descriptor < 0)
     {
-      g_debug ("cannot make a temporary Git index: %s", error->message);
+      g_debug ("cannot make a temporary Git index");
       return NULL;
     }
 
@@ -129,7 +158,7 @@ snapshot_tree (const char *root)
    * hashes changed files instead of every tracked file on every agent call.
    * The copy is immediately made to match disk and is never written back.
    */
-  seeded = seed_from_user_index (root, index_path);
+  seeded = seed_from_user_index (user_index, index_path);
   if (!seeded)
     {
       /* Git expects a missing index or a valid one, not mkstemp's empty file.
