@@ -105,14 +105,14 @@ show_state (XdUpdater *self)
   switch (self->state)
     {
     case STATE_AVAILABLE:
-      icon = "software-update-available-symbolic";
+      icon = "go-down-symbolic";
       accessible_label = "Download update";
       tip = "A newer build is available. Click to install it.";
       fades = TRUE;
       break;
 
     case STATE_UPDATING:
-      icon = "software-update-available-symbolic";
+      icon = "go-down-symbolic";
       accessible_label = "Downloading update";
       tip = "Downloading and installing.";
       fades = TRUE;
@@ -125,7 +125,7 @@ show_state (XdUpdater *self)
       break;
 
     case STATE_FAILED:
-      icon = "software-update-available-symbolic";
+      icon = "go-down-symbolic";
       accessible_label = "Retry update";
       tip = self->trouble;
       fades = TRUE;
