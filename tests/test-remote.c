@@ -2079,8 +2079,8 @@ test_remote_workspace_choice_is_persisted (void)
 
 /*
  * Diff controls on a remote chat read the daemon's checkout, never a path on
- * the client. Both the changed-file list and the selected file's patch travel
- * as ordinary authenticated replies.
+ * the client. Complete branch and working-tree patches travel as ordinary
+ * authenticated replies, including untracked files.
  */
 static void
 test_remote_diff_reads_the_daemon_repository (void)
@@ -2098,6 +2098,8 @@ test_remote_diff_reads_the_daemon_repository (void)
   RemoteReply status = { 0 };
   RemoteReply diff = { 0 };
   RemoteReply untracked = { 0 };
+  RemoteReply branch_all = { 0 };
+  RemoteReply working_all = { 0 };
   const char *init[] = { "git", "init", "-q", "-b", "main", NULL };
   const char *switch_branch[] = { "git", "switch", "-q", "-c", "feature", NULL };
   const char *add[] = { "git", "add", "tracked.txt", NULL };
@@ -2234,16 +2236,70 @@ test_remote_diff_reads_the_daemon_repository (void)
   g_assert_nonnull (strstr (
     json_object_get_string_member (untracked.reply, "output"), "+new"));
 
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "branch-all");
+    json_builder_set_member_name (builder, "base");
+    json_builder_add_string_value (builder, "main");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &branch_all);
+  }
+
+  {
+    const char *output =
+      json_object_get_string_member (branch_all.reply, "output");
+
+    g_assert_nonnull (strstr (output, "-before"));
+    g_assert_nonnull (strstr (output, "+branch"));
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "working-all");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &working_all);
+  }
+
+  {
+    const char *output =
+      json_object_get_string_member (working_all.reply, "output");
+
+    g_assert_nonnull (strstr (output, "-branch"));
+    g_assert_nonnull (strstr (output, "+after"));
+    g_assert_nonnull (strstr (output, "nested/new.txt"));
+    g_assert_nonnull (strstr (output, "+new"));
+  }
+
   json_object_unref (base.reply);
   json_object_unref (branch.reply);
   json_object_unref (status.reply);
   json_object_unref (diff.reply);
   json_object_unref (untracked.reply);
+  json_object_unref (branch_all.reply);
+  json_object_unref (working_all.reply);
   g_free (base.wait.failure);
   g_free (branch.wait.failure);
   g_free (status.wait.failure);
   g_free (diff.wait.failure);
   g_free (untracked.wait.failure);
+  g_free (branch_all.wait.failure);
+  g_free (working_all.wait.failure);
   daemon_stop (&daemon);
 }
 

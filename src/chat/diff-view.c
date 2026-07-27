@@ -4,7 +4,6 @@
 
 #define INLINE_EAGER_ROWS 60
 #define INLINE_PREVIEW_ROWS 120
-#define PANE_PREVIEW_ROWS 250
 
 static void
 clear_box (GtkBox *box)
@@ -66,7 +65,7 @@ xd_diff_view_fill (GtkBox     *box,
                    guint      *additions,
                    guint      *deletions)
 {
-  fill_rows (box, patch, show_file_headers, PANE_PREVIEW_ROWS,
+  fill_rows (box, patch, show_file_headers, 0,
              additions, deletions);
 }
 

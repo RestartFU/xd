@@ -402,21 +402,8 @@ static const char *XD_STYLE =
   " { background: transparent; font-size: 1em; }\n"
   ".xd-code.xd-inline-diff { padding: 0; }\n"
 
-  /* Structured diff pane. One label holds the preview: hundreds of child
-   * widgets made the outer transcript scroller stutter on every frame. */
-  ".xd-diff-files { padding: 5px; background: transparent; }\n"
-  ".xd-diff-files > row { border-radius: 8px; margin: 2px 0; }\n"
-  ".xd-diff-files > row:selected { background: alpha(#ffffff, 0.09); }\n"
-  ".xd-diff-files > row:hover:not(:selected)"
-  " { background: alpha(#ffffff, 0.05); }\n"
-  ".xd-diff-badge { border-radius: 9999px; padding: 2px 7px;"
-  " background: alpha(#ffffff, 0.07); }\n"
-  ".xd-diff-badge-added { color: #57e389;"
-  " background: alpha(#57e389, 0.10); }\n"
-  ".xd-diff-badge-removed { color: #f66151;"
-  " background: alpha(#f66151, 0.10); }\n"
-  ".xd-diff-badge-renamed { color: #78aeed;"
-  " background: alpha(#78aeed, 0.10); }\n"
+  /* Structured diff pane. One label holds the complete patch: hundreds of
+   * child widgets made scrolling stutter on every frame. */
   ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
   " font-family: \"JetBrains Mono\", monospace; font-size: 1em; }\n"
   ".xd-diff-expander > title { padding: 9px 12px; }\n"

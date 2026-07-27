@@ -2021,6 +2021,13 @@ static const char *DIFF_BASE_SCRIPT =
   "  git rev-parse --verify --quiet \"$ref\" >/dev/null && { echo \"$ref\"; exit 0; }; "
   "done";
 
+static const char *DIFF_WORKING_SCRIPT =
+  "git --no-pager diff HEAD; "
+  "git ls-files --others --exclude-standard -z | "
+  "xargs -0 -n 1 sh -c "
+  "'[ \"$#\" -eq 0 ] || "
+  "git --no-pager diff --no-index -- /dev/null \"$1\"' sh";
+
 static gboolean
 diff_base_is_safe (const char *base)
 {
@@ -2126,6 +2133,12 @@ handle_diff_read (Connection *connection,
   const char *branch_status_argv[] = {
     "git", "--no-pager", "diff", "--name-status", NULL, NULL
   };
+  const char *working_all_argv[] = {
+    "sh", "-c", DIFF_WORKING_SCRIPT, NULL
+  };
+  const char *branch_all_argv[] = {
+    "git", "--no-pager", "diff", NULL, NULL
+  };
   const char *working_file_argv[] = {
     "git", "--no-pager", "diff", "HEAD", "--", path, NULL
   };
@@ -2177,6 +2190,22 @@ handle_diff_read (Connection *connection,
       range = g_strdup_printf ("%s...HEAD", base);
       branch_status_argv[4] = range;
       argv = branch_status_argv;
+    }
+  else if (g_strcmp0 (read, "working-all") == 0)
+    {
+      argv = working_all_argv;
+    }
+  else if (g_strcmp0 (read, "branch-all") == 0)
+    {
+      if (!diff_base_is_safe (base))
+        {
+          send_error (connection, "A valid base branch is required.");
+          return;
+        }
+
+      range = g_strdup_printf ("%s...HEAD", base);
+      branch_all_argv[3] = range;
+      argv = branch_all_argv;
     }
   else if (g_strcmp0 (read, "working-file") == 0 ||
            g_strcmp0 (read, "untracked-file") == 0 ||
