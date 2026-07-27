@@ -2386,6 +2386,14 @@ send_current_message (XdChatView *self)
   g_autofree char *text = take_composer_text (self);
   g_autoptr (GString) message = NULL;
 
+  /* Enter on an empty composer means "send the instruction already waiting"
+   * when there is one. This is the keyboard equivalent of the steer button. */
+  if (text == NULL && self->attachments->len == 0 && self->queued != NULL)
+    {
+      on_steer_clicked (NULL, self);
+      return;
+    }
+
   /* A chat on a daemon takes the same composer and the same Enter. */
   if (self->remote != NULL)
     {
