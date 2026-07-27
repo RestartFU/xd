@@ -36,6 +36,14 @@ xd_ask_instructions (void)
     "The question goes on the first line and each option on its own line "
     "starting with \"- \". Give two to six options, each a complete answer "
     "rather than a letter. Put the block at the end of your reply.\n\n"
+    "When the answer is specific text rather than a short list, put an input "
+    "marker on its own line instead:\n\n"
+    "<ask>\n"
+    "What branch name should I use?\n"
+    "<input>\n"
+    "</ask>\n\n"
+    "This shows a text field. An <ask> may contain either two to six options, "
+    "an <input> marker, or both.\n\n"
     "Use it only when different answers lead to materially different work. "
     "Anything you can settle yourself, or find out by looking, is not a "
     "question -- decide it and say what you decided.\n"
@@ -91,6 +99,7 @@ parse_at (const char  *text,
   g_autofree char *body = NULL;
   g_autofree char *question = NULL;
   const char *close;
+  gboolean accepts_input = FALSE;
   XdAsk *ask;
 
   close = strstr (open, ASK_CLOSE);
@@ -111,6 +120,12 @@ parse_at (const char  *text,
       if (*trimmed == '\0')
         continue;
 
+      if (g_strcmp0 (trimmed, "<input>") == 0)
+        {
+          accepts_input = TRUE;
+          continue;
+        }
+
       /* Everything before the first option is the question. */
       if (!g_str_has_prefix (trimmed, "- ") && !g_str_has_prefix (trimmed, "* "))
         {
@@ -128,8 +143,8 @@ parse_at (const char  *text,
         g_ptr_array_add (options, clean_option (trimmed));
     }
 
-  /* One option is not a choice, and none is just prose in angle brackets. */
-  if (options->len < 2)
+  /* One option is not a choice. Input-only questions need no fake options. */
+  if (options->len < 2 && !accepts_input)
     return NULL;
 
   if (remainder != NULL)
@@ -151,6 +166,7 @@ parse_at (const char  *text,
   ask->question = question != NULL ? g_steal_pointer (&question)
                                    : g_strdup ("Which one?");
   ask->options = (GStrv) g_ptr_array_free (g_steal_pointer (&options), FALSE);
+  ask->accepts_input = accepts_input;
 
   return ask;
 }
@@ -161,8 +177,9 @@ parse_at (const char  *text,
  * Taking the first "<ask>" in the text loses to a reply that talks about the
  * format before using it -- "the response should have been wrapped in
  * <ask>...</ask>" parses as a block with no options, and the real one further
- * down is never reached. The last block that actually holds options is the
- * question being asked; anything earlier is prose that mentions the tag.
+ * down is never reached. The last block that actually holds options or an
+ * input is the question being asked; anything earlier is prose that mentions
+ * the tag.
  */
 static const char *
 find_block (const char  *text,

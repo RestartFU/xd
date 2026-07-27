@@ -17,6 +17,7 @@ typedef struct
 {
   char *question;
   GStrv options;
+  gboolean accepts_input;
 } XdAsk;
 
 void  xd_ask_free (XdAsk *self);
@@ -24,10 +25,9 @@ void  xd_ask_free (XdAsk *self);
 /*
  * Lifts the first <ask> block out of @text.
  *
- * Returns NULL when there is none, or when the block names fewer than two
- * options -- a question with one answer is not worth a row of buttons. On
- * success @remainder receives the reply with the block removed, so the block
- * markup is never shown.
+ * Returns NULL when there is none, or when the block has neither two options
+ * nor an <input> marker. On success @remainder receives the reply with the
+ * block removed, so the block markup is never shown.
  */
 XdAsk *xd_ask_parse (const char  *text,
                      char       **remainder);

@@ -773,13 +773,10 @@ retire_open_questions (XdChatView *self)
 }
 
 static void
-on_choice_clicked (GtkButton *button,
-                   gpointer   user_data)
+submit_ask_answer (XdChatView *self,
+                   const char *answer)
 {
-  XdChatView *self = user_data;
-  const char *answer = g_object_get_data (G_OBJECT (button), "answer");
-
-  if (answer == NULL || self->chat == NULL)
+  if (answer == NULL || *answer == '\0' || self->chat == NULL)
     return;
 
   /* Before the buttons are torn down: when the focused button disappears,
@@ -808,6 +805,41 @@ on_choice_clicked (GtkButton *button,
     }
 }
 
+static void
+on_choice_clicked (GtkButton *button,
+                   gpointer   user_data)
+{
+  submit_ask_answer (
+    user_data, g_object_get_data (G_OBJECT (button), "answer"));
+}
+
+static void
+submit_ask_input (XdChatView *self,
+                  GtkEntry   *entry)
+{
+  g_autofree char *answer =
+    g_strdup (gtk_editable_get_text (GTK_EDITABLE (entry)));
+
+  g_strstrip (answer);
+  submit_ask_answer (self, answer);
+}
+
+static void
+on_ask_input_activated (GtkEntry *entry,
+                        gpointer  user_data)
+{
+  submit_ask_input (user_data, entry);
+}
+
+static void
+on_ask_input_clicked (GtkButton *button,
+                      gpointer   user_data)
+{
+  GtkEntry *entry = g_object_get_data (G_OBJECT (button), "input");
+
+  submit_ask_input (user_data, entry);
+}
+
 /*
  * Renders a question the assistant asked as a row of buttons.
  *
@@ -819,7 +851,7 @@ append_choices (XdChatView  *self,
                 const XdAsk *ask,
                 gboolean     answerable)
 {
-  GtkWidget *choices = gtk_flow_box_new ();
+  GtkWidget *choices;
 
   /* Only while it can still be answered. The question itself is part of the
    * reply and stays; these are a way of answering it, and a way of answering
@@ -829,29 +861,56 @@ append_choices (XdChatView  *self,
 
   retire_open_questions (self);
 
-  /* One per line: the options are sentences, so side by side they would each
-   * be too narrow to read. */
-  gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (choices), GTK_SELECTION_NONE);
-  gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (choices), 4);
-  gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (choices), 1);
-  gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (choices), TRUE);
-
-  for (gsize i = 0; ask->options[i] != NULL; i++)
+  if (ask->options[0] != NULL)
     {
-      GtkWidget *button = gtk_button_new_with_label (ask->options[i]);
+      /* One per line: the options are sentences, so side by side they would
+       * each be too narrow to read. */
+      choices = gtk_flow_box_new ();
+      gtk_flow_box_set_selection_mode (
+        GTK_FLOW_BOX (choices), GTK_SELECTION_NONE);
+      gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (choices), 4);
+      gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (choices), 1);
+      gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (choices), TRUE);
 
-      gtk_widget_add_css_class (button, "xd-choice");
-      gtk_label_set_wrap (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (button))), TRUE);
-      g_object_set_data_full (G_OBJECT (button), "answer",
-                              g_strdup (ask->options[i]), g_free);
-      g_signal_connect (button, "clicked", G_CALLBACK (on_choice_clicked), self);
+      for (gsize i = 0; ask->options[i] != NULL; i++)
+        {
+          GtkWidget *button = gtk_button_new_with_label (ask->options[i]);
 
-      /* No option is highlighted: which one is right is the user's call, and
-       * colouring one of them is xd putting a thumb on the scale. */
-      gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
+          gtk_widget_add_css_class (button, "xd-choice");
+          gtk_label_set_wrap (
+            GTK_LABEL (gtk_button_get_child (GTK_BUTTON (button))), TRUE);
+          g_object_set_data_full (G_OBJECT (button), "answer",
+                                  g_strdup (ask->options[i]), g_free);
+          g_signal_connect (
+            button, "clicked", G_CALLBACK (on_choice_clicked), self);
+
+          /* No option is highlighted: which one is right is the user's call,
+           * and colouring one of them is xd putting a thumb on the scale. */
+          gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
+        }
+
+      gtk_box_append (GTK_BOX (self->choices_bar), choices);
     }
 
-  gtk_box_append (GTK_BOX (self->choices_bar), choices);
+  if (ask->accepts_input)
+    {
+      GtkWidget *input_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+      GtkWidget *entry = gtk_entry_new ();
+      GtkWidget *send = gtk_button_new_with_label ("Send");
+
+      gtk_entry_set_placeholder_text (GTK_ENTRY (entry), "Type your answer");
+      gtk_widget_set_hexpand (entry, TRUE);
+      gtk_widget_add_css_class (send, "suggested-action");
+      g_object_set_data (G_OBJECT (send), "input", entry);
+      g_signal_connect (entry, "activate",
+                        G_CALLBACK (on_ask_input_activated), self);
+      g_signal_connect (send, "clicked",
+                        G_CALLBACK (on_ask_input_clicked), self);
+      gtk_box_append (GTK_BOX (input_row), entry);
+      gtk_box_append (GTK_BOX (input_row), send);
+      gtk_box_append (GTK_BOX (self->choices_bar), input_row);
+    }
+
   gtk_widget_set_visible (self->choices_bar, TRUE);
 }
 

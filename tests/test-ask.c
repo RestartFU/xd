@@ -51,6 +51,42 @@ test_needs_at_least_two_options (void)
 }
 
 static void
+test_accepts_specific_input (void)
+{
+  g_autofree char *remainder = NULL;
+  g_autoptr (XdAsk) ask = xd_ask_parse (
+    "Before.\n\n"
+    "<ask>\n"
+    "What branch name should I use?\n"
+    "<input>\n"
+    "</ask>",
+    &remainder);
+
+  g_assert_nonnull (ask);
+  g_assert_true (ask->accepts_input);
+  g_assert_cmpstr (ask->question, ==, "What branch name should I use?");
+  g_assert_cmpuint (g_strv_length (ask->options), ==, 0);
+  g_assert_cmpstr (remainder, ==, "Before.");
+}
+
+static void
+test_combines_options_and_input (void)
+{
+  g_autoptr (XdAsk) ask = xd_ask_parse (
+    "<ask>\n"
+    "Where should I deploy?\n"
+    "- Production\n"
+    "- Staging\n"
+    "<input>\n"
+    "</ask>",
+    NULL);
+
+  g_assert_nonnull (ask);
+  g_assert_true (ask->accepts_input);
+  g_assert_cmpuint (g_strv_length (ask->options), ==, 2);
+}
+
+static void
 test_plain_text_is_left_alone (void)
 {
   g_autofree char *remainder = NULL;
@@ -148,6 +184,8 @@ test_instructions_require_reporting_links (void)
     strstr (instructions, "[PR #12](https://github.com/owner/repo/pull/12)"));
   g_assert_nonnull (strstr (instructions,
                             "Do not leave a resolvable #number as bare text"));
+  g_assert_nonnull (strstr (instructions, "<input>"));
+  g_assert_nonnull (strstr (instructions, "This shows a text field"));
 }
 
 int
@@ -158,6 +196,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/ask/lifts-question", test_lifts_the_question_out);
   g_test_add_func ("/ask/unclosed", test_ignores_an_unclosed_block);
   g_test_add_func ("/ask/two-options", test_needs_at_least_two_options);
+  g_test_add_func ("/ask/specific-input", test_accepts_specific_input);
+  g_test_add_func ("/ask/options-and-input", test_combines_options_and_input);
   g_test_add_func ("/ask/plain-text", test_plain_text_is_left_alone);
   g_test_add_func ("/ask/both-sides", test_keeps_text_on_both_sides);
   g_test_add_func ("/ask/hidden-while-streaming", test_hides_the_block_while_it_streams);
