@@ -1850,12 +1850,33 @@ test_remote_workspace_choice_is_persisted (void)
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
   g_autofree char *chat_id = NULL;
+  g_autofree char *tracked = NULL;
+  g_autofree char *existing = NULL;
   g_autoptr (XdChat) stored = NULL;
   g_autoptr (GError) error = NULL;
   RemoteReply changed = { 0 };
+  RemoteReply selected = { 0 };
   RemoteReply options = { 0 };
+  const char *init[] = { "git", "init", "-q", "-b", "main", NULL };
+  const char *add[] = { "git", "add", "tracked.txt", NULL };
+  const char *commit[] = {
+    "git", "-c", "user.name=xd tests", "-c", "user.email=xd@example.com",
+    "commit", "-q", "-m", "initial", NULL
+  };
+  const char *add_worktree[] = {
+    "git", "worktree", "add", "-q", "-b", "existing", NULL, "HEAD", NULL
+  };
 
   daemon_start (&daemon);
+  tracked = g_build_filename (daemon.root, "tracked.txt", NULL);
+  existing = g_build_filename (daemon.dir, "existing-worktree", NULL);
+  add_worktree[6] = existing;
+  run_in_directory (daemon.root, init);
+  g_assert_true (g_file_set_contents (tracked, "tracked\n", -1, &error));
+  run_in_directory (daemon.root, add);
+  run_in_directory (daemon.root, commit);
+  run_in_directory (daemon.root, add_worktree);
+
   chat_id = xd_storage_create_chat (
     daemon.storage, "folder-1", "fresh", "claude",
     NULL, NULL, daemon.root, &error);
@@ -1907,10 +1928,45 @@ test_remote_workspace_choice_is_persisted (void)
                    ==, 42000);
   g_assert_cmpint (json_object_get_int_member (options.reply, "context_window"),
                    ==, 1000000);
+  {
+    JsonArray *worktrees =
+      json_object_get_array_member (options.reply, "worktrees");
+
+    g_assert_cmpuint (json_array_get_length (worktrees), ==, 2);
+    g_assert_cmpstr (
+      json_object_get_string_member (
+        json_array_get_object_element (worktrees, 1), "path"),
+      ==, existing);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "set-option");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, chat_id);
+    json_builder_set_member_name (builder, "option");
+    json_builder_add_string_value (builder, "workspace");
+    json_builder_set_member_name (builder, "value");
+    json_builder_add_string_value (builder, existing);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &selected);
+  }
+
+  g_clear_pointer (&stored, xd_chat_free);
+  stored = xd_storage_get_chat (daemon.storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_false (stored->new_worktree);
+  g_assert_cmpstr (stored->workdir, ==, existing);
 
   json_object_unref (changed.reply);
+  json_object_unref (selected.reply);
   json_object_unref (options.reply);
   g_free (changed.wait.failure);
+  g_free (selected.wait.failure);
   g_free (options.wait.failure);
   daemon_stop (&daemon);
 }

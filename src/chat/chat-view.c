@@ -149,6 +149,7 @@ struct _XdChatView
   GPtrArray *attachments;   /* absolute paths of pasted images */
   XdModelPicker *model_picker;
   XdOptionPicker *workspace_chooser;
+  GPtrArray *workspace_paths; /* choice index -> existing worktree path or NULL */
   XdOptionPicker *effort_chooser;
   XdOptionPicker *access_chooser;
   GtkToggleButton *build_toggle;
@@ -243,8 +244,10 @@ static void update_context_meter (XdChatView *self,
                                   guint64     window);
 static void update_workspace_choice (XdChatView *self,
                                      const XdChat *chat,
+                                     const char   *workdir,
                                      gboolean      has_messages,
-                                     gboolean      linked_worktree);
+                                     gboolean      linked_worktree,
+                                     GPtrArray    *worktrees);
 static void start_turn (XdChatView *self,
                         const char *prompt);
 static void on_model_chosen (XdModelPicker *picker,
@@ -1181,7 +1184,8 @@ static void
 update_remote_options (XdChatView   *self,
                        const XdChat *chat,
                        gboolean      has_messages,
-                       gboolean      linked_worktree)
+                       gboolean      linked_worktree,
+                       GPtrArray    *worktrees)
 {
   g_autofree char *base_description = describe_context (chat->workdir);
   g_autofree char *description =
@@ -1196,7 +1200,8 @@ update_remote_options (XdChatView   *self,
 
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
-  update_workspace_choice (self, chat, has_messages, linked_worktree);
+  update_workspace_choice (
+    self, chat, chat->workdir, has_messages, linked_worktree, worktrees);
   xd_terminal_panel_set_workdir (self->terminal,
                                  have_workdir ? chat->workdir : NULL);
   xd_file_pane_set_workdir (self->files,
@@ -1248,6 +1253,8 @@ on_remote_options_received (GObject      *source,
   g_autoptr (XdChatView) self = user_data;
   g_autoptr (JsonObject) reply = NULL;
   g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) worktrees =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) xd_worktree_info_free);
   XdChat chat = { 0 };
 
   reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
@@ -1272,6 +1279,30 @@ on_remote_options_received (GObject      *source,
   chat.context_window =
     MAX (json_object_get_int_member_with_default (reply, "context_window", 0), 0);
 
+  if (json_object_has_member (reply, "worktrees"))
+    {
+      JsonArray *rows = json_object_get_array_member (reply, "worktrees");
+
+      for (guint i = 0; i < json_array_get_length (rows); i++)
+        {
+          JsonObject *row = json_array_get_object_element (rows, i);
+          const char *path = member_string (row, "path", NULL);
+          XdWorktreeInfo *item;
+
+          if (path == NULL)
+            continue;
+
+          item = g_new0 (XdWorktreeInfo, 1);
+          item->path = g_strdup (path);
+          item->branch = g_strdup (member_string (row, "branch", NULL));
+          item->detached = json_object_get_boolean_member_with_default (
+            row, "detached", FALSE);
+          item->main = json_object_get_boolean_member_with_default (
+            row, "main", FALSE);
+          g_ptr_array_add (worktrees, item);
+        }
+    }
+
   /*
    * Replace the old view as one main-loop operation.
    *
@@ -1290,7 +1321,8 @@ on_remote_options_received (GObject      *source,
   update_remote_options (
     self, &chat,
     json_object_get_boolean_member_with_default (reply, "has_messages", FALSE),
-    json_object_get_boolean_member_with_default (reply, "linked_worktree", FALSE));
+    json_object_get_boolean_member_with_default (reply, "linked_worktree", FALSE),
+    worktrees);
   set_queued_text (self, chat.queued);
 
   /*
@@ -2760,13 +2792,58 @@ describe_context (const char *workdir)
 static void
 update_workspace_choice (XdChatView   *self,
                          const XdChat *chat,
+                         const char   *workdir,
                          gboolean      has_messages,
-                         gboolean      linked_worktree)
+                         gboolean      linked_worktree,
+                         GPtrArray    *worktrees)
 {
+  g_autoptr (GPtrArray) labels =
+    g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GPtrArray) descriptions =
+    g_ptr_array_new_with_free_func (g_free);
+
   self->syncing_workspace = TRUE;
-  xd_option_picker_set_label (
-    self->workspace_chooser, 0,
-    linked_worktree ? "Current worktree" : "Current checkout");
+
+  g_ptr_array_set_size (self->workspace_paths, 0);
+  g_ptr_array_add (
+    labels, g_strdup (linked_worktree ? "Current worktree"
+                                     : "Current checkout"));
+  g_ptr_array_add (
+    descriptions, g_strdup ("Keep using this chat's current checkout."));
+  g_ptr_array_add (self->workspace_paths, NULL);
+
+  g_ptr_array_add (labels, g_strdup ("New worktree"));
+  g_ptr_array_add (
+    descriptions,
+    g_strdup ("Create an isolated branch and checkout for this chat."));
+  g_ptr_array_add (self->workspace_paths, NULL);
+
+  for (guint i = 0; worktrees != NULL && i < worktrees->len; i++)
+    {
+      XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
+      g_autofree char *label = NULL;
+
+      if (item->path == NULL || g_strcmp0 (item->path, workdir) == 0)
+        continue;
+
+      if (item->branch != NULL)
+        label = item->detached
+          ? g_strdup_printf ("Detached at %s", item->branch)
+          : g_strdup (item->branch);
+      else
+        label = g_path_get_basename (item->path);
+
+      g_ptr_array_add (labels, g_steal_pointer (&label));
+      g_ptr_array_add (descriptions, g_strdup (item->path));
+      g_ptr_array_add (self->workspace_paths, g_strdup (item->path));
+    }
+
+  g_ptr_array_add (labels, NULL);
+  g_ptr_array_add (descriptions, NULL);
+  xd_option_picker_set_choices (
+    self->workspace_chooser,
+    (const char *const *) labels->pdata,
+    (const char *const *) descriptions->pdata);
   xd_option_picker_set_selected (self->workspace_chooser,
                                  chat->new_worktree ? 1 : 0);
   gtk_widget_set_sensitive (GTK_WIDGET (self->workspace_chooser),
@@ -3076,6 +3153,7 @@ update_context_bar (XdChatView   *self,
 {
   g_autoptr (XdEffectiveSettings) resolved = NULL;
   g_autoptr (XdGitInfo) git = NULL;
+  g_autoptr (GPtrArray) worktrees = NULL;
   g_autofree char *base_description = NULL;
   g_autofree char *description = NULL;
   const char *workdir;
@@ -3087,6 +3165,8 @@ update_context_bar (XdChatView   *self,
   workdir = workdir_for (chat, resolved);
   model = chat->model != NULL ? chat->model : resolved->model;
   git = xd_git_info_for_path (workdir);
+  if (git != NULL)
+    worktrees = xd_worktree_list (workdir, NULL);
   base_description = describe_context (workdir);
   description = chat->new_worktree
     ? g_strdup_printf ("New worktree from %s", base_description)
@@ -3095,9 +3175,9 @@ update_context_bar (XdChatView   *self,
   gtk_label_set_label (self->context_label, description);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_label), description);
   update_workspace_choice (
-    self, chat,
+    self, chat, workdir,
     xd_storage_last_message_id (self->storage, chat->id) > 0,
-    git != NULL && git->linked_worktree);
+    git != NULL && git->linked_worktree, worktrees);
   if (xd_storage_get_context_usage (
         self->storage, chat->id, chat->backend, model, &used, &window))
     update_context_meter (self, used, window);
@@ -3165,22 +3245,34 @@ on_workspace_selected (XdOptionPicker *chooser,
   XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
   g_autoptr (XdChat) chat = NULL;
+  const char *worktree = NULL;
+  guint selected;
   gboolean new_worktree;
 
   if (self->syncing_workspace || self->chat == NULL)
     return;
 
-  new_worktree = xd_option_picker_get_selected (chooser) == 1;
+  selected = xd_option_picker_get_selected (chooser);
+  new_worktree = selected == 1;
+  if (selected < self->workspace_paths->len)
+    worktree = g_ptr_array_index (self->workspace_paths, selected);
 
   if (self->remote != NULL)
     {
-      set_remote_option (self, "new-worktree",
-                         new_worktree ? "true" : "false");
+      if (worktree != NULL)
+        set_remote_option (self, "workspace", worktree);
+      else
+        set_remote_option (self, "new-worktree",
+                           new_worktree ? "true" : "false");
       return;
     }
 
-  if (!xd_storage_set_new_worktree (
-        self->storage, xd_node_get_chat_id (self->chat), new_worktree, &error))
+  if (worktree != NULL
+        ? !xd_storage_use_existing_worktree (
+            self->storage, xd_node_get_chat_id (self->chat), worktree, &error)
+        : !xd_storage_set_new_worktree (
+            self->storage, xd_node_get_chat_id (self->chat),
+            new_worktree, &error))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
@@ -3914,6 +4006,7 @@ xd_chat_view_dispose (GObject *object)
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
+  g_clear_pointer (&self->workspace_paths, g_ptr_array_unref);
   g_clear_pointer (&self->queued, g_free);
   g_clear_object (&self->settings);
   g_clear_object (&self->storage);
@@ -3938,6 +4031,7 @@ xd_chat_view_init (XdChatView *self)
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
+  self->workspace_paths = g_ptr_array_new_with_free_func (g_free);
   self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
   self->history_bottom_distance = -1;
   self->header = adw_header_bar_new ();

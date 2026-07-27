@@ -75,11 +75,12 @@ test_create_and_reuse (void)
   g_autoptr (GError) error = NULL;
   g_autofree char *dir = g_dir_make_tmp ("xd-worktree-XXXXXX", &error);
   g_autofree char *repo = NULL;
-  g_autofree char *data = NULL;
+  g_autofree char *expected = NULL;
   g_autofree char *file = NULL;
   g_autofree char *worktree = NULL;
   g_autofree char *again = NULL;
   g_autofree char *branch = NULL;
+  g_autoptr (GPtrArray) listed = NULL;
   const char *init[] = { "git", "init", "-q", "-b", "main", NULL };
   const char *add[] = { "git", "add", "hello.txt", NULL };
   const char *commit[] = {
@@ -91,10 +92,10 @@ test_create_and_reuse (void)
   g_assert_no_error (error);
 
   repo = g_build_filename (dir, "repo", NULL);
-  data = g_build_filename (dir, "data", NULL);
+  expected = g_build_filename (
+    dir, "worktrees", "repo", "12345678-1234-1234-1234-123456789abc", NULL);
   file = g_build_filename (repo, "hello.txt", NULL);
   g_assert_cmpint (g_mkdir (repo, 0700), ==, 0);
-  g_assert_true (g_setenv ("XDG_DATA_HOME", data, TRUE));
 
   run (repo, init);
   g_assert_true (g_file_set_contents (file, "hello\n", -1, &error));
@@ -106,6 +107,7 @@ test_create_and_reuse (void)
     repo, "12345678-1234-1234-1234-123456789abc", &error);
   g_assert_no_error (error);
   g_assert_nonnull (worktree);
+  g_assert_cmpstr (worktree, ==, expected);
   g_assert_true (g_file_test (worktree, G_FILE_TEST_IS_DIR));
 
   branch = read_command (worktree, show_branch);
@@ -116,6 +118,18 @@ test_create_and_reuse (void)
     repo, "12345678-1234-1234-1234-123456789abc", &error);
   g_assert_no_error (error);
   g_assert_cmpstr (again, ==, worktree);
+
+  listed = xd_worktree_list (repo, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (listed->len, ==, 2);
+  g_assert_true (((XdWorktreeInfo *) g_ptr_array_index (listed, 0))->main);
+  g_assert_cmpstr (
+    ((XdWorktreeInfo *) g_ptr_array_index (listed, 0))->path, ==, repo);
+  g_assert_cmpstr (
+    ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->path, ==, worktree);
+  g_assert_cmpstr (
+    ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->branch,
+    ==, "xd/12345678-1234-1234-1234-123456789abc");
 
   remove_tree (dir);
 }
@@ -130,6 +144,10 @@ test_requires_a_repository (void)
   g_assert_no_error (error);
   worktree = xd_worktree_create (dir, "chat", &error);
   g_assert_null (worktree);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_clear_error (&error);
+
+  g_assert_null (xd_worktree_list (dir, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
 
   remove_tree (dir);

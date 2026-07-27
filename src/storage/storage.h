@@ -105,6 +105,15 @@ gboolean    xd_storage_set_new_worktree (XdStorage  *self,
                                          gboolean    enabled,
                                          GError    **error);
 
+/*
+ * Chooses an existing checkout and clears the pending new-worktree choice.
+ * Like every workspace choice, this is locked after the first message.
+ */
+gboolean    xd_storage_use_existing_worktree (XdStorage  *self,
+                                              const char *chat_id,
+                                              const char *workdir,
+                                              GError    **error);
+
 /* Atomically consumes the pending choice and points the chat at its checkout. */
 gboolean    xd_storage_use_worktree     (XdStorage   *self,
                                          const char  *chat_id,

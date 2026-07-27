@@ -744,6 +744,45 @@ xd_storage_set_new_worktree (XdStorage   *self,
 }
 
 gboolean
+xd_storage_use_existing_worktree (XdStorage   *self,
+                                  const char  *chat_id,
+                                  const char  *workdir,
+                                  GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+  g_return_val_if_fail (workdir != NULL && *workdir != '\0', FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats SET workdir = ?, new_worktree = 0, updated_at = ?"
+        " WHERE id = ? AND NOT EXISTS"
+        "   (SELECT 1 FROM messages WHERE chat_id = ?);",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot change the workspace");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, workdir);
+  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 3, chat_id);
+  bind_text (stmt, 4, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "The workspace can only be changed before the first message.");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
+}
+
+gboolean
 xd_storage_use_worktree (XdStorage   *self,
                          const char  *chat_id,
                          const char  *workdir,

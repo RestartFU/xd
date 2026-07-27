@@ -159,6 +159,34 @@ append_choice (XdOptionPicker *self,
   g_ptr_array_add (self->choices, choice);
 }
 
+void
+xd_option_picker_set_choices (XdOptionPicker    *self,
+                              const char *const *labels,
+                              const char *const *descriptions)
+{
+  GtkWidget *child;
+  guint old_selected;
+
+  g_return_if_fail (XD_IS_OPTION_PICKER (self));
+  g_return_if_fail (labels != NULL);
+  g_return_if_fail (descriptions != NULL);
+
+  old_selected = self->selected;
+
+  while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->list))) != NULL)
+    gtk_list_box_remove (self->list, child);
+  g_ptr_array_set_size (self->choices, 0);
+  self->selected = 0;
+
+  for (guint i = 0; labels[i] != NULL; i++)
+    append_choice (self, labels[i], descriptions[i]);
+
+  sync_selection (self);
+
+  if (old_selected != 0)
+    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_SELECTED]);
+}
+
 XdOptionPicker *
 xd_option_picker_new (const char *const *labels,
                       const char *const *descriptions)
@@ -169,11 +197,7 @@ xd_option_picker_new (const char *const *labels,
   g_return_val_if_fail (descriptions != NULL, NULL);
 
   self = g_object_new (XD_TYPE_OPTION_PICKER, NULL);
-
-  for (guint i = 0; labels[i] != NULL; i++)
-    append_choice (self, labels[i], descriptions[i]);
-
-  sync_selection (self);
+  xd_option_picker_set_choices (self, labels, descriptions);
 
   return self;
 }

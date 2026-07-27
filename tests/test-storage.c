@@ -367,12 +367,20 @@ test_workspace_locks_after_first_message (Fixture       *fixture,
   g_assert_no_error (error);
   g_assert_true (chat->new_worktree);
 
+  g_assert_true (xd_storage_use_existing_worktree (
+    fixture->storage, chat_id, "/tmp/existing-worktree", &error));
+  g_assert_no_error (error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_false (chat->new_worktree);
+  g_assert_cmpstr (chat->workdir, ==, "/tmp/existing-worktree");
+
   g_assert_true (xd_storage_append_message (
     fixture->storage, chat_id, "user", "start", NULL, NULL, &error));
   g_assert_no_error (error);
 
-  g_assert_false (xd_storage_set_new_worktree (
-    fixture->storage, chat_id, FALSE, &error));
+  g_assert_false (xd_storage_use_existing_worktree (
+    fixture->storage, chat_id, "/tmp/another-worktree", &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
 }
 

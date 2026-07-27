@@ -17,6 +17,9 @@ G_DECLARE_FINAL_TYPE (XdOptionPicker, xd_option_picker, XD, OPTION_PICKER, AdwBi
 XdOptionPicker *xd_option_picker_new          (const char *const *labels,
                                                const char *const *descriptions);
 
+void            xd_option_picker_set_choices  (XdOptionPicker    *self,
+                                               const char *const *labels,
+                                               const char *const *descriptions);
 guint           xd_option_picker_get_selected (XdOptionPicker    *self);
 void            xd_option_picker_set_selected (XdOptionPicker    *self,
                                                guint              selected);

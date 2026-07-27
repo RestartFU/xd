@@ -2525,6 +2525,38 @@ handle_terminal_kill (Connection *connection,
 /* --- one chat's settings ---------------------------------------------------- */
 
 static void
+add_worktrees (JsonBuilder *builder,
+               const char  *workdir)
+{
+  g_autoptr (GPtrArray) worktrees = xd_worktree_list (workdir, NULL);
+
+  if (worktrees == NULL)
+    return;
+
+  json_builder_set_member_name (builder, "worktrees");
+  json_builder_begin_array (builder);
+  for (guint i = 0; i < worktrees->len; i++)
+    {
+      XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "path");
+      json_builder_add_string_value (builder, item->path);
+      if (item->branch != NULL)
+        {
+          json_builder_set_member_name (builder, "branch");
+          json_builder_add_string_value (builder, item->branch);
+        }
+      json_builder_set_member_name (builder, "detached");
+      json_builder_add_boolean_value (builder, item->detached);
+      json_builder_set_member_name (builder, "main");
+      json_builder_add_boolean_value (builder, item->main);
+      json_builder_end_object (builder);
+    }
+  json_builder_end_array (builder);
+}
+
+static void
 handle_chat (Connection *connection,
              JsonObject *request)
 {
@@ -2675,12 +2707,59 @@ handle_chat (Connection *connection,
         json_builder_set_member_name (builder, "linked_worktree");
         json_builder_add_boolean_value (
           builder, git != NULL && git->linked_worktree);
+        add_worktrees (builder, workdir);
       }
   }
 
   json_builder_end_object (builder);
 
   send_json (connection, builder);
+}
+
+static gboolean
+use_existing_worktree (XdRemoteServer  *self,
+                       const char      *chat_id,
+                       const char      *requested,
+                       GError         **error)
+{
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdDaemonTurn) resolver = NULL;
+  g_autofree char *workdir = NULL;
+  g_autoptr (GPtrArray) worktrees = NULL;
+  g_autofree char *canonical = NULL;
+
+  if (requested == NULL || *requested == '\0')
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                   "An existing worktree path is required.");
+      return FALSE;
+    }
+
+  chat = xd_storage_get_chat (self->storage, chat_id, error);
+  if (chat == NULL)
+    return FALSE;
+
+  resolver = xd_daemon_turn_new (self->storage, self->root_path);
+  workdir = xd_daemon_turn_resolve_workdir (resolver, chat);
+  worktrees = xd_worktree_list (workdir, error);
+  if (worktrees == NULL)
+    return FALSE;
+
+  canonical = g_canonicalize_filename (requested, NULL);
+  for (guint i = 0; i < worktrees->len; i++)
+    {
+      XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
+      g_autofree char *candidate =
+        g_canonicalize_filename (item->path, NULL);
+
+      if (g_strcmp0 (candidate, canonical) == 0)
+        return xd_storage_use_existing_worktree (
+          self->storage, chat_id, item->path, error);
+    }
+
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+               "That path is not a worktree of this repository.");
+  return FALSE;
 }
 
 static void
@@ -2714,6 +2793,8 @@ handle_set_option (Connection *connection,
   else if (g_strcmp0 (option, "new-worktree") == 0)
     ok = xd_storage_set_new_worktree (
       self->storage, chat_id, g_strcmp0 (value, "true") == 0, &error);
+  else if (g_strcmp0 (option, "workspace") == 0)
+    ok = use_existing_worktree (self, chat_id, value, &error);
   else
     {
       send_error (connection, "No such option.");
