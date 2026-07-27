@@ -131,6 +131,10 @@ struct _XdChatView
   GtkBox *transcript;
   GtkScrolledWindow *scroller;
   gboolean follow_bottom;
+  guint bottom_jump_tick;
+  double bottom_jump_upper;
+  double bottom_jump_page_size;
+  guint bottom_jump_stable_frames;
   gboolean rendering_transcript;
   guint transcript_limit;
   double history_bottom_distance;
@@ -348,6 +352,66 @@ set_scroll_at_bottom (GtkAdjustment *adjustment)
 
   if (gtk_adjustment_get_value (adjustment) != bottom)
     gtk_adjustment_set_value (adjustment, bottom);
+}
+
+static gboolean
+reveal_transcript_at_bottom (GtkWidget     *widget,
+                             GdkFrameClock *frame_clock,
+                             gpointer       user_data)
+{
+  XdChatView *self = user_data;
+  GtkAdjustment *adjustment =
+    gtk_scrolled_window_get_vadjustment (self->scroller);
+  double upper = gtk_adjustment_get_upper (adjustment);
+  double page_size = gtk_adjustment_get_page_size (adjustment);
+
+  set_scroll_at_bottom (adjustment);
+
+  if (upper == self->bottom_jump_upper &&
+      page_size == self->bottom_jump_page_size)
+    self->bottom_jump_stable_frames++;
+  else
+    self->bottom_jump_stable_frames = 0;
+
+  self->bottom_jump_upper = upper;
+  self->bottom_jump_page_size = page_size;
+
+  /*
+   * The adjustment can reach its final value before GTK replaces the old
+   * render node. Keep that intermediate frame invisible, then expose the
+   * transcript only after two frames agree on its laid-out range.
+   */
+  if (self->bottom_jump_stable_frames >= 2)
+    {
+      self->bottom_jump_tick = 0;
+      gtk_widget_queue_draw (GTK_WIDGET (self->scroller));
+      gtk_widget_set_opacity (GTK_WIDGET (self->scroller), 1.0);
+      return G_SOURCE_REMOVE;
+    }
+
+  return G_SOURCE_CONTINUE;
+}
+
+/*
+ * Joining and sending replace the bottom edge. Painting before layout settles
+ * either exposes a visible trip down the transcript or leaves GTK's old
+ * snapshot on screen until the next wheel event.
+ */
+static void
+begin_bottom_jump (XdChatView *self)
+{
+  self->follow_bottom = TRUE;
+  self->history_bottom_distance = -1;
+  self->bottom_jump_upper = -1;
+  self->bottom_jump_page_size = -1;
+  self->bottom_jump_stable_frames = 0;
+
+  gtk_widget_set_opacity (GTK_WIDGET (self->scroller), 0.0);
+
+  if (self->bottom_jump_tick == 0)
+    self->bottom_jump_tick =
+      gtk_widget_add_tick_callback (GTK_WIDGET (self->scroller),
+                                    reveal_transcript_at_bottom, self, NULL);
 }
 
 /*
@@ -1314,6 +1378,7 @@ on_remote_options_received (GObject      *source,
    */
   if (self->pending_remote_messages != NULL)
     {
+      begin_bottom_jump (self);
       clear_transcript (self);
       end_remote_turn (self);
       render_transcript (self, self->pending_remote_messages);
@@ -2173,6 +2238,7 @@ send_message (XdChatView *self,
   gtk_widget_set_sensitive (GTK_WIDGET (self->workspace_chooser), FALSE);
   retire_open_questions (self);
   xd_node_set_state (self->chat, XD_NODE_IDLE);
+  begin_bottom_jump (self);
   append_row (self, XD_MESSAGE_USER, text);
   name_chat_after_first_message (self, text);
   xd_fs_tree_bump_chat (self->tree, self->chat);
@@ -3633,6 +3699,8 @@ xd_chat_view_set_chat (XdChatView *self,
       }
   }
 
+  if (changed)
+    begin_bottom_jump (self);
   load_transcript (self);
 
   /* Re-attach a reply that kept arriving while another chat was on screen. */
@@ -3999,6 +4067,13 @@ xd_chat_view_dispose (GObject *object)
 
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
+
+  if (self->bottom_jump_tick != 0)
+    {
+      gtk_widget_remove_tick_callback (GTK_WIDGET (self->scroller),
+                                       self->bottom_jump_tick);
+      self->bottom_jump_tick = 0;
+    }
 
   g_clear_handle_id (&self->working_timer, g_source_remove);
   self->working_label = NULL;
