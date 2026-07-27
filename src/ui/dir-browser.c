@@ -1,4 +1,5 @@
 #include "dir-browser.h"
+#include "panel-style.h"
 
 /*
  * The panel's own look, loaded once.
@@ -9,13 +10,6 @@
  * behind -- is part of the widget rather than a theme choice made elsewhere.
  */
 static const char BROWSER_STYLE[] =
-  ".xd-browser {"
-  "  background: #0b0b0b;"
-  "  border-radius: 14px;"
-  "  border: 1px solid alpha(#ffffff, 0.07);"
-  "  box-shadow: 0 24px 64px alpha(#000000, 0.65);"
-  "}\n"
-
   /* One surface: the list is part of the panel, not a pane inset into it. */
   ".xd-browser scrolledwindow,"
   ".xd-browser listview { background: transparent; }\n"
@@ -31,27 +25,9 @@ static const char BROWSER_STYLE[] =
   "  color: inherit;"
   "}\n"
 
-  ".xd-browser-bar { padding: 13px 16px; }\n"
-  ".xd-browser-head { border-bottom: 1px solid alpha(#ffffff, 0.06); }\n"
-  ".xd-browser-foot { border-top: 1px solid alpha(#ffffff, 0.06); }\n"
-
   /* The path reads as a path: what it is, rather than a title. */
   ".xd-browser-path { font-family: monospace; font-size: 96%;"
-  " color: alpha(#ffffff, 0.85); }\n"
-
-  /* Monochrome, because everything else here is. A blue block would be the
-   * loudest thing on a panel whose whole job is to be read. */
-  ".xd-browser-use {"
-  "  background: alpha(#ffffff, 0.10);"
-  "  border: 1px solid alpha(#ffffff, 0.08);"
-  "  border-radius: 9px;"
-  "  padding: 5px 14px;"
-  "  box-shadow: none;"
-  "}\n"
-  ".xd-browser-use:hover { background: alpha(#ffffff, 0.16); }\n"
-
-  ".xd-key { font-size: 85%; padding: 1px 6px; border-radius: 6px;"
-  " background: alpha(#ffffff, 0.09); }\n";
+  " color: alpha(#ffffff, 0.85); }\n";
 
 static void
 ensure_style (void)
@@ -399,6 +375,7 @@ xd_dir_browser_present (GtkWidget       *parent,
   g_return_if_fail (GTK_IS_WIDGET (parent));
   g_return_if_fail (chosen != NULL);
 
+  xd_panel_style_ensure ();
   ensure_style ();
 
   self = g_new0 (Browser, 1);
@@ -420,6 +397,7 @@ xd_dir_browser_present (GtkWidget       *parent,
   gtk_window_set_modal (GTK_WINDOW (window), TRUE);
   gtk_window_set_decorated (GTK_WINDOW (window), FALSE);
   gtk_window_set_default_size (GTK_WINDOW (window), 620, 460);
+  gtk_widget_add_css_class (window, "xd-panel");
   gtk_widget_add_css_class (window, "xd-browser");
 
   /* The path being looked at, and the way to take it. */
@@ -430,21 +408,21 @@ xd_dir_browser_present (GtkWidget       *parent,
   gtk_widget_add_css_class (GTK_WIDGET (self->path_label), "xd-browser-path");
 
   use = gtk_button_new_with_label ("Work here");
-  gtk_widget_add_css_class (use, "xd-browser-use");
+  gtk_widget_add_css_class (use, "xd-panel-action");
   g_signal_connect (use, "clicked", G_CALLBACK (on_use_clicked), self);
 
   header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->path_label));
   gtk_box_append (GTK_BOX (header), use);
-  gtk_widget_add_css_class (header, "xd-browser-bar");
-  gtk_widget_add_css_class (header, "xd-browser-head");
+  gtk_widget_add_css_class (header, "xd-panel-bar");
+  gtk_widget_add_css_class (header, "xd-panel-head");
 
   self->trouble = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_wrap (self->trouble, TRUE);
   gtk_label_set_xalign (self->trouble, 0.0f);
   gtk_widget_set_visible (GTK_WIDGET (self->trouble), FALSE);
   gtk_widget_add_css_class (GTK_WIDGET (self->trouble), "error");
-  gtk_widget_add_css_class (GTK_WIDGET (self->trouble), "xd-browser-bar");
+  gtk_widget_add_css_class (GTK_WIDGET (self->trouble), "xd-panel-bar");
 
   factory = gtk_signal_list_item_factory_new ();
   g_signal_connect (factory, "setup", G_CALLBACK (on_item_setup), self);
@@ -467,8 +445,8 @@ xd_dir_browser_present (GtkWidget       *parent,
   gtk_box_append (GTK_BOX (footer), hint ("Enter", "Open"));
   gtk_box_append (GTK_BOX (footer), hint ("Backspace", "Back"));
   gtk_box_append (GTK_BOX (footer), hint ("Esc", "Use the folder's"));
-  gtk_widget_add_css_class (footer, "xd-browser-bar");
-  gtk_widget_add_css_class (footer, "xd-browser-foot");
+  gtk_widget_add_css_class (footer, "xd-panel-bar");
+  gtk_widget_add_css_class (footer, "xd-panel-foot");
 
   column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (column), header);
