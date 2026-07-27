@@ -15,6 +15,26 @@ struct _XdGitDiffTracker
 };
 
 static char *
+native_git_path (char *path)
+{
+#ifdef G_OS_WIN32
+  if (path != NULL &&
+      path[0] == '/' &&
+      g_ascii_isalpha (path[1]) &&
+      path[2] == '/')
+    {
+      char drive[3] = { g_ascii_toupper (path[1]), ':', '\0' };
+      char *native = g_strconcat (drive, path + 2, NULL);
+
+      g_free (path);
+      return native;
+    }
+#endif
+
+  return path;
+}
+
+static char *
 run_git (const char        *workdir,
          const char        *index_path,
          const char *const *argv,
@@ -100,7 +120,8 @@ repository_root (const char *workdir)
     return NULL;
 
   g_strchomp (root);
-  return *root != '\0' ? g_steal_pointer (&root) : NULL;
+  return *root != '\0'
+    ? native_git_path (g_steal_pointer (&root)) : NULL;
 }
 
 static char *
@@ -113,6 +134,7 @@ user_index_path (const char *root)
     return NULL;
 
   g_strchomp (reported);
+  reported = native_git_path (g_steal_pointer (&reported));
   return g_path_is_absolute (reported)
     ? g_steal_pointer (&reported) : g_build_filename (root, reported, NULL);
 }
