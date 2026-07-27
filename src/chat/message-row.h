@@ -25,7 +25,9 @@ G_DECLARE_FINAL_TYPE (XdMessageRow, xd_message_row, XD, MESSAGE_ROW, AdwBin)
  */
 XdMessageRow *xd_message_row_new         (XdMessageKind  kind,
                                           const char    *text);
-void          xd_message_row_make_status (XdMessageRow *self);
+void          xd_message_row_make_workflow (XdMessageRow *self,
+                                             const char   *run_id,
+                                             const char   *url);
 void          xd_message_row_make_subagent (XdMessageRow *self);
 
 /* Records what produced the message -- model and effort -- as a tooltip. */

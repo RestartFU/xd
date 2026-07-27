@@ -17,14 +17,21 @@ struct _XdMessageRow
   GString *text;
   XdRemoteClient *remote;
   GCancellable *image_cancellable;
+  GCancellable *workflow_cancellable;
 
   GtkWidget *card;
   GtkWidget *body;          /* a column of prose labels and code cards */
+  GtkWidget *workflow_status;
+  GtkWidget *workflow_spinner;
+  char *workflow_run_id;
+  char *workflow_repository;
+  guint workflow_poll;
 };
 
 G_DEFINE_FINAL_TYPE (XdMessageRow, xd_message_row, ADW_TYPE_BIN)
 
 static void render_body (XdMessageRow *self);
+static void clear_body (XdMessageRow *self);
 
 XdMessageKind
 xd_message_kind_from_role (const char *role)
@@ -165,12 +172,304 @@ make_info_card (XdMessageRow *self,
   gtk_widget_set_margin_end (self->body, 14);
 }
 
-void
-xd_message_row_make_status (XdMessageRow *self)
+static gboolean
+safe_repository_component (const char *component)
 {
+  if (component == NULL || *component == '\0')
+    return FALSE;
+
+  for (const char *at = component; *at != '\0'; at++)
+    if (!g_ascii_isalnum (*at) && *at != '-' && *at != '_' && *at != '.')
+      return FALSE;
+
+  return TRUE;
+}
+
+static char *
+repository_from_workflow_url (const char *url,
+                              const char *run_id)
+{
+  static const char prefix[] = "https://github.com/";
+  g_autofree char *suffix = NULL;
+  g_autofree char *repository = NULL;
+  char *slash;
+  gsize length;
+
+  if (url == NULL || run_id == NULL || !g_str_has_prefix (url, prefix))
+    return NULL;
+
+  suffix = g_strdup_printf ("/actions/runs/%s", run_id);
+  if (!g_str_has_suffix (url, suffix))
+    return NULL;
+
+  length = strlen (url) - strlen (prefix) - strlen (suffix);
+  repository = g_strndup (url + strlen (prefix), length);
+  slash = strchr (repository, '/');
+
+  if (slash == NULL || strchr (slash + 1, '/') != NULL)
+    return NULL;
+
+  *slash = '\0';
+  if (!safe_repository_component (repository) ||
+      !safe_repository_component (slash + 1))
+    return NULL;
+  *slash = '/';
+
+  return g_steal_pointer (&repository);
+}
+
+static const char *
+workflow_conclusion_name (const char *conclusion)
+{
+  if (g_strcmp0 (conclusion, "success") == 0)
+    return "Passed";
+  if (g_strcmp0 (conclusion, "failure") == 0)
+    return "Failed";
+  if (g_strcmp0 (conclusion, "cancelled") == 0)
+    return "Cancelled";
+  if (g_strcmp0 (conclusion, "timed_out") == 0)
+    return "Timed out";
+  if (g_strcmp0 (conclusion, "action_required") == 0)
+    return "Action required";
+  if (g_strcmp0 (conclusion, "skipped") == 0)
+    return "Skipped";
+  if (g_strcmp0 (conclusion, "stale") == 0)
+    return "Stale";
+
+  return "Completed";
+}
+
+static void
+set_workflow_status (XdMessageRow *self,
+                     const char   *text,
+                     gboolean      working,
+                     gboolean      failed)
+{
+  gtk_label_set_label (GTK_LABEL (self->workflow_status), text);
+  gtk_widget_set_visible (self->workflow_spinner, working);
+
+  if (working)
+    gtk_spinner_start (GTK_SPINNER (self->workflow_spinner));
+  else
+    gtk_spinner_stop (GTK_SPINNER (self->workflow_spinner));
+
+  gtk_widget_remove_css_class (self->workflow_status, "success");
+  gtk_widget_remove_css_class (self->workflow_status, "error");
+
+  if (!working)
+    gtk_widget_add_css_class (self->workflow_status,
+                              failed ? "error" : "success");
+}
+
+typedef struct
+{
+  GWeakRef row;
+} WorkflowStatusRequest;
+
+static void
+workflow_status_request_free (WorkflowStatusRequest *request)
+{
+  g_weak_ref_clear (&request->row);
+  g_free (request);
+}
+
+static void refresh_workflow_status (XdMessageRow *self);
+
+static gboolean
+poll_workflow_status (gpointer user_data)
+{
+  XdMessageRow *self = user_data;
+
+  refresh_workflow_status (self);
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+on_workflow_status (GObject      *source,
+                    GAsyncResult *result,
+                    gpointer      user_data)
+{
+  WorkflowStatusRequest *request = user_data;
+  g_autoptr (XdMessageRow) self = g_weak_ref_get (&request->row);
+  g_autoptr (JsonParser) parser = json_parser_new ();
+  g_autoptr (GError) error = NULL;
+  g_autofree char *output = NULL;
+  JsonNode *root_node;
+  JsonObject *root;
+  JsonArray *jobs;
+  const char *status;
+  const char *conclusion;
+  guint complete = 0;
+  guint total = 0;
+  gboolean communicated;
+
+  communicated = g_subprocess_communicate_utf8_finish (
+    G_SUBPROCESS (source), result, &output, NULL, &error);
+  workflow_status_request_free (request);
+  if (self == NULL)
+    return;
+
+  g_clear_object (&self->workflow_cancellable);
+  if (!communicated ||
+      !g_subprocess_get_successful (G_SUBPROCESS (source)) ||
+      !json_parser_load_from_data (parser, output, -1, &error))
+    {
+      set_workflow_status (self, "Status unavailable · retrying…", TRUE, FALSE);
+      return;
+    }
+
+  root_node = json_parser_get_root (parser);
+  root = root_node != NULL && JSON_NODE_HOLDS_OBJECT (root_node)
+    ? json_node_get_object (root_node) : NULL;
+  if (root == NULL)
+    {
+      set_workflow_status (self, "Status unavailable · retrying…", TRUE, FALSE);
+      return;
+    }
+
+  status = json_object_get_string_member_with_default (root, "status", NULL);
+  conclusion =
+    json_object_get_string_member_with_default (root, "conclusion", NULL);
+  jobs = json_object_has_member (root, "jobs")
+    ? json_object_get_array_member (root, "jobs") : NULL;
+  total = jobs != NULL ? json_array_get_length (jobs) : 0;
+
+  for (guint i = 0; i < total; i++)
+    {
+      JsonObject *job = json_array_get_object_element (jobs, i);
+
+      if (g_strcmp0 (
+            json_object_get_string_member_with_default (job, "status", NULL),
+            "completed") == 0)
+        complete++;
+    }
+
+  if (g_strcmp0 (status, "completed") == 0)
+    {
+      const char *name = workflow_conclusion_name (conclusion);
+      g_autofree char *text = total > 0
+        ? g_strdup_printf ("%s · %u/%u jobs completed", name, complete, total)
+        : g_strdup (name);
+
+      set_workflow_status (self, text, FALSE,
+                           g_strcmp0 (conclusion, "success") != 0 &&
+                           g_strcmp0 (conclusion, "skipped") != 0);
+
+      if (self->workflow_poll != 0)
+        {
+          g_source_remove (self->workflow_poll);
+          self->workflow_poll = 0;
+        }
+      return;
+    }
+
+  if (g_strcmp0 (status, "queued") == 0 ||
+      g_strcmp0 (status, "requested") == 0 ||
+      g_strcmp0 (status, "waiting") == 0 ||
+      g_strcmp0 (status, "pending") == 0)
+    {
+      set_workflow_status (self, "Queued", TRUE, FALSE);
+      return;
+    }
+
+  if (total > 0)
+    {
+      g_autofree char *text =
+        g_strdup_printf ("In progress · %u/%u jobs completed", complete, total);
+
+      set_workflow_status (self, text, TRUE, FALSE);
+    }
+  else
+    {
+      set_workflow_status (self, "In progress", TRUE, FALSE);
+    }
+}
+
+static void
+refresh_workflow_status (XdMessageRow *self)
+{
+  g_autoptr (GSubprocess) process = NULL;
+  g_autoptr (GError) error = NULL;
+  WorkflowStatusRequest *request;
+
+  if (self->workflow_cancellable != NULL)
+    return;
+
+  process = g_subprocess_new (
+    G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+    &error, "gh", "run", "view", self->workflow_run_id,
+    "--repo", self->workflow_repository,
+    "--json", "status,conclusion,jobs", NULL);
+
+  if (process == NULL)
+    {
+      set_workflow_status (self, "Status unavailable", FALSE, TRUE);
+      return;
+    }
+
+  self->workflow_cancellable = g_cancellable_new ();
+  request = g_new0 (WorkflowStatusRequest, 1);
+  g_weak_ref_init (&request->row, self);
+  g_subprocess_communicate_utf8_async (
+    process, NULL, self->workflow_cancellable,
+    on_workflow_status, request);
+}
+
+void
+xd_message_row_make_workflow (XdMessageRow *self,
+                              const char   *run_id,
+                              const char   *url)
+{
+  GtkWidget *title;
+  GtkWidget *status;
+  GtkWidget *link;
+  g_autofree char *title_markup = NULL;
+  g_autofree char *link_markup = NULL;
+
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
+  self->workflow_repository = repository_from_workflow_url (url, run_id);
+  self->workflow_run_id = g_strdup (run_id);
+
+  clear_body (self);
   make_info_card (self, "xd-status");
+
+  title = gtk_label_new (NULL);
+  title_markup = g_markup_printf_escaped (
+    "<b>GitHub Actions · Run #%s</b>", run_id);
+  gtk_label_set_markup (GTK_LABEL (title), title_markup);
+  gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
+
+  status = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 7);
+  self->workflow_spinner = gtk_spinner_new ();
+  self->workflow_status = gtk_label_new ("Checking status…");
+  gtk_spinner_start (GTK_SPINNER (self->workflow_spinner));
+  gtk_label_set_xalign (GTK_LABEL (self->workflow_status), 0.0f);
+  gtk_box_append (GTK_BOX (status), self->workflow_spinner);
+  gtk_box_append (GTK_BOX (status), self->workflow_status);
+
+  link = gtk_label_new (NULL);
+  link_markup = g_markup_printf_escaped (
+    "<a href=\"%s\">Open live status and logs</a>", url);
+  gtk_label_set_markup (GTK_LABEL (link), link_markup);
+  gtk_label_set_xalign (GTK_LABEL (link), 0.0f);
+  g_signal_connect (link, "activate-link",
+                    G_CALLBACK (on_link_activated), NULL);
+
+  gtk_box_append (GTK_BOX (self->body), title);
+  gtk_box_append (GTK_BOX (self->body), status);
+  gtk_box_append (GTK_BOX (self->body), link);
+
+  if (self->workflow_repository == NULL)
+    {
+      set_workflow_status (self, "Status unavailable", FALSE, TRUE);
+      return;
+    }
+
+  refresh_workflow_status (self);
+  if (self->workflow_cancellable != NULL)
+    self->workflow_poll =
+      g_timeout_add_seconds (10, poll_workflow_status, self);
 }
 
 void
@@ -645,8 +944,17 @@ xd_message_row_dispose (GObject *object)
 {
   XdMessageRow *self = XD_MESSAGE_ROW (object);
 
+  if (self->workflow_poll != 0)
+    {
+      g_source_remove (self->workflow_poll);
+      self->workflow_poll = 0;
+    }
+
   g_cancellable_cancel (self->image_cancellable);
+  if (self->workflow_cancellable != NULL)
+    g_cancellable_cancel (self->workflow_cancellable);
   g_clear_object (&self->image_cancellable);
+  g_clear_object (&self->workflow_cancellable);
   g_clear_object (&self->remote);
 
   G_OBJECT_CLASS (xd_message_row_parent_class)->dispose (object);
@@ -658,6 +966,8 @@ xd_message_row_finalize (GObject *object)
   XdMessageRow *self = XD_MESSAGE_ROW (object);
 
   g_string_free (self->text, TRUE);
+  g_free (self->workflow_run_id);
+  g_free (self->workflow_repository);
 
   G_OBJECT_CLASS (xd_message_row_parent_class)->finalize (object);
 }

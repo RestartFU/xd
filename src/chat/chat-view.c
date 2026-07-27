@@ -593,7 +593,7 @@ show_tool_use (XdChatView *self,
       XdMessageRow *row =
         append_row (self, XD_MESSAGE_ASSISTANT, block);
 
-      xd_message_row_make_status (row);
+      xd_message_row_make_workflow (row, run_id, url);
       return;
     }
 
