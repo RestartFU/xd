@@ -3372,7 +3372,9 @@ build_composer (XdChatView *self)
 {
   GtkWidget *frame = gtk_frame_new (NULL);
   GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  GtkWidget *toolbar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *toolbar = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+  GtkWidget *identity = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *run = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *scroller = gtk_scrolled_window_new ();
   GtkEventController *keys;
 
@@ -3512,11 +3514,14 @@ build_composer (XdChatView *self)
                       G_CALLBACK (on_access_selected), self);
   }
 
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->workspace_chooser));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->model_picker));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_meter));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->effort_chooser));
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->access_chooser));
+  /* Identity and capacity answer "where and who"; execution controls answer
+   * "how". Keeping those groups on their own rows gives every selected value
+   * its natural width instead of turning the toolbar into ellipses. */
+  gtk_box_append (GTK_BOX (identity), GTK_WIDGET (self->workspace_chooser));
+  gtk_box_append (GTK_BOX (identity), GTK_WIDGET (self->model_picker));
+  gtk_box_append (GTK_BOX (identity), GTK_WIDGET (self->context_meter));
+  gtk_box_append (GTK_BOX (run), GTK_WIDGET (self->effort_chooser));
+  gtk_box_append (GTK_BOX (run), GTK_WIDGET (self->access_chooser));
 
   /* Build and Plan are two states of one choice, so they read as one control
    * rather than two independent buttons. */
@@ -3555,7 +3560,7 @@ build_composer (XdChatView *self)
     gtk_box_append (GTK_BOX (modes), GTK_WIDGET (self->build_toggle));
     gtk_box_append (GTK_BOX (modes), GTK_WIDGET (self->plan_toggle));
     gtk_widget_add_css_class (modes, "linked");
-    gtk_box_append (GTK_BOX (toolbar), modes);
+    gtk_box_append (GTK_BOX (run), modes);
   }
 
   self->terminal_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
@@ -3578,10 +3583,12 @@ build_composer (XdChatView *self)
     GtkWidget *filler = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
 
     gtk_widget_set_hexpand (filler, TRUE);
-    gtk_box_append (GTK_BOX (toolbar), filler);
+    gtk_box_append (GTK_BOX (run), filler);
   }
 
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->send_button));
+  gtk_box_append (GTK_BOX (run), GTK_WIDGET (self->send_button));
+  gtk_box_append (GTK_BOX (toolbar), identity);
+  gtk_box_append (GTK_BOX (toolbar), run);
   /* The controls sit under the text the user is typing, so they need enough
    * clearance not to read as part of it. */
   gtk_widget_set_margin_top (toolbar, 10);

@@ -256,7 +256,6 @@ xd_option_picker_init (XdOptionPicker *self)
   self->choices =
     g_ptr_array_new_with_free_func ((GDestroyNotify) choice_free);
   self->button_label = GTK_LABEL (gtk_label_new (NULL));
-  gtk_label_set_ellipsize (self->button_label, PANGO_ELLIPSIZE_END);
 
   gtk_box_append (GTK_BOX (button_content), GTK_WIDGET (self->button_label));
   gtk_box_append (GTK_BOX (button_content),

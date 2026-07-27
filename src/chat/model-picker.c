@@ -544,7 +544,6 @@ xd_model_picker_init (XdModelPicker *self)
 
   self->button_icon = GTK_IMAGE (gtk_image_new ());
   self->button_label = GTK_LABEL (gtk_label_new (NULL));
-  gtk_label_set_ellipsize (self->button_label, PANGO_ELLIPSIZE_END);
 
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->button_icon));
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->button_label));
