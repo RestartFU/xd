@@ -39,3 +39,7 @@ install_data('icons/hicolor/scalable/apps/xd-backend-claude.svg',
 install_data('icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg',
   install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'symbolic' / 'apps',
 )
+
+install_data('icons/hicolor/symbolic/apps/xd-backend-cerebras-symbolic.svg',
+  install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'symbolic' / 'apps',
+)

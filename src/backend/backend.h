@@ -7,8 +7,8 @@ G_BEGIN_DECLS
 
 /*
  * xd never speaks to an AI API. It drives the CLIs already installed and
- * authenticated on the machine -- claude and codex -- and reads the JSONL they
- * write to stdout.
+ * authenticated on the machine -- claude, codex and opencode -- and reads the
+ * JSONL they write to stdout.
  *
  * A backend contributes two things: how to build the command line, and how to
  * turn one line of its output into events. Spawning, reading and cancelling
@@ -148,6 +148,7 @@ struct _AiParser
   const AiBackend *backend;
   JsonParser *json;
   gboolean streamed_text;
+  char *session_id;  /* backends whose id rides on every event emit it once */
 
   /* Block index -> AiPendingTool*. Tool arguments arrive in fragments after
    * the block opens, so the call cannot be described until it closes. */

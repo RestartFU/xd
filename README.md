@@ -17,9 +17,14 @@ Personal
 └── Dotfiles
 ```
 
-The app does not talk to any AI API itself. It drives the CLIs already
-installed and authenticated on your machine — `claude` and `codex` — as
-subprocesses, streaming their JSONL output into the UI.
+The app does not talk to any AI API itself. It drives the coding-agent CLIs
+already installed and authenticated on your machine — `claude`, `codex`, and
+`opencode` for Cerebras — as subprocesses, streaming their JSONL output into
+the UI.
+
+For Cerebras, install [OpenCode](https://opencode.ai/docs/) and either export
+`CEREBRAS_API_KEY` before starting xd or run `opencode auth login`, choose
+Cerebras, and enter your API key. xd never stores the key.
 
 ## Install
 
@@ -89,9 +94,9 @@ system GTK such as NixOS.
 ```
 
 The app itself is deliberately *not* run inside Docker: it spawns the host's
-`claude` and `codex`, which need the host's own credentials and PATH. The
-launcher invokes the bundled loader with `--library-path` rather than exporting
-`LD_LIBRARY_PATH`, so those child processes still use host libraries.
+agent CLI, which needs the host's own credentials and PATH. The launcher
+invokes the bundled loader with `--library-path` rather than exporting
+`LD_LIBRARY_PATH`, so child processes still use host libraries.
 
 ### Known wart
 
@@ -123,7 +128,7 @@ noise is cosmetic.
 | --------------- | ---------------------------------------------------- |
 | `src/tree/`     | Workspace tree: nodes, disk scanner, sidebar          |
 | `src/chat/`     | Chat view, message rows, subprocess session           |
-| `src/backend/`  | `claude` / `codex` argv building and JSONL parsing    |
+| `src/backend/`  | Agent CLI argv building and JSONL parsing             |
 | `src/settings/` | Per-folder `.xd.json` settings and inheritance        |
 | `src/storage/`  | SQLite: chats, messages, full-text search             |
 | `tests/`        | Headless tests, no GTK required                       |

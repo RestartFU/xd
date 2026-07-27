@@ -2,10 +2,12 @@
 
 extern const AiBackend xd_claude_backend;
 extern const AiBackend xd_codex_backend;
+extern const AiBackend xd_cerebras_backend;
 
 static const AiBackend *const backends[] = {
   &xd_claude_backend,
   &xd_codex_backend,
+  &xd_cerebras_backend,
 };
 
 const AiBackend *
@@ -110,6 +112,9 @@ ai_backend_default_effort (const AiBackend *self)
       path = g_build_filename (g_get_home_dir (), ".codex", "config.toml", NULL);
       return effort_from_config (path, "model_reasoning_effort");
     }
+
+  if (g_strcmp0 (self->id, "claude") != 0)
+    return AI_EFFORT_HIGH;
 
   path = g_build_filename (g_get_home_dir (), ".claude", "settings.json", NULL);
 
@@ -287,8 +292,8 @@ ai_tool_summary (const char *tool_name,
   /* In the order that identifies the work best: what is being run beats
    * where, which beats how. */
   static const char *keys[] = {
-    "command", "file_path", "path", "pattern", "url", "query",
-    "description", "notebook_path", "prompt",
+    "command", "file_path", "filePath", "path", "pattern", "url", "query",
+    "description", "notebook_path", "notebookPath", "prompt",
   };
   const char *detail = NULL;
   g_autofree char *trimmed = NULL;
@@ -387,6 +392,7 @@ ai_parser_free (AiParser *self)
 
   g_clear_pointer (&self->pending_tools, g_hash_table_unref);
   g_clear_object (&self->json);
+  g_free (self->session_id);
   g_free (self);
 }
 

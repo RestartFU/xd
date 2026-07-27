@@ -144,6 +144,21 @@ test_codex_stream (void)
   collected_clear (&collected);
 }
 
+static void
+test_cerebras_stream (void)
+{
+  Collected collected = { 0 };
+
+  replay_fixture ("cerebras", "opencode-run.jsonl", &collected);
+
+  g_assert_cmpstr (collected.session_id, ==, "ses_cerebras_123");
+  g_assert_cmpstr (collected.text->str, ==, "hello from Cerebras");
+  g_assert_cmpuint (collected.n_tools, ==, 1);
+  g_assert_cmpuint (collected.n_errors, ==, 0);
+
+  collected_clear (&collected);
+}
+
 /* Output the parser does not recognise must be skipped, not fatal: the CLIs
  * add event types over time and print the occasional stray line. */
 static void
@@ -252,6 +267,36 @@ test_codex_argv (void)
     strstr (plain, "unless the user specifically asks you not to"));
 }
 
+static void
+test_cerebras_argv (void)
+{
+  const AiBackend *backend = ai_backend_lookup ("cerebras");
+  AiRunSpec spec = {
+    .prompt = "hello",
+    .model = "cerebras/gemma-4-31b",
+    .effort = AI_EFFORT_XHIGH,
+    .access = AI_ACCESS_EDIT,
+  };
+  g_autofree char *plain = argv_to_string (backend, &spec);
+  g_autofree char *resumed = NULL;
+
+  g_assert_nonnull (strstr (plain, "run --format json"));
+  g_assert_nonnull (strstr (plain, "--model cerebras/gemma-4-31b"));
+  g_assert_nonnull (strstr (plain, "--variant high"));
+  g_assert_nonnull (strstr (plain, "--auto"));
+
+  spec.resume_session_id = "ses_123";
+  spec.system_prompt = "be brief";
+  spec.access = AI_ACCESS_READ_ONLY;
+  resumed = argv_to_string (backend, &spec);
+
+  g_assert_nonnull (strstr (resumed, "--session ses_123"));
+  g_assert_nonnull (strstr (resumed, "--agent plan"));
+  g_assert_nonnull (strstr (resumed, "<read_only_mode>"));
+  g_assert_nonnull (strstr (resumed, "be brief\n\nhello"));
+  g_assert_null (strstr (resumed, "--auto"));
+}
+
 /*
  * Access maps onto whatever each CLI calls it. The default has to be the
  * least permissive rung: an unrecognised value must never open the sandbox.
@@ -261,6 +306,7 @@ test_access_maps_to_each_cli (void)
 {
   const AiBackend *claude = ai_backend_lookup ("claude");
   const AiBackend *codex = ai_backend_lookup ("codex");
+  const AiBackend *cerebras = ai_backend_lookup ("cerebras");
   AiRunSpec spec = { .prompt = "hello" };
 
   struct { AiAccess access; const char *claude_flag; const char *codex_flag; } cases[] = {
@@ -274,13 +320,26 @@ test_access_maps_to_each_cli (void)
     {
       g_autofree char *claude_argv = NULL;
       g_autofree char *codex_argv = NULL;
+      g_autofree char *cerebras_argv = NULL;
 
       spec.access = cases[i].access;
       claude_argv = argv_to_string (claude, &spec);
       codex_argv = argv_to_string (codex, &spec);
+      cerebras_argv = argv_to_string (cerebras, &spec);
 
       g_assert_nonnull (strstr (claude_argv, cases[i].claude_flag));
       g_assert_nonnull (strstr (codex_argv, cases[i].codex_flag));
+
+      if (cases[i].access <= AI_ACCESS_READ_ONLY)
+        {
+          g_assert_nonnull (strstr (cerebras_argv, "--agent plan"));
+          g_assert_null (strstr (cerebras_argv, "--auto"));
+        }
+      else
+        {
+          g_assert_nonnull (strstr (cerebras_argv, "--auto"));
+          g_assert_null (strstr (cerebras_argv, "--agent plan"));
+        }
     }
 
   /* Codex has no plan mode, so planning has to be asked for in words. */
@@ -300,13 +359,19 @@ test_effort_maps_to_each_cli (void)
 {
   const AiBackend *claude = ai_backend_lookup ("claude");
   const AiBackend *codex = ai_backend_lookup ("codex");
+  const AiBackend *cerebras = ai_backend_lookup ("cerebras");
   AiRunSpec spec = { .prompt = "hello", .effort = AI_EFFORT_XHIGH };
   g_autofree char *claude_argv = argv_to_string (claude, &spec);
   g_autofree char *codex_argv = argv_to_string (codex, &spec);
+  g_autofree char *cerebras_argv = NULL;
   g_autofree char *unset = NULL;
 
   g_assert_nonnull (strstr (claude_argv, "--effort xhigh"));
   g_assert_nonnull (strstr (codex_argv, "model_reasoning_effort=\"xhigh\""));
+
+  spec.model = "cerebras/gpt-oss-120b";
+  cerebras_argv = argv_to_string (cerebras, &spec);
+  g_assert_nonnull (strstr (cerebras_argv, "--variant high"));
 
   /* Every chat names an effort, so the flag is always passed. */
   spec.effort = AI_EFFORT_LOW;
@@ -456,15 +521,22 @@ test_model_reaches_argv (void)
 {
   const AiBackend *claude = ai_backend_lookup ("claude");
   const AiBackend *codex = ai_backend_lookup ("codex");
+  const AiBackend *cerebras = ai_backend_lookup ("cerebras");
   AiRunSpec spec = { .prompt = "hello", .model = "claude-opus-5" };
   g_autofree char *claude_argv = argv_to_string (claude, &spec);
   g_autofree char *codex_argv = NULL;
+  g_autofree char *cerebras_argv = NULL;
 
   g_assert_nonnull (strstr (claude_argv, "--model claude-opus-5"));
 
   spec.model = "gpt-5.6-sol";
   codex_argv = argv_to_string (codex, &spec);
   g_assert_nonnull (strstr (codex_argv, "-m gpt-5.6-sol"));
+
+  spec.model = "cerebras/zai-glm-4.7";
+  cerebras_argv = argv_to_string (cerebras, &spec);
+  g_assert_nonnull (strstr (cerebras_argv,
+                            "--model cerebras/zai-glm-4.7"));
 }
 
 int
@@ -477,6 +549,8 @@ main (int   argc,
   g_test_add_func ("/backend/claude/argv", test_claude_argv);
   g_test_add_func ("/backend/codex/stream", test_codex_stream);
   g_test_add_func ("/backend/codex/argv", test_codex_argv);
+  g_test_add_func ("/backend/cerebras/stream", test_cerebras_stream);
+  g_test_add_func ("/backend/cerebras/argv", test_cerebras_argv);
   g_test_add_func ("/backend/garbage", test_garbage_is_survivable);
   g_test_add_func ("/backend/unknown", test_unknown_backend);
   g_test_add_func ("/backend/models/named", test_every_backend_names_its_models);
