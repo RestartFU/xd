@@ -70,11 +70,22 @@ typedef struct
   guint64 context_window;
 } Turn;
 
+typedef struct
+{
+  char *key;
+  char *chat_id;
+  GtkBox *transcript;       /* owned by transcript_stack */
+  XdRemoteClient *remote;
+  gint64 message_id;
+  guint limit;
+} TranscriptPage;
+
 /* Code and paired diffs need more room than prose. Keep the column bounded so
  * it still reads as a conversation, but use the space available on a desktop
  * instead of shrinking two diff sides into a narrow card. */
 #define CONTENT_WIDTH 1040
 #define TRANSCRIPT_PAGE_SIZE 100
+#define TRANSCRIPT_CACHE_SIZE 4
 
 typedef enum
 {
@@ -148,7 +159,12 @@ struct _XdChatView
   GtkWidget *header;            /* owned by the toolbar */
   AdwWindowTitle *title;
   GtkStack *stack;
+  GtkStack *transcript_stack;
   GtkBox *transcript;
+  GtkBox *empty_transcript;
+  TranscriptPage *transcript_page;
+  GHashTable *transcript_pages; /* local:/remote: chat key -> TranscriptPage */
+  GQueue transcript_lru;        /* least recently viewed first */
   GtkScrolledWindow *scroller;
   gboolean follow_bottom;
   guint bottom_jump_tick;
@@ -829,6 +845,175 @@ reply_is_answerable (GPtrArray *messages,
     }
 
   return TRUE;
+}
+
+static GtkBox *
+new_transcript (void)
+{
+  GtkBox *transcript =
+    GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 8));
+
+  gtk_widget_set_valign (GTK_WIDGET (transcript), GTK_ALIGN_START);
+  return transcript;
+}
+
+static void
+transcript_page_free (TranscriptPage *page)
+{
+  g_free (page->key);
+  g_free (page->chat_id);
+  g_clear_object (&page->remote);
+  g_free (page);
+}
+
+static char *
+transcript_page_key (XdNode         *chat,
+                     XdRemoteClient *remote)
+{
+  if (remote == NULL)
+    return g_strdup_printf ("local:%s", xd_node_get_chat_id (chat));
+
+  /* A row can hold the connection that loads its remote images. A re-pair to
+   * the same host must therefore get fresh rows rather than revive widgets
+   * bound to the old client object. */
+  return g_strdup_printf ("remote:%p:%s", (void *) remote,
+                          xd_node_get_chat_id (chat));
+}
+
+static void
+touch_transcript_page (XdChatView    *self,
+                       TranscriptPage *page)
+{
+  g_queue_remove (&self->transcript_lru, page);
+  g_queue_push_tail (&self->transcript_lru, page);
+}
+
+static void
+remove_transcript_page (XdChatView     *self,
+                        TranscriptPage *page)
+{
+  g_autofree char *key = NULL;
+
+  if (page == NULL)
+    return;
+
+  key = g_strdup (page->key);
+  g_queue_remove (&self->transcript_lru, page);
+  gtk_stack_remove (self->transcript_stack, GTK_WIDGET (page->transcript));
+  g_hash_table_remove (self->transcript_pages, key);
+}
+
+static void
+activate_empty_transcript (XdChatView *self)
+{
+  gtk_stack_set_visible_child (
+    self->transcript_stack, GTK_WIDGET (self->empty_transcript));
+  self->transcript = self->empty_transcript;
+  self->transcript_page = NULL;
+}
+
+static void
+trim_transcript_cache (XdChatView *self)
+{
+  while (g_hash_table_size (self->transcript_pages) >
+         TRANSCRIPT_CACHE_SIZE)
+    {
+      TranscriptPage *oldest = g_queue_peek_head (&self->transcript_lru);
+
+      if (oldest == NULL)
+        return;
+      if (oldest == self->transcript_page)
+        {
+          touch_transcript_page (self, oldest);
+          continue;
+        }
+
+      remove_transcript_page (self, oldest);
+    }
+}
+
+/*
+ * Makes one chat's already-built rows current.
+ *
+ * Local pages are reused only while their last durable message id still
+ * matches SQLite. Remote pages are shown immediately and then validated by
+ * the normal snapshot request, whose revision id decides whether to rebuild.
+ */
+static gboolean
+activate_transcript_page (XdChatView     *self,
+                          XdNode         *chat,
+                          XdRemoteClient *remote,
+                          gint64          message_id)
+{
+  g_autofree char *key = transcript_page_key (chat, remote);
+  TranscriptPage *page = g_hash_table_lookup (self->transcript_pages, key);
+  gboolean reused = page != NULL;
+
+  if (page != NULL && remote == NULL && page->message_id != message_id)
+    {
+      remove_transcript_page (self, page);
+      page = NULL;
+      reused = FALSE;
+    }
+
+  if (page == NULL)
+    {
+      page = g_new0 (TranscriptPage, 1);
+      page->key = g_strdup (key);
+      page->chat_id = g_strdup (xd_node_get_chat_id (chat));
+      page->transcript = new_transcript ();
+      page->remote = remote != NULL ? g_object_ref (remote) : NULL;
+      page->message_id = remote != NULL ? -1 : message_id;
+      page->limit = TRANSCRIPT_PAGE_SIZE;
+
+      gtk_stack_add_named (self->transcript_stack,
+                           GTK_WIDGET (page->transcript), page->key);
+      g_hash_table_insert (self->transcript_pages, page->key, page);
+    }
+
+  gtk_stack_set_visible_child (
+    self->transcript_stack, GTK_WIDGET (page->transcript));
+  self->transcript = page->transcript;
+  self->transcript_page = page;
+  self->transcript_limit = page->limit;
+  if (remote != NULL)
+    self->remote_rendered_message_id = page->message_id;
+  else
+    self->rendered_message_id = page->message_id;
+
+  touch_transcript_page (self, page);
+  trim_transcript_cache (self);
+  return reused;
+}
+
+static gboolean
+current_transcript_is_cacheable (XdChatView *self)
+{
+  return self->transcript_page != NULL &&
+         current_turn (self) == NULL &&
+         !self->remote_working &&
+         !gtk_widget_get_visible (self->choices_bar);
+}
+
+static void
+leave_current_transcript (XdChatView *self,
+                          gboolean    keep)
+{
+  TranscriptPage *page = self->transcript_page;
+
+  if (page == NULL)
+    return;
+
+  page->message_id = self->remote != NULL
+    ? self->remote_rendered_message_id : self->rendered_message_id;
+  page->limit = self->transcript_limit;
+  touch_transcript_page (self, page);
+
+  if (!keep)
+    {
+      activate_empty_transcript (self);
+      remove_transcript_page (self, page);
+    }
 }
 
 static void
@@ -3562,6 +3747,14 @@ static void
 forget_chat_sessions (XdChatView *self,
                       XdNode     *chat)
 {
+  g_autofree char *key =
+    g_strdup_printf ("local:%s", xd_node_get_chat_id (chat));
+  TranscriptPage *page =
+    g_hash_table_lookup (self->transcript_pages, key);
+
+  if (page == self->transcript_page)
+    activate_empty_transcript (self);
+  remove_transcript_page (self, page);
   xd_terminal_panel_forget_chat (self->terminal, xd_node_get_chat_id (chat));
 }
 
@@ -4053,6 +4246,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
                                XdRemoteClient *client)
 {
   gboolean changed;
+  gboolean keep_previous = FALSE;
 
   g_return_if_fail (XD_IS_CHAT_VIEW (self));
   g_return_if_fail (XD_IS_NODE (chat));
@@ -4060,21 +4254,21 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
 
   changed = self->chat != chat || self->remote != client;
 
-  /* A different chat must not keep the old one's transcript while its first
-   * remote snapshot is on the wire. Refreshes of the same chat do keep their
-   * current frame until the replacement is complete. */
+  /* Completed pages are cheap to revisit. Anything live is rebuilt from its
+   * durable transcript so in-memory turn fragments cannot be duplicated. */
   if (changed)
     {
-      self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
+      keep_previous = current_transcript_is_cacheable (self);
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
-      self->remote_rendered_message_id = -1;
       self->restore_remote_panes = TRUE;
       g_cancellable_cancel (self->fetching);
       g_clear_object (&self->fetching);
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
-      clear_transcript (self);
+      set_working (self, FALSE);
+      retire_open_questions (self);
       end_remote_turn (self);
+      leave_current_transcript (self, keep_previous);
       use_command_scope (self, NULL);
     }
 
@@ -4086,6 +4280,11 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
     g_object_bind_property (chat, "name", self->title, "title",
                             G_BINDING_SYNC_CREATE);
   set_remote (self, client);
+  if (changed)
+    {
+      activate_transcript_page (self, chat, client, -1);
+      begin_bottom_jump (self);
+    }
 
   set_local_controls_visible (self, FALSE);
   xd_terminal_panel_set_chat (self->terminal, xd_node_get_chat_id (chat));
@@ -4119,27 +4318,35 @@ xd_chat_view_set_chat (XdChatView *self,
 {
   Turn *turn;
   gboolean changed;
+  gboolean cached = FALSE;
+  gboolean rebuilt = FALSE;
+  gboolean keep_previous = FALSE;
+  gint64 last_message_id = 0;
 
   g_return_if_fail (XD_IS_CHAT_VIEW (self));
 
   changed = self->chat != chat || self->remote != NULL;
   if (changed)
     {
-      self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
+      keep_previous =
+        chat != NULL && current_transcript_is_cacheable (self);
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
       apply_panes (self, PANE_NONE);
+
+      /* Whatever a daemon was still going to say about the last chat is no
+       * longer about anything on screen. */
+      g_cancellable_cancel (self->fetching);
+      g_clear_object (&self->fetching);
+      g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+      set_working (self, FALSE);
+      retire_open_questions (self);
+      end_remote_turn (self);
+      leave_current_transcript (self, keep_previous);
     }
 
-  /* Whatever a daemon was still going to say about the last chat is no longer
-   * about anything on screen. */
-  g_cancellable_cancel (self->fetching);
-  g_clear_object (&self->fetching);
-  g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   set_remote (self, NULL);
   self->restore_remote_panes = FALSE;
-  set_working (self, FALSE);
-  end_remote_turn (self);
   set_queued_text (self, NULL);
   update_context_meter (self, 0, 0);
   set_local_controls_visible (self, TRUE);
@@ -4152,6 +4359,7 @@ xd_chat_view_set_chat (XdChatView *self,
     {
       xd_git_head_watch_set_workdir (self->git_head_watch, NULL);
       xd_terminal_panel_set_chat (self->terminal, NULL);
+      activate_empty_transcript (self);
       clear_transcript (self);
       gtk_stack_set_visible_child_name (self->stack, "empty");
       gtk_widget_set_visible (self->composer_area, FALSE);
@@ -4165,6 +4373,12 @@ xd_chat_view_set_chat (XdChatView *self,
   self->title_binding =
     g_object_bind_property (chat, "name", self->title, "title",
                             G_BINDING_SYNC_CREATE);
+
+  last_message_id =
+    xd_storage_last_message_id (self->storage, xd_node_get_chat_id (chat));
+  if (changed)
+    cached = activate_transcript_page (
+      self, chat, NULL, last_message_id);
 
   {
     g_autoptr (XdChat) record = xd_storage_get_chat (self->storage,
@@ -4197,11 +4411,16 @@ xd_chat_view_set_chat (XdChatView *self,
 
   if (changed)
     begin_bottom_jump (self);
-  load_transcript (self);
+  if (!cached &&
+      (changed || last_message_id != self->rendered_message_id))
+    {
+      load_transcript (self);
+      rebuilt = TRUE;
+    }
 
   /* Re-attach a reply that kept arriving while another chat was on screen. */
   turn = current_turn (self);
-  if (turn != NULL)
+  if (turn != NULL && rebuilt)
     {
       /* The finished parts of this turn live only in memory until it ends,
        * so the rebuilt transcript has to replay them or they vanish until
@@ -4224,6 +4443,10 @@ xd_chat_view_set_chat (XdChatView *self,
         }
 
       /* The transcript was rebuilt, and the marker went with it. */
+      set_working (self, TRUE);
+    }
+  else if (turn != NULL)
+    {
       set_working (self, TRUE);
     }
   else if (self->queued != NULL)
@@ -4607,6 +4830,8 @@ xd_chat_view_dispose (GObject *object)
   unbind_chat_title (self);
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  g_queue_clear (&self->transcript_lru);
+  g_clear_pointer (&self->transcript_pages, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
   g_clear_pointer (&self->command_sets, g_hash_table_unref);
   g_clear_pointer (&self->command_scope, g_free);
@@ -4634,6 +4859,9 @@ xd_chat_view_init (XdChatView *self)
   GtkWidget *empty = adw_status_page_new ();
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
+  self->transcript_pages = g_hash_table_new_full (
+    g_str_hash, g_str_equal, NULL, (GDestroyNotify) transcript_page_free);
+  g_queue_init (&self->transcript_lru);
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
   self->command_sets = g_hash_table_new_full (
@@ -4674,8 +4902,15 @@ xd_chat_view_init (XdChatView *self)
                                    "Pick a chat in the sidebar, or start a new "
                                    "one in a folder.");
 
-  self->transcript = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 8));
-  gtk_widget_set_valign (GTK_WIDGET (self->transcript), GTK_ALIGN_START);
+  self->transcript_stack = GTK_STACK (gtk_stack_new ());
+  gtk_stack_set_hhomogeneous (self->transcript_stack, TRUE);
+  gtk_stack_set_vhomogeneous (self->transcript_stack, FALSE);
+  gtk_stack_set_transition_type (
+    self->transcript_stack, GTK_STACK_TRANSITION_TYPE_NONE);
+  self->empty_transcript = new_transcript ();
+  self->transcript = self->empty_transcript;
+  gtk_stack_add_named (self->transcript_stack,
+                       GTK_WIDGET (self->empty_transcript), "empty");
 
   self->scroller = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   {
@@ -4713,7 +4948,8 @@ xd_chat_view_init (XdChatView *self)
 
     adw_clamp_set_maximum_size (ADW_CLAMP (clamp), CONTENT_WIDTH);
     adw_clamp_set_tightening_threshold (ADW_CLAMP (clamp), CONTENT_WIDTH);
-    adw_clamp_set_child (ADW_CLAMP (clamp), GTK_WIDGET (self->transcript));
+    adw_clamp_set_child (ADW_CLAMP (clamp),
+                         GTK_WIDGET (self->transcript_stack));
     gtk_widget_set_margin_top (clamp, 12);
     gtk_widget_set_margin_bottom (clamp, 12);
     gtk_scrolled_window_set_child (self->scroller, clamp);

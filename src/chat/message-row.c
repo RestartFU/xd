@@ -1021,10 +1021,42 @@ xd_message_row_finalize (GObject *object)
 }
 
 static void
+xd_message_row_map (GtkWidget *widget)
+{
+  XdMessageRow *self = XD_MESSAGE_ROW (widget);
+
+  GTK_WIDGET_CLASS (xd_message_row_parent_class)->map (widget);
+
+  /* Cached transcript pages are unmapped while another chat is visible.
+   * Resume their workflow status only when the page comes back on screen. */
+  if (self->workflow_run_id != NULL &&
+      self->workflow_repository != NULL &&
+      self->workflow_poll == 0)
+    {
+      refresh_workflow_status (self);
+      self->workflow_poll =
+        g_timeout_add_seconds (10, poll_workflow_status, self);
+    }
+}
+
+static void
+xd_message_row_unmap (GtkWidget *widget)
+{
+  XdMessageRow *self = XD_MESSAGE_ROW (widget);
+
+  g_clear_handle_id (&self->workflow_poll, g_source_remove);
+  GTK_WIDGET_CLASS (xd_message_row_parent_class)->unmap (widget);
+}
+
+static void
 xd_message_row_class_init (XdMessageRowClass *klass)
 {
+  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
+
   G_OBJECT_CLASS (klass)->dispose = xd_message_row_dispose;
   G_OBJECT_CLASS (klass)->finalize = xd_message_row_finalize;
+  widget_class->map = xd_message_row_map;
+  widget_class->unmap = xd_message_row_unmap;
 }
 
 static void
