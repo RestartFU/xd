@@ -229,9 +229,15 @@ static const char *XD_STYLE =
   " .xd-composer dropdown > button:hover"
   " { background: alpha(currentColor, 0.08); }\n"
 
-  /* Except the one that sends, which is the action rather than a setting. */
-  ".xd-composer button.suggested-action { background: #3584e4; color: #ffffff;"
+  /* Except the one that sends or stops, which is the action rather than a
+   * setting. Keep both states the same size so changing state cannot move the
+   * rest of the composer. */
+  ".xd-composer button.suggested-action,"
+  " .xd-composer button.destructive-action { color: #ffffff;"
   " border-radius: 9999px; min-width: 28px; min-height: 28px; padding: 4px; }\n"
+  ".xd-composer button.suggested-action { background: #3584e4; }\n"
+  ".xd-composer button.destructive-action { background: #e01b24; }\n"
+  ".xd-composer button.destructive-action:hover { background: #c01c28; }\n"
 
   /* Controls: pills, sized for a toolbar rather than a dialog. */
   "button, dropdown > button { border-radius: 8px; }\n"
