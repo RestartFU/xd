@@ -398,6 +398,7 @@ static const char *XD_STYLE =
    * while an update is available or moving; restart settles into a still
    * reload icon. */
   ".xd-update image { color: #ffffff; }\n"
+  ".xd-update:disabled image { color: alpha(#ffffff, 0.35); }\n"
   ".xd-update-fade image {"
   " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
 

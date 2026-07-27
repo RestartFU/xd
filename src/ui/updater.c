@@ -149,6 +149,8 @@ show_state (XdUpdater *self)
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->button), tip);
   gtk_widget_set_sensitive (GTK_WIDGET (self->button),
                             self->state != STATE_UPDATING);
+  gtk_widget_set_can_target (GTK_WIDGET (self->button),
+                             self->state != STATE_UPDATING);
 
   if (fades)
     gtk_widget_add_css_class (GTK_WIDGET (self->button),
@@ -362,6 +364,11 @@ install (XdUpdater *self)
   g_autoptr (GError) error = NULL;
   g_autofree char *line = NULL;
 
+  /* Disable the action before doing any setup. The state is the lock: even
+   * an input event already queued behind the click cannot start a second
+   * installer. A launch failure changes it to the retry state below. */
+  set_state (self, STATE_UPDATING);
+
   if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
     line = g_strdup ("curl -fsSL https://github.com/" XD_REPO
                      "/releases/download/nightly/install.sh | sh");
@@ -382,8 +389,6 @@ install (XdUpdater *self)
       set_state (self, STATE_FAILED);
       return;
     }
-
-  set_state (self, STATE_UPDATING);
 
   g_subprocess_wait_check_async (process, self->cancellable, on_installed, self);
 }
