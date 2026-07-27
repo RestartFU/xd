@@ -1987,6 +1987,7 @@ test_remote_diff_reads_the_daemon_repository (void)
   g_autoptr (XdRemoteTree) tree = NULL;
   g_autofree char *repository = NULL;
   g_autofree char *tracked = NULL;
+  g_autofree char *new_dir = NULL;
   g_autofree char *new_file = NULL;
   g_autoptr (GError) error = NULL;
   RemoteReply base = { 0 };
@@ -2005,7 +2006,8 @@ test_remote_diff_reads_the_daemon_repository (void)
   daemon_start (&daemon);
   repository = g_build_filename (daemon.root, "Zeno", NULL);
   tracked = g_build_filename (repository, "tracked.txt", NULL);
-  new_file = g_build_filename (repository, "new.txt", NULL);
+  new_dir = g_build_filename (repository, "nested", NULL);
+  new_file = g_build_filename (new_dir, "new.txt", NULL);
 
   run_in_directory (repository, init);
   g_assert_true (g_file_set_contents (tracked, "before\n", -1, &error));
@@ -2019,6 +2021,7 @@ test_remote_diff_reads_the_daemon_repository (void)
   run_in_directory (repository, commit);
   g_assert_true (g_file_set_contents (tracked, "after\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_mkdir_with_parents (new_dir, 0700), ==, 0);
   g_assert_true (g_file_set_contents (new_file, "new\n", -1, &error));
   g_assert_no_error (error);
 
@@ -2080,6 +2083,9 @@ test_remote_diff_reads_the_daemon_repository (void)
 
   g_assert_nonnull (strstr (
     json_object_get_string_member (status.reply, "output"), "tracked.txt"));
+  g_assert_nonnull (strstr (
+    json_object_get_string_member (status.reply, "output"),
+    "?? nested/new.txt"));
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -2116,7 +2122,7 @@ test_remote_diff_reads_the_daemon_repository (void)
     json_builder_set_member_name (builder, "read");
     json_builder_add_string_value (builder, "untracked-file");
     json_builder_set_member_name (builder, "path");
-    json_builder_add_string_value (builder, "new.txt");
+    json_builder_add_string_value (builder, "nested/new.txt");
     json_builder_end_object (builder);
 
     call_remote_request (client, builder, &untracked);

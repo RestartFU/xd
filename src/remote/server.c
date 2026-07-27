@@ -2061,7 +2061,9 @@ handle_diff_read (Connection *connection,
   g_autoptr (GError) error = NULL;
   const char *const *argv = NULL;
   const char *base_argv[] = { "sh", "-c", DIFF_BASE_SCRIPT, NULL };
-  const char *working_status_argv[] = { "git", "status", "--porcelain", NULL };
+  const char *working_status_argv[] = {
+    "git", "status", "--porcelain", "--untracked-files=all", NULL
+  };
   const char *branch_status_argv[] = {
     "git", "--no-pager", "diff", "--name-status", NULL, NULL
   };

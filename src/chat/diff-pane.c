@@ -179,7 +179,9 @@ run_git (XdDiffPane          *self,
       }
     case DIFF_READ_WORKING_STATUS:
       {
-        const char *argv[] = { "git", "status", "--porcelain", NULL };
+        const char *argv[] = {
+          "git", "status", "--porcelain", "--untracked-files=all", NULL
+        };
 
         run_local_git (self, argv, callback, user_data);
         break;
@@ -294,7 +296,13 @@ on_diff_read (GObject      *source,
   if (!finish_git_read (source, result, &output, &error))
     {
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        g_debug ("cannot read the diff: %s", error->message);
+        {
+          g_debug ("cannot read the diff: %s", error->message);
+          clear_diff (request->pane);
+          gtk_label_set_label (request->pane->diff_stats, "Could not load");
+          gtk_widget_set_tooltip_text (
+            GTK_WIDGET (request->pane->diff_stats), error->message);
+        }
 
       diff_request_free (request);
       return;
