@@ -125,6 +125,7 @@ struct _XdChatView
   GtkWidget *composer_area;
   GtkWidget *attachments_bar;
   GtkWidget *queued_bar;
+  GtkWidget *choices_bar;
   GtkLabel *queued_label;
   char *queued;             /* typed while a turn was running */
   gboolean syncing_panes;   /* setting the toggles to match the chat */
@@ -465,7 +466,7 @@ show_tool_use (XdChatView *self,
 }
 
 /*
- * Retires every question on screen.
+ * Retires the question attached to the composer.
  *
  * Sending anything answers whatever was outstanding -- by button, by typing
  * something else, or by ignoring it and moving on. Once the conversation has
@@ -475,20 +476,17 @@ show_tool_use (XdChatView *self,
 static void
 retire_open_questions (XdChatView *self)
 {
-  GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript));
+  GtkWidget *child;
 
-  while (child != NULL)
-    {
-      GtkWidget *next = gtk_widget_get_next_sibling (child);
+  if (self->choices_bar == NULL)
+    return;
 
-      /* Taken away rather than greyed out. The answer is about to appear as a
-       * message of its own, so a row of dead buttons above it would only be
-       * saying what was on offer at the time. */
-      if (g_object_get_data (G_OBJECT (child), "xd-choices") != NULL)
-        gtk_box_remove (self->transcript, child);
+  /* Taken away rather than greyed out. The answer is about to appear as a
+   * message of its own, so dead buttons would only repeat what was offered. */
+  while ((child = gtk_widget_get_first_child (self->choices_bar)) != NULL)
+    gtk_box_remove (GTK_BOX (self->choices_bar), child);
 
-      child = next;
-    }
+  gtk_widget_set_visible (self->choices_bar, FALSE);
 }
 
 static void
@@ -538,7 +536,6 @@ append_choices (XdChatView  *self,
                 const XdAsk *ask,
                 gboolean     answerable)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   GtkWidget *choices = gtk_flow_box_new ();
 
   /* Only while it can still be answered. The question itself is part of the
@@ -546,6 +543,8 @@ append_choices (XdChatView  *self,
    * something already answered is just something to explain. */
   if (!answerable)
     return;
+
+  retire_open_questions (self);
 
   /* One per line: the options are sentences, so side by side they would each
    * be too narrow to read. */
@@ -569,20 +568,8 @@ append_choices (XdChatView  *self,
       gtk_flow_box_append (GTK_FLOW_BOX (choices), button);
     }
 
-  /* A question with something after it has already been answered. It stays
-   * on screen as a record of what was offered, but it is not an offer. */
-  gtk_widget_set_sensitive (choices, answerable);
-
-  /* Tagged so sending anything takes it away, however it was answered. */
-  g_object_set_data (G_OBJECT (box), "xd-choices", choices);
-
-  gtk_box_append (GTK_BOX (box), choices);
-  gtk_widget_set_margin_top (box, 4);
-  gtk_widget_set_margin_start (box, 12);
-  gtk_widget_set_margin_end (box, 12);
-
-  gtk_box_append (self->transcript, box);
-  queue_scroll_to_bottom (self);
+  gtk_box_append (GTK_BOX (self->choices_bar), choices);
+  gtk_widget_set_visible (self->choices_bar, TRUE);
 }
 
 /*
@@ -644,6 +631,7 @@ clear_transcript (XdChatView *self)
 
   /* It is about to be taken out with everything else. Stop its timer too. */
   set_working (self, FALSE);
+  retire_open_questions (self);
 
   while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->transcript))) != NULL)
     gtk_box_remove (self->transcript, child);
@@ -3331,6 +3319,12 @@ build_composer (XdChatView *self)
   gtk_widget_set_margin_start (self->attachments_bar, 10);
   gtk_widget_set_margin_end (self->attachments_bar, 10);
 
+  self->choices_bar = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_visible (self->choices_bar, FALSE);
+  gtk_widget_set_margin_top (self->choices_bar, 6);
+  gtk_widget_set_margin_start (self->choices_bar, 10);
+  gtk_widget_set_margin_end (self->choices_bar, 10);
+
   self->model_picker = xd_model_picker_new ();
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->model_picker),
                                "Which assistant and model answer in this chat");
@@ -3488,8 +3482,10 @@ build_composer (XdChatView *self)
   gtk_widget_set_margin_bottom (toolbar, 6);
 
   /* Above what is being typed, the way an attachment reads: this is going
-   * with the message below it. */
+   * with the message below it. A pending question sits directly under a
+   * queued steer when both exist, so they form one composer attachment stack. */
   gtk_box_append (GTK_BOX (column), self->queued_bar);
+  gtk_box_append (GTK_BOX (column), self->choices_bar);
   gtk_box_append (GTK_BOX (column), self->attachments_bar);
   gtk_box_append (GTK_BOX (column), scroller);
   gtk_widget_add_css_class (toolbar, "xd-composer");
