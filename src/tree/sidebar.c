@@ -1176,10 +1176,9 @@ on_row_right_clicked (GtkGestureClick *gesture,
  *
  * Dots while it is working, since that is the one state that is going to end
  * on its own and a still picture cannot say "still going". A chat waiting
- * to be answered keeps its own icon but is marked as needing attention, which
- * the stylesheet pulses. A reply completed in another chat pulses differently
- * until that chat is opened. Otherwise the assistant's icon is the resting
- * state and says who has been answering.
+ * to be answered keeps its own icon with a grey corner dot. A reply completed
+ * in another chat gets a green dot until that chat is opened. Otherwise the
+ * assistant's icon is the resting state and says who has been answering.
  *
  * A remote that is not answering goes red. Its rows are still there and still
  * readable, so nothing else on the row would say that what they show is what
@@ -1192,21 +1191,26 @@ show_state (XdNode     *node,
 {
   GtkWidget *box = user_data;
   GtkWidget *icon = g_object_get_data (G_OBJECT (box), "icon");
+  GtkWidget *status = g_object_get_data (G_OBJECT (box), "status");
+  GtkWidget *icon_overlay = g_object_get_data (G_OBJECT (box), "icon-overlay");
   GtkWidget *working = g_object_get_data (G_OBJECT (box), "working");
   XdNodeState state = xd_node_get_state (node);
+  gboolean waiting = state == XD_NODE_WAITING;
+  gboolean done = state == XD_NODE_DONE;
 
   gtk_widget_set_visible (working, state == XD_NODE_WORKING);
-  gtk_widget_set_visible (icon, state != XD_NODE_WORKING);
+  gtk_widget_set_visible (icon_overlay, state != XD_NODE_WORKING);
+  gtk_widget_set_visible (status, waiting || done);
 
-  if (state == XD_NODE_WAITING)
-    gtk_widget_add_css_class (icon, "xd-waiting");
+  if (waiting)
+    gtk_widget_add_css_class (status, "xd-status-waiting");
   else
-    gtk_widget_remove_css_class (icon, "xd-waiting");
+    gtk_widget_remove_css_class (status, "xd-status-waiting");
 
-  if (state == XD_NODE_DONE)
-    gtk_widget_add_css_class (icon, "xd-done");
+  if (done)
+    gtk_widget_add_css_class (status, "xd-status-done");
   else
-    gtk_widget_remove_css_class (icon, "xd-done");
+    gtk_widget_remove_css_class (status, "xd-status-done");
 
   if (state == XD_NODE_OFFLINE)
     gtk_widget_add_css_class (icon, "xd-offline");
@@ -1214,7 +1218,7 @@ show_state (XdNode     *node,
     gtk_widget_remove_css_class (icon, "xd-offline");
 
   gtk_widget_set_tooltip_text (
-    icon,
+    icon_overlay,
     state == XD_NODE_OFFLINE ? "Not connected. Trying again every few seconds."
     : state == XD_NODE_WAITING ? "Waiting for your answer"
     : state == XD_NODE_DONE ? "New reply"
@@ -1338,7 +1342,9 @@ on_item_setup (GtkSignalListItemFactory *factory,
 {
   GtkWidget *expander = gtk_tree_expander_new ();
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *icon_overlay = gtk_overlay_new ();
   GtkWidget *icon = gtk_image_new ();
+  GtkWidget *status = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *working = GTK_WIDGET (xd_dots_new ());
   GtkWidget *label = gtk_label_new (NULL);
   GtkWidget *entry = gtk_entry_new ();
@@ -1359,14 +1365,24 @@ on_item_setup (GtkSignalListItemFactory *factory,
   gtk_widget_add_css_class (entry, "xd-inline-entry");
 
   gtk_widget_set_visible (working, FALSE);
+  gtk_widget_set_visible (status, FALSE);
+  gtk_widget_set_halign (status, GTK_ALIGN_END);
+  gtk_widget_set_valign (status, GTK_ALIGN_END);
+  gtk_widget_set_can_target (status, FALSE);
+  gtk_widget_add_css_class (status, "xd-status-dot");
 
-  gtk_box_append (GTK_BOX (box), icon);
+  gtk_overlay_set_child (GTK_OVERLAY (icon_overlay), icon);
+  gtk_overlay_add_overlay (GTK_OVERLAY (icon_overlay), status);
+
+  gtk_box_append (GTK_BOX (box), icon_overlay);
   gtk_box_append (GTK_BOX (box), working);
   gtk_box_append (GTK_BOX (box), label);
   gtk_box_append (GTK_BOX (box), entry);
 
   g_object_set_data (G_OBJECT (box), "label", label);
   g_object_set_data (G_OBJECT (box), "entry", entry);
+  g_object_set_data (G_OBJECT (box), "icon-overlay", icon_overlay);
+  g_object_set_data (G_OBJECT (box), "status", status);
 
   g_signal_connect (entry, "activate", G_CALLBACK (on_editor_activate), user_data);
 
@@ -1557,8 +1573,9 @@ on_item_bind (GtkSignalListItemFactory *factory,
   GtkTreeListRow *row = gtk_list_item_get_item (item);
   GtkWidget *expander = gtk_list_item_get_child (item);
   GtkWidget *box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
-  GtkWidget *icon = gtk_widget_get_first_child (box);
-  GtkWidget *working = gtk_widget_get_next_sibling (icon);
+  GtkWidget *icon_overlay = gtk_widget_get_first_child (box);
+  GtkWidget *icon = gtk_overlay_get_child (GTK_OVERLAY (icon_overlay));
+  GtkWidget *working = gtk_widget_get_next_sibling (icon_overlay);
   GtkWidget *label = gtk_widget_get_next_sibling (working);
   g_autoptr (XdNode) node = gtk_tree_list_row_get_item (row);
 

@@ -424,13 +424,13 @@ static const char *XD_STYLE =
    * colour; only the caret goes. */
   ".xd-body { caret-color: transparent; }\n"
 
-  /* A chat waiting to be answered, in a tree the user may not be looking at.
-   * Slow enough to notice without being the thing you look at. */
+  /* Attention stays separate from assistant identity: the agent icon keeps
+   * its own colour while a small corner badge says what needs attention. */
   "@keyframes xd-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
-  ".xd-waiting { color: @accent_color;"
-  " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
-  ".xd-done { color: @success_color;"
-  " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
+  ".xd-status-dot { min-width: 7px; min-height: 7px; border-radius: 999px;"
+  " border: 1px solid #0a0a0c; }\n"
+  ".xd-status-waiting { background-color: alpha(#ffffff, 0.55); }\n"
+  ".xd-status-done { background-color: @success_color; }\n"
 
   /* The blue sidebar update control keeps its icon readable. Its download
    * icon fades while an update is available or moving; restart settles into
