@@ -106,103 +106,40 @@ append_full_line (GtkBox           *box,
   gtk_box_append (box, row);
 }
 
-static GtkWidget *
-side (const XdDiffLine *line,
-      gboolean          old_side)
+static void
+append_code_line (GtkBox           *box,
+                  const XdDiffLine *line)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *marker;
   const char *marker_text = " ";
-  guint number = 0;
 
-  if (line != NULL)
+  if (line->kind == XD_DIFF_LINE_REMOVED)
     {
-      number = old_side ? line->old_line : line->new_line;
-      if (line->kind == XD_DIFF_LINE_REMOVED)
-        {
-          marker_text = "−";
-          gtk_widget_add_css_class (box, "xd-diff-removed");
-        }
-      else if (line->kind == XD_DIFF_LINE_ADDED)
-        {
-          marker_text = "+";
-          gtk_widget_add_css_class (box, "xd-diff-added");
-        }
-      else
-        {
-          gtk_widget_add_css_class (box, "xd-diff-context");
-        }
+      marker_text = "−";
+      gtk_widget_add_css_class (row, "xd-diff-removed");
+    }
+  else if (line->kind == XD_DIFF_LINE_ADDED)
+    {
+      marker_text = "+";
+      gtk_widget_add_css_class (row, "xd-diff-added");
     }
   else
     {
-      gtk_widget_add_css_class (box, "xd-diff-empty");
+      gtk_widget_add_css_class (row, "xd-diff-context");
     }
 
-  gtk_box_append (GTK_BOX (box), line_number (number));
+  gtk_box_append (GTK_BOX (row), line_number (line->old_line));
+  gtk_box_append (GTK_BOX (row), line_number (line->new_line));
   marker = gtk_label_new (marker_text);
   gtk_label_set_width_chars (GTK_LABEL (marker), 2);
   gtk_widget_add_css_class (marker, "xd-diff-marker");
-  gtk_box_append (GTK_BOX (box), marker);
-  gtk_box_append (GTK_BOX (box), code_label (
-    line != NULL ? line->text : ""));
-
-  gtk_widget_set_hexpand (box, TRUE);
-  gtk_widget_add_css_class (box, "xd-diff-side");
-  if (!old_side)
-    gtk_widget_add_css_class (box, "xd-diff-new-side");
-  return box;
-}
-
-static void
-append_pair (GtkBox           *box,
-             const XdDiffLine *old_line,
-             const XdDiffLine *new_line)
-{
-  GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-
-  gtk_box_set_homogeneous (GTK_BOX (row), TRUE);
-  gtk_box_append (GTK_BOX (row), side (old_line, TRUE));
-  gtk_box_append (GTK_BOX (row), side (new_line, FALSE));
+  gtk_box_append (GTK_BOX (row), marker);
+  gtk_box_append (GTK_BOX (row), code_label (line->text));
+  gtk_widget_set_hexpand (row, TRUE);
   gtk_widget_add_css_class (row, "xd-diff-line");
+  gtk_widget_add_css_class (row, "xd-diff-code-row");
   gtk_box_append (box, row);
-}
-
-static guint
-append_changes (GtkBox    *box,
-                GPtrArray *lines,
-                guint      start,
-                guint      limit,
-                guint     *rendered)
-{
-  g_autoptr (GPtrArray) removed = g_ptr_array_new ();
-  g_autoptr (GPtrArray) added = g_ptr_array_new ();
-  guint at = start;
-
-  while (at < lines->len)
-    {
-      XdDiffLine *line = g_ptr_array_index (lines, at);
-
-      if (line->kind == XD_DIFF_LINE_REMOVED)
-        g_ptr_array_add (removed, line);
-      else if (line->kind == XD_DIFF_LINE_ADDED)
-        g_ptr_array_add (added, line);
-      else
-        break;
-      at++;
-    }
-
-  for (guint i = 0; i < MAX (removed->len, added->len); i++)
-    {
-      if (limit > 0 && *rendered >= limit)
-        break;
-
-      append_pair (box,
-                   i < removed->len ? g_ptr_array_index (removed, i) : NULL,
-                   i < added->len ? g_ptr_array_index (added, i) : NULL);
-      (*rendered)++;
-    }
-
-  return at;
 }
 
 static guint
@@ -211,41 +148,12 @@ display_row_count (GPtrArray *lines,
 {
   guint rows = 0;
 
-  for (guint i = 0; i < lines->len; )
+  for (guint i = 0; i < lines->len; i++)
     {
       XdDiffLine *line = g_ptr_array_index (lines, i);
 
-      if (line->kind == XD_DIFF_LINE_FILE)
-        {
-          if (show_file_headers)
-            rows++;
-          i++;
-        }
-      else if (line->kind == XD_DIFF_LINE_REMOVED ||
-               line->kind == XD_DIFF_LINE_ADDED)
-        {
-          guint removed = 0;
-          guint added = 0;
-
-          while (i < lines->len)
-            {
-              line = g_ptr_array_index (lines, i);
-              if (line->kind == XD_DIFF_LINE_REMOVED)
-                removed++;
-              else if (line->kind == XD_DIFF_LINE_ADDED)
-                added++;
-              else
-                break;
-              i++;
-            }
-
-          rows += MAX (removed, added);
-        }
-      else
-        {
-          rows++;
-          i++;
-        }
+      if (line->kind != XD_DIFF_LINE_FILE || show_file_headers)
+        rows++;
     }
 
   return rows;
@@ -323,13 +231,11 @@ fill_rows (GtkBox     *box,
           i++;
           break;
         case XD_DIFF_LINE_CONTEXT:
-          append_pair (box, line, line);
-          rendered++;
-          i++;
-          break;
         case XD_DIFF_LINE_REMOVED:
         case XD_DIFF_LINE_ADDED:
-          i = append_changes (box, lines, i, limit, &rendered);
+          append_code_line (box, line);
+          rendered++;
+          i++;
           break;
         }
     }
