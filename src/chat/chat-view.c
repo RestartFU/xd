@@ -1299,6 +1299,8 @@ on_remote_options_received (GObject      *source,
             row, "detached", FALSE);
           item->main = json_object_get_boolean_member_with_default (
             row, "main", FALSE);
+          item->current = json_object_get_boolean_member_with_default (
+            row, "current", FALSE);
           g_ptr_array_add (worktrees, item);
         }
     }
@@ -2823,7 +2825,8 @@ update_workspace_choice (XdChatView   *self,
       XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
       g_autofree char *label = NULL;
 
-      if (item->path == NULL || g_strcmp0 (item->path, workdir) == 0)
+      if (item->path == NULL || item->current ||
+          xd_worktree_path_equal (item->path, workdir))
         continue;
 
       if (item->branch != NULL)

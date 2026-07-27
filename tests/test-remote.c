@@ -6,6 +6,7 @@
 #include "settings/agent-secrets.h"
 #include "settings/folder-settings.h"
 #include "storage/storage.h"
+#include "util/worktree.h"
 
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
@@ -1852,6 +1853,7 @@ test_remote_workspace_choice_is_persisted (void)
   g_autofree char *chat_id = NULL;
   g_autofree char *tracked = NULL;
   g_autofree char *existing = NULL;
+  g_autofree char *listed_existing = NULL;
   g_autoptr (XdChat) stored = NULL;
   g_autoptr (GError) error = NULL;
   RemoteReply changed = { 0 };
@@ -1933,10 +1935,11 @@ test_remote_workspace_choice_is_persisted (void)
       json_object_get_array_member (options.reply, "worktrees");
 
     g_assert_cmpuint (json_array_get_length (worktrees), ==, 2);
-    g_assert_cmpstr (
-      json_object_get_string_member (
-        json_array_get_object_element (worktrees, 1), "path"),
-      ==, existing);
+    g_assert_true (json_object_get_boolean_member (
+      json_array_get_object_element (worktrees, 0), "current"));
+    listed_existing = g_strdup (json_object_get_string_member (
+      json_array_get_object_element (worktrees, 1), "path"));
+    g_assert_true (xd_worktree_path_equal (listed_existing, existing));
   }
 
   {
@@ -1950,7 +1953,7 @@ test_remote_workspace_choice_is_persisted (void)
     json_builder_set_member_name (builder, "option");
     json_builder_add_string_value (builder, "workspace");
     json_builder_set_member_name (builder, "value");
-    json_builder_add_string_value (builder, existing);
+    json_builder_add_string_value (builder, listed_existing);
     json_builder_end_object (builder);
 
     call_remote_request (client, builder, &selected);
@@ -1960,7 +1963,7 @@ test_remote_workspace_choice_is_persisted (void)
   stored = xd_storage_get_chat (daemon.storage, chat_id, &error);
   g_assert_no_error (error);
   g_assert_false (stored->new_worktree);
-  g_assert_cmpstr (stored->workdir, ==, existing);
+  g_assert_cmpstr (stored->workdir, ==, listed_existing);
 
   json_object_unref (changed.reply);
   json_object_unref (selected.reply);

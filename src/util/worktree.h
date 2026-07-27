@@ -10,9 +10,12 @@ typedef struct
   char *branch;
   gboolean detached;
   gboolean main;
+  gboolean current;
 } XdWorktreeInfo;
 
 void       xd_worktree_info_free (XdWorktreeInfo *self);
+gboolean   xd_worktree_path_equal (const char     *a,
+                                   const char     *b);
 
 /*
  * Every checkout registered with the repository containing @workdir.

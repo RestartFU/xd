@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <gio/gio.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
 static char *
@@ -77,9 +78,32 @@ xd_worktree_info_free (XdWorktreeInfo *self)
   g_free (self);
 }
 
+gboolean
+xd_worktree_path_equal (const char *a,
+                        const char *b)
+{
+  GStatBuf a_stat;
+  GStatBuf b_stat;
+
+  if (a == NULL || b == NULL)
+    return a == b;
+
+  if (g_stat (a, &a_stat) == 0 && g_stat (b, &b_stat) == 0)
+    return a_stat.st_dev == b_stat.st_dev &&
+           a_stat.st_ino == b_stat.st_ino;
+
+  {
+    g_autofree char *canonical_a = g_canonicalize_filename (a, NULL);
+    g_autofree char *canonical_b = g_canonicalize_filename (b, NULL);
+
+    return g_strcmp0 (canonical_a, canonical_b) == 0;
+  }
+}
+
 static XdWorktreeInfo *
 finish_worktree (XdWorktreeInfo *item,
-                 guint           position)
+                 guint           position,
+                 const char     *current_path)
 {
   if (item == NULL || item->path == NULL ||
       !g_file_test (item->path, G_FILE_TEST_IS_DIR))
@@ -89,6 +113,7 @@ finish_worktree (XdWorktreeInfo *item,
     }
 
   item->main = position == 0;
+  item->current = xd_worktree_path_equal (item->path, current_path);
 
   return item;
 }
@@ -161,7 +186,7 @@ xd_worktree_list (const char  *workdir,
       if (token_length == 0)
         {
           XdWorktreeInfo *finished =
-            finish_worktree (item, result->len);
+            finish_worktree (item, result->len, git->root);
 
           if (finished != NULL)
             g_ptr_array_add (result, finished);
@@ -188,7 +213,8 @@ xd_worktree_list (const char  *workdir,
 
   if (item != NULL)
     {
-      XdWorktreeInfo *finished = finish_worktree (item, result->len);
+      XdWorktreeInfo *finished =
+        finish_worktree (item, result->len, git->root);
 
       if (finished != NULL)
         g_ptr_array_add (result, finished);

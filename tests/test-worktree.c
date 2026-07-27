@@ -107,7 +107,7 @@ test_create_and_reuse (void)
     repo, "12345678-1234-1234-1234-123456789abc", &error);
   g_assert_no_error (error);
   g_assert_nonnull (worktree);
-  g_assert_cmpstr (worktree, ==, expected);
+  g_assert_true (xd_worktree_path_equal (worktree, expected));
   g_assert_true (g_file_test (worktree, G_FILE_TEST_IS_DIR));
 
   branch = read_command (worktree, show_branch);
@@ -123,10 +123,12 @@ test_create_and_reuse (void)
   g_assert_no_error (error);
   g_assert_cmpuint (listed->len, ==, 2);
   g_assert_true (((XdWorktreeInfo *) g_ptr_array_index (listed, 0))->main);
-  g_assert_cmpstr (
-    ((XdWorktreeInfo *) g_ptr_array_index (listed, 0))->path, ==, repo);
-  g_assert_cmpstr (
-    ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->path, ==, worktree);
+  g_assert_true (((XdWorktreeInfo *) g_ptr_array_index (listed, 0))->current);
+  g_assert_true (xd_worktree_path_equal (
+    ((XdWorktreeInfo *) g_ptr_array_index (listed, 0))->path, repo));
+  g_assert_false (((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->current);
+  g_assert_true (xd_worktree_path_equal (
+    ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->path, worktree));
   g_assert_cmpstr (
     ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->branch,
     ==, "xd/12345678-1234-1234-1234-123456789abc");

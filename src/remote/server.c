@@ -2551,6 +2551,8 @@ add_worktrees (JsonBuilder *builder,
       json_builder_add_boolean_value (builder, item->detached);
       json_builder_set_member_name (builder, "main");
       json_builder_add_boolean_value (builder, item->main);
+      json_builder_set_member_name (builder, "current");
+      json_builder_add_boolean_value (builder, item->current);
       json_builder_end_object (builder);
     }
   json_builder_end_array (builder);
@@ -2726,7 +2728,6 @@ use_existing_worktree (XdRemoteServer  *self,
   g_autoptr (XdDaemonTurn) resolver = NULL;
   g_autofree char *workdir = NULL;
   g_autoptr (GPtrArray) worktrees = NULL;
-  g_autofree char *canonical = NULL;
 
   if (requested == NULL || *requested == '\0')
     {
@@ -2745,14 +2746,11 @@ use_existing_worktree (XdRemoteServer  *self,
   if (worktrees == NULL)
     return FALSE;
 
-  canonical = g_canonicalize_filename (requested, NULL);
   for (guint i = 0; i < worktrees->len; i++)
     {
       XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
-      g_autofree char *candidate =
-        g_canonicalize_filename (item->path, NULL);
 
-      if (g_strcmp0 (candidate, canonical) == 0)
+      if (xd_worktree_path_equal (item->path, requested))
         return xd_storage_use_existing_worktree (
           self->storage, chat_id, item->path, error);
     }
