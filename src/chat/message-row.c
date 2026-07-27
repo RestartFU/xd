@@ -661,19 +661,30 @@ preview_texture_from_bytes (const guchar *data,
 
 /* Keep screenshots recognisable without letting one take over the message. */
 static void
-show_inline_preview (GtkPicture *picture,
+show_inline_preview (GtkStack   *stack,
+                     GtkPicture *picture,
                      GdkTexture *texture)
 {
   int w = gdk_texture_get_width (texture);
   int h = gdk_texture_get_height (texture);
   double scale = MIN (1.0, MIN ((double) INLINE_PREVIEW_MAX_WIDTH / w,
                                 (double) INLINE_PREVIEW_HEIGHT / h));
+  int preview_width = MAX (1, (int) (w * scale));
+  int preview_height = MAX (1, (int) (h * scale));
 
   gtk_picture_set_paintable (picture, GDK_PAINTABLE (texture));
   gtk_picture_set_content_fit (picture, GTK_CONTENT_FIT_CONTAIN);
-  gtk_widget_set_size_request (GTK_WIDGET (picture),
-                               MAX (1, (int) (w * scale)),
-                               MAX (1, (int) (h * scale)));
+  gtk_widget_set_size_request (
+    GTK_WIDGET (picture), preview_width, preview_height);
+
+  /*
+   * The stack sits in a wrapping message bubble. Pin its visible page to the
+   * thumbnail too: asking only the picture left the stack free to retain a
+   * much taller allocation from its other pages and stretched the card below
+   * wide, shallow screenshots.
+   */
+  gtk_widget_set_size_request (
+    GTK_WIDGET (stack), preview_width, preview_height);
 }
 
 static void
@@ -704,7 +715,8 @@ on_remote_preview (GObject      *source,
 
   if (texture != NULL && stack != NULL && picture != NULL)
     {
-      show_inline_preview (GTK_PICTURE (picture), texture);
+      show_inline_preview (
+        GTK_STACK (stack), GTK_PICTURE (picture), texture);
       gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
     }
   else if (stack != NULL &&
@@ -790,7 +802,8 @@ on_local_preview (GObject      *source,
 
   if (texture != NULL && stack != NULL && picture != NULL)
     {
-      show_inline_preview (GTK_PICTURE (picture), texture);
+      show_inline_preview (
+        GTK_STACK (stack), GTK_PICTURE (picture), texture);
       gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
     }
   else if (stack != NULL &&
@@ -850,9 +863,15 @@ make_image_preview (XdMessageRow *self,
   gtk_stack_add_named (GTK_STACK (stack), loading, "loading");
   gtk_stack_add_named (GTK_STACK (stack), picture, "picture");
   gtk_stack_add_named (GTK_STACK (stack), unavailable, "unavailable");
+  gtk_stack_set_hhomogeneous (GTK_STACK (stack), FALSE);
+  gtk_stack_set_vhomogeneous (GTK_STACK (stack), FALSE);
+  gtk_stack_set_transition_type (
+    GTK_STACK (stack), GTK_STACK_TRANSITION_TYPE_NONE);
   gtk_stack_set_visible_child_name (GTK_STACK (stack), "loading");
   gtk_widget_add_css_class (stack, "xd-inline-image");
   gtk_widget_set_halign (stack, GTK_ALIGN_START);
+  gtk_widget_set_valign (stack, GTK_ALIGN_START);
+  gtk_widget_set_vexpand (stack, FALSE);
 
   if (self->remote != NULL)
     {
@@ -879,6 +898,8 @@ make_image_preview (XdMessageRow *self,
   gtk_box_append (GTK_BOX (preview), stack);
   gtk_box_append (GTK_BOX (preview), label);
   gtk_widget_set_halign (preview, GTK_ALIGN_START);
+  gtk_widget_set_valign (preview, GTK_ALIGN_START);
+  gtk_widget_set_vexpand (preview, FALSE);
 
   return preview;
 }
