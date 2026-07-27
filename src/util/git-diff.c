@@ -38,7 +38,8 @@ static char *
 run_git (const char        *workdir,
          const char        *index_path,
          const char *const *argv,
-         gboolean           accept_difference)
+         gboolean           accept_difference,
+         GCancellable      *cancellable)
 {
   g_autoptr (GSubprocessLauncher) launcher = NULL;
   g_autoptr (GSubprocess) process = NULL;
@@ -72,8 +73,12 @@ run_git (const char        *workdir,
     g_subprocess_launcher_spawnv (launcher, argv, &error);
   if (process == NULL ||
       !g_subprocess_communicate_utf8 (
-        process, NULL, NULL, &output, &stderr_text, &error))
+        process, NULL, cancellable, &output, &stderr_text, &error))
     {
+      if (process != NULL &&
+          g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        g_subprocess_force_exit (process);
+
       if (g_getenv ("XD_GIT_DIFF_DEBUG") != NULL)
         g_printerr ("xd: cannot run git %s: %s\n",
                     argv[1] != NULL ? argv[1] : "",
@@ -109,12 +114,14 @@ run_git (const char        *workdir,
 }
 
 static char *
-repository_root (const char *workdir)
+repository_root (const char   *workdir,
+                 GCancellable *cancellable)
 {
   const char *argv[] = {
     "git", "rev-parse", "--show-toplevel", NULL
   };
-  g_autofree char *root = run_git (workdir, NULL, argv, FALSE);
+  g_autofree char *root =
+    run_git (workdir, NULL, argv, FALSE, cancellable);
 
   if (root == NULL)
     return NULL;
@@ -125,10 +132,12 @@ repository_root (const char *workdir)
 }
 
 static char *
-user_index_path (const char *root)
+user_index_path (const char   *root,
+                 GCancellable *cancellable)
 {
   const char *argv[] = { "git", "rev-parse", "--git-path", "index", NULL };
-  g_autofree char *reported = run_git (root, NULL, argv, FALSE);
+  g_autofree char *reported =
+    run_git (root, NULL, argv, FALSE, cancellable);
 
   if (reported == NULL)
     return NULL;
@@ -158,7 +167,8 @@ seed_from_user_index (const char *index_path,
  * touching staging. write-tree stores only content-addressed objects.
  */
 static char *
-snapshot_tree (const char *root)
+snapshot_tree (const char   *root,
+               GCancellable *cancellable)
 {
   const char *read_argv[] = { "git", "read-tree", "HEAD", NULL };
   const char *add_argv[] = { "git", "add", "-A", "--", ".", NULL };
@@ -176,7 +186,7 @@ snapshot_tree (const char *root)
    * cross-filesystem lock/rename, this gives Git a repository-native path on
    * Windows rather than a GLib system-temp path.
    */
-  user_index = user_index_path (root);
+  user_index = user_index_path (root, cancellable);
   if (user_index == NULL)
     return NULL;
 
@@ -203,19 +213,19 @@ snapshot_tree (const char *root)
       /* Git expects a missing index or a valid one, not mkstemp's empty file.
        * read-tree failing here simply means an unborn HEAD. */
       g_remove (index_path);
-      ignored = run_git (root, index_path, read_argv, FALSE);
+      ignored = run_git (root, index_path, read_argv, FALSE, cancellable);
       g_clear_pointer (&ignored, g_free);
     }
 
-  ignored = run_git (root, index_path, add_argv, FALSE);
+  ignored = run_git (root, index_path, add_argv, FALSE, cancellable);
   if (ignored == NULL && seeded)
     {
       /* A corrupt or exotic index extension must not disable inline diffs.
        * Fall back to a clean HEAD index; this path is rare and slower. */
       g_remove (index_path);
-      ignored = run_git (root, index_path, read_argv, FALSE);
+      ignored = run_git (root, index_path, read_argv, FALSE, cancellable);
       g_clear_pointer (&ignored, g_free);
-      ignored = run_git (root, index_path, add_argv, FALSE);
+      ignored = run_git (root, index_path, add_argv, FALSE, cancellable);
     }
   if (ignored == NULL)
     {
@@ -223,7 +233,7 @@ snapshot_tree (const char *root)
       return NULL;
     }
 
-  tree = run_git (root, index_path, write_argv, FALSE);
+  tree = run_git (root, index_path, write_argv, FALSE, cancellable);
   g_remove (index_path);
   if (tree == NULL)
     return NULL;
@@ -256,11 +266,18 @@ xd_git_diff_from_tool (const char *message)
 XdGitDiffTracker *
 xd_git_diff_tracker_new (const char *workdir)
 {
+  return xd_git_diff_tracker_new_cancellable (workdir, NULL);
+}
+
+XdGitDiffTracker *
+xd_git_diff_tracker_new_cancellable (const char   *workdir,
+                                     GCancellable *cancellable)
+{
   XdGitDiffTracker *self = g_new0 (XdGitDiffTracker, 1);
 
-  self->root = repository_root (workdir);
+  self->root = repository_root (workdir, cancellable);
   if (self->root != NULL)
-    self->previous_tree = snapshot_tree (self->root);
+    self->previous_tree = snapshot_tree (self->root, cancellable);
 
   if (self->previous_tree == NULL)
     {
@@ -298,13 +315,13 @@ xd_git_diff_tracker_capture (XdGitDiffTracker *self,
       self == NULL)
     return g_strdup (message);
 
-  current_tree = snapshot_tree (self->root);
+  current_tree = snapshot_tree (self->root, NULL);
   if (current_tree == NULL)
     return g_strdup (message);
 
   argv[5] = self->previous_tree;
   argv[6] = current_tree;
-  patch = run_git (self->root, NULL, argv, FALSE);
+  patch = run_git (self->root, NULL, argv, FALSE, NULL);
 
   g_free (self->previous_tree);
   self->previous_tree = g_steal_pointer (&current_tree);

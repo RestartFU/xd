@@ -11,6 +11,8 @@
 
 #include <string.h>
 
+#define DIFF_INIT_BUDGET_SECONDS 5
+
 /*
  * The daemon running a turn, which is the same work the window does with the
  * same pieces: resolve what the folder chain says, start the CLI, and write
@@ -35,6 +37,8 @@ struct _XdDaemonTurn
   char *label;
   char *workdir;             /* where file-change diffs are captured */
   XdGitDiffTracker *diff_tracker;
+  GCancellable *diff_cancellable;
+  guint diff_timeout_id;
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
 
@@ -61,6 +65,78 @@ enum
 static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (XdDaemonTurn, xd_daemon_turn, G_TYPE_OBJECT)
+
+static void
+build_diff_tracker (GTask        *task,
+                    gpointer      source_object,
+                    gpointer      task_data,
+                    GCancellable *cancellable)
+{
+  XdGitDiffTracker *tracker =
+    xd_git_diff_tracker_new_cancellable (task_data, cancellable);
+
+  if (g_cancellable_is_cancelled (cancellable))
+    {
+      g_clear_pointer (&tracker, xd_git_diff_tracker_free);
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                               "Git snapshot exceeded its time budget");
+      return;
+    }
+
+  g_task_return_pointer (
+    task, tracker, (GDestroyNotify) xd_git_diff_tracker_free);
+}
+
+static gboolean
+cancel_slow_diff_tracker (gpointer user_data)
+{
+  XdDaemonTurn *self = user_data;
+
+  self->diff_timeout_id = 0;
+  g_cancellable_cancel (self->diff_cancellable);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_diff_tracker_ready (GObject      *source,
+                       GAsyncResult *result,
+                       gpointer      user_data)
+{
+  g_autoptr (XdDaemonTurn) self = user_data;
+  g_autoptr (GError) error = NULL;
+  XdGitDiffTracker *tracker =
+    g_task_propagate_pointer (G_TASK (result), &error);
+
+  g_clear_handle_id (&self->diff_timeout_id, g_source_remove);
+  g_clear_object (&self->diff_cancellable);
+
+  if (tracker != NULL)
+    {
+      g_clear_pointer (&self->diff_tracker, xd_git_diff_tracker_free);
+      self->diff_tracker = tracker;
+    }
+}
+
+static void
+start_diff_tracker (XdDaemonTurn *self)
+{
+  g_autoptr (GTask) task = NULL;
+
+  self->diff_cancellable = g_cancellable_new ();
+  task = g_task_new (NULL, self->diff_cancellable,
+                     on_diff_tracker_ready, g_object_ref (self));
+  g_task_set_task_data (task, g_strdup (self->workdir), g_free);
+  g_task_run_in_thread (task, build_diff_tracker);
+
+  /*
+   * Inline diffs are an enhancement. A repository expensive enough to miss
+   * this budget would make every later snapshot expensive too, so abandon the
+   * tracker rather than consuming a worker indefinitely.
+   */
+  self->diff_timeout_id = g_timeout_add_seconds_full (
+    G_PRIORITY_DEFAULT, DIFF_INIT_BUDGET_SECONDS,
+    cancel_slow_diff_tracker, g_object_ref (self), g_object_unref);
+}
 
 /* --- what the folder chain says -------------------------------------------- */
 
@@ -459,7 +535,6 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
     g_strdup (model != NULL ? model : backend->default_model);
   self->label = reply_label (chat, backend, model);
   self->workdir = g_strdup (workdir);
-  self->diff_tracker = xd_git_diff_tracker_new (self->workdir);
   self->resumed = resume_session_id != NULL;
   self->text = g_string_new (NULL);
   self->segment = g_string_new (NULL);
@@ -492,6 +567,8 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
       g_clear_object (&self->session);
       return FALSE;
     }
+
+  start_diff_tracker (self);
 
   return TRUE;
 }
@@ -587,6 +664,10 @@ xd_daemon_turn_dispose (GObject *object)
   if (self->session != NULL)
     g_signal_handlers_disconnect_by_data (self->session, self);
 
+  g_clear_handle_id (&self->diff_timeout_id, g_source_remove);
+  if (self->diff_cancellable != NULL)
+    g_cancellable_cancel (self->diff_cancellable);
+  g_clear_object (&self->diff_cancellable);
   g_clear_object (&self->session);
   g_clear_object (&self->storage);
 

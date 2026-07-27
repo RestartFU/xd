@@ -1,6 +1,6 @@
 #pragma once
 
-#include <glib.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -19,6 +19,9 @@ gboolean    xd_tool_is_file_change       (const char *message);
  * which is how non-Git working directories degrade.
  */
 XdGitDiffTracker *xd_git_diff_tracker_new     (const char       *workdir);
+XdGitDiffTracker *xd_git_diff_tracker_new_cancellable
+                                               (const char       *workdir,
+                                                GCancellable     *cancellable);
 void              xd_git_diff_tracker_free    (XdGitDiffTracker *self);
 char             *xd_git_diff_tracker_capture (XdGitDiffTracker *self,
                                                 const char       *message);

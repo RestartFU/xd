@@ -2903,6 +2903,121 @@ test_send_during_turn_queues (void)
 }
 
 /*
+ * Capturing the initial per-tool diff used to run synchronously while handling
+ * send. A large repository therefore stopped every socket at once: even a
+ * message for another chat could not be read until `git add -A` finished.
+ */
+static void
+test_slow_git_snapshot_does_not_stall_other_chats (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *second_chat = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *git_program = NULL;
+  g_autofree char *claude_program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  g_autoptr (GError) error = NULL;
+  RemoteReply first = { 0 };
+  RemoteReply second = { 0 };
+  RemoteReply ping = { 0 };
+
+  daemon_start (&daemon);
+  second_chat = xd_storage_create_chat (
+    daemon.storage, "folder-1", "another chat", "claude",
+    NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (second_chat);
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  git_program = g_build_filename (bin_dir, "git", NULL);
+  claude_program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    git_program, "#!/bin/sh\nexec sleep 30\n", -1, NULL));
+  g_assert_true (g_file_set_contents (
+    claude_program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-concurrent-chat\"}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (git_program, 0700), ==, 0);
+  g_assert_cmpint (chmod (claude_program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "first");
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &first);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, second_chat);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "second");
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &second);
+  }
+
+  /* A third round trip proves neither background snapshot owns the daemon's
+   * main loop while both turns remain alive. */
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "ping");
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &ping);
+  }
+
+  g_assert_true (json_object_get_boolean_member_with_default (
+    first.reply, "ok", FALSE));
+  g_assert_true (json_object_get_boolean_member_with_default (
+    second.reply, "ok", FALSE));
+  g_assert_true (json_object_get_boolean_member_with_default (
+    ping.reply, "ok", FALSE));
+
+  json_object_unref (first.reply);
+  json_object_unref (second.reply);
+  json_object_unref (ping.reply);
+  g_free (first.wait.failure);
+  g_free (second.wait.failure);
+  g_free (ping.wait.failure);
+  daemon_stop (&daemon);
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+}
+
+/*
  * The client may know about a queued instruction before it knows a remote turn
  * stopped. Clicking steer must still do work: cancel is sent regardless of the
  * client's stale state, and an idle daemon promotes the persisted queue.
@@ -3373,6 +3488,7 @@ main (int argc, char *argv[])
   ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/send-during-turn-queues", test_send_during_turn_queues);
+  ADD ("/remote/slow-git-snapshot-does-not-stall-other-chats", test_slow_git_snapshot_does_not_stall_other_chats);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
   ADD ("/remote/an-interrupted-turn-keeps-its-timeline", test_an_interrupted_turn_keeps_its_timeline);
