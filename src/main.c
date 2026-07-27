@@ -1,6 +1,8 @@
 #include "xd-app.h"
 #include "util/app-paths.h"
+#include "util/host-launch.h"
 
+#include <errno.h>
 #include <stdio.h>
 
 #ifdef __APPLE__
@@ -14,6 +16,8 @@
 
 #if XD_HAS_SERVER
 #include "remote/server.h"
+#include <json-glib/json-glib.h>
+#include <unistd.h>
 #endif
 
 #ifdef G_OS_WIN32
@@ -205,6 +209,307 @@ ensure_certificate (GError **error)
 
   return g_tls_certificate_new_from_files (cert_path, key_path, error);
 }
+
+#define DAEMON_UPDATE_FIRST_SECONDS 8
+#define DAEMON_UPDATE_EVERY_SECONDS (60 * 5)
+
+typedef struct
+{
+  XdRemoteServer *server;      /* unowned; run_serve owns it */
+  GMainLoop *loop;             /* unowned */
+  GCancellable *cancellable;
+  char *install_dir;
+  char *launcher;
+  GStrv restart_argv;
+  guint first_check_id;
+  guint repeating_check_id;
+  gboolean busy;
+  gboolean restart_ready;
+} DaemonUpdater;
+
+static char *
+daemon_install_dir (void)
+{
+  g_autofree char *self = g_file_read_link ("/proc/self/exe", NULL);
+  g_autofree char *bin = NULL;
+  g_autofree char *dir = NULL;
+  g_autofree char *launcher = NULL;
+  g_autofree char *expected = NULL;
+
+  if (self == NULL)
+    return NULL;
+
+  bin = g_path_get_dirname (self);
+  dir = g_path_get_dirname (bin);
+  launcher = g_build_filename (dir, "xd.sh", NULL);
+  expected = g_build_filename (g_get_home_dir (), ".local", "opt",
+                               XD_DATA_NAME, NULL);
+
+  if (!g_file_test (launcher, G_FILE_TEST_IS_EXECUTABLE) ||
+      g_strcmp0 (dir, expected) != 0)
+    return NULL;
+
+  return g_steal_pointer (&dir);
+}
+
+static char *
+daemon_latest_from_json (const char *json)
+{
+  g_autoptr (JsonParser) parser = json_parser_new ();
+  JsonObject *release;
+
+  if (!json_parser_load_from_data (parser, json, -1, NULL) ||
+      !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser)))
+    return NULL;
+
+  release = json_node_get_object (json_parser_get_root (parser));
+  return g_strdup (json_object_get_string_member_with_default (
+    release, g_strcmp0 (XD_CHANNEL, "nightly") == 0
+      ? "target_commitish" : "tag_name", NULL));
+}
+
+static gboolean
+daemon_update_is_newer (const char *latest)
+{
+  if (latest == NULL || *latest == '\0')
+    return FALSE;
+
+  if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
+    return XD_COMMIT[0] != '\0' && !g_str_has_prefix (latest, XD_COMMIT);
+
+  if (latest[0] == 'v')
+    latest++;
+
+  return g_strcmp0 (latest, XD_VERSION) != 0;
+}
+
+static GSubprocess *
+daemon_spawn_host (GSubprocessFlags   flags,
+                   const char *const *argv,
+                   GError           **error)
+{
+  g_autoptr (GSubprocessLauncher) launcher =
+    g_subprocess_launcher_new (flags);
+  g_auto (GStrv) environment = xd_host_environ ();
+
+  if (environment != NULL)
+    g_subprocess_launcher_set_environ (launcher, environment);
+
+  return g_subprocess_launcher_spawnv (launcher, argv, error);
+}
+
+static void
+daemon_update_resume_after_failure (DaemonUpdater *updater)
+{
+  g_autoptr (GError) error = NULL;
+
+  if (!xd_remote_server_resume_interrupted (updater->server, &error))
+    g_warning ("cannot resume chats after failed update: %s", error->message);
+
+  updater->busy = FALSE;
+}
+
+static void
+on_daemon_update_installed (GObject      *source,
+                            GAsyncResult *result,
+                            gpointer      user_data)
+{
+  DaemonUpdater *updater = user_data;
+  g_autoptr (GError) error = NULL;
+
+  if (!g_subprocess_wait_check_finish (G_SUBPROCESS (source), result, &error))
+    {
+      g_warning ("daemon update failed: %s", error->message);
+      daemon_update_resume_after_failure (updater);
+      return;
+    }
+
+  updater->restart_ready = TRUE;
+  g_main_loop_quit (updater->loop);
+}
+
+static void
+on_daemon_quiesced (GObject      *source,
+                    GAsyncResult *result,
+                    gpointer      user_data)
+{
+  DaemonUpdater *updater = user_data;
+  g_autoptr (GSubprocess) process = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *line = NULL;
+
+  if (!xd_remote_server_quiesce_finish (
+        XD_REMOTE_SERVER (source), result, &error))
+    {
+      g_warning ("cannot prepare daemon update: %s", error->message);
+      updater->busy = FALSE;
+      return;
+    }
+
+  line = g_strcmp0 (XD_CHANNEL, "nightly") == 0
+    ? g_strdup ("curl -fsSL https://github.com/" XD_REPO
+                "/releases/download/nightly/install.sh | sh")
+    : g_strdup ("curl -fsSL https://github.com/" XD_REPO
+                "/releases/latest/download/install.sh | sh -s -- --release");
+
+  {
+    const char *argv[] = { "sh", "-c", line, NULL };
+
+    process = daemon_spawn_host (G_SUBPROCESS_FLAGS_NONE, argv, &error);
+  }
+
+  if (process == NULL)
+    {
+      g_warning ("cannot start daemon update: %s", error->message);
+      daemon_update_resume_after_failure (updater);
+      return;
+    }
+
+  g_subprocess_wait_check_async (process, updater->cancellable,
+                                 on_daemon_update_installed, updater);
+}
+
+static void
+on_daemon_update_checked (GObject      *source,
+                          GAsyncResult *result,
+                          gpointer      user_data)
+{
+  DaemonUpdater *updater = user_data;
+  g_autoptr (GBytes) out = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *latest = NULL;
+  const char *json;
+  gsize length;
+
+  if (!g_subprocess_communicate_finish (
+        G_SUBPROCESS (source), result, &out, NULL, &error))
+    {
+      g_debug ("daemon update check failed: %s", error->message);
+      updater->busy = FALSE;
+      return;
+    }
+
+  json = g_bytes_get_data (out, &length);
+  latest = json != NULL && length > 0 ? daemon_latest_from_json (json) : NULL;
+  if (!daemon_update_is_newer (latest))
+    {
+      updater->busy = FALSE;
+      return;
+    }
+
+  printf ("xd serve: update available; stopping active turns safely\n");
+  fflush (stdout);
+  xd_remote_server_quiesce_async (
+    updater->server, updater->cancellable, on_daemon_quiesced, updater);
+}
+
+static void
+daemon_update_check (DaemonUpdater *updater)
+{
+  g_autoptr (GSubprocess) process = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *url = NULL;
+
+  if (updater->busy)
+    return;
+
+  updater->busy = TRUE;
+  url = g_strcmp0 (XD_CHANNEL, "nightly") == 0
+    ? g_strdup ("https://api.github.com/repos/" XD_REPO
+                "/releases/tags/nightly")
+    : g_strdup ("https://api.github.com/repos/" XD_REPO "/releases/latest");
+
+  {
+    const char *argv[] = {
+      "curl", "-fsSL", "--max-time", "20",
+      "-H", "Accept: application/vnd.github+json", url, NULL,
+    };
+
+    process = daemon_spawn_host (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                 G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+                                 argv, &error);
+  }
+
+  if (process == NULL)
+    {
+      g_debug ("cannot check daemon update: %s", error->message);
+      updater->busy = FALSE;
+      return;
+    }
+
+  g_subprocess_communicate_async (
+    process, NULL, updater->cancellable, on_daemon_update_checked, updater);
+}
+
+static gboolean
+daemon_update_first_check (gpointer user_data)
+{
+  DaemonUpdater *updater = user_data;
+
+  updater->first_check_id = 0;
+  daemon_update_check (updater);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean
+daemon_update_repeating_check (gpointer user_data)
+{
+  daemon_update_check (user_data);
+  return G_SOURCE_CONTINUE;
+}
+
+static GStrv
+daemon_restart_argv (int          argc,
+                     char        *argv[],
+                     const char  *launcher)
+{
+  GPtrArray *args = g_ptr_array_new_with_free_func (g_free);
+
+  g_ptr_array_add (args, g_strdup (launcher));
+  for (int i = 1; i < argc; i++)
+    {
+      /* Pairing is an explicit one-use action, not daemon configuration. */
+      if (g_strcmp0 (argv[i], "--pair") != 0)
+        g_ptr_array_add (args, g_strdup (argv[i]));
+    }
+  g_ptr_array_add (args, NULL);
+
+  return (GStrv) g_ptr_array_free (args, FALSE);
+}
+
+static void
+daemon_updater_init (DaemonUpdater *updater,
+                     XdRemoteServer *server,
+                     GMainLoop      *loop,
+                     int             argc,
+                     char           *argv[],
+                     char           *install_dir)
+{
+  updater->server = server;
+  updater->loop = loop;
+  updater->cancellable = g_cancellable_new ();
+  updater->install_dir = g_strdup (install_dir);
+  updater->launcher = g_build_filename (install_dir, "xd.sh", NULL);
+  updater->restart_argv =
+    daemon_restart_argv (argc, argv, updater->launcher);
+  updater->first_check_id = g_timeout_add_seconds (
+    DAEMON_UPDATE_FIRST_SECONDS, daemon_update_first_check, updater);
+  updater->repeating_check_id = g_timeout_add_seconds (
+    DAEMON_UPDATE_EVERY_SECONDS, daemon_update_repeating_check, updater);
+}
+
+static void
+daemon_updater_clear (DaemonUpdater *updater)
+{
+  g_clear_handle_id (&updater->first_check_id, g_source_remove);
+  g_clear_handle_id (&updater->repeating_check_id, g_source_remove);
+  if (updater->cancellable != NULL)
+    g_cancellable_cancel (updater->cancellable);
+  g_clear_object (&updater->cancellable);
+  g_clear_pointer (&updater->install_dir, g_free);
+  g_clear_pointer (&updater->launcher, g_free);
+  g_clear_pointer (&updater->restart_argv, g_strfreev);
+}
 #endif
 
 static void
@@ -224,11 +529,16 @@ run_serve (int argc, char *argv[])
   g_autoptr (XdStorage) storage = NULL;
   g_autoptr (GTlsCertificate) certificate = NULL;
   g_autoptr (XdRemoteServer) server = NULL;
+  g_autoptr (GMainLoop) loop = NULL;
   g_autofree char *db_path = NULL;
   g_autofree char *root = NULL;
-  GMainLoop *loop;
+  g_autofree char *install_dir = NULL;
+  g_autofree char *restart_launcher = NULL;
+  g_auto (GStrv) restart_argv = NULL;
+  DaemonUpdater updater = { 0 };
   guint16 port = 4001;
   gboolean pair = FALSE;
+  gboolean auto_update = FALSE;
 
   for (int i = 2; i < argc; i++)
     {
@@ -238,11 +548,20 @@ run_serve (int argc, char *argv[])
         pair = TRUE;
       else if (g_strcmp0 (argv[i], "--root") == 0 && i + 1 < argc)
         root = g_strdup (argv[++i]);
+      else if (g_strcmp0 (argv[i], "--auto-update") == 0)
+        auto_update = TRUE;
       else
         {
-          fprintf (stderr, "usage: xd serve [--port N] [--pair] [--root DIR]\n");
+          fprintf (stderr, "usage: xd serve [--port N] [--pair] [--root DIR]"
+                           " [--auto-update]\n");
           return 1;
         }
+    }
+
+  if (auto_update && (install_dir = daemon_install_dir ()) == NULL)
+    {
+      fprintf (stderr, "xd serve: --auto-update requires an installed bundle.\n");
+      return 1;
     }
 
   if (root == NULL)
@@ -270,6 +589,13 @@ run_serve (int argc, char *argv[])
       return 1;
     }
 
+  if (!xd_remote_server_resume_interrupted (server, &error))
+    {
+      fprintf (stderr, "xd serve: cannot resume interrupted chats: %s\n",
+               error->message);
+      g_clear_error (&error);
+    }
+
   printf ("xd serve: %s, listening on %u, workspaces at %s\n",
           XD_VERSION_STRING, xd_remote_server_get_port (server), root);
 
@@ -283,7 +609,34 @@ run_serve (int argc, char *argv[])
   fflush (stdout);
 
   loop = g_main_loop_new (NULL, FALSE);
+  if (auto_update)
+    {
+      printf ("xd serve: automatic updates enabled\n");
+      fflush (stdout);
+      daemon_updater_init (&updater, server, loop, argc, argv, install_dir);
+    }
+
   g_main_loop_run (loop);
+
+  if (updater.restart_ready)
+    {
+      restart_launcher = g_strdup (updater.launcher);
+      restart_argv = g_strdupv (updater.restart_argv);
+    }
+  daemon_updater_clear (&updater);
+
+  if (restart_launcher != NULL)
+    {
+      g_clear_object (&server);
+      g_clear_object (&certificate);
+      g_clear_object (&storage);
+      g_clear_pointer (&loop, g_main_loop_unref);
+
+      execv (restart_launcher, restart_argv);
+      fprintf (stderr, "xd serve: cannot restart updated daemon: %s\n",
+               g_strerror (errno));
+      return 1;
+    }
 
   return 0;
 #endif

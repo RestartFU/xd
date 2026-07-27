@@ -592,6 +592,50 @@ test_reopening_keeps_data (Fixture       *fixture,
   fixture->storage = g_object_ref (reopened);
 }
 
+static void
+test_restart_markers_preserve_the_queue (Fixture       *fixture,
+                                         gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) marked = g_ptr_array_new ();
+  g_autoptr (GPtrArray) resumed = NULL;
+  g_autoptr (GPtrArray) empty = NULL;
+  g_autoptr (XdChat) chat = NULL;
+  g_autofree char *first = NULL;
+  g_autofree char *second = NULL;
+
+  first = xd_storage_create_chat (fixture->storage, "folder", "First",
+                                  "claude", NULL, NULL, NULL, &error);
+  second = xd_storage_create_chat (fixture->storage, "folder", "Second",
+                                   "codex", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_true (xd_storage_set_queued (
+    fixture->storage, first, "user queued this", &error));
+
+  g_ptr_array_add (marked, first);
+  g_ptr_array_add (marked, second);
+  g_assert_true (xd_storage_mark_resumes (
+    fixture->storage, marked, &error));
+  g_assert_no_error (error);
+
+  resumed = xd_storage_take_resumes (fixture->storage, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (resumed->len, ==, 2);
+  g_assert_true (
+    (g_strcmp0 (g_ptr_array_index (resumed, 0), first) == 0 &&
+     g_strcmp0 (g_ptr_array_index (resumed, 1), second) == 0) ||
+    (g_strcmp0 (g_ptr_array_index (resumed, 0), second) == 0 &&
+     g_strcmp0 (g_ptr_array_index (resumed, 1), first) == 0));
+
+  chat = xd_storage_get_chat (fixture->storage, first, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (chat->queued, ==, "user queued this");
+
+  empty = xd_storage_take_resumes (fixture->storage, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (empty->len, ==, 0);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -617,6 +661,7 @@ main (int   argc,
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);
+  ADD ("/storage/restart-markers-keep-queue", test_restart_markers_preserve_the_queue);
 
 #undef ADD
 

@@ -12,6 +12,7 @@ parser are the same code either way, not a reimplementation.
 
     xd serve                 # listens on 4001
     xd serve --pair          # prints a short-lived pairing code
+    xd serve --auto-update   # keep an installed daemon on its channel's latest build
 
 A remote appears in the sidebar as its own root beside the local workspaces,
 its folders and chats underneath, drawn from the same XdNode model with a
@@ -95,3 +96,21 @@ pairing code is short-lived and single-use for the same reason.
 ## Port
 
 4001 by default.
+
+## Automatic updates
+
+`--auto-update` is available to installer-managed daemons. It checks the
+daemon's release channel shortly after startup and every five minutes
+thereafter.
+
+When a newer build appears, the daemon durably marks every active chat,
+interrupts those turns, and waits for them to finish stopping before running
+the matching release installer. It then replaces itself with the newly
+installed binary using the same port, workspace root, and update flag. The
+replacement daemon resumes every marked backend session with a continuation
+message. A user message already queued behind a turn remains queued and runs
+after that resumed work.
+
+If download or installation fails, the existing daemon stays up and resumes
+the interrupted chats itself. A checkout cannot use `--auto-update`, because
+the installer would update a different binary than the one being run.

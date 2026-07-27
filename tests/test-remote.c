@@ -3327,6 +3327,21 @@ on_live_turn_text (XdDaemonTurn *turn,
   seen->done = TRUE;
 }
 
+static void
+on_server_quiesced (GObject      *source,
+                    GAsyncResult *result,
+                    gpointer      user_data)
+{
+  Wait *wait = user_data;
+  g_autoptr (GError) error = NULL;
+
+  wait->ok = xd_remote_server_quiesce_finish (
+    XD_REMOTE_SERVER (source), result, &error);
+  if (!wait->ok)
+    wait->failure = g_strdup (error->message);
+  wait->done = TRUE;
+}
+
 /*
  * A daemon can be stopped without the CLI ever producing ::finished. Its
  * streamed reply must already be in SQLite, not waiting in the turn object.
@@ -3392,6 +3407,127 @@ test_a_live_turn_is_already_durable (void)
                    ==, "saved before finish");
 
   xd_daemon_turn_cancel (turn);
+  daemon_stop (&daemon);
+}
+
+/*
+ * Updating stops the active session, but neither loses a queued steer nor
+ * forgets which chat must be continued by the replacement daemon.
+ */
+static void
+test_a_restarted_daemon_resumes_interrupted_work (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autoptr (XdChat) chat = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  g_autofree char *db_path = NULL;
+  g_autoptr (GError) error = NULL;
+  RemoteReply started = { 0 };
+  StoredTurn stored;
+  Wait quiesced = { 0 };
+  gboolean found_resume = FALSE;
+
+  daemon_start (&daemon);
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-update-resume\"}'\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"assistant\",\"message\":{\"content\":["
+    "{\"type\":\"text\",\"text\":\"in progress\"}]}}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "do long work");
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &started);
+  }
+
+  stored.storage = daemon.storage;
+  stored.chat_id = daemon.chat_id;
+  wait_until (live_turn_was_stored, &stored);
+  g_assert_true (xd_storage_set_queued (
+    daemon.storage, daemon.chat_id, "user queued this", &error));
+  g_assert_no_error (error);
+
+  xd_remote_server_quiesce_async (
+    daemon.server, NULL, on_server_quiesced, &quiesced);
+  wait_for (&quiesced);
+  if (!quiesced.ok)
+    g_error ("quiesce failed: %s", quiesced.failure);
+
+  g_clear_object (&tree);
+  g_clear_object (&client);
+  db_path = g_strdup (xd_storage_get_path (daemon.storage));
+  g_clear_object (&daemon.server);
+  g_clear_object (&daemon.storage);
+  daemon.storage = xd_storage_new (db_path, &error);
+  g_assert_no_error (error);
+  daemon.server = xd_remote_server_new (
+    daemon.storage, daemon.root, 0, daemon.certificate, &error);
+  g_assert_no_error (error);
+  daemon.port = xd_remote_server_get_port (daemon.server);
+
+  g_assert_true (xd_remote_server_resume_interrupted (daemon.server, &error));
+  g_assert_no_error (error);
+  stored.storage = daemon.storage;
+  wait_until (live_turn_was_stored, &stored);
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  chat = xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (chat->queued, ==, "user queued this");
+
+  messages = xd_storage_list_messages (
+    daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  for (guint i = 0; i < messages->len; i++)
+    {
+      XdMessage *message = g_ptr_array_index (messages, i);
+
+      if (g_strcmp0 (message->role, "user") == 0 &&
+          g_strcmp0 (message->content,
+                     "Resume the work interrupted by the daemon update.") == 0)
+        found_resume = TRUE;
+    }
+  g_assert_true (found_resume);
+
+  json_object_unref (started.reply);
+  g_free (started.wait.failure);
+  g_free (quiesced.failure);
   daemon_stop (&daemon);
 }
 
@@ -3624,6 +3760,7 @@ main (int argc, char *argv[])
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
   ADD ("/remote/a-live-turn-is-already-durable", test_a_live_turn_is_already_durable);
+  ADD ("/remote/a-restarted-daemon-resumes-work", test_a_restarted_daemon_resumes_interrupted_work);
   ADD ("/remote/an-interrupted-turn-keeps-its-timeline", test_an_interrupted_turn_keeps_its_timeline);
 
   return g_test_run ();

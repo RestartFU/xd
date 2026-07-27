@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 14
+#define XD_STORAGE_SCHEMA_VERSION 15
 
 struct _XdStorage
 {
@@ -389,6 +389,16 @@ migrate (XdStorage  *self,
                  "   VALUES (1, NEW.backend, NEW.model, NEW.effort,"
                  "           NEW.access, NEW.plan);"
                  " END;",
+                 error))
+    return FALSE;
+
+  /* A daemon update stops active turns before replacing its own binary. Keep
+   * this separate from queued user text: both must survive, and the interrupted
+   * work resumes first after restart. */
+  if (version < 15 &&
+      !exec_sql (self,
+                 "ALTER TABLE chats ADD COLUMN"
+                 " resume_after_restart INTEGER NOT NULL DEFAULT 0;",
                  error))
     return FALSE;
 
@@ -912,6 +922,104 @@ xd_storage_set_queued (XdStorage   *self,
                              "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?;",
                              text, chat_id, "Cannot update the queued message",
                              error);
+}
+
+gboolean
+xd_storage_mark_resumes (XdStorage   *self,
+                         GPtrArray   *chat_ids,
+                         GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok = FALSE;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_ids != NULL, FALSE);
+
+  if (!exec_sql (self, "BEGIN IMMEDIATE;", error))
+    return FALSE;
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats SET resume_after_restart = 1 WHERE id = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot mark interrupted chats");
+      goto out;
+    }
+
+  for (guint i = 0; i < chat_ids->len; i++)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_clear_bindings (stmt);
+      bind_text (stmt, 1, g_ptr_array_index (chat_ids, i));
+
+      if (sqlite3_step (stmt) != SQLITE_DONE ||
+          sqlite3_changes (self->db) != 1)
+        {
+          set_sqlite_error (error, self->db, "Cannot mark interrupted chats");
+          goto out;
+        }
+    }
+
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  ok = exec_sql (self, "COMMIT;", error);
+
+out:
+  sqlite3_finalize (stmt);
+  if (!ok)
+    sqlite3_exec (self->db, "ROLLBACK;", NULL, NULL, NULL);
+
+  return ok;
+}
+
+GPtrArray *
+xd_storage_take_resumes (XdStorage  *self,
+                         GError    **error)
+{
+  g_autoptr (GPtrArray) chats = NULL;
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok = FALSE;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
+
+  if (!exec_sql (self, "BEGIN IMMEDIATE;", error))
+    return NULL;
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "SELECT id FROM chats WHERE resume_after_restart = 1"
+        " ORDER BY updated_at;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot read interrupted chats");
+      goto out;
+    }
+
+  chats = g_ptr_array_new_with_free_func (g_free);
+  while (sqlite3_step (stmt) == SQLITE_ROW)
+    g_ptr_array_add (chats, column_text (stmt, 0));
+
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+
+  if (!exec_sql (
+        self, "UPDATE chats SET resume_after_restart = 0"
+              " WHERE resume_after_restart = 1;", error) ||
+      !exec_sql (self, "COMMIT;", error))
+    goto out;
+
+  ok = TRUE;
+
+out:
+  sqlite3_finalize (stmt);
+  if (!ok)
+    {
+      sqlite3_exec (self->db, "ROLLBACK;", NULL, NULL, NULL);
+      g_clear_pointer (&chats, g_ptr_array_unref);
+    }
+
+  return g_steal_pointer (&chats);
 }
 
 gint64

@@ -146,6 +146,15 @@ gboolean    xd_storage_set_queued      (XdStorage   *self,
                                         const char  *text,
                                         GError     **error);
 
+/* Durable daemon-update handoff. These markers deliberately do not use the
+ * queued message slot: a user's pending steer must remain pending behind the
+ * resumed interrupted turn. */
+gboolean    xd_storage_mark_resumes    (XdStorage   *self,
+                                        GPtrArray   *chat_ids,
+                                        GError     **error);
+GPtrArray  *xd_storage_take_resumes    (XdStorage   *self,
+                                        GError     **error);
+
 /* Plan mode rides alongside the access level rather than replacing it, so
  * leaving plan restores whatever access the chat had. */
 /* Which panes a chat is working with. Kept per chat rather than per window:

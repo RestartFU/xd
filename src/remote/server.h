@@ -32,4 +32,18 @@ guint16         xd_remote_server_get_port  (XdRemoteServer *self);
 char           *xd_remote_server_arm_pairing (XdRemoteServer *self,
                                               guint           seconds);
 
+/* Stop every active turn after durably marking it for restart. Queued user
+ * text is preserved separately and runs after the interrupted turn resumes. */
+void             xd_remote_server_quiesce_async (XdRemoteServer    *self,
+                                                 GCancellable      *cancellable,
+                                                 GAsyncReadyCallback callback,
+                                                 gpointer           user_data);
+gboolean         xd_remote_server_quiesce_finish (XdRemoteServer *self,
+                                                  GAsyncResult   *result,
+                                                  GError        **error);
+
+/* Consume restart markers and tell those backend sessions to continue. */
+gboolean         xd_remote_server_resume_interrupted (XdRemoteServer *self,
+                                                      GError        **error);
+
 G_END_DECLS

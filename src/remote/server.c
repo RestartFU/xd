@@ -56,6 +56,8 @@ struct _XdRemoteServer
   /* Turns in flight, by chat. One per chat is the rule, and this is what
    * enforces it. chat id -> XdDaemonTurn*. */
   GHashTable *turns;
+  gboolean quiescing;
+  GTask *quiesce_task;
 
   /* Installed slash commands learned from backend init events. backend id ->
    * GStrv. Kept after a turn ends so newly connected devices get suggestions
@@ -1739,6 +1741,18 @@ on_turn_tool (XdDaemonTurn *turn,
 static gboolean forget_turn (gpointer user_data);
 
 static void
+complete_quiesce (XdRemoteServer *self)
+{
+  g_autoptr (GTask) task = NULL;
+
+  if (self->quiesce_task == NULL || g_hash_table_size (self->turns) != 0)
+    return;
+
+  task = g_steal_pointer (&self->quiesce_task);
+  g_task_return_boolean (task, TRUE);
+}
+
+static void
 on_turn_finished (XdDaemonTurn *turn,
                   gboolean      ok,
                   const char   *message,
@@ -1785,6 +1799,13 @@ start_daemon_turn (XdRemoteServer  *self,
   XdDaemonTurn *turn;
   Running *running;
   g_autofree char *backend_id = NULL;
+
+  if (self->quiescing)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                           "The daemon is preparing to restart.");
+      return FALSE;
+    }
 
   {
     g_autoptr (XdChat) chat =
@@ -1913,7 +1934,7 @@ start_queued (XdRemoteServer *self,
   g_autofree char *text = NULL;
 
   if (chat == NULL || chat->queued == NULL || *chat->queued == '\0' ||
-      g_hash_table_contains (self->turns, chat_id))
+      self->quiescing || g_hash_table_contains (self->turns, chat_id))
     return FALSE;
 
   text = g_strdup (chat->queued);
@@ -2052,7 +2073,10 @@ forget_turn (gpointer user_data)
   Running *running = user_data;
 
   g_hash_table_remove (running->server->turns, running->chat_id);
-  start_queued (running->server, running->chat_id);
+  if (running->server->quiescing)
+    complete_quiesce (running->server);
+  else
+    start_queued (running->server, running->chat_id);
   running_free (running);
 
   return G_SOURCE_REMOVE;
@@ -2090,6 +2114,12 @@ handle_send (Connection *connection,
    * This also keeps two devices from starting agents in the same directory.
    */
   if (g_hash_table_contains (self->turns, chat_id))
+    {
+      store_queued (connection, chat_id, message);
+      return;
+    }
+
+  if (self->quiescing)
     {
       store_queued (connection, chat_id, message);
       return;
@@ -3395,6 +3425,106 @@ xd_remote_server_get_port (XdRemoteServer *self)
   return self->port;
 }
 
+void
+xd_remote_server_quiesce_async (XdRemoteServer     *self,
+                                GCancellable       *cancellable,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+  g_autoptr (GPtrArray) chat_ids = NULL;
+  g_autoptr (GError) error = NULL;
+  GHashTableIter iter;
+  gpointer key;
+  gpointer value;
+
+  g_return_if_fail (XD_IS_REMOTE_SERVER (self));
+
+  if (self->quiescing)
+    {
+      g_task_report_new_error (
+        self, callback, user_data, xd_remote_server_quiesce_async,
+        G_IO_ERROR, G_IO_ERROR_PENDING,
+        "The daemon is already preparing to restart.");
+      return;
+    }
+
+  chat_ids = g_ptr_array_new_with_free_func (g_free);
+  g_hash_table_iter_init (&iter, self->turns);
+  while (g_hash_table_iter_next (&iter, &key, NULL))
+    g_ptr_array_add (chat_ids, g_strdup (key));
+
+  if (!xd_storage_mark_resumes (self->storage, chat_ids, &error))
+    {
+      g_task_report_error (
+        self, callback, user_data, xd_remote_server_quiesce_async,
+        g_steal_pointer (&error));
+      return;
+    }
+
+  self->quiescing = TRUE;
+  self->quiesce_task = g_task_new (self, cancellable, callback, user_data);
+  g_task_set_source_tag (self->quiesce_task,
+                         xd_remote_server_quiesce_async);
+
+  g_hash_table_iter_init (&iter, self->turns);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    xd_daemon_turn_cancel (value);
+
+  complete_quiesce (self);
+}
+
+gboolean
+xd_remote_server_quiesce_finish (XdRemoteServer *self,
+                                 GAsyncResult   *result,
+                                 GError        **error)
+{
+  g_return_val_if_fail (XD_IS_REMOTE_SERVER (self), FALSE);
+  g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
+
+  return g_task_propagate_boolean (G_TASK (result), error);
+}
+
+gboolean
+xd_remote_server_resume_interrupted (XdRemoteServer *self,
+                                     GError        **error)
+{
+  g_autoptr (GPtrArray) chat_ids = NULL;
+  g_autoptr (GError) first_error = NULL;
+
+  g_return_val_if_fail (XD_IS_REMOTE_SERVER (self), FALSE);
+
+  chat_ids = xd_storage_take_resumes (self->storage, error);
+  if (chat_ids == NULL)
+    return FALSE;
+
+  self->quiescing = FALSE;
+
+  for (guint i = 0; i < chat_ids->len; i++)
+    {
+      const char *chat_id = g_ptr_array_index (chat_ids, i);
+      g_autoptr (GError) start_error = NULL;
+
+      if (!start_daemon_turn (
+            self, chat_id,
+            "Resume the work interrupted by the daemon update.",
+            &start_error))
+        {
+          g_warning ("cannot resume chat %s after update: %s",
+                     chat_id, start_error->message);
+          if (first_error == NULL)
+            first_error = g_steal_pointer (&start_error);
+        }
+    }
+
+  if (first_error != NULL)
+    {
+      g_propagate_error (error, g_steal_pointer (&first_error));
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
 static void
 xd_remote_server_dispose (GObject *object)
 {
@@ -3402,6 +3532,14 @@ xd_remote_server_dispose (GObject *object)
 
   if (self->service != NULL)
     g_socket_service_stop (self->service);
+
+  if (self->quiesce_task != NULL)
+    {
+      g_task_return_new_error (self->quiesce_task, G_IO_ERROR,
+                               G_IO_ERROR_CANCELLED,
+                               "The daemon stopped before it quiesced.");
+      g_clear_object (&self->quiesce_task);
+    }
 
   /*
    * The connections outlive this object otherwise.
