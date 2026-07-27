@@ -87,6 +87,7 @@ GPtrArray    *xd_daemon_turn_get_items   (XdDaemonTurn *self);
 
 /* What it is saying now, which no item holds yet. */
 const char   *xd_daemon_turn_get_segment (XdDaemonTurn *self);
+gboolean      xd_daemon_turn_asked_user   (XdDaemonTurn *self);
 
 /* Installed slash commands reported by the backend, if known yet. */
 const char *const *xd_daemon_turn_get_commands (XdDaemonTurn *self);

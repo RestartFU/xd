@@ -1177,9 +1177,9 @@ on_row_right_clicked (GtkGestureClick *gesture,
  * Dots while it is working, since that is the one state that is going to end
  * on its own and a still picture cannot say "still going". A chat waiting
  * to be answered keeps its own icon but is marked as needing attention, which
- * the stylesheet pulses -- it is waiting for the user, so it should catch the
- * eye rather than sit still. Otherwise the assistant's icon, which is the
- * resting state and says who has been answering.
+ * the stylesheet pulses. A reply completed in another chat pulses differently
+ * until that chat is opened. Otherwise the assistant's icon is the resting
+ * state and says who has been answering.
  *
  * A remote that is not answering goes red. Its rows are still there and still
  * readable, so nothing else on the row would say that what they show is what
@@ -1203,14 +1203,22 @@ show_state (XdNode     *node,
   else
     gtk_widget_remove_css_class (icon, "xd-waiting");
 
+  if (state == XD_NODE_DONE)
+    gtk_widget_add_css_class (icon, "xd-done");
+  else
+    gtk_widget_remove_css_class (icon, "xd-done");
+
   if (state == XD_NODE_OFFLINE)
     gtk_widget_add_css_class (icon, "xd-offline");
   else
     gtk_widget_remove_css_class (icon, "xd-offline");
 
-  gtk_widget_set_tooltip_text (icon, state == XD_NODE_OFFLINE
-                                     ? "Not connected. Trying again every few "
-                                       "seconds." : NULL);
+  gtk_widget_set_tooltip_text (
+    icon,
+    state == XD_NODE_OFFLINE ? "Not connected. Trying again every few seconds."
+    : state == XD_NODE_WAITING ? "Waiting for your answer"
+    : state == XD_NODE_DONE ? "New reply"
+    : NULL);
 }
 
 /* --- moving folders by dragging ------------------------------------------- */

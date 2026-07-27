@@ -1613,6 +1613,9 @@ on_turn_finished (XdDaemonTurn *turn,
   json_builder_add_string_value (builder, running->chat_id);
   json_builder_set_member_name (builder, "ok");
   json_builder_add_boolean_value (builder, ok);
+  json_builder_set_member_name (builder, "waiting");
+  json_builder_add_boolean_value (
+    builder, xd_daemon_turn_asked_user (turn));
   if (message != NULL)
     {
       json_builder_set_member_name (builder, "error");

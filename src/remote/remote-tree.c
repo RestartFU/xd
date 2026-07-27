@@ -248,7 +248,10 @@ read_chats (Reload    *reload,
         }
 
       xd_node_set_icon_name (chat, backend_icon (backend));
-      xd_node_set_state (chat, working ? XD_NODE_WORKING : XD_NODE_IDLE);
+      if (working)
+        xd_node_set_state (chat, XD_NODE_WORKING);
+      else if (xd_node_get_state (chat) == XD_NODE_WORKING)
+        xd_node_set_state (chat, XD_NODE_IDLE);
 
       /* The daemon lists a folder's chats most-recent-first, which is the
        * order the sidebar shows them in, and they sort after its folders. */
@@ -1013,7 +1016,16 @@ on_client_event (XdRemoteClient *client,
   if (g_strcmp0 (name, "turn-started") == 0)
     xd_node_set_state (chat, XD_NODE_WORKING);
   else if (g_strcmp0 (name, "turn-finished") == 0)
-    xd_node_set_state (chat, XD_NODE_IDLE);
+    {
+      gboolean waiting =
+        json_object_get_boolean_member_with_default (event, "waiting", FALSE);
+
+      xd_node_set_state (
+        chat,
+        waiting ? XD_NODE_WAITING
+        : xd_node_is_active (chat) ? XD_NODE_IDLE
+                                   : XD_NODE_DONE);
+    }
 }
 
 static void

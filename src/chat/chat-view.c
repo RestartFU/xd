@@ -1882,6 +1882,22 @@ on_remote_opened (XdRemoteClient *client,
   update_send_button (self);
 }
 
+static void
+use_chat_node (XdChatView *self,
+               XdNode     *chat)
+{
+  if (self->chat == chat)
+    return;
+
+  if (self->chat != NULL)
+    xd_node_set_active (self->chat, FALSE);
+
+  g_set_object (&self->chat, chat);
+
+  if (self->chat != NULL)
+    xd_node_set_active (self->chat, TRUE);
+}
+
 /* Connecting is what makes a turn on the daemon visible here: the events are
  * the same for every device watching. */
 static void
@@ -2323,8 +2339,11 @@ on_turn_finished (XdChatSession *session,
     g_autoptr (XdAsk) asked = xd_ask_parse (turn->segment->str, NULL);
 
     asked_user = asked != NULL;
-    xd_node_set_state (turn->node,
-                       asked_user ? XD_NODE_WAITING : XD_NODE_IDLE);
+    xd_node_set_state (
+      turn->node,
+      asked_user ? XD_NODE_WAITING
+      : xd_node_is_active (turn->node) ? XD_NODE_IDLE
+                                       : XD_NODE_DONE);
   }
 
   /* Whatever was still being written when the turn ended is a message like
@@ -3258,6 +3277,7 @@ send_remote_message (XdChatView *self,
 
   request = json_builder_get_root (builder);
 
+  xd_node_set_state (self->chat, XD_NODE_IDLE);
   begin_bottom_jump (self);
   send = g_new0 (RemoteSend, 1);
   send->view = g_object_ref (self);
@@ -4323,7 +4343,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   set_queued_text (self, NULL);
   update_context_meter (self, 0, 0);
   unbind_chat_title (self);
-  g_set_object (&self->chat, chat);
+  use_chat_node (self, chat);
   self->title_binding =
     g_object_bind_property (chat, "name", self->title, "title",
                             G_BINDING_SYNC_CREATE);
@@ -4401,7 +4421,7 @@ xd_chat_view_set_chat (XdChatView *self,
   adw_window_title_set_subtitle (self->title, NULL);
 
   unbind_chat_title (self);
-  g_set_object (&self->chat, chat);
+  use_chat_node (self, chat);
 
   if (chat == NULL)
     {
@@ -4876,6 +4896,8 @@ xd_chat_view_dispose (GObject *object)
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   g_clear_object (&self->remote);
   unbind_chat_title (self);
+  if (self->chat != NULL)
+    xd_node_set_active (self->chat, FALSE);
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_queue_clear (&self->transcript_lru);

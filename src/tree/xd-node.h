@@ -26,6 +26,7 @@ typedef enum
   XD_NODE_IDLE,
   XD_NODE_WORKING,
   XD_NODE_WAITING,   /* it asked something and nobody has answered */
+  XD_NODE_DONE,      /* it finished while this chat was not being read */
   XD_NODE_OFFLINE,   /* a remote that is not answering */
 } XdNodeState;
 
@@ -81,6 +82,9 @@ void         xd_node_set_icon_name  (XdNode     *self,
 XdNodeState  xd_node_get_state      (XdNode *self);
 void         xd_node_set_state      (XdNode      *self,
                                      XdNodeState  state);
+gboolean     xd_node_is_active      (XdNode *self);
+void         xd_node_set_active     (XdNode   *self,
+                                     gboolean  active);
 
 /* Folders only; chats return NULL. Owned by the node. */
 GListStore  *xd_node_get_children   (XdNode *self);

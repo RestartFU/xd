@@ -11,6 +11,7 @@ struct _XdNode
   char *chat_id;
   char *icon_name;
   XdNodeState state;
+  gboolean active;
 
   GListStore *children;   /* folders only */
   XdNode *parent;         /* weak */
@@ -243,6 +244,28 @@ xd_node_set_state (XdNode      *self,
   self->state = state;
 
   g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_STATE]);
+}
+
+gboolean
+xd_node_is_active (XdNode *self)
+{
+  g_return_val_if_fail (XD_IS_NODE (self), FALSE);
+
+  return self->active;
+}
+
+void
+xd_node_set_active (XdNode   *self,
+                    gboolean  active)
+{
+  g_return_if_fail (XD_IS_NODE (self));
+
+  self->active = active;
+
+  /* Merely opening the completed chat acknowledges its new reply. A question
+   * stays marked until it is answered, even while it is being read. */
+  if (active && self->state == XD_NODE_DONE)
+    xd_node_set_state (self, XD_NODE_IDLE);
 }
 
 GListStore *

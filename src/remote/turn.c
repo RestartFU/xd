@@ -44,6 +44,7 @@ struct _XdDaemonTurn
   GStrv commands;              /* installed commands reported by this backend */
   gint64 started_at;           /* monotonic usec */
   gboolean resumed;
+  gboolean asked_user;
   guint64 context_used;
   guint64 context_window;
 };
@@ -309,7 +310,10 @@ on_finished (XdChatSession *session,
 {
   XdDaemonTurn *self = user_data;
   g_autoptr (GError) error = NULL;
+  g_autoptr (XdAsk) asked =
+    xd_ask_parse (self->segment != NULL ? self->segment->str : NULL, NULL);
 
+  self->asked_user = asked != NULL;
   close_segment (self);
   store_turn_items (self);
   store_turn_duration (self);
@@ -542,6 +546,14 @@ xd_daemon_turn_get_segment (XdDaemonTurn *self)
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
 
   return self->segment != NULL ? self->segment->str : NULL;
+}
+
+gboolean
+xd_daemon_turn_asked_user (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), FALSE);
+
+  return self->asked_user;
 }
 
 const char *const *

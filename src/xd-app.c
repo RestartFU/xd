@@ -442,6 +442,8 @@ static const char *XD_STYLE =
   "@keyframes xd-pulse { from { opacity: 1; } to { opacity: 0.25; } }\n"
   ".xd-waiting { color: @accent_color;"
   " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
+  ".xd-done { color: @success_color;"
+  " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
 
   /* The blue sidebar update control keeps its icon readable. Its download
    * icon fades while an update is available or moving; restart settles into
