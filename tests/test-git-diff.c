@@ -144,6 +144,7 @@ int
 main (int   argc,
       char *argv[])
 {
+  g_setenv ("XD_GIT_DIFF_DEBUG", "1", TRUE);
   g_test_init (&argc, &argv, NULL);
 
   g_test_add_func ("/git-diff/captures-only-current-call",
