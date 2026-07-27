@@ -84,6 +84,7 @@ struct _XdChatView
    */
   XdRemoteClient *remote;
   GCancellable *fetching;       /* the transcript request in flight, if any */
+  GPtrArray *pending_remote_messages; /* held until live state arrives */
 
   /*
    * A turn running on the daemon, as far as this window can see it.
@@ -124,6 +125,8 @@ struct _XdChatView
   gboolean follow_bottom;
   GtkTextView *composer;
   GtkButton *send_button;
+  gboolean send_state_set;
+  gboolean send_running;
   GtkWidget *composer_area;
   GtkWidget *attachments_bar;
   GtkWidget *queued_bar;
@@ -896,12 +899,12 @@ on_remote_messages (GObject      *source,
   messages = messages_from_json (json_object_has_member (reply, "messages")
                                  ? json_object_get_array_member (reply, "messages")
                                  : NULL);
-  render_transcript (self, messages);
+  g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+  self->pending_remote_messages = g_steal_pointer (&messages);
 
-  /* And whatever is happening now, which goes after it. */
+  /* Draw only after live state arrives too. Clearing between these two network
+   * replies exposed a blank transcript every time a turn stopped. */
   load_remote_options (self);
-
-  queue_scroll_to_bottom (self);
 }
 
 /* --- a turn running on the daemon ------------------------------------------ */
@@ -1108,7 +1111,10 @@ on_remote_options_received (GObject      *source,
 
   reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
   if (reply == NULL || self->chat == NULL || self->remote == NULL)
-    return;
+    {
+      g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+      return;
+    }
 
   /* Borrowed from the reply, which outlives this call: nothing here is kept. */
   chat.backend = (char *) member_string (reply, "backend", NULL);
@@ -1124,6 +1130,21 @@ on_remote_options_received (GObject      *source,
     MAX (json_object_get_int_member_with_default (reply, "context_used", 0), 0);
   chat.context_window =
     MAX (json_object_get_int_member_with_default (reply, "context_window", 0), 0);
+
+  /*
+   * Replace the old view as one main-loop operation.
+   *
+   * The messages and the in-flight turn are two requests because either can
+   * change independently. Holding the first answer until the second arrives
+   * means GTK never paints the empty state between them.
+   */
+  if (self->pending_remote_messages != NULL)
+    {
+      clear_transcript (self);
+      end_remote_turn (self);
+      render_transcript (self, self->pending_remote_messages);
+      g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+    }
 
   update_remote_options (
     self, &chat,
@@ -1186,8 +1207,10 @@ on_remote_options_received (GObject      *source,
         }
 
       queue_scroll_to_bottom (self);
-      update_send_button (self);
     }
+
+  queue_scroll_to_bottom (self);
+  update_send_button (self);
 }
 
 static void
@@ -1290,11 +1313,9 @@ set_remote (XdChatView     *self,
 static void
 load_remote_transcript (XdChatView *self)
 {
-  clear_transcript (self);
-  end_remote_turn (self);
-
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
+  g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   self->fetching = g_cancellable_new ();
 
   xd_remote_client_call_op_async (self->remote, "messages", "chat",
@@ -2510,6 +2531,12 @@ update_send_button (XdChatView *self)
 {
   gboolean running = current_turn (self) != NULL || self->remote_working;
 
+  if (self->send_state_set && self->send_running == running)
+    return;
+
+  self->send_state_set = TRUE;
+  self->send_running = running;
+
   gtk_button_set_icon_name (self->send_button,
                             running ? "media-playback-stop-symbolic"
                                     : "go-up-symbolic");
@@ -3208,6 +3235,18 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   g_return_if_fail (XD_IS_NODE (chat));
   g_return_if_fail (XD_IS_REMOTE_CLIENT (client));
 
+  /* A different chat must not keep the old one's transcript while its first
+   * remote snapshot is on the wire. Refreshes of the same chat do keep their
+   * current frame until the replacement is complete. */
+  if (self->chat != chat || self->remote != client)
+    {
+      g_cancellable_cancel (self->fetching);
+      g_clear_object (&self->fetching);
+      g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+      clear_transcript (self);
+      end_remote_turn (self);
+    }
+
   set_queued_text (self, NULL);
   update_context_meter (self, 0, 0);
   g_set_object (&self->chat, chat);
@@ -3250,6 +3289,7 @@ xd_chat_view_set_chat (XdChatView *self,
    * about anything on screen. */
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
+  g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   set_remote (self, NULL);
   set_working (self, FALSE);
   end_remote_turn (self);
@@ -3651,6 +3691,7 @@ xd_chat_view_dispose (GObject *object)
   self->working_label = NULL;
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
+  g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   g_clear_object (&self->remote);
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);

@@ -76,10 +76,7 @@ xd_option_picker_set_selected (XdOptionPicker *self,
   g_return_if_fail (selected < self->choices->len);
 
   if (self->selected == selected)
-    {
-      sync_selection (self);
-      return;
-    }
+    return;
 
   self->selected = selected;
   sync_selection (self);

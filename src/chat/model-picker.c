@@ -386,6 +386,10 @@ xd_model_picker_set_selected (XdModelPicker *self,
 {
   g_return_if_fail (XD_IS_MODEL_PICKER (self));
 
+  if (g_strcmp0 (self->backend_id, backend_id) == 0 &&
+      g_strcmp0 (self->model_id, model_id) == 0)
+    return;
+
   g_free (self->backend_id);
   g_free (self->model_id);
   self->backend_id = g_strdup (backend_id);
