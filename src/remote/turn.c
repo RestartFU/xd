@@ -35,15 +35,18 @@ struct _XdDaemonTurn
   char *backend_id;
   char *model_id;
   char *label;
+  gint64 transcript_message_id; /* user row; live output follows it */
   char *workdir;             /* where file-change diffs are captured */
   XdGitDiffTracker *diff_tracker;
   GCancellable *diff_cancellable;
   guint diff_timeout_id;
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
+  gint64 segment_message_id; /* live row extended as this segment streams */
 
-  /* Speech and tools in the order they happened: held until the turn ends for
-   * storage, and shown to any device that joins mid-turn. XdTurnItem*. */
+  /* Speech and tools in the order they happened. Storage is updated live so a
+   * daemon stop cannot erase progress; these copies let devices join a turn
+   * already in flight. XdTurnItem*. */
   GPtrArray *items;
   GStrv commands;              /* installed commands reported by this backend */
   gint64 started_at;           /* monotonic usec */
@@ -277,9 +280,24 @@ on_text_delta (XdChatSession *session,
                gpointer       user_data)
 {
   XdDaemonTurn *self = user_data;
+  g_autoptr (GError) error = NULL;
 
   g_string_append (self->text, delta);
   g_string_append (self->segment, delta);
+
+  if (self->segment_message_id == 0)
+    {
+      if (!xd_storage_append_message_with_id (
+            self->storage, self->chat_id, "assistant", self->segment->str,
+            NULL, self->label, &self->segment_message_id, &error))
+        g_warning ("cannot store live turn output: %s", error->message);
+    }
+  else if (!xd_storage_update_message (
+             self->storage, self->segment_message_id,
+             self->segment->str, &error))
+    {
+      g_warning ("cannot update live turn output: %s", error->message);
+    }
 
   g_signal_emit (self, signals[SIGNAL_TEXT], 0, delta);
 }
@@ -319,6 +337,7 @@ close_segment (XdDaemonTurn *self)
 
   remember (self, FALSE, self->segment->str);
   g_string_truncate (self->segment, 0);
+  self->segment_message_id = 0;
 }
 
 static void
@@ -327,6 +346,7 @@ on_tool_use (XdChatSession *session,
              gpointer       user_data)
 {
   XdDaemonTurn *self = user_data;
+  g_autoptr (GError) error = NULL;
   g_autofree char *diff =
     xd_git_diff_tracker_capture (self->diff_tracker, name);
   g_autofree char *tool =
@@ -334,6 +354,10 @@ on_tool_use (XdChatSession *session,
 
   close_segment (self);
   remember (self, TRUE, tool);
+
+  if (!xd_storage_append_message (self->storage, self->chat_id, "tool", tool,
+                                  NULL, NULL, &error))
+    g_warning ("cannot store live tool output: %s", error->message);
 
   g_signal_emit (self, signals[SIGNAL_TOOL], 0, tool);
 }
@@ -348,22 +372,6 @@ on_usage (XdChatSession *session,
 
   self->context_used = used;
   self->context_window = window;
-}
-
-static void
-store_turn_items (XdDaemonTurn *self)
-{
-  for (guint i = 0; i < self->items->len; i++)
-    {
-      XdTurnItem *item = g_ptr_array_index (self->items, i);
-      g_autoptr (GError) error = NULL;
-
-      if (!xd_storage_append_message (self->storage, self->chat_id,
-                                      item->tool ? "tool" : "assistant",
-                                      item->text, NULL,
-                                      item->tool ? NULL : self->label, &error))
-        g_warning ("cannot store turn output: %s", error->message);
-    }
 }
 
 static void
@@ -391,7 +399,6 @@ on_finished (XdChatSession *session,
 
   self->asked_user = asked != NULL;
   close_segment (self);
-  store_turn_items (self);
   store_turn_duration (self);
 
   if (self->context_used > 0 && self->context_window > 0 &&
@@ -494,6 +501,9 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   if (!xd_storage_append_message (self->storage, chat_id, "user", prompt,
                                   NULL, NULL, error))
     return FALSE;
+
+  self->transcript_message_id =
+    xd_storage_last_message_id (self->storage, chat_id);
 
   resume_session_id = xd_storage_get_session_id (self->storage, chat_id,
                                                  backend->id, NULL);
@@ -607,6 +617,14 @@ xd_daemon_turn_get_label (XdDaemonTurn *self)
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
 
   return self->label;
+}
+
+gint64
+xd_daemon_turn_get_transcript_id (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), 0);
+
+  return self->transcript_message_id;
 }
 
 GPtrArray *

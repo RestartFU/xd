@@ -1504,6 +1504,8 @@ handle_messages (Connection *connection,
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   gint64 requested =
     json_object_get_int_member_with_default (request, "limit", 0);
+  XdDaemonTurn *turn;
+  gint64 through_id;
   guint total = 0;
 
   if (chat_id == NULL)
@@ -1512,10 +1514,17 @@ handle_messages (Connection *connection,
       return;
     }
 
-  if (requested > 0)
-    rows = xd_storage_list_recent_messages (
-      connection->server->storage, chat_id,
-      (guint) MIN (requested, G_MAXUINT), &total, NULL);
+  turn = g_hash_table_lookup (connection->server->turns, chat_id);
+  if (turn != NULL && !xd_daemon_turn_is_running (turn))
+    turn = NULL;
+  through_id = turn != NULL
+    ? xd_daemon_turn_get_transcript_id (turn) : G_MAXINT64;
+
+  if (turn != NULL || requested > 0)
+    rows = xd_storage_list_recent_messages_through (
+      connection->server->storage, chat_id, through_id,
+      requested > 0 ? (guint) MIN (requested, G_MAXUINT) : G_MAXUINT,
+      &total, NULL);
   else
     {
       rows = xd_storage_list_messages (
@@ -1529,8 +1538,8 @@ handle_messages (Connection *connection,
   json_builder_set_member_name (builder, "total_messages");
   json_builder_add_int_value (builder, total);
   json_builder_set_member_name (builder, "last_message_id");
-  json_builder_add_int_value (
-    builder, xd_storage_last_message_id (connection->server->storage, chat_id));
+  json_builder_add_int_value (builder, turn != NULL ? through_id :
+    xd_storage_last_message_id (connection->server->storage, chat_id));
   json_builder_set_member_name (builder, "messages");
   json_builder_begin_array (builder);
 
@@ -2838,6 +2847,9 @@ handle_chat (Connection *connection,
     }
   {
     XdDaemonTurn *turn = g_hash_table_lookup (self->turns, chat_id);
+
+    if (turn != NULL && !xd_daemon_turn_is_running (turn))
+      turn = NULL;
 
     json_builder_set_member_name (builder, "working");
     json_builder_add_boolean_value (builder, turn != NULL);

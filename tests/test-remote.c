@@ -1462,6 +1462,22 @@ turn_was_stored (gpointer user_data)
     "duration") == 0;
 }
 
+static gboolean
+live_turn_was_stored (gpointer user_data)
+{
+  StoredTurn *turn = user_data;
+  g_autoptr (GPtrArray) messages =
+    xd_storage_list_messages (turn->storage, turn->chat_id, NULL);
+  XdMessage *last;
+
+  if (messages == NULL || messages->len == 0)
+    return FALSE;
+
+  last = g_ptr_array_index (messages, messages->len - 1);
+  return g_strcmp0 (last->role, "assistant") == 0 &&
+         g_strcmp0 (last->content, "in progress") == 0;
+}
+
 static void
 test_images_are_uploaded_to_the_daemon (void)
 {
@@ -3136,6 +3152,7 @@ test_a_joining_device_sees_an_active_turn (void)
   g_autofree char *test_path = NULL;
   RemoteReply started = { 0 };
   QueueEvents queues[2] = { 0 };
+  StoredTurn stored_turn;
   XdNode *chat;
 
   daemon_start (&daemon);
@@ -3152,6 +3169,9 @@ test_a_joining_device_sees_an_active_turn (void)
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-running\"}'\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"assistant\",\"message\":{\"content\":["
+    "{\"type\":\"text\",\"text\":\"in progress\"}]}}'\n"
     "exec sleep 30\n",
     -1, NULL));
   g_assert_cmpint (chmod (program, 0700), ==, 0);
@@ -3179,6 +3199,10 @@ test_a_joining_device_sees_an_active_turn (void)
     call_remote_request (sender, builder, &started);
   }
 
+  stored_turn.storage = daemon.storage;
+  stored_turn.chat_id = daemon.chat_id;
+  wait_until (live_turn_was_stored, &stored_turn);
+
   if (old_path != NULL)
     g_setenv ("PATH", old_path, TRUE);
   else
@@ -3191,6 +3215,34 @@ test_a_joining_device_sees_an_active_turn (void)
 
   g_assert_nonnull (chat);
   g_assert_cmpint (xd_node_get_state (chat), ==, XD_NODE_WORKING);
+
+  /*
+   * The live row is already durable, but belongs to the in-flight replay until
+   * the turn ends. Returning it here too would draw the progress twice.
+   */
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    RemoteReply messages = { 0 };
+    JsonArray *rows;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "messages");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (joining, builder, &messages);
+    rows = json_object_get_array_member (messages.reply, "messages");
+    g_assert_cmpuint (json_array_get_length (rows), ==, 3);
+    g_assert_cmpint (json_object_get_int_member (
+                       messages.reply, "total_messages"), ==, 3);
+    g_assert_cmpstr (
+      json_object_get_string_member (
+        json_array_get_object_element (rows, 2), "role"), ==, "user");
+    json_object_unref (messages.reply);
+    g_free (messages.wait.failure);
+  }
 
   /* Queue belongs to daemon's chat: both devices receive the same update and
    * a fresh chat snapshot carries it too. */
@@ -3232,6 +3284,8 @@ test_a_joining_device_sees_an_active_turn (void)
     g_assert_true (json_object_has_member (options.reply, "working_for"));
     g_assert_cmpint (json_object_get_int_member (options.reply, "working_for"),
                      >=, 0);
+    g_assert_cmpstr (json_object_get_string_member (options.reply, "segment"),
+                     ==, "in progress");
     g_assert_cmpstr (json_object_get_string_member (options.reply, "queued"),
                      ==, "follow up");
     json_object_unref (options.reply);
@@ -3262,6 +3316,84 @@ typedef struct
   char *tool_summary;
   GString *said;
 } InterruptedTurn;
+
+static void
+on_live_turn_text (XdDaemonTurn *turn,
+                   const char   *delta,
+                   gpointer      user_data)
+{
+  Wait *seen = user_data;
+
+  seen->done = TRUE;
+}
+
+/*
+ * A daemon can be stopped without the CLI ever producing ::finished. Its
+ * streamed reply must already be in SQLite, not waiting in the turn object.
+ */
+static void
+test_a_live_turn_is_already_durable (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdDaemonTurn) turn = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  g_autoptr (GError) error = NULL;
+  Wait text = { 0 };
+
+  daemon_start (&daemon);
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-live-durable\"}'\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"assistant\",\"message\":{\"content\":["
+    "{\"type\":\"text\",\"text\":\"saved before finish\"}]}}'\n"
+    "exec sleep 30\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  turn = xd_daemon_turn_new (daemon.storage, daemon.root);
+  g_signal_connect (turn, "text", G_CALLBACK (on_live_turn_text), &text);
+  g_assert_true (xd_daemon_turn_start (turn, daemon.chat_id,
+                                       "keep this", &error));
+  g_assert_no_error (error);
+
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  wait_for (&text);
+  g_assert_true (xd_daemon_turn_is_running (turn));
+
+  messages = xd_storage_list_messages (daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (messages->len, ==, 4);
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 2))->role,
+                   ==, "user");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 3))->role,
+                   ==, "assistant");
+  g_assert_cmpstr (((XdMessage *) g_ptr_array_index (messages, 3))->content,
+                   ==, "saved before finish");
+
+  xd_daemon_turn_cancel (turn);
+  daemon_stop (&daemon);
+}
 
 static void
 on_interrupted_turn_tool (XdDaemonTurn *turn,
@@ -3491,6 +3623,7 @@ main (int argc, char *argv[])
   ADD ("/remote/slow-git-snapshot-does-not-stall-other-chats", test_slow_git_snapshot_does_not_stall_other_chats);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
+  ADD ("/remote/a-live-turn-is-already-durable", test_a_live_turn_is_already_durable);
   ADD ("/remote/an-interrupted-turn-keeps-its-timeline", test_an_interrupted_turn_keeps_its_timeline);
 
   return g_test_run ();

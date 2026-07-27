@@ -50,7 +50,8 @@ G_DECLARE_FINAL_TYPE (XdStorage, xd_storage, XD, STORAGE, GObject)
  *
  * Chats are attached to a folder by its UUID rather than its path, so folders
  * can be renamed or moved on disk without losing their conversations. Writes
- * happen on the main loop: they are one small row per turn, never per token.
+ * happen on the main loop. Live assistant rows are extended as deltas arrive
+ * so a process stop cannot erase an in-flight turn.
  */
 XdStorage  *xd_storage_new             (const char  *db_path,
                                         GError     **error);
@@ -256,6 +257,22 @@ gboolean    xd_storage_append_message  (XdStorage   *self,
                                         const char  *label,
                                         GError     **error);
 
+/* Like append_message(), and returns the inserted row id through @message_id.
+ * Used for live assistant output whose content is extended while it streams. */
+gboolean    xd_storage_append_message_with_id (XdStorage   *self,
+                                                const char  *chat_id,
+                                                const char  *role,
+                                                const char  *content,
+                                                const char  *raw_json,
+                                                const char  *label,
+                                                gint64      *message_id,
+                                                GError     **error);
+
+gboolean    xd_storage_update_message  (XdStorage   *self,
+                                        gint64       message_id,
+                                        const char  *content,
+                                        GError     **error);
+
 /* Oldest first. Elements are XdMessage*. */
 GPtrArray  *xd_storage_list_messages   (XdStorage   *self,
                                         const char  *chat_id,
@@ -274,6 +291,16 @@ GPtrArray  *xd_storage_list_recent_messages (XdStorage   *self,
                                              guint        limit,
                                              guint       *total,
                                              GError     **error);
+
+/* Recent rows at or below @through_id. A daemon uses this while a turn is
+ * active: its durable live rows are replayed from the turn, not duplicated in
+ * the finished transcript. */
+GPtrArray  *xd_storage_list_recent_messages_through (XdStorage   *self,
+                                                     const char  *chat_id,
+                                                     gint64       through_id,
+                                                     guint        limit,
+                                                     guint       *total,
+                                                     GError     **error);
 
 /* Paired remote devices: only the token's hash is kept. */
 gboolean    xd_storage_add_device      (XdStorage   *self,

@@ -63,12 +63,16 @@ char         *xd_daemon_turn_resolve_workdir (XdDaemonTurn *self,
 /* Who is answering: the model and effort the turn actually started on. */
 const char   *xd_daemon_turn_get_label (XdDaemonTurn *self);
 
+/* Last finished transcript row when this turn started. Live output has larger
+ * ids and is replayed from the turn until it ends. */
+gint64        xd_daemon_turn_get_transcript_id (XdDaemonTurn *self);
+
 /*
  * The turn so far, in the order it happened.
  *
- * A turn is written to the database when it ends, so until then this is the
- * only copy -- and it is what a device joining the chat halfway through has to
- * be given, or it sees the message that started the turn and nothing else.
+ * A turn is also written live for crash safety. This in-memory copy is what a
+ * device joining the chat halfway through receives, while those live rows are
+ * hidden from its finished transcript to avoid drawing them twice.
  *
  * In order and in pieces rather than as one string: an agent says something,
  * reaches for a tool, then says something about what it found, and a device

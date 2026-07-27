@@ -1253,13 +1253,14 @@ touch_chat (XdStorage  *self,
 }
 
 gboolean
-xd_storage_append_message (XdStorage   *self,
-                           const char  *chat_id,
-                           const char  *role,
-                           const char  *content,
-                           const char  *raw_json,
-                           const char  *label,
-                           GError     **error)
+xd_storage_append_message_with_id (XdStorage   *self,
+                                   const char  *chat_id,
+                                   const char  *role,
+                                   const char  *content,
+                                   const char  *raw_json,
+                                   const char  *label,
+                                   gint64      *message_id,
+                                   GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
@@ -1292,8 +1293,56 @@ xd_storage_append_message (XdStorage   *self,
 
   /* A new message makes the chat the most recent one in its folder. */
   if (ok)
-    touch_chat (self, chat_id);
+    {
+      if (message_id != NULL)
+        *message_id = sqlite3_last_insert_rowid (self->db);
+      touch_chat (self, chat_id);
+    }
 
+  return ok;
+}
+
+gboolean
+xd_storage_append_message (XdStorage   *self,
+                           const char  *chat_id,
+                           const char  *role,
+                           const char  *content,
+                           const char  *raw_json,
+                           const char  *label,
+                           GError     **error)
+{
+  return xd_storage_append_message_with_id (
+    self, chat_id, role, content, raw_json, label, NULL, error);
+}
+
+gboolean
+xd_storage_update_message (XdStorage   *self,
+                           gint64       message_id,
+                           const char  *content,
+                           GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (message_id > 0, FALSE);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "UPDATE messages SET content = ? WHERE id = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot update the message");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, content != NULL ? content : "");
+  sqlite3_bind_int64 (stmt, 2, message_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot update the message");
+
+  sqlite3_finalize (stmt);
   return ok;
 }
 
@@ -1346,11 +1395,12 @@ xd_storage_list_messages (XdStorage   *self,
 }
 
 GPtrArray *
-xd_storage_list_recent_messages (XdStorage   *self,
-                                 const char  *chat_id,
-                                 guint        limit,
-                                 guint       *total,
-                                 GError     **error)
+xd_storage_list_recent_messages_through (XdStorage   *self,
+                                         const char  *chat_id,
+                                         gint64       through_id,
+                                         guint        limit,
+                                         guint       *total,
+                                         GError     **error)
 {
   GPtrArray *messages;
   sqlite3_stmt *stmt = NULL;
@@ -1365,7 +1415,7 @@ xd_storage_list_recent_messages (XdStorage   *self,
 
   if (sqlite3_prepare_v2 (
         self->db,
-        "SELECT COUNT(*) FROM messages WHERE chat_id = ?;",
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND id <= ?;",
         -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot count the conversation");
@@ -1373,6 +1423,7 @@ xd_storage_list_recent_messages (XdStorage   *self,
     }
 
   bind_text (stmt, 1, chat_id);
+  sqlite3_bind_int64 (stmt, 2, through_id);
   count = sqlite3_step (stmt) == SQLITE_ROW ? sqlite3_column_int64 (stmt, 0) : 0;
   sqlite3_finalize (stmt);
   stmt = NULL;
@@ -1388,7 +1439,8 @@ xd_storage_list_recent_messages (XdStorage   *self,
   if (sqlite3_prepare_v2 (
         self->db,
         "SELECT id, chat_id, role, content, NULL, created_at, label"
-        " FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?;",
+        " FROM messages WHERE chat_id = ? AND id <= ?"
+        " ORDER BY id DESC LIMIT ?;",
         -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot read recent conversation");
@@ -1396,7 +1448,8 @@ xd_storage_list_recent_messages (XdStorage   *self,
     }
 
   bind_text (stmt, 1, chat_id);
-  sqlite3_bind_int64 (stmt, 2, limit);
+  sqlite3_bind_int64 (stmt, 2, through_id);
+  sqlite3_bind_int64 (stmt, 3, limit);
 
   messages = g_ptr_array_new_with_free_func ((GDestroyNotify) xd_message_free);
   while (sqlite3_step (stmt) == SQLITE_ROW)
@@ -1415,6 +1468,17 @@ xd_storage_list_recent_messages (XdStorage   *self,
     }
 
   return messages;
+}
+
+GPtrArray *
+xd_storage_list_recent_messages (XdStorage   *self,
+                                 const char  *chat_id,
+                                 guint        limit,
+                                 guint       *total,
+                                 GError     **error)
+{
+  return xd_storage_list_recent_messages_through (
+    self, chat_id, G_MAXINT64, limit, total, error);
 }
 
 GPtrArray *
