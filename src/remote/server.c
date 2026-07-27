@@ -4,12 +4,15 @@
 #include "chat/chat-title.h"
 #include "remote/terminal.h"
 #include "remote/turn.h"
+#include "remote/protocol.h"
 #include "settings/folder-settings.h"
 #include "util/git-info.h"
 #include "util/worktree.h"
 
 #include <json-glib/json-glib.h>
 #include <string.h>
+#include <glib/gstdio.h>
+#include <errno.h>
 
 /*
  * One connection, one line-oriented JSON conversation.
@@ -1190,6 +1193,116 @@ start_queued (XdRemoteServer *self,
   return TRUE;
 }
 
+static void
+remove_paths (GPtrArray *paths)
+{
+  for (guint i = 0; paths != NULL && i < paths->len; i++)
+    g_unlink (g_ptr_array_index (paths, i));
+}
+
+/*
+ * Turns client-side image bytes into files the daemon-side agent can read.
+ *
+ * Supplied names are display metadata only. Generated names and a private
+ * cache directory prevent path traversal and keep uploads out of repositories.
+ */
+static char *
+materialize_message (JsonObject  *request,
+                     const char  *text,
+                     GError     **error)
+{
+  g_autoptr (GString) message = g_string_new (text != NULL ? text : "");
+  g_autoptr (GPtrArray) paths = g_ptr_array_new_with_free_func (g_free);
+  g_autofree char *directory = NULL;
+  JsonNode *node;
+  JsonArray *attachments;
+  gsize total = 0;
+
+  if (!json_object_has_member (request, "attachments"))
+    return g_string_free (g_steal_pointer (&message), FALSE);
+
+  node = json_object_get_member (request, "attachments");
+  if (!JSON_NODE_HOLDS_ARRAY (node))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                           "Message attachments must be an array.");
+      return NULL;
+    }
+
+  attachments = json_node_get_array (node);
+  if (json_array_get_length (attachments) == 0 ||
+      json_array_get_length (attachments) > XD_REMOTE_MAX_IMAGES)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                           "A message can contain between 1 and 4 images.");
+      return NULL;
+    }
+
+  directory = g_build_filename (g_get_user_cache_dir (), "xd",
+                                "remote-pasted", NULL);
+  if (g_mkdir_with_parents (directory, 0700) != 0)
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "Cannot create the remote image cache: %s.",
+                   g_strerror (errno));
+      return NULL;
+    }
+
+  for (guint i = 0; i < json_array_get_length (attachments); i++)
+    {
+      JsonObject *attachment = json_array_get_object_element (attachments, i);
+      const char *mime = member_string (attachment, "mime");
+      const char *encoded = member_string (attachment, "data");
+      g_autofree guchar *data = NULL;
+      g_autofree char *uuid = NULL;
+      g_autofree char *name = NULL;
+      char *path;
+      gsize length = 0;
+      gsize encoded_limit = ((XD_REMOTE_MAX_IMAGE_BYTES + 2) / 3) * 4;
+
+      if (attachment == NULL || g_strcmp0 (mime, "image/png") != 0 ||
+          encoded == NULL || strlen (encoded) > encoded_limit)
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                               "Only PNG images up to 10 MiB can be sent.");
+          remove_paths (paths);
+          return NULL;
+        }
+
+      data = g_base64_decode (encoded, &length);
+      if (length < 8 ||
+          memcmp (data, "\x89PNG\r\n\x1a\n", 8) != 0 ||
+          length > XD_REMOTE_MAX_IMAGE_BYTES ||
+          total > XD_REMOTE_MAX_IMAGES_BYTES - length)
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                               "The attached images are invalid or too large.");
+          remove_paths (paths);
+          return NULL;
+        }
+      total += length;
+
+      uuid = g_uuid_string_random ();
+      name = g_strdup_printf ("paste-%s.png", uuid);
+      path = g_build_filename (directory, name, NULL);
+
+      if (!g_file_set_contents (path, (const char *) data, length, error))
+        {
+          remove_paths (paths);
+          g_free (path);
+          return NULL;
+        }
+      g_chmod (path, 0600);
+      g_ptr_array_add (paths, path);
+
+      if (message->len > 0)
+        g_string_append_c (message, '\n');
+      g_string_append_printf (message, "[image: %s]", path);
+    }
+
+  return g_string_free (g_steal_pointer (&message), FALSE);
+}
+
 /* The turn is over, but it is over inside one of its own signals: dropping it
  * there would take the session down while it was still emitting. */
 static gboolean
@@ -1211,11 +1324,21 @@ handle_send (Connection *connection,
   XdRemoteServer *self = connection->server;
   const char *chat_id = member_string (request, "chat");
   const char *text = member_string (request, "text");
+  g_autofree char *message = NULL;
   g_autoptr (GError) error = NULL;
 
-  if (chat_id == NULL || text == NULL || *text == '\0')
+  if (chat_id == NULL ||
+      ((text == NULL || *text == '\0') &&
+       !json_object_has_member (request, "attachments")))
     {
       send_error (connection, "A message needs a chat and something to say.");
+      return;
+    }
+
+  message = materialize_message (request, text, &error);
+  if (message == NULL)
+    {
+      send_error (connection, error->message);
       return;
     }
 
@@ -1227,11 +1350,11 @@ handle_send (Connection *connection,
    */
   if (g_hash_table_contains (self->turns, chat_id))
     {
-      store_queued (connection, chat_id, text);
+      store_queued (connection, chat_id, message);
       return;
     }
 
-  if (!start_daemon_turn (self, chat_id, text, &error))
+  if (!start_daemon_turn (self, chat_id, message, &error))
     {
       send_error (connection, error->message);
       return;

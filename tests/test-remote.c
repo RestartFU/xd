@@ -2,6 +2,7 @@
 #include "remote/remote-tree.h"
 #include "remote/server.h"
 #include "remote/turn.h"
+#include "remote/protocol.h"
 #include "storage/storage.h"
 
 #include <json-glib/json-glib.h>
@@ -152,6 +153,16 @@ typedef struct
   gboolean ok;
   char *failure;
 } Wait;
+
+typedef struct
+{
+  Wait wait;
+  JsonObject *reply;
+} RemoteReply;
+
+static void call_remote_request (XdRemoteClient *client,
+                                 JsonBuilder    *builder,
+                                 RemoteReply    *waiting);
 
 static gboolean
 on_wait_elapsed (gpointer user_data)
@@ -1084,6 +1095,109 @@ test_a_first_message_names_the_chat (void)
   daemon_stop (&daemon);
 }
 
+static void
+test_images_are_uploaded_to_the_daemon (void)
+{
+  static const guint8 png[] = {
+    0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+  };
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *bin_dir = NULL;
+  g_autofree char *program = NULL;
+  g_autofree char *old_path = NULL;
+  g_autofree char *test_path = NULL;
+  g_autofree char *encoded = NULL;
+  g_autofree char *uploaded = NULL;
+  g_autofree char *contents = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  RemoteReply sent = { 0 };
+
+  daemon_start (&daemon);
+
+  bin_dir = g_build_filename (daemon.dir, "bin", NULL);
+  program = g_build_filename (bin_dir, "claude", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (bin_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    program,
+    "#!/bin/sh\n"
+    "printf '%s\\n' "
+    "'{\"type\":\"system\",\"subtype\":\"init\","
+    "\"session_id\":\"test-image-upload\"}' "
+    "'{\"type\":\"result\",\"result\":\"ok\","
+    "\"session_id\":\"test-image-upload\",\"is_error\":false}'\n",
+    -1, NULL));
+  g_assert_cmpint (chmod (program, 0700), ==, 0);
+
+  old_path = g_strdup (g_getenv ("PATH"));
+  test_path = g_strdup_printf ("%s:%s", bin_dir,
+                               old_path != NULL ? old_path : "");
+  g_setenv ("PATH", test_path, TRUE);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  encoded = g_base64_encode (png, sizeof png);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "send");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "inspect this");
+    json_builder_set_member_name (builder, "attachments");
+    json_builder_begin_array (builder);
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "name");
+    json_builder_add_string_value (builder, "screenshot.png");
+    json_builder_set_member_name (builder, "mime");
+    json_builder_add_string_value (builder, "image/png");
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+    json_builder_end_array (builder);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &sent);
+  }
+
+  messages = xd_storage_list_messages (daemon.storage, daemon.chat_id, NULL);
+  for (guint i = 0; i < messages->len; i++)
+    {
+      XdMessage *message = g_ptr_array_index (messages, i);
+      const char *start;
+      const char *end;
+
+      if (g_strcmp0 (message->role, "user") != 0 ||
+          (start = strstr (message->content, "[image: ")) == NULL)
+        continue;
+
+      start += strlen ("[image: ");
+      end = strchr (start, ']');
+      g_assert_nonnull (end);
+      uploaded = g_strndup (start, end - start);
+      break;
+    }
+
+  g_assert_nonnull (uploaded);
+  g_assert_true (g_file_get_contents (uploaded, &contents, NULL, NULL));
+  g_assert_cmpmem (contents, sizeof png, png, sizeof png);
+
+  unlink (uploaded);
+  if (old_path != NULL)
+    g_setenv ("PATH", old_path, TRUE);
+  else
+    g_unsetenv ("PATH");
+
+  json_object_unref (sent.reply);
+  g_free (sent.wait.failure);
+  daemon_stop (&daemon);
+}
+
 typedef struct
 {
   Wait wait;
@@ -1141,12 +1255,6 @@ test_the_daemon_lists_its_directories (void)
   g_strfreev (listed.entries);
   daemon_stop (&daemon);
 }
-
-typedef struct
-{
-  Wait wait;
-  JsonObject *reply;
-} RemoteReply;
 
 static void
 on_terminal_reply (GObject      *source,
@@ -2454,6 +2562,7 @@ main (int argc, char *argv[])
   ADD ("/remote/two-devices-stay-in-step", test_two_devices_stay_in_step);
   ADD ("/remote/local-changes-reach-the-devices", test_local_changes_reach_the_devices);
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
+  ADD ("/remote/images-are-uploaded-to-the-daemon", test_images_are_uploaded_to_the_daemon);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
   ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);

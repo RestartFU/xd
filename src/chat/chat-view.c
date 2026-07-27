@@ -12,6 +12,7 @@
 #include "git-actions.h"
 #include "terminal-panel.h"
 #include "settings/settings-resolver.h"
+#include "remote/protocol.h"
 #include "util/ask-block.h"
 #include "util/git-info.h"
 #include "util/worktree.h"
@@ -208,7 +209,7 @@ static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data
 static void show_queued (XdChatView *self);
 static void set_queued_text (XdChatView *self, const char *text);
 static Turn *current_turn (XdChatView *self);
-static void send_remote_message (XdChatView *self, const char *text);
+static gboolean send_remote_message (XdChatView *self, const char *text);
 static void cancel_remote_turn (XdChatView *self);
 static void send_queued (XdChatView *self);
 static gboolean send_message (XdChatView *self,
@@ -2304,12 +2305,13 @@ on_remote_sent (GObject      *source,
  * and broadcasts what it did, and this window redraws from that like every
  * other device watching -- including the one the daemon is running on.
  */
-static void
+static gboolean
 send_remote_message (XdChatView *self,
                      const char *text)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (JsonNode) request = NULL;
+  gsize total = 0;
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "op");
@@ -2317,13 +2319,69 @@ send_remote_message (XdChatView *self,
   json_builder_set_member_name (builder, "chat");
   json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
   json_builder_set_member_name (builder, "text");
-  json_builder_add_string_value (builder, text);
+  json_builder_add_string_value (builder, text != NULL ? text : "");
+
+  if (self->attachments->len > 0)
+    {
+      if (self->attachments->len > XD_REMOTE_MAX_IMAGES)
+        {
+          append_row (self, XD_MESSAGE_ERROR,
+                      "A remote message can contain at most 4 images.");
+          return FALSE;
+        }
+
+      json_builder_set_member_name (builder, "attachments");
+      json_builder_begin_array (builder);
+
+      for (guint i = 0; i < self->attachments->len; i++)
+        {
+          const char *path = g_ptr_array_index (self->attachments, i);
+          g_autofree char *contents = NULL;
+          g_autofree char *encoded = NULL;
+          g_autofree char *name = g_path_get_basename (path);
+          gsize length = 0;
+
+          if (!g_file_get_contents (path, &contents, &length, NULL))
+            {
+              append_row (self, XD_MESSAGE_ERROR,
+                          "Cannot read a pasted image for the remote machine.");
+              return FALSE;
+            }
+
+          if (length > XD_REMOTE_MAX_IMAGE_BYTES ||
+              total > XD_REMOTE_MAX_IMAGES_BYTES - length)
+            {
+              append_row (self, XD_MESSAGE_ERROR,
+                          "The pasted images are too large to send remotely.");
+              return FALSE;
+            }
+          total += length;
+          encoded = g_base64_encode ((const guchar *) contents, length);
+
+          json_builder_begin_object (builder);
+          json_builder_set_member_name (builder, "name");
+          json_builder_add_string_value (builder, name);
+          json_builder_set_member_name (builder, "mime");
+          json_builder_add_string_value (builder, "image/png");
+          json_builder_set_member_name (builder, "data");
+          json_builder_add_string_value (builder, encoded);
+          json_builder_end_object (builder);
+        }
+
+      json_builder_end_array (builder);
+    }
+
   json_builder_end_object (builder);
 
   request = json_builder_get_root (builder);
 
   xd_remote_client_call_async (self->remote, request, NULL,
                                on_remote_sent, g_object_ref (self));
+
+  if (self->attachments->len > 0)
+    forget_attachments (self);
+
+  return TRUE;
 }
 
 static void
@@ -2340,23 +2398,26 @@ send_current_message (XdChatView *self)
   g_autofree char *text = take_composer_text (self);
   g_autoptr (GString) message = NULL;
 
-  /*
-   * A chat on a daemon takes the same composer and the same Enter.
-   *
-   * Attachments do not travel: they are files on this machine, and the agent
-   * reading them is on another one.
-   */
+  /* A chat on a daemon takes the same composer and the same Enter. */
   if (self->remote != NULL)
     {
-      if (self->remote_working)
+      if (text == NULL && self->attachments->len == 0)
+        return;
+
+      /*
+       * Plain text uses the queue operation while the daemon works. An image
+       * has bytes to upload, so it goes through send; the authoritative daemon
+       * turns that send into the same single queued instruction.
+       */
+      if (self->remote_working && self->attachments->len == 0)
         {
-          if (text != NULL)
-            queue_message (self, text);
+          queue_message (self, text);
           return;
         }
 
-      if (text != NULL)
-        send_remote_message (self, text);
+      if (!send_remote_message (self, text) && text != NULL)
+        gtk_text_buffer_set_text (
+          gtk_text_view_get_buffer (self->composer), text, -1);
       return;
     }
 
