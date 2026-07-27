@@ -50,9 +50,10 @@ test_capture_only_change_since_previous_event (void)
 {
   g_autoptr (GError) error = NULL;
 #ifdef G_OS_WIN32
-  g_autofree char *cwd = g_get_current_dir ();
+  g_autofree char *source_root =
+    g_path_get_dirname (g_getenv ("G_TEST_SRCDIR"));
   g_autofree char *dir =
-    g_build_filename (cwd, "xd-git-diff-XXXXXX", NULL);
+    g_build_filename (source_root, "xd-git-diff-XXXXXX", NULL);
 #else
   g_autofree char *dir = g_dir_make_tmp ("xd-git-diff-XXXXXX", &error);
 #endif
@@ -73,9 +74,9 @@ test_capture_only_change_since_previous_event (void)
 
 #ifdef G_OS_WIN32
   /*
-   * MSYS exposes /tmp, but native GLib subprocesses cannot reliably chdir to
-   * that virtual path.  Meson's native working directory is writable and
-   * gives the test the same path form the application receives.
+   * MSYS exposes /tmp and rewrites process cwd to /d/..., but native GLib
+   * subprocesses cannot reliably chdir to either virtual path.  Meson exports
+   * G_TEST_SRCDIR in the D:/... form the application receives.
    */
   g_assert_nonnull (g_mkdtemp (dir));
 #else
