@@ -413,6 +413,70 @@ load_style (void)
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
+static gboolean
+is_button (GtkWidget *widget)
+{
+  return GTK_IS_BUTTON (widget) || GTK_IS_MENU_BUTTON (widget);
+}
+
+static void
+update_pointer_cursor (GtkEventControllerMotion *controller,
+                       double                    x,
+                       double                    y,
+                       gpointer                  user_data)
+{
+  GtkWidget *root = gtk_event_controller_get_widget (
+    GTK_EVENT_CONTROLLER (controller));
+  GtkWidget *target = gtk_widget_pick (root, x, y, GTK_PICK_DEFAULT);
+  gboolean over_button = FALSE;
+
+  for (GtkWidget *widget = target;
+       widget != NULL;
+       widget = gtk_widget_get_parent (widget))
+    {
+      if (is_button (widget))
+        {
+          over_button = gtk_widget_is_sensitive (widget);
+          break;
+        }
+    }
+
+  gtk_widget_set_cursor_from_name (root, over_button ? "pointer" : NULL);
+}
+
+static void
+clear_pointer_cursor (GtkEventControllerMotion *controller,
+                      gpointer                  user_data)
+{
+  gtk_widget_set_cursor (
+    gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (controller)), NULL);
+}
+
+/*
+ * GTK themes deliberately keep the default arrow over buttons. xd uses the
+ * same pointer affordance as its web-shaped composer and choice controls.
+ *
+ * Watch each application window at capture phase rather than setting every
+ * button one by one: buttons are also created later for choices, attachments
+ * and dialogs, and those should not quietly miss the rule.
+ */
+static void
+on_window_added (GtkApplication *application,
+                 GtkWindow      *window,
+                 gpointer        user_data)
+{
+  GtkEventController *motion = gtk_event_controller_motion_new ();
+
+  gtk_event_controller_set_propagation_phase (motion, GTK_PHASE_CAPTURE);
+  g_signal_connect (motion, "enter",
+                    G_CALLBACK (update_pointer_cursor), NULL);
+  g_signal_connect (motion, "motion",
+                    G_CALLBACK (update_pointer_cursor), NULL);
+  g_signal_connect (motion, "leave",
+                    G_CALLBACK (clear_pointer_cursor), NULL);
+  gtk_widget_add_controller (GTK_WIDGET (window), motion);
+}
+
 static void
 xd_application_startup (GApplication *app)
 {
@@ -441,6 +505,8 @@ xd_application_startup (GApplication *app)
                                       ADW_COLOR_SCHEME_FORCE_DARK);
 
   load_style ();
+
+  g_signal_connect (self, "window-added", G_CALLBACK (on_window_added), NULL);
 
   g_action_map_add_action_entries (G_ACTION_MAP (self), app_actions,
                                    G_N_ELEMENTS (app_actions), self);
