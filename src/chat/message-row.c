@@ -1,5 +1,6 @@
 #include "message-row.h"
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <string.h>
 
 #include "remote/client.h"
@@ -254,33 +255,85 @@ make_code_card (XdMessageRow *self,
 
 typedef struct
 {
-  GtkPopover *popover;
-  GWeakRef chip;
+  GWeakRef stack;
+  GWeakRef picture;
 } PreviewRequest;
 
 static void
 preview_request_free (PreviewRequest *request)
 {
-  g_weak_ref_clear (&request->chip);
-  g_object_unref (request->popover);
+  g_weak_ref_clear (&request->stack);
+  g_weak_ref_clear (&request->picture);
   g_free (request);
 }
 
-/* The preview popover opens above the chip, sized to the image's own shape
- * rather than a fixed box that would stretch or letterbox it. */
+#define INLINE_PREVIEW_HEIGHT 96
+#define INLINE_PREVIEW_MAX_WIDTH 168
+
 static void
-show_preview (GtkPopover *popover,
-              GdkTexture *texture)
+prepare_preview_size (GdkPixbufLoader *loader,
+                      int              width,
+                      int              height,
+                      gpointer         user_data)
 {
-  GtkWidget *picture;
+  double scale = MIN (1.0, MIN ((double) INLINE_PREVIEW_MAX_WIDTH / width,
+                                (double) INLINE_PREVIEW_HEIGHT / height));
+
+  gdk_pixbuf_loader_set_size (loader,
+                              MAX (1, (int) (width * scale)),
+                              MAX (1, (int) (height * scale)));
+}
+
+/*
+ * Ask the image decoder for thumbnail pixels. Loading a full desktop
+ * screenshot into a texture and shrinking only its widget still retains the
+ * large texture, which makes image-heavy transcripts expensive to reopen.
+ */
+static GdkTexture *
+preview_texture_from_bytes (const guchar *data,
+                            gsize         length,
+                            GError      **error)
+{
+  g_autoptr (GdkPixbufLoader) loader =
+    gdk_pixbuf_loader_new_with_type ("png", error);
+  GdkPixbuf *pixbuf;
+
+  if (loader == NULL)
+    return NULL;
+
+  g_signal_connect (loader, "size-prepared",
+                    G_CALLBACK (prepare_preview_size), NULL);
+
+  if (!gdk_pixbuf_loader_write (loader, data, length, error) ||
+      !gdk_pixbuf_loader_close (loader, error))
+    return NULL;
+
+  pixbuf = gdk_pixbuf_loader_get_pixbuf (loader);
+  if (pixbuf == NULL)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                           "The image could not be decoded.");
+      return NULL;
+    }
+
+  return gdk_texture_new_for_pixbuf (pixbuf);
+}
+
+/* Keep screenshots recognisable without letting one take over the message. */
+static void
+show_inline_preview (GtkPicture *picture,
+                     GdkTexture *texture)
+{
   int w = gdk_texture_get_width (texture);
   int h = gdk_texture_get_height (texture);
-  double scale = MIN (1.0, MIN (440.0 / w, 300.0 / h));
+  double scale = MIN (1.0, MIN ((double) INLINE_PREVIEW_MAX_WIDTH / w,
+                                (double) INLINE_PREVIEW_HEIGHT / h));
 
-  picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (texture));
-  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
-  gtk_widget_set_size_request (picture, (int) (w * scale), (int) (h * scale));
-  gtk_popover_set_child (popover, picture);
+  gtk_picture_set_paintable (picture, GDK_PAINTABLE (texture));
+  gtk_picture_set_content_fit (picture, GTK_CONTENT_FIT_CONTAIN);
+  gtk_widget_set_size_request (GTK_WIDGET (picture),
+                               MAX (1, (int) (w * scale)),
+                               MAX (1, (int) (h * scale)));
 }
 
 static void
@@ -292,15 +345,12 @@ on_remote_preview (GObject      *source,
   g_autoptr (JsonObject) reply = NULL;
   g_autoptr (GError) error = NULL;
   g_autofree guchar *data = NULL;
-  g_autoptr (GBytes) bytes = NULL;
   g_autoptr (GdkTexture) texture = NULL;
-  g_autoptr (GtkWidget) chip = g_weak_ref_get (&request->chip);
+  g_autoptr (GtkWidget) stack = g_weak_ref_get (&request->stack);
+  g_autoptr (GtkWidget) picture = g_weak_ref_get (&request->picture);
   const char *encoded;
   gsize length = 0;
   gsize encoded_limit = ((XD_REMOTE_MAX_IMAGE_BYTES + 2) / 3) * 4;
-
-  if (chip != NULL)
-    g_object_set_data (G_OBJECT (chip), "image-loading", NULL);
 
   reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
   encoded = reply != NULL
@@ -310,21 +360,17 @@ on_remote_preview (GObject      *source,
     data = g_base64_decode (encoded, &length);
 
   if (length > 0 && length <= XD_REMOTE_MAX_IMAGE_BYTES)
-    {
-      bytes = g_bytes_new_take (g_steal_pointer (&data), length);
-      texture = gdk_texture_new_from_bytes (bytes, &error);
-    }
+    texture = preview_texture_from_bytes (data, length, &error);
 
-  if (texture != NULL)
+  if (texture != NULL && stack != NULL && picture != NULL)
     {
-      show_preview (request->popover, texture);
+      show_inline_preview (GTK_PICTURE (picture), texture);
+      gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
     }
-  else if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+  else if (stack != NULL &&
+           !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
     {
-      GtkWidget *unavailable = gtk_label_new ("Preview unavailable");
-
-      gtk_widget_add_css_class (unavailable, "dim-label");
-      gtk_popover_set_child (request->popover, unavailable);
+      gtk_stack_set_visible_child_name (GTK_STACK (stack), "unavailable");
     }
 
   preview_request_free (request);
@@ -332,21 +378,13 @@ on_remote_preview (GObject      *source,
 
 static void
 load_remote_preview (XdMessageRow *self,
-                     GtkWidget    *chip,
-                     GtkPopover   *popover,
+                     GtkStack     *stack,
+                     GtkPicture   *picture,
                      const char   *path)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (JsonNode) request_node = NULL;
   PreviewRequest *request;
-  GtkWidget *loading = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-  GtkWidget *spinner = gtk_spinner_new ();
-
-  gtk_spinner_start (GTK_SPINNER (spinner));
-  gtk_box_append (GTK_BOX (loading), spinner);
-  gtk_box_append (GTK_BOX (loading), gtk_label_new ("Loading preview…"));
-  gtk_popover_set_child (popover, loading);
-  g_object_set_data (G_OBJECT (chip), "image-loading", GINT_TO_POINTER (1));
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "op");
@@ -357,84 +395,57 @@ load_remote_preview (XdMessageRow *self,
   request_node = json_builder_get_root (builder);
 
   request = g_new0 (PreviewRequest, 1);
-  request->popover = g_object_ref (popover);
-  g_weak_ref_init (&request->chip, chip);
+  g_weak_ref_init (&request->stack, stack);
+  g_weak_ref_init (&request->picture, picture);
 
   xd_remote_client_call_async (self->remote, request_node,
                                self->image_cancellable,
                                on_remote_preview, request);
 }
 
-static void
-on_chip_enter (GtkEventControllerMotion *controller,
-               double                    x,
-               double                    y,
-               gpointer                  user_data)
-{
-  XdMessageRow *self = user_data;
-  GtkWidget *chip =
-    gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (controller));
-  GtkPopover *popover =
-    g_object_get_data (G_OBJECT (chip), "image-popover");
-  const char *path = g_object_get_data (G_OBJECT (chip), "image-path");
-
-  if (popover == NULL || path == NULL)
-    return;
-
-  if (gtk_popover_get_child (popover) == NULL &&
-      g_object_get_data (G_OBJECT (chip), "image-loading") == NULL)
-    {
-      g_autoptr (GdkTexture) texture = NULL;
-
-      if (self->remote != NULL)
-        load_remote_preview (self, chip, popover, path);
-      else
-        {
-          texture = gdk_texture_new_from_filename (path, NULL);
-          if (texture == NULL)
-            return;
-          show_preview (popover, texture);
-        }
-    }
-
-  gtk_popover_popup (popover);
-}
-
-static void
-on_chip_leave (GtkEventControllerMotion *controller,
-               gpointer                  user_data)
-{
-  gtk_popover_popdown (GTK_POPOVER (user_data));
-}
-
-static void
-on_chip_destroyed (GtkWidget *chip,
-                   gpointer   user_data)
-{
-  gtk_widget_unparent (GTK_WIDGET (user_data));
-}
-
 /*
- * "[image: /path]" becomes a chip that says what it is.
+ * "[image: /path]" becomes a small inline preview.
  *
  * The path is how the agent receives the image, but the person who pasted it
- * knows it as a picture, not a filename. The chip reads "Image #1", opens
- * with a click, and previews on hover.
+ * knows it as a picture, not a filename. Keep a small preview directly beside
+ * the prose so seeing it does not require a hover or open a large overlay.
  */
 static GtkWidget *
-make_image_chip (XdMessageRow *self,
-                 const char   *path,
-                 int           number)
+make_image_preview (XdMessageRow *self,
+                    const char   *path,
+                    int           number)
 {
   g_autofree char *uri = g_filename_to_uri (path, NULL, NULL);
+  g_autoptr (GdkPixbuf) thumbnail = NULL;
+  g_autoptr (GdkTexture) texture = NULL;
+  GtkWidget *preview = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  GtkWidget *stack = gtk_stack_new ();
+  GtkWidget *picture = gtk_picture_new ();
+  GtkWidget *loading = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *spinner = gtk_spinner_new ();
+  GtkWidget *unavailable = gtk_label_new ("Preview unavailable");
   GtkWidget *label = gtk_label_new (NULL);
+
+  gtk_spinner_start (GTK_SPINNER (spinner));
+  gtk_box_append (GTK_BOX (loading), spinner);
+  gtk_box_append (GTK_BOX (loading), gtk_label_new ("Loading image…"));
+  gtk_widget_add_css_class (loading, "dim-label");
+  gtk_widget_add_css_class (unavailable, "dim-label");
+
+  gtk_stack_add_named (GTK_STACK (stack), loading, "loading");
+  gtk_stack_add_named (GTK_STACK (stack), picture, "picture");
+  gtk_stack_add_named (GTK_STACK (stack), unavailable, "unavailable");
+  gtk_stack_set_visible_child_name (GTK_STACK (stack), "loading");
+  gtk_widget_add_css_class (stack, "xd-inline-image");
+  gtk_widget_set_halign (stack, GTK_ALIGN_START);
 
   if (self->remote != NULL)
     {
       g_autofree char *text = g_strdup_printf ("Image #%d", number);
 
       gtk_label_set_label (GTK_LABEL (label), text);
-      gtk_widget_add_css_class (label, "link");
+      gtk_widget_add_css_class (label, "dim-label");
+      load_remote_preview (self, GTK_STACK (stack), GTK_PICTURE (picture), path);
     }
   else
     {
@@ -445,29 +456,28 @@ make_image_chip (XdMessageRow *self,
       gtk_label_set_markup (GTK_LABEL (label), markup);
       g_signal_connect (label, "activate-link",
                         G_CALLBACK (on_link_activated), NULL);
+
+      thumbnail = gdk_pixbuf_new_from_file_at_scale (
+        path, INLINE_PREVIEW_MAX_WIDTH, INLINE_PREVIEW_HEIGHT, TRUE, NULL);
+      if (thumbnail != NULL)
+        texture = gdk_texture_new_for_pixbuf (thumbnail);
+      if (texture != NULL)
+        {
+          show_inline_preview (GTK_PICTURE (picture), texture);
+          gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
+        }
+      else
+        {
+          gtk_stack_set_visible_child_name (GTK_STACK (stack), "unavailable");
+        }
     }
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
+  gtk_widget_add_css_class (label, "caption");
+  gtk_box_append (GTK_BOX (preview), stack);
+  gtk_box_append (GTK_BOX (preview), label);
+  gtk_widget_set_halign (preview, GTK_ALIGN_START);
 
-  g_object_set_data_full (G_OBJECT (label), "image-path", g_strdup (path), g_free);
-
-  {
-    GtkWidget *popover = gtk_popover_new ();
-    GtkEventController *motion = gtk_event_controller_motion_new ();
-
-    gtk_popover_set_position (GTK_POPOVER (popover), GTK_POS_TOP);
-    gtk_popover_set_autohide (GTK_POPOVER (popover), FALSE);
-    gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
-    gtk_widget_set_parent (popover, label);
-    gtk_widget_add_css_class (popover, "xd-preview");
-    g_object_set_data (G_OBJECT (label), "image-popover", popover);
-
-    g_signal_connect (motion, "enter", G_CALLBACK (on_chip_enter), self);
-    g_signal_connect (motion, "leave", G_CALLBACK (on_chip_leave), popover);
-    gtk_widget_add_controller (label, motion);
-    g_signal_connect (label, "destroy", G_CALLBACK (on_chip_destroyed), popover);
-  }
-
-  return label;
+  return preview;
 }
 
 static void
@@ -511,7 +521,7 @@ render_body (XdMessageRow *self)
                 }
 
               gtk_box_append (GTK_BOX (self->body),
-                              make_image_chip (self, path, ++images));
+                              make_image_preview (self, path, ++images));
               continue;
             }
 
