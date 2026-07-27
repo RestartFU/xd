@@ -550,10 +550,9 @@ append_row (XdChatView    *self,
             XdMessageKind  kind,
             const char    *text)
 {
-  XdMessageRow *row = xd_message_row_new (kind, text);
-
-  if (self->remote != NULL)
-    xd_message_row_set_remote (row, self->remote);
+  XdMessageRow *row = self->remote != NULL
+    ? xd_message_row_new_remote (kind, text, self->remote)
+    : xd_message_row_new (kind, text);
 
   gtk_box_append (self->transcript, GTK_WIDGET (row));
   if (!self->rendering_transcript)

@@ -42,7 +42,7 @@ endif
 # which needs the parser and nothing else.
 xd_core_deps = [glib_dep, gio_dep, json_dep, sqlite_dep, pango_dep, cmark_dep]
 if has_server
-  xd_core_deps += util_dep
+  xd_core_deps += [util_dep, dependency('gdk-pixbuf-2.0')]
 endif
 
 xd_core_inc = include_directories('.')

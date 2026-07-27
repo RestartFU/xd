@@ -25,6 +25,9 @@ G_DECLARE_FINAL_TYPE (XdMessageRow, xd_message_row, XD, MESSAGE_ROW, AdwBin)
  */
 XdMessageRow *xd_message_row_new         (XdMessageKind  kind,
                                           const char    *text);
+XdMessageRow *xd_message_row_new_remote  (XdMessageKind   kind,
+                                          const char     *text,
+                                          XdRemoteClient *remote);
 void          xd_message_row_make_workflow (XdMessageRow *self,
                                              const char   *run_id,
                                              const char   *url);

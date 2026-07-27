@@ -10,6 +10,7 @@
 #include "util/git-info.h"
 #include "util/worktree.h"
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <json-glib/json-glib.h>
 #include <string.h>
 #include <glib/gstdio.h>
@@ -1570,6 +1571,8 @@ handle_image_read (Connection *connection,
                    JsonObject *request)
 {
   const char *path = member_string (request, "path");
+  gboolean preview =
+    json_object_get_boolean_member_with_default (request, "preview", FALSE);
   g_autofree char *directory = NULL;
   g_autofree char *canonical_directory = NULL;
   g_autofree char *canonical_path = NULL;
@@ -1577,6 +1580,7 @@ handle_image_read (Connection *connection,
   g_autofree char *contents = NULL;
   g_autofree char *encoded = NULL;
   g_autoptr (GError) error = NULL;
+  g_autoptr (GdkPixbuf) thumbnail = NULL;
   gsize length = 0;
 
   directory = g_build_filename (g_get_user_cache_dir (), "xd",
@@ -1600,7 +1604,22 @@ handle_image_read (Connection *connection,
       return;
     }
 
-  if (!g_file_get_contents (canonical_path, &contents, &length, &error))
+  if (preview)
+    {
+      thumbnail = gdk_pixbuf_new_from_file_at_scale (
+        canonical_path, 640, 360, TRUE, &error);
+      if (thumbnail != NULL &&
+          !gdk_pixbuf_save_to_buffer (
+            thumbnail, &contents, &length, "png", &error, NULL))
+        g_clear_object (&thumbnail);
+    }
+  else if (!g_file_get_contents (canonical_path, &contents, &length, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  if (preview && thumbnail == NULL)
     {
       send_error (connection, error->message);
       return;

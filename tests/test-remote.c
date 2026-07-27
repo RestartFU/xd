@@ -8,6 +8,7 @@
 #include "storage/storage.h"
 #include "util/worktree.h"
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
 #include <signal.h>
@@ -1464,9 +1465,6 @@ turn_was_stored (gpointer user_data)
 static void
 test_images_are_uploaded_to_the_daemon (void)
 {
-  static const guint8 png[] = {
-    0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
-  };
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
@@ -1477,8 +1475,13 @@ test_images_are_uploaded_to_the_daemon (void)
   g_autofree char *encoded = NULL;
   g_autofree char *uploaded = NULL;
   g_autofree char *contents = NULL;
+  g_autofree char *png = NULL;
   g_autofree guchar *preview_data = NULL;
+  g_autoptr (GdkPixbuf) image = NULL;
+  g_autoptr (GdkPixbufLoader) preview_loader = NULL;
   g_autoptr (GPtrArray) messages = NULL;
+  g_autoptr (GError) error = NULL;
+  gsize png_length = 0;
   gsize preview_length = 0;
   RemoteReply sent = { 0 };
   RemoteReply preview = { 0 };
@@ -1486,6 +1489,11 @@ test_images_are_uploaded_to_the_daemon (void)
   StoredTurn stored;
 
   daemon_start (&daemon);
+  image = gdk_pixbuf_new (GDK_COLORSPACE_RGB, FALSE, 8, 1280, 720);
+  gdk_pixbuf_fill (image, 0x336699ff);
+  g_assert_true (gdk_pixbuf_save_to_buffer (
+    image, &png, &png_length, "png", &error, NULL));
+  g_assert_no_error (error);
 
   bin_dir = g_build_filename (daemon.dir, "bin", NULL);
   program = g_build_filename (bin_dir, "claude", NULL);
@@ -1509,7 +1517,7 @@ test_images_are_uploaded_to_the_daemon (void)
 
   client = xd_remote_client_new ("127.0.0.1", daemon.port);
   tree = paired_tree (&daemon, client);
-  encoded = g_base64_encode (png, sizeof png);
+  encoded = g_base64_encode ((const guchar *) png, png_length);
 
   {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -1588,7 +1596,7 @@ test_images_are_uploaded_to_the_daemon (void)
 
   g_assert_nonnull (uploaded);
   g_assert_true (g_file_get_contents (uploaded, &contents, NULL, NULL));
-  g_assert_cmpmem (contents, sizeof png, png, sizeof png);
+  g_assert_cmpmem (contents, png_length, png, png_length);
 
   /* The daemon path in the transcript does not exist on a paired device.
    * Preview bytes are read lazily through the authenticated connection. */
@@ -1611,7 +1619,44 @@ test_images_are_uploaded_to_the_daemon (void)
       json_object_get_string_member_with_default (preview.reply, "data", NULL);
     g_assert_nonnull (preview_encoded);
     preview_data = g_base64_decode (preview_encoded, &preview_length);
-    g_assert_cmpmem (preview_data, preview_length, png, sizeof png);
+    g_assert_cmpmem (preview_data, preview_length, png, png_length);
+  }
+
+  /* Inline previews are bounded thumbnails, not repeated full-size uploads. */
+  g_clear_pointer (&preview_data, g_free);
+  json_object_unref (preview.reply);
+  g_free (preview.wait.failure);
+  preview = (RemoteReply) { 0 };
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    const char *preview_encoded;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "image-read");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, uploaded);
+    json_builder_set_member_name (builder, "preview");
+    json_builder_add_boolean_value (builder, TRUE);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &preview);
+    preview_encoded =
+      json_object_get_string_member_with_default (preview.reply, "data", NULL);
+    g_assert_nonnull (preview_encoded);
+    preview_data = g_base64_decode (preview_encoded, &preview_length);
+
+    preview_loader = gdk_pixbuf_loader_new ();
+    g_assert_true (gdk_pixbuf_loader_write (
+      preview_loader, preview_data, preview_length, &error));
+    g_assert_true (gdk_pixbuf_loader_close (preview_loader, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (
+      gdk_pixbuf_get_width (gdk_pixbuf_loader_get_pixbuf (preview_loader)),
+      ==, 640);
+    g_assert_cmpint (
+      gdk_pixbuf_get_height (gdk_pixbuf_loader_get_pixbuf (preview_loader)),
+      ==, 360);
   }
 
   unlink (uploaded);

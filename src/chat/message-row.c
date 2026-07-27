@@ -111,9 +111,10 @@ on_link_activated (GtkLabel   *label,
   return TRUE;
 }
 
-XdMessageRow *
-xd_message_row_new (XdMessageKind  kind,
-                    const char    *text)
+static XdMessageRow *
+message_row_new (XdMessageKind   kind,
+                 const char     *text,
+                 XdRemoteClient *remote)
 {
   XdMessageRow *self = g_object_new (XD_TYPE_MESSAGE_ROW, NULL);
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
@@ -122,7 +123,7 @@ xd_message_row_new (XdMessageKind  kind,
   self->kind = kind;
   self->text = g_string_new (text != NULL ? text : "");
   self->card = card;
-
+  self->remote = remote != NULL ? g_object_ref (remote) : NULL;
 
   self->body = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   render_body (self);
@@ -161,6 +162,28 @@ xd_message_row_new (XdMessageKind  kind,
   adw_bin_set_child (ADW_BIN (self), card);
 
   return self;
+}
+
+XdMessageRow *
+xd_message_row_new (XdMessageKind  kind,
+                    const char    *text)
+{
+  return message_row_new (kind, text, NULL);
+}
+
+/*
+ * Remote must be known before the first render. Constructing a local row and
+ * changing it afterwards starts one local image-loader thread per attachment,
+ * only to cancel every one and download the same images from the daemon.
+ */
+XdMessageRow *
+xd_message_row_new_remote (XdMessageKind   kind,
+                           const char     *text,
+                           XdRemoteClient *remote)
+{
+  g_return_val_if_fail (XD_IS_REMOTE_CLIENT (remote), NULL);
+
+  return message_row_new (kind, text, remote);
 }
 
 static void
@@ -743,6 +766,8 @@ load_remote_preview (XdMessageRow *self,
   json_builder_add_string_value (builder, "image-read");
   json_builder_set_member_name (builder, "path");
   json_builder_add_string_value (builder, path);
+  json_builder_set_member_name (builder, "preview");
+  json_builder_add_boolean_value (builder, TRUE);
   json_builder_end_object (builder);
   request_node = json_builder_get_root (builder);
 
