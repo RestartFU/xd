@@ -241,6 +241,194 @@ render_inline_children (GString    *out,
     render_inline (out, child, autolink);
 }
 
+/*
+ * libcmark implements CommonMark, whose core syntax deliberately excludes
+ * tables. Agent replies commonly use the GitHub table extension, though, and
+ * showing its delimiter row as prose makes the result especially hard to
+ * read. Recognise only complete, unambiguous table paragraphs here and keep
+ * libcmark responsible for everything else.
+ */
+static void
+append_inline_plain (GString    *out,
+                     cmark_node *node)
+{
+  cmark_node_type type = cmark_node_get_type (node);
+
+  switch (type)
+    {
+    case CMARK_NODE_TEXT:
+    case CMARK_NODE_CODE:
+    case CMARK_NODE_HTML_INLINE:
+      g_string_append (out, cmark_node_get_literal (node));
+      break;
+
+    case CMARK_NODE_SOFTBREAK:
+    case CMARK_NODE_LINEBREAK:
+      g_string_append_c (out, '\n');
+      break;
+
+    default:
+      for (cmark_node *child = cmark_node_first_child (node);
+           child != NULL;
+           child = cmark_node_next (child))
+        append_inline_plain (out, child);
+      break;
+    }
+}
+
+static GPtrArray *
+split_table_row (const char *line)
+{
+  g_autofree char *copy = g_strdup (line);
+  g_auto (GStrv) pieces = NULL;
+  GPtrArray *cells;
+  char *contents;
+  gsize length;
+
+  contents = g_strstrip (copy);
+  if (strchr (contents, '|') == NULL)
+    return NULL;
+
+  if (*contents == '|')
+    contents++;
+
+  length = strlen (contents);
+  if (length > 0 && contents[length - 1] == '|')
+    contents[length - 1] = '\0';
+
+  pieces = g_strsplit (contents, "|", -1);
+  cells = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; pieces[i] != NULL; i++)
+    g_ptr_array_add (cells, g_strdup (g_strstrip (pieces[i])));
+
+  return cells;
+}
+
+static gboolean
+is_table_delimiter (const char *cell)
+{
+  const char *at = cell;
+  guint dashes = 0;
+
+  if (*at == ':')
+    at++;
+  while (*at == '-')
+    {
+      dashes++;
+      at++;
+    }
+  if (*at == ':')
+    at++;
+
+  return dashes >= 3 && *at == '\0';
+}
+
+static void
+append_padding (GString *out,
+                guint    count)
+{
+  while (count-- > 0)
+    g_string_append_c (out, ' ');
+}
+
+static gboolean
+render_table (GString    *out,
+              cmark_node *paragraph)
+{
+  g_autoptr (GString) plain = g_string_new (NULL);
+  g_auto (GStrv) lines = NULL;
+  g_autoptr (GPtrArray) rows =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) g_ptr_array_unref);
+  g_autoptr (GPtrArray) header = NULL;
+  g_autoptr (GPtrArray) delimiter = NULL;
+  g_autofree guint *widths = NULL;
+  guint columns;
+
+  for (cmark_node *child = cmark_node_first_child (paragraph);
+       child != NULL;
+       child = cmark_node_next (child))
+    append_inline_plain (plain, child);
+
+  lines = g_strsplit (plain->str, "\n", -1);
+  if (lines[0] == NULL || lines[1] == NULL)
+    return FALSE;
+
+  header = split_table_row (lines[0]);
+  delimiter = split_table_row (lines[1]);
+  if (header == NULL || delimiter == NULL)
+    return FALSE;
+
+  columns = delimiter->len;
+  if (columns == 0 || header->len != columns)
+    return FALSE;
+
+  for (guint column = 0; column < columns; column++)
+    if (!is_table_delimiter (g_ptr_array_index (delimiter, column)))
+      return FALSE;
+
+  g_ptr_array_add (rows, g_steal_pointer (&header));
+
+  for (guint line = 2; lines[line] != NULL; line++)
+    {
+      GPtrArray *row = split_table_row (lines[line]);
+
+      if (row == NULL || row->len != columns)
+        {
+          g_clear_pointer (&row, g_ptr_array_unref);
+          return FALSE;
+        }
+      g_ptr_array_add (rows, row);
+    }
+
+  widths = g_new0 (guint, columns);
+  for (guint row = 0; row < rows->len; row++)
+    {
+      GPtrArray *cells = g_ptr_array_index (rows, row);
+
+      for (guint column = 0; column < columns; column++)
+        widths[column] = MAX (
+          widths[column],
+          (guint) g_utf8_strlen (g_ptr_array_index (cells, column), -1));
+    }
+
+  g_string_append (out, "<tt>");
+  for (guint row = 0; row < rows->len; row++)
+    {
+      GPtrArray *cells = g_ptr_array_index (rows, row);
+
+      if (row > 0)
+        g_string_append_c (out, '\n');
+      if (row == 0)
+        g_string_append (out, "<b>");
+
+      for (guint column = 0; column < columns; column++)
+        {
+          const char *cell = g_ptr_array_index (cells, column);
+          guint width = (guint) g_utf8_strlen (cell, -1);
+
+          if (column > 0)
+            g_string_append (out, " \xe2\x94\x82 ");
+          append_escaped (out, cell, -1);
+          append_padding (out, widths[column] - width);
+        }
+
+      if (row == 0)
+        {
+          g_string_append (out, "</b>\n");
+          for (guint column = 0; column < columns; column++)
+            {
+              if (column > 0)
+                g_string_append (out, "\xe2\x94\x80\xe2\x94\xbc\xe2\x94\x80");
+              for (guint i = 0; i < widths[column]; i++)
+                g_string_append (out, "\xe2\x94\x80");
+            }
+        }
+    }
+  g_string_append (out, "</tt>");
+
+  return TRUE;
+}
+
 static void render_block (GString    *out,
                           cmark_node *node,
                           guint       depth);
@@ -336,7 +524,8 @@ render_block (GString    *out,
       break;
 
     case CMARK_NODE_PARAGRAPH:
-      render_inline_children (out, node, TRUE);
+      if (!render_table (out, node))
+        render_inline_children (out, node, TRUE);
       break;
 
     case CMARK_NODE_HEADING:

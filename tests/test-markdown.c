@@ -204,6 +204,36 @@ test_commonmark_inline_nesting (void)
 }
 
 static void
+test_tables (void)
+{
+  g_autofree char *out = xd_markdown_to_pango (
+    "| metric | old | new |\n"
+    "|---|---|---|\n"
+    "| ack_rtt_p50 | 269ms | 41ms |\n"
+    "| corrections | 0 | 0 |");
+
+  g_assert_nonnull (strstr (out, "<tt><b>metric"));
+  g_assert_nonnull (strstr (out, "ack_rtt_p50"));
+  g_assert_nonnull (strstr (out, "269ms"));
+  g_assert_nonnull (strstr (out, "\xe2\x94\x82"));
+  g_assert_nonnull (strstr (out, "\xe2\x94\xbc"));
+  g_assert_null (strstr (out, "|---|"));
+  assert_valid_markup (out);
+}
+
+static void
+test_pipe_prose_is_not_a_table (void)
+{
+  g_autofree char *out = xd_markdown_to_pango (
+    "Run foo | bar.\n"
+    "This is still ordinary prose.");
+
+  g_assert_null (strstr (out, "<tt>"));
+  g_assert_nonnull (strstr (out, "foo | bar"));
+  assert_valid_markup (out);
+}
+
+static void
 test_images_and_unsafe_links (void)
 {
   g_autofree char *image =
@@ -249,6 +279,8 @@ main (int   argc,
   g_test_add_func ("/markdown/bullets", test_list_bullets);
   g_test_add_func ("/markdown/commonmark-blocks", test_commonmark_blocks);
   g_test_add_func ("/markdown/commonmark-inline", test_commonmark_inline_nesting);
+  g_test_add_func ("/markdown/tables", test_tables);
+  g_test_add_func ("/markdown/pipe-prose", test_pipe_prose_is_not_a_table);
   g_test_add_func ("/markdown/images-and-unsafe-links",
                    test_images_and_unsafe_links);
   g_test_add_func ("/markdown/raw-html", test_raw_html_stays_literal);
