@@ -321,10 +321,6 @@ scroll_to_bottom (GtkWidget     *widget,
   double upper = gtk_adjustment_get_upper (adjustment);
   double page_size = gtk_adjustment_get_page_size (adjustment);
 
-  gtk_adjustment_set_value (adjustment,
-                            MAX (gtk_adjustment_get_lower (adjustment),
-                                 upper - page_size));
-
   if (upper == self->scroll_upper && page_size == self->scroll_page_size)
     self->scroll_stable_frames++;
   else
@@ -335,11 +331,15 @@ scroll_to_bottom (GtkWidget     *widget,
 
   /*
    * Row allocation can update the adjustment after this frame's callback.
-   * Wait until a later frame sees the same range before letting go, so joining
-   * a live chat lands below both its stored transcript and its in-flight rows.
+   * Wait until a later frame sees the same range, then jump once. Moving on
+   * every intermediate frame visibly animated through a joined transcript
+   * and again when steering rebuilt the tail.
    */
   if (self->scroll_stable_frames >= 1)
     {
+      gtk_adjustment_set_value (
+        adjustment,
+        MAX (gtk_adjustment_get_lower (adjustment), upper - page_size));
       self->scroll_tick = 0;
       return G_SOURCE_REMOVE;
     }
