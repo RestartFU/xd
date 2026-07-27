@@ -64,6 +64,7 @@ typedef struct
 /* Wide enough for code and a diff line, narrow enough that a line of prose
  * is one glance. */
 #define CONTENT_WIDTH 860
+#define TRANSCRIPT_PAGE_SIZE 100
 
 struct _XdChatView
 {
@@ -128,6 +129,9 @@ struct _XdChatView
   GtkBox *transcript;
   GtkScrolledWindow *scroller;
   gboolean follow_bottom;
+  gboolean rendering_transcript;
+  guint transcript_limit;
+  double history_bottom_distance;
   GtkTextView *composer;
   GtkButton *send_button;
   gboolean send_state_set;
@@ -211,6 +215,7 @@ static void send_current_message (XdChatView *self);
 static void keep_working_last (XdChatView *self);
 static void set_working (XdChatView *self, gboolean working);
 static void on_storage_changed (XdStorage *storage, gpointer user_data);
+static void load_transcript (XdChatView *self);
 static void load_remote_transcript (XdChatView *self);
 static void load_remote_options (XdChatView *self);
 static void append_tool_line (XdChatView *self, const char *name);
@@ -350,6 +355,16 @@ on_scroll_adjustment_changed (GtkAdjustment *adjustment,
 
   if (self->follow_bottom)
     set_scroll_at_bottom (adjustment);
+  else if (self->history_bottom_distance >= 0)
+    {
+      double value =
+        MAX (gtk_adjustment_get_lower (adjustment),
+             gtk_adjustment_get_upper (adjustment) -
+             self->history_bottom_distance);
+
+      if (gtk_adjustment_get_value (adjustment) != value)
+        gtk_adjustment_set_value (adjustment, value);
+    }
 }
 
 static gboolean
@@ -361,6 +376,7 @@ on_transcript_scrolled (GtkEventControllerScroll *controller,
   XdChatView *self = user_data;
 
   self->follow_bottom = FALSE;
+  self->history_bottom_distance = -1;
   return GDK_EVENT_PROPAGATE;
 }
 
@@ -369,6 +385,7 @@ static void
 queue_scroll_to_bottom (XdChatView *self)
 {
   self->follow_bottom = TRUE;
+  self->history_bottom_distance = -1;
   set_scroll_at_bottom (
     gtk_scrolled_window_get_vadjustment (self->scroller));
 }
@@ -384,8 +401,11 @@ append_row (XdChatView    *self,
     xd_message_row_set_remote (row, self->remote);
 
   gtk_box_append (self->transcript, GTK_WIDGET (row));
-  keep_working_last (self);
-  queue_scroll_to_bottom (self);
+  if (!self->rendering_transcript)
+    {
+      keep_working_last (self);
+      queue_scroll_to_bottom (self);
+    }
 
   return row;
 }
@@ -451,8 +471,11 @@ append_tool_line (XdChatView *self,
                      : g_strdup_printf ("%d tool calls", count);
   gtk_expander_set_label (GTK_EXPANDER (expander), title);
 
-  keep_working_last (self);
-  queue_scroll_to_bottom (self);
+  if (!self->rendering_transcript)
+    {
+      keep_working_last (self);
+      queue_scroll_to_bottom (self);
+    }
 }
 
 static void
@@ -786,18 +809,70 @@ set_working (XdChatView *self,
   self->working_timer = g_timeout_add_seconds (1, update_working_label, self);
 }
 
+static void
+on_load_earlier_clicked (GtkButton *button,
+                         gpointer   user_data)
+{
+  XdChatView *self = user_data;
+  GtkAdjustment *adjustment =
+    gtk_scrolled_window_get_vadjustment (self->scroller);
+
+  /*
+   * Rebuilding with older rows increases the range above the current view.
+   * Preserve its distance from the bottom while GTK settles the new layout.
+   */
+  self->follow_bottom = FALSE;
+  self->history_bottom_distance =
+    gtk_adjustment_get_upper (adjustment) -
+    gtk_adjustment_get_value (adjustment);
+  self->transcript_limit =
+    MIN (G_MAXUINT - TRANSCRIPT_PAGE_SIZE, self->transcript_limit) +
+    TRANSCRIPT_PAGE_SIZE;
+
+  if (self->remote != NULL)
+    load_remote_transcript (self);
+  else
+    load_transcript (self);
+}
+
+static void
+append_history_button (XdChatView *self,
+                       guint       hidden)
+{
+  guint count = MIN (hidden, TRANSCRIPT_PAGE_SIZE);
+  g_autofree char *label = g_strdup_printf (
+    "Load %u earlier message%s", count, count == 1 ? "" : "s");
+  GtkWidget *button = gtk_button_new_with_label (label);
+
+  gtk_widget_set_halign (button, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_bottom (button, 8);
+  gtk_widget_add_css_class (button, "flat");
+  gtk_widget_add_css_class (button, "pill");
+  g_signal_connect (button, "clicked",
+                    G_CALLBACK (on_load_earlier_clicked), self);
+  gtk_box_append (self->transcript, button);
+}
+
 /*
- * Draws a conversation, oldest first.
+ * Draws the recent conversation, oldest first.
  *
- * Where the messages came from is not this function's business: the local
- * database and a daemon both hand over the same rows, and a remote chat reads
- * like a local one because it is drawn by the same code.
+ * GtkBox does not virtualize. Rendering an unbounded tool-heavy transcript
+ * created thousands of widgets before first paint, so older rows are loaded
+ * explicitly in fixed pages.
  */
 static void
 render_transcript (XdChatView *self,
                    GPtrArray  *messages)
 {
-  for (guint i = 0; i < messages->len; i++)
+  guint start =
+    messages->len > self->transcript_limit
+      ? messages->len - self->transcript_limit : 0;
+
+  self->rendering_transcript = TRUE;
+  if (start > 0)
+    append_history_button (self, start);
+
+  for (guint i = start; i < messages->len; i++)
     {
       const XdMessage *message = g_ptr_array_index (messages, i);
 
@@ -864,6 +939,11 @@ render_transcript (XdChatView *self,
       else
         append_row (self, xd_message_kind_from_role (message->role), message->content);
     }
+
+  self->rendering_transcript = FALSE;
+  keep_working_last (self);
+  if (self->follow_bottom)
+    queue_scroll_to_bottom (self);
 }
 
 static void
@@ -3294,6 +3374,9 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
    * current frame until the replacement is complete. */
   if (self->chat != chat || self->remote != client)
     {
+      self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
+      self->follow_bottom = TRUE;
+      self->history_bottom_distance = -1;
       g_cancellable_cancel (self->fetching);
       g_clear_object (&self->fetching);
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
@@ -3336,8 +3419,17 @@ xd_chat_view_set_chat (XdChatView *self,
                        XdNode     *chat)
 {
   Turn *turn;
+  gboolean changed;
 
   g_return_if_fail (XD_IS_CHAT_VIEW (self));
+
+  changed = self->chat != chat || self->remote != NULL;
+  if (changed)
+    {
+      self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
+      self->follow_bottom = TRUE;
+      self->history_bottom_distance = -1;
+    }
 
   /* Whatever a daemon was still going to say about the last chat is no longer
    * about anything on screen. */
@@ -3774,6 +3866,8 @@ xd_chat_view_init (XdChatView *self)
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
+  self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
+  self->history_bottom_distance = -1;
   self->header = adw_header_bar_new ();
 
   self->title = ADW_WINDOW_TITLE (adw_window_title_new ("xd", NULL));
