@@ -119,10 +119,7 @@ struct _XdChatView
   GtkStack *stack;
   GtkBox *transcript;
   GtkScrolledWindow *scroller;
-  guint scroll_tick;
-  double scroll_upper;
-  double scroll_page_size;
-  guint scroll_stable_frames;
+  gboolean follow_bottom;
   GtkTextView *composer;
   GtkButton *send_button;
   GtkWidget *composer_area;
@@ -322,75 +319,47 @@ worked_for_row (gint64 seconds)
 static void
 set_scroll_at_bottom (GtkAdjustment *adjustment)
 {
-  gtk_adjustment_set_value (
-    adjustment,
+  double bottom =
     MAX (gtk_adjustment_get_lower (adjustment),
          gtk_adjustment_get_upper (adjustment) -
-         gtk_adjustment_get_page_size (adjustment)));
+         gtk_adjustment_get_page_size (adjustment));
+
+  if (gtk_adjustment_get_value (adjustment) != bottom)
+    gtk_adjustment_set_value (adjustment, bottom);
 }
 
 /*
- * GtkAdjustment updates its range during layout, before that frame is drawn.
- * Follow those updates synchronously while a bottom jump is pending. Waiting
- * for a later tick leaves the old position visible and makes a join or send
- * look like it scrolled through the transcript.
+ * Layout can change the range after any finite number of frames: wrapped text,
+ * fonts, and late remote rows all do it. Keep the adjustment pinned until the
+ * user scrolls, instead of guessing when layout has finished.
  */
 static void
-on_scroll_range_changed (GtkAdjustment *adjustment,
-                         gpointer       user_data)
+on_scroll_adjustment_changed (GtkAdjustment *adjustment,
+                              gpointer       user_data)
 {
   XdChatView *self = user_data;
 
-  if (self->scroll_tick != 0)
+  if (self->follow_bottom)
     set_scroll_at_bottom (adjustment);
 }
 
 static gboolean
-scroll_to_bottom (GtkWidget     *widget,
-                  GdkFrameClock *frame_clock,
-                  gpointer       user_data)
+on_transcript_scrolled (GtkEventControllerScroll *controller,
+                        double                    dx,
+                        double                    dy,
+                        gpointer                  user_data)
 {
   XdChatView *self = user_data;
-  GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (self->scroller);
-  double upper = gtk_adjustment_get_upper (adjustment);
-  double page_size = gtk_adjustment_get_page_size (adjustment);
 
-  if (upper == self->scroll_upper && page_size == self->scroll_page_size)
-    self->scroll_stable_frames++;
-  else
-    self->scroll_stable_frames = 0;
-
-  self->scroll_upper = upper;
-  self->scroll_page_size = page_size;
-
-  /*
-   * Row allocation can update the adjustment after this frame's callback.
-   * Keep the range handler active until a later frame sees the same range, so
-   * late allocations cannot leave the viewport above the final row.
-   */
-  if (self->scroll_stable_frames >= 1)
-    {
-      set_scroll_at_bottom (adjustment);
-      self->scroll_tick = 0;
-      return G_SOURCE_REMOVE;
-    }
-
-  return G_SOURCE_CONTINUE;
+  self->follow_bottom = FALSE;
+  return GDK_EVENT_PROPAGATE;
 }
 
-/* Follow layout until a freshly appended row is part of the scroll range. */
+/* Joining, sending, and new output all explicitly resume bottom following. */
 static void
 queue_scroll_to_bottom (XdChatView *self)
 {
-  self->scroll_upper = -1;
-  self->scroll_page_size = -1;
-  self->scroll_stable_frames = 0;
-
-  if (self->scroll_tick == 0)
-    self->scroll_tick =
-      gtk_widget_add_tick_callback (GTK_WIDGET (self->scroller),
-                                    scroll_to_bottom, self, NULL);
-
+  self->follow_bottom = TRUE;
   set_scroll_at_bottom (
     gtk_scrolled_window_get_vadjustment (self->scroller));
 }
@@ -3684,13 +3653,6 @@ xd_chat_view_dispose (GObject *object)
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
 
-  if (self->scroll_tick != 0)
-    {
-      gtk_widget_remove_tick_callback (GTK_WIDGET (self->scroller),
-                                       self->scroll_tick);
-      self->scroll_tick = 0;
-    }
-
   g_clear_handle_id (&self->working_timer, g_source_remove);
   self->working_label = NULL;
   g_cancellable_cancel (self->fetching);
@@ -3757,9 +3719,21 @@ xd_chat_view_init (XdChatView *self)
   gtk_widget_set_valign (GTK_WIDGET (self->transcript), GTK_ALIGN_START);
 
   self->scroller = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
-  g_signal_connect (
-    gtk_scrolled_window_get_vadjustment (self->scroller), "changed",
-    G_CALLBACK (on_scroll_range_changed), self);
+  {
+    GtkAdjustment *adjustment =
+      gtk_scrolled_window_get_vadjustment (self->scroller);
+    GtkEventController *scroll =
+      gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+
+    g_signal_connect (adjustment, "changed",
+                      G_CALLBACK (on_scroll_adjustment_changed), self);
+    g_signal_connect (adjustment, "value-changed",
+                      G_CALLBACK (on_scroll_adjustment_changed), self);
+    gtk_event_controller_set_propagation_phase (scroll, GTK_PHASE_CAPTURE);
+    g_signal_connect (scroll, "scroll",
+                      G_CALLBACK (on_transcript_scrolled), self);
+    gtk_widget_add_controller (GTK_WIDGET (self->scroller), scroll);
+  }
 
   /* No scrollbar here either: GTK's overlay bar never quite goes away, and a
    * line beside the conversation was the first thing the eye caught. The
