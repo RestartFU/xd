@@ -1871,8 +1871,6 @@ xd_sidebar_init (XdSidebar *self)
 {
   GtkWidget *toolbar = adw_toolbar_view_new ();
   GtkWidget *new_button = gtk_menu_button_new ();
-
-  GtkWidget *pair_button = gtk_button_new_from_icon_name ("network-server-symbolic");
   GtkWidget *scrolled = gtk_scrolled_window_new ();
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
 
@@ -1905,13 +1903,6 @@ xd_sidebar_init (XdSidebar *self)
   gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (new_button), "list-add-symbolic");
   gtk_widget_set_tooltip_text (new_button, "Add a workspace or a machine");
   adw_header_bar_pack_start (ADW_HEADER_BAR (self->header), new_button);
-
-  /* The window's action, not the sidebar's: pairing sets up a connection the
-   * whole window works through, and it is the window that owns it. It sits
-   * here because this is where the remote turns up. */
-  gtk_widget_set_tooltip_text (pair_button, "Connect to a Remote…");
-  gtk_actionable_set_action_name (GTK_ACTIONABLE (pair_button), "win.pair-remote");
-  adw_header_bar_pack_end (ADW_HEADER_BAR (self->header), pair_button);
 
   /*
    * The window's own title and buttons belong to the chat side.
