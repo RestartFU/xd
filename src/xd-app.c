@@ -206,6 +206,9 @@ static const char *XD_STYLE =
   ".xd-composer button, .xd-composer togglebutton,"
   " .xd-composer dropdown > button { background: none; border: none;"
   " box-shadow: none; padding: 4px 10px; }\n"
+  /* AdwButtonContent's icon and label sit in this internal box. Keep their
+   * gap explicit: theme defaults differ, and on macOS they can touch. */
+  ".xd-composer button buttoncontent > box { border-spacing: 6px; }\n"
   /* Settings, not statements: they say how the next message will be handled,
    * which is worth reading once and then ignoring. */
   ".xd-composer button label, .xd-composer dropdown label"
