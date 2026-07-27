@@ -86,11 +86,10 @@ append_untracked (GString    *patch,
 
       if (length >= 4 && at[0] == '?' && at[1] == '?' && at[2] == ' ')
         {
-#ifdef G_OS_WIN32
-          const char *empty = "NUL";
-#else
+          /* Git recognizes this sentinel itself on every platform. Passing
+           * Windows' NUL device instead makes Git for Windows silently omit
+           * the untracked file from the generated patch. */
           const char *empty = "/dev/null";
-#endif
           const char *path = at + 3;
           const char *diff_argv[] = {
             "git", "--no-pager", "diff", "--no-index", "--", empty, path, NULL
