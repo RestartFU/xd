@@ -97,6 +97,30 @@ test_formats_one_safe_layout (void)
   g_assert_nonnull (strstr (plain, "src/a.c  +1  −1"));
   g_assert_nonnull (strstr (plain, "old <value>"));
   g_assert_nonnull (strstr (plain, "Showing first 3 of 5 rows"));
+  g_assert_nonnull (strstr (markup, "background=\"#3a1d1b\""));
+  g_assert_nonnull (strstr (markup, "foreground=\"#f66151\""));
+}
+
+static void
+test_colours_complete_changed_lines (void)
+{
+  static const char *patch =
+    "@@ -1 +1 @@\n"
+    "-removed line\n"
+    "+added line\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, FALSE, 0);
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (pango_parse_markup (
+    markup, -1, 0, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (markup, "background=\"#3a1d1b\""));
+  g_assert_nonnull (strstr (markup, "foreground=\"#f66151\">removed line"));
+  g_assert_nonnull (strstr (markup, "background=\"#183522\""));
+  g_assert_nonnull (strstr (markup, "foreground=\"#57e389\">added line"));
 }
 
 int
@@ -111,6 +135,8 @@ main (int   argc,
                    test_keeps_meaningful_metadata);
   g_test_add_func ("/unified-diff/formats-one-safe-layout",
                    test_formats_one_safe_layout);
+  g_test_add_func ("/unified-diff/colours-complete-changed-lines",
+                   test_colours_complete_changed_lines);
 
   return g_test_run ();
 }

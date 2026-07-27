@@ -289,24 +289,37 @@ append_code_line_markup (GString          *markup,
                        : g_strdup ("    ");
   const char *marker = " ";
   const char *colour = "#9a9996";
+  const char *background = NULL;
 
   if (line->kind == XD_DIFF_LINE_ADDED)
     {
       marker = "+";
       colour = "#57e389";
+      background = "#183522";
     }
   else if (line->kind == XD_DIFF_LINE_REMOVED)
     {
       marker = "−";
       colour = "#f66151";
+      background = "#3a1d1b";
     }
 
   start_markup_row (markup, rendered);
-  g_string_append_printf (
-    markup,
-    "<span foreground=\"#77767b\">%s %s</span>"
-    " <span foreground=\"%s\" weight=\"bold\">%s</span> %s",
-    old_line, new_line, colour, marker, text);
+  if (background != NULL)
+    g_string_append_printf (
+      markup,
+      "<span background=\"%s\">"
+      "<span foreground=\"#c0bfbc\">%s %s</span>"
+      " <span foreground=\"%s\" weight=\"bold\">%s</span>"
+      " <span foreground=\"%s\">%s</span>"
+      "</span>",
+      background, old_line, new_line, colour, marker, colour, text);
+  else
+    g_string_append_printf (
+      markup,
+      "<span foreground=\"#77767b\">%s %s</span>"
+      " <span foreground=\"%s\" weight=\"bold\">%s</span> %s",
+      old_line, new_line, colour, marker, text);
 }
 
 char *
