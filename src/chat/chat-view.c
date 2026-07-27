@@ -442,8 +442,7 @@ show_tool_use (XdChatView *self,
     g_strcmp0 (summary, "file_change") == 0 ||
     (summary != NULL && g_str_has_prefix (summary, "file_change  "));
 
-  if (file_change && self->remote == NULL &&
-      gtk_toggle_button_get_active (self->auto_diff_toggle))
+  if (file_change && gtk_toggle_button_get_active (self->auto_diff_toggle))
     {
       if (!gtk_toggle_button_get_active (self->diff_button))
         gtk_toggle_button_set_active (self->diff_button, TRUE);
@@ -1061,9 +1060,15 @@ update_remote_options (XdChatView   *self,
   update_workspace_choice (self, chat, has_messages, linked_worktree);
   xd_terminal_panel_set_workdir (self->terminal,
                                  have_workdir ? chat->workdir : NULL);
+  xd_diff_pane_set_workdir (self->diff,
+                            have_workdir ? chat->workdir : NULL);
   gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->diff_button), have_workdir);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
                                have_workdir ? tooltip
+                                            : "This chat has no working directory");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->diff_button),
+                               have_workdir ? "Changed files"
                                             : "This chat has no working directory");
 
   xd_model_picker_set_selected (self->model_picker, chat->backend, chat->model);
@@ -1230,6 +1235,7 @@ on_remote_opened (XdRemoteClient *client,
     return;
 
   load_remote_transcript (self);
+  xd_diff_pane_refresh (self->diff);
   update_send_button (self);
 }
 
@@ -1240,13 +1246,23 @@ set_remote (XdChatView     *self,
             XdRemoteClient *client)
 {
   if (self->remote == client)
-    return;
+    {
+      xd_diff_pane_set_remote (
+        self->diff, client,
+        client != NULL && self->chat != NULL
+          ? xd_node_get_chat_id (self->chat) : NULL);
+      return;
+    }
 
   if (self->remote != NULL)
     g_signal_handlers_disconnect_by_data (self->remote, self);
 
   g_set_object (&self->remote, client);
   xd_terminal_panel_set_remote (self->terminal, client);
+  xd_diff_pane_set_remote (
+    self->diff, client,
+    client != NULL && self->chat != NULL
+      ? xd_node_get_chat_id (self->chat) : NULL);
 
   if (client != NULL)
     {
@@ -2988,18 +3004,12 @@ on_composer_key (GtkEventControllerKey *controller,
 
 /* --- public API ----------------------------------------------------------- */
 
-/*
- * Controls that inspect this machine.
- *
- * Diff and git actions are still local-only. Terminal is not: its pty can live
- * on the daemon, so that button remains useful for a remote chat.
- */
+/* Git actions mutate a checkout and remain local-only. Terminal and diff are
+ * read through the daemon when the chat lives remotely. */
 static void
 set_local_controls_visible (XdChatView *self,
                             gboolean    visible)
 {
-  gtk_widget_set_visible (GTK_WIDGET (self->diff_button), visible);
-  gtk_widget_set_visible (GTK_WIDGET (self->auto_diff_toggle), visible);
   gtk_widget_set_visible (GTK_WIDGET (self->git_actions), visible);
 
   if (visible)
@@ -3035,6 +3045,9 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   self->syncing_panes = FALSE;
   gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), FALSE);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
+                               "Reading the remote working directory");
+  gtk_widget_set_sensitive (GTK_WIDGET (self->diff_button), FALSE);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->diff_button),
                                "Reading the remote working directory");
 
   gtk_stack_set_visible_child_name (self->stack, "chat");

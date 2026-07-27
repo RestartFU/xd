@@ -1287,6 +1287,225 @@ handle_queue (Connection *connection,
   store_queued (connection, chat_id, text);
 }
 
+/* --- read-only repository views ------------------------------------------- */
+
+#define MAX_REMOTE_DIFF_BYTES (8 * 1024 * 1024)
+
+static const char *DIFF_BASE_SCRIPT =
+  "for ref in \"$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD)\" "
+  "origin/main origin/master main master; do "
+  "  [ -n \"$ref\" ] || continue; "
+  "  git rev-parse --verify --quiet \"$ref\" >/dev/null && { echo \"$ref\"; exit 0; }; "
+  "done";
+
+static gboolean
+diff_base_is_safe (const char *base)
+{
+  if (base == NULL || *base == '\0' || strlen (base) > 256)
+    return FALSE;
+
+  for (const char *at = base; *at != '\0'; at++)
+    {
+      if (!g_ascii_isalnum (*at) &&
+          *at != '-' && *at != '_' && *at != '.' && *at != '/')
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
+static gboolean
+diff_path_is_safe (const char *workdir,
+                   const char *repository,
+                   const char *path)
+{
+  g_autofree char *canonical = NULL;
+  g_autofree char *prefix = NULL;
+
+  if (path == NULL || *path == '\0' || g_path_is_absolute (path))
+    return FALSE;
+
+  canonical = g_canonicalize_filename (path, workdir);
+  prefix = g_strconcat (repository, G_DIR_SEPARATOR_S, NULL);
+
+  return g_strcmp0 (canonical, repository) == 0 ||
+         g_str_has_prefix (canonical, prefix);
+}
+
+static char *
+read_diff_output (const char        *workdir,
+                  const char *const *argv,
+                  GError           **error)
+{
+  g_autoptr (GSubprocessLauncher) launcher = NULL;
+  g_autoptr (GSubprocess) process = NULL;
+  g_autofree char *stderr_text = NULL;
+  char *output = NULL;
+
+  launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                        G_SUBPROCESS_FLAGS_STDERR_PIPE);
+  g_subprocess_launcher_set_cwd (launcher, workdir);
+  process = g_subprocess_launcher_spawnv (launcher, argv, error);
+  if (process == NULL)
+    return NULL;
+
+  if (!g_subprocess_communicate_utf8 (process, NULL, NULL, &output,
+                                      &stderr_text, error))
+    return NULL;
+
+  /*
+   * `git diff --no-index` exits 1 when it found a difference. The output is
+   * still the answer, so process status is deliberately not treated as an
+   * error. An empty failed command is different: surface git's explanation.
+   */
+  if ((output == NULL || *output == '\0') &&
+      !g_subprocess_get_successful (process) &&
+      stderr_text != NULL && *stderr_text != '\0')
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           g_strstrip (stderr_text));
+      g_free (output);
+      return NULL;
+    }
+
+  if (output != NULL && strlen (output) > MAX_REMOTE_DIFF_BYTES)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
+                           "That diff is too large to send over the remote connection.");
+      g_free (output);
+      return NULL;
+    }
+
+  return output != NULL ? output : g_strdup ("");
+}
+
+static void
+handle_diff_read (Connection *connection,
+                  JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *read = member_string (request, "read");
+  const char *path = member_string (request, "path");
+  const char *base = member_string (request, "base");
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdDaemonTurn) resolver = NULL;
+  g_autoptr (XdGitInfo) repository = NULL;
+  g_autofree char *workdir = NULL;
+  g_autofree char *range = NULL;
+  g_autofree char *output = NULL;
+  g_autoptr (GError) error = NULL;
+  const char *const *argv = NULL;
+  const char *base_argv[] = { "sh", "-c", DIFF_BASE_SCRIPT, NULL };
+  const char *working_status_argv[] = { "git", "status", "--porcelain", NULL };
+  const char *branch_status_argv[] = {
+    "git", "--no-pager", "diff", "--name-status", NULL, NULL
+  };
+  const char *working_file_argv[] = {
+    "git", "--no-pager", "diff", "HEAD", "--", path, NULL
+  };
+  const char *untracked_file_argv[] = {
+    "git", "--no-pager", "diff", "--no-index", "--", "/dev/null", path, NULL
+  };
+  const char *branch_file_argv[] = {
+    "git", "--no-pager", "diff", NULL, "--", path, NULL
+  };
+
+  if (chat_id == NULL || read == NULL)
+    {
+      send_error (connection, "diff-read needs a chat and read type.");
+      return;
+    }
+
+  chat = xd_storage_get_chat (self->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error != NULL ? error->message : "No such chat.");
+      return;
+    }
+
+  resolver = xd_daemon_turn_new (self->storage, self->root_path);
+  workdir = xd_daemon_turn_resolve_workdir (resolver, chat);
+  repository = xd_git_info_for_path (workdir);
+  if (workdir == NULL || repository == NULL)
+    {
+      send_error (connection, "This chat is not in a Git repository.");
+      return;
+    }
+
+  if (g_strcmp0 (read, "base") == 0)
+    {
+      argv = base_argv;
+    }
+  else if (g_strcmp0 (read, "working-status") == 0)
+    {
+      argv = working_status_argv;
+    }
+  else if (g_strcmp0 (read, "branch-status") == 0)
+    {
+      if (!diff_base_is_safe (base))
+        {
+          send_error (connection, "A valid base branch is required.");
+          return;
+        }
+
+      range = g_strdup_printf ("%s...HEAD", base);
+      branch_status_argv[4] = range;
+      argv = branch_status_argv;
+    }
+  else if (g_strcmp0 (read, "working-file") == 0 ||
+           g_strcmp0 (read, "untracked-file") == 0 ||
+           g_strcmp0 (read, "branch-file") == 0)
+    {
+      if (!diff_path_is_safe (workdir, repository->root, path))
+        {
+          send_error (connection, "That diff path is outside the repository.");
+          return;
+        }
+
+      if (g_strcmp0 (read, "working-file") == 0)
+        argv = working_file_argv;
+      else if (g_strcmp0 (read, "untracked-file") == 0)
+        argv = untracked_file_argv;
+      else
+        {
+          if (!diff_base_is_safe (base))
+            {
+              send_error (connection, "A valid base branch is required.");
+              return;
+            }
+
+          range = g_strdup_printf ("%s...HEAD", base);
+          branch_file_argv[3] = range;
+          argv = branch_file_argv;
+        }
+    }
+  else
+    {
+      send_error (connection, "No such diff read type.");
+      return;
+    }
+
+  output = read_diff_output (workdir, argv, &error);
+  if (output == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "ok");
+    json_builder_add_boolean_value (builder, TRUE);
+    json_builder_set_member_name (builder, "output");
+    json_builder_add_string_value (builder, output);
+    json_builder_end_object (builder);
+    send_json (connection, builder);
+  }
+}
+
 /* --- terminals ------------------------------------------------------------ */
 
 static XdRemoteTerminal *
@@ -1999,6 +2218,8 @@ dispatch (Connection *connection,
     handle_queue (connection, request, TRUE);
   else if (g_strcmp0 (op, "cancel") == 0)
     handle_cancel (connection, request);
+  else if (g_strcmp0 (op, "diff-read") == 0)
+    handle_diff_read (connection, request);
   else if (g_strcmp0 (op, "terminal-list") == 0)
     handle_terminal_list (connection, request);
   else if (g_strcmp0 (op, "terminal-open") == 0)

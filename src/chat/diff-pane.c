@@ -17,6 +17,8 @@ struct _XdDiffPane
 
   char *workdir;
   char *base;               /* what the branch is measured against */
+  XdRemoteClient *remote;
+  char *chat_id;
   gboolean branch_mode;
   GCancellable *cancellable;
 
@@ -35,6 +37,16 @@ typedef struct
   char *path;
   gboolean untracked;
 } DiffRequest;
+
+typedef enum
+{
+  DIFF_READ_BASE,
+  DIFF_READ_WORKING_STATUS,
+  DIFF_READ_BRANCH_STATUS,
+  DIFF_READ_WORKING_FILE,
+  DIFF_READ_UNTRACKED_FILE,
+  DIFF_READ_BRANCH_FILE,
+} DiffRead;
 
 /*
  * Where this branch left the one it came from.
@@ -68,10 +80,10 @@ diff_request_free (DiffRequest *request)
  * used here have output formats git keeps stable on purpose.
  */
 static void
-run_git (XdDiffPane          *self,
-         const char *const   *argv,
-         GAsyncReadyCallback  callback,
-         gpointer             user_data)
+run_local_git (XdDiffPane          *self,
+               const char *const   *argv,
+               GAsyncReadyCallback  callback,
+               gpointer             user_data)
 {
   g_autoptr (GSubprocessLauncher) launcher = NULL;
   g_autoptr (GSubprocess) process = NULL;
@@ -92,6 +104,170 @@ run_git (XdDiffPane          *self,
                                        callback, user_data);
 }
 
+static const char *
+diff_read_name (DiffRead read)
+{
+  switch (read)
+    {
+    case DIFF_READ_BASE:           return "base";
+    case DIFF_READ_WORKING_STATUS: return "working-status";
+    case DIFF_READ_BRANCH_STATUS:  return "branch-status";
+    case DIFF_READ_WORKING_FILE:   return "working-file";
+    case DIFF_READ_UNTRACKED_FILE: return "untracked-file";
+    case DIFF_READ_BRANCH_FILE:    return "branch-file";
+    default:                       return NULL;
+    }
+}
+
+/*
+ * The pane consumes command output the same way locally and remotely.
+ *
+ * Local reads spawn git here. Remote reads name the exact read-only view and
+ * let the daemon resolve the chat's own working directory; paths on the
+ * client machine are never used to reach into a remote repository.
+ */
+static void
+run_git (XdDiffPane          *self,
+         DiffRead             read,
+         const char          *path,
+         GAsyncReadyCallback  callback,
+         gpointer             user_data)
+{
+  if (self->remote != NULL)
+    {
+      g_autoptr (JsonBuilder) builder = json_builder_new ();
+      g_autoptr (JsonNode) request = NULL;
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "op");
+      json_builder_add_string_value (builder, "diff-read");
+      json_builder_set_member_name (builder, "chat");
+      json_builder_add_string_value (builder, self->chat_id);
+      json_builder_set_member_name (builder, "read");
+      json_builder_add_string_value (builder, diff_read_name (read));
+      if (path != NULL)
+        {
+          json_builder_set_member_name (builder, "path");
+          json_builder_add_string_value (builder, path);
+        }
+      if (self->base != NULL &&
+          (read == DIFF_READ_BRANCH_STATUS || read == DIFF_READ_BRANCH_FILE))
+        {
+          json_builder_set_member_name (builder, "base");
+          json_builder_add_string_value (builder, self->base);
+        }
+      json_builder_end_object (builder);
+
+      request = json_builder_get_root (builder);
+      xd_remote_client_call_async (self->remote, request, self->cancellable,
+                                   callback, user_data);
+      return;
+    }
+
+  switch (read)
+    {
+    case DIFF_READ_BASE:
+      {
+        const char *argv[] = { "sh", "-c", BASE_SCRIPT, NULL };
+
+        run_local_git (self, argv, callback, user_data);
+        break;
+      }
+    case DIFF_READ_WORKING_STATUS:
+      {
+        const char *argv[] = { "git", "status", "--porcelain", NULL };
+
+        run_local_git (self, argv, callback, user_data);
+        break;
+      }
+    case DIFF_READ_BRANCH_STATUS:
+      {
+        g_autofree char *range = g_strdup_printf ("%s...HEAD", self->base);
+        const char *argv[] = { "git", "--no-pager", "diff", "--name-status",
+                               range, NULL };
+
+        run_local_git (self, argv, callback, user_data);
+        break;
+      }
+    case DIFF_READ_WORKING_FILE:
+      {
+        const char *argv[] = {
+          "git", "--no-pager", "diff", "HEAD", "--", path, NULL
+        };
+
+        run_local_git (self, argv, callback, user_data);
+        break;
+      }
+    case DIFF_READ_UNTRACKED_FILE:
+      {
+        const char *argv[] = {
+          "git", "--no-pager", "diff", "--no-index", "--", "/dev/null", path, NULL
+        };
+
+        run_local_git (self, argv, callback, user_data);
+        break;
+      }
+    case DIFF_READ_BRANCH_FILE:
+      {
+        g_autofree char *range = g_strdup_printf ("%s...HEAD", self->base);
+        const char *argv[] = {
+          "git", "--no-pager", "diff", range, "--", path, NULL
+        };
+
+        run_local_git (self, argv, callback, user_data);
+        break;
+      }
+    }
+}
+
+static gboolean
+finish_git_read (GObject       *source,
+                 GAsyncResult  *result,
+                 char         **output,
+                 GError       **error)
+{
+  if (G_IS_SUBPROCESS (source))
+    return g_subprocess_communicate_utf8_finish (
+      G_SUBPROCESS (source), result, output, NULL, error);
+
+  if (XD_IS_REMOTE_CLIENT (source))
+    {
+      g_autoptr (JsonObject) reply =
+        xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, error);
+
+      if (reply == NULL)
+        return FALSE;
+
+      *output = g_strdup (
+        json_object_get_string_member_with_default (reply, "output", ""));
+      return TRUE;
+    }
+
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Unknown diff source.");
+  return FALSE;
+}
+
+static void
+show_read_error (XdDiffPane *self,
+                 GError     *error)
+{
+  const char *summary;
+
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    return;
+
+  summary = self->remote != NULL &&
+            g_strcmp0 (error != NULL ? error->message : NULL, "Unknown op") == 0
+    ? "Update xd on the remote machine"
+    : "Could not read changes";
+
+  gtk_label_set_label (self->summary, summary);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->summary),
+                               error != NULL ? error->message : NULL);
+  gtk_stack_set_visible_child_name (GTK_STACK (self->stack), "empty");
+}
+
 /* --- the diff of one file -------------------------------------------------- */
 
 static void
@@ -106,8 +282,7 @@ on_diff_read (GObject      *source,
   GtkTextIter at;
   g_auto (GStrv) lines = NULL;
 
-  if (!g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result,
-                                             &output, NULL, &error))
+  if (!finish_git_read (source, result, &output, &error))
     {
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
         g_debug ("cannot read the diff: %s", error->message);
@@ -168,31 +343,20 @@ load_diff (XdDiffPane *self,
 
   if (self->branch_mode)
     {
-      /* Three dots: what this branch added since it diverged, rather than
-       * every difference between the two tips. That is the change under
-       * review -- what a pull request shows. */
-      g_autofree char *range = g_strdup_printf ("%s...HEAD", self->base);
-      const char *argv[] = { "git", "--no-pager", "diff", range, "--", path, NULL };
-
-      run_git (self, argv, on_diff_read, request);
+      run_git (self, DIFF_READ_BRANCH_FILE, path, on_diff_read, request);
     }
   else if (untracked)
     {
       /* A file git does not know about has nothing to be compared against,
        * so it is diffed against nothing and reads as all additions. */
-      const char *argv[] = { "git", "--no-pager", "diff", "--no-index",
-                             "--", "/dev/null", path, NULL };
-
-      run_git (self, argv, on_diff_read, request);
+      run_git (self, DIFF_READ_UNTRACKED_FILE, path, on_diff_read, request);
     }
   else
     {
       /* Against HEAD rather than the index, so staged and unstaged changes
        * appear together -- an agent's work is not usually split between
        * them, and a half-shown diff would be misleading. */
-      const char *argv[] = { "git", "--no-pager", "diff", "HEAD", "--", path, NULL };
-
-      run_git (self, argv, on_diff_read, request);
+      run_git (self, DIFF_READ_WORKING_FILE, path, on_diff_read, request);
     }
 }
 
@@ -267,9 +431,9 @@ on_status_read (GObject      *source,
   g_auto (GStrv) lines = NULL;
   guint changed = 0;
 
-  if (!g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result,
-                                             &output, NULL, &error))
+  if (!finish_git_read (source, result, &output, &error))
     {
+      show_read_error (self, error);
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
         g_debug ("cannot read the status: %s", error->message);
       return;
@@ -339,19 +503,9 @@ static void
 read_changed_files (XdDiffPane *self)
 {
   if (self->branch_mode)
-    {
-      g_autofree char *range = g_strdup_printf ("%s...HEAD", self->base);
-      const char *argv[] = { "git", "--no-pager", "diff", "--name-status",
-                             range, NULL };
-
-      run_git (self, argv, on_status_read, self);
-    }
+    run_git (self, DIFF_READ_BRANCH_STATUS, NULL, on_status_read, self);
   else
-    {
-      const char *argv[] = { "git", "status", "--porcelain", NULL };
-
-      run_git (self, argv, on_status_read, self);
-    }
+    run_git (self, DIFF_READ_WORKING_STATUS, NULL, on_status_read, self);
 }
 
 static void
@@ -363,9 +517,11 @@ on_base_read (GObject      *source,
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
 
-  if (!g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result,
-                                             &output, NULL, &error))
-    return;
+  if (!finish_git_read (source, result, &output, &error))
+    {
+      show_read_error (self, error);
+      return;
+    }
 
   if (output != NULL)
     g_strstrip (output);
@@ -409,9 +565,7 @@ xd_diff_pane_refresh (XdDiffPane *self)
    * remotes are added while the pane sits there. */
   if (self->branch_mode)
     {
-      const char *argv[] = { "sh", "-c", BASE_SCRIPT, NULL };
-
-      run_git (self, argv, on_base_read, self);
+      run_git (self, DIFF_READ_BASE, NULL, on_base_read, self);
       return;
     }
 
@@ -429,6 +583,29 @@ xd_diff_pane_set_workdir (XdDiffPane *self,
 
   g_free (self->workdir);
   self->workdir = g_strdup (workdir);
+
+  xd_diff_pane_refresh (self);
+}
+
+void
+xd_diff_pane_set_remote (XdDiffPane     *self,
+                         XdRemoteClient *client,
+                         const char     *chat_id)
+{
+  g_return_if_fail (XD_IS_DIFF_PANE (self));
+  g_return_if_fail (client == NULL || XD_IS_REMOTE_CLIENT (client));
+  g_return_if_fail ((client == NULL) == (chat_id == NULL));
+
+  if (self->remote == client && g_strcmp0 (self->chat_id, chat_id) == 0)
+    return;
+
+  g_cancellable_cancel (self->cancellable);
+  g_clear_object (&self->cancellable);
+  self->cancellable = g_cancellable_new ();
+
+  g_set_object (&self->remote, client);
+  g_free (self->chat_id);
+  self->chat_id = g_strdup (chat_id);
 
   xd_diff_pane_refresh (self);
 }
@@ -457,8 +634,10 @@ xd_diff_pane_dispose (GObject *object)
 
   g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
+  g_clear_object (&self->remote);
   g_clear_pointer (&self->workdir, g_free);
   g_clear_pointer (&self->base, g_free);
+  g_clear_pointer (&self->chat_id, g_free);
 
   G_OBJECT_CLASS (xd_diff_pane_parent_class)->dispose (object);
 }

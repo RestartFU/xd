@@ -2,6 +2,8 @@
 
 #include <adwaita.h>
 
+#include "remote/client.h"
+
 G_BEGIN_DECLS
 
 #define XD_TYPE_DIFF_PANE (xd_diff_pane_get_type ())
@@ -13,6 +15,14 @@ XdDiffPane *xd_diff_pane_new         (void);
 /* The repository to read. NULL, or a directory outside one, shows nothing. */
 void        xd_diff_pane_set_workdir (XdDiffPane *self,
                                       const char *workdir);
+
+/*
+ * Reads through @client when set, using @chat_id to let the daemon resolve the
+ * repository it owns. Passing NULL for both returns to local git.
+ */
+void        xd_diff_pane_set_remote  (XdDiffPane     *self,
+                                      XdRemoteClient *client,
+                                      const char     *chat_id);
 
 /*
  * Re-reads the working tree.

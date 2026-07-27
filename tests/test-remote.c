@@ -125,6 +125,24 @@ daemon_stop (Daemon *daemon)
   g_clear_pointer (&daemon->dir, g_free);
 }
 
+static void
+run_in_directory (const char        *directory,
+                  const char *const *argv)
+{
+  g_autoptr (GSubprocessLauncher) launcher = NULL;
+  g_autoptr (GSubprocess) process = NULL;
+  g_autoptr (GError) error = NULL;
+
+  launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+                                        G_SUBPROCESS_FLAGS_STDERR_PIPE);
+  g_subprocess_launcher_set_cwd (launcher, directory);
+  process = g_subprocess_launcher_spawnv (launcher, argv, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (process);
+  g_assert_true (g_subprocess_wait_check (process, NULL, &error));
+  g_assert_no_error (error);
+}
+
 /* --- waiting on the loop --------------------------------------------------- */
 
 typedef struct
@@ -1377,6 +1395,170 @@ test_remote_workspace_choice_is_persisted (void)
 }
 
 /*
+ * Diff controls on a remote chat read the daemon's checkout, never a path on
+ * the client. Both the changed-file list and the selected file's patch travel
+ * as ordinary authenticated replies.
+ */
+static void
+test_remote_diff_reads_the_daemon_repository (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *repository = NULL;
+  g_autofree char *tracked = NULL;
+  g_autofree char *new_file = NULL;
+  g_autoptr (GError) error = NULL;
+  RemoteReply base = { 0 };
+  RemoteReply branch = { 0 };
+  RemoteReply status = { 0 };
+  RemoteReply diff = { 0 };
+  RemoteReply untracked = { 0 };
+  const char *init[] = { "git", "init", "-q", "-b", "main", NULL };
+  const char *switch_branch[] = { "git", "switch", "-q", "-c", "feature", NULL };
+  const char *add[] = { "git", "add", "tracked.txt", NULL };
+  const char *commit[] = {
+    "git", "-c", "user.name=xd tests", "-c", "user.email=xd@example.com",
+    "commit", "-q", "-m", "initial", NULL
+  };
+
+  daemon_start (&daemon);
+  repository = g_build_filename (daemon.root, "Zeno", NULL);
+  tracked = g_build_filename (repository, "tracked.txt", NULL);
+  new_file = g_build_filename (repository, "new.txt", NULL);
+
+  run_in_directory (repository, init);
+  g_assert_true (g_file_set_contents (tracked, "before\n", -1, &error));
+  g_assert_no_error (error);
+  run_in_directory (repository, add);
+  run_in_directory (repository, commit);
+  run_in_directory (repository, switch_branch);
+  g_assert_true (g_file_set_contents (tracked, "branch\n", -1, &error));
+  g_assert_no_error (error);
+  run_in_directory (repository, add);
+  run_in_directory (repository, commit);
+  g_assert_true (g_file_set_contents (tracked, "after\n", -1, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_file_set_contents (new_file, "new\n", -1, &error));
+  g_assert_no_error (error);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "base");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &base);
+  }
+
+  g_assert_cmpstr (json_object_get_string_member (base.reply, "output"), ==,
+                   "main\n");
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "branch-status");
+    json_builder_set_member_name (builder, "base");
+    json_builder_add_string_value (builder, "main");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &branch);
+  }
+
+  g_assert_nonnull (strstr (
+    json_object_get_string_member (branch.reply, "output"), "tracked.txt"));
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "working-status");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &status);
+  }
+
+  g_assert_nonnull (strstr (
+    json_object_get_string_member (status.reply, "output"), "tracked.txt"));
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "working-file");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, "tracked.txt");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &diff);
+  }
+
+  {
+    const char *output = json_object_get_string_member (diff.reply, "output");
+
+    g_assert_nonnull (strstr (output, "-branch"));
+    g_assert_nonnull (strstr (output, "+after"));
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "diff-read");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "read");
+    json_builder_add_string_value (builder, "untracked-file");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, "new.txt");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &untracked);
+  }
+
+  g_assert_nonnull (strstr (
+    json_object_get_string_member (untracked.reply, "output"), "+new"));
+
+  json_object_unref (base.reply);
+  json_object_unref (branch.reply);
+  json_object_unref (status.reply);
+  json_object_unref (diff.reply);
+  json_object_unref (untracked.reply);
+  g_free (base.wait.failure);
+  g_free (branch.wait.failure);
+  g_free (status.wait.failure);
+  g_free (diff.wait.failure);
+  g_free (untracked.wait.failure);
+  daemon_stop (&daemon);
+}
+
+/*
  * A pty lives on the daemon, accepts input over the authenticated line, and
  * keeps enough output for a second device joining after the command ran.
  */
@@ -2274,6 +2456,7 @@ main (int argc, char *argv[])
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
+  ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/send-during-turn-queues", test_send_during_turn_queues);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
