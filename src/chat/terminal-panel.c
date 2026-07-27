@@ -229,6 +229,13 @@ on_terminal_key (GtkEventControllerKey *controller,
       return GDK_EVENT_STOP;
     }
 
+  if ((state & copy_modifiers) == copy_modifiers &&
+      gdk_keyval_to_lower (keyval) == GDK_KEY_v)
+    {
+      vte_terminal_paste_clipboard (terminal);
+      return GDK_EVENT_STOP;
+    }
+
   return GDK_EVENT_PROPAGATE;
 }
 
