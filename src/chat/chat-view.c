@@ -601,6 +601,7 @@ show_tool_use (XdChatView *self,
     {
       g_autoptr (GString) safe_identity = g_string_new (NULL);
       g_autoptr (GString) safe_task = g_string_new (NULL);
+      GtkWidget *activity;
       GtkWidget *last =
         gtk_widget_get_last_child (GTK_WIDGET (self->transcript));
 
@@ -617,6 +618,8 @@ show_tool_use (XdChatView *self,
                                        "xd-subagent-record"),
                      summary) == 0)
         return;
+
+      activity = last != NULL && GTK_IS_EXPANDER (last) ? last : NULL;
 
       /* Tool prompts are plain text. Keep Markdown punctuation in a task from
        * turning its card into a heading, code span, or accidental link. */
@@ -640,7 +643,7 @@ show_tool_use (XdChatView *self,
 
       g_object_set_data_full (G_OBJECT (row), "xd-subagent-record",
                               g_strdup (summary), g_free);
-      xd_message_row_make_subagent (row);
+      xd_message_row_make_subagent (row, activity);
       return;
     }
 

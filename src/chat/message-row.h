@@ -28,7 +28,8 @@ XdMessageRow *xd_message_row_new         (XdMessageKind  kind,
 void          xd_message_row_make_workflow (XdMessageRow *self,
                                              const char   *run_id,
                                              const char   *url);
-void          xd_message_row_make_subagent (XdMessageRow *self);
+void          xd_message_row_make_subagent (XdMessageRow *self,
+                                             GtkWidget    *activity);
 
 /* Records what produced the message -- model and effort -- as a tooltip. */
 void          xd_message_row_set_source (XdMessageRow  *self,

@@ -473,11 +473,42 @@ xd_message_row_make_workflow (XdMessageRow *self,
 }
 
 void
-xd_message_row_make_subagent (XdMessageRow *self)
+xd_message_row_make_subagent (XdMessageRow *self,
+                              GtkWidget    *activity)
 {
+  GtkWidget *expander;
+
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
   make_info_card (self, "xd-subagent");
+
+  if (activity == NULL)
+    return;
+
+  /*
+   * Claude reports a delegated agent's internal calls immediately before the
+   * completed Task tool. Put that activity behind the card instead of leaving
+   * a potentially huge tool list permanently in the transcript.
+   */
+  g_object_ref (activity);
+  gtk_box_remove (GTK_BOX (gtk_widget_get_parent (activity)), activity);
+
+  expander = gtk_expander_new (NULL);
+  gtk_expander_set_expanded (GTK_EXPANDER (expander), FALSE);
+  gtk_widget_set_hexpand (expander, TRUE);
+
+  g_object_ref (self->body);
+  gtk_box_remove (GTK_BOX (self->card), self->body);
+  gtk_expander_set_label_widget (GTK_EXPANDER (expander), self->body);
+  g_object_unref (self->body);
+
+  gtk_expander_set_expanded (GTK_EXPANDER (activity), TRUE);
+  gtk_widget_set_margin_start (activity, 12);
+  gtk_widget_set_margin_end (activity, 0);
+  gtk_expander_set_child (GTK_EXPANDER (expander), activity);
+  g_object_unref (activity);
+
+  gtk_box_append (GTK_BOX (self->card), expander);
 }
 
 /* One prose label, configured the way every piece of message text is. */
