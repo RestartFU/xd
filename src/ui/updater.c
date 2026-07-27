@@ -115,7 +115,6 @@ show_state (XdUpdater *self)
       icon = "go-down-symbolic";
       accessible_label = "Downloading update";
       tip = "Downloading and installing.";
-      fades = TRUE;
       break;
 
     case STATE_DONE:
