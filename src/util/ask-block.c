@@ -46,7 +46,15 @@ xd_ask_instructions (void)
     "[abc1234](https://github.com/owner/repo/commit/abc1234). Use the actual "
     "repository URL and hash. Do not report a bare hash when its web URL can "
     "be determined from the repository remote.\n"
-    "</commit_links>";
+    "</commit_links>\n\n"
+    "<issue_links>\n"
+    "When mentioning a GitHub issue or pull request, make the visible reference "
+    "a Markdown link to its web URL whenever the repository and number can be "
+    "determined. Examples: "
+    "[#35](https://github.com/owner/repo/issues/35) and "
+    "[PR #12](https://github.com/owner/repo/pull/12). Do not leave a "
+    "resolvable #number as bare text.\n"
+    "</issue_links>";
 }
 
 

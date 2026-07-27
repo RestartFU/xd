@@ -134,7 +134,7 @@ test_ignores_the_tag_mentioned_in_prose (void)
 }
 
 static void
-test_instructions_require_commit_links (void)
+test_instructions_require_reporting_links (void)
 {
   const char *instructions = xd_ask_instructions ();
 
@@ -142,6 +142,12 @@ test_instructions_require_commit_links (void)
     strstr (instructions,
             "[abc1234](https://github.com/owner/repo/commit/abc1234)"));
   g_assert_nonnull (strstr (instructions, "Do not report a bare hash"));
+  g_assert_nonnull (
+    strstr (instructions, "[#35](https://github.com/owner/repo/issues/35)"));
+  g_assert_nonnull (
+    strstr (instructions, "[PR #12](https://github.com/owner/repo/pull/12)"));
+  g_assert_nonnull (strstr (instructions,
+                            "Do not leave a resolvable #number as bare text"));
 }
 
 int
@@ -156,8 +162,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/ask/both-sides", test_keeps_text_on_both_sides);
   g_test_add_func ("/ask/hidden-while-streaming", test_hides_the_block_while_it_streams);
   g_test_add_func ("/ask/tag-in-prose", test_ignores_the_tag_mentioned_in_prose);
-  g_test_add_func ("/ask/instructions-require-commit-links",
-                   test_instructions_require_commit_links);
+  g_test_add_func ("/ask/instructions-require-reporting-links",
+                   test_instructions_require_reporting_links);
 
   return g_test_run ();
 }
