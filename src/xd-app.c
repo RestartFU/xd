@@ -311,6 +311,11 @@ static const char *XD_STYLE =
   " { background-color: alpha(#ffffff, 0.05); border-radius: 10px; }\n"
   "row.entry:focus-within { background-color: alpha(#ffffff, 0.08); }\n"
   ".xd-inline-image picture { border-radius: 10px; }\n"
+  ".xd-image-button { padding: 0; min-width: 0; min-height: 0;"
+  " background: none; border: none; box-shadow: none; }\n"
+  ".xd-image-button:hover, .xd-image-button:active"
+  " { background: none; box-shadow: none; }\n"
+  ".xd-image-viewer { background-color: alpha(#000000, 0.86); }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
   /* The list widgets inside paint their own lighter slab over the popover's

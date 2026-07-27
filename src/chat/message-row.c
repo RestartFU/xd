@@ -622,6 +622,25 @@ typedef struct
   GWeakRef picture;
 } PreviewRequest;
 
+typedef struct
+{
+  char *path;
+  XdRemoteClient *remote;
+} ImageOpenRequest;
+
+typedef struct
+{
+  GWeakRef stack;
+  GWeakRef picture;
+  GCancellable *cancellable;
+} ImageLoadRequest;
+
+typedef struct
+{
+  char *path;
+  GBytes *bytes;
+} ImageDecodeRequest;
+
 static void
 preview_request_free (PreviewRequest *request)
 {
@@ -630,8 +649,35 @@ preview_request_free (PreviewRequest *request)
   g_free (request);
 }
 
+static void
+image_open_request_free (ImageOpenRequest *request)
+{
+  g_clear_pointer (&request->path, g_free);
+  g_clear_object (&request->remote);
+  g_free (request);
+}
+
+static void
+image_load_request_free (ImageLoadRequest *request)
+{
+  g_weak_ref_clear (&request->stack);
+  g_weak_ref_clear (&request->picture);
+  g_clear_object (&request->cancellable);
+  g_free (request);
+}
+
+static void
+image_decode_request_free (ImageDecodeRequest *request)
+{
+  g_clear_pointer (&request->path, g_free);
+  g_clear_pointer (&request->bytes, g_bytes_unref);
+  g_free (request);
+}
+
 #define INLINE_PREVIEW_HEIGHT 96
 #define INLINE_PREVIEW_MAX_WIDTH 168
+#define IMAGE_VIEWER_MAX_WIDTH 1920
+#define IMAGE_VIEWER_MAX_HEIGHT 1200
 
 static void
 prepare_preview_size (GdkPixbufLoader *loader,
@@ -680,6 +726,20 @@ preview_texture_from_bytes (const guchar *data,
     }
 
   return gdk_texture_new_for_pixbuf (pixbuf);
+}
+
+static void
+prepare_viewer_size (GdkPixbufLoader *loader,
+                     int              width,
+                     int              height,
+                     gpointer         user_data)
+{
+  double scale = MIN (1.0, MIN ((double) IMAGE_VIEWER_MAX_WIDTH / width,
+                                (double) IMAGE_VIEWER_MAX_HEIGHT / height));
+
+  gdk_pixbuf_loader_set_size (loader,
+                              MAX (1, (int) (width * scale)),
+                              MAX (1, (int) (height * scale)));
 }
 
 /* Keep screenshots recognisable without letting one take over the message. */
@@ -858,6 +918,255 @@ load_local_preview (XdMessageRow *self,
   g_task_run_in_thread (task, load_local_preview_thread);
 }
 
+static void
+load_viewer_image_thread (GTask        *task,
+                          gpointer      source_object,
+                          gpointer      task_data,
+                          GCancellable *cancellable)
+{
+  ImageDecodeRequest *decode = task_data;
+  g_autoptr (GdkPixbuf) pixbuf = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (g_task_return_error_if_cancelled (task))
+    return;
+
+  if (decode->bytes != NULL)
+    {
+      g_autoptr (GdkPixbufLoader) loader = gdk_pixbuf_loader_new ();
+      gconstpointer data;
+      gsize length;
+
+      g_signal_connect (loader, "size-prepared",
+                        G_CALLBACK (prepare_viewer_size), NULL);
+      data = g_bytes_get_data (decode->bytes, &length);
+
+      if (!gdk_pixbuf_loader_write (loader, data, length, &error) ||
+          !gdk_pixbuf_loader_close (loader, &error))
+        {
+          g_task_return_error (task, g_steal_pointer (&error));
+          return;
+        }
+
+      if (gdk_pixbuf_loader_get_pixbuf (loader) != NULL)
+        pixbuf = g_object_ref (gdk_pixbuf_loader_get_pixbuf (loader));
+    }
+  else
+    {
+      pixbuf = gdk_pixbuf_new_from_file_at_scale (
+        decode->path, IMAGE_VIEWER_MAX_WIDTH, IMAGE_VIEWER_MAX_HEIGHT,
+        TRUE, &error);
+    }
+
+  if (pixbuf == NULL)
+    {
+      if (error == NULL)
+        g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "The image could not be decoded.");
+      g_task_return_error (task, g_steal_pointer (&error));
+      return;
+    }
+
+  if (g_task_return_error_if_cancelled (task))
+    return;
+
+  g_task_return_pointer (task, g_steal_pointer (&pixbuf), g_object_unref);
+}
+
+static void
+on_viewer_image_loaded (GObject      *source,
+                        GAsyncResult *result,
+                        gpointer      user_data)
+{
+  ImageLoadRequest *request = user_data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GdkPixbuf) pixbuf =
+    g_task_propagate_pointer (G_TASK (result), &error);
+  g_autoptr (GdkTexture) texture = pixbuf != NULL
+    ? gdk_texture_new_for_pixbuf (pixbuf) : NULL;
+  g_autoptr (GtkWidget) stack = g_weak_ref_get (&request->stack);
+  g_autoptr (GtkWidget) picture = g_weak_ref_get (&request->picture);
+
+  if (texture != NULL && stack != NULL && picture != NULL)
+    {
+      gtk_picture_set_paintable (GTK_PICTURE (picture),
+                                 GDK_PAINTABLE (texture));
+      gtk_stack_set_visible_child_name (GTK_STACK (stack), "picture");
+    }
+  else if (stack != NULL &&
+           !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    {
+      gtk_stack_set_visible_child_name (GTK_STACK (stack), "unavailable");
+    }
+
+  image_load_request_free (request);
+}
+
+static void
+start_viewer_decode (ImageLoadRequest   *request,
+                     ImageDecodeRequest *decode)
+{
+  g_autoptr (GTask) task = NULL;
+
+  task = g_task_new (NULL, request->cancellable,
+                     on_viewer_image_loaded, request);
+  g_task_set_task_data (
+    task, decode, (GDestroyNotify) image_decode_request_free);
+  g_task_run_in_thread (task, load_viewer_image_thread);
+}
+
+static void
+on_remote_viewer_image (GObject      *source,
+                        GAsyncResult *result,
+                        gpointer      user_data)
+{
+  ImageLoadRequest *request = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree guchar *data = NULL;
+  g_autoptr (GtkWidget) stack = NULL;
+  ImageDecodeRequest *decode;
+  const char *encoded;
+  gsize length = 0;
+  gsize encoded_limit = ((XD_REMOTE_MAX_IMAGE_BYTES + 2) / 3) * 4;
+
+  reply = xd_remote_client_call_finish (
+    XD_REMOTE_CLIENT (source), result, &error);
+  encoded = reply != NULL
+    ? json_object_get_string_member_with_default (reply, "data", NULL) : NULL;
+
+  if (encoded != NULL && strlen (encoded) <= encoded_limit)
+    data = g_base64_decode (encoded, &length);
+
+  if (length == 0 || length > XD_REMOTE_MAX_IMAGE_BYTES)
+    {
+      stack = g_weak_ref_get (&request->stack);
+      if (stack != NULL &&
+          !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        gtk_stack_set_visible_child_name (
+          GTK_STACK (stack), "unavailable");
+      image_load_request_free (request);
+      return;
+    }
+
+  decode = g_new0 (ImageDecodeRequest, 1);
+  decode->bytes = g_bytes_new_take (g_steal_pointer (&data), length);
+  start_viewer_decode (request, decode);
+}
+
+static ImageLoadRequest *
+image_load_request_new (GtkStack     *stack,
+                        GtkPicture   *picture,
+                        GCancellable *cancellable)
+{
+  ImageLoadRequest *request = g_new0 (ImageLoadRequest, 1);
+
+  g_weak_ref_init (&request->stack, stack);
+  g_weak_ref_init (&request->picture, picture);
+  request->cancellable = g_object_ref (cancellable);
+
+  return request;
+}
+
+static void
+close_image_viewer (GtkButton *button,
+                    gpointer   user_data)
+{
+  adw_dialog_close (ADW_DIALOG (user_data));
+}
+
+static void
+open_image_viewer (GtkButton *button,
+                   gpointer   user_data)
+{
+  ImageOpenRequest *open_request = user_data;
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  AdwDialog *dialog = ADW_DIALOG (adw_dialog_new ());
+  GtkWidget *overlay = gtk_overlay_new ();
+  GtkWidget *stack = gtk_stack_new ();
+  GtkWidget *picture = gtk_picture_new ();
+  GtkWidget *spinner = gtk_spinner_new ();
+  GtkWidget *unavailable = gtk_label_new ("Image unavailable");
+  GtkWidget *close = gtk_button_new_from_icon_name ("window-close-symbolic");
+  ImageLoadRequest *load_request;
+
+  adw_dialog_set_title (dialog, "Image");
+  adw_dialog_set_content_width (dialog, 1100);
+  adw_dialog_set_content_height (dialog, 720);
+
+  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
+  gtk_widget_set_hexpand (picture, TRUE);
+  gtk_widget_set_vexpand (picture, TRUE);
+  gtk_widget_set_margin_top (picture, 24);
+  gtk_widget_set_margin_bottom (picture, 24);
+  gtk_widget_set_margin_start (picture, 24);
+  gtk_widget_set_margin_end (picture, 24);
+
+  gtk_spinner_start (GTK_SPINNER (spinner));
+  gtk_widget_set_halign (spinner, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (spinner, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class (unavailable, "dim-label");
+
+  gtk_stack_add_named (GTK_STACK (stack), spinner, "loading");
+  gtk_stack_add_named (GTK_STACK (stack), picture, "picture");
+  gtk_stack_add_named (GTK_STACK (stack), unavailable, "unavailable");
+  gtk_stack_set_transition_type (
+    GTK_STACK (stack), GTK_STACK_TRANSITION_TYPE_NONE);
+  gtk_stack_set_visible_child_name (GTK_STACK (stack), "loading");
+  gtk_widget_set_hexpand (stack, TRUE);
+  gtk_widget_set_vexpand (stack, TRUE);
+  gtk_widget_add_css_class (stack, "xd-image-viewer");
+
+  gtk_widget_add_css_class (close, "circular");
+  gtk_widget_add_css_class (close, "osd");
+  gtk_widget_set_halign (close, GTK_ALIGN_END);
+  gtk_widget_set_valign (close, GTK_ALIGN_START);
+  gtk_widget_set_margin_top (close, 12);
+  gtk_widget_set_margin_end (close, 12);
+  gtk_widget_set_tooltip_text (close, "Close");
+  g_signal_connect (close, "clicked",
+                    G_CALLBACK (close_image_viewer), dialog);
+
+  gtk_overlay_set_child (GTK_OVERLAY (overlay), stack);
+  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), close);
+  adw_dialog_set_child (dialog, overlay);
+
+  g_signal_connect_swapped (dialog, "closed",
+                            G_CALLBACK (g_cancellable_cancel), cancellable);
+  g_object_set_data_full (G_OBJECT (dialog), "image-cancellable",
+                          g_object_ref (cancellable), g_object_unref);
+
+  load_request = image_load_request_new (
+    GTK_STACK (stack), GTK_PICTURE (picture), cancellable);
+
+  if (open_request->remote != NULL)
+    {
+      g_autoptr (JsonBuilder) builder = json_builder_new ();
+      g_autoptr (JsonNode) request_node = NULL;
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "op");
+      json_builder_add_string_value (builder, "image-read");
+      json_builder_set_member_name (builder, "path");
+      json_builder_add_string_value (builder, open_request->path);
+      json_builder_end_object (builder);
+      request_node = json_builder_get_root (builder);
+
+      xd_remote_client_call_async (
+        open_request->remote, request_node, cancellable,
+        on_remote_viewer_image, load_request);
+    }
+  else
+    {
+      ImageDecodeRequest *decode = g_new0 (ImageDecodeRequest, 1);
+
+      decode->path = g_strdup (open_request->path);
+      start_viewer_decode (load_request, decode);
+    }
+
+  adw_dialog_present (dialog, GTK_WIDGET (button));
+}
+
 /*
  * "[image: /path]" becomes a small inline preview.
  *
@@ -874,10 +1183,12 @@ make_image_preview (XdMessageRow *self,
   GtkWidget *preview = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
   GtkWidget *stack = gtk_stack_new ();
   GtkWidget *picture = gtk_picture_new ();
+  GtkWidget *button = gtk_button_new ();
   GtkWidget *loading = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget *spinner = gtk_spinner_new ();
   GtkWidget *unavailable = gtk_label_new ("Preview unavailable");
   GtkWidget *label = gtk_label_new (NULL);
+  ImageOpenRequest *open_request = g_new0 (ImageOpenRequest, 1);
 
   gtk_spinner_start (GTK_SPINNER (spinner));
   gtk_box_append (GTK_BOX (loading), spinner);
@@ -897,6 +1208,21 @@ make_image_preview (XdMessageRow *self,
   gtk_widget_set_halign (stack, GTK_ALIGN_START);
   gtk_widget_set_valign (stack, GTK_ALIGN_START);
   gtk_widget_set_vexpand (stack, FALSE);
+
+  open_request->path = g_strdup (path);
+  open_request->remote =
+    self->remote != NULL ? g_object_ref (self->remote) : NULL;
+  gtk_button_set_child (GTK_BUTTON (button), stack);
+  gtk_widget_add_css_class (button, "flat");
+  gtk_widget_add_css_class (button, "xd-image-button");
+  gtk_widget_set_halign (button, GTK_ALIGN_START);
+  gtk_widget_set_valign (button, GTK_ALIGN_START);
+  gtk_widget_set_tooltip_text (button, "Open image");
+  g_object_set_data_full (
+    G_OBJECT (button), "image-open-request", open_request,
+    (GDestroyNotify) image_open_request_free);
+  g_signal_connect (button, "clicked",
+                    G_CALLBACK (open_image_viewer), open_request);
 
   if (self->remote != NULL)
     {
@@ -920,7 +1246,7 @@ make_image_preview (XdMessageRow *self,
     }
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
   gtk_widget_add_css_class (label, "caption");
-  gtk_box_append (GTK_BOX (preview), stack);
+  gtk_box_append (GTK_BOX (preview), button);
   gtk_box_append (GTK_BOX (preview), label);
   gtk_widget_set_halign (preview, GTK_ALIGN_START);
   gtk_widget_set_valign (preview, GTK_ALIGN_START);
