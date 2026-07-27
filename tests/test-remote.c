@@ -344,6 +344,9 @@ client_thread (gpointer user_data)
     reply = round_trip (in, out, messages, parser);
     if (reply == NULL || !json_object_get_boolean_member (reply, "ok"))
       FAIL ("messages refused");
+    if (json_object_get_int_member_with_default (
+          reply, "last_message_id", 0) != 2)
+      FAIL ("message revision wrong");
     rows = json_object_get_array_member (reply, "messages");
     if (json_array_get_length (rows) != 2)
       FAIL ("message count wrong");

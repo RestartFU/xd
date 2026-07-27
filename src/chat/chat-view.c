@@ -110,6 +110,9 @@ struct _XdChatView
   XdRemoteClient *remote;
   GCancellable *fetching;       /* the transcript request in flight, if any */
   GPtrArray *pending_remote_messages; /* held until live state arrives */
+  gint64 pending_remote_message_id;
+  gint64 remote_rendered_message_id;
+  gboolean restore_remote_panes;
 
   /*
    * A turn running on the daemon, as far as this window can see it.
@@ -958,7 +961,10 @@ on_load_earlier_clicked (GtkButton *button,
     TRANSCRIPT_PAGE_SIZE;
 
   if (self->remote != NULL)
-    load_remote_transcript (self);
+    {
+      self->remote_rendered_message_id = -1;
+      load_remote_transcript (self);
+    }
   else
     load_transcript (self);
 }
@@ -1158,7 +1164,14 @@ on_remote_messages (GObject      *source,
                                  ? json_object_get_array_member (reply, "messages")
                                  : NULL);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
-  self->pending_remote_messages = g_steal_pointer (&messages);
+  self->pending_remote_message_id =
+    json_object_get_int_member_with_default (reply, "last_message_id", 0);
+
+  /* A semantic event already drew this exact database revision. Generic file
+   * change broadcasts can arrive afterwards; options may still have changed,
+   * but rebuilding identical transcript widgets is pure flicker. */
+  if (self->pending_remote_message_id != self->remote_rendered_message_id)
+    self->pending_remote_messages = g_steal_pointer (&messages);
 
   /* Draw only after live state arrives too. Clearing between these two network
    * replies exposed a blank transcript every time a turn stopped. */
@@ -1306,6 +1319,7 @@ on_remote_event (XdRemoteClient *client,
           if (g_object_get_data (G_OBJECT (child),
                                  "xd-optimistic-remote") != NULL)
             {
+              self->remote_rendered_message_id = -1;
               load_remote_transcript (self);
               break;
             }
@@ -1398,8 +1412,6 @@ update_remote_options (XdChatView   *self,
                                have_workdir ? "Browse files"
                                             : "This chat has no working directory");
   update_context_meter (self, chat->context_used, chat->context_window);
-
-  apply_panes (self, saved_panes (self, PANE_NONE));
 
   xd_model_picker_set_selected (self->model_picker, chat->backend, chat->model);
 
@@ -1508,6 +1520,7 @@ on_remote_options_received (GObject      *source,
       end_remote_turn (self);
       render_transcript (self, self->pending_remote_messages);
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
+      self->remote_rendered_message_id = self->pending_remote_message_id;
     }
 
   update_remote_options (
@@ -1515,6 +1528,11 @@ on_remote_options_received (GObject      *source,
     json_object_get_boolean_member_with_default (reply, "has_messages", FALSE),
     json_object_get_boolean_member_with_default (reply, "linked_worktree", FALSE),
     worktrees);
+  if (self->restore_remote_panes)
+    {
+      apply_panes (self, saved_panes (self, PANE_NONE));
+      self->restore_remote_panes = FALSE;
+    }
   set_queued_text (self, chat.queued);
 
   /*
@@ -2139,6 +2157,12 @@ on_turn_finished (XdChatSession *session,
   /* An agent that edited anything has finished doing so. */
   xd_diff_pane_refresh (self->diff);
   xd_git_actions_refresh (self->git_actions);
+
+  /* The live rows already are this finished turn. When the coalesced database
+   * notification arrives, do not clear and reconstruct the same transcript. */
+  if (visible)
+    self->rendered_message_id =
+      xd_storage_last_message_id (self->storage, chat_id);
 
   /* Frees the turn, so nothing may touch it afterwards. */
   g_hash_table_remove (self->turns, chat_id);
@@ -3690,15 +3714,6 @@ update_context_bar (XdChatView   *self,
     xd_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
     xd_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
 
-    /* SQLite supplies the existing local default; the per-device state also
-     * remembers which repository pane occupied the shared side slot. */
-    apply_panes (
-      self,
-      saved_panes (
-        self,
-        (chat->terminal_open ? PANE_TERMINAL : PANE_NONE) |
-        (chat->diff_open ? PANE_DIFF : PANE_NONE)));
-
     gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
     gtk_widget_set_sensitive (GTK_WIDGET (self->file_button), have_workdir);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
@@ -4053,6 +4068,8 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
       self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
+      self->remote_rendered_message_id = -1;
+      self->restore_remote_panes = TRUE;
       g_cancellable_cancel (self->fetching);
       g_clear_object (&self->fetching);
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
@@ -4120,6 +4137,7 @@ xd_chat_view_set_chat (XdChatView *self,
   g_clear_object (&self->fetching);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   set_remote (self, NULL);
+  self->restore_remote_panes = FALSE;
   set_working (self, FALSE);
   end_remote_turn (self);
   set_queued_text (self, NULL);
@@ -4157,6 +4175,18 @@ xd_chat_view_set_chat (XdChatView *self,
       {
         use_command_scope (self, record->backend);
         update_context_bar (self, record);
+        if (changed)
+          {
+            /* SQLite supplies the existing local default; the per-device
+             * state also remembers which repository pane occupied the shared
+             * side slot. Restore once, not on every metadata refresh. */
+            apply_panes (
+              self,
+              saved_panes (
+                self,
+                (record->terminal_open ? PANE_TERMINAL : PANE_NONE) |
+                (record->diff_open ? PANE_DIFF : PANE_NONE)));
+          }
         set_queued_text (self, record->queued);
       }
     else

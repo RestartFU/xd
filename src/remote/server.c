@@ -1414,6 +1414,9 @@ handle_messages (Connection *connection,
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "ok");
   json_builder_add_boolean_value (builder, TRUE);
+  json_builder_set_member_name (builder, "last_message_id");
+  json_builder_add_int_value (
+    builder, xd_storage_last_message_id (connection->server->storage, chat_id));
   json_builder_set_member_name (builder, "messages");
   json_builder_begin_array (builder);
 
