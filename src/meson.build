@@ -7,6 +7,7 @@ xd_core_sources = files(
   'util/markdown.c',
   'util/ask-block.c',
   'util/git-diff.c',
+  'util/git-head-watch.c',
   'util/git-info.c',
   'util/subagent-tool.c',
   'util/unified-diff.c',

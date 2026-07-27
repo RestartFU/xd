@@ -10,6 +10,7 @@ xd_git_info_free (XdGitInfo *self)
     return;
 
   g_free (self->root);
+  g_free (self->git_dir);
   g_free (self->name);
   g_free (self->branch);
   g_free (self->remote_url);
@@ -174,6 +175,7 @@ xd_git_info_for_path (const char *path)
 
   self = g_new0 (XdGitInfo, 1);
   self->root = g_strdup (root);
+  self->git_dir = g_strdup (git_dir);
   self->name = g_path_get_basename (root);
   self->linked_worktree = linked;
 

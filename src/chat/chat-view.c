@@ -18,6 +18,7 @@
 #include "remote/protocol.h"
 #include "util/ask-block.h"
 #include "util/git-diff.h"
+#include "util/git-head-watch.h"
 #include "util/git-info.h"
 #include "util/subagent-tool.h"
 #include "util/workflow-run.h"
@@ -181,6 +182,7 @@ struct _XdChatView
   GtkToggleButton *diff_button;
   XdGitActions *git_actions;
   XdDiffPane *diff;
+  XdGitHeadWatch *git_head_watch;
   GtkPaned *split;
   GtkPaned *side_split;
   GtkStack *side_stack;
@@ -1593,6 +1595,8 @@ set_remote (XdChatView     *self,
     g_signal_handlers_disconnect_by_data (self->remote, self);
 
   g_set_object (&self->remote, client);
+  if (client != NULL)
+    xd_git_head_watch_set_workdir (self->git_head_watch, NULL);
   xd_terminal_panel_set_remote (self->terminal, client);
   xd_diff_pane_set_remote (
     self->diff, client,
@@ -3444,6 +3448,7 @@ update_context_bar (XdChatView   *self,
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
   workdir = workdir_for (chat, resolved);
+  xd_git_head_watch_set_workdir (self->git_head_watch, workdir);
   model = chat->model != NULL ? chat->model : resolved->model;
   git = xd_git_info_for_path (workdir);
   if (git != NULL)
@@ -3518,6 +3523,26 @@ update_context_bar (XdChatView   *self,
   gtk_widget_set_sensitive (GTK_WIDGET (self->access_chooser), !chat->plan);
 
   self->syncing_run_options = FALSE;
+}
+
+static void
+on_git_head_changed (XdGitHeadWatch *watch,
+                     gpointer        user_data)
+{
+  XdChatView *self = user_data;
+  g_autoptr (XdChat) chat = NULL;
+
+  if (self->chat == NULL || self->remote != NULL)
+    return;
+
+  chat = xd_storage_get_chat (
+    self->storage, xd_node_get_chat_id (self->chat), NULL);
+  if (chat == NULL)
+    return;
+
+  update_context_bar (self, chat);
+  xd_diff_pane_refresh (self->diff);
+  xd_git_actions_refresh (self->git_actions);
 }
 
 static void
@@ -3880,6 +3905,7 @@ xd_chat_view_set_chat (XdChatView *self,
 
   if (chat == NULL)
     {
+      xd_git_head_watch_set_workdir (self->git_head_watch, NULL);
       xd_terminal_panel_set_chat (self->terminal, NULL);
       clear_transcript (self);
       gtk_stack_set_visible_child_name (self->stack, "empty");
@@ -4293,6 +4319,7 @@ xd_chat_view_dispose (GObject *object)
   g_clear_pointer (&self->workspace_paths, g_ptr_array_unref);
   g_clear_pointer (&self->queued, g_free);
   g_clear_object (&self->settings);
+  g_clear_object (&self->git_head_watch);
   g_clear_object (&self->storage);
   g_clear_object (&self->tree);
 
@@ -4316,6 +4343,9 @@ xd_chat_view_init (XdChatView *self)
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
   self->workspace_paths = g_ptr_array_new_with_free_func (g_free);
+  self->git_head_watch = xd_git_head_watch_new ();
+  g_signal_connect (self->git_head_watch, "changed",
+                    G_CALLBACK (on_git_head_changed), self);
   self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
   self->history_bottom_distance = -1;
   self->header = adw_header_bar_new ();

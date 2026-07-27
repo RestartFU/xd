@@ -14,6 +14,7 @@ G_BEGIN_DECLS
 typedef struct
 {
   char *root;         /* top of the working tree */
+  char *git_dir;      /* directory containing this worktree's HEAD */
   char *name;         /* its directory name */
   char *branch;       /* branch, or a short commit id when detached */
   char *remote_url;   /* origin's URL, when there is one */
