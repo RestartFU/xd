@@ -8,6 +8,7 @@
 #include "chat/chat-title.h"
 #include "ui/dir-browser.h"
 #include "ui/dots.h"
+#include "ui/updater.h"
 
 struct _XdSidebar
 {
@@ -1923,6 +1924,7 @@ xd_sidebar_init (XdSidebar *self)
   GtkWidget *toolbar = adw_toolbar_view_new ();
   GtkWidget *new_button = gtk_menu_button_new ();
   GtkWidget *scrolled = gtk_scrolled_window_new ();
+  GtkWidget *updater = GTK_WIDGET (xd_updater_new ());
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
 
   g_auto (GStrv) expanded = NULL;
@@ -1995,6 +1997,12 @@ xd_sidebar_init (XdSidebar *self)
   gtk_widget_set_vexpand (scrolled, TRUE);
 
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), scrolled);
+  gtk_widget_set_halign (updater, GTK_ALIGN_START);
+  gtk_widget_set_margin_start (updater, 6);
+  gtk_widget_set_margin_end (updater, 6);
+  gtk_widget_set_margin_top (updater, 6);
+  gtk_widget_set_margin_bottom (updater, 6);
+  adw_toolbar_view_add_bottom_bar (ADW_TOOLBAR_VIEW (toolbar), updater);
   gtk_widget_add_css_class (toolbar, "xd-sidebar");
   gtk_widget_add_css_class (scrolled, "xd-sidebar");
   gtk_widget_add_css_class (GTK_WIDGET (self->list_view), "xd-sidebar");

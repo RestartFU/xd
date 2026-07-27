@@ -105,14 +105,14 @@ show_state (XdUpdater *self)
   switch (self->state)
     {
     case STATE_AVAILABLE:
-      icon = "go-down-symbolic";
+      icon = "document-save-symbolic";
       accessible_label = "Download update";
       tip = "A newer build is available. Click to install it.";
       fades = TRUE;
       break;
 
     case STATE_UPDATING:
-      icon = "go-down-symbolic";
+      icon = "document-save-symbolic";
       accessible_label = "Downloading update";
       tip = "Downloading and installing.";
       break;
@@ -124,7 +124,7 @@ show_state (XdUpdater *self)
       break;
 
     case STATE_FAILED:
-      icon = "go-down-symbolic";
+      icon = "document-save-symbolic";
       accessible_label = "Retry update";
       tip = self->trouble;
       fades = TRUE;
@@ -484,7 +484,7 @@ xd_updater_init (XdUpdater *self)
   self->state = STATE_QUIET;
 
   self->button = GTK_BUTTON (gtk_button_new ());
-  gtk_widget_add_css_class (GTK_WIDGET (self->button), "flat");
+  gtk_widget_add_css_class (GTK_WIDGET (self->button), "suggested-action");
   gtk_widget_add_css_class (GTK_WIDGET (self->button), "xd-update");
   g_signal_connect (self->button, "clicked", G_CALLBACK (on_clicked), self);
 

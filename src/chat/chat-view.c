@@ -5,7 +5,6 @@
 #include "chat-session.h"
 #include "chat-title.h"
 #include "ui/dots.h"
-#include "ui/updater.h"
 #include "handover.h"
 #include "message-row.h"
 #include "model-picker.h"
@@ -4889,10 +4888,6 @@ xd_chat_view_init (XdChatView *self)
   self->git_actions = xd_git_actions_new ();
   adw_header_bar_pack_end (
     ADW_HEADER_BAR (self->header), GTK_WIDGET (self->git_actions));
-
-  /* Hidden unless there is a newer build; see src/ui/updater.c. */
-  adw_header_bar_pack_end (
-    ADW_HEADER_BAR (self->header), GTK_WIDGET (xd_updater_new ()));
 
   adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), self->header);
 

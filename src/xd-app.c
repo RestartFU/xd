@@ -443,9 +443,9 @@ static const char *XD_STYLE =
   ".xd-waiting { color: @accent_color;"
   " animation: xd-pulse 1.4s ease-in-out infinite alternate; }\n"
 
-  /* Same white-on-black header control as terminal. Its download icon fades
-   * while an update is available or moving; restart settles into a still
-   * reload icon. */
+  /* The blue sidebar update control keeps its icon readable. Its download
+   * icon fades while an update is available or moving; restart settles into
+   * a still reload icon. */
   ".xd-update image { color: #ffffff; }\n"
   ".xd-update:disabled image { color: alpha(#ffffff, 0.35); }\n"
   ".xd-update-fade image {"
