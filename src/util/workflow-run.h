@@ -6,7 +6,8 @@
 G_BEGIN_DECLS
 
 /*
- * Replaces a `gh run watch` tool summary with a durable workflow record.
+ * Replaces a `gh run watch` or `gh run view` tool summary with a durable
+ * workflow record.
  *
  * The record stays a tool message, so it survives transcript reloads and
  * remote viewing without being replayed to the model as conversation.

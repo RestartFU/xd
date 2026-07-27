@@ -86,17 +86,27 @@ test_repository_from_workdir (void)
 }
 
 static void
-test_ignores_other_commands (void)
+test_polling_with_view (void)
 {
-  g_autofree char *view =
-    xd_workflow_run_capture_tool ("$ gh run view 123 --repo a/b", NULL);
+  g_autofree char *view = xd_workflow_run_capture_tool (
+    "$ sleep 25; gh run view 30281954834 --repo RestartFU/xd "
+    "--json status,conclusion,jobs", NULL);
+
+  assert_workflow (
+    view,
+    "30281954834",
+    "https://github.com/RestartFU/xd/actions/runs/30281954834");
+}
+
+static void
+test_ignores_invalid_commands (void)
+{
   g_autofree char *unsafe =
     xd_workflow_run_capture_tool (
       "$ gh run watch not-a-number --repo a/b", NULL);
 
-  g_assert_cmpstr (view, ==, "$ gh run view 123 --repo a/b");
   g_assert_cmpstr (unsafe, ==, "$ gh run watch not-a-number --repo a/b");
-  g_assert_false (xd_workflow_run_from_tool (view, NULL, NULL));
+  g_assert_false (xd_workflow_run_from_tool (unsafe, NULL, NULL));
 }
 
 static void
@@ -155,8 +165,10 @@ main (int   argc,
                    test_explicit_repository);
   g_test_add_func ("/workflow-run/repository-from-workdir",
                    test_repository_from_workdir);
-  g_test_add_func ("/workflow-run/ignores-other-commands",
-                   test_ignores_other_commands);
+  g_test_add_func ("/workflow-run/polling-with-view",
+                   test_polling_with_view);
+  g_test_add_func ("/workflow-run/ignores-invalid-commands",
+                   test_ignores_invalid_commands);
   g_test_add_func ("/workflow-run/live-activity", test_live_activity);
   g_test_add_func ("/workflow-run/empty-activity", test_empty_activity);
 

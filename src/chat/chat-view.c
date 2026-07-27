@@ -669,9 +669,24 @@ show_tool_use (XdChatView *self,
       g_autofree char *block = g_strdup_printf (
         "**GitHub Actions · Run #%s**\n\n"
         "[Open live status and logs](%s)", run_id, url);
-      XdMessageRow *row =
-        append_row (self, XD_MESSAGE_ASSISTANT, block);
+      XdMessageRow *row;
 
+      /* Polling emits the same `gh run view` command repeatedly. The durable
+       * tool records may all be useful to the agent, but one live card per run
+       * is the useful transcript. This also folds watch-after-view into the
+       * card that is already polling that run. */
+      for (GtkWidget *child =
+             gtk_widget_get_first_child (GTK_WIDGET (self->transcript));
+           child != NULL;
+           child = gtk_widget_get_next_sibling (child))
+        if (g_strcmp0 (
+              g_object_get_data (G_OBJECT (child), "xd-workflow-run-id"),
+              run_id) == 0)
+          return;
+
+      row = append_row (self, XD_MESSAGE_ASSISTANT, block);
+      g_object_set_data_full (G_OBJECT (row), "xd-workflow-run-id",
+                              g_strdup (run_id), g_free);
       xd_message_row_make_workflow (row, run_id, url);
       return;
     }

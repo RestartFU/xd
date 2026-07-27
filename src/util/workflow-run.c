@@ -96,7 +96,7 @@ xd_workflow_run_capture_tool (const char *message,
   const char *command;
   const char *run_id = NULL;
   int argc = 0;
-  int watch_at = -1;
+  int run_at = -1;
 
   if (message == NULL ||
       g_str_has_prefix (message, WORKFLOW_RUN_PREFIX) ||
@@ -107,23 +107,25 @@ xd_workflow_run_capture_tool (const char *message,
   if (!g_shell_parse_argv (command, &argc, &argv, &error))
     return g_strdup (message);
 
-  /* Commands may be part of `push && gh run watch ...`; find the useful
-   * invocation rather than requiring it to be the whole shell line. */
+  /* Commands may be part of `push && gh run watch ...` or a polling loop
+   * using `gh run view ...`; find the useful invocation rather than requiring
+   * it to be the whole shell line. */
   for (int i = 0; i + 3 < argc; i++)
     if (g_strcmp0 (argv[i], "gh") == 0 &&
         g_strcmp0 (argv[i + 1], "run") == 0 &&
-        g_strcmp0 (argv[i + 2], "watch") == 0 &&
+        (g_strcmp0 (argv[i + 2], "watch") == 0 ||
+         g_strcmp0 (argv[i + 2], "view") == 0) &&
         run_id_is_safe (argv[i + 3]))
       {
-        watch_at = i;
+        run_at = i;
         run_id = argv[i + 3];
         break;
       }
 
-  if (watch_at < 0)
+  if (run_at < 0)
     return g_strdup (message);
 
-  for (int i = watch_at + 4; i < argc; i++)
+  for (int i = run_at + 4; i < argc; i++)
     {
       const char *spec = NULL;
 
