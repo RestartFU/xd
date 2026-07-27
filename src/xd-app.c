@@ -147,7 +147,9 @@ static const char *XD_STYLE =
 
   /* DM Sans, which is what t3code itself is set in; Inter and Cantarell
    * behind it as the fallbacks the bundle already carried. */
-  "window { font-family: \"DM Sans\", \"Inter\", \"Cantarell\", sans-serif;"
+  "window { font-family: \"DM Sans\", \"Inter\", \"Cantarell\","
+  " \"Noto Color Emoji\", \"Apple Color Emoji\", \"Segoe UI Emoji\","
+  " sans-serif;"
   " font-size: 0.95em; }\n"
 
   /* Flat: the window is one surface, so the bars that divide it are told

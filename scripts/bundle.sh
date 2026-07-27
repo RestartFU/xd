@@ -135,7 +135,8 @@ JSON
 mkdir -p "$OUT/share/fonts"
 for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu \
            /usr/share/fonts/truetype/inter /usr/share/fonts/opentype/inter \
-           /usr/share/fonts/truetype/jetbrains-mono; do
+           /usr/share/fonts/truetype/jetbrains-mono \
+           /usr/share/fonts/truetype/noto; do
   [ -d "$dir" ] && cp -a "$dir" "$OUT/share/fonts/"
 done
 

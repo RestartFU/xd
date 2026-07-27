@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-inter \
       fonts-jetbrains-mono \
       fonts-dejavu-core \
+      fonts-noto-color-emoji \
       fontconfig \
       openssl \
       glib-networking \
