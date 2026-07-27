@@ -402,8 +402,8 @@ static const char *XD_STYLE =
   " { background: transparent; font-size: 1em; }\n"
   ".xd-code.xd-inline-diff { padding: 0; }\n"
 
-  /* Structured diff pane: file cards above line-by-line changes. Git's raw
-   * plumbing stays in the parser instead of becoming the interface. */
+  /* Structured diff pane. One label holds the preview: hundreds of child
+   * widgets made the outer transcript scroller stutter on every frame. */
   ".xd-diff-files { padding: 5px; background: transparent; }\n"
   ".xd-diff-files > row { border-radius: 8px; margin: 2px 0; }\n"
   ".xd-diff-files > row:selected { background: alpha(#ffffff, 0.09); }\n"
@@ -417,31 +417,9 @@ static const char *XD_STYLE =
   " background: alpha(#f66151, 0.10); }\n"
   ".xd-diff-badge-renamed { color: #78aeed;"
   " background: alpha(#78aeed, 0.10); }\n"
-  ".xd-diff-file { padding: 7px 10px; background: alpha(#ffffff, 0.035);"
-  " border-top: 1px solid alpha(#ffffff, 0.07);"
-  " border-bottom: 1px solid alpha(#ffffff, 0.07); }\n"
-  ".xd-diff-line { min-height: 24px; }\n"
-  ".xd-diff-line label { padding-top: 2px; padding-bottom: 2px; }\n"
-  ".xd-diff-code-row { min-width: 480px; }\n"
-  ".xd-diff-gutter { min-width: 42px; padding-left: 7px;"
-  " padding-right: 7px; background: alpha(#ffffff, 0.018);"
-  " border-right: 1px solid alpha(#ffffff, 0.04);"
-  " font-family: \"JetBrains Mono\", monospace; font-size: 0.90em; }\n"
-  ".xd-diff-marker { font-family: \"JetBrains Mono\", monospace;"
-  " font-weight: 700; }\n"
-  ".xd-diff-code { padding-left: 6px; padding-right: 12px;"
+  ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
   " font-family: \"JetBrains Mono\", monospace; font-size: 1em; }\n"
-  ".xd-diff-added { background: alpha(#57e389, 0.09); }\n"
-  ".xd-diff-added .xd-diff-marker { color: #57e389; }\n"
-  ".xd-diff-removed { background: alpha(#f66151, 0.09); }\n"
-  ".xd-diff-removed .xd-diff-marker { color: #f66151; }\n"
-  ".xd-diff-hunk { background: alpha(#3584e4, 0.09);"
-  " color: #78aeed; }\n"
-  ".xd-diff-meta { color: alpha(#ffffff, 0.55);"
-  " background: alpha(#ffffff, 0.025); }\n"
   ".xd-diff-expander > title { padding: 9px 12px; }\n"
-  ".xd-diff-truncated { padding: 9px 12px;"
-  " background: alpha(#ffffff, 0.025); }\n"
 
   /* Repository browser: the list and preview share the same quiet side pane
    * as changes, so files read like navigation rather than message cards. */

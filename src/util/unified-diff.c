@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define DISPLAY_LINE_BYTES 1024
+
 void
 xd_diff_line_free (XdDiffLine *line)
 {
@@ -171,4 +173,187 @@ xd_unified_diff_parse (const char *patch,
     *deletions = removed;
 
   return g_steal_pointer (&result);
+}
+
+guint
+xd_unified_diff_display_rows (GPtrArray *lines,
+                              gboolean   show_file_headers)
+{
+  guint rows = 0;
+
+  g_return_val_if_fail (lines != NULL, 0);
+
+  for (guint i = 0; i < lines->len; i++)
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i);
+
+      if (line->kind != XD_DIFF_LINE_FILE || show_file_headers)
+        rows++;
+    }
+
+  return rows;
+}
+
+static char *
+display_text (const char *text)
+{
+  g_autofree char *valid = g_utf8_make_valid (text != NULL ? text : "", -1);
+  gsize length = strlen (valid);
+  gsize cut;
+
+  if (length <= DISPLAY_LINE_BYTES)
+    return g_steal_pointer (&valid);
+
+  cut = DISPLAY_LINE_BYTES;
+  while (cut > 0 && (((guchar) valid[cut]) & 0xc0) == 0x80)
+    cut--;
+
+  return g_strdup_printf ("%.*s…", (int) cut, valid);
+}
+
+static char *
+escaped_display_text (const char *text)
+{
+  g_autofree char *shown = display_text (text);
+
+  return g_markup_escape_text (shown, -1);
+}
+
+static void
+start_markup_row (GString *markup,
+                  guint    rendered)
+{
+  if (rendered > 0)
+    g_string_append_c (markup, '\n');
+}
+
+static void
+append_file_markup (GString          *markup,
+                    GPtrArray        *lines,
+                    guint             position,
+                    const XdDiffLine *line,
+                    guint             rendered)
+{
+  g_autofree char *path = escaped_display_text (line->text);
+  guint additions = 0;
+  guint deletions = 0;
+
+  for (guint i = position + 1; i < lines->len; i++)
+    {
+      XdDiffLine *within = g_ptr_array_index (lines, i);
+
+      if (within->kind == XD_DIFF_LINE_FILE)
+        break;
+      if (within->kind == XD_DIFF_LINE_ADDED)
+        additions++;
+      else if (within->kind == XD_DIFF_LINE_REMOVED)
+        deletions++;
+    }
+
+  start_markup_row (markup, rendered);
+  g_string_append_printf (
+    markup,
+    "<span weight=\"bold\">%s</span>"
+    "  <span foreground=\"#57e389\">+%u</span>"
+    "  <span foreground=\"#f66151\">−%u</span>",
+    path, additions, deletions);
+}
+
+static void
+append_full_line_markup (GString          *markup,
+                         const XdDiffLine *line,
+                         guint             rendered)
+{
+  g_autofree char *text = escaped_display_text (line->text);
+
+  start_markup_row (markup, rendered);
+  if (line->kind == XD_DIFF_LINE_HUNK)
+    g_string_append_printf (
+      markup, "<span foreground=\"#78aeed\">%s</span>", text);
+  else
+    g_string_append_printf (
+      markup, "<span foreground=\"#9a9996\">%s</span>", text);
+}
+
+static void
+append_code_line_markup (GString          *markup,
+                         const XdDiffLine *line,
+                         guint             rendered)
+{
+  g_autofree char *text = escaped_display_text (line->text);
+  g_autofree char *old_line =
+    line->old_line > 0 ? g_strdup_printf ("%4u", line->old_line)
+                       : g_strdup ("    ");
+  g_autofree char *new_line =
+    line->new_line > 0 ? g_strdup_printf ("%4u", line->new_line)
+                       : g_strdup ("    ");
+  const char *marker = " ";
+  const char *colour = "#9a9996";
+
+  if (line->kind == XD_DIFF_LINE_ADDED)
+    {
+      marker = "+";
+      colour = "#57e389";
+    }
+  else if (line->kind == XD_DIFF_LINE_REMOVED)
+    {
+      marker = "−";
+      colour = "#f66151";
+    }
+
+  start_markup_row (markup, rendered);
+  g_string_append_printf (
+    markup,
+    "<span foreground=\"#77767b\">%s %s</span>"
+    " <span foreground=\"%s\" weight=\"bold\">%s</span> %s",
+    old_line, new_line, colour, marker, text);
+}
+
+char *
+xd_unified_diff_markup (GPtrArray *lines,
+                        gboolean   show_file_headers,
+                        guint      limit)
+{
+  g_autoptr (GString) markup = g_string_new (NULL);
+  guint rendered = 0;
+  guint total;
+
+  g_return_val_if_fail (lines != NULL, g_strdup (""));
+
+  total = xd_unified_diff_display_rows (lines, show_file_headers);
+  for (guint i = 0;
+       i < lines->len && (limit == 0 || rendered < limit);
+       i++)
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i);
+
+      if (line->kind == XD_DIFF_LINE_FILE)
+        {
+          if (!show_file_headers)
+            continue;
+          append_file_markup (markup, lines, i, line, rendered);
+        }
+      else if (line->kind == XD_DIFF_LINE_HUNK ||
+               line->kind == XD_DIFF_LINE_META)
+        {
+          append_full_line_markup (markup, line, rendered);
+        }
+      else
+        {
+          append_code_line_markup (markup, line, rendered);
+        }
+
+      rendered++;
+    }
+
+  if (rendered < total)
+    {
+      start_markup_row (markup, rendered);
+      g_string_append_printf (
+        markup,
+        "<span foreground=\"#9a9996\">Showing first %u of %u rows</span>",
+        rendered, total);
+    }
+
+  return g_string_free (g_steal_pointer (&markup), FALSE);
 }

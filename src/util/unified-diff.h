@@ -34,4 +34,18 @@ GPtrArray *xd_unified_diff_parse   (const char *patch,
                                     guint      *additions,
                                     guint      *deletions);
 
+/* Number of rows shown after optional file headers are filtered. */
+guint      xd_unified_diff_display_rows (GPtrArray *lines,
+                                         gboolean   show_file_headers);
+
+/*
+ * Formats parsed rows as one selectable monospace Pango layout.
+ *
+ * A single layout keeps inline diffs cheap for the transcript scroller;
+ * @limit zero means all rows. The returned markup is always valid.
+ */
+char      *xd_unified_diff_markup  (GPtrArray *lines,
+                                    gboolean   show_file_headers,
+                                    guint      limit);
+
 G_END_DECLS

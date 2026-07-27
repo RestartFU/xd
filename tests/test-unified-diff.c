@@ -1,5 +1,8 @@
 #include "util/unified-diff.h"
 
+#include <pango/pango.h>
+#include <string.h>
+
 static void
 test_parses_display_rows (void)
 {
@@ -71,6 +74,31 @@ test_keeps_meaningful_metadata (void)
                    "Binary files /dev/null and b/image.png differ");
 }
 
+static void
+test_formats_one_safe_layout (void)
+{
+  static const char *patch =
+    "diff --git a/src/a.c b/src/a.c\n"
+    "@@ -1,2 +1,2 @@\n"
+    "-old <value>\n"
+    "+new & value\n"
+    " same\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 3);
+  g_autofree char *plain = NULL;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_cmpuint (xd_unified_diff_display_rows (lines, TRUE), ==, 5);
+  g_assert_true (
+    pango_parse_markup (markup, -1, 0, NULL, &plain, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (plain, "src/a.c  +1  −1"));
+  g_assert_nonnull (strstr (plain, "old <value>"));
+  g_assert_nonnull (strstr (plain, "Showing first 3 of 5 rows"));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -81,6 +109,8 @@ main (int   argc,
                    test_parses_display_rows);
   g_test_add_func ("/unified-diff/keeps-meaningful-metadata",
                    test_keeps_meaningful_metadata);
+  g_test_add_func ("/unified-diff/formats-one-safe-layout",
+                   test_formats_one_safe_layout);
 
   return g_test_run ();
 }
