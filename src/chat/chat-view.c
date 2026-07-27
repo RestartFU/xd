@@ -1,5 +1,7 @@
 #include "chat-view.h"
 
+#include <string.h>
+
 #include "chat-session.h"
 #include "chat-title.h"
 #include "ui/dots.h"
@@ -16,6 +18,7 @@
 #include "util/ask-block.h"
 #include "util/git-diff.h"
 #include "util/git-info.h"
+#include "util/subagent-tool.h"
 #include "util/workflow-run.h"
 #include "util/worktree.h"
 
@@ -458,6 +461,8 @@ show_tool_use (XdChatView *self,
   const char *diff = xd_git_diff_from_tool (summary);
   g_autofree char *run_id = NULL;
   g_autofree char *url = NULL;
+  g_autofree char *subagent = NULL;
+  g_autofree char *task = NULL;
 
   if (diff != NULL)
     {
@@ -476,6 +481,35 @@ show_tool_use (XdChatView *self,
         append_row (self, XD_MESSAGE_ASSISTANT, block);
 
       xd_message_row_make_status (row);
+      return;
+    }
+
+  if (xd_subagent_tool_from_tool (summary, &subagent, &task))
+    {
+      g_autoptr (GString) safe_identity = g_string_new (NULL);
+      g_autoptr (GString) safe_task = g_string_new (NULL);
+
+      /* Tool prompts are plain text. Keep Markdown punctuation in a task from
+       * turning its card into a heading, code span, or accidental link. */
+      for (const char *at = subagent; *at != '\0'; at++)
+        {
+          if (strchr ("\\`*_[]<>#", *at) != NULL)
+            g_string_append_c (safe_identity, '\\');
+          g_string_append_c (safe_identity, *at);
+        }
+      for (const char *at = task; *at != '\0'; at++)
+        {
+          if (strchr ("\\`*_[]<>#", *at) != NULL)
+            g_string_append_c (safe_task, '\\');
+          g_string_append_c (safe_task, *at);
+        }
+
+      g_autofree char *block = g_strdup_printf (
+        "**Subagent · %s**\n\n%s", safe_identity->str, safe_task->str);
+      XdMessageRow *row =
+        append_row (self, XD_MESSAGE_ASSISTANT, block);
+
+      xd_message_row_make_subagent (row);
       return;
     }
 

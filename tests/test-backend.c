@@ -1,4 +1,5 @@
 #include "backend/backend.h"
+#include "util/subagent-tool.h"
 
 #include <glib/gstdio.h>
 
@@ -464,6 +465,9 @@ test_tool_summary_names_the_work (void)
   g_autofree char *bash = NULL;
   g_autofree char *bare = NULL;
   g_autofree char *file_change = NULL;
+  g_autofree char *subagent = NULL;
+  g_autofree char *subagent_identity = NULL;
+  g_autofree char *subagent_task = NULL;
 
   g_assert_true (json_parser_load_from_data (
     parser, "{\"command\":\"git status\",\"file_path\":\"ignored\"}", -1, NULL));
@@ -496,6 +500,45 @@ test_tool_summary_names_the_work (void)
    * is what the chat uses to replace the dead tool line with the diff pane. */
   file_change = ai_tool_summary ("file_change", NULL);
   g_assert_cmpstr (file_change, ==, "file_change");
+
+  {
+    g_autoptr (JsonParser) agent = json_parser_new ();
+
+    g_assert_true (json_parser_load_from_data (
+      agent,
+      "{\"subagent_type\":\"Explore\","
+      "\"description\":\"Trace the storage layer\"}",
+      -1, NULL));
+
+    subagent = ai_tool_summary (
+      "Agent", json_node_get_object (json_parser_get_root (agent)));
+    g_assert_true (xd_subagent_tool_from_tool (
+      subagent, &subagent_identity, &subagent_task));
+    g_assert_cmpstr (subagent_identity, ==, "Explore");
+    g_assert_cmpstr (subagent_task, ==, "Trace the storage layer");
+  }
+
+  {
+    g_autoptr (JsonParser) collab = json_parser_new ();
+
+    g_clear_pointer (&subagent, g_free);
+    g_clear_pointer (&subagent_identity, g_free);
+    g_clear_pointer (&subagent_task, g_free);
+
+    g_assert_true (json_parser_load_from_data (
+      collab,
+      "{\"tool\":\"spawnAgent\",\"model\":\"gpt-5\","
+      "\"prompt\":\"Review the diff\"}",
+      -1, NULL));
+
+    subagent = ai_tool_summary (
+      "collab_tool_call",
+      json_node_get_object (json_parser_get_root (collab)));
+    g_assert_true (xd_subagent_tool_from_tool (
+      subagent, &subagent_identity, &subagent_task));
+    g_assert_cmpstr (subagent_identity, ==, "gpt-5");
+    g_assert_cmpstr (subagent_task, ==, "Review the diff");
+  }
 }
 
 static void

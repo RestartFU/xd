@@ -7,6 +7,7 @@ xd_core_sources = files(
   'util/ask-block.c',
   'util/git-diff.c',
   'util/git-info.c',
+  'util/subagent-tool.c',
   'util/unified-diff.c',
   'util/workflow-run.c',
   'util/worktree.c',

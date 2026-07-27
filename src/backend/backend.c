@@ -1,5 +1,7 @@
 #include "backend.h"
 
+#include "util/subagent-tool.h"
+
 extern const AiBackend xd_claude_backend;
 extern const AiBackend xd_codex_backend;
 extern const AiBackend xd_cerebras_backend;
@@ -347,26 +349,47 @@ ai_tool_summary (const char *tool_name,
   };
   const char *detail = NULL;
   g_autofree char *trimmed = NULL;
-  g_autofree char *heading = NULL;
   gboolean is_command = FALSE;
 
   if (tool_name == NULL)
     tool_name = "tool";
 
   /*
-   * A subagent is not a tool call like the others.
+   * A delegated agent gets a durable record rather than a generic tool line.
    *
-   * It is another agent doing its own work, and a row reading "Task" hides
-   * that entirely. The kind of agent is what distinguishes one from the next,
-   * so it goes in the heading rather than the detail.
+   * Claude calls the tool Task or Agent. Codex exposes its collaboration call
+   * as an item. Both carry enough information for one shared transcript view.
    */
-  if (g_strcmp0 (tool_name, "Task") == 0)
+  if (g_strcmp0 (tool_name, "Task") == 0 ||
+      g_strcmp0 (tool_name, "Agent") == 0)
     {
       const char *kind = ai_json_get_string (input, "subagent_type");
+      const char *task = ai_json_get_string (input, "description");
 
-      heading = kind != NULL ? g_strdup_printf ("Subagent: %s", kind)
-                             : g_strdup ("Subagent");
-      tool_name = heading;
+      if (task == NULL)
+        task = ai_json_get_string (input, "prompt");
+
+      return xd_subagent_tool_new (kind, task);
+    }
+
+  if (g_strcmp0 (tool_name, "collab_tool_call") == 0 ||
+      g_strcmp0 (tool_name, "collab_agent_tool_call") == 0)
+    {
+      const char *tool = ai_json_get_string (input, "tool");
+
+      if (g_strcmp0 (tool, "spawn_agent") == 0 ||
+          g_strcmp0 (tool, "spawnAgent") == 0)
+        {
+          const char *identity = ai_json_get_string (input, "task_name");
+          const char *task = ai_json_get_string (input, "prompt");
+
+          if (identity == NULL)
+            identity = ai_json_get_string (input, "model");
+          if (identity == NULL)
+            identity = "Codex";
+
+          return xd_subagent_tool_new (identity, task);
+        }
     }
 
   for (gsize i = 0; i < G_N_ELEMENTS (keys) && detail == NULL; i++)

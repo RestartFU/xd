@@ -160,16 +160,31 @@ xd_message_row_new (XdMessageKind  kind,
   return self;
 }
 
+static void
+make_info_card (XdMessageRow *self,
+                const char   *css_class)
+{
+  gtk_widget_add_css_class (self->card, css_class);
+  gtk_widget_set_margin_top (self->body, 12);
+  gtk_widget_set_margin_bottom (self->body, 12);
+  gtk_widget_set_margin_start (self->body, 14);
+  gtk_widget_set_margin_end (self->body, 14);
+}
+
 void
 xd_message_row_make_status (XdMessageRow *self)
 {
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
-  gtk_widget_add_css_class (self->card, "xd-status");
-  gtk_widget_set_margin_top (self->body, 12);
-  gtk_widget_set_margin_bottom (self->body, 12);
-  gtk_widget_set_margin_start (self->body, 14);
-  gtk_widget_set_margin_end (self->body, 14);
+  make_info_card (self, "xd-status");
+}
+
+void
+xd_message_row_make_subagent (XdMessageRow *self)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+
+  make_info_card (self, "xd-subagent");
 }
 
 /* One prose label, configured the way every piece of message text is. */

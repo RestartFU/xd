@@ -382,6 +382,9 @@ static const char *XD_STYLE =
    * enough to stay in the timeline after the run has finished. */
   ".xd-status { background-color: alpha(#3584e4, 0.08);"
   " border: 1px solid alpha(#3584e4, 0.22); border-radius: 10px; }\n"
+  ".xd-subagent { background-color: alpha(#a56de2, 0.07);"
+  " border: 1px solid alpha(#a56de2, 0.22);"
+  " border-left: 3px solid alpha(#a56de2, 0.72); border-radius: 10px; }\n"
   ".xd-code label { font-family: \"JetBrains Mono\", monospace;"
   " font-size: 0.88em; }\n"
   ".xd-code textview.xd-diff, .xd-code textview.xd-diff text"
