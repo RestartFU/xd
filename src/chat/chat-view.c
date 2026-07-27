@@ -40,6 +40,13 @@ typedef struct
 
 typedef struct
 {
+  XdChatView *view;
+  XdMessageRow *row;
+  char *chat_id;
+} RemoteSend;
+
+typedef struct
+{
   XdChatView *view;         /* unowned; the view outlives its turns */
   XdChatSession *session;
   char *chat_id;
@@ -1207,6 +1214,24 @@ on_remote_event (XdRemoteClient *client,
   if (g_strcmp0 (name, "queued") == 0)
     {
       set_queued_text (self, text);
+
+      /*
+       * A send can race the daemon starting a turn on another device. The
+       * immediate row belongs in the queue in that case, so replace it with
+       * the daemon's authoritative transcript as soon as that is known.
+       */
+      for (GtkWidget *child = gtk_widget_get_first_child (
+             GTK_WIDGET (self->transcript));
+           child != NULL;
+           child = gtk_widget_get_next_sibling (child))
+        {
+          if (g_object_get_data (G_OBJECT (child),
+                                 "xd-optimistic-remote") != NULL)
+            {
+              load_remote_transcript (self);
+              break;
+            }
+        }
       return;
     }
 
@@ -2619,12 +2644,49 @@ on_remote_sent (GObject      *source,
     append_row (self, XD_MESSAGE_ERROR, error->message);
 }
 
+static void
+remote_send_free (RemoteSend *send)
+{
+  g_clear_object (&send->view);
+  g_clear_object (&send->row);
+  g_free (send->chat_id);
+  g_free (send);
+}
+
+static void
+on_remote_message_sent (GObject      *source,
+                        GAsyncResult *result,
+                        gpointer      user_data)
+{
+  RemoteSend *send = user_data;
+  XdChatView *self = send->view;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+
+  if (reply == NULL &&
+      !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
+      self->remote == XD_REMOTE_CLIENT (source) &&
+      self->chat != NULL &&
+      g_strcmp0 (send->chat_id, xd_node_get_chat_id (self->chat)) == 0)
+    {
+      if (gtk_widget_get_parent (GTK_WIDGET (send->row)) ==
+          GTK_WIDGET (self->transcript))
+        gtk_box_remove (self->transcript, GTK_WIDGET (send->row));
+
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+    }
+
+  remote_send_free (send);
+}
+
 /*
  * Sends to the daemon, which is where the agent runs.
  *
- * Nothing is written here and nothing is drawn: the daemon stores the message
- * and broadcasts what it did, and this window redraws from that like every
- * other device watching -- including the one the daemon is running on.
+ * The daemon remains authoritative, but waiting for its broadcast made a sent
+ * message feel lost on a latent connection. Draw a temporary row immediately;
+ * the normal transcript reload replaces it with what the daemon stored.
  */
 static gboolean
 send_remote_message (XdChatView *self,
@@ -2632,6 +2694,8 @@ send_remote_message (XdChatView *self,
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (JsonNode) request = NULL;
+  g_autoptr (GString) display = g_string_new (text != NULL ? text : "");
+  RemoteSend *send;
   gsize total = 0;
 
   json_builder_begin_object (builder);
@@ -2687,6 +2751,10 @@ send_remote_message (XdChatView *self,
           json_builder_set_member_name (builder, "data");
           json_builder_add_string_value (builder, encoded);
           json_builder_end_object (builder);
+
+          if (display->len > 0)
+            g_string_append_c (display, '\n');
+          g_string_append_printf (display, "Image #%u", i + 1);
         }
 
       json_builder_end_array (builder);
@@ -2696,8 +2764,17 @@ send_remote_message (XdChatView *self,
 
   request = json_builder_get_root (builder);
 
+  begin_bottom_jump (self);
+  send = g_new0 (RemoteSend, 1);
+  send->view = g_object_ref (self);
+  send->chat_id = g_strdup (xd_node_get_chat_id (self->chat));
+  send->row = g_object_ref (
+    append_row (self, XD_MESSAGE_USER, display->str));
+  g_object_set_data (G_OBJECT (send->row), "xd-optimistic-remote",
+                     GINT_TO_POINTER (1));
+
   xd_remote_client_call_async (self->remote, request, NULL,
-                               on_remote_sent, g_object_ref (self));
+                               on_remote_message_sent, send);
 
   if (self->attachments->len > 0)
     forget_attachments (self);
