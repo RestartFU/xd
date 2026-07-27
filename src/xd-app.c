@@ -145,11 +145,14 @@ static const char *XD_STYLE =
   " padding: 4px 12px; }\n"
   ".xd-context label { font-size: 0.85em; }\n"
 
-  /* DM Sans, which is what t3code itself is set in; Inter and Cantarell
-   * behind it as the fallbacks the bundle already carried. */
-  "window { font-family: \"DM Sans\", \"Inter\", \"Cantarell\","
-  " \"Noto Color Emoji\", \"Apple Color Emoji\", \"Segoe UI Emoji\","
-  " sans-serif;"
+  /*
+   * DM Sans, which is what t3code itself is set in; Inter and Cantarell
+   * behind it as the fallbacks the bundle already carried. Emoji fonts stay
+   * out of this explicit list: Pango can otherwise choose their keycap
+   * components for ordinary digits. Fontconfig still finds the bundled emoji
+   * font for glyphs these text faces do not cover.
+   */
+  "window { font-family: \"DM Sans\", \"Inter\", \"Cantarell\", sans-serif;"
   " font-size: 0.95em; }\n"
 
   /* Flat: the window is one surface, so the bars that divide it are told
@@ -179,13 +182,11 @@ static const char *XD_STYLE =
    * clear where the panes are darkest.
    */
   /*
-   * The separator itself is never drawn. It rendered differently across
-   * boundaries on some display stacks -- wide enough to read as a scrollbar
-   * -- and hiding it is the only rendering that proved consistent. The
-   * visible line is a border on the pane beside it instead, which nothing
-   * composites over and which scales like every other border.
+   * The separator itself is never drawn. Give it a forgiving hit target,
+   * though: a one-pixel invisible handle made pane resizing impractical.
+   * The visible line remains a border on the pane beside it.
    */
-  "paned > separator { min-width: 1px; min-height: 1px; border: none;"
+  "paned > separator { min-width: 8px; min-height: 8px; border: none;"
   " opacity: 0; }\n"
   ".xd-divider-left { border-left: 1px solid #2a2a2d; }\n"
   ".xd-divider-top { border-top: 1px solid #2a2a2d; }\n"
