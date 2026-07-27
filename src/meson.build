@@ -15,6 +15,7 @@ xd_core_sources = files(
   'util/worktree.c',
   'util/host-launch.c',
   'util/app-paths.c',
+  'integrations/discord-presence.c',
   'remote/client.c',
   'remote/remote-tree.c',
   'tree/xd-node.c',

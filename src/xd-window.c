@@ -4,6 +4,7 @@
 
 #include "chat/chat-view.h"
 #include "chat/search-dialog.h"
+#include "integrations/discord-presence.h"
 #include "remote/pair-dialog.h"
 #include "remote/remote-tree.h"
 #include "storage/storage.h"
@@ -28,6 +29,9 @@ struct _XdWindow
   XdSidebar *sidebar;
   XdChatView *chat_view;
   GtkSizeGroup *header_size_group;
+
+  XdDiscordPresence *discord_presence;
+  XdNode *presence_node;
 };
 
 G_DEFINE_FINAL_TYPE (XdWindow, xd_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -47,6 +51,63 @@ resolve_root (GSettings  *settings,
     return g_steal_pointer (&configured);
 
   return xd_app_workspaces_root ();
+}
+
+static const char *
+presence_state_for_node (XdNode *node)
+{
+  if (node == NULL)
+    return "Browsing workspaces";
+
+  switch (xd_node_get_state (node))
+    {
+    case XD_NODE_WORKING:
+      return "Agent working";
+    case XD_NODE_WAITING:
+      return "Waiting for input";
+    case XD_NODE_DONE:
+      return "Reply ready";
+    case XD_NODE_OFFLINE:
+      return "Remote unavailable";
+    case XD_NODE_IDLE:
+    default:
+      return "Reviewing a conversation";
+    }
+}
+
+static void
+update_discord_presence (XdWindow *self)
+{
+  xd_discord_presence_set_state (
+    self->discord_presence, presence_state_for_node (self->presence_node));
+}
+
+static void
+on_presence_node_state_changed (XdNode    *node,
+                                GParamSpec *pspec,
+                                gpointer   user_data)
+{
+  update_discord_presence (user_data);
+}
+
+static void
+set_presence_node (XdWindow *self,
+                   XdNode   *node)
+{
+  if (self->presence_node == node)
+    return;
+
+  if (self->presence_node != NULL)
+    g_signal_handlers_disconnect_by_func (
+      self->presence_node, on_presence_node_state_changed, self);
+
+  g_set_object (&self->presence_node, node);
+
+  if (self->presence_node != NULL)
+    g_signal_connect (self->presence_node, "notify::state",
+                      G_CALLBACK (on_presence_node_state_changed), self);
+
+  update_discord_presence (self);
 }
 
 /*
@@ -73,6 +134,8 @@ show_chat (XdWindow *self,
     xd_chat_view_show_remote_chat (self->chat_view, node, self->remote_client);
   else
     xd_chat_view_set_chat (self->chat_view, node);
+
+  set_presence_node (self, node);
 
   saved = g_strdup_printf ("%s%s",
                            remote ? ACTIVE_CHAT_REMOTE : ACTIVE_CHAT_LOCAL,
@@ -108,6 +171,7 @@ on_chat_removed (gpointer  tree,
   if (xd_chat_view_get_chat (self->chat_view) == chat)
     {
       xd_chat_view_set_chat (self->chat_view, NULL);
+      set_presence_node (self, NULL);
       g_settings_set_string (self->settings, "active-chat", "");
     }
 }
@@ -314,6 +378,7 @@ xd_window_new (XdApplication *app)
 
   self = g_object_new (XD_TYPE_WINDOW, "application", app, NULL);
   self->settings = g_object_ref (xd_application_get_settings (app));
+  self->discord_presence = xd_discord_presence_new ();
 
   gtk_window_set_default_size (GTK_WINDOW (self),
                                g_settings_get_int (self->settings, "window-width"),
@@ -389,6 +454,8 @@ xd_window_dispose (GObject *object)
 {
   XdWindow *self = XD_WINDOW (object);
 
+  set_presence_node (self, NULL);
+
   if (self->remote_client != NULL)
     xd_remote_client_stop (self->remote_client);
 
@@ -398,6 +465,7 @@ xd_window_dispose (GObject *object)
   g_clear_object (&self->storage);
   g_clear_object (&self->settings);
   g_clear_object (&self->header_size_group);
+  g_clear_pointer (&self->discord_presence, xd_discord_presence_free);
 
   G_OBJECT_CLASS (xd_window_parent_class)->dispose (object);
 }
