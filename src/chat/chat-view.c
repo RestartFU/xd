@@ -167,6 +167,7 @@ struct _XdChatView
   GtkScrolledWindow *scroller;
   gboolean follow_bottom;
   guint bottom_jump_tick;
+  guint bottom_pin_tick;
   double bottom_jump_upper;
   double bottom_jump_page_size;
   guint bottom_jump_stable_frames;
@@ -404,6 +405,36 @@ set_scroll_at_bottom (GtkAdjustment *adjustment)
     gtk_adjustment_set_value (adjustment, bottom);
 }
 
+/*
+ * Adjustment signals fire while GTK is still negotiating an allocation.
+ * Setting the value inside that signal can be overwritten by the scroller's
+ * own clamp later in the same frame. Pin again on the next frame, after the
+ * allocation that emitted the signal has completed and before the next paint.
+ */
+static gboolean
+pin_transcript_at_bottom (GtkWidget     *widget,
+                          GdkFrameClock *frame_clock,
+                          gpointer       user_data)
+{
+  XdChatView *self = user_data;
+
+  self->bottom_pin_tick = 0;
+  if (self->follow_bottom)
+    set_scroll_at_bottom (
+      gtk_scrolled_window_get_vadjustment (self->scroller));
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+queue_bottom_pin (XdChatView *self)
+{
+  if (self->bottom_pin_tick == 0)
+    self->bottom_pin_tick =
+      gtk_widget_add_tick_callback (GTK_WIDGET (self->scroller),
+                                    pin_transcript_at_bottom, self, NULL);
+}
+
 static gboolean
 reveal_transcript_at_bottom (GtkWidget     *widget,
                              GdkFrameClock *frame_clock,
@@ -476,7 +507,7 @@ on_scroll_adjustment_changed (GtkAdjustment *adjustment,
   XdChatView *self = user_data;
 
   if (self->follow_bottom)
-    set_scroll_at_bottom (adjustment);
+    queue_bottom_pin (self);
   else if (self->history_bottom_distance >= 0)
     {
       double value =
@@ -510,6 +541,7 @@ queue_scroll_to_bottom (XdChatView *self)
   self->history_bottom_distance = -1;
   set_scroll_at_bottom (
     gtk_scrolled_window_get_vadjustment (self->scroller));
+  queue_bottom_pin (self);
 }
 
 static XdMessageRow *
@@ -4961,6 +4993,12 @@ xd_chat_view_dispose (GObject *object)
       gtk_widget_remove_tick_callback (GTK_WIDGET (self->scroller),
                                        self->bottom_jump_tick);
       self->bottom_jump_tick = 0;
+    }
+  if (self->bottom_pin_tick != 0)
+    {
+      gtk_widget_remove_tick_callback (GTK_WIDGET (self->scroller),
+                                       self->bottom_pin_tick);
+      self->bottom_pin_tick = 0;
     }
 
   g_clear_handle_id (&self->working_timer, g_source_remove);
