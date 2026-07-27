@@ -30,12 +30,17 @@ GPtrArray *xd_worktree_list      (const char      *workdir,
 /*
  * Creates the private checkout used by a new chat.
  *
- * The checkout starts at the current HEAD and gets its own xd/<chat-id>
- * branch under ../worktrees/<repository>/<chat-id>. Its path is returned; an
- * existing checkout from an interrupted first-send attempt is reused.
+ * The checkout starts at the current HEAD. @name_hint becomes a readable
+ * worktree name, while a short stable suffix keeps its branch unique. The
+ * checkout lives at
+ * ../worktrees/<repository>/<worktree-name>/<repository>.
+ *
+ * Its path is returned; an existing checkout from an interrupted first-send
+ * attempt is reused.
  */
 char      *xd_worktree_create    (const char      *workdir,
                                   const char      *chat_id,
+                                  const char      *name_hint,
                                   GError         **error);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (XdWorktreeInfo, xd_worktree_info_free)

@@ -77,12 +77,19 @@ test_create_and_reuse (void)
   g_autofree char *repo = NULL;
   g_autofree char *file = NULL;
   g_autofree char *worktree = NULL;
+  g_autofree char *worktree_name_dir = NULL;
   g_autofree char *worktree_repo_dir = NULL;
   g_autofree char *worktrees_dir = NULL;
+  g_autofree char *checkout_name = NULL;
+  g_autofree char *worktree_name = NULL;
   g_autofree char *worktree_repo_name = NULL;
   g_autofree char *worktrees_name = NULL;
   g_autofree char *again = NULL;
   g_autofree char *branch = NULL;
+  g_autofree char *expected_branch = NULL;
+  g_autofree char *second = NULL;
+  g_autofree char *second_parent = NULL;
+  g_autofree char *second_name = NULL;
   g_autoptr (GPtrArray) listed = NULL;
   const char *init[] = { "git", "init", "-q", "-b", "main", NULL };
   const char *add[] = { "git", "add", "hello.txt", NULL };
@@ -105,23 +112,33 @@ test_create_and_reuse (void)
   run (repo, commit);
 
   worktree = xd_worktree_create (
-    repo, "12345678-1234-1234-1234-123456789abc", &error);
+    repo, "12345678-1234-1234-1234-123456789abc",
+    "Fix parser crashes!", &error);
   g_assert_no_error (error);
   g_assert_nonnull (worktree);
   g_assert_true (g_file_test (worktree, G_FILE_TEST_IS_DIR));
-  worktree_repo_dir = g_path_get_dirname (worktree);
+  worktree_name_dir = g_path_get_dirname (worktree);
+  worktree_repo_dir = g_path_get_dirname (worktree_name_dir);
   worktrees_dir = g_path_get_dirname (worktree_repo_dir);
+  checkout_name = g_path_get_basename (worktree);
+  worktree_name = g_path_get_basename (worktree_name_dir);
   worktree_repo_name = g_path_get_basename (worktree_repo_dir);
   worktrees_name = g_path_get_basename (worktrees_dir);
+  g_assert_cmpstr (checkout_name, ==, "repo");
+  g_assert_cmpstr (worktree_name, ==, "fix-parser-crashes");
   g_assert_cmpstr (worktree_repo_name, ==, "repo");
   g_assert_cmpstr (worktrees_name, ==, "worktrees");
 
   branch = read_command (worktree, show_branch);
-  g_assert_cmpstr (branch, ==, "xd/12345678-1234-1234-1234-123456789abc");
+  expected_branch = g_strdup_printf (
+    "xd/fix-parser-crashes-%08x",
+    g_str_hash ("12345678-1234-1234-1234-123456789abc"));
+  g_assert_cmpstr (branch, ==, expected_branch);
 
   /* Retrying after creation must reuse it, not fail on its branch. */
   again = xd_worktree_create (
-    repo, "12345678-1234-1234-1234-123456789abc", &error);
+    repo, "12345678-1234-1234-1234-123456789abc",
+    "Fix parser crashes!", &error);
   g_assert_no_error (error);
   g_assert_cmpstr (again, ==, worktree);
 
@@ -135,7 +152,19 @@ test_create_and_reuse (void)
     ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->path, worktree));
   g_assert_cmpstr (
     ((XdWorktreeInfo *) g_ptr_array_index (listed, 1))->branch,
-    ==, "xd/12345678-1234-1234-1234-123456789abc");
+    ==, expected_branch);
+
+  /* Similar requests stay readable and receive a numeric directory suffix,
+   * while their branches remain independently addressable. */
+  second = xd_worktree_create (
+    repo, "abcdefab-1234-1234-1234-123456789abc",
+    "Fix parser crashes!", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (second);
+  g_assert_cmpstr (second, !=, worktree);
+  second_parent = g_path_get_dirname (second);
+  second_name = g_path_get_basename (second_parent);
+  g_assert_cmpstr (second_name, ==, "fix-parser-crashes-2");
 
   remove_tree (dir);
 }
@@ -148,7 +177,7 @@ test_requires_a_repository (void)
   g_autofree char *worktree = NULL;
 
   g_assert_no_error (error);
-  worktree = xd_worktree_create (dir, "chat", &error);
+  worktree = xd_worktree_create (dir, "chat", "Fix tests", &error);
   g_assert_null (worktree);
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
   g_clear_error (&error);

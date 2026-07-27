@@ -28,6 +28,72 @@ normalize_worktree_path (const char *path)
   return g_canonicalize_filename (native, NULL);
 }
 
+/*
+ * A branch and directory name from what the user asked for.
+ *
+ * Git permits a lot more than filesystems agree on. Letters and numbers from
+ * any script plus one separator keep names readable while remaining portable.
+ */
+static char *
+worktree_slug (const char *hint)
+{
+  g_autoptr (GString) slug = g_string_new (NULL);
+  gboolean separator = FALSE;
+  guint characters = 0;
+
+  for (const char *at = hint != NULL ? hint : ""; *at != '\0';)
+    {
+      gunichar character = g_utf8_get_char_validated (at, -1);
+
+      if (character == (gunichar) -1 || character == (gunichar) -2)
+        {
+          at++;
+          separator = slug->len > 0;
+          continue;
+        }
+
+      at = g_utf8_next_char (at);
+      if (!g_unichar_isalnum (character))
+        {
+          separator = slug->len > 0;
+          continue;
+        }
+
+      if (separator && slug->str[slug->len - 1] != '-')
+        g_string_append_c (slug, '-');
+      separator = FALSE;
+
+      character = g_unichar_tolower (character);
+      g_string_append_unichar (slug, character);
+      if (++characters == 40)
+        break;
+    }
+
+  if (slug->len > 0 && slug->str[slug->len - 1] == '-')
+    g_string_truncate (slug, slug->len - 1);
+  if (slug->len == 0)
+    g_string_assign (slug, "worktree");
+
+#ifdef G_OS_WIN32
+  {
+    static const char *reserved[] = {
+      "con", "prn", "aux", "nul",
+      "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+      "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    };
+
+    for (guint i = 0; i < G_N_ELEMENTS (reserved); i++)
+      if (g_ascii_strcasecmp (slug->str, reserved[i]) == 0)
+        {
+          g_string_prepend (slug, "worktree-");
+          break;
+        }
+  }
+#endif
+
+  return g_string_free (g_steal_pointer (&slug), FALSE);
+}
+
 static char *
 current_worktree_path (const char *cwd)
 {
@@ -296,6 +362,7 @@ xd_worktree_list (const char  *workdir,
 char *
 xd_worktree_create (const char  *workdir,
                     const char  *chat_id,
+                    const char  *name_hint,
                     GError     **error)
 {
   g_autoptr (XdGitInfo) git = NULL;
@@ -303,9 +370,12 @@ xd_worktree_create (const char  *workdir,
   XdWorktreeInfo *main;
   g_autofree char *repository_parent = NULL;
   g_autofree char *repository_name = NULL;
+  g_autofree char *slug = NULL;
+  g_autofree char *worktree_name = NULL;
   g_autofree char *parent = NULL;
   g_autofree char *target = NULL;
   g_autofree char *branch = NULL;
+  g_autofree char *legacy_branch = NULL;
   const char *branch_argv[] = {
     "git", "show-ref", "--verify", "--quiet", NULL, NULL
   };
@@ -331,7 +401,9 @@ xd_worktree_create (const char  *workdir,
   if (worktrees == NULL)
     return NULL;
 
-  branch = g_strdup_printf ("xd/%s", chat_id);
+  slug = worktree_slug (name_hint);
+  branch = g_strdup_printf ("xd/%s-%08x", slug, g_str_hash (chat_id));
+  legacy_branch = g_strdup_printf ("xd/%s", chat_id);
   for (guint i = 0; i < worktrees->len; i++)
     {
       XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
@@ -339,22 +411,30 @@ xd_worktree_create (const char  *workdir,
       /* Reuse retries and worktrees made by older xd versions in their old
        * app-data location. Moving a checked-out branch would make Git reject
        * the retry even though the desired checkout is already ready. */
-      if (!item->detached && g_strcmp0 (item->branch, branch) == 0)
+      if (!item->detached &&
+          (g_strcmp0 (item->branch, branch) == 0 ||
+           g_strcmp0 (item->branch, legacy_branch) == 0))
         return g_strdup (item->path);
     }
 
   main = g_ptr_array_index (worktrees, 0);
   repository_parent = g_path_get_dirname (main->path);
   repository_name = g_path_get_basename (main->path);
-  parent = g_build_filename (repository_parent, "worktrees",
-                             repository_name, NULL);
-  target = g_build_filename (parent, chat_id, NULL);
+  worktree_name = g_strdup (slug);
 
-  if (g_file_test (target, G_FILE_TEST_EXISTS))
+  for (guint suffix = 2;; suffix++)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_EXISTS,
-                   "Cannot create worktree: %s already exists.", target);
-      return NULL;
+      g_free (g_steal_pointer (&parent));
+      g_free (g_steal_pointer (&target));
+      parent = g_build_filename (repository_parent, "worktrees",
+                                 repository_name, worktree_name, NULL);
+      target = g_build_filename (parent, repository_name, NULL);
+
+      if (!g_file_test (target, G_FILE_TEST_EXISTS))
+        break;
+
+      g_free (worktree_name);
+      worktree_name = g_strdup_printf ("%s-%u", slug, suffix);
     }
 
   if (g_mkdir_with_parents (parent, 0700) != 0)

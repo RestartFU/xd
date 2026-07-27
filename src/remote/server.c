@@ -1655,10 +1655,11 @@ start_daemon_turn (XdRemoteServer  *self,
       {
         g_autoptr (XdDaemonTurn) resolver =
           xd_daemon_turn_new (self->storage, self->root_path);
+        g_autofree char *name = xd_chat_title_from_prompt (text);
         g_autofree char *source =
           xd_daemon_turn_resolve_workdir (resolver, chat);
         g_autofree char *worktree =
-          xd_worktree_create (source, chat_id, error);
+          xd_worktree_create (source, chat_id, name, error);
 
         if (worktree == NULL ||
             !xd_storage_use_worktree (

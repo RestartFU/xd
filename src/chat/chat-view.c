@@ -2708,17 +2708,20 @@ name_chat_after_first_message (XdChatView *self,
 static gboolean
 prepare_new_worktree (XdChatView *self,
                       XdChat     *chat,
+                      const char *prompt,
                       GError    **error)
 {
   g_autoptr (XdEffectiveSettings) resolved = NULL;
   g_autofree char *worktree = NULL;
+  g_autofree char *name = NULL;
 
   if (!chat->new_worktree)
     return TRUE;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  name = xd_chat_title_from_prompt (prompt);
   worktree = xd_worktree_create (
-    workdir_for (chat, resolved), chat->id, error);
+    workdir_for (chat, resolved), chat->id, name, error);
   if (worktree == NULL)
     return FALSE;
 
@@ -2750,7 +2753,7 @@ send_message (XdChatView *self,
 
   chat = xd_storage_get_chat (
     self->storage, xd_node_get_chat_id (self->chat), &error);
-  if (chat == NULL || !prepare_new_worktree (self, chat, &error))
+  if (chat == NULL || !prepare_new_worktree (self, chat, text, &error))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return FALSE;
