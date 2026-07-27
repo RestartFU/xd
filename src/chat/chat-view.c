@@ -498,7 +498,24 @@ on_choice_clicked (GtkButton *button,
    * first means it never lands there. */
   gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 
-  send_message (self, answer);
+  if (self->remote != NULL)
+    {
+      /*
+       * Remote nodes deliberately do not exist in local storage. Send through
+       * the daemon like composer text; otherwise the local write fails with
+       * "Unknown chat <uuid>" before the answer ever leaves this machine.
+       *
+       * The daemon also owns the one-turn-at-a-time check. If another device
+       * started a turn since these choices appeared, it preserves this answer
+       * as that chat's queued instruction.
+       */
+      retire_open_questions (self);
+      send_remote_message (self, answer);
+    }
+  else
+    {
+      send_message (self, answer);
+    }
 }
 
 /*
