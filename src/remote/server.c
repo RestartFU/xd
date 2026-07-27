@@ -5,6 +5,7 @@
 #include "remote/terminal.h"
 #include "remote/turn.h"
 #include "remote/protocol.h"
+#include "settings/agent-secrets.h"
 #include "settings/folder-settings.h"
 #include "util/git-info.h"
 #include "util/worktree.h"
@@ -1013,6 +1014,154 @@ handle_list_dir (Connection *connection,
   json_builder_end_object (builder);
 
   send_json (connection, builder);
+}
+
+/*
+ * Global agent secrets live on the machine that executes the agent.
+ *
+ * A paired client may manage their names and replace values, but reading the
+ * store never sends values over the wire. An omitted value means "keep the
+ * existing value", allowing a masked editor to save without first retrieving
+ * credentials.
+ */
+static void
+handle_agent_secrets (Connection *connection)
+{
+  g_autoptr (XdAgentSecrets) secrets = NULL;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (GError) error = NULL;
+  g_auto (GStrv) names = NULL;
+
+  secrets = xd_agent_secrets_load (NULL, &error);
+  if (secrets == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  names = xd_agent_secrets_names (secrets);
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, TRUE);
+  json_builder_set_member_name (builder, "names");
+  json_builder_begin_array (builder);
+  for (gsize i = 0; names[i] != NULL; i++)
+    json_builder_add_string_value (builder, names[i]);
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+  send_json (connection, builder);
+}
+
+static void
+handle_set_agent_secrets (Connection *connection,
+                          JsonObject *request)
+{
+  g_autoptr (XdAgentSecrets) secrets = NULL;
+  g_autoptr (GHashTable) desired = NULL;
+  g_autoptr (GError) error = NULL;
+  g_auto (GStrv) old_names = NULL;
+  JsonNode *entries_node;
+  JsonArray *entries;
+
+  entries_node = json_object_get_member (request, "entries");
+  if (entries_node == NULL || !JSON_NODE_HOLDS_ARRAY (entries_node))
+    {
+      send_error (connection, "set-agent-secrets needs an entries array.");
+      return;
+    }
+
+  secrets = xd_agent_secrets_load (NULL, &error);
+  if (secrets == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  entries = json_node_get_array (entries_node);
+  desired = g_hash_table_new (g_str_hash, g_str_equal);
+
+  /* Validate the complete request before changing the in-memory copy. */
+  for (guint i = 0; i < json_array_get_length (entries); i++)
+    {
+      JsonNode *entry_node = json_array_get_element (entries, i);
+      JsonObject *entry;
+      JsonNode *value_node;
+      const char *name;
+      const char *value = NULL;
+
+      if (!JSON_NODE_HOLDS_OBJECT (entry_node))
+        {
+          send_error (connection, "Every secret entry must be an object.");
+          return;
+        }
+
+      entry = json_node_get_object (entry_node);
+      name = member_string (entry, "name");
+      if (!xd_agent_secret_name_is_valid (name))
+        {
+          send_error (connection, "A secret has an invalid environment name.");
+          return;
+        }
+
+      if (g_hash_table_contains (desired, name))
+        {
+          send_error (connection, "Secret names must be unique.");
+          return;
+        }
+
+      value_node = json_object_get_member (entry, "value");
+      if (value_node != NULL)
+        {
+          if (!JSON_NODE_HOLDS_VALUE (value_node) ||
+              json_node_get_value_type (value_node) != G_TYPE_STRING)
+            {
+              send_error (connection, "A secret value must be text.");
+              return;
+            }
+
+          value = json_node_get_string (value_node);
+          if (value == NULL || *value == '\0')
+            {
+              send_error (connection, "A replacement secret needs a value.");
+              return;
+            }
+        }
+      else if (!xd_agent_secrets_contains (secrets, name))
+        {
+          send_error (connection, "A new secret needs a value.");
+          return;
+        }
+
+      g_hash_table_add (desired, (gpointer) name);
+    }
+
+  old_names = xd_agent_secrets_names (secrets);
+  for (gsize i = 0; old_names[i] != NULL; i++)
+    if (!g_hash_table_contains (desired, old_names[i]))
+      xd_agent_secrets_remove (secrets, old_names[i]);
+
+  for (guint i = 0; i < json_array_get_length (entries); i++)
+    {
+      JsonObject *entry = json_array_get_object_element (entries, i);
+      JsonNode *value_node = json_object_get_member (entry, "value");
+
+      if (value_node != NULL &&
+          !xd_agent_secrets_set (
+            secrets, member_string (entry, "name"),
+            json_node_get_string (value_node), &error))
+        {
+          send_error (connection, error->message);
+          return;
+        }
+    }
+
+  if (!xd_agent_secrets_save (secrets, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
 }
 
 static void
@@ -2497,6 +2646,10 @@ dispatch (Connection *connection,
     handle_image_read (connection, request);
   else if (g_strcmp0 (op, "list-dir") == 0)
     handle_list_dir (connection, request);
+  else if (g_strcmp0 (op, "agent-secrets") == 0)
+    handle_agent_secrets (connection);
+  else if (g_strcmp0 (op, "set-agent-secrets") == 0)
+    handle_set_agent_secrets (connection, request);
   /* The daemon is the only writer: a client sends what it wants done and this
    * is where it is done, so two of them acting at once are ordered here rather
    * than racing in the database. */

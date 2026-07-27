@@ -26,6 +26,12 @@ xd_app_database_path (void)
 }
 
 char *
+xd_app_agent_secrets_path (void)
+{
+  return g_build_filename (xd_app_data_dir (), "agent-secrets.json", NULL);
+}
+
+char *
 xd_app_workspaces_root (void)
 {
   char *root = g_build_filename (xd_app_data_dir (), "Workspaces", NULL);

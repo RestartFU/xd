@@ -728,6 +728,118 @@ xd_remote_tree_set_folder_context_finish (XdRemoteTree *self,
 }
 
 void
+xd_remote_tree_get_agent_secrets_async (XdRemoteTree        *self,
+                                        GCancellable        *cancellable,
+                                        GAsyncReadyCallback  callback,
+                                        gpointer             user_data)
+{
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+
+  xd_remote_client_call_op_async (self->client, "agent-secrets", NULL, NULL,
+                                  cancellable, callback, user_data);
+}
+
+GStrv
+xd_remote_tree_get_agent_secrets_finish (XdRemoteTree  *self,
+                                         GAsyncResult  *result,
+                                         GError       **error)
+{
+  g_autoptr (JsonObject) reply = NULL;
+  JsonNode *names_node;
+  JsonArray *names;
+  GStrv values;
+
+  g_return_val_if_fail (XD_IS_REMOTE_TREE (self), NULL);
+
+  reply = xd_remote_client_call_finish (self->client, result, error);
+  if (reply == NULL)
+    return NULL;
+
+  names_node = json_object_get_member (reply, "names");
+  if (names_node == NULL || !JSON_NODE_HOLDS_ARRAY (names_node))
+    {
+      g_set_error_literal (error, XD_REMOTE_ERROR,
+                           XD_REMOTE_ERROR_PROTOCOL,
+                           "The daemon omitted agent secret names.");
+      return NULL;
+    }
+
+  names = json_node_get_array (names_node);
+  values = g_new0 (char *, json_array_get_length (names) + 1);
+  for (guint i = 0; i < json_array_get_length (names); i++)
+    {
+      JsonNode *name = json_array_get_element (names, i);
+
+      if (!JSON_NODE_HOLDS_VALUE (name) ||
+          json_node_get_value_type (name) != G_TYPE_STRING)
+        {
+          g_strfreev (values);
+          g_set_error_literal (error, XD_REMOTE_ERROR,
+                               XD_REMOTE_ERROR_PROTOCOL,
+                               "The daemon sent an invalid secret name.");
+          return NULL;
+        }
+
+      values[i] = json_node_dup_string (name);
+    }
+
+  return values;
+}
+
+void
+xd_remote_tree_set_agent_secrets_async (
+                                       XdRemoteTree              *self,
+                                       const XdAgentSecretUpdate *entries,
+                                       gsize                      n_entries,
+                                       GCancellable              *cancellable,
+                                       GAsyncReadyCallback        callback,
+                                       gpointer                   user_data)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (entries != NULL || n_entries == 0);
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "set-agent-secrets");
+  json_builder_set_member_name (builder, "entries");
+  json_builder_begin_array (builder);
+  for (gsize i = 0; i < n_entries; i++)
+    {
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "name");
+      json_builder_add_string_value (builder, entries[i].name);
+      if (entries[i].value != NULL)
+        {
+          json_builder_set_member_name (builder, "value");
+          json_builder_add_string_value (builder, entries[i].value);
+        }
+      json_builder_end_object (builder);
+    }
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->client, request, cancellable,
+                               callback, user_data);
+}
+
+gboolean
+xd_remote_tree_set_agent_secrets_finish (XdRemoteTree  *self,
+                                         GAsyncResult  *result,
+                                         GError       **error)
+{
+  g_autoptr (JsonObject) reply = NULL;
+
+  g_return_val_if_fail (XD_IS_REMOTE_TREE (self), FALSE);
+
+  reply = xd_remote_client_call_finish (self->client, result, error);
+  return reply != NULL;
+}
+
+void
 xd_remote_tree_create_chat (XdRemoteTree *self,
                             XdNode       *folder,
                             const char   *title,

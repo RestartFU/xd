@@ -1,6 +1,7 @@
 #include "sidebar.h"
 
 #include "backend/backend.h"
+#include "settings/agent-secrets-dialog.h"
 #include "settings/folder-context-dialog.h"
 #include "settings/folder-settings-dialog.h"
 #include "settings/settings-resolver.h"
@@ -820,6 +821,23 @@ on_folder_context (GtkWidget  *widget,
     GTK_WIDGET (self), folder, is_remote_row (folder) ? self->remote : NULL);
 }
 
+static void
+on_agent_secrets (GtkWidget  *widget,
+                  const char *action_name,
+                  GVariant   *target)
+{
+  XdSidebar *self = XD_SIDEBAR (widget);
+  gboolean remote =
+    target != NULL &&
+    g_strcmp0 (g_variant_get_string (target, NULL), "remote") == 0;
+
+  if (remote && self->remote == NULL)
+    return;
+
+  xd_agent_secrets_dialog_present (
+    GTK_WIDGET (self), remote ? self->remote : NULL);
+}
+
 typedef struct
 {
   XdSidebar *self;
@@ -1470,11 +1488,17 @@ build_remote_menu (XdNode *node)
     g_variant_ref_sink (g_variant_new_string (xd_node_get_path (node)));
   GMenu *menu = g_menu_new ();
   g_autoptr (GMenuItem) new_folder = NULL;
+  g_autoptr (GMenuItem) secrets = NULL;
   g_autoptr (GMenuItem) refresh = NULL;
 
   new_folder = g_menu_item_new ("New Workspace", NULL);
   g_menu_item_set_action_and_target_value (new_folder, "sidebar.new-folder", target);
   g_menu_append_item (menu, new_folder);
+
+  secrets = g_menu_item_new ("Agent Secrets…", NULL);
+  g_menu_item_set_action_and_target (
+    secrets, "sidebar.agent-secrets", "s", "remote");
+  g_menu_append_item (menu, secrets);
 
   refresh = g_menu_item_new ("Refresh", NULL);
   g_menu_item_set_action_and_target_value (refresh, "sidebar.refresh-remote", target);
@@ -1886,6 +1910,8 @@ xd_sidebar_class_init (XdSidebarClass *klass)
                                    on_folder_settings);
   gtk_widget_class_install_action (widget_class, "sidebar.folder-context", "s",
                                    on_folder_context);
+  gtk_widget_class_install_action (widget_class, "sidebar.agent-secrets", "s",
+                                   on_agent_secrets);
   gtk_widget_class_install_action (widget_class, "sidebar.refresh-remote", "s",
                                    on_refresh_remote);
 }
@@ -1916,9 +1942,14 @@ xd_sidebar_init (XdSidebar *self)
    */
   {
     GMenu *menu = g_menu_new ();
+    g_autoptr (GMenuItem) secrets = NULL;
 
     g_menu_append (menu, "New Workspace", "sidebar.new-workspace");
     g_menu_append (menu, "Connect to a Machine\u2026", "win.pair-remote");
+    secrets = g_menu_item_new ("Agent Secrets…", NULL);
+    g_menu_item_set_action_and_target (
+      secrets, "sidebar.agent-secrets", "s", "local");
+    g_menu_append_item (menu, secrets);
 
     gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (new_button),
                                     G_MENU_MODEL (menu));

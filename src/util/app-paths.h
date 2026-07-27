@@ -19,6 +19,9 @@ const char *xd_app_data_dir        (void);
 /* The chat database, inside it. */
 char       *xd_app_database_path   (void);
 
+/* Private global agent environment values, separate from chats and settings. */
+char       *xd_app_agent_secrets_path (void);
+
 /*
  * The workspace tree.
  *

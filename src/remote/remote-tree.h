@@ -98,6 +98,40 @@ gboolean        xd_remote_tree_set_folder_context_finish (
                                               GError      **error);
 
 /*
+ * Global secrets on the daemon.
+ *
+ * Listing returns names only. During save, a NULL value keeps an existing
+ * value; new names need a non-NULL value. Names omitted from @entries are
+ * removed.
+ */
+typedef struct
+{
+  const char *name;
+  const char *value;
+} XdAgentSecretUpdate;
+
+void            xd_remote_tree_get_agent_secrets_async (
+                                              XdRemoteTree        *self,
+                                              GCancellable        *cancellable,
+                                              GAsyncReadyCallback  callback,
+                                              gpointer             user_data);
+GStrv           xd_remote_tree_get_agent_secrets_finish (
+                                              XdRemoteTree *self,
+                                              GAsyncResult *result,
+                                              GError      **error);
+void            xd_remote_tree_set_agent_secrets_async (
+                                              XdRemoteTree              *self,
+                                              const XdAgentSecretUpdate *entries,
+                                              gsize                      n_entries,
+                                              GCancellable              *cancellable,
+                                              GAsyncReadyCallback        callback,
+                                              gpointer                   user_data);
+gboolean        xd_remote_tree_set_agent_secrets_finish (
+                                              XdRemoteTree *self,
+                                              GAsyncResult *result,
+                                              GError      **error);
+
+/*
  * The backend, model and effort are the daemon's to decide -- they come from
  * the folder chain, which lives over there. @workdir may be NULL to inherit
  * the folder's; anything else must be a directory on the daemon, which is why

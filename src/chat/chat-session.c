@@ -1,5 +1,8 @@
 #include "chat-session.h"
 
+#include "settings/agent-secrets.h"
+#include "util/host-launch.h"
+
 #ifndef G_OS_WIN32
 #include <signal.h>
 #endif
@@ -239,22 +242,53 @@ xd_chat_session_start (XdChatSession    *self,
   g_autoptr (GSubprocessLauncher) launcher = NULL;
   g_autoptr (GPtrArray) argv = NULL;
   g_autoptr (GError) local_error = NULL;
+  g_autoptr (XdAgentSecrets) secrets = NULL;
+  g_auto (GStrv) environment = NULL;
+  g_autofree char *secret_prompt = NULL;
+  g_autofree char *system_prompt = NULL;
+  AiRunSpec effective;
 
   g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
   g_return_val_if_fail (spec != NULL, FALSE);
   g_return_val_if_fail (self->process == NULL, FALSE);
 
-  ai_parser_set_model (self->parser, spec->model);
-  argv = self->backend->build_argv (self->backend, spec);
+  secrets = xd_agent_secrets_load (NULL, &local_error);
+  if (secrets == NULL)
+    {
+      g_prefix_error (&local_error, "Cannot load agent secrets: ");
+      g_propagate_error (error, g_steal_pointer (&local_error));
+      return FALSE;
+    }
+
+  /*
+   * Models learn which environment variables exist, never their values. The
+   * CLI process receives values below, so commands it launches inherit them
+   * without a credential crossing the prompt or transcript.
+   */
+  effective = *spec;
+  secret_prompt = xd_agent_secrets_prompt (secrets);
+  if (secret_prompt != NULL)
+    {
+      system_prompt = spec->system_prompt != NULL
+        ? g_strdup_printf ("%s\n\n%s", spec->system_prompt, secret_prompt)
+        : g_strdup (secret_prompt);
+      effective.system_prompt = system_prompt;
+    }
+
+  ai_parser_set_model (self->parser, effective.model);
+  argv = self->backend->build_argv (self->backend, &effective);
 
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDIN_PIPE |
                                         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                         G_SUBPROCESS_FLAGS_STDERR_PIPE);
+  environment = xd_host_environ ();
+  environment = xd_agent_secrets_apply_environment (secrets, environment);
+  g_subprocess_launcher_set_environ (launcher, environment);
 
   /* The working directory is how a folder's project context reaches the CLI:
    * both of them read the repository they are started in. */
-  if (spec->workdir != NULL)
-    g_subprocess_launcher_set_cwd (launcher, spec->workdir);
+  if (effective.workdir != NULL)
+    g_subprocess_launcher_set_cwd (launcher, effective.workdir);
 
   self->process = g_subprocess_launcher_spawnv (launcher,
                                                 (const char * const *) argv->pdata,

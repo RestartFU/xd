@@ -9,6 +9,7 @@ xd_tests = {
   'backend': 'test-backend.c',
   'session': 'test-session.c',
   'settings': 'test-settings.c',
+  'agent-secrets': 'test-agent-secrets.c',
   'markdown': 'test-markdown.c',
   'ask': 'test-ask.c',
   'git-diff': 'test-git-diff.c',

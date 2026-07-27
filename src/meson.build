@@ -2,6 +2,7 @@
 # exercised by the headless tests in tests/.
 xd_core_sources = files(
   'settings/folder-settings.c',
+  'settings/agent-secrets.c',
   'settings/settings-resolver.c',
   'util/markdown.c',
   'util/ask-block.c',
@@ -66,6 +67,7 @@ xd_sources = files(
   'ui/panel-style.c',
   'ui/updater.c',
   'remote/pair-dialog.c',
+  'settings/agent-secrets-dialog.c',
   'settings/folder-context-dialog.c',
   'settings/folder-settings-dialog.c',
   'chat/model-picker.c',

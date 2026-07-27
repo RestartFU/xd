@@ -1,4 +1,8 @@
 #include "chat/chat-session.h"
+#include "settings/agent-secrets.h"
+
+#include <glib/gstdio.h>
+#include <stdio.h>
 
 /*
  * Exercises the spawn/read/parse/finish path without going near a real AI CLI:
@@ -54,6 +58,34 @@ static const AiBackend missing_backend = {
   .display_name = "Missing",
   .program = "xd-definitely-not-installed",
   .build_argv = stub_build_argv,
+  .parse_object = stub_parse_object,
+};
+
+static char *secret_child_program;
+static char *secret_system_prompt;
+
+static GPtrArray *
+secret_build_argv (const AiBackend *self,
+                   const AiRunSpec *spec)
+{
+  GPtrArray *argv = g_ptr_array_new_with_free_func (g_free);
+
+  g_free (secret_system_prompt);
+  secret_system_prompt = g_strdup (spec->system_prompt);
+
+  g_ptr_array_add (argv, g_strdup (secret_child_program));
+  g_ptr_array_add (argv, g_strdup ("--secret-child"));
+  g_ptr_array_add (argv, g_strdup (spec->prompt));
+  g_ptr_array_add (argv, NULL);
+
+  return argv;
+}
+
+static const AiBackend secret_backend = {
+  .id = "secret-stub",
+  .display_name = "Secret Stub",
+  .program = "test-session",
+  .build_argv = secret_build_argv,
   .parse_object = stub_parse_object,
 };
 
@@ -202,15 +234,81 @@ test_nonzero_exit_is_a_failure (void)
   run_clear (&run);
 }
 
+static void
+test_agent_secret_reaches_process_not_prompt (void)
+{
+  g_autoptr (XdChatSession) session = xd_chat_session_new (&secret_backend);
+  g_autoptr (XdAgentSecrets) secrets = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *directory = NULL;
+  g_autofree char *path = NULL;
+  g_autofree char *fixture = NULL;
+  AiRunSpec spec = { .system_prompt = "existing instructions" };
+  Run run = { 0 };
+
+  directory = g_dir_make_tmp ("xd-session-secrets-XXXXXX", &error);
+  g_assert_no_error (error);
+  path = g_build_filename (directory, "agent-secrets.json", NULL);
+  secrets = xd_agent_secrets_load (path, &error);
+  g_assert_no_error (error);
+  g_assert_true (
+    xd_agent_secrets_set (secrets, "XD_TEST_TOKEN", "super-secret", &error));
+  g_assert_true (xd_agent_secrets_save (secrets, &error));
+  g_assert_no_error (error);
+
+  fixture = g_build_filename (g_getenv ("G_TEST_SRCDIR"), "fixtures",
+                              "claude-stream.jsonl", NULL);
+  spec.prompt = fixture;
+  g_setenv ("XD_AGENT_SECRETS_FILE", path, TRUE);
+
+  run_init (&run, session);
+  g_assert_true (xd_chat_session_start (session, &spec, &error));
+  g_assert_no_error (error);
+
+  g_timeout_add_seconds (10, on_timeout, &run);
+  g_main_loop_run (run.loop);
+
+  g_assert_true (run.finished);
+  g_assert_true (run.success);
+  g_assert_nonnull (strstr (secret_system_prompt, "existing instructions"));
+  g_assert_nonnull (strstr (secret_system_prompt, "XD_TEST_TOKEN"));
+  g_assert_null (strstr (secret_system_prompt, "super-secret"));
+
+  run_clear (&run);
+  g_unsetenv ("XD_AGENT_SECRETS_FILE");
+  g_remove (path);
+  g_rmdir (directory);
+}
+
 int
 main (int   argc,
       char *argv[])
 {
+  if (argc == 3 && g_strcmp0 (argv[1], "--secret-child") == 0)
+    {
+      g_autofree char *contents = NULL;
+      gsize length = 0;
+
+      if (g_strcmp0 (g_getenv ("XD_TEST_TOKEN"), "super-secret") != 0 ||
+          !g_file_get_contents (argv[2], &contents, &length, NULL))
+        return 9;
+
+      return fwrite (contents, 1, length, stdout) == length ? 0 : 10;
+    }
+
+  secret_child_program = argv[0];
   g_test_init (&argc, &argv, NULL);
 
   g_test_add_func ("/session/streams", test_streams_a_transcript);
   g_test_add_func ("/session/missing-program", test_missing_program_explains_itself);
   g_test_add_func ("/session/nonzero-exit", test_nonzero_exit_is_a_failure);
+  g_test_add_func ("/session/agent-secret-environment",
+                   test_agent_secret_reaches_process_not_prompt);
 
-  return g_test_run ();
+  {
+    int status = g_test_run ();
+
+    g_free (secret_system_prompt);
+    return status;
+  }
 }

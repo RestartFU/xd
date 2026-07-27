@@ -3,6 +3,7 @@
 #include "remote/server.h"
 #include "remote/turn.h"
 #include "remote/protocol.h"
+#include "settings/agent-secrets.h"
 #include "settings/folder-settings.h"
 #include "storage/storage.h"
 
@@ -669,6 +670,155 @@ paired_tree (Daemon         *daemon,
   g_signal_handlers_disconnect_by_data (tree, &loading);
 
   return tree;
+}
+
+typedef struct
+{
+  Wait wait;
+  XdRemoteTree *tree;          /* unowned */
+  GStrv names;
+} AgentSecretsWait;
+
+static void
+on_agent_secrets_read (GObject      *source,
+                       GAsyncResult *result,
+                       gpointer      user_data)
+{
+  AgentSecretsWait *waiting = user_data;
+  g_autoptr (GError) error = NULL;
+
+  waiting->names = xd_remote_tree_get_agent_secrets_finish (
+    waiting->tree, result, &error);
+  if (waiting->names == NULL)
+    waiting->wait.failure = g_strdup (error->message);
+  else
+    waiting->wait.ok = TRUE;
+  waiting->wait.done = TRUE;
+}
+
+static void
+on_agent_secrets_saved (GObject      *source,
+                        GAsyncResult *result,
+                        gpointer      user_data)
+{
+  AgentSecretsWait *waiting = user_data;
+  g_autoptr (GError) error = NULL;
+
+  waiting->wait.ok = xd_remote_tree_set_agent_secrets_finish (
+    waiting->tree, result, &error);
+  if (!waiting->wait.ok)
+    waiting->wait.failure = g_strdup (error->message);
+  waiting->wait.done = TRUE;
+}
+
+static void
+test_agent_secrets_are_managed_without_reading_values (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *path = NULL;
+  g_autofree char *old_override = g_strdup (
+    g_getenv ("XD_AGENT_SECRETS_FILE"));
+  g_autoptr (XdAgentSecrets) stored = NULL;
+  g_autoptr (GError) error = NULL;
+  g_auto (GStrv) environment = NULL;
+
+  daemon_start (&daemon);
+  path = g_build_filename (daemon.dir, "agent-secrets.json", NULL);
+  g_setenv ("XD_AGENT_SECRETS_FILE", path, TRUE);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    AgentSecretsWait read = { .tree = tree };
+
+    xd_remote_tree_get_agent_secrets_async (
+      tree, NULL, on_agent_secrets_read, &read);
+    wait_for (&read.wait);
+    g_assert_true (read.wait.ok);
+    g_assert_null (read.names[0]);
+    g_strfreev (read.names);
+    g_free (read.wait.failure);
+  }
+
+  {
+    const XdAgentSecretUpdate entries[] = {
+      { "CLOUDFLARE_API_TOKEN", "never-return-this-value" },
+    };
+    AgentSecretsWait saved = { .tree = tree };
+
+    xd_remote_tree_set_agent_secrets_async (
+      tree, entries, G_N_ELEMENTS (entries), NULL,
+      on_agent_secrets_saved, &saved);
+    wait_for (&saved.wait);
+    g_assert_true (saved.wait.ok);
+    g_free (saved.wait.failure);
+  }
+
+  {
+    AgentSecretsWait read = { .tree = tree };
+
+    xd_remote_tree_get_agent_secrets_async (
+      tree, NULL, on_agent_secrets_read, &read);
+    wait_for (&read.wait);
+    g_assert_true (read.wait.ok);
+    g_assert_cmpstr (read.names[0], ==, "CLOUDFLARE_API_TOKEN");
+    g_assert_null (read.names[1]);
+    g_assert_cmpstr (read.names[0], !=, "never-return-this-value");
+    g_strfreev (read.names);
+    g_free (read.wait.failure);
+  }
+
+  /* A masked editor saves blank existing values as "keep". */
+  {
+    const XdAgentSecretUpdate entries[] = {
+      { "CLOUDFLARE_API_TOKEN", NULL },
+    };
+    AgentSecretsWait saved = { .tree = tree };
+
+    xd_remote_tree_set_agent_secrets_async (
+      tree, entries, G_N_ELEMENTS (entries), NULL,
+      on_agent_secrets_saved, &saved);
+    wait_for (&saved.wait);
+    g_assert_true (saved.wait.ok);
+    g_free (saved.wait.failure);
+  }
+
+  stored = xd_agent_secrets_load (path, &error);
+  g_assert_no_error (error);
+  environment = g_new0 (char *, 1);
+  environment = xd_agent_secrets_apply_environment (stored, environment);
+  g_assert_cmpstr (
+    g_environ_getenv (environment, "CLOUDFLARE_API_TOKEN"),
+    ==, "never-return-this-value");
+
+  /* Omitting a name is the explicit deletion mechanism. */
+  {
+    AgentSecretsWait saved = { .tree = tree };
+
+    xd_remote_tree_set_agent_secrets_async (
+      tree, NULL, 0, NULL, on_agent_secrets_saved, &saved);
+    wait_for (&saved.wait);
+    g_assert_true (saved.wait.ok);
+    g_free (saved.wait.failure);
+  }
+
+  g_clear_pointer (&stored, xd_agent_secrets_free);
+  stored = xd_agent_secrets_load (path, &error);
+  g_assert_no_error (error);
+  {
+    g_auto (GStrv) names = xd_agent_secrets_names (stored);
+
+    g_assert_null (names[0]);
+  }
+
+  if (old_override != NULL)
+    g_setenv ("XD_AGENT_SECRETS_FILE", old_override, TRUE);
+  else
+    g_unsetenv ("XD_AGENT_SECRETS_FILE");
+  daemon_stop (&daemon);
 }
 
 /*
@@ -2728,6 +2878,7 @@ main (int argc, char *argv[])
   ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
   ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
   ADD ("/remote/folder-context-is-managed-from-the-client", test_folder_context_is_managed_from_the_client);
+  ADD ("/remote/agent-secrets-are-managed-without-reading-values", test_agent_secrets_are_managed_without_reading_values);
   ADD ("/remote/a-refused-change-is-reported", test_a_refused_change_is_reported);
   ADD ("/remote/a-remote-that-is-not-answering-shows-offline", test_a_remote_that_is_not_answering_shows_offline);
   ADD ("/remote/two-devices-stay-in-step", test_two_devices_stay_in_step);
