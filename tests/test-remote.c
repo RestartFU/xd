@@ -1095,6 +1095,27 @@ test_a_first_message_names_the_chat (void)
   daemon_stop (&daemon);
 }
 
+typedef struct
+{
+  XdStorage *storage;
+  const char *chat_id;
+} StoredTurn;
+
+static gboolean
+turn_was_stored (gpointer user_data)
+{
+  StoredTurn *turn = user_data;
+  g_autoptr (GPtrArray) messages =
+    xd_storage_list_messages (turn->storage, turn->chat_id, NULL);
+
+  if (messages == NULL || messages->len == 0)
+    return FALSE;
+
+  return g_strcmp0 (
+    ((XdMessage *) g_ptr_array_index (messages, messages->len - 1))->role,
+    "duration") == 0;
+}
+
 static void
 test_images_are_uploaded_to_the_daemon (void)
 {
@@ -1113,6 +1134,7 @@ test_images_are_uploaded_to_the_daemon (void)
   g_autofree char *contents = NULL;
   g_autoptr (GPtrArray) messages = NULL;
   RemoteReply sent = { 0 };
+  StoredTurn stored;
 
   daemon_start (&daemon);
 
@@ -1164,6 +1186,15 @@ test_images_are_uploaded_to_the_daemon (void)
 
     call_remote_request (client, builder, &sent);
   }
+
+  stored.storage = daemon.storage;
+  stored.chat_id = daemon.chat_id;
+  wait_until (turn_was_stored, &stored);
+  /* ::finished stores the duration, then the server removes the turn on an
+   * idle callback. Let that callback release its server-owned state before
+   * this test tears the server down. */
+  while (g_main_context_pending (NULL))
+    g_main_context_iteration (NULL, FALSE);
 
   messages = xd_storage_list_messages (daemon.storage, daemon.chat_id, NULL);
   for (guint i = 0; i < messages->len; i++)
