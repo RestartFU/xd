@@ -105,8 +105,7 @@ finish_worktree (XdWorktreeInfo *item,
                  guint           position,
                  const char     *current_path)
 {
-  if (item == NULL || item->path == NULL ||
-      !g_file_test (item->path, G_FILE_TEST_IS_DIR))
+  if (item == NULL || item->path == NULL || item->prunable)
     {
       xd_worktree_info_free (item);
       return NULL;
@@ -209,6 +208,8 @@ xd_worktree_list (const char  *workdir,
         item->branch = g_strndup (token + strlen ("HEAD "), 8);
       else if (g_strcmp0 (token, "detached") == 0)
         item->detached = TRUE;
+      else if (g_str_has_prefix (token, "prunable"))
+        item->prunable = TRUE;
     }
 
   if (item != NULL)

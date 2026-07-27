@@ -11,6 +11,7 @@ typedef struct
   gboolean detached;
   gboolean main;
   gboolean current;
+  gboolean prunable;
 } XdWorktreeInfo;
 
 void       xd_worktree_info_free (XdWorktreeInfo *self);
