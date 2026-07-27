@@ -2735,7 +2735,9 @@ test_send_during_turn_queues (void)
   g_autofree char *old_path = NULL;
   g_autofree char *test_path = NULL;
   RemoteReply started = { 0 };
-  RemoteReply steered = { 0 };
+  RemoteReply queued = { 0 };
+  RemoteReply messages = { 0 };
+  RemoteReply options = { 0 };
   QueueEvents seen = { 0 };
 
   daemon_start (&daemon);
@@ -2787,20 +2789,54 @@ test_send_during_turn_queues (void)
     json_builder_set_member_name (builder, "chat");
     json_builder_add_string_value (builder, daemon.chat_id);
     json_builder_set_member_name (builder, "text");
-    json_builder_add_string_value (builder, "steer now");
+    json_builder_add_string_value (builder, "follow up");
     json_builder_end_object (builder);
 
-    call_remote_request (client, builder, &steered);
+    call_remote_request (client, builder, &queued);
   }
 
   wait_until (queue_changed, &seen);
-  g_assert_cmpstr (seen.text, ==, "steer now");
+  g_assert_cmpstr (seen.text, ==, "follow up");
 
   {
     g_autoptr (XdChat) stored =
       xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
 
-    g_assert_cmpstr (stored->queued, ==, "steer now");
+    g_assert_cmpstr (stored->queued, ==, "follow up");
+  }
+
+  /*
+   * Enter during a turn is followed by these two reads when a chat opens.
+   * The queue event must not damage framing or strand the connection with a
+   * transcript page that can never be filled.
+   */
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "messages");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &messages);
+    g_assert_true (json_object_has_member (messages.reply, "messages"));
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "chat");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &options);
+    g_assert_true (json_object_get_boolean_member_with_default (
+      options.reply, "working", FALSE));
   }
 
   if (old_path != NULL)
@@ -2810,9 +2846,13 @@ test_send_during_turn_queues (void)
 
   g_signal_handlers_disconnect_by_data (client, &seen);
   json_object_unref (started.reply);
-  json_object_unref (steered.reply);
+  json_object_unref (queued.reply);
+  json_object_unref (messages.reply);
+  json_object_unref (options.reply);
   g_free (started.wait.failure);
-  g_free (steered.wait.failure);
+  g_free (queued.wait.failure);
+  g_free (messages.wait.failure);
+  g_free (options.wait.failure);
   g_free (seen.text);
   daemon_stop (&daemon);
 }

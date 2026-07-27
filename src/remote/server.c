@@ -30,7 +30,12 @@ typedef struct
   GDataInputStream *in;
   GOutputStream *out;
   GIOStream *stream;
+  GQueue *outgoing;            /* complete JSON lines, oldest first */
+  gsize outgoing_bytes;
+  guint refs;
   gboolean authed;
+  gboolean writing;
+  gboolean closed;
 } Connection;
 
 struct _XdRemoteServer
@@ -72,10 +77,12 @@ struct _XdRemoteServer
 /* SQLite writes several times per statement, and a checkout touches everything
  * at once; one event out the far side is enough. */
 #define LOCAL_CHANGE_DEBOUNCE_MS 400
+#define MAX_QUEUED_OUTPUT (32u * 1024u * 1024u)
 
 G_DEFINE_FINAL_TYPE (XdRemoteServer, xd_remote_server, G_TYPE_OBJECT)
 
 static void read_next_request (Connection *connection);
+static void connection_close (Connection *connection);
 
 /* --- small json helpers ---------------------------------------------------- */
 
@@ -87,6 +94,103 @@ member_string (JsonObject *object,
     return NULL;
 
   return json_object_get_string_member_with_default (object, name, NULL);
+}
+
+static Connection *
+connection_ref (Connection *connection)
+{
+  connection->refs++;
+  return connection;
+}
+
+static void
+outgoing_free (GQueue *outgoing)
+{
+  g_queue_free_full (outgoing, g_free);
+}
+
+static void
+connection_unref (Connection *connection)
+{
+  g_return_if_fail (connection->refs > 0);
+
+  if (--connection->refs > 0)
+    return;
+
+  g_clear_pointer (&connection->outgoing, outgoing_free);
+  g_clear_object (&connection->in);
+  g_clear_object (&connection->stream);
+  g_free (connection);
+}
+
+static void write_next_json (Connection *connection);
+
+static void
+on_json_written (GObject      *source,
+                 GAsyncResult *result,
+                 gpointer      user_data)
+{
+  Connection *connection = user_data;
+  g_autoptr (GError) error = NULL;
+  char *line = g_queue_pop_head (connection->outgoing);
+  gsize length = line != NULL ? strlen (line) : 0;
+
+  if (!g_output_stream_write_all_finish (G_OUTPUT_STREAM (source), result,
+                                         NULL, &error) &&
+      !connection->closed)
+    connection_close (connection);
+
+  connection->outgoing_bytes -= MIN (connection->outgoing_bytes, length);
+  g_free (line);
+  connection->writing = FALSE;
+  write_next_json (connection);
+  connection_unref (connection);
+}
+
+static void
+write_next_json (Connection *connection)
+{
+  const char *line;
+
+  if (connection->closed || connection->writing ||
+      (line = g_queue_peek_head (connection->outgoing)) == NULL)
+    return;
+
+  connection->writing = TRUE;
+  g_output_stream_write_all_async (
+    connection->out, line, strlen (line), G_PRIORITY_DEFAULT, NULL,
+    on_json_written, connection_ref (connection));
+}
+
+/*
+ * Queue complete lines rather than blocking the daemon's main loop on a
+ * device that is busy rendering. One slow client must not stall every remote
+ * chat and make otherwise healthy connections appear dead.
+ */
+static void
+send_line (Connection *connection,
+           const char *text,
+           gsize       length)
+{
+  char *line;
+
+  if (connection->closed)
+    return;
+
+  if (length >= MAX_QUEUED_OUTPUT ||
+      connection->outgoing_bytes > MAX_QUEUED_OUTPUT - length - 1)
+    {
+      connection_close (connection);
+      return;
+    }
+
+  line = g_malloc (length + 2);
+  memcpy (line, text, length);
+  line[length] = '\n';
+  line[length + 1] = '\0';
+  g_queue_push_tail (connection->outgoing, line);
+  connection->outgoing_bytes += length + 1;
+  write_next_json (connection);
 }
 
 static void
@@ -101,8 +205,7 @@ send_json (Connection  *connection,
   json_generator_set_root (generator, root);
   text = json_generator_to_data (generator, &length);
 
-  g_output_stream_write_all (connection->out, text, length, NULL, NULL, NULL);
-  g_output_stream_write_all (connection->out, "\n", 1, NULL, NULL, NULL);
+  send_line (connection, text, length);
 }
 
 /* --- telling every device ---------------------------------------------------
@@ -125,18 +228,14 @@ broadcast (XdRemoteServer *self,
   json_generator_set_root (generator, root);
   text = json_generator_to_data (generator, &length);
 
-  for (guint i = 0; i < self->connections->len; i++)
+  for (guint i = self->connections->len; i > 0; i--)
     {
-      Connection *connection = g_ptr_array_index (self->connections, i);
+      Connection *connection = g_ptr_array_index (self->connections, i - 1);
 
       if (!connection->authed)
         continue;
 
-      /* Errors are ignored on purpose: a connection that cannot be written to
-       * is one whose read side is about to notice the same thing and clean
-       * itself up. */
-      g_output_stream_write_all (connection->out, text, length, NULL, NULL, NULL);
-      g_output_stream_write_all (connection->out, "\n", 1, NULL, NULL, NULL);
+      send_line (connection, text, length);
     }
 }
 
@@ -3002,15 +3101,27 @@ watch_for_local_changes (XdRemoteServer *self)
 /* --- the conversation ------------------------------------------------------ */
 
 static void
-connection_free (Connection *connection)
+connection_close (Connection *connection)
 {
+  if (connection->closed)
+    return;
+
+  connection->closed = TRUE;
+  connection->authed = FALSE;
+
   /* NULL when the server went first and let its connections know. */
   if (connection->server != NULL)
     g_ptr_array_remove_fast (connection->server->connections, connection);
 
-  g_clear_object (&connection->in);
-  g_clear_object (&connection->stream);
-  g_free (connection);
+  if (connection->stream != NULL)
+    g_io_stream_close (connection->stream, NULL, NULL);
+}
+
+static void
+connection_free (Connection *connection)
+{
+  connection_close (connection);
+  connection_unref (connection);
 }
 
 static void
@@ -3187,7 +3298,9 @@ on_incoming (GSocketService    *service,
     return TRUE;
 
   connection = g_new0 (Connection, 1);
+  connection->refs = 1;
   connection->server = self;
+  connection->outgoing = g_queue_new ();
   g_ptr_array_add (self->connections, connection);
   connection->stream = g_object_ref (tls);
   connection->in = g_data_input_stream_new (g_io_stream_get_input_stream (tls));
@@ -3275,6 +3388,7 @@ xd_remote_server_dispose (GObject *object)
 
           connection->server = NULL;
           connection->authed = FALSE;
+          connection->closed = TRUE;
 
           if (connection->stream != NULL)
             g_io_stream_close (connection->stream, NULL, NULL);

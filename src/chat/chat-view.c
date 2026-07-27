@@ -1141,9 +1141,21 @@ activate_transcript_page (XdChatView     *self,
 static gboolean
 current_transcript_is_cacheable (XdChatView *self)
 {
-  return self->transcript_page != NULL &&
-         current_turn (self) == NULL &&
-         !self->remote_working &&
+  if (self->transcript_page == NULL)
+    return FALSE;
+
+  /*
+   * A remote page is the last useful copy when its connection drops. Keep it
+   * even during a live turn; reopening validates it against the daemon, while
+   * an outage leaves the readable stale copy in place instead of a blank page.
+   *
+   * Local live fragments can be reconstructed from their in-memory Turn, so
+   * they retain the stricter cache rule.
+   */
+  if (self->remote != NULL)
+    return TRUE;
+
+  return current_turn (self) == NULL &&
          !gtk_widget_get_visible (self->choices_bar);
 }
 
@@ -1157,7 +1169,8 @@ leave_current_transcript (XdChatView *self,
     return;
 
   page->message_id = self->remote != NULL
-    ? self->remote_rendered_message_id : self->rendered_message_id;
+    ? (self->remote_working ? -1 : self->remote_rendered_message_id)
+    : self->rendered_message_id;
   page->limit = self->transcript_limit;
   touch_transcript_page (self, page);
 
@@ -4457,8 +4470,8 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
 
   changed = self->chat != chat || self->remote != client;
 
-  /* Completed pages are cheap to revisit. Anything live is rebuilt from its
-   * durable transcript so in-memory turn fragments cannot be duplicated. */
+  /* Remote pages remain useful during an outage. A live page is marked stale
+   * as it is left, so the next successful snapshot rebuilds it exactly once. */
   if (changed)
     {
       keep_previous = current_transcript_is_cacheable (self);
@@ -4470,8 +4483,8 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
       set_working (self, FALSE);
       retire_open_questions (self);
-      end_remote_turn (self);
       leave_current_transcript (self, keep_previous);
+      end_remote_turn (self);
       use_command_scope (self, NULL);
     }
 
@@ -4544,8 +4557,8 @@ xd_chat_view_set_chat (XdChatView *self,
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
       set_working (self, FALSE);
       retire_open_questions (self);
-      end_remote_turn (self);
       leave_current_transcript (self, keep_previous);
+      end_remote_turn (self);
     }
 
   set_remote (self, NULL);
