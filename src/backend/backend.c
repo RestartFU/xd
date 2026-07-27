@@ -192,6 +192,56 @@ ai_backend_model_label (const AiBackend *self,
   return model_id;
 }
 
+guint64
+ai_backend_context_window (const AiBackend *self,
+                           const char      *model_id)
+{
+  g_return_val_if_fail (self != NULL, 0);
+
+  if (model_id == NULL || *model_id == '\0')
+    model_id = self->default_model;
+
+  /*
+   * Codex ships the effective window in its own refreshed model catalog.
+   * Prefer that to compiled metadata, since account/runtime caps can change
+   * without an xd release.
+   */
+  if (g_strcmp0 (self->id, "codex") == 0)
+    {
+      const char *configured = g_getenv ("CODEX_HOME");
+      g_autofree char *home = configured != NULL && *configured != '\0'
+        ? g_strdup (configured)
+        : g_build_filename (g_get_home_dir (), ".codex", NULL);
+      g_autofree char *path =
+        g_build_filename (home, "models_cache.json", NULL);
+      g_autoptr (JsonParser) parser = json_parser_new ();
+
+      if (json_parser_load_from_file (parser, path, NULL))
+        {
+          JsonObject *root = json_node_get_object (json_parser_get_root (parser));
+          JsonArray *models = root != NULL &&
+                              json_object_has_member (root, "models")
+                                ? json_object_get_array_member (root, "models")
+                                : NULL;
+
+          for (guint i = 0; models != NULL && i < json_array_get_length (models); i++)
+            {
+              JsonObject *model = json_array_get_object_element (models, i);
+
+              if (g_strcmp0 (ai_json_get_string (model, "slug"), model_id) == 0)
+                return json_object_get_int_member_with_default (
+                  model, "context_window", 0);
+            }
+        }
+    }
+
+  for (gsize i = 0; i < self->n_models; i++)
+    if (g_strcmp0 (self->models[i].id, model_id) == 0)
+      return self->models[i].context_window;
+
+  return 0;
+}
+
 const char *
 ai_json_get_string (JsonObject *object,
                     const char *member)
@@ -378,6 +428,7 @@ ai_parser_new (const AiBackend *backend)
   self = g_new0 (AiParser, 1);
   self->backend = backend;
   self->json = json_parser_new ();
+  self->model = g_strdup (backend->default_model);
   self->pending_tools = g_hash_table_new_full (g_direct_hash, g_direct_equal,
                                                NULL, pending_tool_free);
 
@@ -393,7 +444,18 @@ ai_parser_free (AiParser *self)
   g_clear_pointer (&self->pending_tools, g_hash_table_unref);
   g_clear_object (&self->json);
   g_free (self->session_id);
+  g_free (self->model);
   g_free (self);
+}
+
+void
+ai_parser_set_model (AiParser   *self,
+                     const char *model)
+{
+  g_return_if_fail (self != NULL);
+
+  g_free (self->model);
+  self->model = g_strdup (model != NULL ? model : self->backend->default_model);
 }
 
 void

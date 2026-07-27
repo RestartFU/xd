@@ -1484,6 +1484,9 @@ test_remote_workspace_choice_is_persisted (void)
   chat_id = xd_storage_create_chat (
     daemon.storage, "folder-1", "fresh", "claude",
     NULL, NULL, daemon.root, &error);
+  g_assert_true (xd_storage_set_context_usage (
+    daemon.storage, chat_id, "claude", "claude-opus-5",
+    42000, 1000000, &error));
   g_assert_no_error (error);
 
   client = xd_remote_client_new ("127.0.0.1", daemon.port);
@@ -1525,6 +1528,10 @@ test_remote_workspace_choice_is_persisted (void)
 
   g_assert_true (json_object_get_boolean_member (options.reply, "new_worktree"));
   g_assert_false (json_object_get_boolean_member (options.reply, "has_messages"));
+  g_assert_cmpint (json_object_get_int_member (options.reply, "context_used"),
+                   ==, 42000);
+  g_assert_cmpint (json_object_get_int_member (options.reply, "context_window"),
+                   ==, 1000000);
 
   json_object_unref (changed.reply);
   json_object_unref (options.reply);

@@ -1,5 +1,7 @@
 #include "backend/backend.h"
 
+#include <glib/gstdio.h>
+
 /* Collects everything a fixture produces so a test can assert on the whole
  * sequence rather than one event at a time. */
 typedef struct
@@ -8,8 +10,11 @@ typedef struct
   char *session_id;
   guint n_deltas;
   guint n_tools;
+  guint n_usage;
   guint n_results;
   guint n_errors;
+  guint64 context_used;
+  guint64 context_window;
 } Collected;
 
 static void
@@ -32,6 +37,12 @@ collect (const AiEvent *event,
 
     case AI_EVENT_TOOL_USE:
       collected->n_tools++;
+      break;
+
+    case AI_EVENT_USAGE:
+      collected->n_usage++;
+      collected->context_used = event->context_used;
+      collected->context_window = event->context_window;
       break;
 
     case AI_EVENT_RESULT:
@@ -101,6 +112,9 @@ test_claude_stream (void)
 
   g_assert_cmpstr (collected.session_id, ==, "653dbf2a-6521-4412-9ac9-81b4d94160e7");
   g_assert_cmpstr (collected.text->str, ==, "hello from hy");
+  g_assert_cmpuint (collected.n_usage, ==, 1);
+  g_assert_cmpuint (collected.context_used, ==, 21335);
+  g_assert_cmpuint (collected.context_window, ==, 1000000);
   g_assert_cmpuint (collected.n_results, ==, 1);
   g_assert_cmpuint (collected.n_errors, ==, 0);
 
@@ -133,15 +147,40 @@ static void
 test_codex_stream (void)
 {
   Collected collected = { 0 };
+  g_autofree char *old_home = g_strdup (g_getenv ("CODEX_HOME"));
+  g_autofree char *home = g_dir_make_tmp ("xd-codex-home-XXXXXX", NULL);
+  g_autofree char *sessions = g_build_filename (home, "sessions", NULL);
+  g_autofree char *rollout = g_build_filename (
+    sessions,
+    "rollout-019f9b16-df5f-7182-bdc6-1cce26148979.jsonl", NULL);
+
+  g_assert_cmpint (g_mkdir_with_parents (sessions, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (
+    rollout,
+    "{\"payload\":{\"type\":\"token_count\",\"info\":{"
+    "\"last_token_usage\":{\"total_tokens\":15555},"
+    "\"model_context_window\":258400}}}\n",
+    -1, NULL));
+  g_setenv ("CODEX_HOME", home, TRUE);
 
   replay_fixture ("codex", "codex-exec.jsonl", &collected);
 
   g_assert_cmpstr (collected.session_id, ==, "019f9b16-df5f-7182-bdc6-1cce26148979");
   g_assert_cmpstr (collected.text->str, ==, "hello from hy");
+  g_assert_cmpuint (collected.n_usage, ==, 1);
+  g_assert_cmpuint (collected.context_used, ==, 15555);
+  g_assert_cmpuint (collected.context_window, ==, 258400);
   g_assert_cmpuint (collected.n_results, ==, 1);
   g_assert_cmpuint (collected.n_errors, ==, 0);
 
   collected_clear (&collected);
+  if (old_home != NULL)
+    g_setenv ("CODEX_HOME", old_home, TRUE);
+  else
+    g_unsetenv ("CODEX_HOME");
+  g_assert_cmpint (g_remove (rollout), ==, 0);
+  g_assert_cmpint (g_rmdir (sessions), ==, 0);
+  g_assert_cmpint (g_rmdir (home), ==, 0);
 }
 
 static void
@@ -154,6 +193,9 @@ test_cerebras_stream (void)
   g_assert_cmpstr (collected.session_id, ==, "ses_cerebras_123");
   g_assert_cmpstr (collected.text->str, ==, "hello from Cerebras");
   g_assert_cmpuint (collected.n_tools, ==, 1);
+  g_assert_cmpuint (collected.n_usage, ==, 1);
+  g_assert_cmpuint (collected.context_used, ==, 12025);
+  g_assert_cmpuint (collected.context_window, ==, 131072);
   g_assert_cmpuint (collected.n_errors, ==, 0);
 
   collected_clear (&collected);

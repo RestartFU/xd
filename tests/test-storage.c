@@ -282,6 +282,44 @@ test_forgetting_a_session_replays_everything (Fixture       *fixture,
   g_assert_cmpint (xd_storage_get_last_seen (fixture->storage, chat_id, "claude"), ==, 0);
 }
 
+static void
+test_context_usage_follows_session (Fixture       *fixture,
+                                    gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  guint64 used = 0;
+  guint64 window = 0;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", "claude-opus-5", NULL, NULL,
+                                    &error);
+  g_assert_true (xd_storage_set_session_id (
+    fixture->storage, chat_id, "claude", "sess", &error));
+  g_assert_true (xd_storage_set_context_usage (
+    fixture->storage, chat_id, "claude", "claude-opus-5",
+    48750, 1000000, &error));
+  g_assert_no_error (error);
+
+  g_assert_true (xd_storage_get_context_usage (
+    fixture->storage, chat_id, "claude", "claude-opus-5",
+    &used, &window));
+  g_assert_cmpuint (used, ==, 48750);
+  g_assert_cmpuint (window, ==, 1000000);
+
+  /* Changing model must not present the old model's usage as current. */
+  g_assert_false (xd_storage_get_context_usage (
+    fixture->storage, chat_id, "claude", "claude-haiku-4-5",
+    &used, &window));
+
+  /* A session that cannot resume has no live context either. */
+  g_assert_true (xd_storage_set_session_id (
+    fixture->storage, chat_id, "claude", NULL, &error));
+  g_assert_false (xd_storage_get_context_usage (
+    fixture->storage, chat_id, "claude", "claude-opus-5",
+    &used, &window));
+}
+
 /*
  * Plan sits alongside the access level rather than replacing it, so leaving
  * plan puts the chat back where it was instead of dropping it to read-only.
@@ -473,6 +511,7 @@ main (int   argc,
   ADD ("/storage/session-id-replaced", test_session_id_is_replaced);
   ADD ("/storage/tracks-what-was-seen", test_each_backend_tracks_what_it_has_seen);
   ADD ("/storage/forgetting-replays", test_forgetting_a_session_replays_everything);
+  ADD ("/storage/context-usage", test_context_usage_follows_session);
   ADD ("/storage/plan-keeps-access", test_plan_preserves_the_access_level);
   ADD ("/storage/workspace-locks", test_workspace_locks_after_first_message);
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);

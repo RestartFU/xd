@@ -19,6 +19,8 @@ typedef struct
   gboolean plan;      /* think it through, change nothing */
   gboolean terminal_open;  /* the panes this chat was left with */
   gboolean diff_open;
+  guint64 context_used;    /* transient when sent to a remote client */
+  guint64 context_window;
   gint64 created_at;
   gint64 updated_at;
 } XdChat;
@@ -196,6 +198,23 @@ gboolean    xd_storage_set_last_seen   (XdStorage   *self,
                                         const char  *backend,
                                         gint64       message_id,
                                         GError     **error);
+
+/* Last measured context for one backend session. @model prevents usage from a
+ * previous model being shown after the chat switches models. */
+gboolean    xd_storage_set_context_usage (XdStorage   *self,
+                                          const char  *chat_id,
+                                          const char  *backend,
+                                          const char  *model,
+                                          guint64      used,
+                                          guint64      window,
+                                          GError     **error);
+
+gboolean    xd_storage_get_context_usage (XdStorage   *self,
+                                          const char  *chat_id,
+                                          const char  *backend,
+                                          const char  *model,
+                                          guint64     *used,
+                                          guint64     *window);
 
 /* Highest message id in a chat; 0 when it has none. */
 gint64      xd_storage_last_message_id (XdStorage   *self,

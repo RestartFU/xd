@@ -91,6 +91,88 @@ emit (AiEventFunc  callback,
   callback (&event, user_data);
 }
 
+static guint64
+usage_total (JsonObject *usage)
+{
+  gint64 input;
+  gint64 created;
+  gint64 read;
+  gint64 output;
+
+  if (usage == NULL)
+    return 0;
+
+  input = MAX (json_object_get_int_member_with_default (
+                 usage, "input_tokens", 0), 0);
+  created = MAX (json_object_get_int_member_with_default (
+                   usage, "cache_creation_input_tokens", 0), 0);
+  read = MAX (json_object_get_int_member_with_default (
+                usage, "cache_read_input_tokens", 0), 0);
+  output = MAX (json_object_get_int_member_with_default (
+                  usage, "output_tokens", 0), 0);
+
+  return input + created + read + output;
+}
+
+static guint64
+claude_context_window (AiParser   *parser,
+                       JsonObject *root)
+{
+  JsonObject *models = ai_json_get_object (root, "modelUsage");
+  GList *names;
+  guint64 window = 0;
+
+  names = models != NULL ? json_object_get_members (models) : NULL;
+  for (GList *at = names; at != NULL; at = at->next)
+    {
+      const char *name = at->data;
+      JsonObject *model = ai_json_get_object (models, name);
+      const char *canonical = ai_json_get_string (model, "canonicalModel");
+
+      if (g_strcmp0 (name, parser->model) != 0 &&
+          g_strcmp0 (canonical, parser->model) != 0 &&
+          !(parser->model != NULL && g_str_has_prefix (name, parser->model)))
+        continue;
+
+      window = MAX (json_object_get_int_member_with_default (
+                      model, "contextWindow", 0), 0);
+      break;
+    }
+  g_list_free (names);
+
+  return window != 0
+    ? window : ai_backend_context_window (parser->backend, parser->model);
+}
+
+static void
+emit_usage (AiParser    *parser,
+            JsonObject  *root,
+            AiEventFunc  callback,
+            gpointer     user_data)
+{
+  JsonObject *usage = ai_json_get_object (root, "usage");
+  JsonArray *iterations = usage != NULL &&
+                          json_object_has_member (usage, "iterations")
+                            ? json_object_get_array_member (usage, "iterations")
+                            : NULL;
+  AiEvent event;
+
+  /* The result total adds every API step. The final iteration is the actual
+   * context presented to the model at the end of the turn. */
+  if (iterations != NULL && json_array_get_length (iterations) > 0)
+    usage = json_array_get_object_element (
+      iterations, json_array_get_length (iterations) - 1);
+
+  event = (AiEvent) {
+    .type = AI_EVENT_USAGE,
+    .context_used = usage_total (usage),
+    .context_window = claude_context_window (parser, root),
+  };
+
+  if (event.context_used > 0 && event.context_window > 0)
+    callback (&event, user_data);
+}
+
 /* A "stream_event" wraps the raw Anthropic streaming event. */
 static void
 parse_stream_event (AiParser    *parser,
@@ -266,6 +348,9 @@ claude_parse_object (AiParser    *parser,
       gboolean failed = json_object_has_member (root, "is_error") &&
                         json_object_get_boolean_member (root, "is_error");
 
+      if (!failed)
+        emit_usage (parser, root, callback, user_data);
+
       emit (callback, user_data,
             failed ? AI_EVENT_ERROR : AI_EVENT_RESULT,
             text, ai_json_get_string (root, "session_id"));
@@ -285,11 +370,13 @@ claude_parse_object (AiParser    *parser,
  * The first entry is what new chats get, so the newest model leads.
  */
 static const AiModel claude_models[] = {
-  { "claude-opus-5",    "Claude Opus 5" },
-  { "claude-fable-5",   "Claude Fable 5" },
-  { "claude-sonnet-5",  "Claude Sonnet 5" },
-  { "claude-haiku-4-5", "Claude Haiku 4.5" },
-  { "claude-opus-4-8",  "Claude Opus 4.8" },
+  /* Claude reports the effective window in every completed result. Zero is
+   * deliberate: hiding is safer than guessing if an older CLI omits it. */
+  { "claude-opus-5",    "Claude Opus 5",    0 },
+  { "claude-fable-5",   "Claude Fable 5",   0 },
+  { "claude-sonnet-5",  "Claude Sonnet 5",  0 },
+  { "claude-haiku-4-5", "Claude Haiku 4.5", 0 },
+  { "claude-opus-4-8",  "Claude Opus 4.8",  0 },
 };
 
 const AiBackend xd_claude_backend = {

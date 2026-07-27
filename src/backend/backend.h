@@ -20,6 +20,7 @@ typedef enum
   AI_EVENT_SESSION_STARTED,   /* carries the id needed to resume later */
   AI_EVENT_TEXT_DELTA,        /* a piece of the reply */
   AI_EVENT_TOOL_USE,          /* the agent reached for a tool */
+  AI_EVENT_USAGE,             /* context used and the model's context window */
   AI_EVENT_RESULT,            /* the turn finished; text is the whole reply */
   AI_EVENT_ERROR,
 } AiEventType;
@@ -29,6 +30,8 @@ typedef struct
   AiEventType type;
   const char *session_id;
   const char *text;
+  guint64 context_used;
+  guint64 context_window;
   JsonNode *raw;
 } AiEvent;
 
@@ -89,6 +92,7 @@ typedef struct
 {
   const char *id;
   const char *display_name;
+  guint64 context_window;     /* fallback when the CLI does not report it */
 } AiModel;
 
 struct _AiBackend
@@ -128,6 +132,8 @@ const AiBackend *const *ai_backend_all    (guint      *n_backends);
  * unknown or hand-typed model still shows something meaningful. */
 const char             *ai_backend_model_label (const AiBackend *self,
                                                 const char      *model_id);
+guint64                 ai_backend_context_window (const AiBackend *self,
+                                                   const char      *model_id);
 
 /*
  * Per-run parser state.
@@ -149,6 +155,7 @@ struct _AiParser
   JsonParser *json;
   gboolean streamed_text;
   char *session_id;  /* backends whose id rides on every event emit it once */
+  char *model;       /* model selected for this run */
 
   /* Block index -> AiPendingTool*. Tool arguments arrive in fragments after
    * the block opens, so the call cannot be described until it closes. */
@@ -157,6 +164,8 @@ struct _AiParser
 
 AiParser *ai_parser_new       (const AiBackend *backend);
 void      ai_parser_free      (AiParser        *self);
+void      ai_parser_set_model (AiParser        *self,
+                               const char      *model);
 
 /* Malformed lines are logged and skipped: a backend hiccup must not take the
  * conversation down with it. */

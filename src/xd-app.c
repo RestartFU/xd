@@ -354,6 +354,12 @@ static const char *XD_STYLE =
   " border-color: alpha(#ffffff, 0.18); }\n"
   ".xd-choice:hover label { color: alpha(#ffffff, 0.95); }\n"
 
+  /* Compact context usage beside the selected model. */
+  "progressbar.xd-context-meter { font-size: 0.82em; }\n"
+  "progressbar.xd-context-meter > trough,"
+  " progressbar.xd-context-meter > trough > progress"
+  " { min-height: 5px; border-radius: 5px; }\n"
+
   /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
    * enough width that the title and its close button stop fighting. */
   "tabbar { background: none; box-shadow: none; }\n"

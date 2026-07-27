@@ -33,6 +33,7 @@ enum
   SIGNAL_SESSION_STARTED,
   SIGNAL_TEXT_DELTA,
   SIGNAL_TOOL_USE,
+  SIGNAL_USAGE,
   SIGNAL_FINISHED,
   N_SIGNALS,
 };
@@ -126,6 +127,11 @@ on_event (const AiEvent *event,
     case AI_EVENT_TOOL_USE:
       g_signal_emit (self, signals[SIGNAL_TOOL_USE], 0,
                      event->text != NULL ? event->text : "tool");
+      break;
+
+    case AI_EVENT_USAGE:
+      g_signal_emit (self, signals[SIGNAL_USAGE], 0,
+                     event->context_used, event->context_window);
       break;
 
     case AI_EVENT_RESULT:
@@ -238,6 +244,7 @@ xd_chat_session_start (XdChatSession    *self,
   g_return_val_if_fail (spec != NULL, FALSE);
   g_return_val_if_fail (self->process == NULL, FALSE);
 
+  ai_parser_set_model (self->parser, spec->model);
   argv = self->backend->build_argv (self->backend, spec);
 
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDIN_PIPE |
@@ -386,6 +393,11 @@ xd_chat_session_class_init (XdChatSessionClass *klass)
   signals[SIGNAL_TOOL_USE] =
     g_signal_new ("tool-use", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  signals[SIGNAL_USAGE] =
+    g_signal_new ("usage", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_UINT64, G_TYPE_UINT64);
 
   signals[SIGNAL_FINISHED] =
     g_signal_new ("finished", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,

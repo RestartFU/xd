@@ -29,6 +29,7 @@ struct _XdDaemonTurn
   XdChatSession *session;
   char *chat_id;
   char *backend_id;
+  char *model_id;
   char *label;
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
@@ -38,6 +39,8 @@ struct _XdDaemonTurn
   GPtrArray *items;
   gint64 started_at;           /* monotonic usec */
   gboolean resumed;
+  guint64 context_used;
+  guint64 context_window;
 };
 
 enum
@@ -237,6 +240,18 @@ on_tool_use (XdChatSession *session,
 }
 
 static void
+on_usage (XdChatSession *session,
+          guint64        used,
+          guint64        window,
+          gpointer       user_data)
+{
+  XdDaemonTurn *self = user_data;
+
+  self->context_used = used;
+  self->context_window = window;
+}
+
+static void
 store_turn_items (XdDaemonTurn *self)
 {
   for (guint i = 0; i < self->items->len; i++)
@@ -276,6 +291,15 @@ on_finished (XdChatSession *session,
   close_segment (self);
   store_turn_items (self);
   store_turn_duration (self);
+
+  if (self->context_used > 0 && self->context_window > 0 &&
+      !xd_storage_set_context_usage (
+        self->storage, self->chat_id, self->backend_id, self->model_id,
+        self->context_used, self->context_window, &error))
+    {
+      g_warning ("cannot store context usage: %s", error->message);
+      g_clear_error (&error);
+    }
 
   if (!success && message != NULL)
     {
@@ -406,6 +430,8 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
 
   self->chat_id = g_strdup (chat_id);
   self->backend_id = g_strdup (backend->id);
+  self->model_id =
+    g_strdup (model != NULL ? model : backend->default_model);
   self->label = reply_label (chat, backend, model);
   self->resumed = resume_session_id != NULL;
   self->text = g_string_new (NULL);
@@ -417,6 +443,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
                     G_CALLBACK (on_session_started), self);
   g_signal_connect (self->session, "text-delta", G_CALLBACK (on_text_delta), self);
   g_signal_connect (self->session, "tool-use", G_CALLBACK (on_tool_use), self);
+  g_signal_connect (self->session, "usage", G_CALLBACK (on_usage), self);
   g_signal_connect (self->session, "finished", G_CALLBACK (on_finished), self);
 
   spec.prompt = full_prompt;
@@ -530,6 +557,7 @@ xd_daemon_turn_finalize (GObject *object)
   g_clear_pointer (&self->root_path, g_free);
   g_clear_pointer (&self->chat_id, g_free);
   g_clear_pointer (&self->backend_id, g_free);
+  g_clear_pointer (&self->model_id, g_free);
   g_clear_pointer (&self->label, g_free);
   g_clear_pointer (&self->items, g_ptr_array_unref);
 

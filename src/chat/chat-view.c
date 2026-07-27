@@ -38,6 +38,7 @@ typedef struct
   XdChatSession *session;
   char *chat_id;
   char *backend_id;         /* the backend this turn's session id belongs to */
+  char *model_id;           /* context usage belongs to this exact model */
   char *prompt;             /* kept so a dead session can be retried */
   char *label;              /* the model and effort this turn actually ran on */
   gint64 started_at;        /* monotonic; how long the work took */
@@ -49,6 +50,8 @@ typedef struct
   gboolean resumed;
   gboolean is_retry;
   gboolean had_tool;
+  guint64 context_used;
+  guint64 context_window;
 } Turn;
 
 /* Wide enough for code and a diff line, narrow enough that a line of prose
@@ -126,6 +129,7 @@ struct _XdChatView
   GtkWidget *attachments_bar;
   GtkWidget *queued_bar;
   GtkWidget *choices_bar;
+  GtkProgressBar *context_meter;
   GtkLabel *queued_label;
   char *queued;             /* typed while a turn was running */
   gboolean syncing_panes;   /* setting the toggles to match the chat */
@@ -218,6 +222,9 @@ static gboolean send_message (XdChatView *self,
 static void update_send_button (XdChatView *self);
 static void update_context_bar (XdChatView *self,
                                 const XdChat *chat);
+static void update_context_meter (XdChatView *self,
+                                  guint64     used,
+                                  guint64     window);
 static void update_workspace_choice (XdChatView *self,
                                      const XdChat *chat,
                                      gboolean      has_messages,
@@ -1068,6 +1075,7 @@ update_remote_options (XdChatView   *self,
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->diff_button),
                                have_workdir ? "Changed files"
                                             : "This chat has no working directory");
+  update_context_meter (self, chat->context_used, chat->context_window);
 
   xd_model_picker_set_selected (self->model_picker, chat->backend, chat->model);
 
@@ -1116,6 +1124,10 @@ on_remote_options_received (GObject      *source,
   chat.plan = json_object_get_boolean_member_with_default (reply, "plan", FALSE);
   chat.new_worktree =
     json_object_get_boolean_member_with_default (reply, "new_worktree", FALSE);
+  chat.context_used =
+    MAX (json_object_get_int_member_with_default (reply, "context_used", 0), 0);
+  chat.context_window =
+    MAX (json_object_get_int_member_with_default (reply, "context_window", 0), 0);
 
   update_remote_options (
     self, &chat,
@@ -1382,6 +1394,7 @@ turn_free (gpointer data)
   g_clear_object (&turn->session);
   g_clear_pointer (&turn->chat_id, g_free);
   g_clear_pointer (&turn->backend_id, g_free);
+  g_clear_pointer (&turn->model_id, g_free);
   g_clear_pointer (&turn->prompt, g_free);
   g_clear_pointer (&turn->label, g_free);
   g_clear_object (&turn->node);
@@ -1535,6 +1548,20 @@ on_tool_use (XdChatSession *session,
 }
 
 static void
+on_usage (XdChatSession *session,
+          guint64        used,
+          guint64        window,
+          gpointer       user_data)
+{
+  Turn *turn = user_data;
+
+  /* Step-based backends report this more than once. Latest step is current
+   * context, not a sum of every request made during the turn. */
+  turn->context_used = used;
+  turn->context_window = window;
+}
+
+static void
 on_turn_finished (XdChatSession *session,
                   gboolean       success,
                   const char    *message,
@@ -1565,6 +1592,9 @@ on_turn_finished (XdChatSession *session,
       if (!xd_storage_set_session_id (self->storage, chat_id, turn->backend_id,
                                       NULL, &error))
         g_warning ("cannot forget the stale session: %s", error->message);
+
+      if (visible)
+        update_context_meter (self, 0, 0);
 
       /* start_turn() marks it working again; without this the row would sit
        * idle for as long as the retry takes. */
@@ -1602,6 +1632,18 @@ on_turn_finished (XdChatSession *session,
   close_segment (turn, asked_user);
   store_turn_items (turn);
   store_turn_duration (turn, seconds);
+
+  if (turn->context_used > 0 && turn->context_window > 0)
+    {
+      g_autoptr (GError) context_error = NULL;
+
+      if (!xd_storage_set_context_usage (
+            self->storage, chat_id, turn->backend_id, turn->model_id,
+            turn->context_used, turn->context_window, &context_error))
+        g_warning ("cannot store context usage: %s", context_error->message);
+      else if (visible)
+        update_context_meter (self, turn->context_used, turn->context_window);
+    }
 
   /* This backend has now been told everything up to and including its own
    * reply, so the next turn only has to replay what comes after. Read after
@@ -1773,6 +1815,8 @@ start_turn (XdChatView *self,
                     G_CALLBACK (on_text_delta), turn);
   g_signal_connect (turn->session, "tool-use",
                     G_CALLBACK (on_tool_use), turn);
+  g_signal_connect (turn->session, "usage",
+                    G_CALLBACK (on_usage), turn);
   g_signal_connect (turn->session, "finished",
                     G_CALLBACK (on_turn_finished), turn);
 
@@ -1788,6 +1832,8 @@ start_turn (XdChatView *self,
   spec.workdir = workdir_for (chat, resolved);
   /* The chat's own pick wins; the folder chain is the fallback. */
   spec.model = chat->model != NULL ? chat->model : resolved->model;
+  turn->model_id =
+    g_strdup (spec.model != NULL ? spec.model : backend->default_model);
   {
     g_autofree char *place =
       xd_settings_describe_place (xd_node_get_parent (self->chat),
@@ -2754,6 +2800,62 @@ on_terminal_toggled (GtkToggleButton *button,
     xd_terminal_panel_activate (self->terminal);
 }
 
+static char *
+format_token_count (guint64 tokens)
+{
+  if (tokens >= 1000000)
+    return g_strdup_printf (tokens % 1000000 == 0 ? "%.0fM" : "%.1fM",
+                            tokens / 1000000.0);
+
+  if (tokens >= 1000)
+    return g_strdup_printf (tokens % 1000 == 0 ? "%.0fk" : "%.1fk",
+                            tokens / 1000.0);
+
+  return g_strdup_printf ("%" G_GUINT64_FORMAT, tokens);
+}
+
+static void
+update_context_meter (XdChatView *self,
+                      guint64     used,
+                      guint64     window)
+{
+  g_autofree char *used_text = NULL;
+  g_autofree char *window_text = NULL;
+  g_autofree char *label = NULL;
+  g_autofree char *tooltip = NULL;
+  double fraction;
+
+  if (self->context_meter == NULL)
+    return;
+
+  if (used == 0 || window == 0)
+    {
+      gtk_widget_set_visible (GTK_WIDGET (self->context_meter), FALSE);
+      return;
+    }
+
+  fraction = MIN ((double) used / window, 1.0);
+  used_text = format_token_count (used);
+  window_text = format_token_count (window);
+  label = g_strdup_printf ("%s / %s", used_text, window_text);
+  tooltip = g_strdup_printf (
+    "Context window: %" G_GUINT64_FORMAT " of %" G_GUINT64_FORMAT
+    " tokens (%.0f%%)", used, window, fraction * 100.0);
+
+  gtk_progress_bar_set_fraction (self->context_meter, fraction);
+  gtk_progress_bar_set_text (self->context_meter, label);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->context_meter), tooltip);
+  gtk_widget_remove_css_class (GTK_WIDGET (self->context_meter), "warning");
+  gtk_widget_remove_css_class (GTK_WIDGET (self->context_meter), "error");
+
+  if (fraction >= 0.9)
+    gtk_widget_add_css_class (GTK_WIDGET (self->context_meter), "error");
+  else if (fraction >= 0.75)
+    gtk_widget_add_css_class (GTK_WIDGET (self->context_meter), "warning");
+
+  gtk_widget_set_visible (GTK_WIDGET (self->context_meter), TRUE);
+}
+
 static void
 update_context_bar (XdChatView   *self,
                     const XdChat *chat)
@@ -2763,9 +2865,13 @@ update_context_bar (XdChatView   *self,
   g_autofree char *base_description = NULL;
   g_autofree char *description = NULL;
   const char *workdir;
+  const char *model;
+  guint64 used = 0;
+  guint64 window = 0;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
   workdir = workdir_for (chat, resolved);
+  model = chat->model != NULL ? chat->model : resolved->model;
   git = xd_git_info_for_path (workdir);
   base_description = describe_context (workdir);
   description = chat->new_worktree
@@ -2778,6 +2884,11 @@ update_context_bar (XdChatView   *self,
     self, chat,
     xd_storage_last_message_id (self->storage, chat->id) > 0,
     git != NULL && git->linked_worktree);
+  if (xd_storage_get_context_usage (
+        self->storage, chat->id, chat->backend, model, &used, &window))
+    update_context_meter (self, used, window);
+  else
+    update_context_meter (self, 0, 0);
 
   {
     gboolean have_workdir = workdir != NULL && *workdir != '\0';
@@ -3098,6 +3209,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   g_return_if_fail (XD_IS_REMOTE_CLIENT (client));
 
   set_queued_text (self, NULL);
+  update_context_meter (self, 0, 0);
   g_set_object (&self->chat, chat);
   set_remote (self, client);
 
@@ -3142,6 +3254,7 @@ xd_chat_view_set_chat (XdChatView *self,
   set_working (self, FALSE);
   end_remote_turn (self);
   set_queued_text (self, NULL);
+  update_context_meter (self, 0, 0);
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
 
@@ -3363,6 +3476,13 @@ build_composer (XdChatView *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->context_label), "dim-label");
   gtk_widget_add_css_class (GTK_WIDGET (self->context_label), "caption");
 
+  self->context_meter = GTK_PROGRESS_BAR (gtk_progress_bar_new ());
+  gtk_progress_bar_set_show_text (self->context_meter, TRUE);
+  gtk_widget_set_size_request (GTK_WIDGET (self->context_meter), 108, -1);
+  gtk_widget_set_valign (GTK_WIDGET (self->context_meter), GTK_ALIGN_CENTER);
+  gtk_widget_set_visible (GTK_WIDGET (self->context_meter), FALSE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->context_meter), "xd-context-meter");
+
   self->send_button = GTK_BUTTON (gtk_button_new_from_icon_name ("go-up-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "suggested-action");
   gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "circular");
@@ -3397,6 +3517,7 @@ build_composer (XdChatView *self)
 
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->workspace_chooser));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->model_picker));
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->context_meter));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->effort_chooser));
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->access_chooser));
 

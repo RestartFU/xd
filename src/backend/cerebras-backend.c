@@ -193,14 +193,48 @@ cerebras_parse_object (AiParser    *parser,
       return;
     }
 
-  /* step_start, step_finish and reasoning do not belong in the transcript. */
+  if (g_strcmp0 (type, "step_finish") == 0)
+    {
+      JsonObject *tokens;
+      JsonObject *cache;
+      gint64 input;
+      gint64 output;
+      gint64 read;
+      AiEvent event;
+
+      part = ai_json_get_object (root, "part");
+      tokens = ai_json_get_object (part, "tokens");
+      if (tokens == NULL)
+        return;
+
+      cache = ai_json_get_object (tokens, "cache");
+      input = MAX (json_object_get_int_member_with_default (
+                     tokens, "input", 0), 0);
+      output = MAX (json_object_get_int_member_with_default (
+                      tokens, "output", 0), 0);
+      read = cache != NULL
+        ? MAX (json_object_get_int_member_with_default (cache, "read", 0), 0)
+        : 0;
+      event = (AiEvent) {
+        .type = AI_EVENT_USAGE,
+        .context_used = input + output + read,
+        .context_window =
+          ai_backend_context_window (parser->backend, parser->model),
+      };
+
+      if (event.context_used > 0 && event.context_window > 0)
+        callback (&event, user_data);
+      return;
+    }
+
+  /* step_start and reasoning do not belong in the transcript. */
   g_debug ("cerebras: ignoring event %s", type != NULL ? type : "(none)");
 }
 
 static const AiModel cerebras_models[] = {
-  { "cerebras/zai-glm-4.7",   "Cerebras GLM 4.7" },
-  { "cerebras/gemma-4-31b",   "Cerebras Gemma 4 31B" },
-  { "cerebras/gpt-oss-120b",  "Cerebras GPT OSS 120B" },
+  { "cerebras/zai-glm-4.7",  "Cerebras GLM 4.7",        131072 },
+  { "cerebras/gemma-4-31b",  "Cerebras Gemma 4 31B",    131072 },
+  { "cerebras/gpt-oss-120b", "Cerebras GPT OSS 120B",   131072 },
 };
 
 const AiBackend xd_cerebras_backend = {

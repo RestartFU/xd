@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 12
+#define XD_STORAGE_SCHEMA_VERSION 13
 
 struct _XdStorage
 {
@@ -327,6 +327,20 @@ migrate (XdStorage  *self,
                  error))
     return FALSE;
 
+  if (version < 13 &&
+      (!exec_sql (self,
+                  "ALTER TABLE chat_sessions"
+                  " ADD COLUMN context_used INTEGER NOT NULL DEFAULT 0;",
+                  error) ||
+       !exec_sql (self,
+                  "ALTER TABLE chat_sessions"
+                  " ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0;",
+                  error) ||
+       !exec_sql (self,
+                  "ALTER TABLE chat_sessions ADD COLUMN context_model TEXT;",
+                  error)))
+    return FALSE;
+
   if (version < 9 &&
       (!exec_sql (self, "ALTER TABLE chats ADD COLUMN terminal_open INTEGER NOT NULL DEFAULT 0;", error) ||
        !exec_sql (self, "ALTER TABLE chats ADD COLUMN diff_open INTEGER NOT NULL DEFAULT 0;", error)))
@@ -629,7 +643,9 @@ xd_storage_set_session_id (XdStorage   *self,
     {
       if (sqlite3_prepare_v2 (self->db,
                               "UPDATE chat_sessions"
-                              "   SET session_id = NULL, last_message_id = 0"
+                              "   SET session_id = NULL, last_message_id = 0,"
+                              "       context_used = 0, context_window = 0,"
+                              "       context_model = NULL"
                               " WHERE chat_id = ? AND backend = ?;",
                               -1, &stmt, NULL) != SQLITE_OK)
         {
@@ -844,6 +860,101 @@ xd_storage_set_last_seen (XdStorage   *self,
   sqlite3_finalize (stmt);
 
   return ok;
+}
+
+gboolean
+xd_storage_set_context_usage (XdStorage   *self,
+                              const char  *chat_id,
+                              const char  *backend,
+                              const char  *model,
+                              guint64      used,
+                              guint64      window,
+                              GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+  g_return_val_if_fail (backend != NULL, FALSE);
+  g_return_val_if_fail (used <= G_MAXINT64 && window <= G_MAXINT64, FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "INSERT INTO chat_sessions"
+        "  (chat_id, backend, context_model, context_used, context_window)"
+        " VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT (chat_id, backend) DO UPDATE SET"
+        "   context_model = excluded.context_model,"
+        "   context_used = excluded.context_used,"
+        "   context_window = excluded.context_window;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot store context usage");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, chat_id);
+  bind_text (stmt, 2, backend);
+  bind_text (stmt, 3, model);
+  sqlite3_bind_int64 (stmt, 4, (gint64) used);
+  sqlite3_bind_int64 (stmt, 5, (gint64) window);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot store context usage");
+
+  sqlite3_finalize (stmt);
+
+  return ok;
+}
+
+gboolean
+xd_storage_get_context_usage (XdStorage  *self,
+                              const char *chat_id,
+                              const char *backend,
+                              const char *model,
+                              guint64    *used,
+                              guint64    *window)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean found = FALSE;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+  g_return_val_if_fail (backend != NULL, FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "SELECT context_model, context_used, context_window"
+        " FROM chat_sessions WHERE chat_id = ? AND backend = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    return FALSE;
+
+  bind_text (stmt, 1, chat_id);
+  bind_text (stmt, 2, backend);
+
+  if (sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const char *stored_model =
+        (const char *) sqlite3_column_text (stmt, 0);
+      gint64 stored_used = sqlite3_column_int64 (stmt, 1);
+      gint64 stored_window = sqlite3_column_int64 (stmt, 2);
+
+      found = (model == NULL || g_strcmp0 (stored_model, model) == 0) &&
+              stored_used > 0 && stored_window > 0;
+      if (found)
+        {
+          if (used != NULL)
+            *used = stored_used;
+          if (window != NULL)
+            *window = stored_window;
+        }
+    }
+
+  sqlite3_finalize (stmt);
+
+  return found;
 }
 
 gint64

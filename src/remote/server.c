@@ -2093,6 +2093,23 @@ handle_chat (Connection *connection,
       json_builder_add_string_value (builder, chat->access);
     }
 
+  {
+    const AiBackend *backend = ai_backend_lookup (chat->backend);
+    const char *model = chat->model != NULL
+      ? chat->model : backend != NULL ? backend->default_model : NULL;
+    guint64 used = 0;
+    guint64 window = 0;
+
+    if (xd_storage_get_context_usage (
+          self->storage, chat->id, chat->backend, model, &used, &window))
+      {
+        json_builder_set_member_name (builder, "context_used");
+        json_builder_add_int_value (builder, used);
+        json_builder_set_member_name (builder, "context_window");
+        json_builder_add_int_value (builder, window);
+      }
+  }
+
   json_builder_set_member_name (builder, "new_worktree");
   json_builder_add_boolean_value (builder, chat->new_worktree);
   json_builder_set_member_name (builder, "has_messages");

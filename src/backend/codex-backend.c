@@ -157,6 +157,172 @@ emit (AiEventFunc  callback,
   callback (&event, user_data);
 }
 
+/* Finds Codex's rollout for a thread under sessions/YYYY/MM/DD. */
+static char *
+find_rollout (const char *directory,
+              const char *thread_id,
+              guint       depth)
+{
+  g_autoptr (GDir) dir = NULL;
+  g_autofree char *suffix = NULL;
+  const char *name;
+
+  if (depth > 4)
+    return NULL;
+
+  dir = g_dir_open (directory, 0, NULL);
+  if (dir == NULL)
+    return NULL;
+
+  suffix = g_strdup_printf ("%s.jsonl", thread_id);
+  while ((name = g_dir_read_name (dir)) != NULL)
+    {
+      g_autofree char *path = g_build_filename (directory, name, NULL);
+
+      if (g_file_test (path, G_FILE_TEST_IS_DIR))
+        {
+          char *found = find_rollout (path, thread_id, depth + 1);
+
+          if (found != NULL)
+            return found;
+        }
+      else if (g_str_has_suffix (name, suffix))
+        {
+          return g_steal_pointer (&path);
+        }
+    }
+
+  return NULL;
+}
+
+/*
+ * --json exposes accumulated turn spend, not current context. Codex writes
+ * exact live context beside the session, which is the value its own TUI uses.
+ */
+static gboolean
+rollout_context (AiParser *parser,
+                 guint64  *used,
+                 guint64  *window)
+{
+  const char *configured = g_getenv ("CODEX_HOME");
+  g_autofree char *home = configured != NULL && *configured != '\0'
+    ? g_strdup (configured)
+    : g_build_filename (g_get_home_dir (), ".codex", NULL);
+  g_autofree char *sessions = g_build_filename (home, "sessions", NULL);
+  g_autofree char *path = NULL;
+  g_autoptr (GFile) file = NULL;
+  g_autoptr (GFileInputStream) input = NULL;
+  g_autoptr (GFileInfo) info = NULL;
+  g_autoptr (GDataInputStream) lines = NULL;
+  g_autoptr (JsonParser) json = json_parser_new ();
+  goffset offset = 0;
+  guint64 latest_used = 0;
+  guint64 latest_window = 0;
+
+  if (parser->session_id == NULL)
+    return FALSE;
+
+  path = find_rollout (sessions, parser->session_id, 0);
+  if (path == NULL)
+    return FALSE;
+
+  file = g_file_new_for_path (path);
+  input = g_file_read (file, NULL, NULL);
+  info = g_file_query_info (file, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                            G_FILE_QUERY_INFO_NONE, NULL, NULL);
+  if (input == NULL || info == NULL)
+    return FALSE;
+
+  /* Rollouts can be huge. Token counts sit near the end; one MiB leaves room
+   * for a large final response without reading the whole conversation. */
+  if (g_file_info_get_size (info) > 1024 * 1024)
+    offset = g_file_info_get_size (info) - 1024 * 1024;
+
+  if (offset > 0 &&
+      !g_seekable_seek (G_SEEKABLE (input), offset, G_SEEK_SET, NULL, NULL))
+    return FALSE;
+
+  lines = g_data_input_stream_new (G_INPUT_STREAM (input));
+
+  /* A tail seek can land mid-record. Discard that fragment. */
+  if (offset > 0)
+    {
+      g_autofree char *fragment =
+        g_data_input_stream_read_line_utf8 (lines, NULL, NULL, NULL);
+    }
+
+  while (TRUE)
+    {
+      g_autofree char *line =
+        g_data_input_stream_read_line_utf8 (lines, NULL, NULL, NULL);
+      JsonObject *root;
+      JsonObject *payload;
+      JsonObject *usage;
+      JsonObject *context;
+
+      if (line == NULL)
+        break;
+      if (strstr (line, "\"token_count\"") == NULL ||
+          !json_parser_load_from_data (json, line, -1, NULL))
+        continue;
+
+      root = json_node_get_object (json_parser_get_root (json));
+      payload = ai_json_get_object (root, "payload");
+      if (g_strcmp0 (ai_json_get_string (payload, "type"), "token_count") != 0)
+        continue;
+
+      context = ai_json_get_object (payload, "info");
+      usage = ai_json_get_object (context, "last_token_usage");
+      if (context == NULL || usage == NULL)
+        continue;
+
+      latest_used = MAX (json_object_get_int_member_with_default (
+                           usage, "total_tokens", 0), 0);
+      latest_window = MAX (json_object_get_int_member_with_default (
+                             context, "model_context_window", 0), 0);
+    }
+
+  if (latest_used == 0 || latest_window == 0)
+    return FALSE;
+
+  *used = latest_used;
+  *window = latest_window;
+  return TRUE;
+}
+
+static void
+emit_usage (AiParser    *parser,
+            JsonObject  *root,
+            AiEventFunc  callback,
+            gpointer     user_data)
+{
+  JsonObject *usage = ai_json_get_object (root, "usage");
+  gint64 input;
+  gint64 output;
+  guint64 used;
+  guint64 window;
+  AiEvent event;
+
+  if (usage == NULL)
+    return;
+
+  /* cached_input_tokens is a subset of input_tokens in Codex output. */
+  input = MAX (json_object_get_int_member_with_default (
+                 usage, "input_tokens", 0), 0);
+  output = MAX (json_object_get_int_member_with_default (
+                  usage, "output_tokens", 0), 0);
+  used = input + output;
+  window = ai_backend_context_window (parser->backend, parser->model);
+  rollout_context (parser, &used, &window);
+
+  event = (AiEvent) {
+    .type = AI_EVENT_USAGE,
+    .context_used = used,
+    .context_window = window,
+  };
+  callback (&event, user_data);
+}
+
 static void
 parse_item (AiParser    *parser,
             JsonObject  *root,
@@ -198,7 +364,11 @@ codex_parse_object (AiParser    *parser,
       const char *thread_id = ai_json_get_string (root, "thread_id");
 
       if (thread_id != NULL)
-        emit (callback, user_data, AI_EVENT_SESSION_STARTED, NULL, thread_id);
+        {
+          g_free (parser->session_id);
+          parser->session_id = g_strdup (thread_id);
+          emit (callback, user_data, AI_EVENT_SESSION_STARTED, NULL, thread_id);
+        }
 
       return;
     }
@@ -211,6 +381,7 @@ codex_parse_object (AiParser    *parser,
 
   if (g_strcmp0 (type, "turn.completed") == 0)
     {
+      emit_usage (parser, root, callback, user_data);
       emit (callback, user_data, AI_EVENT_RESULT, NULL, NULL);
       return;
     }
@@ -234,11 +405,11 @@ codex_parse_object (AiParser    *parser,
  * chats get, so the newest model leads.
  */
 static const AiModel codex_models[] = {
-  { "gpt-5.6-sol",         "GPT-5.6 Sol" },
-  { "gpt-5.6-luna",        "GPT-5.6 Luna" },
-  { "gpt-5.6-terra",       "GPT-5.6 Terra" },
-  { "gpt-5.5",             "GPT-5.5" },
-  { "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark" },
+  { "gpt-5.6-sol",         "GPT-5.6 Sol",         272000 },
+  { "gpt-5.6-luna",        "GPT-5.6 Luna",        272000 },
+  { "gpt-5.6-terra",       "GPT-5.6 Terra",       272000 },
+  { "gpt-5.5",             "GPT-5.5",             272000 },
+  { "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000 },
 };
 
 const AiBackend xd_codex_backend = {
