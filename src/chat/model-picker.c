@@ -11,12 +11,18 @@ typedef struct
   const AiModel *model;
 } Entry;
 
-/* GtkMenuButton is final, so the picker wraps one rather than deriving it. */
+typedef struct
+{
+  XdModelPicker *picker;
+  guint index;
+} ModelShortcut;
+
 struct _XdModelPicker
 {
   AdwBin parent_instance;
 
-  GtkMenuButton *button;
+  GtkButton *button;
+  AdwDialog *dialog;
   GSettings *settings;
   GHashTable *favorites;        /* "backend/model" keys */
 
@@ -161,8 +167,6 @@ build_row (XdModelPicker *self,
   gtk_box_append (GTK_BOX (box), icon);
   gtk_box_append (GTK_BOX (box), names);
 
-  /* Only the first few rows get a shortcut; showing one on row 30 would be a
-   * promise the keyboard cannot keep. */
   if (index < N_SHORTCUTS)
     {
       g_autofree char *accel = g_strdup_printf ("Ctrl+%d", index + 1);
@@ -260,7 +264,9 @@ rebuild_list (XdModelPicker *self)
     }
 
   for (guint i = 0; i < self->visible->len; i++)
-    gtk_list_box_append (self->list, build_row (self, g_ptr_array_index (self->visible, i), (int) i));
+    gtk_list_box_append (
+      self->list,
+      build_row (self, g_ptr_array_index (self->visible, i), (int) i));
 
   gtk_stack_set_visible_child_name (self->stack,
                                     self->visible->len > 0 ? "list" : "empty");
@@ -276,7 +282,7 @@ choose_entry (XdModelPicker *self,
   self->model_id = g_strdup (entry->model->id);
 
   update_button (self);
-  gtk_menu_button_popdown (self->button);
+  adw_dialog_close (self->dialog);
 
   g_signal_emit (self, signals[SIGNAL_MODEL_CHOSEN], 0,
                  self->backend_id, self->model_id);
@@ -301,17 +307,21 @@ on_search_changed (GtkSearchEntry *search,
   rebuild_list (user_data);
 }
 
-/* Ctrl+1 through Ctrl+9 pick the corresponding visible row. */
-static void
-on_choose_action (GtkWidget  *widget,
-                  const char *action_name,
-                  GVariant   *parameter)
+static gboolean
+on_model_shortcut (GtkWidget *widget,
+                   GVariant  *args,
+                   gpointer   user_data)
 {
-  XdModelPicker *self = XD_MODEL_PICKER (widget);
-  gint32 index = g_variant_get_int32 (parameter);
+  ModelShortcut *shortcut = user_data;
 
-  if (index >= 0 && (guint) index < self->visible->len)
-    choose_entry (self, g_ptr_array_index (self->visible, index));
+  if (shortcut->index >= shortcut->picker->visible->len)
+    return FALSE;
+
+  choose_entry (
+    shortcut->picker,
+    g_ptr_array_index (shortcut->picker->visible, shortcut->index));
+
+  return TRUE;
 }
 
 /* --- the provider rail ---------------------------------------------------- */
@@ -414,7 +424,7 @@ xd_model_picker_new (void)
 /* --- construction --------------------------------------------------------- */
 
 static GtkWidget *
-build_popover_content (XdModelPicker *self)
+build_dialog_content (XdModelPicker *self)
 {
   GtkWidget *columns = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *right = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
@@ -445,6 +455,7 @@ build_popover_content (XdModelPicker *self)
 
   self->list = GTK_LIST_BOX (gtk_list_box_new ());
   gtk_list_box_set_selection_mode (self->list, GTK_SELECTION_NONE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->list), "xd-picker-list");
   g_signal_connect (self->list, "row-activated", G_CALLBACK (on_row_activated), self);
 
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
@@ -469,19 +480,18 @@ build_popover_content (XdModelPicker *self)
   gtk_box_append (GTK_BOX (columns), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   gtk_box_append (GTK_BOX (columns), right);
 
-  gtk_widget_set_size_request (columns, 380, 360);
-
   return columns;
 }
 
 static void
-on_popover_shown (GtkPopover *popover,
-                  gpointer    user_data)
+on_button_clicked (GtkButton *button,
+                   gpointer   user_data)
 {
   XdModelPicker *self = user_data;
 
   gtk_editable_set_text (GTK_EDITABLE (self->search), "");
   rebuild_list (self);
+  adw_dialog_present (self->dialog, GTK_WIDGET (self));
   gtk_widget_grab_focus (GTK_WIDGET (self->search));
 }
 
@@ -493,6 +503,7 @@ xd_model_picker_dispose (GObject *object)
   g_clear_pointer (&self->visible, g_ptr_array_unref);
   g_clear_pointer (&self->favorites, g_hash_table_unref);
   g_clear_object (&self->settings);
+  g_clear_object (&self->dialog);
 
   G_OBJECT_CLASS (xd_model_picker_parent_class)->dispose (object);
 }
@@ -512,7 +523,6 @@ static void
 xd_model_picker_class_init (XdModelPickerClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
-  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
 
   object_class->dispose = xd_model_picker_dispose;
   object_class->finalize = xd_model_picker_finalize;
@@ -521,21 +531,15 @@ xd_model_picker_class_init (XdModelPickerClass *klass)
     g_signal_new ("model-chosen", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 2,
                   G_TYPE_STRING, G_TYPE_STRING);
-
-  gtk_widget_class_install_action (widget_class, "picker.choose", "i",
-                                   on_choose_action);
-
-  for (int i = 0; i < N_SHORTCUTS; i++)
-    gtk_widget_class_add_binding_action (widget_class, GDK_KEY_1 + i,
-                                         GDK_CONTROL_MASK, "picker.choose",
-                                         "i", i);
 }
 
 static void
 xd_model_picker_init (XdModelPicker *self)
 {
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
-  GtkWidget *popover = gtk_popover_new ();
+  GtkWidget *toolbar = adw_toolbar_view_new ();
+  GtkWidget *header = adw_header_bar_new ();
+  GtkShortcutController *shortcuts;
   g_auto (GStrv) favorites = NULL;
 
   self->settings = g_settings_new (XD_APP_ID);
@@ -551,23 +555,45 @@ xd_model_picker_init (XdModelPicker *self)
 
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->button_icon));
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->button_label));
-  gtk_box_append (GTK_BOX (content), gtk_image_new_from_icon_name ("pan-down-symbolic"));
 
-  self->button = GTK_MENU_BUTTON (gtk_menu_button_new ());
-  gtk_menu_button_set_child (self->button, content);
+  self->button = GTK_BUTTON (gtk_button_new ());
+  gtk_button_set_child (self->button, content);
   gtk_widget_add_css_class (GTK_WIDGET (self->button), "flat");
+  g_signal_connect (self->button, "clicked",
+                    G_CALLBACK (on_button_clicked), self);
 
   {
-    GtkWidget *content = build_popover_content (self);
+    GtkWidget *picker = build_dialog_content (self);
 
-    /* The visible panel is this child, not the popover's own chrome; see the
-     * stylesheet's note on popover surfaces. */
-    gtk_widget_add_css_class (content, "xd-menu");
-    gtk_popover_set_child (GTK_POPOVER (popover), content);
+    adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
+    adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), picker);
   }
-  gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
-  g_signal_connect (popover, "show", G_CALLBACK (on_popover_shown), self);
-  gtk_menu_button_set_popover (self->button, popover);
+
+  self->dialog = ADW_DIALOG (g_object_ref_sink (adw_dialog_new ()));
+  adw_dialog_set_title (self->dialog, "Choose Model");
+  adw_dialog_set_content_width (self->dialog, 520);
+  adw_dialog_set_content_height (self->dialog, 480);
+  adw_dialog_set_presentation_mode (
+    self->dialog, ADW_DIALOG_FLOATING);
+  adw_dialog_set_child (self->dialog, toolbar);
+
+  shortcuts = GTK_SHORTCUT_CONTROLLER (gtk_shortcut_controller_new ());
+  for (guint i = 0; i < N_SHORTCUTS; i++)
+    {
+      ModelShortcut *shortcut = g_new0 (ModelShortcut, 1);
+      GtkShortcutTrigger *trigger;
+      GtkShortcutAction *action;
+
+      shortcut->picker = self;
+      shortcut->index = i;
+      trigger = gtk_keyval_trigger_new (GDK_KEY_1 + i, GDK_CONTROL_MASK);
+      action = gtk_callback_action_new (
+        on_model_shortcut, shortcut, g_free);
+      gtk_shortcut_controller_add_shortcut (
+        shortcuts, gtk_shortcut_new (trigger, action));
+    }
+  gtk_widget_add_controller (
+    GTK_WIDGET (self->dialog), GTK_EVENT_CONTROLLER (shortcuts));
 
   adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->button));
 

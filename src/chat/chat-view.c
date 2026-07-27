@@ -4834,7 +4834,8 @@ build_composer (XdChatView *self)
     };
 
     self->workspace_chooser =
-      xd_option_picker_new (workspaces, workspace_descriptions);
+      xd_option_picker_new ("Choose Workspace",
+                            workspaces, workspace_descriptions);
     gtk_widget_set_tooltip_text (
       GTK_WIDGET (self->workspace_chooser),
       "Where this chat works; locked after the first message");
@@ -4874,14 +4875,16 @@ build_composer (XdChatView *self)
       accesses[i] = ai_access_label (access_choices[i]);
 
     self->effort_chooser =
-      xd_option_picker_new (efforts, effort_descriptions);
+      xd_option_picker_new ("Choose Reasoning Effort",
+                            efforts, effort_descriptions);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->effort_chooser),
                                  "How hard the model is asked to think");
     g_signal_connect (self->effort_chooser, "notify::selected",
                       G_CALLBACK (on_effort_selected), self);
 
     self->access_chooser =
-      xd_option_picker_new (accesses, access_descriptions);
+      xd_option_picker_new ("Choose Access",
+                            accesses, access_descriptions);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->access_chooser),
                                  "What the assistant may do in the working "
                                  "directory");

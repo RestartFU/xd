@@ -13,7 +13,8 @@ struct _XdOptionPicker
 {
   AdwBin parent_instance;
 
-  GtkMenuButton *button;
+  GtkButton *button;
+  AdwDialog *dialog;
   GtkLabel *button_label;
   GtkListBox *list;
   GPtrArray *choices;             /* Choice* */
@@ -112,7 +113,7 @@ on_row_activated (GtkListBox    *list,
     GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (row), "position")) - 1;
 
   xd_option_picker_set_selected (self, position);
-  gtk_menu_button_popdown (self->button);
+  adw_dialog_close (self->dialog);
 }
 
 static void
@@ -182,24 +183,38 @@ xd_option_picker_set_choices (XdOptionPicker    *self,
     append_choice (self, labels[i], descriptions[i]);
 
   sync_selection (self);
+  adw_dialog_set_content_height (
+    self->dialog, MIN (520, MAX (190, 68 * (int) self->choices->len + 52)));
 
   if (old_selected != 0)
     g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_SELECTED]);
 }
 
 XdOptionPicker *
-xd_option_picker_new (const char *const *labels,
+xd_option_picker_new (const char        *title,
+                      const char *const *labels,
                       const char *const *descriptions)
 {
   XdOptionPicker *self;
 
+  g_return_val_if_fail (title != NULL, NULL);
   g_return_val_if_fail (labels != NULL, NULL);
   g_return_val_if_fail (descriptions != NULL, NULL);
 
   self = g_object_new (XD_TYPE_OPTION_PICKER, NULL);
+  adw_dialog_set_title (self->dialog, title);
   xd_option_picker_set_choices (self, labels, descriptions);
 
   return self;
+}
+
+static void
+on_button_clicked (GtkButton *button,
+                   gpointer   user_data)
+{
+  XdOptionPicker *self = user_data;
+
+  adw_dialog_present (self->dialog, GTK_WIDGET (self));
 }
 
 static void
@@ -246,6 +261,7 @@ xd_option_picker_dispose (GObject *object)
   XdOptionPicker *self = XD_OPTION_PICKER (object);
 
   g_clear_pointer (&self->choices, g_ptr_array_unref);
+  g_clear_object (&self->dialog);
 
   G_OBJECT_CLASS (xd_option_picker_parent_class)->dispose (object);
 }
@@ -271,32 +287,45 @@ static void
 xd_option_picker_init (XdOptionPicker *self)
 {
   GtkWidget *button_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
-  GtkWidget *popover = gtk_popover_new ();
-  GtkWidget *panel = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *toolbar = adw_toolbar_view_new ();
+  GtkWidget *header = adw_header_bar_new ();
+  GtkWidget *scroller = gtk_scrolled_window_new ();
 
   self->choices =
     g_ptr_array_new_with_free_func ((GDestroyNotify) choice_free);
   self->button_label = GTK_LABEL (gtk_label_new (NULL));
 
   gtk_box_append (GTK_BOX (button_content), GTK_WIDGET (self->button_label));
-  gtk_box_append (GTK_BOX (button_content),
-                  gtk_image_new_from_icon_name ("pan-down-symbolic"));
 
-  self->button = GTK_MENU_BUTTON (gtk_menu_button_new ());
-  gtk_menu_button_set_child (self->button, button_content);
+  self->button = GTK_BUTTON (gtk_button_new ());
+  gtk_button_set_child (self->button, button_content);
   gtk_widget_add_css_class (GTK_WIDGET (self->button), "flat");
+  g_signal_connect (self->button, "clicked",
+                    G_CALLBACK (on_button_clicked), self);
 
   self->list = GTK_LIST_BOX (gtk_list_box_new ());
   gtk_list_box_set_selection_mode (self->list, GTK_SELECTION_SINGLE);
-  gtk_widget_set_size_request (GTK_WIDGET (self->list), 320, -1);
+  gtk_widget_add_css_class (GTK_WIDGET (self->list), "xd-picker-list");
   g_signal_connect (self->list, "row-activated",
                     G_CALLBACK (on_row_activated), self);
 
-  gtk_box_append (GTK_BOX (panel), GTK_WIDGET (self->list));
-  gtk_widget_add_css_class (panel, "xd-menu");
-  gtk_popover_set_child (GTK_POPOVER (popover), panel);
-  gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
-  gtk_menu_button_set_popover (self->button, popover);
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
+                                 GTK_WIDGET (self->list));
+  gtk_widget_set_margin_top (scroller, 6);
+  gtk_widget_set_margin_bottom (scroller, 6);
+  gtk_widget_set_margin_start (scroller, 6);
+  gtk_widget_set_margin_end (scroller, 6);
+
+  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), scroller);
+
+  self->dialog = ADW_DIALOG (g_object_ref_sink (adw_dialog_new ()));
+  adw_dialog_set_content_width (self->dialog, 400);
+  adw_dialog_set_presentation_mode (
+    self->dialog, ADW_DIALOG_FLOATING);
+  adw_dialog_set_child (self->dialog, toolbar);
 
   adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->button));
 }

@@ -335,6 +335,12 @@ static const char *XD_STYLE =
   "popover listview > row:selected { background: alpha(#ffffff, 0.07); }\n"
   "popover listview > row:hover:not(:selected)"
   " { background: alpha(#ffffff, 0.05); }\n"
+  ".xd-picker-list { background: none; }\n"
+  ".xd-picker-list > row { border-radius: 10px; }\n"
+  ".xd-picker-list > row:selected"
+  " { background: alpha(#ffffff, 0.07); }\n"
+  ".xd-picker-list > row:hover:not(:selected)"
+  " { background: alpha(#ffffff, 0.05); }\n"
 
   /* Nothing has a scrollbar except the transcript, and that one is a thin
    * overlay: everywhere else the content says how long it is. */
