@@ -404,9 +404,11 @@ static const char *XD_STYLE =
   ".xd-code.xd-inline-diff { padding: 0; }\n"
 
   /* Structured diff pane. One label holds the complete patch: hundreds of
-   * child widgets made scrolling stutter on every frame. */
+   * child widgets made scrolling stutter on every frame. Keep its line boxes
+   * flush so Pango's changed-line backgrounds do not show dark seams. */
   ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
-  " font-family: \"JetBrains Mono\", monospace; font-size: 1em; }\n"
+  " font-family: \"JetBrains Mono\", monospace; font-size: 1em;"
+  " line-height: 1; }\n"
   ".xd-diff-expander > title { padding: 9px 12px; }\n"
 
   /* Repository browser: the list and preview share the same quiet side pane
