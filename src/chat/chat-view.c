@@ -372,6 +372,9 @@ append_row (XdChatView    *self,
 {
   XdMessageRow *row = xd_message_row_new (kind, text);
 
+  if (self->remote != NULL)
+    xd_message_row_set_remote (row, self->remote);
+
   gtk_box_append (self->transcript, GTK_WIDGET (row));
   keep_working_last (self);
   queue_scroll_to_bottom (self);

@@ -1132,8 +1132,11 @@ test_images_are_uploaded_to_the_daemon (void)
   g_autofree char *encoded = NULL;
   g_autofree char *uploaded = NULL;
   g_autofree char *contents = NULL;
+  g_autofree guchar *preview_data = NULL;
   g_autoptr (GPtrArray) messages = NULL;
+  gsize preview_length = 0;
   RemoteReply sent = { 0 };
+  RemoteReply preview = { 0 };
   StoredTurn stored;
 
   daemon_start (&daemon);
@@ -1218,6 +1221,30 @@ test_images_are_uploaded_to_the_daemon (void)
   g_assert_true (g_file_get_contents (uploaded, &contents, NULL, NULL));
   g_assert_cmpmem (contents, sizeof png, png, sizeof png);
 
+  /* The daemon path in the transcript does not exist on a paired device.
+   * Preview bytes are read lazily through the authenticated connection. */
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    const char *preview_encoded;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "image-read");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, uploaded);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &preview);
+    g_assert_cmpstr (
+      json_object_get_string_member_with_default (preview.reply, "mime", NULL),
+      ==, "image/png");
+    preview_encoded =
+      json_object_get_string_member_with_default (preview.reply, "data", NULL);
+    g_assert_nonnull (preview_encoded);
+    preview_data = g_base64_decode (preview_encoded, &preview_length);
+    g_assert_cmpmem (preview_data, preview_length, png, sizeof png);
+  }
+
   unlink (uploaded);
   if (old_path != NULL)
     g_setenv ("PATH", old_path, TRUE);
@@ -1225,7 +1252,9 @@ test_images_are_uploaded_to_the_daemon (void)
     g_unsetenv ("PATH");
 
   json_object_unref (sent.reply);
+  json_object_unref (preview.reply);
   g_free (sent.wait.failure);
+  g_free (preview.wait.failure);
   daemon_stop (&daemon);
 }
 

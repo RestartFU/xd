@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * Remote images are carried inline in the authenticated JSON request.
+ * Remote images are carried inline in authenticated JSON requests/replies.
  *
  * The limits keep one paste from turning into an unbounded allocation on
  * either device while leaving plenty of room for full-resolution screenshots.

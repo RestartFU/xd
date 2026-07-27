@@ -4,6 +4,8 @@
 
 G_BEGIN_DECLS
 
+typedef struct _XdRemoteClient XdRemoteClient;
+
 typedef enum
 {
   XD_MESSAGE_USER,
@@ -27,6 +29,10 @@ XdMessageRow *xd_message_row_new        (XdMessageKind  kind,
 /* Records what produced the message -- model and effort -- as a tooltip. */
 void          xd_message_row_set_source (XdMessageRow  *self,
                                          const char    *source);
+
+/* Lets daemon-local image paths be previewed through their paired client. */
+void          xd_message_row_set_remote (XdMessageRow   *self,
+                                         XdRemoteClient *remote);
 
 XdMessageKind xd_message_kind_from_role (const char *role);
 const char   *xd_message_kind_to_role   (XdMessageKind kind);

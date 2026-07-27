@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "remote/client.h"
+#include "remote/protocol.h"
 #include "util/markdown.h"
 #include "util/host-launch.h"
 
@@ -11,6 +13,8 @@ struct _XdMessageRow
 
   XdMessageKind kind;
   GString *text;
+  XdRemoteClient *remote;
+  GCancellable *image_cancellable;
 
   GtkWidget *body;          /* a column of prose labels and code cards */
 };
@@ -267,40 +271,149 @@ make_code_card (XdMessageRow *self,
   return card;
 }
 
+typedef struct
+{
+  GtkPopover *popover;
+  GWeakRef chip;
+} PreviewRequest;
+
+static void
+preview_request_free (PreviewRequest *request)
+{
+  g_weak_ref_clear (&request->chip);
+  g_object_unref (request->popover);
+  g_free (request);
+}
+
 /* The preview popover opens above the chip, sized to the image's own shape
  * rather than a fixed box that would stretch or letterbox it. */
+static void
+show_preview (GtkPopover *popover,
+              GdkTexture *texture)
+{
+  GtkWidget *picture;
+  int w = gdk_texture_get_width (texture);
+  int h = gdk_texture_get_height (texture);
+  double scale = MIN (1.0, MIN (440.0 / w, 300.0 / h));
+
+  picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (texture));
+  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
+  gtk_widget_set_size_request (picture, (int) (w * scale), (int) (h * scale));
+  gtk_popover_set_child (popover, picture);
+}
+
+static void
+on_remote_preview (GObject      *source,
+                   GAsyncResult *result,
+                   gpointer      user_data)
+{
+  PreviewRequest *request = user_data;
+  g_autoptr (JsonObject) reply = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autofree guchar *data = NULL;
+  g_autoptr (GBytes) bytes = NULL;
+  g_autoptr (GdkTexture) texture = NULL;
+  g_autoptr (GtkWidget) chip = g_weak_ref_get (&request->chip);
+  const char *encoded;
+  gsize length = 0;
+  gsize encoded_limit = ((XD_REMOTE_MAX_IMAGE_BYTES + 2) / 3) * 4;
+
+  if (chip != NULL)
+    g_object_set_data (G_OBJECT (chip), "image-loading", NULL);
+
+  reply = xd_remote_client_call_finish (XD_REMOTE_CLIENT (source), result, &error);
+  encoded = reply != NULL
+    ? json_object_get_string_member_with_default (reply, "data", NULL) : NULL;
+
+  if (encoded != NULL && strlen (encoded) <= encoded_limit)
+    data = g_base64_decode (encoded, &length);
+
+  if (length > 0 && length <= XD_REMOTE_MAX_IMAGE_BYTES)
+    {
+      bytes = g_bytes_new_take (g_steal_pointer (&data), length);
+      texture = gdk_texture_new_from_bytes (bytes, &error);
+    }
+
+  if (texture != NULL)
+    {
+      show_preview (request->popover, texture);
+    }
+  else if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    {
+      GtkWidget *unavailable = gtk_label_new ("Preview unavailable");
+
+      gtk_widget_add_css_class (unavailable, "dim-label");
+      gtk_popover_set_child (request->popover, unavailable);
+    }
+
+  preview_request_free (request);
+}
+
+static void
+load_remote_preview (XdMessageRow *self,
+                     GtkWidget    *chip,
+                     GtkPopover   *popover,
+                     const char   *path)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request_node = NULL;
+  PreviewRequest *request;
+  GtkWidget *loading = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *spinner = gtk_spinner_new ();
+
+  gtk_spinner_start (GTK_SPINNER (spinner));
+  gtk_box_append (GTK_BOX (loading), spinner);
+  gtk_box_append (GTK_BOX (loading), gtk_label_new ("Loading preview…"));
+  gtk_popover_set_child (popover, loading);
+  g_object_set_data (G_OBJECT (chip), "image-loading", GINT_TO_POINTER (1));
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "image-read");
+  json_builder_set_member_name (builder, "path");
+  json_builder_add_string_value (builder, path);
+  json_builder_end_object (builder);
+  request_node = json_builder_get_root (builder);
+
+  request = g_new0 (PreviewRequest, 1);
+  request->popover = g_object_ref (popover);
+  g_weak_ref_init (&request->chip, chip);
+
+  xd_remote_client_call_async (self->remote, request_node,
+                               self->image_cancellable,
+                               on_remote_preview, request);
+}
+
 static void
 on_chip_enter (GtkEventControllerMotion *controller,
                double                    x,
                double                    y,
                gpointer                  user_data)
 {
-  GtkPopover *popover = user_data;
-  GtkWidget *chip = gtk_widget_get_parent (GTK_WIDGET (popover));
+  XdMessageRow *self = user_data;
+  GtkWidget *chip =
+    gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (controller));
+  GtkPopover *popover =
+    g_object_get_data (G_OBJECT (chip), "image-popover");
   const char *path = g_object_get_data (G_OBJECT (chip), "image-path");
 
-  if (gtk_popover_get_child (popover) == NULL)
+  if (popover == NULL || path == NULL)
+    return;
+
+  if (gtk_popover_get_child (popover) == NULL &&
+      g_object_get_data (G_OBJECT (chip), "image-loading") == NULL)
     {
       g_autoptr (GdkTexture) texture = NULL;
-      GtkWidget *picture;
-      int w, h;
-      double scale;
 
-      if (path == NULL)
-        return;
-
-      texture = gdk_texture_new_from_filename (path, NULL);
-      if (texture == NULL)
-        return;
-
-      w = gdk_texture_get_width (GDK_TEXTURE (texture));
-      h = gdk_texture_get_height (GDK_TEXTURE (texture));
-      scale = MIN (1.0, MIN (440.0 / w, 300.0 / h));
-
-      picture = gtk_picture_new_for_paintable (GDK_PAINTABLE (texture));
-      gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
-      gtk_widget_set_size_request (picture, (int) (w * scale), (int) (h * scale));
-      gtk_popover_set_child (popover, picture);
+      if (self->remote != NULL)
+        load_remote_preview (self, chip, popover, path);
+      else
+        {
+          texture = gdk_texture_new_from_filename (path, NULL);
+          if (texture == NULL)
+            return;
+          show_preview (popover, texture);
+        }
     }
 
   gtk_popover_popup (popover);
@@ -333,14 +446,26 @@ make_image_chip (XdMessageRow *self,
                  int           number)
 {
   g_autofree char *uri = g_filename_to_uri (path, NULL, NULL);
-  g_autofree char *markup =
-    g_markup_printf_escaped ("<a href=\"%s\">Image #%d</a>",
-                             uri != NULL ? uri : path, number);
   GtkWidget *label = gtk_label_new (NULL);
 
-  gtk_label_set_markup (GTK_LABEL (label), markup);
+  if (self->remote != NULL)
+    {
+      g_autofree char *text = g_strdup_printf ("Image #%d", number);
+
+      gtk_label_set_label (GTK_LABEL (label), text);
+      gtk_widget_add_css_class (label, "link");
+    }
+  else
+    {
+      g_autofree char *markup =
+        g_markup_printf_escaped ("<a href=\"%s\">Image #%d</a>",
+                                 uri != NULL ? uri : path, number);
+
+      gtk_label_set_markup (GTK_LABEL (label), markup);
+      g_signal_connect (label, "activate-link",
+                        G_CALLBACK (on_link_activated), NULL);
+    }
   gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
-  g_signal_connect (label, "activate-link", G_CALLBACK (on_link_activated), NULL);
 
   g_object_set_data_full (G_OBJECT (label), "image-path", g_strdup (path), g_free);
 
@@ -353,8 +478,9 @@ make_image_chip (XdMessageRow *self,
     gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
     gtk_widget_set_parent (popover, label);
     gtk_widget_add_css_class (popover, "xd-preview");
+    g_object_set_data (G_OBJECT (label), "image-popover", popover);
 
-    g_signal_connect (motion, "enter", G_CALLBACK (on_chip_enter), popover);
+    g_signal_connect (motion, "enter", G_CALLBACK (on_chip_enter), self);
     g_signal_connect (motion, "leave", G_CALLBACK (on_chip_leave), popover);
     gtk_widget_add_controller (label, motion);
     g_signal_connect (label, "destroy", G_CALLBACK (on_chip_destroyed), popover);
@@ -504,6 +630,37 @@ xd_message_row_set_source (XdMessageRow *self,
     gtk_widget_set_tooltip_text (GTK_WIDGET (self), source);
 }
 
+void
+xd_message_row_set_remote (XdMessageRow   *self,
+                           XdRemoteClient *remote)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+  g_return_if_fail (remote == NULL || XD_IS_REMOTE_CLIENT (remote));
+
+  if (self->remote == remote)
+    return;
+
+  g_cancellable_cancel (self->image_cancellable);
+  g_clear_object (&self->image_cancellable);
+  self->image_cancellable = g_cancellable_new ();
+  g_set_object (&self->remote, remote);
+
+  /* Image chips choose their loader when they are built. */
+  render_body (self);
+}
+
+static void
+xd_message_row_dispose (GObject *object)
+{
+  XdMessageRow *self = XD_MESSAGE_ROW (object);
+
+  g_cancellable_cancel (self->image_cancellable);
+  g_clear_object (&self->image_cancellable);
+  g_clear_object (&self->remote);
+
+  G_OBJECT_CLASS (xd_message_row_parent_class)->dispose (object);
+}
+
 static void
 xd_message_row_finalize (GObject *object)
 {
@@ -517,10 +674,12 @@ xd_message_row_finalize (GObject *object)
 static void
 xd_message_row_class_init (XdMessageRowClass *klass)
 {
+  G_OBJECT_CLASS (klass)->dispose = xd_message_row_dispose;
   G_OBJECT_CLASS (klass)->finalize = xd_message_row_finalize;
 }
 
 static void
 xd_message_row_init (XdMessageRow *self)
 {
+  self->image_cancellable = g_cancellable_new ();
 }

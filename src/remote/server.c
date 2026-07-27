@@ -969,6 +969,79 @@ handle_messages (Connection *connection,
   send_json (connection, builder);
 }
 
+/*
+ * A transcript stores the path the daemon-side agent received. That path is
+ * meaningless on a paired device, so hover previews fetch the bytes lazily.
+ *
+ * Only files materialized by remote paste handling are exposed. Authentication
+ * alone must not turn this small UI endpoint into an arbitrary file reader.
+ */
+static void
+handle_image_read (Connection *connection,
+                   JsonObject *request)
+{
+  const char *path = member_string (request, "path");
+  g_autofree char *directory = NULL;
+  g_autofree char *canonical_directory = NULL;
+  g_autofree char *canonical_path = NULL;
+  g_autofree char *parent = NULL;
+  g_autofree char *contents = NULL;
+  g_autofree char *encoded = NULL;
+  g_autoptr (GError) error = NULL;
+  gsize length = 0;
+
+  directory = g_build_filename (g_get_user_cache_dir (), "xd",
+                                "remote-pasted", NULL);
+  canonical_directory = g_canonicalize_filename (directory, NULL);
+
+  if (path == NULL || !g_path_is_absolute (path))
+    {
+      send_error (connection, "image-read needs an image path.");
+      return;
+    }
+
+  canonical_path = g_canonicalize_filename (path, NULL);
+  parent = g_path_get_dirname (canonical_path);
+
+  if (g_strcmp0 (parent, canonical_directory) != 0 ||
+      g_file_test (canonical_path, G_FILE_TEST_IS_SYMLINK) ||
+      !g_file_test (canonical_path, G_FILE_TEST_IS_REGULAR))
+    {
+      send_error (connection, "That image is not a remote paste.");
+      return;
+    }
+
+  if (!g_file_get_contents (canonical_path, &contents, &length, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  if (length < 8 || length > XD_REMOTE_MAX_IMAGE_BYTES ||
+      memcmp (contents, "\x89PNG\r\n\x1a\n", 8) != 0)
+    {
+      send_error (connection, "That remote paste is not a valid PNG.");
+      return;
+    }
+
+  encoded = g_base64_encode ((const guchar *) contents, length);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "ok");
+    json_builder_add_boolean_value (builder, TRUE);
+    json_builder_set_member_name (builder, "mime");
+    json_builder_add_string_value (builder, "image/png");
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    send_json (connection, builder);
+  }
+}
+
 /* --- running a turn -------------------------------------------------------- */
 
 typedef struct
@@ -2327,6 +2400,8 @@ dispatch (Connection *connection,
     handle_tree (connection);
   else if (g_strcmp0 (op, "messages") == 0)
     handle_messages (connection, request);
+  else if (g_strcmp0 (op, "image-read") == 0)
+    handle_image_read (connection, request);
   else if (g_strcmp0 (op, "list-dir") == 0)
     handle_list_dir (connection, request);
   /* The daemon is the only writer: a client sends what it wants done and this
