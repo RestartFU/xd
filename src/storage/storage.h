@@ -84,7 +84,11 @@ const char *xd_storage_get_path        (XdStorage   *self);
  */
 void        xd_storage_watch           (XdStorage   *self);
 
-/* Returns the new chat's id. @workdir may be NULL to inherit the folder's. */
+/*
+ * Returns the new chat's id. @workdir may be NULL to inherit the folder's.
+ * Agent arguments are cold-start fallbacks; after the user changes an agent
+ * option, new chats inherit that complete configuration instead.
+ */
 char       *xd_storage_create_chat     (XdStorage   *self,
                                         const char  *folder_id,
                                         const char  *title,

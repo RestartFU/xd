@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 13
+#define XD_STORAGE_SCHEMA_VERSION 14
 
 struct _XdStorage
 {
@@ -358,6 +358,40 @@ migrate (XdStorage  *self,
        !exec_sql (self, "ALTER TABLE chats ADD COLUMN access TEXT;", error)))
     return FALSE;
 
+  /*
+   * A new chat follows the last agent configuration the user changed.
+   *
+   * This cannot be derived from chats.updated_at: sending a message, renaming
+   * a chat, or choosing a workspace also changes that timestamp, and none of
+   * those actions should silently replace the defaults. The trigger snapshots
+   * all agent options atomically whenever one of them actually changes.
+   */
+  if (version < 14 &&
+      !exec_sql (self,
+                 "CREATE TABLE agent_defaults ("
+                 "  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
+                 "  backend   TEXT NOT NULL,"
+                 "  model     TEXT,"
+                 "  effort    TEXT,"
+                 "  access    TEXT,"
+                 "  plan      INTEGER NOT NULL"
+                 ");"
+                 "CREATE TRIGGER remember_agent_defaults"
+                 " AFTER UPDATE OF backend, model, effort, access, plan ON chats"
+                 " WHEN OLD.backend IS NOT NEW.backend"
+                 "   OR OLD.model IS NOT NEW.model"
+                 "   OR OLD.effort IS NOT NEW.effort"
+                 "   OR OLD.access IS NOT NEW.access"
+                 "   OR OLD.plan IS NOT NEW.plan"
+                 " BEGIN"
+                 "   INSERT OR REPLACE INTO agent_defaults"
+                 "     (singleton, backend, model, effort, access, plan)"
+                 "   VALUES (1, NEW.backend, NEW.model, NEW.effort,"
+                 "           NEW.access, NEW.plan);"
+                 " END;",
+                 error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          XD_STORAGE_SCHEMA_VERSION);
@@ -419,6 +453,16 @@ xd_storage_create_chat (XdStorage   *self,
 {
   sqlite3_stmt *stmt = NULL;
   g_autofree char *id = NULL;
+  g_autofree char *saved_backend = NULL;
+  g_autofree char *saved_model = NULL;
+  g_autofree char *saved_effort = NULL;
+  g_autofree char *saved_access = NULL;
+  const char *actual_backend = backend;
+  const char *actual_model = model;
+  const char *actual_effort = effort;
+  const char *actual_access = NULL;
+  gboolean actual_plan = FALSE;
+  int result;
   gint64 now;
 
   g_return_val_if_fail (XD_IS_STORAGE (self), NULL);
@@ -429,10 +473,42 @@ xd_storage_create_chat (XdStorage   *self,
   now = g_get_real_time () / G_USEC_PER_SEC;
 
   if (sqlite3_prepare_v2 (self->db,
+                          "SELECT backend, model, effort, access, plan"
+                          " FROM agent_defaults WHERE singleton = 1;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot read the agent defaults");
+      return NULL;
+    }
+
+  result = sqlite3_step (stmt);
+  if (result == SQLITE_ROW)
+    {
+      saved_backend = column_text (stmt, 0);
+      saved_model = column_text (stmt, 1);
+      saved_effort = column_text (stmt, 2);
+      saved_access = column_text (stmt, 3);
+      actual_backend = saved_backend;
+      actual_model = saved_model;
+      actual_effort = saved_effort;
+      actual_access = saved_access;
+      actual_plan = sqlite3_column_int (stmt, 4) != 0;
+    }
+  else if (result != SQLITE_DONE)
+    {
+      set_sqlite_error (error, self->db, "Cannot read the agent defaults");
+      sqlite3_finalize (stmt);
+      return NULL;
+    }
+
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+
+  if (sqlite3_prepare_v2 (self->db,
                           "INSERT INTO chats (id, folder_id, title, backend,"
-                          "                   model, effort, workdir,"
+                          "                   model, effort, access, plan, workdir,"
                           "                   created_at, updated_at)"
-                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot create the chat");
@@ -442,12 +518,14 @@ xd_storage_create_chat (XdStorage   *self,
   bind_text (stmt, 1, id);
   bind_text (stmt, 2, folder_id);
   bind_text (stmt, 3, title);
-  bind_text (stmt, 4, backend);
-  bind_text (stmt, 5, model);
-  bind_text (stmt, 6, effort);
-  bind_text (stmt, 7, workdir);
-  sqlite3_bind_int64 (stmt, 8, now);
-  sqlite3_bind_int64 (stmt, 9, now);
+  bind_text (stmt, 4, actual_backend);
+  bind_text (stmt, 5, actual_model);
+  bind_text (stmt, 6, actual_effort);
+  bind_text (stmt, 7, actual_access);
+  sqlite3_bind_int (stmt, 8, actual_plan ? 1 : 0);
+  bind_text (stmt, 9, workdir);
+  sqlite3_bind_int64 (stmt, 10, now);
+  sqlite3_bind_int64 (stmt, 11, now);
 
   if (sqlite3_step (stmt) != SQLITE_DONE)
     {

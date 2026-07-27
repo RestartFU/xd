@@ -1028,6 +1028,72 @@ test_folders_and_chats_are_managed_from_the_client (void)
   daemon_stop (&daemon);
 }
 
+static void
+set_remote_agent_option (XdRemoteClient *client,
+                         const char     *chat_id,
+                         const char     *option,
+                         const char     *value)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  RemoteReply reply = { 0 };
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "set-option");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, chat_id);
+  json_builder_set_member_name (builder, "option");
+  json_builder_add_string_value (builder, option);
+  json_builder_set_member_name (builder, "value");
+  json_builder_add_string_value (builder, value);
+  json_builder_end_object (builder);
+
+  call_remote_request (client, builder, &reply);
+  json_object_unref (reply.reply);
+  g_free (reply.wait.failure);
+}
+
+static void
+test_remote_new_chat_inherits_last_changed_agent (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (XdChat) chat = NULL;
+  XdNode *folder;
+  Created created = { 0 };
+
+  daemon_start (&daemon);
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  folder = child_at (xd_remote_tree_get_root (tree), 0);
+
+  set_remote_agent_option (client, daemon.chat_id, "backend", "codex");
+  set_remote_agent_option (client, daemon.chat_id, "model", "gpt-5.6-codex");
+  set_remote_agent_option (client, daemon.chat_id, "effort", "xhigh");
+  set_remote_agent_option (client, daemon.chat_id, "access", "full");
+  set_remote_agent_option (client, daemon.chat_id, "plan", "true");
+
+  g_signal_connect (tree, "chat-created", G_CALLBACK (on_chat_signal), &created);
+  xd_remote_tree_create_chat (tree, folder, "inherits agent", NULL);
+  wait_for (&created.wait);
+  g_signal_handlers_disconnect_by_data (tree, &created);
+
+  g_assert_nonnull (created.chat);
+  chat_id = g_strdup (xd_node_get_chat_id (created.chat));
+  chat = xd_storage_get_chat (daemon.storage, chat_id, NULL);
+  g_assert_nonnull (chat);
+  g_assert_cmpstr (chat->backend, ==, "codex");
+  g_assert_cmpstr (chat->model, ==, "gpt-5.6-codex");
+  g_assert_cmpstr (chat->effort, ==, "xhigh");
+  g_assert_cmpstr (chat->access, ==, "full");
+  g_assert_true (chat->plan);
+
+  g_clear_object (&created.chat);
+  daemon_stop (&daemon);
+}
+
 /*
  * A folder's own context can be edited from another machine without exposing
  * its path. Clearing it restores inheritance; parent context is deliberately
@@ -3069,6 +3135,7 @@ main (int argc, char *argv[])
   ADD ("/remote/client-pairs-and-reads-the-tree", test_client_pairs_and_reads_the_tree);
   ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
   ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
+  ADD ("/remote/new-chat-inherits-last-changed-agent", test_remote_new_chat_inherits_last_changed_agent);
   ADD ("/remote/folder-context-is-managed-from-the-client", test_folder_context_is_managed_from_the_client);
   ADD ("/remote/agent-secrets-are-managed-without-reading-values", test_agent_secrets_are_managed_without_reading_values);
   ADD ("/remote/a-refused-change-is-reported", test_a_refused_change_is_reported);

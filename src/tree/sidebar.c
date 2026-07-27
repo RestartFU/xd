@@ -572,10 +572,11 @@ chat_from_target (XdSidebar *self,
  * A new chat is a row waiting for a name, like a new folder.
  *
  * It comes with the name it will keep if nothing is typed, so making one is
- * Enter, and naming it is a word and then Enter. What it runs on -- the
- * backend, the model, how hard it thinks -- is the folder chain's to say, and
- * the folder chain has already said it; asking again in a dialog was asking
- * the user to repeat something they had configured.
+ * Enter, and naming it is a word and then Enter. What it runs on starts with
+ * the last agent configuration the user changed. Until there is one, the
+ * folder chain supplies the backend and model and the CLI supplies its normal
+ * effort; asking again in a dialog would make the user repeat settings they
+ * already chose.
  */
 typedef struct
 {

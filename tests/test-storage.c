@@ -76,6 +76,60 @@ test_create_and_list (Fixture       *fixture,
   g_assert_cmpstr (chat->backend, ==, "claude");
 }
 
+static void
+test_new_chats_inherit_last_changed_agent (Fixture       *fixture,
+                                           gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *changed_id = NULL;
+  g_autofree char *before_id = NULL;
+  g_autofree char *after_id = NULL;
+  g_autoptr (XdChat) before = NULL;
+  g_autoptr (XdChat) after = NULL;
+
+  changed_id = xd_storage_create_chat (
+    fixture->storage, "folder-a", "Changed",
+    "claude", "claude-opus-5", "medium", NULL, &error);
+  g_assert_no_error (error);
+
+  /* Merely creating a chat is not a changed preference. Folder defaults still
+   * apply until the user touches an agent option. */
+  before_id = xd_storage_create_chat (
+    fixture->storage, "folder-b", "Before",
+    "codex", "gpt-5.4", "low", NULL, &error);
+  g_assert_no_error (error);
+  before = xd_storage_get_chat (fixture->storage, before_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (before->backend, ==, "codex");
+  g_assert_cmpstr (before->model, ==, "gpt-5.4");
+  g_assert_cmpstr (before->effort, ==, "low");
+
+  g_assert_true (xd_storage_set_backend (
+    fixture->storage, changed_id, "codex", &error));
+  g_assert_true (xd_storage_set_model (
+    fixture->storage, changed_id, "gpt-5.6-codex", &error));
+  g_assert_true (xd_storage_set_effort (
+    fixture->storage, changed_id, "xhigh", &error));
+  g_assert_true (xd_storage_set_access (
+    fixture->storage, changed_id, "full", &error));
+  g_assert_true (xd_storage_set_plan (
+    fixture->storage, changed_id, TRUE, &error));
+  g_assert_no_error (error);
+
+  /* Folder fallbacks now lose to the complete last-changed configuration. */
+  after_id = xd_storage_create_chat (
+    fixture->storage, "folder-b", "After",
+    "claude", "claude-haiku-4-5", "low", NULL, &error);
+  g_assert_no_error (error);
+  after = xd_storage_get_chat (fixture->storage, after_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (after->backend, ==, "codex");
+  g_assert_cmpstr (after->model, ==, "gpt-5.6-codex");
+  g_assert_cmpstr (after->effort, ==, "xhigh");
+  g_assert_cmpstr (after->access, ==, "full");
+  g_assert_true (after->plan);
+}
+
 /* Chats hang off a folder's UUID, never its path: that is what lets a folder
  * be renamed or moved on disk without losing its conversations. */
 static void
@@ -512,6 +566,7 @@ main (int   argc,
   g_test_add (path, Fixture, NULL, fixture_set_up, func, fixture_tear_down)
 
   ADD ("/storage/create-and-list", test_create_and_list);
+  ADD ("/storage/new-chats-inherit-agent", test_new_chats_inherit_last_changed_agent);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
   ADD ("/storage/sessions-per-backend", test_sessions_are_per_backend);
