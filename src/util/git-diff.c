@@ -1,15 +1,22 @@
 #include "git-diff.h"
 
 #include <gio/gio.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
-/* A tool row must not be allowed to turn one generated file into an
- * unbounded transcript. Enough for a substantial source change. */
+/* A tool row must not turn one generated file into an unbounded transcript. */
 #define DIFF_LIMIT (256 * 1024)
 #define FILE_CHANGE_PREFIX "file_change\n"
 
+struct _XdGitDiffTracker
+{
+  char *root;
+  char *previous_tree;
+};
+
 static char *
 run_git (const char        *workdir,
+         const char        *index_path,
          const char *const *argv,
          gboolean           accept_difference)
 {
@@ -24,9 +31,14 @@ run_git (const char        *workdir,
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                         G_SUBPROCESS_FLAGS_STDERR_SILENCE);
   g_subprocess_launcher_set_cwd (launcher, workdir);
-  process = g_subprocess_launcher_spawnv (launcher, argv, &error);
+  if (index_path != NULL)
+    g_subprocess_launcher_setenv (launcher, "GIT_INDEX_FILE", index_path, TRUE);
+
+  process =
+    g_subprocess_launcher_spawnv (launcher, argv, &error);
   if (process == NULL ||
-      !g_subprocess_communicate_utf8 (process, NULL, NULL, &output, NULL, &error))
+      !g_subprocess_communicate_utf8 (
+        process, NULL, NULL, &output, NULL, &error))
     {
       g_debug ("cannot capture file diff: %s",
                error != NULL ? error->message : "git did not start");
@@ -44,63 +56,108 @@ run_git (const char        *workdir,
   return output;
 }
 
-static void
-append_limited (GString    *patch,
-                const char *text)
+static char *
+repository_root (const char *workdir)
 {
-  gsize available;
-  gsize length;
+  const char *argv[] = {
+    "git", "rev-parse", "--show-toplevel", NULL
+  };
+  g_autofree char *root = run_git (workdir, NULL, argv, FALSE);
 
-  if (text == NULL || *text == '\0' || patch->len >= DIFF_LIMIT)
-    return;
+  if (root == NULL)
+    return NULL;
 
-  available = DIFF_LIMIT - patch->len;
-  length = MIN (strlen (text), available);
-  g_string_append_len (patch, text, length);
+  g_strchomp (root);
+  return *root != '\0' ? g_steal_pointer (&root) : NULL;
+}
+
+static gboolean
+seed_from_user_index (const char *root,
+                      const char *temporary)
+{
+  const char *argv[] = { "git", "rev-parse", "--git-path", "index", NULL };
+  g_autofree char *reported = run_git (root, NULL, argv, FALSE);
+  g_autofree char *index_path = NULL;
+  g_autofree char *contents = NULL;
+  gsize length = 0;
+
+  if (reported == NULL)
+    return FALSE;
+
+  g_strchomp (reported);
+  index_path = g_path_is_absolute (reported)
+    ? g_strdup (reported) : g_build_filename (root, reported, NULL);
+
+  return g_file_get_contents (index_path, &contents, &length, NULL) &&
+         g_file_set_contents (temporary, contents, length, NULL);
 }
 
 /*
- * Adds files Git does not know about.
+ * Materializes the worktree as a Git tree through a disposable index.
  *
- * A normal `git diff HEAD` intentionally omits them, although a newly written
- * file is exactly the kind of edit this feature needs to show. Porcelain -z
- * keeps spaces, quotes and newlines in paths unambiguous; each path is then a
- * separate argv element, never shell input.
+ * HEAD seeds modes and tracked paths when it exists. `git add -A` then makes
+ * that private index match disk, including ordinary untracked files, without
+ * touching staging. write-tree stores only content-addressed objects.
  */
-static void
-append_untracked (GString    *patch,
-                  const char *workdir)
+static char *
+snapshot_tree (const char *root)
 {
-  const char *status_argv[] = {
-    "git", "status", "--porcelain", "-z", "--untracked-files=all", NULL
-  };
-  g_autofree char *status = run_git (workdir, status_argv, FALSE);
-  const char *at;
+  const char *read_argv[] = { "git", "read-tree", "HEAD", NULL };
+  const char *add_argv[] = { "git", "add", "-A", "--", ".", NULL };
+  const char *write_argv[] = { "git", "write-tree", NULL };
+  g_autofree char *index_path = NULL;
+  g_autofree char *ignored = NULL;
+  g_autofree char *tree = NULL;
+  g_autoptr (GError) error = NULL;
+  gboolean seeded;
+  int descriptor;
 
-  if (status == NULL)
-    return;
-
-  for (at = status; *at != '\0' && patch->len < DIFF_LIMIT; )
+  descriptor = g_file_open_tmp ("xd-diff-index-XXXXXX", &index_path, &error);
+  if (descriptor < 0)
     {
-      gsize length = strlen (at);
-
-      if (length >= 4 && at[0] == '?' && at[1] == '?' && at[2] == ' ')
-        {
-          /* Git recognizes this sentinel itself on every platform. Passing
-           * Windows' NUL device instead makes Git for Windows silently omit
-           * the untracked file from the generated patch. */
-          const char *empty = "/dev/null";
-          const char *path = at + 3;
-          const char *diff_argv[] = {
-            "git", "--no-pager", "diff", "--no-index", "--", empty, path, NULL
-          };
-          g_autofree char *diff = run_git (workdir, diff_argv, TRUE);
-
-          append_limited (patch, diff);
-        }
-
-      at += length + 1;
+      g_debug ("cannot make a temporary Git index: %s", error->message);
+      return NULL;
     }
+
+  g_close (descriptor, NULL);
+  /*
+   * Cloning the user's index gives the disposable copy its stat cache, so Git
+   * hashes changed files instead of every tracked file on every agent call.
+   * The copy is immediately made to match disk and is never written back.
+   */
+  seeded = seed_from_user_index (root, index_path);
+  if (!seeded)
+    {
+      /* Git expects a missing index or a valid one, not mkstemp's empty file.
+       * read-tree failing here simply means an unborn HEAD. */
+      g_remove (index_path);
+      ignored = run_git (root, index_path, read_argv, FALSE);
+      g_clear_pointer (&ignored, g_free);
+    }
+
+  ignored = run_git (root, index_path, add_argv, FALSE);
+  if (ignored == NULL && seeded)
+    {
+      /* A corrupt or exotic index extension must not disable inline diffs.
+       * Fall back to a clean HEAD index; this path is rare and slower. */
+      g_remove (index_path);
+      ignored = run_git (root, index_path, read_argv, FALSE);
+      g_clear_pointer (&ignored, g_free);
+      ignored = run_git (root, index_path, add_argv, FALSE);
+    }
+  if (ignored == NULL)
+    {
+      g_remove (index_path);
+      return NULL;
+    }
+
+  tree = run_git (root, index_path, write_argv, FALSE);
+  g_remove (index_path);
+  if (tree == NULL)
+    return NULL;
+
+  g_strchomp (tree);
+  return *tree != '\0' ? g_steal_pointer (&tree) : NULL;
 }
 
 gboolean
@@ -121,50 +178,75 @@ xd_git_diff_from_tool (const char *message)
     return NULL;
 
   patch = message + strlen (FILE_CHANGE_PREFIX);
-
-  /* A captured Git patch always starts this way. This boundary keeps a future
-   * multi-line summary from accidentally being rendered as source changes. */
   return g_str_has_prefix (patch, "diff --git ") ? patch : NULL;
 }
 
-char *
-xd_git_diff_capture_tool (const char *message,
-                          const char *workdir)
+XdGitDiffTracker *
+xd_git_diff_tracker_new (const char *workdir)
 {
-  const char *head_argv[] = {
-    "git", "--no-pager", "diff", "--no-ext-diff", "--no-color", "HEAD", "--",
-    NULL
+  XdGitDiffTracker *self = g_new0 (XdGitDiffTracker, 1);
+
+  self->root = repository_root (workdir);
+  if (self->root != NULL)
+    self->previous_tree = snapshot_tree (self->root);
+
+  if (self->previous_tree == NULL)
+    {
+      xd_git_diff_tracker_free (self);
+      return NULL;
+    }
+
+  return self;
+}
+
+void
+xd_git_diff_tracker_free (XdGitDiffTracker *self)
+{
+  if (self == NULL)
+    return;
+
+  g_free (self->root);
+  g_free (self->previous_tree);
+  g_free (self);
+}
+
+char *
+xd_git_diff_tracker_capture (XdGitDiffTracker *self,
+                             const char       *message)
+{
+  g_autofree char *current_tree = NULL;
+  g_autofree char *patch = NULL;
+  const char *argv[] = {
+    "git", "--no-pager", "diff", "--no-ext-diff", "--no-color",
+    NULL, NULL, "--", NULL
   };
-  const char *staged_argv[] = {
-    "git", "--no-pager", "diff", "--no-ext-diff", "--no-color", "--cached",
-    NULL
-  };
-  g_autoptr (GString) patch = NULL;
-  g_autofree char *tracked = NULL;
 
   if (!xd_tool_is_file_change (message) ||
-      xd_git_diff_from_tool (message) != NULL)
+      xd_git_diff_from_tool (message) != NULL ||
+      self == NULL)
     return g_strdup (message);
 
-  patch = g_string_new (NULL);
-
-  /* HEAD gives one coherent view of staged and unstaged edits. An unborn
-   * repository has no HEAD; --cached is its equivalent for already added
-   * files, and the status pass below supplies everything not yet added. */
-  tracked = run_git (workdir, head_argv, FALSE);
-  if (tracked == NULL)
-    tracked = run_git (workdir, staged_argv, FALSE);
-  append_limited (patch, tracked);
-  append_untracked (patch, workdir);
-
-  if (patch->len == 0)
+  current_tree = snapshot_tree (self->root);
+  if (current_tree == NULL)
     return g_strdup (message);
 
-  if (patch->len >= DIFF_LIMIT)
-    g_string_append (patch, "\n… diff truncated …\n");
+  argv[5] = self->previous_tree;
+  argv[6] = current_tree;
+  patch = run_git (self->root, NULL, argv, FALSE);
 
-  g_strchomp (patch->str);
-  patch->len = strlen (patch->str);
+  g_free (self->previous_tree);
+  self->previous_tree = g_steal_pointer (&current_tree);
 
-  return g_strconcat (FILE_CHANGE_PREFIX, patch->str, NULL);
+  if (patch == NULL || *patch == '\0')
+    return g_strdup (message);
+
+  if (strlen (patch) > DIFF_LIMIT)
+    {
+      patch[DIFF_LIMIT] = '\0';
+      patch = g_realloc (patch, DIFF_LIMIT + strlen ("\n… diff truncated …\n") + 1);
+      strcat (patch, "\n… diff truncated …\n");
+    }
+
+  g_strchomp (patch);
+  return g_strconcat (FILE_CHANGE_PREFIX, patch, NULL);
 }

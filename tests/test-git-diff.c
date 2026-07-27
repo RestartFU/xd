@@ -46,14 +46,18 @@ remove_tree (const char *path)
 }
 
 static void
-test_capture_file_change (void)
+test_capture_only_change_since_previous_event (void)
 {
   g_autoptr (GError) error = NULL;
   g_autofree char *dir = g_dir_make_tmp ("xd-git-diff-XXXXXX", &error);
   g_autofree char *tracked = NULL;
-  g_autofree char *untracked = NULL;
-  g_autofree char *message = NULL;
-  const char *patch;
+  g_autofree char *preexisting = NULL;
+  g_autofree char *created = NULL;
+  g_autofree char *first_message = NULL;
+  g_autofree char *second_message = NULL;
+  g_autoptr (XdGitDiffTracker) tracker = NULL;
+  const char *first_patch;
+  const char *second_patch;
   const char *init[] = { "git", "init", "-q", NULL };
   const char *add[] = { "git", "add", "tracked.txt", NULL };
   const char *commit[] = {
@@ -63,7 +67,8 @@ test_capture_file_change (void)
 
   g_assert_no_error (error);
   tracked = g_build_filename (dir, "tracked.txt", NULL);
-  untracked = g_build_filename (dir, "new file.txt", NULL);
+  preexisting = g_build_filename (dir, "preexisting.txt", NULL);
+  created = g_build_filename (dir, "new file.txt", NULL);
 
   run (dir, init);
   g_assert_true (g_file_set_contents (tracked, "before\n", -1, &error));
@@ -71,19 +76,40 @@ test_capture_file_change (void)
   run (dir, add);
   run (dir, commit);
 
-  g_assert_true (g_file_set_contents (tracked, "after\n", -1, &error));
+  /* Dirty before the turn: neither change belongs to a later tool call. */
+  g_assert_true (g_file_set_contents (tracked, "before turn\n", -1, &error));
   g_assert_no_error (error);
-  g_assert_true (g_file_set_contents (untracked, "new\n", -1, &error));
+  g_assert_true (g_file_set_contents (preexisting, "already here\n", -1, &error));
   g_assert_no_error (error);
 
-  message = xd_git_diff_capture_tool ("file_change", dir);
-  patch = xd_git_diff_from_tool (message);
+  tracker = xd_git_diff_tracker_new (dir);
+  g_assert_nonnull (tracker);
 
-  g_assert_nonnull (patch);
-  g_assert_nonnull (strstr (patch, "-before"));
-  g_assert_nonnull (strstr (patch, "+after"));
-  g_assert_nonnull (strstr (patch, "new file.txt"));
-  g_assert_nonnull (strstr (patch, "+new"));
+  g_assert_true (g_file_set_contents (tracked, "first call\n", -1, &error));
+  first_message = xd_git_diff_tracker_capture (tracker, "file_change");
+  first_patch = xd_git_diff_from_tool (first_message);
+  g_assert_nonnull (first_patch);
+  g_assert_nonnull (strstr (first_patch, "-before turn"));
+  g_assert_nonnull (strstr (first_patch, "+first call"));
+  g_assert_null (strstr (first_patch, "-before\n"));
+  g_assert_null (strstr (first_patch, "preexisting.txt"));
+
+  g_assert_true (g_file_set_contents (created, "second call\n", -1, &error));
+  second_message = xd_git_diff_tracker_capture (tracker, "file_change");
+  second_patch = xd_git_diff_from_tool (second_message);
+  g_assert_nonnull (second_patch);
+  g_assert_nonnull (strstr (second_patch, "new file.txt"));
+  g_assert_nonnull (strstr (second_patch, "+second call"));
+  g_assert_null (strstr (second_patch, "tracked.txt"));
+  g_assert_null (strstr (second_patch, "preexisting.txt"));
+
+  {
+    const char *index_unchanged[] = {
+      "git", "diff", "--cached", "--quiet", NULL
+    };
+
+    run (dir, index_unchanged);
+  }
 
   remove_tree (dir);
 }
@@ -92,7 +118,7 @@ static void
 test_ignores_other_tools (void)
 {
   g_autofree char *message =
-    xd_git_diff_capture_tool ("$ git status", "/does/not/matter");
+    xd_git_diff_tracker_capture (NULL, "$ git status");
 
   g_assert_cmpstr (message, ==, "$ git status");
   g_assert_false (xd_tool_is_file_change (message));
@@ -105,8 +131,8 @@ main (int   argc,
 {
   g_test_init (&argc, &argv, NULL);
 
-  g_test_add_func ("/git-diff/captures-file-change",
-                   test_capture_file_change);
+  g_test_add_func ("/git-diff/captures-only-current-call",
+                   test_capture_only_change_since_previous_event);
   g_test_add_func ("/git-diff/ignores-other-tools",
                    test_ignores_other_tools);
 

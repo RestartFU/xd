@@ -46,6 +46,7 @@ typedef struct
   char *model_id;           /* context usage belongs to this exact model */
   char *prompt;             /* kept so a dead session can be retried */
   char *workdir;            /* where file-change diffs are captured */
+  XdGitDiffTracker *diff_tracker;
   char *label;              /* the model and effort this turn actually ran on */
   gint64 started_at;        /* monotonic; how long the work took */
   GtkWidget *anchor;        /* weak: the row just above the turn's output */
@@ -1463,6 +1464,7 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->model_id, g_free);
   g_clear_pointer (&turn->prompt, g_free);
   g_clear_pointer (&turn->workdir, g_free);
+  g_clear_pointer (&turn->diff_tracker, xd_git_diff_tracker_free);
   g_clear_pointer (&turn->label, g_free);
   g_clear_object (&turn->node);
   if (turn->anchor != NULL)
@@ -1606,7 +1608,7 @@ on_tool_use (XdChatSession *session,
 {
   Turn *turn = user_data;
   g_autofree char *diff =
-    xd_git_diff_capture_tool (name, turn->workdir);
+    xd_git_diff_tracker_capture (turn->diff_tracker, name);
   g_autofree char *tool =
     xd_workflow_run_capture_tool (diff, turn->workdir);
 
@@ -1902,6 +1904,7 @@ start_turn (XdChatView *self,
   spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
   turn->workdir = g_strdup (spec.workdir);
+  turn->diff_tracker = xd_git_diff_tracker_new (turn->workdir);
   /* The chat's own pick wins; the folder chain is the fallback. */
   spec.model = chat->model != NULL ? chat->model : resolved->model;
   turn->model_id =

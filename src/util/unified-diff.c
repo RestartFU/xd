@@ -49,10 +49,37 @@ parse_hunk_start (const char *line,
 static gboolean
 is_plumbing_header (const char *line)
 {
-  return g_str_has_prefix (line, "diff --git ") ||
-         g_str_has_prefix (line, "index ") ||
+  return g_str_has_prefix (line, "index ") ||
          g_str_has_prefix (line, "--- ") ||
          g_str_has_prefix (line, "+++ ");
+}
+
+static char *
+file_title (const char *line)
+{
+  const char *path = NULL;
+
+  /* The target path is the useful identity for adds and renames. Git quotes
+   * unusual paths; keep its escaping, but remove the surrounding plumbing. */
+  for (const char *at = line; (at = strstr (at, " b/")) != NULL; at += 3)
+    path = at + 3;
+
+  if (path != NULL)
+    return g_strdup (path);
+
+  for (const char *at = line; (at = strstr (at, " \"b/")) != NULL; at += 4)
+    path = at + 4;
+
+  if (path != NULL)
+    {
+      char *title = g_strdup (path);
+
+      if (g_str_has_suffix (title, "\""))
+        title[strlen (title) - 1] = '\0';
+      return title;
+    }
+
+  return g_strdup (line + strlen ("diff --git "));
 }
 
 static void
@@ -90,6 +117,15 @@ xd_unified_diff_parse (const char *patch,
   for (gsize i = 0; raw_lines[i] != NULL; i++)
     {
       const char *raw = raw_lines[i];
+
+      if (g_str_has_prefix (raw, "diff --git "))
+        {
+          g_autofree char *title = file_title (raw);
+
+          append_line (result, XD_DIFF_LINE_FILE, title, 0, 0);
+          in_hunk = FALSE;
+          continue;
+        }
 
       if (parse_hunk_start (raw, &old_line, &new_line))
         {

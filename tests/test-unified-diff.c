@@ -21,32 +21,36 @@ test_parses_display_rows (void)
 
   lines = xd_unified_diff_parse (patch, &additions, &deletions);
 
-  g_assert_cmpuint (lines->len, ==, 6);
+  g_assert_cmpuint (lines->len, ==, 7);
   g_assert_cmpuint (additions, ==, 2);
   g_assert_cmpuint (deletions, ==, 1);
 
   line = g_ptr_array_index (lines, 0);
+  g_assert_cmpint (line->kind, ==, XD_DIFF_LINE_FILE);
+  g_assert_cmpstr (line->text, ==, "src/a.c");
+
+  line = g_ptr_array_index (lines, 1);
   g_assert_cmpint (line->kind, ==, XD_DIFF_LINE_HUNK);
   g_assert_cmpuint (line->old_line, ==, 10);
   g_assert_cmpuint (line->new_line, ==, 10);
 
-  line = g_ptr_array_index (lines, 1);
+  line = g_ptr_array_index (lines, 2);
   g_assert_cmpint (line->kind, ==, XD_DIFF_LINE_CONTEXT);
   g_assert_cmpuint (line->old_line, ==, 10);
   g_assert_cmpuint (line->new_line, ==, 10);
   g_assert_cmpstr (line->text, ==, "unchanged");
 
-  line = g_ptr_array_index (lines, 2);
+  line = g_ptr_array_index (lines, 3);
   g_assert_cmpint (line->kind, ==, XD_DIFF_LINE_REMOVED);
   g_assert_cmpuint (line->old_line, ==, 11);
   g_assert_cmpuint (line->new_line, ==, 0);
 
-  line = g_ptr_array_index (lines, 3);
+  line = g_ptr_array_index (lines, 4);
   g_assert_cmpint (line->kind, ==, XD_DIFF_LINE_ADDED);
   g_assert_cmpuint (line->old_line, ==, 0);
   g_assert_cmpuint (line->new_line, ==, 11);
 
-  line = g_ptr_array_index (lines, 5);
+  line = g_ptr_array_index (lines, 6);
   g_assert_cmpint (line->kind, ==, XD_DIFF_LINE_META);
 }
 
@@ -58,10 +62,10 @@ test_keeps_meaningful_metadata (void)
     "new file mode 100644\n"
     "Binary files /dev/null and b/image.png differ\n";
   g_autoptr (GPtrArray) lines = xd_unified_diff_parse (patch, NULL, NULL);
-  XdDiffLine *first = g_ptr_array_index (lines, 0);
-  XdDiffLine *second = g_ptr_array_index (lines, 1);
+  XdDiffLine *first = g_ptr_array_index (lines, 1);
+  XdDiffLine *second = g_ptr_array_index (lines, 2);
 
-  g_assert_cmpuint (lines->len, ==, 2);
+  g_assert_cmpuint (lines->len, ==, 3);
   g_assert_cmpstr (first->text, ==, "new file mode 100644");
   g_assert_cmpstr (second->text, ==,
                    "Binary files /dev/null and b/image.png differ");

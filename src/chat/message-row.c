@@ -4,6 +4,7 @@
 
 #include "remote/client.h"
 #include "remote/protocol.h"
+#include "diff-view.h"
 #include "util/markdown.h"
 #include "util/host-launch.h"
 
@@ -217,49 +218,6 @@ make_text_label (XdMessageRow *self)
  * text, so a code block that stays inside the label can only ever be
  * monospace prose. As a widget it can look like what it is.
  */
-static void
-fill_diff_buffer (GtkTextBuffer *buffer,
-                  const char    *code)
-{
-  g_auto (GStrv) lines = g_strsplit (code, "\n", -1);
-  GtkTextIter at;
-
-  gtk_text_buffer_create_tag (buffer, "added", "foreground", "#57e389", NULL);
-  gtk_text_buffer_create_tag (buffer, "removed", "foreground", "#f66151", NULL);
-  gtk_text_buffer_create_tag (buffer, "hunk", "foreground", "#78aeed", NULL);
-  gtk_text_buffer_create_tag (buffer, "header", "weight", PANGO_WEIGHT_BOLD, NULL);
-  gtk_text_buffer_get_start_iter (buffer, &at);
-
-  for (gsize i = 0; lines[i] != NULL; i++)
-    {
-      const char *line = lines[i];
-      const char *tag = NULL;
-
-      if (g_str_has_prefix (line, "diff ") ||
-          g_str_has_prefix (line, "index ") ||
-          g_str_has_prefix (line, "+++") ||
-          g_str_has_prefix (line, "---") ||
-          g_str_has_prefix (line, "new file") ||
-          g_str_has_prefix (line, "deleted file"))
-        tag = "header";
-      else if (g_str_has_prefix (line, "@@"))
-        tag = "hunk";
-      else if (line[0] == '+')
-        tag = "added";
-      else if (line[0] == '-')
-        tag = "removed";
-
-      if (tag != NULL)
-        gtk_text_buffer_insert_with_tags_by_name (buffer, &at, line, -1,
-                                                  tag, NULL);
-      else
-        gtk_text_buffer_insert (buffer, &at, line, -1);
-
-      if (lines[i + 1] != NULL)
-        gtk_text_buffer_insert (buffer, &at, "\n", 1);
-    }
-}
-
 static GtkWidget *
 make_code_card (XdMessageRow *self,
                 const char   *code,
@@ -270,15 +228,17 @@ make_code_card (XdMessageRow *self,
 
   if (diff)
     {
-      GtkTextView *view = GTK_TEXT_VIEW (gtk_text_view_new ());
+      GtkWidget *scroller = gtk_scrolled_window_new ();
+      GtkWidget *view = xd_diff_view_new (code, TRUE, NULL, NULL);
 
-      gtk_text_view_set_editable (view, FALSE);
-      gtk_text_view_set_cursor_visible (view, FALSE);
-      gtk_text_view_set_monospace (view, TRUE);
-      gtk_text_view_set_wrap_mode (view, GTK_WRAP_WORD_CHAR);
-      gtk_widget_add_css_class (GTK_WIDGET (view), "xd-diff");
-      fill_diff_buffer (gtk_text_view_get_buffer (view), code);
-      content = GTK_WIDGET (view);
+      gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                      GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+      gtk_scrolled_window_set_propagate_natural_height (
+        GTK_SCROLLED_WINDOW (scroller), TRUE);
+      gtk_scrolled_window_set_child (
+        GTK_SCROLLED_WINDOW (scroller), view);
+      gtk_widget_add_css_class (card, "xd-inline-diff");
+      content = scroller;
     }
   else
     {

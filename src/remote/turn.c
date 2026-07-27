@@ -34,6 +34,7 @@ struct _XdDaemonTurn
   char *model_id;
   char *label;
   char *workdir;             /* where file-change diffs are captured */
+  XdGitDiffTracker *diff_tracker;
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
 
@@ -236,7 +237,7 @@ on_tool_use (XdChatSession *session,
 {
   XdDaemonTurn *self = user_data;
   g_autofree char *diff =
-    xd_git_diff_capture_tool (name, self->workdir);
+    xd_git_diff_tracker_capture (self->diff_tracker, name);
   g_autofree char *tool =
     xd_workflow_run_capture_tool (diff, self->workdir);
 
@@ -441,6 +442,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
     g_strdup (model != NULL ? model : backend->default_model);
   self->label = reply_label (chat, backend, model);
   self->workdir = g_strdup (workdir);
+  self->diff_tracker = xd_git_diff_tracker_new (self->workdir);
   self->resumed = resume_session_id != NULL;
   self->text = g_string_new (NULL);
   self->segment = g_string_new (NULL);
@@ -568,6 +570,7 @@ xd_daemon_turn_finalize (GObject *object)
   g_clear_pointer (&self->model_id, g_free);
   g_clear_pointer (&self->label, g_free);
   g_clear_pointer (&self->workdir, g_free);
+  g_clear_pointer (&self->diff_tracker, xd_git_diff_tracker_free);
   g_clear_pointer (&self->items, g_ptr_array_unref);
 
   if (self->text != NULL)

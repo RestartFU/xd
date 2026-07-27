@@ -389,6 +389,7 @@ static const char *XD_STYLE =
   " font-size: 0.88em; }\n"
   ".xd-code textview.xd-diff, .xd-code textview.xd-diff text"
   " { background: transparent; font-size: 0.88em; }\n"
+  ".xd-code.xd-inline-diff { padding: 0; }\n"
 
   /* Structured diff pane: file cards above line-by-line changes. Git's raw
    * plumbing stays in the parser instead of becoming the interface. */
@@ -405,8 +406,14 @@ static const char *XD_STYLE =
   " background: alpha(#f66151, 0.10); }\n"
   ".xd-diff-badge-renamed { color: #78aeed;"
   " background: alpha(#78aeed, 0.10); }\n"
-  ".xd-diff-line { min-height: 24px; }\n"
-  ".xd-diff-line label { padding-top: 3px; padding-bottom: 3px; }\n"
+  ".xd-diff-file { padding: 7px 10px; background: alpha(#ffffff, 0.035);"
+  " border-top: 1px solid alpha(#ffffff, 0.07);"
+  " border-bottom: 1px solid alpha(#ffffff, 0.07); }\n"
+  ".xd-diff-line { min-height: 20px; }\n"
+  ".xd-diff-line label { padding-top: 1px; padding-bottom: 1px; }\n"
+  ".xd-diff-side { min-width: 360px; }\n"
+  ".xd-diff-new-side { border-left: 1px solid alpha(#ffffff, 0.08); }\n"
+  ".xd-diff-empty { background: alpha(#ffffff, 0.012); }\n"
   ".xd-diff-gutter { min-width: 42px; padding-left: 7px;"
   " padding-right: 7px; background: alpha(#ffffff, 0.018);"
   " border-right: 1px solid alpha(#ffffff, 0.04);"
@@ -419,7 +426,7 @@ static const char *XD_STYLE =
   ".xd-diff-added .xd-diff-marker { color: #57e389; }\n"
   ".xd-diff-removed { background: alpha(#f66151, 0.09); }\n"
   ".xd-diff-removed .xd-diff-marker { color: #f66151; }\n"
-  ".xd-diff-hunk { margin-top: 8px; background: alpha(#3584e4, 0.09);"
+  ".xd-diff-hunk { background: alpha(#3584e4, 0.09);"
   " color: #78aeed; }\n"
   ".xd-diff-meta { color: alpha(#ffffff, 0.55);"
   " background: alpha(#ffffff, 0.025); }\n"

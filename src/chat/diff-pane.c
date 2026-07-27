@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "util/unified-diff.h"
+#include "diff-view.h"
 
 /*
  * What the agent changed, without leaving the chat.
@@ -277,103 +277,7 @@ show_read_error (XdDiffPane *self,
 static void
 clear_diff (XdDiffPane *self)
 {
-  GtkWidget *child;
-
-  while ((child = gtk_widget_get_first_child (
-            GTK_WIDGET (self->diff_lines))) != NULL)
-    gtk_box_remove (self->diff_lines, child);
-}
-
-static GtkWidget *
-line_number (guint number)
-{
-  g_autofree char *text =
-    number > 0 ? g_strdup_printf ("%u", number) : NULL;
-  GtkWidget *label = gtk_label_new (text);
-
-  gtk_label_set_xalign (GTK_LABEL (label), 1.0f);
-  gtk_label_set_width_chars (GTK_LABEL (label), 4);
-  gtk_widget_add_css_class (label, "xd-diff-gutter");
-  gtk_widget_add_css_class (label, "dim-label");
-  return label;
-}
-
-static char *
-hunk_title (const XdDiffLine *line)
-{
-  const char *context = strstr (line->text + 2, "@@");
-
-  if (context != NULL)
-    {
-      context += 2;
-      while (*context == ' ')
-        context++;
-    }
-
-  if (context != NULL && *context != '\0')
-    return g_strdup_printf ("Old line %u · New line %u · %s",
-                            line->old_line, line->new_line, context);
-
-  return g_strdup_printf ("Old line %u · New line %u",
-                          line->old_line, line->new_line);
-}
-
-static void
-append_diff_line (XdDiffPane      *self,
-                  const XdDiffLine *line)
-{
-  GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  GtkWidget *marker;
-  GtkWidget *content;
-  g_autofree char *title = NULL;
-  const char *marker_text = " ";
-  const char *class_name = "xd-diff-context";
-
-  switch (line->kind)
-    {
-    case XD_DIFF_LINE_ADDED:
-      marker_text = "+";
-      class_name = "xd-diff-added";
-      break;
-    case XD_DIFF_LINE_REMOVED:
-      marker_text = "−";
-      class_name = "xd-diff-removed";
-      break;
-    case XD_DIFF_LINE_HUNK:
-      marker_text = "◆";
-      class_name = "xd-diff-hunk";
-      title = hunk_title (line);
-      break;
-    case XD_DIFF_LINE_META:
-      marker_text = "·";
-      class_name = "xd-diff-meta";
-      break;
-    case XD_DIFF_LINE_CONTEXT:
-    default:
-      break;
-    }
-
-  gtk_box_append (GTK_BOX (row), line_number (
-    line->kind == XD_DIFF_LINE_HUNK ? 0 : line->old_line));
-  gtk_box_append (GTK_BOX (row), line_number (
-    line->kind == XD_DIFF_LINE_HUNK ? 0 : line->new_line));
-
-  marker = gtk_label_new (marker_text);
-  gtk_label_set_width_chars (GTK_LABEL (marker), 2);
-  gtk_widget_add_css_class (marker, "xd-diff-marker");
-  gtk_box_append (GTK_BOX (row), marker);
-
-  content = gtk_label_new (title != NULL ? title : line->text);
-  gtk_label_set_xalign (GTK_LABEL (content), 0.0f);
-  gtk_label_set_selectable (GTK_LABEL (content), TRUE);
-  gtk_label_set_single_line_mode (GTK_LABEL (content), TRUE);
-  gtk_widget_set_hexpand (content, TRUE);
-  gtk_widget_add_css_class (content, "xd-diff-code");
-  gtk_box_append (GTK_BOX (row), content);
-
-  gtk_widget_add_css_class (row, "xd-diff-line");
-  gtk_widget_add_css_class (row, class_name);
-  gtk_box_append (self->diff_lines, row);
+  xd_diff_view_fill (self->diff_lines, "", FALSE, NULL, NULL);
 }
 
 static void
@@ -384,7 +288,6 @@ on_diff_read (GObject      *source,
   DiffRequest *request = user_data;
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
-  g_autoptr (GPtrArray) lines = NULL;
   guint additions = 0;
   guint deletions = 0;
 
@@ -397,11 +300,8 @@ on_diff_read (GObject      *source,
       return;
     }
 
-  lines = xd_unified_diff_parse (output, &additions, &deletions);
-  clear_diff (request->pane);
-
-  for (guint i = 0; i < lines->len; i++)
-    append_diff_line (request->pane, g_ptr_array_index (lines, i));
+  xd_diff_view_fill (request->pane->diff_lines, output, FALSE,
+                     &additions, &deletions);
 
   {
     g_autofree char *stats = g_strdup_printf (
