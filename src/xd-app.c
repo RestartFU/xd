@@ -363,8 +363,8 @@ static const char *XD_STYLE =
   /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
    * enough width that the title and its close button stop fighting. */
   "tabbar { background: none; box-shadow: none; }\n"
-  "tabbar tabbox { background: none; }\n"
-  "tabbar tab { border-radius: 8px; margin: 3px 2px; padding: 2px 8px;"
+  "tabbar tabbox { background: none; margin: 0; padding: 0; }\n"
+  "tabbar tab { border-radius: 0; margin: 0; padding: 5px 8px;"
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
   " { background: alpha(#ffffff, 0.10); }\n"

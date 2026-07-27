@@ -881,10 +881,10 @@ on_remote_reopened (XdRemoteClient *client,
 }
 
 /* The chat's last session is gone, so the panel has nothing to show. */
-static void
-on_page_closed (AdwTabView *view,
-                AdwTabPage *page,
-                gpointer    user_data)
+static gboolean
+on_close_page (AdwTabView *view,
+               AdwTabPage *page,
+               gpointer    user_data)
 {
   XdTerminalPanel *self = user_data;
   VteTerminal *terminal = terminal_for_page (page);
@@ -901,6 +901,9 @@ on_page_closed (AdwTabView *view,
 
   if (view == current_view (self) && adw_tab_view_get_n_pages (view) == 1)
     g_signal_emit (self, signals[SIGNAL_CLOSE_REQUESTED], 0);
+
+  /* Non-pinned terminal pages need no confirmation. */
+  return GDK_EVENT_PROPAGATE;
 }
 
 static AdwTabView *
@@ -913,7 +916,7 @@ ensure_view (XdTerminalPanel *self,
   if (view == NULL)
     {
       view = ADW_TAB_VIEW (adw_tab_view_new ());
-      g_signal_connect (view, "close-page", G_CALLBACK (on_page_closed), self);
+      g_signal_connect (view, "close-page", G_CALLBACK (on_close_page), self);
       gtk_stack_add_named (self->stack, GTK_WIDGET (view), key);
       g_hash_table_insert (self->views, g_strdup (key), view);
     }
@@ -1117,7 +1120,7 @@ on_new_session (GtkButton *button,
  * Kills the session on screen.
  *
  * Closing the page destroys the terminal; the pty closes with it and the
- * kernel hangs up everything attached. If it was the last one, on_page_closed
+ * kernel hangs up everything attached. If it was the last one, on_close_page
  * asks for the panel to go too.
  */
 static void
@@ -1175,10 +1178,10 @@ static void
 xd_terminal_panel_init (XdTerminalPanel *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *tabs = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
   GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
   GtkWidget *kill_button = gtk_button_new_from_icon_name ("user-trash-symbolic");
-  GtkWidget *overlay = gtk_overlay_new ();
 
   self->views = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   self->pending_kills =
@@ -1189,9 +1192,7 @@ xd_terminal_panel_init (XdTerminalPanel *self)
 
   self->stack = GTK_STACK (gtk_stack_new ());
   gtk_widget_set_vexpand (GTK_WIDGET (self->stack), TRUE);
-
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->bar));
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
+  gtk_widget_set_hexpand (GTK_WIDGET (self->bar), TRUE);
 
   gtk_widget_add_css_class (new_button, "flat");
   gtk_widget_set_tooltip_text (new_button, "New session");
@@ -1203,13 +1204,14 @@ xd_terminal_panel_init (XdTerminalPanel *self)
 
   gtk_box_append (GTK_BOX (controls), new_button);
   gtk_box_append (GTK_BOX (controls), kill_button);
-  gtk_widget_set_halign (controls, GTK_ALIGN_END);
-  gtk_widget_set_valign (controls, GTK_ALIGN_START);
-  gtk_widget_set_margin_top (controls, 4);
-  gtk_widget_set_margin_end (controls, 16);
+  gtk_widget_set_valign (controls, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_start (controls, 4);
+  gtk_widget_set_margin_end (controls, 8);
 
-  gtk_overlay_set_child (GTK_OVERLAY (overlay), box);
-  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), controls);
+  gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->bar));
+  gtk_box_append (GTK_BOX (tabs), controls);
+  gtk_box_append (GTK_BOX (box), tabs);
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
 
-  adw_bin_set_child (ADW_BIN (self), overlay);
+  adw_bin_set_child (ADW_BIN (self), box);
 }
