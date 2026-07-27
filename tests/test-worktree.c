@@ -107,6 +107,8 @@ test_create_and_reuse (void)
     repo, "12345678-1234-1234-1234-123456789abc", &error);
   g_assert_no_error (error);
   g_assert_nonnull (worktree);
+  if (!xd_worktree_path_equal (worktree, expected))
+    g_test_message ("worktree=%s expected=%s", worktree, expected);
   g_assert_true (xd_worktree_path_equal (worktree, expected));
   g_assert_true (g_file_test (worktree, G_FILE_TEST_IS_DIR));
 

@@ -82,11 +82,43 @@ gboolean
 xd_worktree_path_equal (const char *a,
                         const char *b)
 {
+  g_autoptr (GFile) a_file = NULL;
+  g_autoptr (GFile) b_file = NULL;
+  g_autoptr (GFileInfo) a_info = NULL;
+  g_autoptr (GFileInfo) b_info = NULL;
   GStatBuf a_stat;
   GStatBuf b_stat;
 
   if (a == NULL || b == NULL)
     return a == b;
+
+  a_file = g_file_new_for_path (a);
+  b_file = g_file_new_for_path (b);
+  a_info = g_file_query_info (
+    a_file,
+    G_FILE_ATTRIBUTE_ID_FILE "," G_FILE_ATTRIBUTE_ID_FILESYSTEM,
+    G_FILE_QUERY_INFO_NONE, NULL, NULL);
+  b_info = g_file_query_info (
+    b_file,
+    G_FILE_ATTRIBUTE_ID_FILE "," G_FILE_ATTRIBUTE_ID_FILESYSTEM,
+    G_FILE_QUERY_INFO_NONE, NULL, NULL);
+
+  if (a_info != NULL && b_info != NULL)
+    {
+      const char *a_id =
+        g_file_info_get_attribute_string (a_info, G_FILE_ATTRIBUTE_ID_FILE);
+      const char *b_id =
+        g_file_info_get_attribute_string (b_info, G_FILE_ATTRIBUTE_ID_FILE);
+      const char *a_filesystem = g_file_info_get_attribute_string (
+        a_info, G_FILE_ATTRIBUTE_ID_FILESYSTEM);
+      const char *b_filesystem = g_file_info_get_attribute_string (
+        b_info, G_FILE_ATTRIBUTE_ID_FILESYSTEM);
+
+      if (a_id != NULL && b_id != NULL &&
+          a_filesystem != NULL && b_filesystem != NULL)
+        return g_str_equal (a_id, b_id) &&
+               g_str_equal (a_filesystem, b_filesystem);
+    }
 
   if (g_stat (a, &a_stat) == 0 && g_stat (b, &b_stat) == 0)
     return a_stat.st_dev == b_stat.st_dev &&
