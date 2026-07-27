@@ -110,6 +110,7 @@ struct _XdChatView
 
   GHashTable *turns;            /* chat id -> Turn* */
 
+  GtkWidget *header;            /* owned by the toolbar */
   AdwWindowTitle *title;
   GtkStack *stack;
   GtkBox *transcript;
@@ -164,6 +165,14 @@ static const AiEffort effort_choices[] = {
   AI_EFFORT_LOW, AI_EFFORT_MEDIUM, AI_EFFORT_HIGH,
   AI_EFFORT_XHIGH, AI_EFFORT_MAX,
 };
+
+GtkWidget *
+xd_chat_view_get_header (XdChatView *self)
+{
+  g_return_val_if_fail (XD_IS_CHAT_VIEW (self), NULL);
+
+  return self->header;
+}
 
 /* What each option means, one line, shown under its name in the dropdown.
  * Same order as the choice arrays above. */
@@ -3496,31 +3505,35 @@ static void
 xd_chat_view_init (XdChatView *self)
 {
   GtkWidget *toolbar = adw_toolbar_view_new ();
-  GtkWidget *header = adw_header_bar_new ();
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *empty = adw_status_page_new ();
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
+  self->header = adw_header_bar_new ();
 
   self->title = ADW_WINDOW_TITLE (adw_window_title_new ("xd", NULL));
-  adw_header_bar_set_title_widget (ADW_HEADER_BAR (header), GTK_WIDGET (self->title));
+  adw_header_bar_set_title_widget (
+    ADW_HEADER_BAR (self->header), GTK_WIDGET (self->title));
 
   /* The sidebar is the leftmost header bar, so whatever the desktop puts on
    * that side of the title bar is its to draw. */
-  adw_header_bar_set_show_start_title_buttons (ADW_HEADER_BAR (header), FALSE);
+  adw_header_bar_set_show_start_title_buttons (
+    ADW_HEADER_BAR (self->header), FALSE);
 
   /* At the top: these open and close parts of the window, which is what the
    * header bar is for. The row under the composer decides how the next
    * message is answered, which is a different question. */
   self->git_actions = xd_git_actions_new ();
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->git_actions));
+  adw_header_bar_pack_end (
+    ADW_HEADER_BAR (self->header), GTK_WIDGET (self->git_actions));
 
   /* Hidden unless there is a newer build; see src/ui/updater.c. */
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (xd_updater_new ()));
+  adw_header_bar_pack_end (
+    ADW_HEADER_BAR (self->header), GTK_WIDGET (xd_updater_new ()));
 
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
+  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), self->header);
 
   adw_status_page_set_icon_name (ADW_STATUS_PAGE (empty), XD_CHAT_ICON);
   adw_status_page_set_title (ADW_STATUS_PAGE (empty), "No Chat Selected");
@@ -3568,8 +3581,10 @@ xd_chat_view_init (XdChatView *self)
 
   /* Packed here rather than with the rest of the header: the toggles are
    * built with the composer, so they do not exist until it has been. */
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->terminal_button));
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), GTK_WIDGET (self->diff_button));
+  adw_header_bar_pack_end (
+    ADW_HEADER_BAR (self->header), GTK_WIDGET (self->terminal_button));
+  adw_header_bar_pack_end (
+    ADW_HEADER_BAR (self->header), GTK_WIDGET (self->diff_button));
 
   {
     GtkWidget *clamp = adw_clamp_new ();

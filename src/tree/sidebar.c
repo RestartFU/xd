@@ -18,6 +18,7 @@ struct _XdSidebar
   GtkTreeListModel *tree_model;
   GtkSingleSelection *selection;
   GtkListView *list_view;
+  GtkWidget *header;         /* owned by the toolbar */
 
   GHashTable *expanded;     /* folder ids the user left open */
 
@@ -58,6 +59,14 @@ enum
 static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (XdSidebar, xd_sidebar, ADW_TYPE_BIN)
+
+GtkWidget *
+xd_sidebar_get_header (XdSidebar *self)
+{
+  g_return_val_if_fail (XD_IS_SIDEBAR (self), NULL);
+
+  return self->header;
+}
 
 /* --- small dialog helpers ------------------------------------------------- */
 
@@ -1861,7 +1870,6 @@ static void
 xd_sidebar_init (XdSidebar *self)
 {
   GtkWidget *toolbar = adw_toolbar_view_new ();
-  GtkWidget *header = adw_header_bar_new ();
   GtkWidget *new_button = gtk_menu_button_new ();
 
   GtkWidget *pair_button = gtk_button_new_from_icon_name ("network-server-symbolic");
@@ -1873,6 +1881,7 @@ xd_sidebar_init (XdSidebar *self)
   self->settings = g_settings_new (XD_APP_ID);
   self->expanded = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   self->closing = g_hash_table_new_full (NULL, NULL, g_object_unref, g_free);
+  self->header = adw_header_bar_new ();
 
   expanded = g_settings_get_strv (self->settings, "expanded-folders");
   for (gsize i = 0; expanded[i] != NULL; i++)
@@ -1895,14 +1904,14 @@ xd_sidebar_init (XdSidebar *self)
   }
   gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (new_button), "list-add-symbolic");
   gtk_widget_set_tooltip_text (new_button, "Add a workspace or a machine");
-  adw_header_bar_pack_start (ADW_HEADER_BAR (header), new_button);
+  adw_header_bar_pack_start (ADW_HEADER_BAR (self->header), new_button);
 
   /* The window's action, not the sidebar's: pairing sets up a connection the
    * whole window works through, and it is the window that owns it. It sits
    * here because this is where the remote turns up. */
   gtk_widget_set_tooltip_text (pair_button, "Connect to a Remote…");
   gtk_actionable_set_action_name (GTK_ACTIONABLE (pair_button), "win.pair-remote");
-  adw_header_bar_pack_end (ADW_HEADER_BAR (header), pair_button);
+  adw_header_bar_pack_end (ADW_HEADER_BAR (self->header), pair_button);
 
   /*
    * The window's own title and buttons belong to the chat side.
@@ -1911,10 +1920,11 @@ xd_sidebar_init (XdSidebar *self)
    * sidebar sits beside another header bar rather than under it -- so without
    * this the window gets a second set of close buttons, over the tree.
    */
-  adw_header_bar_set_title_widget (ADW_HEADER_BAR (header),
+  adw_header_bar_set_title_widget (ADW_HEADER_BAR (self->header),
                                    adw_window_title_new ("Workspaces", NULL));
-  adw_header_bar_set_show_end_title_buttons (ADW_HEADER_BAR (header), FALSE);
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), header);
+  adw_header_bar_set_show_end_title_buttons (
+    ADW_HEADER_BAR (self->header), FALSE);
+  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), self->header);
 
   g_signal_connect (factory, "setup", G_CALLBACK (on_item_setup), self);
   g_signal_connect (factory, "bind", G_CALLBACK (on_item_bind), self);

@@ -27,6 +27,7 @@ struct _XdWindow
   GtkPaned *split_view;
   XdSidebar *sidebar;
   XdChatView *chat_view;
+  GtkSizeGroup *header_size_group;
 };
 
 G_DEFINE_FINAL_TYPE (XdWindow, xd_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -350,6 +351,17 @@ xd_window_new (XdApplication *app)
   gtk_widget_add_css_class (GTK_WIDGET (self->chat_view), "xd-divider-left");
   g_signal_connect (self->tree, "chat-removed", G_CALLBACK (on_chat_removed), self);
 
+  /*
+   * Each header contains different controls, so their natural heights differ.
+   * One vertical size group makes both toolbars reserve the larger height and
+   * keeps their bottom borders on the same row at every display scale.
+   */
+  self->header_size_group = gtk_size_group_new (GTK_SIZE_GROUP_VERTICAL);
+  gtk_size_group_add_widget (
+    self->header_size_group, xd_sidebar_get_header (self->sidebar));
+  gtk_size_group_add_widget (
+    self->header_size_group, xd_chat_view_get_header (self->chat_view));
+
   gtk_paned_set_start_child (self->split_view, GTK_WIDGET (self->sidebar));
   gtk_paned_set_end_child (self->split_view, GTK_WIDGET (self->chat_view));
   gtk_paned_set_position (self->split_view,
@@ -385,6 +397,7 @@ xd_window_dispose (GObject *object)
   g_clear_object (&self->tree);
   g_clear_object (&self->storage);
   g_clear_object (&self->settings);
+  g_clear_object (&self->header_size_group);
 
   G_OBJECT_CLASS (xd_window_parent_class)->dispose (object);
 }

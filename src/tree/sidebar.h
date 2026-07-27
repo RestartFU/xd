@@ -18,6 +18,9 @@ G_DECLARE_FINAL_TYPE (XdSidebar, xd_sidebar, XD, SIDEBAR, AdwBin)
  */
 XdSidebar *xd_sidebar_new        (XdFsTree *tree);
 
+/* The top bar, exposed only so the window can size it with the chat's bar. */
+GtkWidget *xd_sidebar_get_header (XdSidebar *self);
+
 /*
  * The remote whose root sits beside the local workspaces; NULL takes it away.
  *

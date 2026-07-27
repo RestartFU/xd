@@ -19,6 +19,9 @@ G_DECLARE_FINAL_TYPE (XdChatView, xd_chat_view, XD, CHAT_VIEW, AdwBin)
 XdChatView *xd_chat_view_new      (XdStorage  *storage,
                                    XdFsTree   *tree);
 
+/* The top bar, exposed only so the window can size it with the sidebar's bar. */
+GtkWidget  *xd_chat_view_get_header (XdChatView *self);
+
 void        xd_chat_view_set_chat (XdChatView *self,
                                    XdNode     *chat);
 
