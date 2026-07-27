@@ -29,6 +29,7 @@ struct _XdWindow
   XdSidebar *sidebar;
   XdChatView *chat_view;
   GtkSizeGroup *header_size_group;
+  GtkWidget *header_divider_spacer;
 
   XdDiscordPresence *discord_presence;
   XdNode *presence_node;
@@ -426,6 +427,8 @@ xd_window_new (XdApplication *app)
     self->header_size_group, xd_sidebar_get_header (self->sidebar));
   gtk_size_group_add_widget (
     self->header_size_group, xd_chat_view_get_header (self->chat_view));
+  gtk_size_group_add_widget (
+    self->header_size_group, self->header_divider_spacer);
 
   gtk_paned_set_start_child (self->split_view, GTK_WIDGET (self->sidebar));
   gtk_paned_set_end_child (self->split_view, GTK_WIDGET (self->chat_view));
@@ -491,6 +494,10 @@ xd_window_class_init (XdWindowClass *klass)
 static void
 xd_window_init (XdWindow *self)
 {
+  GtkWidget *overlay;
+  GtkWidget *divider_layer;
+  GtkWidget *divider;
+
   gtk_window_set_title (GTK_WINDOW (self), "xd");
 
   /*
@@ -505,6 +512,30 @@ xd_window_init (XdWindow *self)
   gtk_paned_set_resize_end_child (self->split_view, TRUE);
   gtk_paned_set_shrink_end_child (self->split_view, FALSE);
 
+  /*
+   * GtkPaned reserves eight pixels for its draggable separator. The two
+   * header borders therefore stop on either side of that invisible handle.
+   * Draw one non-interactive line over the full window at the same dynamic
+   * header height, keeping the generous resize target without a visual gap.
+   */
+  overlay = gtk_overlay_new ();
+  divider_layer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  self->header_divider_spacer =
+    gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  divider = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_add_css_class (divider, "xd-header-divider");
+  gtk_box_append (
+    GTK_BOX (divider_layer), self->header_divider_spacer);
+  gtk_box_append (GTK_BOX (divider_layer), divider);
+  gtk_widget_set_halign (divider_layer, GTK_ALIGN_FILL);
+  gtk_widget_set_valign (divider_layer, GTK_ALIGN_START);
+  gtk_widget_set_can_target (divider_layer, FALSE);
+  gtk_widget_set_can_target (self->header_divider_spacer, FALSE);
+  gtk_widget_set_can_target (divider, FALSE);
+
+  gtk_overlay_set_child (GTK_OVERLAY (overlay), GTK_WIDGET (self->split_view));
+  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), divider_layer);
+
   adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
-                                      GTK_WIDGET (self->split_view));
+                                      overlay);
 }

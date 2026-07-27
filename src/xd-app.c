@@ -168,6 +168,7 @@ static const char *XD_STYLE =
   "headerbar { min-height: 42px; padding-top: 5px; padding-bottom: 5px;"
   " background: transparent; box-shadow: none;"
   " border: none; border-bottom: 1px solid #2a2a2d; }\n"
+  ".xd-header-divider { min-height: 1px; background: #2a2a2d; }\n"
   "headerbar button, headerbar menubutton > button { min-height: 26px;"
   " min-width: 26px; padding: 2px 6px; margin-top: 0; margin-bottom: 0; }\n"
   /* A hairline, not a gutter. Two pixels rather than one so it can still be
