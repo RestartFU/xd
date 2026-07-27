@@ -6,6 +6,7 @@
 #include "settings/settings-resolver.h"
 #include "tree/xd-node.h"
 #include "util/ask-block.h"
+#include "util/git-diff.h"
 
 #include <string.h>
 
@@ -31,6 +32,7 @@ struct _XdDaemonTurn
   char *backend_id;
   char *model_id;
   char *label;
+  char *workdir;             /* where file-change diffs are captured */
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
 
@@ -232,11 +234,13 @@ on_tool_use (XdChatSession *session,
              gpointer       user_data)
 {
   XdDaemonTurn *self = user_data;
+  g_autofree char *tool =
+    xd_git_diff_capture_tool (name, self->workdir);
 
   close_segment (self);
-  remember (self, TRUE, name);
+  remember (self, TRUE, tool);
 
-  g_signal_emit (self, signals[SIGNAL_TOOL], 0, name);
+  g_signal_emit (self, signals[SIGNAL_TOOL], 0, tool);
 }
 
 static void
@@ -433,6 +437,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   self->model_id =
     g_strdup (model != NULL ? model : backend->default_model);
   self->label = reply_label (chat, backend, model);
+  self->workdir = g_strdup (workdir);
   self->resumed = resume_session_id != NULL;
   self->text = g_string_new (NULL);
   self->segment = g_string_new (NULL);
@@ -559,6 +564,7 @@ xd_daemon_turn_finalize (GObject *object)
   g_clear_pointer (&self->backend_id, g_free);
   g_clear_pointer (&self->model_id, g_free);
   g_clear_pointer (&self->label, g_free);
+  g_clear_pointer (&self->workdir, g_free);
   g_clear_pointer (&self->items, g_ptr_array_unref);
 
   if (self->text != NULL)

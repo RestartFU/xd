@@ -14,6 +14,7 @@
 #include "settings/settings-resolver.h"
 #include "remote/protocol.h"
 #include "util/ask-block.h"
+#include "util/git-diff.h"
 #include "util/git-info.h"
 #include "util/worktree.h"
 
@@ -40,6 +41,7 @@ typedef struct
   char *backend_id;         /* the backend this turn's session id belongs to */
   char *model_id;           /* context usage belongs to this exact model */
   char *prompt;             /* kept so a dead session can be retried */
+  char *workdir;            /* where file-change diffs are captured */
   char *label;              /* the model and effort this turn actually ran on */
   gint64 started_at;        /* monotonic; how long the work took */
   GtkWidget *anchor;        /* weak: the row just above the turn's output */
@@ -141,7 +143,6 @@ struct _XdChatView
   GtkToggleButton *terminal_button;
   XdTerminalPanel *terminal;
   GtkToggleButton *diff_button;
-  GtkToggleButton *auto_diff_toggle;
   XdGitActions *git_actions;
   XdDiffPane *diff;
   GtkPaned *split;
@@ -443,28 +444,25 @@ append_tool_line (XdChatView *self,
   queue_scroll_to_bottom (self);
 }
 
-/*
- * file_change normally says nothing beyond its machine-facing event name.
- * When asked, replace that dead line with the live working-tree diff.
- */
 static void
 show_tool_use (XdChatView *self,
                const char *summary)
 {
-  gboolean file_change =
-    g_strcmp0 (summary, "file_change") == 0 ||
-    (summary != NULL && g_str_has_prefix (summary, "file_change  "));
+  const char *diff = xd_git_diff_from_tool (summary);
 
-  if (file_change && gtk_toggle_button_get_active (self->auto_diff_toggle))
+  if (diff != NULL)
     {
-      if (!gtk_toggle_button_get_active (self->diff_button))
-        gtk_toggle_button_set_active (self->diff_button, TRUE);
-      else
-        xd_diff_pane_refresh (self->diff);
+      g_autofree char *block = g_strdup_printf ("```diff\n%s\n```", diff);
+
+      append_row (self, XD_MESSAGE_ASSISTANT, block);
       return;
     }
 
-  append_tool_line (self, summary);
+  /* The machine-facing event name is not useful prose. A backend may report
+   * an edit outside Git, where no patch can be captured; keep that case human
+   * instead of leaking "file_change" into the conversation. */
+  append_tool_line (self, xd_tool_is_file_change (summary)
+                          ? "Files changed" : summary);
 }
 
 /*
@@ -806,7 +804,7 @@ render_transcript (XdChatView *self,
         append_reply (self, message->content, message->label,
                       reply_is_answerable (messages, i));
       else if (g_strcmp0 (message->role, "tool") == 0)
-        append_tool_line (self, message->content);
+        show_tool_use (self, message->content);
       else
         append_row (self, xd_message_kind_from_role (message->role), message->content);
     }
@@ -1391,6 +1389,7 @@ turn_free (gpointer data)
   g_clear_pointer (&turn->backend_id, g_free);
   g_clear_pointer (&turn->model_id, g_free);
   g_clear_pointer (&turn->prompt, g_free);
+  g_clear_pointer (&turn->workdir, g_free);
   g_clear_pointer (&turn->label, g_free);
   g_clear_object (&turn->node);
   if (turn->anchor != NULL)
@@ -1533,13 +1532,15 @@ on_tool_use (XdChatSession *session,
              gpointer       user_data)
 {
   Turn *turn = user_data;
+  g_autofree char *tool =
+    xd_git_diff_capture_tool (name, turn->workdir);
 
   close_segment (turn, FALSE);
-  remember_turn_item (turn, TRUE, name);
+  remember_turn_item (turn, TRUE, tool);
   turn->had_tool = TRUE;
 
   if (turn_is_visible (turn))
-    show_tool_use (turn->view, name);
+    show_tool_use (turn->view, tool);
 }
 
 static void
@@ -1825,6 +1826,7 @@ start_turn (XdChatView *self,
 
   spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
+  turn->workdir = g_strdup (spec.workdir);
   /* The chat's own pick wins; the folder chain is the fallback. */
   spec.model = chat->model != NULL ? chat->model : resolved->model;
   turn->model_id =
@@ -3297,7 +3299,7 @@ xd_chat_view_set_chat (XdChatView *self,
 
           if (item->tool)
             {
-              append_tool_line (self, item->text);
+              show_tool_use (self, item->text);
             }
           else
             {
@@ -3555,24 +3557,6 @@ build_composer (XdChatView *self)
     gtk_widget_add_css_class (modes, "linked");
     gtk_box_append (GTK_BOX (toolbar), modes);
   }
-
-  self->auto_diff_toggle = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
-  {
-    GtkWidget *content = adw_button_content_new ();
-
-    adw_button_content_set_icon_name (ADW_BUTTON_CONTENT (content),
-                                      "document-edit-symbolic");
-    adw_button_content_set_label (ADW_BUTTON_CONTENT (content), "Diffs");
-    gtk_button_set_child (GTK_BUTTON (self->auto_diff_toggle), content);
-  }
-  gtk_widget_add_css_class (GTK_WIDGET (self->auto_diff_toggle), "flat");
-  gtk_widget_set_tooltip_text (
-    GTK_WIDGET (self->auto_diff_toggle),
-    "Show changed files when a file_change tool completes");
-  g_settings_bind (self->settings, "auto-show-file-diffs",
-                   self->auto_diff_toggle, "active",
-                   G_SETTINGS_BIND_DEFAULT);
-  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (self->auto_diff_toggle));
 
   self->terminal_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
   gtk_button_set_icon_name (GTK_BUTTON (self->terminal_button), "utilities-terminal-symbolic");

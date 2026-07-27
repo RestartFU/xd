@@ -184,22 +184,85 @@ make_text_label (XdMessageRow *self)
  * text, so a code block that stays inside the label can only ever be
  * monospace prose. As a widget it can look like what it is.
  */
+static void
+fill_diff_buffer (GtkTextBuffer *buffer,
+                  const char    *code)
+{
+  g_auto (GStrv) lines = g_strsplit (code, "\n", -1);
+  GtkTextIter at;
+
+  gtk_text_buffer_create_tag (buffer, "added", "foreground", "#57e389", NULL);
+  gtk_text_buffer_create_tag (buffer, "removed", "foreground", "#f66151", NULL);
+  gtk_text_buffer_create_tag (buffer, "hunk", "foreground", "#78aeed", NULL);
+  gtk_text_buffer_create_tag (buffer, "header", "weight", PANGO_WEIGHT_BOLD, NULL);
+  gtk_text_buffer_get_start_iter (buffer, &at);
+
+  for (gsize i = 0; lines[i] != NULL; i++)
+    {
+      const char *line = lines[i];
+      const char *tag = NULL;
+
+      if (g_str_has_prefix (line, "diff ") ||
+          g_str_has_prefix (line, "index ") ||
+          g_str_has_prefix (line, "+++") ||
+          g_str_has_prefix (line, "---") ||
+          g_str_has_prefix (line, "new file") ||
+          g_str_has_prefix (line, "deleted file"))
+        tag = "header";
+      else if (g_str_has_prefix (line, "@@"))
+        tag = "hunk";
+      else if (line[0] == '+')
+        tag = "added";
+      else if (line[0] == '-')
+        tag = "removed";
+
+      if (tag != NULL)
+        gtk_text_buffer_insert_with_tags_by_name (buffer, &at, line, -1,
+                                                  tag, NULL);
+      else
+        gtk_text_buffer_insert (buffer, &at, line, -1);
+
+      if (lines[i + 1] != NULL)
+        gtk_text_buffer_insert (buffer, &at, "\n", 1);
+    }
+}
+
 static GtkWidget *
 make_code_card (XdMessageRow *self,
-                const char   *code)
+                const char   *code,
+                gboolean      diff)
 {
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  GtkWidget *label = gtk_label_new (code);
+  GtkWidget *content;
 
-  gtk_label_set_wrap (GTK_LABEL (label), TRUE);
-  gtk_label_set_wrap_mode (GTK_LABEL (label), PANGO_WRAP_WORD_CHAR);
-  gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
-  gtk_label_set_selectable (GTK_LABEL (label), TRUE);
-  gtk_widget_add_css_class (label, "xd-body");
-  gtk_widget_set_hexpand (label, TRUE);
+  if (diff)
+    {
+      GtkTextView *view = GTK_TEXT_VIEW (gtk_text_view_new ());
+
+      gtk_text_view_set_editable (view, FALSE);
+      gtk_text_view_set_cursor_visible (view, FALSE);
+      gtk_text_view_set_monospace (view, TRUE);
+      gtk_text_view_set_wrap_mode (view, GTK_WRAP_WORD_CHAR);
+      gtk_widget_add_css_class (GTK_WIDGET (view), "xd-diff");
+      fill_diff_buffer (gtk_text_view_get_buffer (view), code);
+      content = GTK_WIDGET (view);
+    }
+  else
+    {
+      GtkWidget *label = gtk_label_new (code);
+
+      gtk_label_set_wrap (GTK_LABEL (label), TRUE);
+      gtk_label_set_wrap_mode (GTK_LABEL (label), PANGO_WRAP_WORD_CHAR);
+      gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
+      gtk_label_set_selectable (GTK_LABEL (label), TRUE);
+      gtk_widget_add_css_class (label, "xd-body");
+      content = label;
+    }
+
+  gtk_widget_set_hexpand (content, TRUE);
 
   gtk_widget_add_css_class (card, "xd-code");
-  gtk_box_append (GTK_BOX (card), label);
+  gtk_box_append (GTK_BOX (card), content);
 
   return card;
 }
@@ -369,6 +432,7 @@ render_body (XdMessageRow *self)
     g_auto (GStrv) lines = g_strsplit (self->text->str, "\n", -1);
     g_autoptr (GString) chunk = g_string_new (NULL);
     gboolean in_fence = FALSE;
+    gboolean diff_fence = FALSE;
 
     for (gsize i = 0; lines[i] != NULL; i++)
       {
@@ -379,7 +443,7 @@ render_body (XdMessageRow *self)
                 GtkWidget *piece;
 
                 if (in_fence)
-                  piece = make_code_card (self, chunk->str);
+                  piece = make_code_card (self, chunk->str, diff_fence);
                 else
                   {
                     g_autofree char *markup = xd_markdown_to_pango (chunk->str);
@@ -393,6 +457,8 @@ render_body (XdMessageRow *self)
               }
 
             in_fence = !in_fence;
+            diff_fence = in_fence &&
+                         g_strcmp0 (lines[i] + strlen ("```"), "diff") == 0;
             continue;
           }
 
@@ -406,7 +472,7 @@ render_body (XdMessageRow *self)
         GtkWidget *piece;
 
         if (in_fence)
-          piece = make_code_card (self, chunk->str);
+          piece = make_code_card (self, chunk->str, diff_fence);
         else
           {
             g_autofree char *markup = xd_markdown_to_pango (chunk->str);

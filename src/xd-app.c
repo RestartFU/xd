@@ -380,6 +380,8 @@ static const char *XD_STYLE =
   " padding: 10px 12px; }\n"
   ".xd-code label { font-family: \"JetBrains Mono\", monospace;"
   " font-size: 0.88em; }\n"
+  ".xd-code textview.xd-diff, .xd-code textview.xd-diff text"
+  " { background: transparent; font-size: 0.88em; }\n"
 
   /* Selectable, but not editable-looking: a caret blinking in a message
    * suggests typing somewhere nothing can be typed. Selection keeps its

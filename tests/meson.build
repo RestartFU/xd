@@ -11,6 +11,7 @@ xd_tests = {
   'settings': 'test-settings.c',
   'markdown': 'test-markdown.c',
   'ask': 'test-ask.c',
+  'git-diff': 'test-git-diff.c',
   'worktree': 'test-worktree.c',
 }
 

@@ -5,6 +5,7 @@ xd_core_sources = files(
   'settings/settings-resolver.c',
   'util/markdown.c',
   'util/ask-block.c',
+  'util/git-diff.c',
   'util/git-info.c',
   'util/worktree.c',
   'util/host-launch.c',
