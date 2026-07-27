@@ -42,6 +42,14 @@ static guint signals[N_SIGNALS];
 
 #define SCROLLBACK_LINES 10000
 
+/*
+ * VTE understands OSC 8 hyperlinks itself. This match adds ordinary URLs
+ * printed by tools which do not emit OSC 8, stopping before common sentence
+ * punctuation while retaining URL path and query characters.
+ */
+#define TERMINAL_URL_PATTERN \
+  "(?i)\\b(?:https?|ftp)://[^[:space:]<>\"']*[-[:alnum:]_~/#?&=%+]"
+
 /* One Dark's hues, toned to sit on this window: VTE's stock palette is the
  * primaries of a 1990s xterm, and one saturated #00ff00 prompt undoes a
  * theme. */
@@ -182,19 +190,95 @@ spawn_shell (XdTerminalPanel *self,
 }
 
 static void
+on_terminal_link_pressed (GtkGestureClick *gesture,
+                          int              n_press,
+                          double           x,
+                          double           y,
+                          gpointer         user_data)
+{
+  VteTerminal *terminal = VTE_TERMINAL (user_data);
+  g_autofree char *uri = NULL;
+
+  if (n_press != 1)
+    return;
+
+  uri = vte_terminal_check_hyperlink_at (terminal, x, y);
+  if (uri == NULL)
+    uri = vte_terminal_check_match_at (terminal, x, y, NULL);
+  if (uri == NULL)
+    return;
+
+  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  xd_host_open_uri (uri);
+}
+
+static gboolean
+on_terminal_key (GtkEventControllerKey *controller,
+                 guint                  keyval,
+                 guint                  keycode,
+                 GdkModifierType        state,
+                 gpointer               user_data)
+{
+  VteTerminal *terminal = VTE_TERMINAL (user_data);
+  GdkModifierType copy_modifiers = GDK_CONTROL_MASK | GDK_SHIFT_MASK;
+
+  if ((state & copy_modifiers) == copy_modifiers &&
+      gdk_keyval_to_lower (keyval) == GDK_KEY_c)
+    {
+      vte_terminal_copy_clipboard_format (terminal, VTE_FORMAT_TEXT);
+      return GDK_EVENT_STOP;
+    }
+
+  return GDK_EVENT_PROPAGATE;
+}
+
+static void
 configure_terminal (VteTerminal *terminal)
 {
   g_autoptr (PangoFontDescription) font = NULL;
+  g_autoptr (VteRegex) url_regex = NULL;
+  g_autoptr (GError) error = NULL;
+  GtkEventController *keys;
+  GtkGesture *links;
+  int tag;
 
   vte_terminal_set_scrollback_lines (terminal, SCROLLBACK_LINES);
   vte_terminal_set_scroll_on_output (terminal, FALSE);
   vte_terminal_set_scroll_on_keystroke (terminal, TRUE);
   vte_terminal_set_mouse_autohide (terminal, TRUE);
   vte_terminal_set_cursor_blink_mode (terminal, VTE_CURSOR_BLINK_ON);
+  vte_terminal_set_allow_hyperlink (terminal, TRUE);
+
+  url_regex = vte_regex_new_for_match (TERMINAL_URL_PATTERN, -1,
+                                       VTE_REGEX_FLAGS_DEFAULT, &error);
+  if (url_regex != NULL)
+    {
+      tag = vte_terminal_match_add_regex (terminal, url_regex, 0);
+      vte_terminal_match_set_cursor_name (terminal, tag, "pointer");
+    }
+  else
+    {
+      g_warning ("cannot enable terminal URL matching: %s", error->message);
+    }
 
   font = pango_font_description_from_string ("JetBrains Mono, Monospace 10");
   vte_terminal_set_font (terminal, font);
   apply_colours (terminal);
+
+  keys = gtk_event_controller_key_new ();
+  gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
+  g_signal_connect (keys, "key-pressed", G_CALLBACK (on_terminal_key), terminal);
+  gtk_widget_add_controller (GTK_WIDGET (terminal), keys);
+
+  links = gtk_gesture_click_new ();
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (links),
+                                 GDK_BUTTON_PRIMARY);
+  gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (links),
+                                              GTK_PHASE_CAPTURE);
+  g_signal_connect (links, "pressed",
+                    G_CALLBACK (on_terminal_link_pressed), terminal);
+  gtk_widget_add_controller (GTK_WIDGET (terminal),
+                             GTK_EVENT_CONTROLLER (links));
 
   gtk_widget_set_hexpand (GTK_WIDGET (terminal), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (terminal), TRUE);

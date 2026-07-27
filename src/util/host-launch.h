@@ -15,4 +15,7 @@ G_BEGIN_DECLS
  */
 GStrv xd_host_environ (void);
 
+/* Opens a URI with the host desktop instead of the bundled GTK environment. */
+void  xd_host_open_uri (const char *uri);
+
 G_END_DECLS

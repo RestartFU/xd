@@ -1,5 +1,7 @@
 #include "host-launch.h"
 
+#include <gio/gio.h>
+
 /* Overridden by the launcher, and recorded there as XD_HOST_<name>. */
 static const char *rewritten[] = {
   "XDG_DATA_DIRS", "LANG", "LC_ALL",
@@ -37,4 +39,20 @@ xd_host_environ (void)
     env = g_environ_unsetenv (env, bundle_only[i]);
 
   return env;
+}
+
+void
+xd_host_open_uri (const char *uri)
+{
+  g_return_if_fail (uri != NULL);
+
+#if defined(G_OS_WIN32) || defined(__APPLE__)
+  g_app_info_launch_default_for_uri (uri, NULL, NULL);
+#else
+  g_auto (GStrv) env = xd_host_environ ();
+  const char *argv[] = { "xdg-open", uri, NULL };
+
+  g_spawn_async (NULL, (char **) argv, env, G_SPAWN_SEARCH_PATH,
+                 NULL, NULL, NULL, NULL);
+#endif
 }
