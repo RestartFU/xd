@@ -3,7 +3,7 @@
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #ifdef G_OS_WIN32
-#include <glib/gwin32.h>
+#include <windows.h>
 #endif
 
 static void
@@ -48,13 +48,36 @@ remove_tree (const char *path)
   g_rmdir (path);
 }
 
+#ifdef G_OS_WIN32
+static char *
+native_temp_dir (void)
+{
+  g_autofree WCHAR *buffer = g_new (WCHAR, 32768);
+  g_autoptr (GError) error = NULL;
+  DWORD length;
+  char *path;
+
+  /*
+   * Environment and module paths are rewritten to /d/... by the MSYS shell.
+   * Ask Win32 directly so GSubprocess receives a drive-letter cwd.
+   */
+  length = GetTempPathW (32768, buffer);
+  g_assert_cmpuint (length, >, 0);
+  g_assert_cmpuint (length, <, 32768);
+
+  path = g_utf16_to_utf8 ((const gunichar2 *) buffer, length,
+                          NULL, NULL, &error);
+  g_assert_no_error (error);
+  return path;
+}
+#endif
+
 static void
 test_capture_only_change_since_previous_event (void)
 {
   g_autoptr (GError) error = NULL;
 #ifdef G_OS_WIN32
-  g_autofree char *module_dir =
-    g_win32_get_package_installation_directory_of_module (NULL);
+  g_autofree char *module_dir = native_temp_dir ();
   g_autofree char *dir =
     g_build_filename (module_dir, "xd-git-diff-XXXXXX", NULL);
 #else
@@ -79,7 +102,7 @@ test_capture_only_change_since_previous_event (void)
   /*
    * MSYS exposes /tmp and rewrites cwd/environment paths to /d/..., but
    * native GLib subprocesses cannot reliably chdir to those virtual paths.
-   * The Win32 module directory is an unconverted drive-letter path.
+   * GetTempPathW returns an unconverted drive-letter path.
    */
   g_assert_nonnull (g_mkdtemp (dir));
 #else
