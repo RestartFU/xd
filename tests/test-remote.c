@@ -7,6 +7,7 @@
 #include "settings/folder-settings.h"
 #include "storage/storage.h"
 
+#include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
 #include <signal.h>
 #include <string.h>
@@ -1570,6 +1571,98 @@ test_the_daemon_lists_its_directories (void)
 }
 
 static void
+test_remote_files_are_browsed_and_read (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *folder = NULL;
+  g_autofree char *source_dir = NULL;
+  g_autofree char *note = NULL;
+  RemoteReply listed = { 0 };
+  RemoteReply read = { 0 };
+  gboolean saw_source = FALSE;
+  gboolean saw_note = FALSE;
+
+  daemon_start (&daemon);
+  folder = g_build_filename (daemon.root, "Zeno", NULL);
+  source_dir = g_build_filename (folder, "src", NULL);
+  note = g_build_filename (folder, "notes.txt", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (source_dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (note, "remote preview\n", -1, NULL));
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    JsonArray *entries;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "file-browse");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "action");
+    json_builder_add_string_value (builder, "list");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, "");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &listed);
+    entries = json_object_get_array_member (listed.reply, "entries");
+    g_assert_nonnull (entries);
+
+    for (guint i = 0; i < json_array_get_length (entries); i++)
+      {
+        JsonObject *entry = json_array_get_object_element (entries, i);
+        const char *name =
+          json_object_get_string_member_with_default (entry, "name", "");
+        gboolean directory =
+          json_object_get_boolean_member_with_default (
+            entry, "directory", FALSE);
+
+        if (g_strcmp0 (name, "src") == 0 && directory)
+          saw_source = TRUE;
+        if (g_strcmp0 (name, "notes.txt") == 0 && !directory)
+          saw_note = TRUE;
+      }
+  }
+
+  g_assert_true (saw_source);
+  g_assert_true (saw_note);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "file-browse");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "action");
+    json_builder_add_string_value (builder, "read");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, "notes.txt");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &read);
+    g_assert_cmpstr (
+      json_object_get_string_member_with_default (
+        read.reply, "content", NULL),
+      ==, "remote preview\n");
+  }
+
+  json_object_unref (listed.reply);
+  json_object_unref (read.reply);
+  g_free (listed.wait.failure);
+  g_free (read.wait.failure);
+  g_remove (note);
+  g_rmdir (source_dir);
+  daemon_stop (&daemon);
+}
+
+static void
 on_terminal_reply (GObject      *source,
                    GAsyncResult *result,
                    gpointer      user_data)
@@ -2886,6 +2979,7 @@ main (int argc, char *argv[])
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/images-are-uploaded-to-the-daemon", test_images_are_uploaded_to_the_daemon);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
+  ADD ("/remote/files-are-browsed-and-read", test_remote_files_are_browsed_and_read);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
   ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);

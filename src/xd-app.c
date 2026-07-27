@@ -434,6 +434,17 @@ static const char *XD_STYLE =
   ".xd-diff-truncated { padding: 9px 12px;"
   " background: alpha(#ffffff, 0.025); }\n"
 
+  /* Repository browser: the list and preview share the same quiet side pane
+   * as changes, so files read like navigation rather than message cards. */
+  ".xd-file-list { padding: 5px; background: transparent; }\n"
+  ".xd-file-list > row { border-radius: 8px; margin: 2px 0; }\n"
+  ".xd-file-list > row:selected { background: alpha(#ffffff, 0.09); }\n"
+  ".xd-file-list > row:hover:not(:selected)"
+  " { background: alpha(#ffffff, 0.05); }\n"
+  "textview.xd-file-preview, textview.xd-file-preview text"
+  " { background: transparent; font-family: \"JetBrains Mono\", monospace;"
+  " font-size: 0.94em; }\n"
+
   /* Selectable, but not editable-looking: a caret blinking in a message
    * suggests typing somewhere nothing can be typed. Selection keeps its
    * colour; only the caret goes. */

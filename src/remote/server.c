@@ -1016,6 +1016,232 @@ handle_list_dir (Connection *connection,
   send_json (connection, builder);
 }
 
+/* --- files in a chat's working directory --------------------------------- */
+
+#define FILE_PREVIEW_LIMIT (1024 * 1024)
+
+typedef struct
+{
+  char *name;
+  gboolean directory;
+} BrowseEntry;
+
+static void
+browse_entry_free (BrowseEntry *entry)
+{
+  g_free (entry->name);
+  g_free (entry);
+}
+
+static gint
+compare_browse_entries (gconstpointer a,
+                        gconstpointer b)
+{
+  const BrowseEntry *left = a;
+  const BrowseEntry *right = b;
+
+  if (left->directory != right->directory)
+    return left->directory ? -1 : 1;
+
+  return g_utf8_collate (left->name, right->name);
+}
+
+/*
+ * A file request is relative to the chat's working directory.
+ *
+ * The device is authenticated and can already open a terminal there, but
+ * keeping this operation inside the checkout prevents a stale or malformed
+ * pane request from reading some unrelated absolute path.
+ */
+static char *
+browse_path (const char  *workdir,
+             const char  *relative,
+             GError     **error)
+{
+  g_autofree char *root = NULL;
+  g_autofree char *joined = NULL;
+  g_autofree char *prefix = NULL;
+  char *path;
+
+  if (relative == NULL)
+    relative = "";
+
+  if (g_path_is_absolute (relative))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                           "File paths must be relative to the working directory.");
+      return NULL;
+    }
+
+  root = g_canonicalize_filename (workdir, NULL);
+  joined = g_build_filename (root, relative, NULL);
+  path = g_canonicalize_filename (joined, NULL);
+  prefix = g_strconcat (root, G_DIR_SEPARATOR_S, NULL);
+
+  if (g_strcmp0 (path, root) != 0 && !g_str_has_prefix (path, prefix))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+                           "That file is outside the working directory.");
+      g_free (path);
+      return NULL;
+    }
+
+  return path;
+}
+
+static void
+handle_file_browse (Connection *connection,
+                    JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *action = member_string (request, "action");
+  const char *relative = member_string (request, "path");
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdDaemonTurn) resolver = NULL;
+  g_autofree char *workdir = NULL;
+  g_autofree char *path = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL || action == NULL)
+    {
+      send_error (connection, "file-browse needs a chat and action.");
+      return;
+    }
+
+  chat = xd_storage_get_chat (self->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error != NULL ? error->message : "No such chat.");
+      return;
+    }
+
+  resolver = xd_daemon_turn_new (self->storage, self->root_path);
+  workdir = xd_daemon_turn_resolve_workdir (resolver, chat);
+  if (workdir == NULL)
+    {
+      send_error (connection, "This chat has no working directory.");
+      return;
+    }
+
+  path = browse_path (workdir, relative, &error);
+  if (path == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  if (g_strcmp0 (action, "list") == 0)
+    {
+      g_autoptr (GDir) dir = g_dir_open (path, 0, &error);
+      g_autoptr (GPtrArray) entries =
+        g_ptr_array_new_with_free_func ((GDestroyNotify) browse_entry_free);
+      g_autoptr (JsonBuilder) builder = json_builder_new ();
+      const char *name;
+
+      if (dir == NULL)
+        {
+          send_error (connection, error->message);
+          return;
+        }
+
+      while ((name = g_dir_read_name (dir)) != NULL)
+        {
+          g_autofree char *child = NULL;
+          BrowseEntry *entry;
+
+          if (name[0] == '.')
+            continue;
+
+          child = g_build_filename (path, name, NULL);
+          entry = g_new0 (BrowseEntry, 1);
+          entry->name = g_strdup (name);
+          entry->directory = g_file_test (child, G_FILE_TEST_IS_DIR);
+          g_ptr_array_add (entries, entry);
+        }
+
+      g_ptr_array_sort_values (entries, compare_browse_entries);
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "ok");
+      json_builder_add_boolean_value (builder, TRUE);
+      json_builder_set_member_name (builder, "entries");
+      json_builder_begin_array (builder);
+      for (guint i = 0; i < entries->len; i++)
+        {
+          BrowseEntry *entry = g_ptr_array_index (entries, i);
+
+          json_builder_begin_object (builder);
+          json_builder_set_member_name (builder, "name");
+          json_builder_add_string_value (builder, entry->name);
+          json_builder_set_member_name (builder, "directory");
+          json_builder_add_boolean_value (builder, entry->directory);
+          json_builder_end_object (builder);
+        }
+      json_builder_end_array (builder);
+      json_builder_end_object (builder);
+      send_json (connection, builder);
+      return;
+    }
+
+  if (g_strcmp0 (action, "read") == 0)
+    {
+      g_autoptr (GFile) file = g_file_new_for_path (path);
+      g_autoptr (GFileInfo) info = NULL;
+      g_autofree char *content = NULL;
+      gsize length = 0;
+      g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+      info = g_file_query_info (
+        file,
+        G_FILE_ATTRIBUTE_STANDARD_TYPE ","
+        G_FILE_ATTRIBUTE_STANDARD_SIZE,
+        G_FILE_QUERY_INFO_NONE, NULL, &error);
+      if (info == NULL)
+        {
+          send_error (connection, error->message);
+          return;
+        }
+      if (g_file_info_get_file_type (info) != G_FILE_TYPE_REGULAR)
+        {
+          send_error (connection, "Only regular files can be previewed.");
+          return;
+        }
+      if (g_file_info_get_size (info) > FILE_PREVIEW_LIMIT)
+        {
+          send_error (connection, "Files larger than 1 MB are not previewed.");
+          return;
+        }
+      if (!g_file_get_contents (path, &content, &length, &error))
+        {
+          send_error (connection, error->message);
+          return;
+        }
+      if (length > FILE_PREVIEW_LIMIT)
+        {
+          send_error (connection, "Files larger than 1 MB are not previewed.");
+          return;
+        }
+      if (memchr (content, '\0', length) != NULL ||
+          !g_utf8_validate (content, length, NULL))
+        {
+          send_error (connection, "Binary files cannot be previewed as text.");
+          return;
+        }
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "ok");
+      json_builder_add_boolean_value (builder, TRUE);
+      json_builder_set_member_name (builder, "content");
+      json_builder_add_string_value (builder, content);
+      json_builder_end_object (builder);
+      send_json (connection, builder);
+      return;
+    }
+
+  send_error (connection, "No such file-browse action.");
+}
+
 /*
  * Global agent secrets live on the machine that executes the agent.
  *
@@ -2646,6 +2872,8 @@ dispatch (Connection *connection,
     handle_image_read (connection, request);
   else if (g_strcmp0 (op, "list-dir") == 0)
     handle_list_dir (connection, request);
+  else if (g_strcmp0 (op, "file-browse") == 0)
+    handle_file_browse (connection, request);
   else if (g_strcmp0 (op, "agent-secrets") == 0)
     handle_agent_secrets (connection);
   else if (g_strcmp0 (op, "set-agent-secrets") == 0)

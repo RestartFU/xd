@@ -10,6 +10,7 @@
 #include "message-row.h"
 #include "model-picker.h"
 #include "option-picker.h"
+#include "file-pane.h"
 #include "diff-pane.h"
 #include "git-actions.h"
 #include "terminal-panel.h"
@@ -155,11 +156,14 @@ struct _XdChatView
   GtkLabel *context_label;
   GtkToggleButton *terminal_button;
   XdTerminalPanel *terminal;
+  GtkToggleButton *file_button;
+  XdFilePane *files;
   GtkToggleButton *diff_button;
   XdGitActions *git_actions;
   XdDiffPane *diff;
   GtkPaned *split;
   GtkPaned *side_split;
+  GtkStack *side_stack;
   GSettings *settings;
 
   /* Set while the choosers are filled in from the chat, so the resulting
@@ -1195,15 +1199,21 @@ update_remote_options (XdChatView   *self,
   update_workspace_choice (self, chat, has_messages, linked_worktree);
   xd_terminal_panel_set_workdir (self->terminal,
                                  have_workdir ? chat->workdir : NULL);
+  xd_file_pane_set_workdir (self->files,
+                            have_workdir ? chat->workdir : NULL);
   xd_diff_pane_set_workdir (self->diff,
                             have_workdir ? chat->workdir : NULL);
   gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->file_button), have_workdir);
   gtk_widget_set_sensitive (GTK_WIDGET (self->diff_button), have_workdir);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
                                have_workdir ? tooltip
                                             : "This chat has no working directory");
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->diff_button),
                                have_workdir ? "Changed files"
+                                            : "This chat has no working directory");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->file_button),
+                               have_workdir ? "Browse files"
                                             : "This chat has no working directory");
   update_context_meter (self, chat->context_used, chat->context_window);
 
@@ -1395,6 +1405,7 @@ on_remote_opened (XdRemoteClient *client,
     return;
 
   load_remote_transcript (self);
+  xd_file_pane_refresh (self->files);
   xd_diff_pane_refresh (self->diff);
   update_send_button (self);
 }
@@ -1411,6 +1422,10 @@ set_remote (XdChatView     *self,
         self->diff, client,
         client != NULL && self->chat != NULL
           ? xd_node_get_chat_id (self->chat) : NULL);
+      xd_file_pane_set_remote (
+        self->files, client,
+        client != NULL && self->chat != NULL
+          ? xd_node_get_chat_id (self->chat) : NULL);
       return;
     }
 
@@ -1421,6 +1436,10 @@ set_remote (XdChatView     *self,
   xd_terminal_panel_set_remote (self->terminal, client);
   xd_diff_pane_set_remote (
     self->diff, client,
+    client != NULL && self->chat != NULL
+      ? xd_node_get_chat_id (self->chat) : NULL);
+  xd_file_pane_set_remote (
+    self->files, client,
     client != NULL && self->chat != NULL
       ? xd_node_get_chat_id (self->chat) : NULL);
 
@@ -2863,14 +2882,14 @@ on_terminal_dragged (GtkPaned   *paned,
 }
 
 static void
-on_diff_dragged (GtkPaned   *paned,
+on_side_dragged (GtkPaned   *paned,
                  GParamSpec *pspec,
                  gpointer    user_data)
 {
   XdChatView *self = user_data;
-  int width = gtk_widget_get_width (GTK_WIDGET (self->diff));
+  int width = gtk_widget_get_width (GTK_WIDGET (self->side_stack));
 
-  if (width > 0 && gtk_widget_get_visible (GTK_WIDGET (self->diff)))
+  if (width > 0 && gtk_widget_get_visible (GTK_WIDGET (self->side_stack)))
     g_settings_set_int (self->settings, "diff-width", width);
 }
 
@@ -2885,21 +2904,54 @@ on_diff_toggled (GtkToggleButton *button,
 
   if (!shown)
     {
-      int width = gtk_widget_get_width (GTK_WIDGET (self->diff));
+      int width = gtk_widget_get_width (GTK_WIDGET (self->side_stack));
 
       if (width > 0)
         g_settings_set_int (self->settings, "diff-width", width);
 
-      gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
+      if (!gtk_toggle_button_get_active (self->file_button))
+        gtk_widget_set_visible (GTK_WIDGET (self->side_stack), FALSE);
       return;
     }
 
-  gtk_widget_set_visible (GTK_WIDGET (self->diff), TRUE);
+  if (gtk_toggle_button_get_active (self->file_button))
+    gtk_toggle_button_set_active (self->file_button, FALSE);
 
+  gtk_stack_set_visible_child_name (self->side_stack, "diff");
+  gtk_widget_set_visible (GTK_WIDGET (self->side_stack), TRUE);
   set_end_child_size (self->side_split,
                       g_settings_get_int (self->settings, "diff-width"), FALSE);
 
   xd_diff_pane_refresh (self->diff);
+}
+
+static void
+on_file_toggled (GtkToggleButton *button,
+                 gpointer         user_data)
+{
+  XdChatView *self = user_data;
+  gboolean shown = gtk_toggle_button_get_active (button);
+
+  if (!shown)
+    {
+      int width = gtk_widget_get_width (GTK_WIDGET (self->side_stack));
+
+      if (width > 0)
+        g_settings_set_int (self->settings, "diff-width", width);
+
+      if (!gtk_toggle_button_get_active (self->diff_button))
+        gtk_widget_set_visible (GTK_WIDGET (self->side_stack), FALSE);
+      return;
+    }
+
+  if (gtk_toggle_button_get_active (self->diff_button))
+    gtk_toggle_button_set_active (self->diff_button, FALSE);
+
+  gtk_stack_set_visible_child_name (self->side_stack, "files");
+  gtk_widget_set_visible (GTK_WIDGET (self->side_stack), TRUE);
+  set_end_child_size (self->side_split,
+                      g_settings_get_int (self->settings, "diff-width"), FALSE);
+  xd_file_pane_refresh (self->files);
 }
 
 /* The panel asked to go away; the button has to agree, or it would take two
@@ -3059,18 +3111,24 @@ update_context_bar (XdChatView   *self,
 
     xd_terminal_panel_set_chat (self->terminal, xd_node_get_chat_id (self->chat));
     xd_terminal_panel_set_workdir (self->terminal, have_workdir ? workdir : NULL);
+    xd_file_pane_set_workdir (self->files, have_workdir ? workdir : NULL);
     xd_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
     xd_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
 
     /* The panes belong to the chat, so opening one brings them back. */
     self->syncing_panes = TRUE;
     gtk_toggle_button_set_active (self->terminal_button, chat->terminal_open);
+    gtk_toggle_button_set_active (self->file_button, FALSE);
     gtk_toggle_button_set_active (self->diff_button, chat->diff_open);
     self->syncing_panes = FALSE;
 
     gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
+    gtk_widget_set_sensitive (GTK_WIDGET (self->file_button), have_workdir);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
                                  have_workdir ? tooltip : "This chat has no working directory");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->file_button),
+                                 have_workdir ? "Browse files"
+                                              : "This chat has no working directory");
   }
 
   xd_model_picker_set_selected (self->model_picker, chat->backend,
@@ -3343,8 +3401,8 @@ on_composer_key (GtkEventControllerKey *controller,
 
 /* --- public API ----------------------------------------------------------- */
 
-/* Git actions mutate a checkout and remain local-only. Terminal and diff are
- * read through the daemon when the chat lives remotely. */
+/* Git actions mutate a checkout and remain local-only. Terminal, files and
+ * diff are read through the daemon when the chat lives remotely. */
 static void
 set_local_controls_visible (XdChatView *self,
                             gboolean    visible)
@@ -3357,6 +3415,7 @@ set_local_controls_visible (XdChatView *self,
   /* Closing them without writing the panes back: they are being closed
    * because of where the chat lives, not because the user shut them. */
   self->syncing_panes = TRUE;
+  gtk_toggle_button_set_active (self->file_button, FALSE);
   gtk_toggle_button_set_active (self->diff_button, FALSE);
   self->syncing_panes = FALSE;
 }
@@ -3397,12 +3456,16 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
    * when entering a remote chat; running ptys remain alive on the daemon. */
   self->syncing_panes = TRUE;
   gtk_toggle_button_set_active (self->terminal_button, FALSE);
+  gtk_toggle_button_set_active (self->file_button, FALSE);
   self->syncing_panes = FALSE;
   gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), FALSE);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
                                "Reading the remote working directory");
   gtk_widget_set_sensitive (GTK_WIDGET (self->diff_button), FALSE);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->diff_button),
+                               "Reading the remote working directory");
+  gtk_widget_set_sensitive (GTK_WIDGET (self->file_button), FALSE);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->file_button),
                                "Reading the remote working directory");
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
@@ -3450,6 +3513,7 @@ xd_chat_view_set_chat (XdChatView *self,
   if (chat == NULL)
     {
       xd_terminal_panel_set_chat (self->terminal, NULL);
+      gtk_toggle_button_set_active (self->file_button, FALSE);
       clear_transcript (self);
       gtk_stack_set_visible_child_name (self->stack, "empty");
       gtk_widget_set_visible (self->composer_area, FALSE);
@@ -3760,6 +3824,13 @@ build_composer (XdChatView *self)
   g_signal_connect (self->terminal_button, "toggled",
                     G_CALLBACK (on_terminal_toggled), self);
 
+  self->file_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
+  gtk_button_set_icon_name (GTK_BUTTON (self->file_button), "folder-symbolic");
+  gtk_widget_add_css_class (GTK_WIDGET (self->file_button), "flat");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->file_button), "Browse files");
+  g_signal_connect (self->file_button, "toggled",
+                    G_CALLBACK (on_file_toggled), self);
+
   self->diff_button = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
   gtk_button_set_icon_name (GTK_BUTTON (self->diff_button), "view-list-ordered-symbolic");
   gtk_widget_add_css_class (GTK_WIDGET (self->diff_button), "flat");
@@ -3957,6 +4028,8 @@ xd_chat_view_init (XdChatView *self)
   adw_header_bar_pack_end (
     ADW_HEADER_BAR (self->header), GTK_WIDGET (self->terminal_button));
   adw_header_bar_pack_end (
+    ADW_HEADER_BAR (self->header), GTK_WIDGET (self->file_button));
+  adw_header_bar_pack_end (
     ADW_HEADER_BAR (self->header), GTK_WIDGET (self->diff_button));
 
   {
@@ -3990,19 +4063,27 @@ xd_chat_view_init (XdChatView *self)
   gtk_paned_set_resize_end_child (self->split, FALSE);
   gtk_paned_set_shrink_end_child (self->split, FALSE);
 
-  /* The diff sits beside the conversation and the terminal together, since
-   * it is about the repository rather than about either of them. */
+  /* Repository panes sit beside the conversation and terminal together. */
   self->diff = xd_diff_pane_new ();
-  gtk_widget_set_visible (GTK_WIDGET (self->diff), FALSE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->diff), "xd-divider-left");
+  self->files = xd_file_pane_new ();
+
+  self->side_stack = GTK_STACK (gtk_stack_new ());
+  gtk_stack_add_named (
+    self->side_stack, GTK_WIDGET (self->files), "files");
+  gtk_stack_add_named (
+    self->side_stack, GTK_WIDGET (self->diff), "diff");
+  gtk_widget_set_visible (GTK_WIDGET (self->side_stack), FALSE);
+  gtk_widget_add_css_class (
+    GTK_WIDGET (self->side_stack), "xd-divider-left");
 
   self->side_split = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
   g_signal_connect (self->side_split, "notify::position",
-                    G_CALLBACK (on_diff_dragged), self);
+                    G_CALLBACK (on_side_dragged), self);
   gtk_paned_set_start_child (self->side_split, GTK_WIDGET (self->split));
   gtk_paned_set_resize_start_child (self->side_split, TRUE);
   gtk_paned_set_shrink_start_child (self->side_split, FALSE);
-  gtk_paned_set_end_child (self->side_split, GTK_WIDGET (self->diff));
+  gtk_paned_set_end_child (
+    self->side_split, GTK_WIDGET (self->side_stack));
   gtk_paned_set_resize_end_child (self->side_split, FALSE);
   gtk_paned_set_shrink_end_child (self->side_split, FALSE);
 

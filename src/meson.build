@@ -71,6 +71,7 @@ xd_sources = files(
   'settings/folder-context-dialog.c',
   'settings/folder-settings-dialog.c',
   'chat/model-picker.c',
+  'chat/file-pane.c',
   'chat/diff-view.c',
   'chat/option-picker.c',
   'chat/diff-pane.c',

@@ -560,7 +560,7 @@ xd_diff_pane_refresh (XdDiffPane *self)
 {
   g_return_if_fail (XD_IS_DIFF_PANE (self));
 
-  if (!gtk_widget_get_visible (GTK_WIDGET (self)))
+  if (!gtk_widget_is_visible (GTK_WIDGET (self)))
     return;
 
   /* An earlier read is no longer the answer to anything. */
