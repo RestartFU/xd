@@ -431,9 +431,7 @@ xd_message_row_make_workflow (XdMessageRow *self,
 {
   GtkWidget *title;
   GtkWidget *status;
-  GtkWidget *link;
   g_autofree char *title_markup = NULL;
-  g_autofree char *link_markup = NULL;
 
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
@@ -445,9 +443,11 @@ xd_message_row_make_workflow (XdMessageRow *self,
 
   title = gtk_label_new (NULL);
   title_markup = g_markup_printf_escaped (
-    "<b>GitHub Actions · Run #%s</b>", run_id);
+    "<b>GitHub Actions · Run <a href=\"%s\">#%s</a></b>", url, run_id);
   gtk_label_set_markup (GTK_LABEL (title), title_markup);
   gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
+  g_signal_connect (title, "activate-link",
+                    G_CALLBACK (on_link_activated), NULL);
 
   status = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 7);
   self->workflow_spinner = gtk_spinner_new ();
@@ -464,18 +464,9 @@ xd_message_row_make_workflow (XdMessageRow *self,
   gtk_box_append (GTK_BOX (status), self->workflow_spinner);
   gtk_box_append (GTK_BOX (status), self->workflow_status);
 
-  link = gtk_label_new (NULL);
-  link_markup = g_markup_printf_escaped (
-    "<a href=\"%s\">Open live status and logs</a>", url);
-  gtk_label_set_markup (GTK_LABEL (link), link_markup);
-  gtk_label_set_xalign (GTK_LABEL (link), 0.0f);
-  g_signal_connect (link, "activate-link",
-                    G_CALLBACK (on_link_activated), NULL);
-
   gtk_box_append (GTK_BOX (self->body), title);
   gtk_box_append (GTK_BOX (self->body), status);
   gtk_box_append (GTK_BOX (self->body), self->workflow_log);
-  gtk_box_append (GTK_BOX (self->body), link);
 
   if (self->workflow_repository == NULL)
     {
