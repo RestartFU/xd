@@ -853,6 +853,16 @@ wait_until (gboolean (*ready) (gpointer),
   g_assert_false (wait.timed_out);
 }
 
+static void
+iterate_for (guint milliseconds)
+{
+  Wait wait = { 0 };
+
+  g_timeout_add (milliseconds, on_wait_elapsed, &wait);
+  while (!wait.timed_out)
+    g_main_context_iteration (NULL, TRUE);
+}
+
 typedef struct
 {
   XdNode *node;
@@ -1865,6 +1875,14 @@ terminal_printed_after_resize (gpointer user_data)
 }
 
 static gboolean
+terminal_resize_job_ready (gpointer user_data)
+{
+  TerminalEvents *events = user_data;
+
+  return strstr (events->output->str, "RESIZE_JOB_READY") != NULL;
+}
+
+static gboolean
 replay_contains (JsonArray  *replay,
                  const char *marker)
 {
@@ -2368,6 +2386,31 @@ test_remote_terminal_is_shared_and_replayable (void)
   wait_until (terminal_printed_marker, &events);
 
   {
+    static const char command[] =
+      "sh -c 'printf \"\\nRESIZE_JOB_READY\\n\"; "
+      "while :; do sleep 1; done'\n";
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *encoded =
+      g_base64_encode ((const guint8 *) command, strlen (command));
+    RemoteReply written = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-input");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &written);
+    json_object_unref (written.reply);
+    g_free (written.wait.failure);
+  }
+
+  wait_until (terminal_resize_job_ready, &events);
+
+  {
     g_autoptr (JsonBuilder) builder = json_builder_new ();
     RemoteReply listed = { 0 };
     JsonArray *rows;
@@ -2419,7 +2462,40 @@ test_remote_terminal_is_shared_and_replayable (void)
   wait_until (terminal_was_resized, &events);
 
   {
-    static const char command[] = "printf '\\nAFTER_RESIZE\\n'\n";
+    /* The literal output marker is deliberately not present in the input:
+     * the terminal echoes typed commands even while the foreground job owns
+     * it. */
+    static const char command[] =
+      "printf '\\nDETACHED_%s\\n' AFTER_RESIZE\n";
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *encoded =
+      g_base64_encode ((const guint8 *) command, strlen (command));
+    RemoteReply written = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "terminal-input");
+    json_builder_set_member_name (builder, "terminal");
+    json_builder_add_string_value (builder, events.terminal_id);
+    json_builder_set_member_name (builder, "data");
+    json_builder_add_string_value (builder, encoded);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &written);
+    json_object_unref (written.reply);
+    g_free (written.wait.failure);
+  }
+
+  /*
+   * The foreground command must still own the pty after resizing. If the
+   * shell observed it being suspended, it returns to its prompt and executes
+   * the probe above.
+   */
+  iterate_for (500);
+  g_assert_null (strstr (events.output->str, "DETACHED_AFTER_RESIZE"));
+
+  {
+    static const char command[] = "\003printf '\\nAFTER_RESIZE\\n'\n";
     g_autoptr (JsonBuilder) builder = json_builder_new ();
     g_autofree char *encoded =
       g_base64_encode ((const guint8 *) command, strlen (command));

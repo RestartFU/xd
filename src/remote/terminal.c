@@ -218,86 +218,6 @@ drain_available_output (XdRemoteTerminal *self)
   return FALSE;
 }
 
-/*
- * Makes resize an ordering barrier.
- *
- * SIGSTOP cannot be caught, so once every process we stopped reports T in
- * /proc, no more old-geometry output can race the drain. Processes already
- * stopped by the user are not added and therefore are not resumed.
- */
-static GArray *
-stop_running_session_members (XdRemoteTerminal *self)
-{
-  g_autoptr (GDir) proc = g_dir_open ("/proc", 0, NULL);
-  GArray *stopped = g_array_new (FALSE, FALSE, sizeof (pid_t));
-  const char *name;
-  gint64 deadline;
-
-  while (proc != NULL && (name = g_dir_read_name (proc)) != NULL)
-    {
-      pid_t session;
-      pid_t process;
-      char state;
-
-      if (!g_ascii_isdigit (name[0]) ||
-          !process_info (name, &session, &state) ||
-          session != self->session_id ||
-          state == 'T' || state == 't' || state == 'Z' || state == 'X')
-        continue;
-
-      process = (pid_t) g_ascii_strtoll (name, NULL, 10);
-      if (kill (process, SIGSTOP) == 0)
-        g_array_append_val (stopped, process);
-    }
-
-  deadline = g_get_monotonic_time () + 100 * 1000;
-  while (g_get_monotonic_time () < deadline)
-    {
-      gboolean all_stopped = TRUE;
-
-      for (guint i = 0; i < stopped->len; i++)
-        {
-          pid_t process = g_array_index (stopped, pid_t, i);
-          g_autofree char *pid_name = g_strdup_printf ("%d", process);
-          pid_t session;
-          char state;
-
-          if (process_info (pid_name, &session, &state) &&
-              session == self->session_id &&
-              state != 'T' && state != 't' && state != 'Z' && state != 'X')
-            {
-              all_stopped = FALSE;
-              break;
-            }
-        }
-
-      if (all_stopped)
-        break;
-      g_usleep (1000);
-    }
-
-  return stopped;
-}
-
-static void
-resume_session_members (XdRemoteTerminal *self,
-                        GArray           *stopped)
-{
-  if (self->closing)
-    return;
-
-  for (guint i = 0; i < stopped->len; i++)
-    {
-      pid_t process = g_array_index (stopped, pid_t, i);
-      g_autofree char *pid_name = g_strdup_printf ("%d", process);
-      pid_t session;
-
-      if (process_info (pid_name, &session, NULL) &&
-          session == self->session_id)
-        kill (process, SIGCONT);
-    }
-}
-
 static gboolean
 on_pty_readable (int          fd,
                  GIOCondition condition,
@@ -635,7 +555,6 @@ xd_remote_terminal_resize (XdRemoteTerminal *self,
                            GError          **error)
 {
   struct winsize size = { 0 };
-  g_autoptr (GArray) stopped = NULL;
   guint new_columns;
   guint new_rows;
 
@@ -655,10 +574,14 @@ xd_remote_terminal_resize (XdRemoteTerminal *self,
   size.ws_col = (unsigned short) new_columns;
   size.ws_row = (unsigned short) new_rows;
 
-  stopped = stop_running_session_members (self);
+  /*
+   * Drain bytes already queued at the old geometry before recording the new
+   * one. Never suspend the pty session to make this boundary exact: an
+   * interactive shell observes its foreground child stopping and moves that
+   * job into the background even if it is immediately continued.
+   */
   if (!drain_available_output (self))
     {
-      resume_session_members (self, stopped);
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CLOSED,
                            "The terminal closed while resizing.");
       return FALSE;
@@ -670,14 +593,12 @@ xd_remote_terminal_resize (XdRemoteTerminal *self,
 
       g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved_errno),
                    "Cannot resize terminal: %s.", g_strerror (saved_errno));
-      resume_session_members (self, stopped);
       return FALSE;
     }
 
   self->columns = new_columns;
   self->rows = new_rows;
   g_assert (record_geometry (self, new_columns, new_rows));
-  resume_session_members (self, stopped);
 
   return TRUE;
 }
