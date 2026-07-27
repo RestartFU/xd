@@ -444,9 +444,10 @@ static const char *XD_STYLE =
    * may sit in for hours, and nothing is being waited on. */
   ".xd-offline { color: @error_color; }\n"
 
-  /* The first row sits directly under the header, and on a desktop with larger
-   * text its ascenders met that edge. A row of clearance costs nothing. */
-  ".xd-sidebar listview { padding-top: 4px; }\n"
+  /* The first row sits directly under the header. Keep its clearance tied to
+   * the desktop font: a fixed four pixels was still too shallow when text
+   * scaling was enabled and clipped the remote host's ascenders. */
+  ".xd-sidebar listview { padding-top: 0.5em; }\n"
 
   /* The entry a row becomes while it is being named. Sized to the row rather
    * than to a form, so naming something does not make the tree jump. */
