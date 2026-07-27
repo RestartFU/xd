@@ -126,6 +126,12 @@
       <summary>Width of the changed-files pane</summary>
     </key>
 
+    <key name="pane-state" type="a{su}">
+      <default>{}</default>
+      <summary>Open panes by chat</summary>
+      <description>Per-device terminal and repository pane visibility for local and remote chats.</description>
+    </key>
+
     <key name="sidebar-width" type="i">
       <default>280</default>
       <summary>Sidebar width</summary>

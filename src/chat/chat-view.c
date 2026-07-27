@@ -68,6 +68,14 @@ typedef struct
 #define CONTENT_WIDTH 1040
 #define TRANSCRIPT_PAGE_SIZE 100
 
+typedef enum
+{
+  PANE_NONE     = 0,
+  PANE_TERMINAL = 1 << 0,
+  PANE_FILES    = 1 << 1,
+  PANE_DIFF     = 1 << 2,
+} PaneState;
+
 struct _XdChatView
 {
   AdwBin parent_instance;
@@ -252,6 +260,8 @@ static void update_workspace_choice (XdChatView *self,
                                      gboolean      has_messages,
                                      gboolean      linked_worktree,
                                      GPtrArray    *worktrees);
+static guint saved_panes (XdChatView *self, guint fallback);
+static void apply_panes (XdChatView *self, guint state);
 static void start_turn (XdChatView *self,
                         const char *prompt);
 static void on_model_chosen (XdModelPicker *picker,
@@ -1285,6 +1295,8 @@ update_remote_options (XdChatView   *self,
                                have_workdir ? "Browse files"
                                             : "This chat has no working directory");
   update_context_meter (self, chat->context_used, chat->context_window);
+
+  apply_panes (self, saved_panes (self, PANE_NONE));
 
   xd_model_picker_set_selected (self->model_picker, chat->backend, chat->model);
 
@@ -2983,6 +2995,98 @@ set_terminal_height (XdChatView *self,
   set_end_child_size (self->split, height, TRUE);
 }
 
+static char *
+pane_state_key (XdChatView *self)
+{
+  const char *chat_id;
+
+  if (self->chat == NULL)
+    return NULL;
+
+  chat_id = xd_node_get_chat_id (self->chat);
+  if (self->remote == NULL)
+    return g_strdup_printf ("local/%s", chat_id);
+
+  return g_strdup_printf (
+    "remote/%s:%u/%s",
+    xd_remote_client_get_host (self->remote),
+    xd_remote_client_get_port (self->remote),
+    chat_id);
+}
+
+static guint
+current_panes (XdChatView *self)
+{
+  guint state = PANE_NONE;
+
+  if (gtk_toggle_button_get_active (self->terminal_button))
+    state |= PANE_TERMINAL;
+  if (gtk_toggle_button_get_active (self->file_button))
+    state |= PANE_FILES;
+  if (gtk_toggle_button_get_active (self->diff_button))
+    state |= PANE_DIFF;
+
+  return state;
+}
+
+static void
+store_panes (XdChatView *self)
+{
+  g_autofree char *key = pane_state_key (self);
+  g_autoptr (GVariant) states = NULL;
+  g_autoptr (GVariant) updated = NULL;
+  GVariantDict dictionary;
+
+  if (key == NULL)
+    return;
+
+  states = g_settings_get_value (self->settings, "pane-state");
+  g_variant_dict_init (&dictionary, states);
+  g_variant_dict_insert (&dictionary, key, "u", current_panes (self));
+  updated = g_variant_dict_end (&dictionary);
+  g_settings_set_value (self->settings, "pane-state", updated);
+}
+
+static guint
+saved_panes (XdChatView *self,
+             guint       fallback)
+{
+  g_autofree char *key = pane_state_key (self);
+  g_autoptr (GVariant) states = NULL;
+  guint state;
+
+  if (key == NULL)
+    return fallback;
+
+  states = g_settings_get_value (self->settings, "pane-state");
+  return g_variant_lookup (states, key, "u", &state) ? state : fallback;
+}
+
+static void
+apply_panes (XdChatView *self,
+             guint       state)
+{
+  if ((state & PANE_FILES) != 0)
+    state &= ~PANE_DIFF;
+
+  if (current_panes (self) == state)
+    return;
+
+  self->syncing_panes = TRUE;
+  gtk_toggle_button_set_active (
+    self->terminal_button, (state & PANE_TERMINAL) != 0);
+
+  /* Repository panes share one slot. Clear both first so restoring the same
+   * kind after a chat switch still runs its open path against the new chat. */
+  gtk_toggle_button_set_active (self->file_button, FALSE);
+  gtk_toggle_button_set_active (self->diff_button, FALSE);
+  if ((state & PANE_FILES) != 0)
+    gtk_toggle_button_set_active (self->file_button, TRUE);
+  else if ((state & PANE_DIFF) != 0)
+    gtk_toggle_button_set_active (self->diff_button, TRUE);
+  self->syncing_panes = FALSE;
+}
+
 /*
  * Writes which panes this chat is working with.
  *
@@ -2995,7 +3099,12 @@ remember_panes (XdChatView *self)
 {
   g_autoptr (GError) error = NULL;
 
-  if (self->syncing_panes || self->chat == NULL || self->remote != NULL)
+  if (self->syncing_panes || self->chat == NULL)
+    return;
+
+  store_panes (self);
+
+  if (self->remote != NULL)
     return;
 
   if (!xd_storage_set_panes (self->storage, xd_node_get_chat_id (self->chat),
@@ -3077,6 +3186,8 @@ on_file_toggled (GtkToggleButton *button,
 {
   XdChatView *self = user_data;
   gboolean shown = gtk_toggle_button_get_active (button);
+
+  remember_panes (self);
 
   if (!shown)
     {
@@ -3264,12 +3375,14 @@ update_context_bar (XdChatView   *self,
     xd_diff_pane_set_workdir (self->diff, have_workdir ? workdir : NULL);
     xd_git_actions_set_workdir (self->git_actions, have_workdir ? workdir : NULL);
 
-    /* The panes belong to the chat, so opening one brings them back. */
-    self->syncing_panes = TRUE;
-    gtk_toggle_button_set_active (self->terminal_button, chat->terminal_open);
-    gtk_toggle_button_set_active (self->file_button, FALSE);
-    gtk_toggle_button_set_active (self->diff_button, chat->diff_open);
-    self->syncing_panes = FALSE;
+    /* SQLite supplies the existing local default; the per-device state also
+     * remembers which repository pane occupied the shared side slot. */
+    apply_panes (
+      self,
+      saved_panes (
+        self,
+        (chat->terminal_open ? PANE_TERMINAL : PANE_NONE) |
+        (chat->diff_open ? PANE_DIFF : PANE_NONE)));
 
     gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), have_workdir);
     gtk_widget_set_sensitive (GTK_WIDGET (self->file_button), have_workdir);
@@ -3569,16 +3682,6 @@ set_local_controls_visible (XdChatView *self,
                             gboolean    visible)
 {
   gtk_widget_set_visible (GTK_WIDGET (self->git_actions), visible);
-
-  if (visible)
-    return;
-
-  /* Closing them without writing the panes back: they are being closed
-   * because of where the chat lives, not because the user shut them. */
-  self->syncing_panes = TRUE;
-  gtk_toggle_button_set_active (self->file_button, FALSE);
-  gtk_toggle_button_set_active (self->diff_button, FALSE);
-  self->syncing_panes = FALSE;
 }
 
 void
@@ -3586,14 +3689,18 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
                                XdNode         *chat,
                                XdRemoteClient *client)
 {
+  gboolean changed;
+
   g_return_if_fail (XD_IS_CHAT_VIEW (self));
   g_return_if_fail (XD_IS_NODE (chat));
   g_return_if_fail (XD_IS_REMOTE_CLIENT (client));
 
+  changed = self->chat != chat || self->remote != client;
+
   /* A different chat must not keep the old one's transcript while its first
    * remote snapshot is on the wire. Refreshes of the same chat do keep their
    * current frame until the replacement is complete. */
-  if (self->chat != chat || self->remote != client)
+  if (changed)
     {
       self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
       self->follow_bottom = TRUE;
@@ -3613,12 +3720,10 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
   set_local_controls_visible (self, FALSE);
   xd_terminal_panel_set_chat (self->terminal, xd_node_get_chat_id (chat));
 
-  /* Pane visibility belongs to this device, not daemon state. Start closed
-   * when entering a remote chat; running ptys remain alive on the daemon. */
-  self->syncing_panes = TRUE;
-  gtk_toggle_button_set_active (self->terminal_button, FALSE);
-  gtk_toggle_button_set_active (self->file_button, FALSE);
-  self->syncing_panes = FALSE;
+  /* Pane visibility belongs to this device, not daemon state. Keep the old
+   * frame during a refresh; a new chat restores after its options arrive. */
+  if (changed)
+    apply_panes (self, PANE_NONE);
   gtk_widget_set_sensitive (GTK_WIDGET (self->terminal_button), FALSE);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->terminal_button),
                                "Reading the remote working directory");
@@ -3654,6 +3759,7 @@ xd_chat_view_set_chat (XdChatView *self,
       self->transcript_limit = TRANSCRIPT_PAGE_SIZE;
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
+      apply_panes (self, PANE_NONE);
     }
 
   /* Whatever a daemon was still going to say about the last chat is no longer
@@ -3674,7 +3780,6 @@ xd_chat_view_set_chat (XdChatView *self,
   if (chat == NULL)
     {
       xd_terminal_panel_set_chat (self->terminal, NULL);
-      gtk_toggle_button_set_active (self->file_button, FALSE);
       clear_transcript (self);
       gtk_stack_set_visible_child_name (self->stack, "empty");
       gtk_widget_set_visible (self->composer_area, FALSE);
