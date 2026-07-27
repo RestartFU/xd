@@ -28,6 +28,30 @@ normalize_worktree_path (const char *path)
   return g_canonicalize_filename (native, NULL);
 }
 
+static char *
+current_worktree_path (const char *cwd)
+{
+  g_autoptr (GSubprocessLauncher) launcher =
+    g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                               G_SUBPROCESS_FLAGS_STDERR_SILENCE);
+  g_autoptr (GSubprocess) process = NULL;
+  g_autofree char *stdout_text = NULL;
+  const char *argv[] = {
+    "git", "rev-parse", "--show-toplevel", NULL
+  };
+
+  g_subprocess_launcher_set_cwd (launcher, cwd);
+  process = g_subprocess_launcher_spawnv (launcher, argv, NULL);
+  if (process == NULL ||
+      !g_subprocess_communicate_utf8 (
+        process, NULL, NULL, &stdout_text, NULL, NULL) ||
+      !g_subprocess_get_successful (process))
+    return NULL;
+
+  g_strchomp (stdout_text);
+  return normalize_worktree_path (stdout_text);
+}
+
 static gboolean
 run_git (const char  *cwd,
          const char *const *argv,
@@ -159,6 +183,7 @@ xd_worktree_list (const char  *workdir,
   g_autoptr (GBytes) stdout_bytes = NULL;
   g_autoptr (GBytes) stderr_bytes = NULL;
   g_autoptr (GPtrArray) result = NULL;
+  g_autofree char *current_path = NULL;
   XdWorktreeInfo *item = NULL;
   const char *argv[] = {
     "git", "worktree", "list", "--porcelain", "-z", NULL
@@ -202,6 +227,7 @@ xd_worktree_list (const char  *workdir,
 
   result = g_ptr_array_new_with_free_func (
     (GDestroyNotify) xd_worktree_info_free);
+  current_path = current_worktree_path (git->root);
   data = g_bytes_get_data (stdout_bytes, &length);
 
   while (offset < length)
@@ -217,7 +243,9 @@ xd_worktree_list (const char  *workdir,
       if (token_length == 0)
         {
           XdWorktreeInfo *finished =
-            finish_worktree (item, result->len, git->root);
+            finish_worktree (
+              item, result->len,
+              current_path != NULL ? current_path : git->root);
 
           if (finished != NULL)
             g_ptr_array_add (result, finished);
@@ -247,7 +275,9 @@ xd_worktree_list (const char  *workdir,
   if (item != NULL)
     {
       XdWorktreeInfo *finished =
-        finish_worktree (item, result->len, git->root);
+        finish_worktree (
+          item, result->len,
+          current_path != NULL ? current_path : git->root);
 
       if (finished != NULL)
         g_ptr_array_add (result, finished);
