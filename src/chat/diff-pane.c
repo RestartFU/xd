@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "util/unified-diff.h"
+
 /*
  * What the agent changed, without leaving the chat.
  *
@@ -23,8 +25,10 @@ struct _XdDiffPane
   GCancellable *cancellable;
 
   GtkListBox *files;
-  GtkTextView *diff;
+  GtkBox *diff_lines;
   GtkLabel *summary;
+  GtkLabel *diff_path;
+  GtkLabel *diff_stats;
   GtkWidget *stack;
   GtkWidget *changes;
 };
@@ -271,6 +275,108 @@ show_read_error (XdDiffPane *self,
 /* --- the diff of one file -------------------------------------------------- */
 
 static void
+clear_diff (XdDiffPane *self)
+{
+  GtkWidget *child;
+
+  while ((child = gtk_widget_get_first_child (
+            GTK_WIDGET (self->diff_lines))) != NULL)
+    gtk_box_remove (self->diff_lines, child);
+}
+
+static GtkWidget *
+line_number (guint number)
+{
+  g_autofree char *text =
+    number > 0 ? g_strdup_printf ("%u", number) : NULL;
+  GtkWidget *label = gtk_label_new (text);
+
+  gtk_label_set_xalign (GTK_LABEL (label), 1.0f);
+  gtk_label_set_width_chars (GTK_LABEL (label), 4);
+  gtk_widget_add_css_class (label, "xd-diff-gutter");
+  gtk_widget_add_css_class (label, "dim-label");
+  return label;
+}
+
+static char *
+hunk_title (const XdDiffLine *line)
+{
+  const char *context = strstr (line->text + 2, "@@");
+
+  if (context != NULL)
+    {
+      context += 2;
+      while (*context == ' ')
+        context++;
+    }
+
+  if (context != NULL && *context != '\0')
+    return g_strdup_printf ("Old line %u · New line %u · %s",
+                            line->old_line, line->new_line, context);
+
+  return g_strdup_printf ("Old line %u · New line %u",
+                          line->old_line, line->new_line);
+}
+
+static void
+append_diff_line (XdDiffPane      *self,
+                  const XdDiffLine *line)
+{
+  GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *marker;
+  GtkWidget *content;
+  g_autofree char *title = NULL;
+  const char *marker_text = " ";
+  const char *class_name = "xd-diff-context";
+
+  switch (line->kind)
+    {
+    case XD_DIFF_LINE_ADDED:
+      marker_text = "+";
+      class_name = "xd-diff-added";
+      break;
+    case XD_DIFF_LINE_REMOVED:
+      marker_text = "−";
+      class_name = "xd-diff-removed";
+      break;
+    case XD_DIFF_LINE_HUNK:
+      marker_text = "◆";
+      class_name = "xd-diff-hunk";
+      title = hunk_title (line);
+      break;
+    case XD_DIFF_LINE_META:
+      marker_text = "·";
+      class_name = "xd-diff-meta";
+      break;
+    case XD_DIFF_LINE_CONTEXT:
+    default:
+      break;
+    }
+
+  gtk_box_append (GTK_BOX (row), line_number (
+    line->kind == XD_DIFF_LINE_HUNK ? 0 : line->old_line));
+  gtk_box_append (GTK_BOX (row), line_number (
+    line->kind == XD_DIFF_LINE_HUNK ? 0 : line->new_line));
+
+  marker = gtk_label_new (marker_text);
+  gtk_label_set_width_chars (GTK_LABEL (marker), 2);
+  gtk_widget_add_css_class (marker, "xd-diff-marker");
+  gtk_box_append (GTK_BOX (row), marker);
+
+  content = gtk_label_new (title != NULL ? title : line->text);
+  gtk_label_set_xalign (GTK_LABEL (content), 0.0f);
+  gtk_label_set_selectable (GTK_LABEL (content), TRUE);
+  gtk_label_set_single_line_mode (GTK_LABEL (content), TRUE);
+  gtk_widget_set_hexpand (content, TRUE);
+  gtk_widget_add_css_class (content, "xd-diff-code");
+  gtk_box_append (GTK_BOX (row), content);
+
+  gtk_widget_add_css_class (row, "xd-diff-line");
+  gtk_widget_add_css_class (row, class_name);
+  gtk_box_append (self->diff_lines, row);
+}
+
+static void
 on_diff_read (GObject      *source,
               GAsyncResult *result,
               gpointer      user_data)
@@ -278,9 +384,9 @@ on_diff_read (GObject      *source,
   DiffRequest *request = user_data;
   g_autofree char *output = NULL;
   g_autoptr (GError) error = NULL;
-  GtkTextBuffer *buffer;
-  GtkTextIter at;
-  g_auto (GStrv) lines = NULL;
+  g_autoptr (GPtrArray) lines = NULL;
+  guint additions = 0;
+  guint deletions = 0;
 
   if (!finish_git_read (source, result, &output, &error))
     {
@@ -291,37 +397,18 @@ on_diff_read (GObject      *source,
       return;
     }
 
-  buffer = gtk_text_view_get_buffer (request->pane->diff);
-  gtk_text_buffer_set_text (buffer, "", 0);
-  gtk_text_buffer_get_start_iter (buffer, &at);
+  lines = xd_unified_diff_parse (output, &additions, &deletions);
+  clear_diff (request->pane);
 
-  lines = g_strsplit (output != NULL ? output : "", "\n", -1);
+  for (guint i = 0; i < lines->len; i++)
+    append_diff_line (request->pane, g_ptr_array_index (lines, i));
 
-  for (gsize i = 0; lines[i] != NULL; i++)
-    {
-      const char *line = lines[i];
-      const char *tag = NULL;
+  {
+    g_autofree char *stats = g_strdup_printf (
+      "+%u  −%u", additions, deletions);
 
-      /* "+++"/"---" name the file and are not changes, so they read as
-       * headers rather than as a whole file added and removed. */
-      if (g_str_has_prefix (line, "diff ") || g_str_has_prefix (line, "index ") ||
-          g_str_has_prefix (line, "+++") || g_str_has_prefix (line, "---") ||
-          g_str_has_prefix (line, "new file") || g_str_has_prefix (line, "deleted file"))
-        tag = "header";
-      else if (g_str_has_prefix (line, "@@"))
-        tag = "hunk";
-      else if (line[0] == '+')
-        tag = "added";
-      else if (line[0] == '-')
-        tag = "removed";
-
-      if (tag != NULL)
-        gtk_text_buffer_insert_with_tags_by_name (buffer, &at, line, -1, tag, NULL);
-      else
-        gtk_text_buffer_insert (buffer, &at, line, -1);
-
-      gtk_text_buffer_insert (buffer, &at, "\n", 1);
-    }
+    gtk_label_set_label (request->pane->diff_stats, stats);
+  }
 
   diff_request_free (request);
 }
@@ -340,6 +427,8 @@ load_diff (XdDiffPane *self,
   request->pane = self;
   request->path = g_strdup (path);
   request->untracked = untracked;
+  gtk_label_set_label (self->diff_path, path);
+  gtk_label_set_label (self->diff_stats, "Loading…");
 
   if (self->branch_mode)
     {
@@ -394,24 +483,47 @@ add_file_row (XdDiffPane *self,
               const char *path)
 {
   GtkWidget *row = gtk_list_box_row_new ();
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-  GtkWidget *name = gtk_label_new (path);
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
+  GtkWidget *icon = gtk_image_new_from_icon_name ("text-x-generic-symbolic");
+  GtkWidget *identity = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
+  g_autofree char *basename = g_path_get_basename (path);
+  g_autofree char *directory = g_path_get_dirname (path);
+  GtkWidget *name = gtk_label_new (basename);
+  GtkWidget *location = gtk_label_new (directory);
   GtkWidget *state = gtk_label_new (status_label (code));
 
   gtk_label_set_xalign (GTK_LABEL (name), 0.0f);
-  gtk_label_set_ellipsize (GTK_LABEL (name), PANGO_ELLIPSIZE_START);
-  gtk_widget_set_hexpand (name, TRUE);
-  gtk_widget_set_tooltip_text (name, path);
+  gtk_label_set_ellipsize (GTK_LABEL (name), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_widget_add_css_class (name, "heading");
 
-  gtk_widget_add_css_class (state, "dim-label");
+  gtk_label_set_xalign (GTK_LABEL (location), 0.0f);
+  gtk_label_set_ellipsize (GTK_LABEL (location), PANGO_ELLIPSIZE_START);
+  gtk_widget_add_css_class (location, "caption");
+  gtk_widget_add_css_class (location, "dim-label");
+  gtk_widget_set_visible (location, g_strcmp0 (directory, ".") != 0);
+
+  gtk_widget_set_hexpand (identity, TRUE);
+  gtk_widget_set_tooltip_text (identity, path);
+  gtk_box_append (GTK_BOX (identity), name);
+  gtk_box_append (GTK_BOX (identity), location);
+
   gtk_widget_add_css_class (state, "caption");
+  gtk_widget_add_css_class (state, "xd-diff-badge");
+  if (code[0] == '?' || code[0] == 'A' || code[1] == 'A')
+    gtk_widget_add_css_class (state, "xd-diff-badge-added");
+  else if (code[0] == 'D' || code[1] == 'D')
+    gtk_widget_add_css_class (state, "xd-diff-badge-removed");
+  else if (code[0] == 'R')
+    gtk_widget_add_css_class (state, "xd-diff-badge-renamed");
 
-  gtk_box_append (GTK_BOX (box), name);
+  gtk_widget_add_css_class (icon, "dim-label");
+  gtk_box_append (GTK_BOX (box), icon);
+  gtk_box_append (GTK_BOX (box), identity);
   gtk_box_append (GTK_BOX (box), state);
-  gtk_widget_set_margin_start (box, 8);
-  gtk_widget_set_margin_end (box, 8);
-  gtk_widget_set_margin_top (box, 4);
-  gtk_widget_set_margin_bottom (box, 4);
+  gtk_widget_set_margin_start (box, 10);
+  gtk_widget_set_margin_end (box, 10);
+  gtk_widget_set_margin_top (box, 7);
+  gtk_widget_set_margin_bottom (box, 7);
 
   gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
   g_object_set_data_full (G_OBJECT (row), "path", g_strdup (path), g_free);
@@ -440,7 +552,9 @@ on_status_read (GObject      *source,
     }
 
   gtk_list_box_remove_all (self->files);
-  gtk_text_buffer_set_text (gtk_text_view_get_buffer (self->diff), "", 0);
+  clear_diff (self);
+  gtk_label_set_label (self->diff_path, "Select a file");
+  gtk_label_set_label (self->diff_stats, "");
 
   lines = g_strsplit (output != NULL ? output : "", "\n", -1);
 
@@ -656,9 +770,10 @@ xd_diff_pane_init (XdDiffPane *self)
   GtkWidget *refresh = gtk_button_new_from_icon_name ("view-refresh-symbolic");
   GtkWidget *files_window = gtk_scrolled_window_new ();
   GtkWidget *diff_window = gtk_scrolled_window_new ();
+  GtkWidget *diff_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *diff_header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *empty = adw_status_page_new ();
   GtkWidget *changes = gtk_paned_new (GTK_ORIENTATION_VERTICAL);
-  GtkTextBuffer *buffer;
 
   self->summary = GTK_LABEL (gtk_label_new ("No changes"));
   gtk_label_set_xalign (self->summary, 0.0f);
@@ -703,7 +818,7 @@ xd_diff_pane_init (XdDiffPane *self)
 
   self->files = GTK_LIST_BOX (gtk_list_box_new ());
   gtk_list_box_set_selection_mode (self->files, GTK_SELECTION_SINGLE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->files), "navigation-sidebar");
+  gtk_widget_add_css_class (GTK_WIDGET (self->files), "xd-diff-files");
   g_signal_connect (self->files, "row-selected", G_CALLBACK (on_file_selected), self);
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (files_window),
@@ -711,22 +826,38 @@ xd_diff_pane_init (XdDiffPane *self)
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (files_window),
                                   GTK_POLICY_NEVER, GTK_POLICY_EXTERNAL);
 
-  self->diff = GTK_TEXT_VIEW (gtk_text_view_new ());
-  gtk_text_view_set_editable (self->diff, FALSE);
-  gtk_text_view_set_monospace (self->diff, TRUE);
-  gtk_text_view_set_left_margin (self->diff, 8);
-  gtk_text_view_set_top_margin (self->diff, 4);
+  self->diff_path = GTK_LABEL (gtk_label_new ("Select a file"));
+  gtk_label_set_xalign (self->diff_path, 0.0f);
+  gtk_label_set_ellipsize (self->diff_path, PANGO_ELLIPSIZE_MIDDLE);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->diff_path), TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->diff_path), "heading");
 
-  buffer = gtk_text_view_get_buffer (self->diff);
-  gtk_text_buffer_create_tag (buffer, "added", "foreground", "#57e389", NULL);
-  gtk_text_buffer_create_tag (buffer, "removed", "foreground", "#f66151", NULL);
-  gtk_text_buffer_create_tag (buffer, "hunk", "foreground", "#78aeed", NULL);
-  gtk_text_buffer_create_tag (buffer, "header", "weight", PANGO_WEIGHT_BOLD, NULL);
+  self->diff_stats = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->diff_stats), "caption");
+  gtk_widget_add_css_class (GTK_WIDGET (self->diff_stats), "dim-label");
+
+  gtk_box_append (GTK_BOX (diff_header), GTK_WIDGET (self->diff_path));
+  gtk_box_append (GTK_BOX (diff_header), GTK_WIDGET (self->diff_stats));
+  gtk_widget_set_margin_start (diff_header, 10);
+  gtk_widget_set_margin_end (diff_header, 10);
+  gtk_widget_set_margin_top (diff_header, 7);
+  gtk_widget_set_margin_bottom (diff_header, 7);
+
+  self->diff_lines = GTK_BOX (
+    gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+  gtk_widget_set_valign (GTK_WIDGET (self->diff_lines), GTK_ALIGN_START);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->diff_lines), TRUE);
 
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (diff_window),
                                   GTK_POLICY_EXTERNAL, GTK_POLICY_EXTERNAL);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (diff_window),
-                                 GTK_WIDGET (self->diff));
+                                 GTK_WIDGET (self->diff_lines));
+  gtk_widget_set_vexpand (diff_window, TRUE);
+
+  gtk_box_append (GTK_BOX (diff_section), diff_header);
+  gtk_box_append (GTK_BOX (diff_section),
+                  gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
+  gtk_box_append (GTK_BOX (diff_section), diff_window);
 
   /*
    * The list takes what it needs before it starts scrolling.
@@ -740,7 +871,7 @@ xd_diff_pane_init (XdDiffPane *self)
   gtk_widget_set_vexpand (files_window, FALSE);
 
   gtk_paned_set_start_child (GTK_PANED (changes), files_window);
-  gtk_paned_set_end_child (GTK_PANED (changes), diff_window);
+  gtk_paned_set_end_child (GTK_PANED (changes), diff_section);
   gtk_paned_set_resize_start_child (GTK_PANED (changes), TRUE);
   gtk_paned_set_shrink_start_child (GTK_PANED (changes), FALSE);
   gtk_paned_set_resize_end_child (GTK_PANED (changes), TRUE);

@@ -387,6 +387,40 @@ static const char *XD_STYLE =
   ".xd-code textview.xd-diff, .xd-code textview.xd-diff text"
   " { background: transparent; font-size: 0.88em; }\n"
 
+  /* Structured diff pane: file cards above line-by-line changes. Git's raw
+   * plumbing stays in the parser instead of becoming the interface. */
+  ".xd-diff-files { padding: 5px; background: transparent; }\n"
+  ".xd-diff-files > row { border-radius: 8px; margin: 2px 0; }\n"
+  ".xd-diff-files > row:selected { background: alpha(#ffffff, 0.09); }\n"
+  ".xd-diff-files > row:hover:not(:selected)"
+  " { background: alpha(#ffffff, 0.05); }\n"
+  ".xd-diff-badge { border-radius: 9999px; padding: 2px 7px;"
+  " background: alpha(#ffffff, 0.07); }\n"
+  ".xd-diff-badge-added { color: #57e389;"
+  " background: alpha(#57e389, 0.10); }\n"
+  ".xd-diff-badge-removed { color: #f66151;"
+  " background: alpha(#f66151, 0.10); }\n"
+  ".xd-diff-badge-renamed { color: #78aeed;"
+  " background: alpha(#78aeed, 0.10); }\n"
+  ".xd-diff-line { min-height: 24px; }\n"
+  ".xd-diff-line label { padding-top: 3px; padding-bottom: 3px; }\n"
+  ".xd-diff-gutter { min-width: 42px; padding-left: 7px;"
+  " padding-right: 7px; background: alpha(#ffffff, 0.018);"
+  " border-right: 1px solid alpha(#ffffff, 0.04);"
+  " font-family: \"JetBrains Mono\", monospace; font-size: 0.80em; }\n"
+  ".xd-diff-marker { font-family: \"JetBrains Mono\", monospace;"
+  " font-weight: 700; }\n"
+  ".xd-diff-code { padding-left: 6px; padding-right: 12px;"
+  " font-family: \"JetBrains Mono\", monospace; font-size: 0.86em; }\n"
+  ".xd-diff-added { background: alpha(#57e389, 0.09); }\n"
+  ".xd-diff-added .xd-diff-marker { color: #57e389; }\n"
+  ".xd-diff-removed { background: alpha(#f66151, 0.09); }\n"
+  ".xd-diff-removed .xd-diff-marker { color: #f66151; }\n"
+  ".xd-diff-hunk { margin-top: 8px; background: alpha(#3584e4, 0.09);"
+  " color: #78aeed; }\n"
+  ".xd-diff-meta { color: alpha(#ffffff, 0.55);"
+  " background: alpha(#ffffff, 0.025); }\n"
+
   /* Selectable, but not editable-looking: a caret blinking in a message
    * suggests typing somewhere nothing can be typed. Selection keeps its
    * colour; only the caret goes. */
