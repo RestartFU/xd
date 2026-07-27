@@ -28,6 +28,8 @@ sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/egl_vendor.json.in" > "$RUNTIME/egl_vendor.j
 export XD_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
 export XD_HOST_LANG="${LANG-}"
 export XD_HOST_LC_ALL="${LC_ALL-}"
+export XD_HOST_LOCPATH="${LOCPATH-}"
+export XD_HOST_LOCALE_ARCHIVE="${LOCALE_ARCHIVE-}"
 export XD_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
 export XD_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
 export XD_HOST_GTK_PATH="${GTK_PATH-}"

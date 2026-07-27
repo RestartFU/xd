@@ -13,6 +13,7 @@ xd_tests = {
   'markdown': 'test-markdown.c',
   'ask': 'test-ask.c',
   'git-diff': 'test-git-diff.c',
+  'host-launch': 'test-host-launch.c',
   'subagent-tool': 'test-subagent-tool.c',
   'unified-diff': 'test-unified-diff.c',
   'workflow-run': 'test-workflow-run.c',

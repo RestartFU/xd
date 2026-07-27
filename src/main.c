@@ -104,7 +104,8 @@ static void
 prepare_macos_runtime (void)
 {
   static const char *host_names[] = {
-    "XDG_DATA_DIRS", "LANG", "LC_ALL", "GIO_EXTRA_MODULES",
+    "XDG_DATA_DIRS", "LANG", "LC_ALL", "LOCPATH", "LOCALE_ARCHIVE",
+    "GIO_EXTRA_MODULES",
     "GTK_IM_MODULE", "GTK_PATH",
   };
   uint32_t size = 0;

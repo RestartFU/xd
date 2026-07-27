@@ -4,7 +4,7 @@
 
 /* Overridden by the launcher, and recorded there as XD_HOST_<name>. */
 static const char *rewritten[] = {
-  "XDG_DATA_DIRS", "LANG", "LC_ALL",
+  "XDG_DATA_DIRS", "LANG", "LC_ALL", "LOCPATH", "LOCALE_ARCHIVE",
   "GIO_EXTRA_MODULES", "GTK_IM_MODULE", "GTK_PATH",
 };
 
@@ -26,8 +26,13 @@ xd_host_environ (void)
       g_autofree char *key = g_strconcat ("XD_HOST_", rewritten[i], NULL);
       const char *value = g_environ_getenv (env, key);
 
+      /* A development build has no launcher markers and already runs in the
+       * host environment. Leave those values alone. */
+      if (value == NULL)
+        continue;
+
       /* An empty recorded value means the host did not set it either. */
-      if (value != NULL && *value != '\0')
+      if (*value != '\0')
         env = g_environ_setenv (env, rewritten[i], value, TRUE);
       else
         env = g_environ_unsetenv (env, rewritten[i]);
