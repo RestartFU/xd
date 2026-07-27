@@ -54,9 +54,9 @@ run_git (const char        *workdir,
       !g_subprocess_communicate_utf8 (
         process, NULL, NULL, &output, &stderr_text, &error))
     {
-      g_printerr ("xd: cannot run git %s: %s\n",
-                  argv[1] != NULL ? argv[1] : "",
-                  error != NULL ? error->message : "git did not start");
+      g_debug ("cannot run git %s: %s",
+               argv[1] != NULL ? argv[1] : "",
+               error != NULL ? error->message : "git did not start");
       g_free (output);
       return NULL;
     }
@@ -64,10 +64,10 @@ run_git (const char        *workdir,
   if (!g_subprocess_get_successful (process) &&
       !(accept_difference && g_subprocess_get_exit_status (process) == 1))
     {
-      g_printerr ("xd: git %s failed (%d): %s",
-                  argv[1] != NULL ? argv[1] : "",
-                  g_subprocess_get_exit_status (process),
-                  stderr_text != NULL ? stderr_text : "no error output\n");
+      g_debug ("git %s failed (%d): %s",
+               argv[1] != NULL ? argv[1] : "",
+               g_subprocess_get_exit_status (process),
+               stderr_text != NULL ? stderr_text : "no error output");
       g_free (output);
       return NULL;
     }
@@ -154,7 +154,7 @@ snapshot_tree (const char *root)
   descriptor = g_mkstemp (index_path);
   if (descriptor < 0)
     {
-      g_warning ("cannot make temporary Git index at %s", index_path);
+      g_debug ("cannot make temporary Git index at %s", index_path);
       return NULL;
     }
 

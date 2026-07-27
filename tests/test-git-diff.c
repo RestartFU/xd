@@ -49,7 +49,13 @@ static void
 test_capture_only_change_since_previous_event (void)
 {
   g_autoptr (GError) error = NULL;
+#ifdef G_OS_WIN32
+  g_autofree char *cwd = g_get_current_dir ();
+  g_autofree char *dir =
+    g_build_filename (cwd, "xd-git-diff-XXXXXX", NULL);
+#else
   g_autofree char *dir = g_dir_make_tmp ("xd-git-diff-XXXXXX", &error);
+#endif
   g_autofree char *tracked = NULL;
   g_autofree char *preexisting = NULL;
   g_autofree char *created = NULL;
@@ -65,7 +71,16 @@ test_capture_only_change_since_previous_event (void)
     "commit", "-q", "-m", "initial", NULL
   };
 
+#ifdef G_OS_WIN32
+  /*
+   * MSYS exposes /tmp, but native GLib subprocesses cannot reliably chdir to
+   * that virtual path.  Meson's native working directory is writable and
+   * gives the test the same path form the application receives.
+   */
+  g_assert_nonnull (g_mkdtemp (dir));
+#else
   g_assert_no_error (error);
+#endif
   tracked = g_build_filename (dir, "tracked.txt", NULL);
   preexisting = g_build_filename (dir, "preexisting.txt", NULL);
   created = g_build_filename (dir, "new file.txt", NULL);
@@ -129,8 +144,6 @@ int
 main (int   argc,
       char *argv[])
 {
-  /* Preserve Git's stderr in failed CI logs without making normal runs noisy. */
-  g_setenv ("G_MESSAGES_DEBUG", "xd", TRUE);
   g_test_init (&argc, &argv, NULL);
 
   g_test_add_func ("/git-diff/captures-only-current-call",
