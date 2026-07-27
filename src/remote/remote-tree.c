@@ -436,13 +436,17 @@ typedef struct
   XdRemoteTree *tree;
   char *heading;        /* what to say if the daemon says no */
   gboolean opens_chat;  /* the answer names a chat that should be opened */
+  XdNode *renamed_node; /* optimistic rename to undo if the daemon says no */
+  char *old_name;
 } Intent;
 
 static void
 intent_free (Intent *intent)
 {
   g_clear_object (&intent->tree);
+  g_clear_object (&intent->renamed_node);
   g_free (intent->heading);
+  g_free (intent->old_name);
   g_free (intent);
 }
 
@@ -461,8 +465,13 @@ on_intent_answered (GObject      *source,
   if (reply == NULL)
     {
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        g_signal_emit (self, signals[SIGNAL_FAILED], 0, intent->heading,
-                       error->message);
+        {
+          if (intent->renamed_node != NULL)
+            xd_node_set_name (intent->renamed_node, intent->old_name);
+
+          g_signal_emit (self, signals[SIGNAL_FAILED], 0, intent->heading,
+                         error->message);
+        }
 
       intent_free (intent);
       return;
@@ -480,11 +489,12 @@ on_intent_answered (GObject      *source,
   intent_free (intent);
 }
 
-static void
+static gboolean
 send_intent (XdRemoteTree *self,
              JsonBuilder  *builder,
              const char   *heading,
-             gboolean      opens_chat)
+             gboolean      opens_chat,
+             XdNode       *renamed_node)
 {
   g_autoptr (JsonNode) request = json_builder_get_root (builder);
   Intent *intent;
@@ -493,16 +503,22 @@ send_intent (XdRemoteTree *self,
     {
       g_signal_emit (self, signals[SIGNAL_FAILED], 0, heading,
                      "The daemon is not connected.");
-      return;
+      return FALSE;
     }
 
   intent = g_new0 (Intent, 1);
   intent->tree = g_object_ref (self);
   intent->heading = g_strdup (heading);
   intent->opens_chat = opens_chat;
+  if (renamed_node != NULL)
+    {
+      intent->renamed_node = g_object_ref (renamed_node);
+      intent->old_name = g_strdup (xd_node_get_name (renamed_node));
+    }
 
   xd_remote_client_call_async (self->client, request, self->cancellable,
                                on_intent_answered, intent);
+  return TRUE;
 }
 
 /* An op naming the folder or chat it acts on, which is most of them. A NULL
@@ -562,7 +578,7 @@ xd_remote_tree_create_folder (XdRemoteTree *self,
   json_builder_add_string_value (builder, name);
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Could not create the folder", FALSE);
+  send_intent (self, builder, "Could not create the folder", FALSE, NULL);
 }
 
 void
@@ -582,7 +598,9 @@ xd_remote_tree_rename_folder (XdRemoteTree *self,
   json_builder_add_string_value (builder, name);
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Could not rename the folder", FALSE);
+  if (send_intent (
+        self, builder, "Could not rename the folder", FALSE, folder))
+    xd_node_set_name (folder, name);
 }
 
 void
@@ -606,7 +624,7 @@ xd_remote_tree_move_folder (XdRemoteTree *self,
 
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Cannot Move the Folder", FALSE);
+  send_intent (self, builder, "Cannot Move the Folder", FALSE, NULL);
 }
 
 void
@@ -621,7 +639,8 @@ xd_remote_tree_trash_folder (XdRemoteTree *self,
   builder = intent_for ("trash-folder", "folder", folder);
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Could not move the folder to the trash", FALSE);
+  send_intent (
+    self, builder, "Could not move the folder to the trash", FALSE, NULL);
 }
 
 void
@@ -862,7 +881,7 @@ xd_remote_tree_create_chat (XdRemoteTree *self,
 
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Could not start the chat", TRUE);
+  send_intent (self, builder, "Could not start the chat", TRUE, NULL);
 }
 
 /* --- browsing the daemon's directories -------------------------------------- */
@@ -942,7 +961,9 @@ xd_remote_tree_rename_chat (XdRemoteTree *self,
   json_builder_add_string_value (builder, title);
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Could not rename the chat", FALSE);
+  if (send_intent (
+        self, builder, "Could not rename the chat", FALSE, chat))
+    xd_node_set_name (chat, title);
 }
 
 void
@@ -957,7 +978,7 @@ xd_remote_tree_delete_chat (XdRemoteTree *self,
   builder = intent_for ("delete-chat", "chat", chat);
   json_builder_end_object (builder);
 
-  send_intent (self, builder, "Could not delete the chat", FALSE);
+  send_intent (self, builder, "Could not delete the chat", FALSE, NULL);
 }
 
 /*

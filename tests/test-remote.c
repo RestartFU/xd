@@ -850,6 +850,8 @@ wait_until (gboolean (*ready) (gpointer),
 typedef struct
 {
   XdNode *node;
+  XdStorage *storage;
+  const char *chat_id;
   guint count;
   const char *name;
 } Expected;
@@ -863,11 +865,13 @@ has_children (gpointer data)
 }
 
 static gboolean
-is_named (gpointer data)
+stored_chat_is_named (gpointer data)
 {
   const Expected *expected = data;
+  g_autoptr (XdChat) chat =
+    xd_storage_get_chat (expected->storage, expected->chat_id, NULL);
 
-  return g_strcmp0 (xd_node_get_name (expected->node), expected->name) == 0;
+  return chat != NULL && g_strcmp0 (chat->title, expected->name) == 0;
 }
 
 /* Waits for @node to hold exactly @count rows. */
@@ -878,15 +882,6 @@ wait_for_children (XdNode *node,
   Expected expected = { .node = node, .count = count };
 
   wait_until (has_children, &expected);
-}
-
-static void
-wait_for_name (XdNode     *node,
-               const char *name)
-{
-  Expected expected = { .node = node, .name = name };
-
-  wait_until (is_named, &expected);
 }
 
 /*
@@ -935,7 +930,7 @@ test_folders_and_chats_are_managed_from_the_client (void)
     g_assert_cmpstr (xd_node_get_name (proxy), ==, "Proxy");
 
     xd_remote_tree_rename_folder (tree, proxy, "Gateway");
-    wait_for_name (proxy, "Gateway");
+    g_assert_cmpstr (xd_node_get_name (proxy), ==, "Gateway");
 
     /* The same node, because the folder's id travelled with the directory. */
     g_assert_true (child_at (made, 0) == proxy);
@@ -982,8 +977,21 @@ test_folders_and_chats_are_managed_from_the_client (void)
       g_assert_nonnull (record->model);
     }
 
-    xd_remote_tree_rename_chat (tree, created.chat, "renamed from the client");
-    wait_for_name (created.chat, "renamed from the client");
+    {
+      Expected stored = {
+        .storage = daemon.storage,
+        .chat_id = chat_id,
+        .name = "renamed from the client",
+      };
+
+      xd_remote_tree_rename_chat (
+        tree, created.chat, "renamed from the client");
+
+      /* The UI changes now; the daemon remains the durable source of truth. */
+      g_assert_cmpstr (
+        xd_node_get_name (created.chat), ==, "renamed from the client");
+      wait_until (stored_chat_is_named, &stored);
+    }
 
     /* Deleting it takes the row away, and says so for whoever is reading it. */
     {

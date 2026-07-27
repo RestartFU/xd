@@ -98,6 +98,7 @@ struct _XdChatView
    * borrowing it means reading freed memory the moment the two disagree.
    */
   XdNode *chat;
+  GBinding *title_binding;
 
   /*
    * Set while the chat on screen belongs to a daemon.
@@ -3810,6 +3811,16 @@ set_local_controls_visible (XdChatView *self,
   gtk_widget_set_visible (GTK_WIDGET (self->git_actions), visible);
 }
 
+static void
+unbind_chat_title (XdChatView *self)
+{
+  if (self->title_binding == NULL)
+    return;
+
+  g_binding_unbind (self->title_binding);
+  self->title_binding = NULL;
+}
+
 void
 xd_chat_view_show_remote_chat (XdChatView     *self,
                                XdNode         *chat,
@@ -3840,7 +3851,11 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
 
   set_queued_text (self, NULL);
   update_context_meter (self, 0, 0);
+  unbind_chat_title (self);
   g_set_object (&self->chat, chat);
+  self->title_binding =
+    g_object_bind_property (chat, "name", self->title, "title",
+                            G_BINDING_SYNC_CREATE);
   set_remote (self, client);
 
   set_local_controls_visible (self, FALSE);
@@ -3862,7 +3877,6 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
   gtk_widget_set_visible (self->composer_area, TRUE);
-  adw_window_title_set_title (self->title, xd_node_get_name (chat));
   adw_window_title_set_subtitle (self->title, xd_remote_client_get_host (client));
 
   load_remote_transcript (self);
@@ -3901,6 +3915,7 @@ xd_chat_view_set_chat (XdChatView *self,
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
 
+  unbind_chat_title (self);
   g_set_object (&self->chat, chat);
 
   if (chat == NULL)
@@ -3917,7 +3932,9 @@ xd_chat_view_set_chat (XdChatView *self,
 
   gtk_stack_set_visible_child_name (self->stack, "chat");
   gtk_widget_set_visible (self->composer_area, TRUE);
-  adw_window_title_set_title (self->title, xd_node_get_name (chat));
+  self->title_binding =
+    g_object_bind_property (chat, "name", self->title, "title",
+                            G_BINDING_SYNC_CREATE);
 
   {
     g_autoptr (XdChat) record = xd_storage_get_chat (self->storage,
@@ -4313,6 +4330,7 @@ xd_chat_view_dispose (GObject *object)
   g_clear_object (&self->fetching);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
   g_clear_object (&self->remote);
+  unbind_chat_title (self);
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
