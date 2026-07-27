@@ -1,6 +1,7 @@
 #include <glib/gstdio.h>
 
 #include "settings/folder-settings.h"
+#include "settings/pane-state.h"
 #include "settings/settings-resolver.h"
 
 typedef struct
@@ -184,6 +185,33 @@ test_workdir_is_inherited (Fixture       *fixture,
   g_assert_cmpstr (resolved->workdir_from, ==, "Lunar");
 }
 
+static void
+test_pane_state_keeps_schema_type (Fixture       *fixture,
+                                   gconstpointer  user_data)
+{
+  GVariantBuilder builder;
+  g_autoptr (GVariant) states = NULL;
+  g_autoptr (GVariant) updated = NULL;
+  guint state = 0;
+
+  g_variant_builder_init (&builder, G_VARIANT_TYPE ("a{su}"));
+  g_variant_builder_add (&builder, "{su}", "local/one", 1);
+  g_variant_builder_add (
+    &builder, "{su}", "remote/host:4001/two", 4);
+  states = g_variant_ref_sink (g_variant_builder_end (&builder));
+  updated = xd_pane_state_update (states, "remote/host:4001/two", 3);
+
+  g_assert_true (
+    g_variant_is_of_type (updated, G_VARIANT_TYPE ("a{su}")));
+  g_assert_true (
+    g_variant_lookup (updated, "local/one", "u", &state));
+  g_assert_cmpuint (state, ==, 1);
+  g_assert_true (
+    g_variant_lookup (updated, "remote/host:4001/two", "u", &state));
+  g_assert_cmpuint (state, ==, 3);
+  g_assert_cmpuint (g_variant_n_children (updated), ==, 2);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -198,6 +226,7 @@ main (int   argc,
   ADD ("/settings/default-backend", test_falls_back_to_default_backend);
   ADD ("/settings/workdir-default", test_workdir_defaults_to_the_folder);
   ADD ("/settings/workdir-inherited", test_workdir_is_inherited);
+  ADD ("/settings/pane-state-schema", test_pane_state_keeps_schema_type);
 
 #undef ADD
 

@@ -12,6 +12,7 @@
 #include "file-pane.h"
 #include "diff-pane.h"
 #include "git-actions.h"
+#include "settings/pane-state.h"
 #include "terminal-panel.h"
 #include "settings/settings-resolver.h"
 #include "remote/protocol.h"
@@ -3773,15 +3774,12 @@ store_panes (XdChatView *self)
   g_autofree char *key = pane_state_key (self);
   g_autoptr (GVariant) states = NULL;
   g_autoptr (GVariant) updated = NULL;
-  GVariantDict dictionary;
 
   if (key == NULL)
     return;
 
   states = g_settings_get_value (self->settings, "pane-state");
-  g_variant_dict_init (&dictionary, states);
-  g_variant_dict_insert (&dictionary, key, "u", current_panes (self));
-  updated = g_variant_dict_end (&dictionary);
+  updated = xd_pane_state_update (states, key, current_panes (self));
   g_settings_set_value (self->settings, "pane-state", updated);
 }
 

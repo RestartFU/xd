@@ -3,6 +3,7 @@
 xd_core_sources = files(
   'settings/folder-settings.c',
   'settings/agent-secrets.c',
+  'settings/pane-state.c',
   'settings/settings-resolver.c',
   'util/markdown.c',
   'util/ask-block.c',
