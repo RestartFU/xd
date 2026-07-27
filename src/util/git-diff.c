@@ -53,7 +53,11 @@ run_git (const char        *workdir,
       return NULL;
     }
 
-  return output;
+  /*
+   * Empty stdout may be reported as NULL on Windows.  Successful plumbing
+   * commands such as `git add` still need a non-NULL success sentinel.
+   */
+  return output != NULL ? output : g_strdup ("");
 }
 
 static char *
