@@ -458,6 +458,38 @@ test_tool_calls_are_reported_in_order (void)
   collected_clear (&collected);
 }
 
+/*
+ * Tool-only assistant messages still have a finished-message event even when
+ * their streamed block already emitted the call. No text delta exists to
+ * trigger the older duplicate guard.
+ */
+static void
+test_tool_only_message_is_not_repeated (void)
+{
+  g_autoptr (AiParser) parser = ai_parser_new (ai_backend_lookup ("claude"));
+  Collected collected = { .text = g_string_new (NULL) };
+  const char *lines[] = {
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\","
+      "\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"name\":\"Agent\","
+      "\"input\":{}}}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\","
+      "\"index\":0,\"delta\":{\"type\":\"input_json_delta\","
+      "\"partial_json\":\"{\\\"subagent_type\\\":\\\"Explore\\\","
+      "\\\"description\\\":\\\"Explore module patterns\\\"}\"}}}",
+    "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\","
+      "\"name\":\"Agent\",\"input\":{\"subagent_type\":\"Explore\","
+      "\"description\":\"Explore module patterns\"}}]}}",
+    "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_stop\","
+      "\"index\":0}}",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (lines); i++)
+    ai_parser_feed_line (parser, lines[i], collect, &collected);
+
+  g_assert_cmpuint (collected.n_tools, ==, 1);
+  collected_clear (&collected);
+}
+
 static void
 test_tool_summary_names_the_work (void)
 {
@@ -645,6 +677,8 @@ main (int   argc,
   g_test_add_func ("/backend/access", test_access_maps_to_each_cli);
   g_test_add_func ("/backend/effort", test_effort_maps_to_each_cli);
   g_test_add_func ("/backend/tools/order", test_tool_calls_are_reported_in_order);
+  g_test_add_func ("/backend/tools/tool-only-once",
+                   test_tool_only_message_is_not_repeated);
   g_test_add_func ("/backend/tools/live", test_claude_reports_tool_use);
   g_test_add_func ("/backend/tools/summary", test_tool_summary_names_the_work);
 

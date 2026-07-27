@@ -292,7 +292,7 @@ parse_assistant (AiParser    *parser,
        * the reply. */
       if (g_strcmp0 (type, "tool_use") == 0)
         {
-          if (!parser->streamed_text)
+          if (g_hash_table_size (parser->pending_tools) == 0)
             {
               g_autofree char *summary =
                 ai_tool_summary (ai_json_get_string (block, "name"),

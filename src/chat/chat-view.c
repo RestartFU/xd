@@ -601,6 +601,22 @@ show_tool_use (XdChatView *self,
     {
       g_autoptr (GString) safe_identity = g_string_new (NULL);
       g_autoptr (GString) safe_task = g_string_new (NULL);
+      GtkWidget *last =
+        gtk_widget_get_last_child (GTK_WIDGET (self->transcript));
+
+      if (last == self->working_row && last != NULL)
+        last = gtk_widget_get_prev_sibling (last);
+
+      /*
+       * Older Claude transcripts may already contain each streamed tool-only
+       * message twice. Suppress those stored duplicates while the parser fix
+       * prevents new ones.
+       */
+      if (last != NULL &&
+          g_strcmp0 (g_object_get_data (G_OBJECT (last),
+                                       "xd-subagent-record"),
+                     summary) == 0)
+        return;
 
       /* Tool prompts are plain text. Keep Markdown punctuation in a task from
        * turning its card into a heading, code span, or accidental link. */
@@ -622,6 +638,8 @@ show_tool_use (XdChatView *self,
       XdMessageRow *row =
         append_row (self, XD_MESSAGE_ASSISTANT, block);
 
+      g_object_set_data_full (G_OBJECT (row), "xd-subagent-record",
+                              g_strdup (summary), g_free);
       xd_message_row_make_subagent (row);
       return;
     }
@@ -810,6 +828,9 @@ static void
 keep_working_last (XdChatView *self)
 {
   if (self->working_row == NULL)
+    return;
+  if (gtk_widget_get_last_child (GTK_WIDGET (self->transcript)) ==
+      self->working_row)
     return;
 
   g_object_ref (self->working_row);
