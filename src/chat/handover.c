@@ -7,6 +7,37 @@
  * out the message the user actually asked. */
 #define HANDOVER_LIMIT_BYTES 12000
 
+static gboolean
+prompt_starts_with_command (const char *prompt)
+{
+  const char *at;
+
+  if (prompt == NULL || prompt[0] != '/' || prompt[1] == '\0')
+    return FALSE;
+
+  for (at = prompt + 1; *at != '\0' && !g_ascii_isspace (*at); at++)
+    {
+      if (!g_ascii_isalnum (*at) && *at != '_' && *at != '-' && *at != ':')
+        return FALSE;
+    }
+
+  return at > prompt + 1;
+}
+
+char *
+xd_handover_join (const char *handover,
+                  const char *prompt)
+{
+  g_return_val_if_fail (prompt != NULL, NULL);
+
+  if (handover == NULL || *handover == '\0')
+    return g_strdup (prompt);
+
+  return prompt_starts_with_command (prompt)
+    ? g_strdup_printf ("%s\n\n%s", prompt, handover)
+    : g_strdup_printf ("%s\n\n%s", handover, prompt);
+}
+
 char *
 xd_handover_build (XdStorage  *storage,
                    const char *chat_id,

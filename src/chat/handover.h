@@ -20,4 +20,11 @@ char *xd_handover_build (XdStorage  *storage,
                          const char *chat_id,
                          gint64      last_seen);
 
+/*
+ * Adds unseen conversation to a prompt without hiding a slash command behind
+ * it. Agent CLIs only resolve commands when the command is first.
+ */
+char *xd_handover_join  (const char *handover,
+                         const char *prompt);
+
 G_END_DECLS

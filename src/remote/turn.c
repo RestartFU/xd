@@ -41,6 +41,7 @@ struct _XdDaemonTurn
   /* Speech and tools in the order they happened: held until the turn ends for
    * storage, and shown to any device that joins mid-turn. XdTurnItem*. */
   GPtrArray *items;
+  GStrv commands;              /* installed commands reported by this backend */
   gint64 started_at;           /* monotonic usec */
   gboolean resumed;
   guint64 context_used;
@@ -49,6 +50,7 @@ struct _XdDaemonTurn
 
 enum
 {
+  SIGNAL_COMMANDS,
   SIGNAL_TEXT,
   SIGNAL_TOOL,
   SIGNAL_FINISHED,
@@ -163,6 +165,18 @@ folder_chain (XdDaemonTurn *self,
 }
 
 /* --- the turn -------------------------------------------------------------- */
+
+static void
+on_commands (XdChatSession    *session,
+             const char *const *commands,
+             gpointer          user_data)
+{
+  XdDaemonTurn *self = user_data;
+
+  g_strfreev (self->commands);
+  self->commands = g_strdupv ((char **) commands);
+  g_signal_emit (self, signals[SIGNAL_COMMANDS], 0, commands);
+}
 
 static void
 on_session_started (XdChatSession *session,
@@ -406,8 +420,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   handover = xd_handover_build (self->storage, chat_id,
                                 xd_storage_get_last_seen (self->storage, chat_id,
                                                           backend->id));
-  full_prompt = handover != NULL ? g_strdup_printf ("%s\n\n%s", handover, prompt)
-                                 : g_strdup (prompt);
+  full_prompt = xd_handover_join (handover, prompt);
 
   /* Resolved per turn rather than at creation, so editing a folder's
    * instructions or model takes effect on the next message. */
@@ -451,6 +464,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
 
   g_signal_connect (self->session, "session-started",
                     G_CALLBACK (on_session_started), self);
+  g_signal_connect (self->session, "commands", G_CALLBACK (on_commands), self);
   g_signal_connect (self->session, "text-delta", G_CALLBACK (on_text_delta), self);
   g_signal_connect (self->session, "tool-use", G_CALLBACK (on_tool_use), self);
   g_signal_connect (self->session, "usage", G_CALLBACK (on_usage), self);
@@ -530,6 +544,14 @@ xd_daemon_turn_get_segment (XdDaemonTurn *self)
   return self->segment != NULL ? self->segment->str : NULL;
 }
 
+const char *const *
+xd_daemon_turn_get_commands (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
+
+  return (const char *const *) self->commands;
+}
+
 XdDaemonTurn *
 xd_daemon_turn_new (XdStorage  *storage,
                     const char *root_path)
@@ -572,6 +594,7 @@ xd_daemon_turn_finalize (GObject *object)
   g_clear_pointer (&self->workdir, g_free);
   g_clear_pointer (&self->diff_tracker, xd_git_diff_tracker_free);
   g_clear_pointer (&self->items, g_ptr_array_unref);
+  g_clear_pointer (&self->commands, g_strfreev);
 
   if (self->text != NULL)
     g_string_free (self->text, TRUE);
@@ -588,6 +611,10 @@ xd_daemon_turn_class_init (XdDaemonTurnClass *klass)
 
   object_class->dispose = xd_daemon_turn_dispose;
   object_class->finalize = xd_daemon_turn_finalize;
+
+  signals[SIGNAL_COMMANDS] =
+    g_signal_new ("commands", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRV);
 
   signals[SIGNAL_TEXT] =
     g_signal_new ("text", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,

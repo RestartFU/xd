@@ -34,6 +34,7 @@ struct _XdChatSession
 enum
 {
   SIGNAL_SESSION_STARTED,
+  SIGNAL_COMMANDS,
   SIGNAL_TEXT_DELTA,
   SIGNAL_TOOL_USE,
   SIGNAL_USAGE,
@@ -120,6 +121,11 @@ on_event (const AiEvent *event,
     {
     case AI_EVENT_SESSION_STARTED:
       g_signal_emit (self, signals[SIGNAL_SESSION_STARTED], 0, event->session_id);
+      break;
+
+    case AI_EVENT_COMMANDS:
+      if (event->commands != NULL)
+        g_signal_emit (self, signals[SIGNAL_COMMANDS], 0, event->commands);
       break;
 
     case AI_EVENT_TEXT_DELTA:
@@ -419,6 +425,10 @@ xd_chat_session_class_init (XdChatSessionClass *klass)
   signals[SIGNAL_SESSION_STARTED] =
     g_signal_new ("session-started", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  signals[SIGNAL_COMMANDS] =
+    g_signal_new ("commands", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRV);
 
   signals[SIGNAL_TEXT_DELTA] =
     g_signal_new ("text-delta", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,

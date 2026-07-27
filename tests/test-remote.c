@@ -1400,6 +1400,7 @@ test_images_are_uploaded_to_the_daemon (void)
   gsize preview_length = 0;
   RemoteReply sent = { 0 };
   RemoteReply preview = { 0 };
+  RemoteReply options = { 0 };
   StoredTurn stored;
 
   daemon_start (&daemon);
@@ -1412,7 +1413,8 @@ test_images_are_uploaded_to_the_daemon (void)
     "#!/bin/sh\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
-    "\"session_id\":\"test-image-upload\"}' "
+    "\"session_id\":\"test-image-upload\","
+    "\"slash_commands\":[\"simplify\",\"review\"]}' "
     "'{\"type\":\"result\",\"result\":\"ok\","
     "\"session_id\":\"test-image-upload\",\"is_error\":false}'\n",
     -1, NULL));
@@ -1461,6 +1463,28 @@ test_images_are_uploaded_to_the_daemon (void)
    * this test tears the server down. */
   while (g_main_context_pending (NULL))
     g_main_context_iteration (NULL, FALSE);
+
+  /* Command metadata survives the turn on the daemon, so a device opening
+   * this chat later gets the same installed command list. */
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    JsonArray *commands;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "chat");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &options);
+    commands = json_object_get_array_member (options.reply, "commands");
+    g_assert_nonnull (commands);
+    g_assert_cmpstr (json_array_get_string_element (commands, 0),
+                     ==, "simplify");
+    g_assert_cmpstr (json_array_get_string_element (commands, 1),
+                     ==, "review");
+  }
 
   messages = xd_storage_list_messages (daemon.storage, daemon.chat_id, NULL);
   for (guint i = 0; i < messages->len; i++)
@@ -1516,8 +1540,10 @@ test_images_are_uploaded_to_the_daemon (void)
 
   json_object_unref (sent.reply);
   json_object_unref (preview.reply);
+  json_object_unref (options.reply);
   g_free (sent.wait.failure);
   g_free (preview.wait.failure);
+  g_free (options.wait.failure);
   daemon_stop (&daemon);
 }
 

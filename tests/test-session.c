@@ -15,6 +15,7 @@ typedef struct
   GMainLoop *loop;
   GString *text;
   char *session_id;
+  GStrv commands;
   gboolean finished;
   gboolean success;
   char *message;
@@ -101,6 +102,17 @@ on_session_started (XdChatSession *session,
 }
 
 static void
+on_commands (XdChatSession    *session,
+             const char *const *commands,
+             gpointer          user_data)
+{
+  Run *run = user_data;
+
+  g_strfreev (run->commands);
+  run->commands = g_strdupv ((char **) commands);
+}
+
+static void
 on_text_delta (XdChatSession *session,
                const char    *delta,
                gpointer       user_data)
@@ -133,6 +145,7 @@ run_init (Run           *run,
   run->text = g_string_new (NULL);
 
   g_signal_connect (session, "session-started", G_CALLBACK (on_session_started), run);
+  g_signal_connect (session, "commands", G_CALLBACK (on_commands), run);
   g_signal_connect (session, "text-delta", G_CALLBACK (on_text_delta), run);
   g_signal_connect (session, "finished", G_CALLBACK (on_finished), run);
 }
@@ -143,6 +156,7 @@ run_clear (Run *run)
   g_main_loop_unref (run->loop);
   g_string_free (run->text, TRUE);
   g_free (run->session_id);
+  g_strfreev (run->commands);
   g_free (run->message);
 }
 
@@ -182,6 +196,8 @@ test_streams_a_transcript (void)
   g_assert_true (run.success);
   g_assert_cmpstr (run.text->str, ==, "hello from hy");
   g_assert_cmpstr (run.session_id, ==, "653dbf2a-6521-4412-9ac9-81b4d94160e7");
+  g_assert_true (g_strv_contains (
+    (const char *const *) run.commands, "simplify"));
 
   run_clear (&run);
 }

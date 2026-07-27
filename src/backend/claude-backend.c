@@ -91,6 +91,47 @@ emit (AiEventFunc  callback,
   callback (&event, user_data);
 }
 
+static void
+emit_commands (JsonObject  *root,
+               AiEventFunc  callback,
+               gpointer     user_data)
+{
+  JsonArray *array;
+  g_auto (GStrv) commands = NULL;
+  guint length;
+  guint written = 0;
+
+  if (!json_object_has_member (root, "slash_commands"))
+    return;
+
+  array = json_object_get_array_member (root, "slash_commands");
+  if (array == NULL || (length = json_array_get_length (array)) == 0)
+    return;
+
+  commands = g_new0 (char *, length + 1);
+  for (guint i = 0; i < length; i++)
+    {
+      const char *command = json_array_get_string_element (array, i);
+
+      if (command == NULL || *command == '\0')
+        continue;
+
+      /* Claude reports names without "/", but tolerate a future version that
+       * includes it so the composer always owns that presentation detail. */
+      commands[written++] = g_strdup (command[0] == '/' ? command + 1 : command);
+    }
+
+  if (written > 0)
+    {
+      AiEvent event = {
+        .type = AI_EVENT_COMMANDS,
+        .commands = (const char *const *) commands,
+      };
+
+      callback (&event, user_data);
+    }
+}
+
 static guint64
 usage_total (JsonObject *usage)
 {
@@ -401,9 +442,12 @@ claude_parse_object (AiParser    *parser,
     {
       const char *session_id = ai_json_get_string (root, "session_id");
 
-      if (g_strcmp0 (ai_json_get_string (root, "subtype"), "init") == 0 &&
-          session_id != NULL)
-        emit (callback, user_data, AI_EVENT_SESSION_STARTED, NULL, session_id);
+      if (g_strcmp0 (ai_json_get_string (root, "subtype"), "init") == 0)
+        {
+          if (session_id != NULL)
+            emit (callback, user_data, AI_EVENT_SESSION_STARTED, NULL, session_id);
+          emit_commands (root, callback, user_data);
+        }
 
       return;
     }

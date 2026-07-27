@@ -19,6 +19,7 @@ xd_tests = {
   'unified-diff': 'test-unified-diff.c',
   'workflow-run': 'test-workflow-run.c',
   'worktree': 'test-worktree.c',
+  'handover': 'test-handover.c',
 }
 
 if has_server

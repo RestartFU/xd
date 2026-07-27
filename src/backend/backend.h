@@ -18,6 +18,7 @@ G_BEGIN_DECLS
 typedef enum
 {
   AI_EVENT_SESSION_STARTED,   /* carries the id needed to resume later */
+  AI_EVENT_COMMANDS,          /* installed slash commands, without leading / */
   AI_EVENT_TEXT_DELTA,        /* a piece of the reply */
   AI_EVENT_TOOL_USE,          /* the agent reached for a tool */
   AI_EVENT_USAGE,             /* context used and the model's context window */
@@ -30,6 +31,7 @@ typedef struct
   AiEventType type;
   const char *session_id;
   const char *text;
+  const char *const *commands;
   guint64 context_used;
   guint64 context_window;
   JsonNode *raw;

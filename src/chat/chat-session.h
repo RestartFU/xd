@@ -18,6 +18,7 @@ G_DECLARE_FINAL_TYPE (XdChatSession, xd_chat_session, XD, CHAT_SESSION, GObject)
  *
  * Signals:
  *   session-started (id)          the backend reported a resumable session
+ *   commands        (names)       installed slash commands, without leading /
  *   text-delta      (text)        another piece of the reply
  *   tool-use        (name)        the agent used a tool
  *   finished        (ok, message) the turn ended; message explains a failure

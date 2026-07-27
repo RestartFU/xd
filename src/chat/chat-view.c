@@ -163,11 +163,15 @@ struct _XdChatView
   GtkWidget *attachments_bar;
   GtkWidget *queued_bar;
   GtkWidget *choices_bar;
+  GtkWidget *commands_bar;
+  GtkFlowBox *commands_flow;
   GtkProgressBar *context_meter;
   GtkLabel *queued_label;
   char *queued;             /* typed while a turn was running */
   gboolean syncing_panes;   /* setting the toggles to match the chat */
   GPtrArray *attachments;   /* absolute paths of pasted images */
+  GHashTable *command_sets; /* local/remote backend scope -> GStrv */
+  char *command_scope;      /* command set used by composer on screen */
   XdModelPicker *model_picker;
   XdOptionPicker *workspace_chooser;
   GPtrArray *workspace_paths; /* choice index -> existing worktree path or NULL */
@@ -274,6 +278,14 @@ static guint saved_panes (XdChatView *self, guint fallback);
 static void apply_panes (XdChatView *self, guint state);
 static void start_turn (XdChatView *self,
                         const char *prompt);
+static char *command_scope (XdChatView *self,
+                            const char *backend_id);
+static void use_command_scope (XdChatView *self,
+                               const char *backend_id);
+static void store_commands (XdChatView       *self,
+                            const char       *scope,
+                            const char *const *commands);
+static void refresh_command_suggestions (XdChatView *self);
 static void on_model_chosen (XdModelPicker *picker,
                              const char    *backend_id,
                              const char    *model_id,
@@ -1195,6 +1207,31 @@ end_remote_turn (XdChatView *self)
     g_string_truncate (self->remote_said, 0);
 }
 
+static GStrv
+commands_from_json (JsonArray *array)
+{
+  GStrv commands;
+  guint length;
+  guint written = 0;
+
+  if (array == NULL || (length = json_array_get_length (array)) == 0)
+    return NULL;
+
+  commands = g_new0 (char *, length + 1);
+  for (guint i = 0; i < length; i++)
+    {
+      const char *command = json_array_get_string_element (array, i);
+
+      if (command != NULL && *command != '\0')
+        commands[written++] = g_strdup (command[0] == '/' ? command + 1 : command);
+    }
+
+  if (written == 0)
+    g_clear_pointer (&commands, g_strfreev);
+
+  return commands;
+}
+
 static void
 on_remote_event (XdRemoteClient *client,
                  JsonObject     *event,
@@ -1222,6 +1259,20 @@ on_remote_event (XdRemoteClient *client,
   if (chat_id != NULL &&
       g_strcmp0 (chat_id, xd_node_get_chat_id (self->chat)) != 0)
     return;
+
+  if (g_strcmp0 (name, "commands") == 0 &&
+      json_object_has_member (event, "commands"))
+    {
+      g_auto (GStrv) commands =
+        commands_from_json (json_object_get_array_member (event, "commands"));
+      g_autofree char *scope = command_scope (
+        self, json_object_get_string_member_with_default (
+                event, "backend", NULL));
+
+      store_commands (
+        self, scope, (const char *const *) commands);
+      return;
+    }
 
   if (g_strcmp0 (name, "turn-started") == 0)
     {
@@ -1406,6 +1457,16 @@ on_remote_options_received (GObject      *source,
     MAX (json_object_get_int_member_with_default (reply, "context_used", 0), 0);
   chat.context_window =
     MAX (json_object_get_int_member_with_default (reply, "context_window", 0), 0);
+
+  use_command_scope (self, chat.backend);
+  if (json_object_has_member (reply, "commands"))
+    {
+      g_auto (GStrv) commands =
+        commands_from_json (json_object_get_array_member (reply, "commands"));
+
+      store_commands (
+        self, self->command_scope, (const char *const *) commands);
+    }
 
   if (json_object_has_member (reply, "worktrees"))
     {
@@ -1765,6 +1826,60 @@ on_session_started (XdChatSession *session,
     g_warning ("cannot store the session id: %s", error->message);
 }
 
+static char *
+command_scope (XdChatView *self,
+               const char *backend_id)
+{
+  if (backend_id == NULL)
+    return NULL;
+
+  return self->remote != NULL
+    ? g_strdup_printf ("remote:%s:%s",
+                       xd_remote_client_get_host (self->remote), backend_id)
+    : g_strdup_printf ("local:%s", backend_id);
+}
+
+static void
+use_command_scope (XdChatView *self,
+                   const char *backend_id)
+{
+  g_autofree char *scope = command_scope (self, backend_id);
+
+  if (g_strcmp0 (self->command_scope, scope) == 0)
+    return;
+
+  g_free (self->command_scope);
+  self->command_scope = g_steal_pointer (&scope);
+  refresh_command_suggestions (self);
+}
+
+static void
+store_commands (XdChatView       *self,
+                const char       *scope,
+                const char *const *commands)
+{
+  if (scope == NULL || commands == NULL)
+    return;
+
+  g_hash_table_replace (self->command_sets, g_strdup (scope),
+                        g_strdupv ((char **) commands));
+
+  if (g_strcmp0 (scope, self->command_scope) == 0)
+    refresh_command_suggestions (self);
+}
+
+static void
+on_commands (XdChatSession    *session,
+             const char *const *commands,
+             gpointer          user_data)
+{
+  Turn *turn = user_data;
+  g_autofree char *scope =
+    g_strdup_printf ("local:%s", turn->backend_id);
+
+  store_commands (turn->view, scope, commands);
+}
+
 static void
 on_text_delta (XdChatSession *session,
                const char    *delta,
@@ -2038,6 +2153,98 @@ on_turn_finished (XdChatSession *session,
 
 /* --- sending -------------------------------------------------------------- */
 
+static void
+on_command_clicked (GtkButton *button,
+                    gpointer   user_data)
+{
+  XdChatView *self = user_data;
+  const char *command =
+    g_object_get_data (G_OBJECT (button), "xd-agent-command");
+  g_autofree char *text = NULL;
+
+  if (command == NULL)
+    return;
+
+  text = g_strdup_printf ("/%s ", command);
+  gtk_text_buffer_set_text (
+    gtk_text_view_get_buffer (self->composer), text, -1);
+  gtk_text_view_set_cursor_visible (self->composer, TRUE);
+  gtk_widget_grab_focus (GTK_WIDGET (self->composer));
+}
+
+static void
+refresh_command_suggestions (XdChatView *self)
+{
+  GtkTextBuffer *buffer;
+  GtkTextIter start;
+  GtkTextIter end;
+  g_autofree char *text = NULL;
+  const char *query;
+  GStrv commands;
+  guint matches = 0;
+
+  if (self->commands_bar == NULL || self->commands_flow == NULL ||
+      self->composer == NULL)
+    return;
+
+  for (GtkWidget *child =
+         gtk_widget_get_first_child (GTK_WIDGET (self->commands_flow));
+       child != NULL;
+       child = gtk_widget_get_first_child (GTK_WIDGET (self->commands_flow)))
+    gtk_flow_box_remove (self->commands_flow, child);
+
+  buffer = gtk_text_view_get_buffer (self->composer);
+  gtk_text_buffer_get_bounds (buffer, &start, &end);
+  text = gtk_text_buffer_get_text (buffer, &start, &end, FALSE);
+
+  if (text[0] != '/' || self->command_scope == NULL)
+    {
+      gtk_widget_set_visible (self->commands_bar, FALSE);
+      return;
+    }
+
+  query = text + 1;
+  for (const char *at = query; *at != '\0'; at++)
+    {
+      if (g_ascii_isspace (*at))
+        {
+          gtk_widget_set_visible (self->commands_bar, FALSE);
+          return;
+        }
+    }
+
+  commands = g_hash_table_lookup (self->command_sets, self->command_scope);
+  for (guint i = 0; commands != NULL && commands[i] != NULL; i++)
+    {
+      GtkWidget *button;
+      g_autofree char *label = NULL;
+
+      if (*query != '\0' &&
+          g_ascii_strncasecmp (commands[i], query, strlen (query)) != 0)
+        continue;
+
+      label = g_strdup_printf ("/%s", commands[i]);
+      button = gtk_button_new_with_label (label);
+      gtk_widget_add_css_class (button, "flat");
+      gtk_widget_set_halign (button, GTK_ALIGN_FILL);
+      g_object_set_data_full (G_OBJECT (button), "xd-agent-command",
+                              g_strdup (commands[i]), g_free);
+      g_signal_connect (button, "clicked",
+                        G_CALLBACK (on_command_clicked), self);
+      gtk_flow_box_append (self->commands_flow, button);
+      matches++;
+    }
+
+  gtk_widget_set_visible (self->commands_bar, matches > 0);
+}
+
+static void
+on_composer_changed (GtkTextBuffer *buffer,
+                     gpointer       user_data)
+{
+  refresh_command_suggestions (user_data);
+}
+
 static char *
 take_composer_text (XdChatView *self)
 {
@@ -2117,8 +2324,7 @@ start_turn (XdChatView *self,
                                 xd_storage_get_last_seen (self->storage, chat->id,
                                                           backend->id));
 
-  full_prompt = handover != NULL ? g_strdup_printf ("%s\n\n%s", handover, prompt)
-                                 : g_strdup (prompt);
+  full_prompt = xd_handover_join (handover, prompt);
 
   turn = g_new0 (Turn, 1);
   turn->view = self;
@@ -2149,6 +2355,8 @@ start_turn (XdChatView *self,
 
   g_signal_connect (turn->session, "session-started",
                     G_CALLBACK (on_session_started), turn);
+  g_signal_connect (turn->session, "commands",
+                    G_CALLBACK (on_commands), turn);
   g_signal_connect (turn->session, "text-delta",
                     G_CALLBACK (on_text_delta), turn);
   g_signal_connect (turn->session, "tool-use",
@@ -3692,6 +3900,7 @@ on_model_chosen (XdModelPicker *picker,
     {
       /* Both, and in that order: the backend decides which models mean
        * anything, so a model set against the old one would be nonsense. */
+      use_command_scope (self, backend_id);
       set_remote_option (self, "backend", backend_id);
       set_remote_option (self, "model", model_id);
       return;
@@ -3716,6 +3925,8 @@ on_model_chosen (XdModelPicker *picker,
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
+
+  use_command_scope (self, backend_id);
 
   /* The tree shows which assistant a chat belongs to, so it follows. */
   if (backend_changed)
@@ -3847,6 +4058,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
       g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);
       clear_transcript (self);
       end_remote_turn (self);
+      use_command_scope (self, NULL);
     }
 
   set_queued_text (self, NULL);
@@ -3943,8 +4155,13 @@ xd_chat_view_set_chat (XdChatView *self,
 
     if (record != NULL)
       {
+        use_command_scope (self, record->backend);
         update_context_bar (self, record);
         set_queued_text (self, record->queued);
+      }
+    else
+      {
+        use_command_scope (self, NULL);
       }
   }
 
@@ -4054,6 +4271,8 @@ build_composer (XdChatView *self)
   keys = gtk_event_controller_key_new ();
   g_signal_connect (keys, "key-pressed", G_CALLBACK (on_composer_key), self);
   gtk_widget_add_controller (GTK_WIDGET (self->composer), keys);
+  g_signal_connect (gtk_text_view_get_buffer (self->composer), "changed",
+                    G_CALLBACK (on_composer_changed), self);
 
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
@@ -4110,6 +4329,30 @@ build_composer (XdChatView *self)
   gtk_widget_set_margin_top (self->choices_bar, 6);
   gtk_widget_set_margin_start (self->choices_bar, 10);
   gtk_widget_set_margin_end (self->choices_bar, 10);
+
+  self->commands_flow = GTK_FLOW_BOX (gtk_flow_box_new ());
+  gtk_flow_box_set_selection_mode (self->commands_flow, GTK_SELECTION_NONE);
+  gtk_flow_box_set_min_children_per_line (self->commands_flow, 1);
+  gtk_flow_box_set_max_children_per_line (self->commands_flow, 4);
+  gtk_flow_box_set_column_spacing (self->commands_flow, 4);
+  gtk_flow_box_set_row_spacing (self->commands_flow, 4);
+  gtk_widget_set_halign (GTK_WIDGET (self->commands_flow), GTK_ALIGN_FILL);
+
+  self->commands_bar = gtk_scrolled_window_new ();
+  gtk_scrolled_window_set_policy (
+    GTK_SCROLLED_WINDOW (self->commands_bar),
+    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_max_content_height (
+    GTK_SCROLLED_WINDOW (self->commands_bar), 144);
+  gtk_scrolled_window_set_propagate_natural_height (
+    GTK_SCROLLED_WINDOW (self->commands_bar), TRUE);
+  gtk_scrolled_window_set_child (
+    GTK_SCROLLED_WINDOW (self->commands_bar),
+    GTK_WIDGET (self->commands_flow));
+  gtk_widget_set_visible (self->commands_bar, FALSE);
+  gtk_widget_set_margin_top (self->commands_bar, 6);
+  gtk_widget_set_margin_start (self->commands_bar, 10);
+  gtk_widget_set_margin_end (self->commands_bar, 10);
 
   self->model_picker = xd_model_picker_new ();
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->model_picker),
@@ -4275,6 +4518,7 @@ build_composer (XdChatView *self)
   gtk_box_append (GTK_BOX (column), self->queued_bar);
   gtk_box_append (GTK_BOX (column), self->choices_bar);
   gtk_box_append (GTK_BOX (column), self->attachments_bar);
+  gtk_box_append (GTK_BOX (column), self->commands_bar);
   gtk_box_append (GTK_BOX (column), scroller);
   gtk_widget_add_css_class (toolbar, "xd-composer");
   gtk_box_append (GTK_BOX (column), toolbar);
@@ -4334,6 +4578,8 @@ xd_chat_view_dispose (GObject *object)
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
+  g_clear_pointer (&self->command_sets, g_hash_table_unref);
+  g_clear_pointer (&self->command_scope, g_free);
   g_clear_pointer (&self->workspace_paths, g_ptr_array_unref);
   g_clear_pointer (&self->queued, g_free);
   g_clear_object (&self->settings);
@@ -4360,6 +4606,8 @@ xd_chat_view_init (XdChatView *self)
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
+  self->command_sets = g_hash_table_new_full (
+    g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_strfreev);
   self->workspace_paths = g_ptr_array_new_with_free_func (g_free);
   self->git_head_watch = xd_git_head_watch_new ();
   g_signal_connect (self->git_head_watch, "changed",

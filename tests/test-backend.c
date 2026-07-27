@@ -10,6 +10,8 @@ typedef struct
   GString *text;
   char *session_id;
   char *last_tool;
+  GStrv commands;
+  guint n_command_events;
   guint n_deltas;
   guint n_tools;
   guint n_usage;
@@ -30,6 +32,12 @@ collect (const AiEvent *event,
     case AI_EVENT_SESSION_STARTED:
       g_free (collected->session_id);
       collected->session_id = g_strdup (event->session_id);
+      break;
+
+    case AI_EVENT_COMMANDS:
+      collected->n_command_events++;
+      g_strfreev (collected->commands);
+      collected->commands = g_strdupv ((char **) event->commands);
       break;
 
     case AI_EVENT_TEXT_DELTA:
@@ -73,6 +81,7 @@ collected_clear (Collected *collected)
   g_string_free (collected->text, TRUE);
   g_free (collected->session_id);
   g_free (collected->last_tool);
+  g_strfreev (collected->commands);
 }
 
 /* Replays a captured CLI transcript through the backend's parser. */
@@ -122,6 +131,11 @@ test_claude_stream (void)
   g_assert_cmpuint (collected.context_window, ==, 1000000);
   g_assert_cmpuint (collected.n_results, ==, 1);
   g_assert_cmpuint (collected.n_errors, ==, 0);
+  g_assert_cmpuint (collected.n_command_events, ==, 1);
+  g_assert_true (g_strv_contains (
+    (const char *const *) collected.commands, "simplify"));
+  g_assert_true (g_strv_contains (
+    (const char *const *) collected.commands, "review"));
 
   collected_clear (&collected);
 }

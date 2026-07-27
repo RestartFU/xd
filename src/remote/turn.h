@@ -20,6 +20,7 @@ G_DECLARE_FINAL_TYPE (XdDaemonTurn, xd_daemon_turn, XD, DAEMON_TURN, GObject)
  * being drawn.
  *
  * Signals:
+ *   commands (names)          installed slash commands, without leading /
  *   text     (delta)          another piece of the reply
  *   tool     (name)           the agent reached for something
  *   finished (ok, message)    the turn ended; message explains a failure
@@ -86,5 +87,8 @@ GPtrArray    *xd_daemon_turn_get_items   (XdDaemonTurn *self);
 
 /* What it is saying now, which no item holds yet. */
 const char   *xd_daemon_turn_get_segment (XdDaemonTurn *self);
+
+/* Installed slash commands reported by the backend, if known yet. */
+const char *const *xd_daemon_turn_get_commands (XdDaemonTurn *self);
 
 G_END_DECLS

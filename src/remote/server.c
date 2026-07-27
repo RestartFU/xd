@@ -51,6 +51,11 @@ struct _XdRemoteServer
    * enforces it. chat id -> XdDaemonTurn*. */
   GHashTable *turns;
 
+  /* Installed slash commands learned from backend init events. backend id ->
+   * GStrv. Kept after a turn ends so newly connected devices get suggestions
+   * without starting another turn first. */
+  GHashTable *command_sets;
+
   /* Shells live here, not on whichever device opened them. terminal id ->
    * XdRemoteTerminal*. */
   GHashTable *terminals;
@@ -1516,13 +1521,55 @@ typedef struct
 {
   XdRemoteServer *server;   /* unowned; the server outlives its turns */
   char *chat_id;
+  char *backend_id;
 } Running;
 
 static void
 running_free (Running *running)
 {
   g_free (running->chat_id);
+  g_free (running->backend_id);
   g_free (running);
+}
+
+static void
+add_commands (JsonBuilder       *builder,
+              const char        *member,
+              const char *const *commands)
+{
+  if (commands == NULL)
+    return;
+
+  json_builder_set_member_name (builder, member);
+  json_builder_begin_array (builder);
+  for (guint i = 0; commands[i] != NULL; i++)
+    json_builder_add_string_value (builder, commands[i]);
+  json_builder_end_array (builder);
+}
+
+static void
+on_turn_commands (XdDaemonTurn    *turn,
+                  const char *const *commands,
+                  gpointer          user_data)
+{
+  Running *running = user_data;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  g_hash_table_replace (running->server->command_sets,
+                        g_strdup (running->backend_id),
+                        g_strdupv ((char **) commands));
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "commands");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, running->chat_id);
+  json_builder_set_member_name (builder, "backend");
+  json_builder_add_string_value (builder, running->backend_id);
+  add_commands (builder, "commands", commands);
+  json_builder_end_object (builder);
+
+  broadcast (running->server, builder);
 }
 
 static void
@@ -1590,6 +1637,7 @@ start_daemon_turn (XdRemoteServer  *self,
 {
   XdDaemonTurn *turn;
   Running *running;
+  g_autofree char *backend_id = NULL;
 
   {
     g_autoptr (XdChat) chat =
@@ -1597,6 +1645,8 @@ start_daemon_turn (XdRemoteServer  *self,
 
     if (chat == NULL)
       return FALSE;
+
+    backend_id = g_strdup (chat->backend);
 
     if (chat->new_worktree)
       {
@@ -1641,7 +1691,9 @@ start_daemon_turn (XdRemoteServer  *self,
   running = g_new0 (Running, 1);
   running->server = self;
   running->chat_id = g_strdup (chat_id);
+  running->backend_id = g_steal_pointer (&backend_id);
 
+  g_signal_connect (turn, "commands", G_CALLBACK (on_turn_commands), running);
   g_signal_connect (turn, "text", G_CALLBACK (on_turn_text), running);
   g_signal_connect (turn, "tool", G_CALLBACK (on_turn_tool), running);
   g_signal_connect (turn, "finished", G_CALLBACK (on_turn_finished), running);
@@ -2606,6 +2658,9 @@ handle_chat (Connection *connection,
   json_builder_add_string_value (builder, chat->title);
   json_builder_set_member_name (builder, "backend");
   json_builder_add_string_value (builder, chat->backend);
+  add_commands (
+    builder, "commands",
+    g_hash_table_lookup (self->command_sets, chat->backend));
   json_builder_set_member_name (builder, "plan");
   json_builder_add_boolean_value (builder, chat->plan);
   if (chat->queued != NULL)
@@ -3181,6 +3236,7 @@ xd_remote_server_dispose (GObject *object)
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  g_clear_pointer (&self->command_sets, g_hash_table_unref);
   if (self->terminals != NULL)
     {
       GHashTableIter iter;
@@ -3218,6 +3274,8 @@ xd_remote_server_init (XdRemoteServer *self)
   self->connections = g_ptr_array_new ();
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal,
                                        g_free, g_object_unref);
+  self->command_sets = g_hash_table_new_full (
+    g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_strfreev);
   self->terminals = g_hash_table_new_full (g_str_hash, g_str_equal,
                                            g_free, g_object_unref);
 }
