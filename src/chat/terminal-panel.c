@@ -1296,6 +1296,7 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_box_append (GTK_BOX (controls), new_button);
   gtk_box_append (GTK_BOX (controls), kill_button);
   gtk_widget_set_valign (controls, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_top (controls, 4);
   gtk_widget_set_margin_start (controls, 4);
   gtk_widget_set_margin_end (controls, 8);
 
