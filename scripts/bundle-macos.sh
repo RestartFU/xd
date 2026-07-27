@@ -90,7 +90,6 @@ RESOURCES="$APP/Contents/Resources"
 # ICU loads its data library through @loader_path. gtk-mac-bundler does not
 # discover that dependency, so put the matching Homebrew library beside
 # libicuuc wherever the bundler chose to relocate it.
-ICU_LIBDIR="$(pkg-config --variable=libdir icu-uc)"
 ICU_BUNDLE_DIR=
 while IFS= read -r library; do
   ICU_BUNDLE_DIR="${library%/*}"
@@ -100,7 +99,18 @@ done < <(find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print)
   echo "bundle-macos: bundled libicuuc was not found" >&2
   exit 1
 }
-cp -L "$ICU_LIBDIR"/libicudata*.dylib "$ICU_BUNDLE_DIR/"
+ICU_RELATIVE_DIR="${ICU_BUNDLE_DIR#"$RESOURCES"/}"
+ICU_LIBDIR="$HOMEBREW_PREFIX/$ICU_RELATIVE_DIR"
+copied_icu_data=false
+for library in "$ICU_LIBDIR"/libicudata*.dylib; do
+  [ -e "$library" ] || continue
+  cp -L "$library" "$ICU_BUNDLE_DIR/"
+  copied_icu_data=true
+done
+[ "$copied_icu_data" = true ] || {
+  echo "bundle-macos: ICU data libraries were not found in $ICU_LIBDIR" >&2
+  exit 1
+}
 
 # Data not modeled by gtk-mac-bundler itself.
 for directory in gtk-4.0 libadwaita-1 themes; do
