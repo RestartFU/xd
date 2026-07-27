@@ -519,10 +519,12 @@ xd_message_row_make_subagent (XdMessageRow *self,
   gtk_expander_set_label_widget (GTK_EXPANDER (expander), self->body);
   g_object_unref (self->body);
 
-  gtk_expander_set_expanded (GTK_EXPANDER (activity), TRUE);
   gtk_widget_set_margin_start (activity, 12);
   gtk_widget_set_margin_end (activity, 0);
   gtk_expander_set_child (GTK_EXPANDER (expander), activity);
+  g_object_bind_property (expander, "expanded",
+                          activity, "expanded",
+                          G_BINDING_SYNC_CREATE);
   g_object_unref (activity);
 
   gtk_box_append (GTK_BOX (self->card), expander);

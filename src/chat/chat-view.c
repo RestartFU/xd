@@ -533,6 +533,50 @@ append_row (XdChatView    *self,
 }
 
 /*
+ * A collapsed tool group keeps only its text, not one hidden GTK widget per
+ * call. Large delegated turns can contain hundreds of calls across several
+ * cards; constructing and measuring all those labels made merely opening the
+ * transcript expensive even though none of them were visible.
+ */
+static void
+free_tool_summaries (gpointer data)
+{
+  g_string_free (data, TRUE);
+}
+
+static void
+render_tool_group (GtkExpander *expander)
+{
+  GString *summaries =
+    g_object_get_data (G_OBJECT (expander), "xd-tool-summaries");
+  GtkWidget *label = gtk_expander_get_child (expander);
+
+  if (label == NULL)
+    {
+      label = gtk_label_new (NULL);
+      gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
+      gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_MIDDLE);
+      gtk_label_set_max_width_chars (GTK_LABEL (label), 100);
+      gtk_label_set_selectable (GTK_LABEL (label), TRUE);
+      gtk_widget_add_css_class (label, "caption");
+      gtk_widget_set_margin_top (label, 4);
+      gtk_widget_set_margin_start (label, 12);
+      gtk_expander_set_child (expander, label);
+    }
+
+  gtk_label_set_text (GTK_LABEL (label), summaries->str);
+}
+
+static void
+on_tool_group_expanded (GtkExpander *expander,
+                        GParamSpec  *pspec,
+                        gpointer     user_data)
+{
+  if (gtk_expander_get_expanded (expander))
+    render_tool_group (expander);
+}
+
+/*
  * Tool calls collapse into one row.
  *
  * A turn can make a dozen of them, and expanded they push the reply off the
@@ -544,9 +588,8 @@ append_tool_line (XdChatView *self,
                   const char *summary)
 {
   GtkWidget *last = gtk_widget_get_last_child (GTK_WIDGET (self->transcript));
-  GtkWidget *lines;
-  GtkWidget *line;
   GtkWidget *expander;
+  GString *summaries;
   g_autofree char *title = NULL;
   int count;
 
@@ -554,7 +597,9 @@ append_tool_line (XdChatView *self,
   if (last == self->working_row && last != NULL)
     last = gtk_widget_get_prev_sibling (last);
 
-  if (last != NULL && GTK_IS_EXPANDER (last))
+  if (last != NULL &&
+      GTK_IS_EXPANDER (last) &&
+      g_object_get_data (G_OBJECT (last), "xd-tool-summaries") != NULL)
     {
       expander = last;
     }
@@ -568,23 +613,24 @@ append_tool_line (XdChatView *self,
       gtk_widget_set_margin_start (expander, 24);
       gtk_widget_set_margin_end (expander, 24);
 
-      lines = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
-      gtk_widget_set_margin_top (lines, 4);
-      gtk_widget_set_margin_start (lines, 12);
-      gtk_expander_set_child (GTK_EXPANDER (expander), lines);
-
+      g_object_set_data_full (G_OBJECT (expander), "xd-tool-summaries",
+                              g_string_new (NULL),
+                              free_tool_summaries);
       g_object_set_data (G_OBJECT (expander), "count", GINT_TO_POINTER (0));
+      g_signal_connect (expander, "notify::expanded",
+                        G_CALLBACK (on_tool_group_expanded), NULL);
       gtk_box_append (self->transcript, expander);
     }
 
-  lines = gtk_expander_get_child (GTK_EXPANDER (expander));
+  summaries = g_object_get_data (G_OBJECT (expander), "xd-tool-summaries");
+  if (summaries->len > 0)
+    g_string_append_c (summaries, '\n');
+  g_string_append (summaries, summary);
 
-  line = gtk_label_new (summary);
-  gtk_label_set_xalign (GTK_LABEL (line), 0.0f);
-  gtk_label_set_ellipsize (GTK_LABEL (line), PANGO_ELLIPSIZE_MIDDLE);
-  gtk_label_set_selectable (GTK_LABEL (line), TRUE);
-  gtk_widget_add_css_class (line, "caption");
-  gtk_box_append (GTK_BOX (lines), line);
+  /* An open live group stays current. A closed one remains text-only until
+   * it is opened again, so hidden content never enters GTK's layout queue. */
+  if (gtk_expander_get_expanded (GTK_EXPANDER (expander)))
+    render_tool_group (GTK_EXPANDER (expander));
 
   count = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (expander), "count")) + 1;
   g_object_set_data (G_OBJECT (expander), "count", GINT_TO_POINTER (count));
