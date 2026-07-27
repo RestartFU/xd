@@ -574,6 +574,7 @@ xd_remote_tree_rename_folder (XdRemoteTree *self,
 
   g_return_if_fail (XD_IS_REMOTE_TREE (self));
   g_return_if_fail (XD_IS_NODE (folder));
+  g_return_if_fail (xd_node_get_folder_id (folder) != NULL);
   g_return_if_fail (name != NULL && *name != '\0');
 
   builder = intent_for ("rename-folder", "folder", folder);
@@ -621,6 +622,109 @@ xd_remote_tree_trash_folder (XdRemoteTree *self,
   json_builder_end_object (builder);
 
   send_intent (self, builder, "Could not move the folder to the trash", FALSE);
+}
+
+void
+xd_remote_tree_get_folder_context_async (XdRemoteTree        *self,
+                                         XdNode              *folder,
+                                         GCancellable        *cancellable,
+                                         GAsyncReadyCallback  callback,
+                                         gpointer             user_data)
+{
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (folder));
+
+  xd_remote_client_call_op_async (
+    self->client, "folder-context", "folder",
+    xd_node_get_folder_id (folder), cancellable, callback, user_data);
+}
+
+gboolean
+xd_remote_tree_get_folder_context_finish (XdRemoteTree  *self,
+                                          GAsyncResult  *result,
+                                          char         **context,
+                                          GError       **error)
+{
+  g_autoptr (JsonObject) reply = NULL;
+  JsonNode *node;
+
+  g_return_val_if_fail (XD_IS_REMOTE_TREE (self), FALSE);
+  g_return_val_if_fail (context != NULL, FALSE);
+
+  *context = NULL;
+  reply = xd_remote_client_call_finish (self->client, result, error);
+  if (reply == NULL)
+    return FALSE;
+
+  node = json_object_get_member (reply, "context");
+  if (node == NULL)
+    {
+      g_set_error_literal (error, XD_REMOTE_ERROR,
+                           XD_REMOTE_ERROR_PROTOCOL,
+                           "The daemon omitted folder context.");
+      return FALSE;
+    }
+
+  if (!JSON_NODE_HOLDS_NULL (node))
+    {
+      if (!JSON_NODE_HOLDS_VALUE (node) ||
+          json_node_get_value_type (node) != G_TYPE_STRING)
+        {
+          g_set_error_literal (error, XD_REMOTE_ERROR,
+                               XD_REMOTE_ERROR_PROTOCOL,
+                               "The daemon sent invalid folder context.");
+          return FALSE;
+        }
+
+      *context = json_node_dup_string (node);
+    }
+
+  return TRUE;
+}
+
+void
+xd_remote_tree_set_folder_context_async (XdRemoteTree        *self,
+                                         XdNode              *folder,
+                                         const char          *context,
+                                         GCancellable        *cancellable,
+                                         GAsyncReadyCallback  callback,
+                                         gpointer             user_data)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (XD_IS_NODE (folder));
+  g_return_if_fail (xd_node_get_folder_id (folder) != NULL);
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "set-folder-context");
+  json_builder_set_member_name (builder, "folder");
+  json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+  json_builder_set_member_name (builder, "context");
+  if (context != NULL)
+    json_builder_add_string_value (builder, context);
+  else
+    json_builder_add_null_value (builder);
+  json_builder_end_object (builder);
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->client, request, cancellable,
+                               callback, user_data);
+}
+
+gboolean
+xd_remote_tree_set_folder_context_finish (XdRemoteTree *self,
+                                          GAsyncResult *result,
+                                          GError      **error)
+{
+  g_autoptr (JsonObject) reply = NULL;
+
+  g_return_val_if_fail (XD_IS_REMOTE_TREE (self), FALSE);
+
+  reply = xd_remote_client_call_finish (self->client, result, error);
+  return reply != NULL;
 }
 
 void

@@ -3,6 +3,7 @@
 #include "remote/server.h"
 #include "remote/turn.h"
 #include "remote/protocol.h"
+#include "settings/folder-settings.h"
 #include "storage/storage.h"
 
 #include <json-glib/json-glib.h>
@@ -862,6 +863,108 @@ test_folders_and_chats_are_managed_from_the_client (void)
     g_autofree char *path = g_build_filename (daemon.root, "Lunar", NULL);
 
     g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  }
+
+  daemon_stop (&daemon);
+}
+
+/*
+ * A folder's own context can be edited from another machine without exposing
+ * its path. Clearing it restores inheritance; parent context is deliberately
+ * not flattened into this reply.
+ */
+static void
+test_folder_context_is_managed_from_the_client (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autofree char *folder_path = NULL;
+  XdNode *folder;
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  folder = child_at (xd_remote_tree_get_root (tree), 0);
+  folder_path = g_build_filename (daemon.root, "Zeno", NULL);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    RemoteReply read = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "folder-context");
+    json_builder_set_member_name (builder, "folder");
+    json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &read);
+
+    g_assert_true (read.wait.ok);
+    g_assert_true (json_object_get_null_member (read.reply, "context"));
+    json_object_unref (read.reply);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autoptr (XdFolderSettings) settings = NULL;
+    RemoteReply saved = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "set-folder-context");
+    json_builder_set_member_name (builder, "folder");
+    json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    json_builder_set_member_name (builder, "context");
+    json_builder_add_string_value (builder, "  Prefer small patches.  ");
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &saved);
+
+    g_assert_true (saved.wait.ok);
+    settings = xd_folder_settings_load (folder_path, NULL);
+    g_assert_cmpstr (settings->instructions, ==, "Prefer small patches.");
+    json_object_unref (saved.reply);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    RemoteReply read = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "folder-context");
+    json_builder_set_member_name (builder, "folder");
+    json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &read);
+
+    g_assert_true (read.wait.ok);
+    g_assert_cmpstr (
+      json_object_get_string_member (read.reply, "context"), ==,
+      "Prefer small patches.");
+    json_object_unref (read.reply);
+  }
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autoptr (XdFolderSettings) settings = NULL;
+    RemoteReply cleared = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "set-folder-context");
+    json_builder_set_member_name (builder, "folder");
+    json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    json_builder_set_member_name (builder, "context");
+    json_builder_add_null_value (builder);
+    json_builder_end_object (builder);
+    call_remote_request (client, builder, &cleared);
+
+    g_assert_true (cleared.wait.ok);
+    settings = xd_folder_settings_load (folder_path, NULL);
+    g_assert_null (settings->instructions);
+    json_object_unref (cleared.reply);
   }
 
   daemon_stop (&daemon);
@@ -2624,6 +2727,7 @@ main (int argc, char *argv[])
   ADD ("/remote/client-pairs-and-reads-the-tree", test_client_pairs_and_reads_the_tree);
   ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
   ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
+  ADD ("/remote/folder-context-is-managed-from-the-client", test_folder_context_is_managed_from_the_client);
   ADD ("/remote/a-refused-change-is-reported", test_a_refused_change_is_reported);
   ADD ("/remote/a-remote-that-is-not-answering-shows-offline", test_a_remote_that_is_not_answering_shows_offline);
   ADD ("/remote/two-devices-stay-in-step", test_two_devices_stay_in_step);

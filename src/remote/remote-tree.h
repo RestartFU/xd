@@ -70,6 +70,34 @@ void            xd_remote_tree_trash_folder  (XdRemoteTree *self,
                                               XdNode       *folder);
 
 /*
+ * Reads and writes only this folder's own agent context. Parent context is
+ * accumulated by the daemon when a turn starts, so it must not be copied into
+ * a child when the editor saves.
+ */
+void            xd_remote_tree_get_folder_context_async (
+                                              XdRemoteTree        *self,
+                                              XdNode              *folder,
+                                              GCancellable        *cancellable,
+                                              GAsyncReadyCallback  callback,
+                                              gpointer             user_data);
+gboolean        xd_remote_tree_get_folder_context_finish (
+                                              XdRemoteTree *self,
+                                              GAsyncResult *result,
+                                              char        **context,
+                                              GError      **error);
+void            xd_remote_tree_set_folder_context_async (
+                                              XdRemoteTree        *self,
+                                              XdNode              *folder,
+                                              const char          *context,
+                                              GCancellable        *cancellable,
+                                              GAsyncReadyCallback  callback,
+                                              gpointer             user_data);
+gboolean        xd_remote_tree_set_folder_context_finish (
+                                              XdRemoteTree *self,
+                                              GAsyncResult *result,
+                                              GError      **error);
+
+/*
  * The backend, model and effort are the daemon's to decide -- they come from
  * the folder chain, which lives over there. @workdir may be NULL to inherit
  * the folder's; anything else must be a directory on the daemon, which is why

@@ -66,6 +66,7 @@ xd_sources = files(
   'ui/panel-style.c',
   'ui/updater.c',
   'remote/pair-dialog.c',
+  'settings/folder-context-dialog.c',
   'settings/folder-settings-dialog.c',
   'chat/model-picker.c',
   'chat/option-picker.c',

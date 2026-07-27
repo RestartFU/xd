@@ -698,6 +698,99 @@ handle_trash_folder (Connection *connection,
 }
 
 /*
+ * The context belongs to the folder on the daemon, not to the device editing
+ * it. Only the folder's own text crosses the wire; inherited context remains
+ * the resolver's job when a turn starts.
+ */
+static void
+handle_folder_context (Connection *connection,
+                       JsonObject *request)
+{
+  g_autofree char *path = NULL;
+  g_autoptr (XdFolderSettings) settings = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  path = folder_argument (connection, request, "folder", FALSE);
+  if (path == NULL)
+    return;
+
+  settings = xd_folder_settings_ensure (path, &error);
+  if (settings == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, TRUE);
+  json_builder_set_member_name (builder, "context");
+  if (settings->instructions != NULL)
+    json_builder_add_string_value (builder, settings->instructions);
+  else
+    json_builder_add_null_value (builder);
+  json_builder_end_object (builder);
+
+  send_json (connection, builder);
+}
+
+static void
+handle_set_folder_context (Connection *connection,
+                           JsonObject *request)
+{
+  g_autofree char *path = NULL;
+  g_autofree char *context = NULL;
+  g_autoptr (XdFolderSettings) settings = NULL;
+  g_autoptr (GError) error = NULL;
+  JsonNode *node;
+
+  path = folder_argument (connection, request, "folder", FALSE);
+  if (path == NULL)
+    return;
+
+  if (!json_object_has_member (request, "context"))
+    {
+      send_error (connection, "set-folder-context needs context.");
+      return;
+    }
+
+  node = json_object_get_member (request, "context");
+  if (!JSON_NODE_HOLDS_NULL (node))
+    {
+      if (!JSON_NODE_HOLDS_VALUE (node) ||
+          json_node_get_value_type (node) != G_TYPE_STRING)
+        {
+          send_error (connection, "Folder context must be text or null.");
+          return;
+        }
+
+      context = json_node_dup_string (node);
+      g_strstrip (context);
+      if (*context == '\0')
+        g_clear_pointer (&context, g_free);
+    }
+
+  settings = xd_folder_settings_ensure (path, &error);
+  if (settings == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  g_free (settings->instructions);
+  settings->instructions = g_steal_pointer (&context);
+
+  if (!xd_folder_settings_save (settings, path, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+}
+
+/*
  * What a new chat in @path answers with.
  *
  * Resolved here rather than sent by the client, because the folder chain that
@@ -2415,6 +2508,10 @@ dispatch (Connection *connection,
     handle_move_folder (connection, request);
   else if (g_strcmp0 (op, "trash-folder") == 0)
     handle_trash_folder (connection, request);
+  else if (g_strcmp0 (op, "folder-context") == 0)
+    handle_folder_context (connection, request);
+  else if (g_strcmp0 (op, "set-folder-context") == 0)
+    handle_set_folder_context (connection, request);
   else if (g_strcmp0 (op, "new-chat") == 0)
     handle_new_chat (connection, request);
   else if (g_strcmp0 (op, "rename-chat") == 0)

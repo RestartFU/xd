@@ -1,6 +1,7 @@
 #include "sidebar.h"
 
 #include "backend/backend.h"
+#include "settings/folder-context-dialog.h"
 #include "settings/folder-settings-dialog.h"
 #include "settings/settings-resolver.h"
 #include "chat/chat-title.h"
@@ -804,6 +805,21 @@ on_folder_settings (GtkWidget  *widget,
   xd_folder_settings_dialog_present (GTK_WIDGET (self), folder, self->settings);
 }
 
+static void
+on_folder_context (GtkWidget  *widget,
+                   const char *action_name,
+                   GVariant   *target)
+{
+  XdSidebar *self = XD_SIDEBAR (widget);
+  XdNode *folder = node_from_target (self, target);
+
+  if (folder == NULL)
+    return;
+
+  xd_folder_context_dialog_present (
+    GTK_WIDGET (self), folder, is_remote_row (folder) ? self->remote : NULL);
+}
+
 typedef struct
 {
   XdSidebar *self;
@@ -1393,6 +1409,7 @@ build_row_menu (XdNode *node)
   g_autoptr (GMenuItem) new_chat = NULL;
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) rename = NULL;
+  g_autoptr (GMenuItem) context = NULL;
   g_autoptr (GMenuItem) settings = NULL;
   g_autoptr (GMenuItem) trash = NULL;
 
@@ -1417,8 +1434,13 @@ build_row_menu (XdNode *node)
   g_menu_item_set_action_and_target_value (rename, "sidebar.rename", target);
   g_menu_append_item (menu, rename);
 
-  /* The settings dialog edits the dotfile inside the folder, which for a
-   * remote is a file on the other machine that nothing here can write. */
+  context = g_menu_item_new ("Agent Context…", NULL);
+  g_menu_item_set_action_and_target_value (
+    context, "sidebar.folder-context", target);
+  g_menu_append_item (menu, context);
+
+  /* The rest of the settings still edit a local dotfile directly. Agent
+   * context has its own daemon operation and is available on both sides. */
   if (!remote)
     {
       settings = g_menu_item_new ("Folder Settings…", NULL);
@@ -1862,6 +1884,8 @@ xd_sidebar_class_init (XdSidebarClass *klass)
                                    on_delete_chat);
   gtk_widget_class_install_action (widget_class, "sidebar.settings", "s",
                                    on_folder_settings);
+  gtk_widget_class_install_action (widget_class, "sidebar.folder-context", "s",
+                                   on_folder_context);
   gtk_widget_class_install_action (widget_class, "sidebar.refresh-remote", "s",
                                    on_refresh_remote);
 }
