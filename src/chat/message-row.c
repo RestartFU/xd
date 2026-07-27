@@ -8,6 +8,7 @@
 #include "diff-view.h"
 #include "util/markdown.h"
 #include "util/host-launch.h"
+#include "util/workflow-run.h"
 
 struct _XdMessageRow
 {
@@ -23,6 +24,7 @@ struct _XdMessageRow
   GtkWidget *body;          /* a column of prose labels and code cards */
   GtkWidget *workflow_status;
   GtkWidget *workflow_spinner;
+  GtkWidget *workflow_log;
   char *workflow_run_id;
   char *workflow_repository;
   guint workflow_poll;
@@ -337,12 +339,19 @@ on_workflow_status (GObject      *source,
   for (guint i = 0; i < total; i++)
     {
       JsonObject *job = json_array_get_object_element (jobs, i);
+      const char *job_status =
+        json_object_get_string_member_with_default (job, "status", NULL);
 
-      if (g_strcmp0 (
-            json_object_get_string_member_with_default (job, "status", NULL),
-            "completed") == 0)
+      if (g_strcmp0 (job_status, "completed") == 0)
         complete++;
     }
+
+  {
+    g_autofree char *activity = xd_workflow_run_activity (jobs, 5);
+
+    gtk_label_set_label (GTK_LABEL (self->workflow_log), activity);
+    gtk_widget_set_visible (self->workflow_log, activity != NULL);
+  }
 
   if (g_strcmp0 (status, "completed") == 0)
     {
@@ -443,8 +452,15 @@ xd_message_row_make_workflow (XdMessageRow *self,
   status = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 7);
   self->workflow_spinner = gtk_spinner_new ();
   self->workflow_status = gtk_label_new ("Checking status…");
+  self->workflow_log = gtk_label_new (NULL);
   gtk_spinner_start (GTK_SPINNER (self->workflow_spinner));
   gtk_label_set_xalign (GTK_LABEL (self->workflow_status), 0.0f);
+  gtk_label_set_xalign (GTK_LABEL (self->workflow_log), 0.0f);
+  gtk_label_set_selectable (GTK_LABEL (self->workflow_log), TRUE);
+  gtk_label_set_ellipsize (GTK_LABEL (self->workflow_log),
+                           PANGO_ELLIPSIZE_END);
+  gtk_widget_set_visible (self->workflow_log, FALSE);
+  gtk_widget_add_css_class (self->workflow_log, "xd-workflow-log");
   gtk_box_append (GTK_BOX (status), self->workflow_spinner);
   gtk_box_append (GTK_BOX (status), self->workflow_status);
 
@@ -458,6 +474,7 @@ xd_message_row_make_workflow (XdMessageRow *self,
 
   gtk_box_append (GTK_BOX (self->body), title);
   gtk_box_append (GTK_BOX (self->body), status);
+  gtk_box_append (GTK_BOX (self->body), self->workflow_log);
   gtk_box_append (GTK_BOX (self->body), link);
 
   if (self->workflow_repository == NULL)

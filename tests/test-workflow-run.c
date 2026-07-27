@@ -99,6 +99,52 @@ test_ignores_other_commands (void)
   g_assert_false (xd_workflow_run_from_tool (view, NULL, NULL));
 }
 
+static void
+test_live_activity (void)
+{
+  g_autoptr (JsonParser) parser = json_parser_new ();
+  g_autoptr (GError) error = NULL;
+  g_autofree char *activity = NULL;
+  JsonArray *jobs;
+
+  g_assert_true (json_parser_load_from_data (
+    parser,
+    "["
+    " {\"name\":\"Linux\",\"status\":\"completed\"},"
+    " {\"name\":\"Windows\",\"status\":\"in_progress\",\"steps\":["
+    "   {\"name\":\"Checkout\",\"status\":\"completed\"},"
+    "   {\"name\":\"Build MSI\",\"status\":\"in_progress\"}"
+    " ]},"
+    " {\"name\":\"macOS\",\"status\":\"queued\"},"
+    " {\"name\":\"Publish\",\"status\":\"waiting\"}"
+    "]",
+    -1, &error));
+  g_assert_no_error (error);
+  jobs = json_node_get_array (json_parser_get_root (parser));
+
+  activity = xd_workflow_run_activity (jobs, 2);
+
+  g_assert_cmpstr (activity, ==,
+                   "Windows · Build MSI\n"
+                   "macOS · Queued");
+}
+
+static void
+test_empty_activity (void)
+{
+  g_autoptr (JsonParser) parser = json_parser_new ();
+  g_autoptr (GError) error = NULL;
+  JsonArray *jobs;
+
+  g_assert_true (json_parser_load_from_data (
+    parser, "[{\"name\":\"Linux\",\"status\":\"completed\"}]", -1, &error));
+  g_assert_no_error (error);
+  jobs = json_node_get_array (json_parser_get_root (parser));
+
+  g_assert_null (xd_workflow_run_activity (jobs, 5));
+  g_assert_null (xd_workflow_run_activity (jobs, 0));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -111,6 +157,8 @@ main (int   argc,
                    test_repository_from_workdir);
   g_test_add_func ("/workflow-run/ignores-other-commands",
                    test_ignores_other_commands);
+  g_test_add_func ("/workflow-run/live-activity", test_live_activity);
+  g_test_add_func ("/workflow-run/empty-activity", test_empty_activity);
 
   return g_test_run ();
 }

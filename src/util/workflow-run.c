@@ -188,3 +188,92 @@ xd_workflow_run_from_tool (const char *message,
 
   return TRUE;
 }
+
+static const char *
+workflow_activity_status (const char *status)
+{
+  if (g_strcmp0 (status, "queued") == 0)
+    return "Queued";
+  if (g_strcmp0 (status, "waiting") == 0)
+    return "Waiting";
+  if (g_strcmp0 (status, "pending") == 0 ||
+      g_strcmp0 (status, "requested") == 0)
+    return "Pending";
+  if (g_strcmp0 (status, "in_progress") == 0)
+    return "In progress";
+
+  return NULL;
+}
+
+static JsonArray *
+workflow_job_steps (JsonObject *job)
+{
+  JsonNode *node;
+
+  if (!json_object_has_member (job, "steps"))
+    return NULL;
+
+  node = json_object_get_member (job, "steps");
+  return node != NULL && JSON_NODE_HOLDS_ARRAY (node)
+    ? json_node_get_array (node) : NULL;
+}
+
+char *
+xd_workflow_run_activity (JsonArray *jobs,
+                          guint      limit)
+{
+  g_autoptr (GString) activity = g_string_new (NULL);
+  guint shown = 0;
+
+  if (jobs == NULL || limit == 0)
+    return NULL;
+
+  for (guint i = 0;
+       i < json_array_get_length (jobs) && shown < limit;
+       i++)
+    {
+      JsonObject *job = json_array_get_object_element (jobs, i);
+      JsonArray *steps;
+      const char *job_name;
+      const char *status;
+      const char *detail;
+
+      if (job == NULL)
+        continue;
+
+      job_name =
+        json_object_get_string_member_with_default (job, "name", "Job");
+      status =
+        json_object_get_string_member_with_default (job, "status", NULL);
+      detail = workflow_activity_status (status);
+      if (detail == NULL)
+        continue;
+
+      steps = workflow_job_steps (job);
+      if (g_strcmp0 (status, "in_progress") == 0 && steps != NULL)
+        for (guint j = 0; j < json_array_get_length (steps); j++)
+          {
+            JsonObject *step = json_array_get_object_element (steps, j);
+            const char *step_status;
+
+            if (step == NULL)
+              continue;
+
+            step_status = json_object_get_string_member_with_default (
+              step, "status", NULL);
+            if (g_strcmp0 (step_status, "in_progress") == 0)
+              {
+                detail = json_object_get_string_member_with_default (
+                  step, "name", detail);
+                break;
+              }
+          }
+
+      g_string_append_printf (activity, "%s%s · %s",
+                              shown > 0 ? "\n" : "", job_name, detail);
+      shown++;
+    }
+
+  return activity->len > 0
+    ? g_string_free (g_steal_pointer (&activity), FALSE) : NULL;
+}
