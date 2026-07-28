@@ -9,6 +9,13 @@
 
 set -e
 
+# A shell can stay attached to a directory after that directory is deleted.
+# Its cached $PWD still looks right, but every child then inherits a cwd that
+# getcwd(3) cannot resolve. Recover before the bundle starts helper processes.
+if ! pwd -P >/dev/null 2>&1; then
+  cd "${HOME:-/}" 2>/dev/null || cd /
+fi
+
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 # Per bundle, not just per user: a nightly and a release installed side by side

@@ -518,6 +518,32 @@ print_version (void)
   printf ("xd %s\n", XD_VERSION_STRING);
 }
 
+#if XD_HAS_SERVER
+static gboolean
+repair_daemon_cwd (GError **error)
+{
+  g_autofree char *cwd = getcwd (NULL, 0);
+  int saved_errno;
+
+  if (cwd != NULL)
+    return TRUE;
+
+  /*
+   * A long-running shell may still refer to a directory that was deleted.
+   * The daemon uses absolute data paths, but updater shells and the replacement
+   * launcher inherit its cwd and otherwise repeat getcwd errors indefinitely.
+   */
+  if (chdir (g_get_home_dir ()) == 0 || chdir ("/") == 0)
+    return TRUE;
+
+  saved_errno = errno;
+  g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+               "Cannot select a working directory for the daemon: %s",
+               g_strerror (saved_errno));
+  return FALSE;
+}
+#endif
+
 static int
 run_serve (int argc, char *argv[])
 {
@@ -539,6 +565,12 @@ run_serve (int argc, char *argv[])
   guint16 port = 4001;
   gboolean pair = FALSE;
   gboolean auto_update = FALSE;
+
+  if (!repair_daemon_cwd (&error))
+    {
+      fprintf (stderr, "xd serve: %s\n", error->message);
+      return 1;
+    }
 
   for (int i = 2; i < argc; i++)
     {
