@@ -187,8 +187,7 @@ struct _XdChatView
   GtkWidget *commands_bar;
   GtkFlowBox *commands_flow;
   GtkProgressBar *context_meter;
-  GtkLabel *queued_label;
-  char *queued;             /* typed while a turn was running */
+  GPtrArray *queue;         /* char*, typed while a turn was running */
   gboolean syncing_panes;   /* setting the toggles to match the chat */
   GPtrArray *attachments;   /* absolute paths of pasted images */
   GHashTable *command_sets; /* local/remote backend scope -> GStrv */
@@ -276,7 +275,9 @@ static void show_tool_use (XdChatView *self, const char *summary);
 static char *describe_context (const char *workdir);
 static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data);
 static void show_queued (XdChatView *self);
-static void set_queued_text (XdChatView *self, const char *text);
+static void set_queue (XdChatView *self, GPtrArray *messages);
+static void clear_queue (XdChatView *self);
+static void on_steer_clicked (GtkButton *button, gpointer user_data);
 static Turn *current_turn (XdChatView *self);
 static gboolean send_remote_message (XdChatView *self, const char *text);
 static void cancel_remote_turn (XdChatView *self);
@@ -1601,6 +1602,41 @@ end_remote_turn (XdChatView *self)
     g_string_truncate (self->remote_said, 0);
 }
 
+/*
+ * The queue as the daemon holds it.
+ *
+ * @single is what a daemon that only ever had room for one message sends; it
+ * stands in for the list when no list arrived, so an older daemon still shows
+ * what is waiting.
+ */
+static GPtrArray *
+queue_from_json (JsonObject *object,
+                 const char *single)
+{
+  GPtrArray *messages = g_ptr_array_new_with_free_func (g_free);
+  JsonArray *array;
+
+  if (object != NULL && json_object_has_member (object, "queue"))
+    {
+      array = json_object_get_array_member (object, "queue");
+
+      for (guint i = 0; array != NULL && i < json_array_get_length (array); i++)
+        {
+          const char *text = json_array_get_string_element (array, i);
+
+          if (text != NULL && *text != '\0')
+            g_ptr_array_add (messages, g_strdup (text));
+        }
+
+      return messages;
+    }
+
+  if (single != NULL && *single != '\0')
+    g_ptr_array_add (messages, g_strdup (single));
+
+  return messages;
+}
+
 static GStrv
 commands_from_json (JsonArray *array)
 {
@@ -1685,7 +1721,9 @@ on_remote_event (XdRemoteClient *client,
 
   if (g_strcmp0 (name, "queued") == 0)
     {
-      set_queued_text (self, text);
+      g_autoptr (GPtrArray) messages = queue_from_json (event, text);
+
+      set_queue (self, messages);
 
       /*
        * A send can race the daemon starting a turn on another device. The
@@ -1842,7 +1880,6 @@ on_remote_options_received (GObject      *source,
   chat.effort = (char *) member_string (reply, "effort", NULL);
   chat.access = (char *) member_string (reply, "access", NULL);
   chat.workdir = (char *) member_string (reply, "workdir", NULL);
-  chat.queued = (char *) member_string (reply, "queued", NULL);
   chat.plan = json_object_get_boolean_member_with_default (reply, "plan", FALSE);
   chat.new_worktree =
     json_object_get_boolean_member_with_default (reply, "new_worktree", FALSE);
@@ -1916,7 +1953,12 @@ on_remote_options_received (GObject      *source,
       apply_panes (self, saved_panes (self, PANE_NONE));
       self->restore_remote_panes = FALSE;
     }
-  set_queued_text (self, chat.queued);
+  {
+    g_autoptr (GPtrArray) queued =
+      queue_from_json (reply, member_string (reply, "queued", NULL));
+
+    set_queue (self, queued);
+  }
 
   /*
    * A turn already running when the chat was opened.
@@ -2157,7 +2199,7 @@ on_storage_changed (XdStorage *storage,
   chat_id = xd_node_get_chat_id (self->chat);
   chat = xd_storage_get_chat (self->storage, chat_id, NULL);
   if (chat != NULL)
-    set_queued_text (self, chat->queued);
+    set_queue (self, chat->queue);
 
   if (current_turn (self) != NULL)
     return;
@@ -2167,7 +2209,7 @@ on_storage_changed (XdStorage *storage,
 
   /* Another window may have queued this while this one owned the turn. Once
    * that turn is gone, the persisted instruction still runs. */
-  if (self->queued != NULL)
+  if (self->queue->len > 0)
     {
       send_queued (self);
       return;
@@ -2588,7 +2630,7 @@ on_turn_finished (XdChatSession *session,
     update_send_button (self);
 
   /* Whatever was typed while it was working is what to do next. */
-  if (visible && self->queued != NULL)
+  if (visible && self->queue->len > 0)
     send_queued (self);
 }
 
@@ -3151,22 +3193,101 @@ paste_image (XdChatView *self)
 
 /* --- messages typed while the agent is working ------------------------------ */
 
+static void drop_queued_at (XdChatView *self, guint position);
+
+static void
+on_queued_row_dropped (GtkButton *button,
+                       gpointer   user_data)
+{
+  XdChatView *self = user_data;
+  guint position =
+    GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "position")) - 1;
+
+  drop_queued_at (self, position);
+}
+
+/*
+ * A row per waiting message, in the order they will be answered.
+ *
+ * More than one can wait, so the bar is a list rather than a line: each row
+ * says what it will send and can be dropped on its own, and only the first
+ * carries the button that interrupts the agent to send it now.
+ */
 static void
 show_queued (XdChatView *self)
 {
-  gtk_widget_set_visible (self->queued_bar, self->queued != NULL);
+  GtkWidget *child;
 
-  if (self->queued != NULL)
-    gtk_label_set_label (self->queued_label, self->queued);
+  gtk_widget_set_visible (self->queued_bar, self->queue->len > 0);
+
+  while ((child = gtk_widget_get_first_child (self->queued_bar)) != NULL)
+    gtk_box_remove (GTK_BOX (self->queued_bar), child);
+
+  for (guint i = 0; i < self->queue->len; i++)
+    {
+      GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+      GtkWidget *icon = gtk_image_new_from_icon_name ("document-send-symbolic");
+      GtkWidget *label = gtk_label_new (g_ptr_array_index (self->queue, i));
+      GtkWidget *drop = gtk_button_new_from_icon_name ("window-close-symbolic");
+
+      gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
+      gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
+      gtk_widget_set_hexpand (label, TRUE);
+      gtk_widget_add_css_class (label, "dim-label");
+
+      gtk_widget_add_css_class (drop, "flat");
+      gtk_widget_set_tooltip_text (drop, "Discard");
+      g_object_set_data (G_OBJECT (drop), "position", GUINT_TO_POINTER (i + 1));
+      g_signal_connect (drop, "clicked",
+                        G_CALLBACK (on_queued_row_dropped), self);
+
+      gtk_box_append (GTK_BOX (row), icon);
+      gtk_box_append (GTK_BOX (row), label);
+
+      if (i == 0)
+        {
+          GtkWidget *steer =
+            gtk_button_new_from_icon_name ("media-skip-forward-symbolic");
+
+          gtk_widget_add_css_class (steer, "flat");
+          gtk_widget_set_tooltip_text (
+            steer, "Send now, interrupting the agent");
+          g_signal_connect (steer, "clicked",
+                            G_CALLBACK (on_steer_clicked), self);
+          gtk_box_append (GTK_BOX (row), steer);
+        }
+      else
+        {
+          g_autofree char *ordinal = g_strdup_printf ("%u", i + 1);
+          GtkWidget *place = gtk_label_new (ordinal);
+
+          gtk_widget_add_css_class (place, "dim-label");
+          gtk_widget_add_css_class (place, "caption");
+          gtk_box_append (GTK_BOX (row), place);
+        }
+
+      gtk_box_append (GTK_BOX (row), drop);
+      gtk_box_append (GTK_BOX (self->queued_bar), row);
+    }
 }
 
 static void
-set_queued_text (XdChatView *self,
-                 const char *text)
+set_queue (XdChatView *self,
+           GPtrArray  *messages)
 {
-  g_free (self->queued);
-  self->queued = g_strdup (text);
+  g_ptr_array_set_size (self->queue, 0);
+
+  for (guint i = 0; messages != NULL && i < messages->len; i++)
+    g_ptr_array_add (self->queue,
+                     g_strdup (g_ptr_array_index (messages, i)));
+
   show_queued (self);
+}
+
+static void
+clear_queue (XdChatView *self)
+{
+  set_queue (self, NULL);
 }
 
 static void
@@ -3189,9 +3310,17 @@ on_remote_queue_set (GObject      *source,
     load_remote_options (self);
 }
 
+/*
+ * @text queues a message; NULL drops one.
+ *
+ * @position says which message to drop, or -1 for the whole queue. The daemon
+ * answers with the queue it ended up with, so every device agrees on the order
+ * without any of them working it out for itself.
+ */
 static void
-set_remote_queue (XdChatView *self,
-                  const char *text)
+send_remote_queue_op (XdChatView *self,
+                      const char *text,
+                      int         position)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (JsonNode) request = NULL;
@@ -3206,6 +3335,11 @@ set_remote_queue (XdChatView *self,
       json_builder_set_member_name (builder, "text");
       json_builder_add_string_value (builder, text);
     }
+  else if (position >= 0)
+    {
+      json_builder_set_member_name (builder, "index");
+      json_builder_add_int_value (builder, position);
+    }
   json_builder_end_object (builder);
 
   request = json_builder_get_root (builder);
@@ -3213,14 +3347,14 @@ set_remote_queue (XdChatView *self,
                                on_remote_queue_set, g_object_ref (self));
 }
 
+/* The queue on screen is what gets written: one order, kept in both places. */
 static gboolean
-set_local_queue (XdChatView *self,
-                 const char *text)
+store_local_queue (XdChatView *self)
 {
   g_autoptr (GError) error = NULL;
 
-  if (!xd_storage_set_queued (self->storage,
-                              xd_node_get_chat_id (self->chat), text, &error))
+  if (!xd_storage_set_queue (self->storage, xd_node_get_chat_id (self->chat),
+                             self->queue, &error))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return FALSE;
@@ -3229,39 +3363,79 @@ set_local_queue (XdChatView *self,
   return TRUE;
 }
 
+/*
+ * Adds to the queue rather than replacing it.
+ *
+ * A second message typed while the agent works is a second thing to do, not a
+ * correction of the first: they are answered one turn at a time, in the order
+ * they were written.
+ */
 static void
 queue_message (XdChatView *self,
                const char *text)
 {
-  /* A second message replaces the first rather than piling up: what is meant
-   * is the latest instruction, not a list of them to be answered in turn. */
-  if (self->remote != NULL)
-    set_remote_queue (self, text);
-  else if (!set_local_queue (self, text))
+  if (text == NULL || *text == '\0')
     return;
 
-  set_queued_text (self, text);
+  g_ptr_array_add (self->queue, g_strdup (text));
+
+  if (self->remote != NULL)
+    send_remote_queue_op (self, text, -1);
+  else if (!store_local_queue (self))
+    {
+      g_ptr_array_remove_index (self->queue, self->queue->len - 1);
+      return;
+    }
+
+  show_queued (self);
+}
+
+static void
+drop_queued_at (XdChatView *self,
+                guint       position)
+{
+  if (position >= self->queue->len)
+    return;
+
+  g_ptr_array_remove_index (self->queue, position);
+
+  if (self->remote != NULL)
+    send_remote_queue_op (self, NULL, (int) position);
+  else if (!store_local_queue (self))
+    return;
+
+  show_queued (self);
 }
 
 /*
- * Sends what is queued as soon as it can be sent.
+ * Sends the oldest queued message as soon as it can be sent.
  *
- * Called when a turn ends. The queued text goes through the normal path, so
- * it is stored, shown and answered like anything else.
+ * Called when a turn ends. It goes through the normal path, so it is stored,
+ * shown and answered like anything else -- and when that turn ends, whatever
+ * is still waiting behind it follows the same way.
  */
 static void
 send_queued (XdChatView *self)
 {
-  g_autofree char *text = g_strdup (self->queued);
+  g_autofree char *text = NULL;
 
-  if (text == NULL || !set_local_queue (self, NULL))
+  if (self->queue->len == 0)
     return;
 
-  set_queued_text (self, NULL);
+  text = g_strdup (g_ptr_array_index (self->queue, 0));
+  g_ptr_array_remove_index (self->queue, 0);
+
+  if (!store_local_queue (self))
+    return;
+
+  show_queued (self);
+
   if (!send_message (self, text))
     {
-      set_local_queue (self, text);
-      set_queued_text (self, text);
+      /* Back where it was: still the next thing to do. */
+      g_ptr_array_insert (self->queue, 0, g_strdup (text));
+      store_local_queue (self);
+      show_queued (self);
     }
 }
 
@@ -3292,20 +3466,6 @@ on_steer_clicked (GtkButton *button,
   else
     send_queued (self);
   /* The queued text goes out when the turn reports that it has stopped. */
-}
-
-static void
-on_queued_dropped (GtkButton *button,
-                   gpointer   user_data)
-{
-  XdChatView *self = user_data;
-
-  if (self->remote != NULL)
-    set_remote_queue (self, NULL);
-  else if (!set_local_queue (self, NULL))
-    return;
-
-  set_queued_text (self, NULL);
 }
 
 /* A refusal -- the chat already working, the daemon gone -- is the only part of
@@ -3480,7 +3640,7 @@ send_current_message (XdChatView *self)
 
   /* Enter on an empty composer means "send the instruction already waiting"
    * when there is one. This is the keyboard equivalent of the steer button. */
-  if (text == NULL && self->attachments->len == 0 && self->queued != NULL)
+  if (text == NULL && self->attachments->len == 0 && self->queue->len > 0)
     {
       on_steer_clicked (NULL, self);
       return;
@@ -3495,7 +3655,7 @@ send_current_message (XdChatView *self)
       /*
        * Plain text uses the queue operation while the daemon works. An image
        * has bytes to upload, so it goes through send; the authoritative daemon
-       * turns that send into the same single queued instruction.
+       * puts that send at the back of the same queue.
        */
       if (self->remote_working && self->attachments->len == 0)
         {
@@ -4505,7 +4665,7 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
       use_command_scope (self, NULL);
     }
 
-  set_queued_text (self, NULL);
+  clear_queue (self);
   update_context_meter (self, 0, 0);
   unbind_chat_title (self);
   use_chat_node (self, chat);
@@ -4580,7 +4740,7 @@ xd_chat_view_set_chat (XdChatView *self,
 
   set_remote (self, NULL);
   self->restore_remote_panes = FALSE;
-  set_queued_text (self, NULL);
+  clear_queue (self);
   update_context_meter (self, 0, 0);
   set_local_controls_visible (self, TRUE);
   adw_window_title_set_subtitle (self->title, NULL);
@@ -4634,7 +4794,7 @@ xd_chat_view_set_chat (XdChatView *self,
                 (record->terminal_open ? PANE_TERMINAL : PANE_NONE) |
                 (record->diff_open ? PANE_DIFF : PANE_NONE)));
           }
-        set_queued_text (self, record->queued);
+        set_queue (self, record->queue);
       }
     else
       {
@@ -4682,7 +4842,7 @@ xd_chat_view_set_chat (XdChatView *self,
     {
       set_working (self, TRUE);
     }
-  else if (self->queued != NULL)
+  else if (self->queue->len > 0)
     {
       /* A restart ended the process, not the instruction waiting behind it. */
       send_queued (self);
@@ -4775,29 +4935,8 @@ build_composer (XdChatView *self)
    * ends wastes the time they spent typing it.
    */
   {
-    GtkWidget *icon = gtk_image_new_from_icon_name ("document-send-symbolic");
-    GtkWidget *steer = gtk_button_new_from_icon_name ("media-skip-forward-symbolic");
-    GtkWidget *drop = gtk_button_new_from_icon_name ("window-close-symbolic");
-
-    self->queued_label = GTK_LABEL (gtk_label_new (NULL));
-    gtk_label_set_ellipsize (self->queued_label, PANGO_ELLIPSIZE_END);
-    gtk_label_set_xalign (self->queued_label, 0.0f);
-    gtk_widget_set_hexpand (GTK_WIDGET (self->queued_label), TRUE);
-    gtk_widget_add_css_class (GTK_WIDGET (self->queued_label), "dim-label");
-
-    gtk_widget_add_css_class (steer, "flat");
-    gtk_widget_set_tooltip_text (steer, "Send now, interrupting the agent");
-    g_signal_connect (steer, "clicked", G_CALLBACK (on_steer_clicked), self);
-
-    gtk_widget_add_css_class (drop, "flat");
-    gtk_widget_set_tooltip_text (drop, "Discard");
-    g_signal_connect (drop, "clicked", G_CALLBACK (on_queued_dropped), self);
-
-    self->queued_bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_box_append (GTK_BOX (self->queued_bar), icon);
-    gtk_box_append (GTK_BOX (self->queued_bar), GTK_WIDGET (self->queued_label));
-    gtk_box_append (GTK_BOX (self->queued_bar), steer);
-    gtk_box_append (GTK_BOX (self->queued_bar), drop);
+    /* A column: the rows are built from the queue itself, in show_queued. */
+    self->queued_bar = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_set_visible (self->queued_bar, FALSE);
     gtk_widget_set_margin_top (self->queued_bar, 6);
     gtk_widget_set_margin_start (self->queued_bar, 10);
@@ -5077,7 +5216,7 @@ xd_chat_view_dispose (GObject *object)
   g_clear_pointer (&self->command_sets, g_hash_table_unref);
   g_clear_pointer (&self->command_scope, g_free);
   g_clear_pointer (&self->workspace_paths, g_ptr_array_unref);
-  g_clear_pointer (&self->queued, g_free);
+  g_clear_pointer (&self->queue, g_ptr_array_unref);
   g_clear_object (&self->settings);
   g_clear_object (&self->git_head_watch);
   g_clear_object (&self->storage);
@@ -5105,6 +5244,7 @@ xd_chat_view_init (XdChatView *self)
   g_queue_init (&self->transcript_lru);
   self->settings = g_settings_new (XD_APP_ID);
   self->attachments = g_ptr_array_new_with_free_func (g_free);
+  self->queue = g_ptr_array_new_with_free_func (g_free);
   self->command_sets = g_hash_table_new_full (
     g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_strfreev);
   self->workspace_paths = g_ptr_array_new_with_free_func (g_free);

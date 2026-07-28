@@ -219,48 +219,48 @@ escaped_display_text (const char *text)
   return g_markup_escape_text (shown, -1);
 }
 
+const char *
+xd_diff_line_background (XdDiffLineKind kind)
+{
+  if (kind == XD_DIFF_LINE_ADDED)
+    return "#183522";
+  if (kind == XD_DIFF_LINE_REMOVED)
+    return "#3a1d1b";
+
+  return NULL;
+}
+
 typedef struct
 {
   GString *text;
-  const char *background;
+  GArray *kinds;  /* guint8 per rendered row; NULL when the caller wants none */
   guint rendered;
 } MarkupBuilder;
 
 /*
- * Keep consecutive changed lines inside one background span.
+ * Begins a row, and records what kind of row it is.
  *
- * Closing every span before its newline leaves a fractional Pango line box
- * uncovered, which shows as a dark seam between otherwise adjacent rows.
+ * The row's colour is deliberately not in the markup. Pango paints a
+ * background attribute across the glyphs it covers and nothing else, so a
+ * block of changed lines came out striped by the line spacing and ragged
+ * wherever a line was shorter than the one above it. The kinds go to the
+ * widget instead, which paints each row edge to edge.
  */
 static void
-start_markup_row (MarkupBuilder *builder,
-                  const char    *background)
+start_markup_row (MarkupBuilder  *builder,
+                  XdDiffLineKind  kind)
 {
   if (builder->rendered > 0)
     g_string_append_c (builder->text, '\n');
 
-  if (g_strcmp0 (builder->background, background) != 0)
+  if (builder->kinds != NULL)
     {
-      if (builder->background != NULL)
-        g_string_append (builder->text, "</span>");
-      if (background != NULL)
-        g_string_append_printf (
-          builder->text, "<span background=\"%s\">", background);
+      guint8 value = (guint8) kind;
 
-      builder->background = background;
+      g_array_append_val (builder->kinds, value);
     }
 
   builder->rendered++;
-}
-
-static void
-finish_markup (MarkupBuilder *builder)
-{
-  if (builder->background != NULL)
-    {
-      g_string_append (builder->text, "</span>");
-      builder->background = NULL;
-    }
 }
 
 static void
@@ -285,7 +285,7 @@ append_file_markup (MarkupBuilder    *builder,
         deletions++;
     }
 
-  start_markup_row (builder, NULL);
+  start_markup_row (builder, line->kind);
   g_string_append_printf (
     builder->text,
     "<span weight=\"bold\">%s</span>"
@@ -300,7 +300,7 @@ append_full_line_markup (MarkupBuilder    *builder,
 {
   g_autofree char *text = escaped_display_text (line->text);
 
-  start_markup_row (builder, NULL);
+  start_markup_row (builder, line->kind);
   if (line->kind == XD_DIFF_LINE_HUNK)
     g_string_append_printf (
       builder->text, "<span foreground=\"#78aeed\">%s</span>", text);
@@ -322,23 +322,21 @@ append_code_line_markup (MarkupBuilder    *builder,
                        : g_strdup ("    ");
   const char *marker = " ";
   const char *colour = "#9a9996";
-  const char *background = NULL;
+  gboolean changed = xd_diff_line_background (line->kind) != NULL;
 
   if (line->kind == XD_DIFF_LINE_ADDED)
     {
       marker = "+";
       colour = "#57e389";
-      background = "#183522";
     }
   else if (line->kind == XD_DIFF_LINE_REMOVED)
     {
       marker = "−";
       colour = "#f66151";
-      background = "#3a1d1b";
     }
 
-  start_markup_row (builder, background);
-  if (background != NULL)
+  start_markup_row (builder, line->kind);
+  if (changed)
     g_string_append_printf (
       builder->text,
       "<span foreground=\"#c0bfbc\">%s %s</span>"
@@ -353,13 +351,26 @@ append_code_line_markup (MarkupBuilder    *builder,
       old_line, new_line, colour, marker, text);
 }
 
+/* One entry per rendered row, so the widget can colour whole rows. */
+static GArray *
+new_row_kinds (GArray **row_kinds)
+{
+  if (row_kinds == NULL)
+    return NULL;
+
+  *row_kinds = g_array_new (FALSE, FALSE, sizeof (guint8));
+
+  return *row_kinds;
+}
+
 char *
 xd_unified_diff_markup (GPtrArray *lines,
                         gboolean   show_file_headers,
-                        guint      limit)
+                        guint      limit,
+                        GArray   **row_kinds)
 {
   g_autoptr (GString) markup = g_string_new (NULL);
-  MarkupBuilder builder = { .text = markup };
+  MarkupBuilder builder = { .text = markup, .kinds = new_row_kinds (row_kinds) };
   guint total;
 
   g_return_val_if_fail (lines != NULL, g_strdup (""));
@@ -392,14 +403,13 @@ xd_unified_diff_markup (GPtrArray *lines,
     {
       guint rendered = builder.rendered;
 
-      start_markup_row (&builder, NULL);
+      start_markup_row (&builder, XD_DIFF_LINE_META);
       g_string_append_printf (
         markup,
         "<span foreground=\"#9a9996\">Showing first %u of %u rows</span>",
         rendered, total);
     }
 
-  finish_markup (&builder);
   return g_string_free (g_steal_pointer (&markup), FALSE);
 }
 
@@ -407,10 +417,11 @@ char *
 xd_unified_diff_markup_slice (GPtrArray *lines,
                               gboolean   show_file_headers,
                               guint      start,
-                              guint      end)
+                              guint      end,
+                              GArray   **row_kinds)
 {
   g_autoptr (GString) markup = g_string_new (NULL);
-  MarkupBuilder builder = { .text = markup };
+  MarkupBuilder builder = { .text = markup, .kinds = new_row_kinds (row_kinds) };
 
   g_return_val_if_fail (lines != NULL, g_strdup (""));
 
@@ -436,6 +447,5 @@ xd_unified_diff_markup_slice (GPtrArray *lines,
         }
     }
 
-  finish_markup (&builder);
   return g_string_free (g_steal_pointer (&markup), FALSE);
 }

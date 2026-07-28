@@ -756,7 +756,18 @@ show_inline_preview (GtkStack   *stack,
   int preview_height = MAX (1, (int) (h * scale));
 
   gtk_picture_set_paintable (picture, GDK_PAINTABLE (texture));
-  gtk_picture_set_content_fit (picture, GTK_CONTENT_FIT_CONTAIN);
+
+  /*
+   * Scaled down, never up.
+   *
+   * A picture that may scale up answers "how tall are you?" with the height
+   * its aspect ratio needs at the *whole* width it is offered -- the width of
+   * the transcript column, not the width of the thumbnail. The bubble was then
+   * given hundreds of pixels of height for a 96-pixel image and painted the
+   * remainder as empty card. The texture is already thumbnail-sized, so there
+   * is nothing to gain by growing it.
+   */
+  gtk_picture_set_content_fit (picture, GTK_CONTENT_FIT_SCALE_DOWN);
   gtk_widget_set_size_request (
     GTK_WIDGET (picture), preview_width, preview_height);
 
@@ -1072,17 +1083,7 @@ static void
 close_image_viewer (GtkButton *button,
                     gpointer   user_data)
 {
-  gtk_popover_popdown (GTK_POPOVER (user_data));
-}
-
-static void
-on_image_viewer_closed (GtkPopover   *popover,
-                        GCancellable *cancellable)
-{
-  g_object_ref (popover);
-  g_cancellable_cancel (cancellable);
-  gtk_widget_unparent (GTK_WIDGET (popover));
-  g_object_unref (popover);
+  adw_dialog_close (ADW_DIALOG (user_data));
 }
 
 static void
@@ -1099,8 +1100,10 @@ on_image_viewer_background_pressed (GtkGestureClick *gesture,
   GtkWidget *target =
     gtk_widget_pick (background, x, y, GTK_PICK_DEFAULT);
 
+  /* Anywhere but the picture is the dimmed window: clicking it closes, the
+   * same as clicking past the edge of the viewer. */
   if (target != picture)
-    gtk_popover_popdown (GTK_POPOVER (user_data));
+    adw_dialog_close (ADW_DIALOG (user_data));
 }
 
 static void
@@ -1109,7 +1112,7 @@ open_image_viewer (GtkButton *button,
 {
   ImageOpenRequest *open_request = user_data;
   g_autoptr (GCancellable) cancellable = g_cancellable_new ();
-  GtkPopover *popover = GTK_POPOVER (gtk_popover_new ());
+  AdwDialog *dialog = ADW_DIALOG (adw_dialog_new ());
   GtkWidget *overlay = gtk_overlay_new ();
   GtkWidget *stack = gtk_stack_new ();
   GtkWidget *picture = gtk_picture_new ();
@@ -1141,11 +1144,10 @@ open_image_viewer (GtkButton *button,
   gtk_widget_set_hexpand (stack, TRUE);
   gtk_widget_set_vexpand (stack, TRUE);
   gtk_widget_add_css_class (stack, "xd-image-viewer");
-  gtk_widget_set_size_request (stack, 1100, 720);
   g_object_set_data (G_OBJECT (stack), "image-picture", picture);
   g_signal_connect (
     background_click, "pressed",
-    G_CALLBACK (on_image_viewer_background_pressed), popover);
+    G_CALLBACK (on_image_viewer_background_pressed), dialog);
   gtk_widget_add_controller (
     stack, GTK_EVENT_CONTROLLER (background_click));
 
@@ -1157,18 +1159,26 @@ open_image_viewer (GtkButton *button,
   gtk_widget_set_margin_end (close, 12);
   gtk_widget_set_tooltip_text (close, "Close");
   g_signal_connect (close, "clicked",
-                    G_CALLBACK (close_image_viewer), popover);
+                    G_CALLBACK (close_image_viewer), dialog);
 
   gtk_overlay_set_child (GTK_OVERLAY (overlay), stack);
   gtk_overlay_add_overlay (GTK_OVERLAY (overlay), close);
-  gtk_popover_set_child (popover, overlay);
-  gtk_popover_set_has_arrow (popover, FALSE);
-  gtk_popover_set_autohide (popover, TRUE);
-  gtk_widget_set_parent (GTK_WIDGET (popover), GTK_WIDGET (button));
 
-  g_signal_connect (popover, "closed",
-                    G_CALLBACK (on_image_viewer_closed), cancellable);
-  g_object_set_data_full (G_OBJECT (popover), "image-cancellable",
+  /*
+   * A dialog, so the window behind it is dimmed rather than left at full
+   * brightness beside the picture. Its own sheet paints nothing (see
+   * .xd-image-dialog): what is behind stays readable, just darkened, and
+   * clicking it puts the picture away.
+   */
+  adw_dialog_set_title (dialog, "Image");
+  adw_dialog_set_content_width (dialog, 1100);
+  adw_dialog_set_content_height (dialog, 720);
+  adw_dialog_set_child (dialog, overlay);
+  gtk_widget_add_css_class (GTK_WIDGET (dialog), "xd-image-dialog");
+
+  g_signal_connect_swapped (dialog, "closed",
+                            G_CALLBACK (g_cancellable_cancel), cancellable);
+  g_object_set_data_full (G_OBJECT (dialog), "image-cancellable",
                           g_object_ref (cancellable), g_object_unref);
 
   load_request = image_load_request_new (
@@ -1199,7 +1209,7 @@ open_image_viewer (GtkButton *button,
       start_viewer_decode (load_request, decode);
     }
 
-  gtk_popover_popup (popover);
+  adw_dialog_present (dialog, GTK_WIDGET (button));
 }
 
 /*

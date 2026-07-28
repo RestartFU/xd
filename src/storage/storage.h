@@ -14,7 +14,7 @@ typedef struct
   char *model;        /* NULL: the backend's default */
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
-  char *queued;       /* next message, kept until its turn starts */
+  GPtrArray *queue;   /* char*, oldest first: what is waiting for its turn */
   gboolean new_worktree; /* create an isolated checkout before first turn */
   gboolean plan;      /* think it through, change nothing */
   gboolean terminal_open;  /* the panes this chat was left with */
@@ -140,11 +140,39 @@ gboolean    xd_storage_set_access      (XdStorage   *self,
                                         const char  *access,
                                         GError     **error);
 
-/* @text may be NULL to discard or consume the queued message. */
-gboolean    xd_storage_set_queued      (XdStorage   *self,
+/*
+ * The queue: everything typed while a turn was running, in that order.
+ *
+ * More than one message can wait. They are answered one turn at a time, in the
+ * order they were written, so a second thought does not overwrite the first.
+ * @messages may be NULL or empty to discard the queue.
+ */
+gboolean    xd_storage_set_queue       (XdStorage   *self,
+                                        const char  *chat_id,
+                                        GPtrArray   *messages,
+                                        GError     **error);
+
+gboolean    xd_storage_queue_append    (XdStorage   *self,
                                         const char  *chat_id,
                                         const char  *text,
                                         GError     **error);
+
+/* Removes one waiting message; a position past the end changes nothing. */
+gboolean    xd_storage_queue_remove    (XdStorage   *self,
+                                        const char  *chat_id,
+                                        guint        position,
+                                        GError     **error);
+
+/*
+ * Consumes the oldest waiting message, if any.
+ *
+ * @text receives it, or NULL when the queue was empty. Taking and storing in
+ * one step is what keeps two devices from starting the same message twice.
+ */
+gboolean    xd_storage_queue_take_first (XdStorage   *self,
+                                         const char  *chat_id,
+                                         char       **text,
+                                         GError     **error);
 
 /* Durable daemon-update handoff. These markers deliberately do not use the
  * queued message slot: a user's pending steer must remain pending behind the

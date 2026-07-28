@@ -1888,38 +1888,69 @@ start_daemon_turn (XdRemoteServer  *self,
   return TRUE;
 }
 
+/*
+ * What is waiting, in order.
+ *
+ * Every device shows the same queue, so the whole list travels rather than
+ * only its head. "text" carries the oldest message as well: a client from
+ * before the queue could hold more than one still shows something useful.
+ */
 static void
-broadcast_queued (XdRemoteServer *self,
-                  const char     *chat_id,
-                  const char     *text)
+broadcast_queue (XdRemoteServer *self,
+                 const char     *chat_id,
+                 GPtrArray      *messages)
 {
-  broadcast_event (self, "queued", chat_id,
-                   text != NULL ? "text" : NULL, text);
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "queued");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, chat_id);
+
+  if (messages != NULL && messages->len > 0)
+    {
+      json_builder_set_member_name (builder, "text");
+      json_builder_add_string_value (builder, g_ptr_array_index (messages, 0));
+    }
+
+  json_builder_set_member_name (builder, "queue");
+  json_builder_begin_array (builder);
+  for (guint i = 0; messages != NULL && i < messages->len; i++)
+    json_builder_add_string_value (builder, g_ptr_array_index (messages, i));
+  json_builder_end_array (builder);
+
+  json_builder_end_object (builder);
+
+  broadcast (self, builder);
 }
 
+static void
+broadcast_stored_queue (XdRemoteServer *self,
+                        const char     *chat_id)
+{
+  g_autoptr (XdChat) chat = xd_storage_get_chat (self->storage, chat_id, NULL);
+
+  broadcast_queue (self, chat_id, chat != NULL ? chat->queue : NULL);
+}
+
+/* Appended rather than replacing: a second thought waits behind the first. */
 static gboolean
 store_queued (Connection *connection,
               const char *chat_id,
               const char *text)
 {
-  g_autoptr (XdChat) chat = NULL;
   g_autoptr (GError) error = NULL;
 
-  chat = xd_storage_get_chat (connection->server->storage, chat_id, &error);
-  if (chat == NULL)
-    {
-      send_error (connection, error->message);
-      return FALSE;
-    }
-
-  if (!xd_storage_set_queued (connection->server->storage, chat_id, text, &error))
+  if (!xd_storage_queue_append (connection->server->storage, chat_id,
+                                text, &error))
     {
       send_error (connection, error->message);
       return FALSE;
     }
 
   send_done (connection, NULL);
-  broadcast_queued (connection->server, chat_id, text);
+  broadcast_stored_queue (connection->server, chat_id);
 
   return TRUE;
 }
@@ -1930,22 +1961,22 @@ static gboolean
 start_queued (XdRemoteServer *self,
               const char     *chat_id)
 {
-  g_autoptr (XdChat) chat = xd_storage_get_chat (self->storage, chat_id, NULL);
   g_autoptr (GError) error = NULL;
   g_autofree char *text = NULL;
 
-  if (chat == NULL || chat->queued == NULL || *chat->queued == '\0' ||
-      self->quiescing || g_hash_table_contains (self->turns, chat_id))
+  if (self->quiescing || g_hash_table_contains (self->turns, chat_id))
     return FALSE;
 
-  text = g_strdup (chat->queued);
-  if (!xd_storage_set_queued (self->storage, chat_id, NULL, &error))
+  if (!xd_storage_queue_take_first (self->storage, chat_id, &text, &error))
     {
       g_warning ("cannot consume the queued message: %s", error->message);
       return FALSE;
     }
 
-  broadcast_queued (self, chat_id, NULL);
+  if (text == NULL)
+    return FALSE;
+
+  broadcast_stored_queue (self, chat_id);
 
   if (!start_daemon_turn (self, chat_id, text, &error))
     {
@@ -2179,7 +2210,40 @@ handle_queue (Connection *connection,
       return;
     }
 
-  store_queued (connection, chat_id, text);
+  if (!drop)
+    {
+      store_queued (connection, chat_id, text);
+      return;
+    }
+
+  /*
+   * Dropping one waiting message, or all of them.
+   *
+   * A client that says which position it means discards that message; one that
+   * says nothing discards the queue, which is what the old single-message
+   * discard did.
+   */
+  {
+    g_autoptr (GError) error = NULL;
+    gboolean ok;
+
+    if (json_object_has_member (request, "index"))
+      ok = xd_storage_queue_remove (
+        connection->server->storage, chat_id,
+        (guint) MAX (json_object_get_int_member (request, "index"), 0), &error);
+    else
+      ok = xd_storage_set_queue (
+        connection->server->storage, chat_id, NULL, &error);
+
+    if (!ok)
+      {
+        send_error (connection, error->message);
+        return;
+      }
+
+    send_done (connection, NULL);
+    broadcast_stored_queue (connection->server, chat_id);
+  }
 }
 
 /* --- read-only repository views ------------------------------------------- */
@@ -2845,7 +2909,7 @@ handle_chat (Connection *connection,
 
   /* A daemon restart ends the old process, not the user's next instruction.
    * Opening the chat is enough to resume its persisted queue. */
-  if (chat->queued != NULL &&
+  if (chat->queue->len > 0 &&
       !g_hash_table_contains (self->turns, chat_id) &&
       start_queued (self, chat_id))
     {
@@ -2871,11 +2935,16 @@ handle_chat (Connection *connection,
     g_hash_table_lookup (self->command_sets, chat->backend));
   json_builder_set_member_name (builder, "plan");
   json_builder_add_boolean_value (builder, chat->plan);
-  if (chat->queued != NULL)
+  if (chat->queue->len > 0)
     {
       json_builder_set_member_name (builder, "queued");
-      json_builder_add_string_value (builder, chat->queued);
+      json_builder_add_string_value (builder, g_ptr_array_index (chat->queue, 0));
     }
+  json_builder_set_member_name (builder, "queue");
+  json_builder_begin_array (builder);
+  for (guint i = 0; i < chat->queue->len; i++)
+    json_builder_add_string_value (builder, g_ptr_array_index (chat->queue, i));
+  json_builder_end_array (builder);
   {
     XdDaemonTurn *turn = g_hash_table_lookup (self->turns, chat_id);
 

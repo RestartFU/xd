@@ -1,4 +1,5 @@
 #include <glib/gstdio.h>
+#include <sqlite3.h>
 
 #include "storage/storage.h"
 
@@ -564,7 +565,7 @@ test_reopening_keeps_data (Fixture       *fixture,
                                     "claude", NULL, NULL, NULL, &error);
   xd_storage_append_message (fixture->storage, chat_id, "user", "persist me",
                              NULL, NULL, &error);
-  xd_storage_set_queued (fixture->storage, chat_id, "send me next", &error);
+  xd_storage_queue_append (fixture->storage, chat_id, "send me next", &error);
   g_assert_no_error (error);
 
   g_clear_object (&fixture->storage);
@@ -581,13 +582,14 @@ test_reopening_keeps_data (Fixture       *fixture,
 
   chat = xd_storage_get_chat (reopened, chat_id, &error);
   g_assert_no_error (error);
-  g_assert_cmpstr (chat->queued, ==, "send me next");
+  g_assert_cmpuint (chat->queue->len, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "send me next");
 
-  g_assert_true (xd_storage_set_queued (reopened, chat_id, NULL, &error));
+  g_assert_true (xd_storage_set_queue (reopened, chat_id, NULL, &error));
   g_clear_pointer (&chat, xd_chat_free);
   chat = xd_storage_get_chat (reopened, chat_id, &error);
   g_assert_no_error (error);
-  g_assert_null (chat->queued);
+  g_assert_cmpuint (chat->queue->len, ==, 0);
 
   fixture->storage = g_object_ref (reopened);
 }
@@ -609,7 +611,7 @@ test_restart_markers_preserve_the_queue (Fixture       *fixture,
   second = xd_storage_create_chat (fixture->storage, "folder", "Second",
                                    "codex", NULL, NULL, NULL, &error);
   g_assert_no_error (error);
-  g_assert_true (xd_storage_set_queued (
+  g_assert_true (xd_storage_queue_append (
     fixture->storage, first, "user queued this", &error));
 
   g_ptr_array_add (marked, first);
@@ -629,11 +631,104 @@ test_restart_markers_preserve_the_queue (Fixture       *fixture,
 
   chat = xd_storage_get_chat (fixture->storage, first, &error);
   g_assert_no_error (error);
-  g_assert_cmpstr (chat->queued, ==, "user queued this");
+  g_assert_cmpuint (chat->queue->len, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "user queued this");
 
   empty = xd_storage_take_resumes (fixture->storage, &error);
   g_assert_no_error (error);
   g_assert_cmpuint (empty->len, ==, 0);
+}
+
+/*
+ * More than one message can wait, and they are answered in the order written.
+ */
+static void
+test_queue_keeps_every_message (Fixture       *fixture,
+                                gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (XdChat) chat = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autofree char *first = NULL;
+  g_autofree char *second = NULL;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  g_assert_true (xd_storage_queue_append (
+    fixture->storage, chat_id, "first thing", &error));
+  g_assert_true (xd_storage_queue_append (
+    fixture->storage, chat_id, "second thing", &error));
+  g_assert_true (xd_storage_queue_append (
+    fixture->storage, chat_id, "third thing", &error));
+
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (chat->queue->len, ==, 3);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "first thing");
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 2), ==, "third thing");
+
+  /* Dropping one leaves the rest in order. */
+  g_assert_true (xd_storage_queue_remove (fixture->storage, chat_id, 1, &error));
+
+  /* Oldest first, and consumed as it is taken. */
+  g_assert_true (xd_storage_queue_take_first (
+    fixture->storage, chat_id, &first, &error));
+  g_assert_cmpstr (first, ==, "first thing");
+  g_assert_true (xd_storage_queue_take_first (
+    fixture->storage, chat_id, &second, &error));
+  g_assert_cmpstr (second, ==, "third thing");
+
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (chat->queue->len, ==, 0);
+
+  /* Nothing waiting is not a failure; it just takes nothing. */
+  {
+    g_autofree char *nothing = NULL;
+
+    g_assert_true (xd_storage_queue_take_first (
+      fixture->storage, chat_id, &nothing, &error));
+    g_assert_null (nothing);
+  }
+}
+
+/*
+ * A queue written before it could hold more than one message is a plain string
+ * in that column. It has to read back as the one message it is, or an
+ * instruction typed just before an update would be lost.
+ */
+static void
+test_queue_reads_a_pre_list_row (Fixture       *fixture,
+                                 gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (XdChat) chat = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autofree char *db_path = NULL;
+  g_autofree char *sql = NULL;
+  sqlite3 *db = NULL;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  /* What the old code stored: the message itself, not a list of them. */
+  db_path = g_build_filename (fixture->dir, "chats.db", NULL);
+  sql = g_strdup_printf (
+    "UPDATE chats SET queued = 'typed before the update' WHERE id = '%s';",
+    chat_id);
+  g_assert_cmpint (sqlite3_open (db_path, &db), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_close (db);
+
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (chat->queue->len, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==,
+                   "typed before the update");
 }
 
 int
@@ -662,6 +757,8 @@ main (int   argc,
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);
   ADD ("/storage/restart-markers-keep-queue", test_restart_markers_preserve_the_queue);
+  ADD ("/storage/queue-keeps-every-message", test_queue_keeps_every_message);
+  ADD ("/storage/queue-reads-pre-list-row", test_queue_reads_a_pre_list_row);
 
 #undef ADD
 

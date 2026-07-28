@@ -1,5 +1,6 @@
 #include "diff-view.h"
 
+#include "chat/diff-text.h"
 #include "util/unified-diff.h"
 
 #define INLINE_EAGER_ROWS 60
@@ -28,20 +29,6 @@ clear_box (GtkBox *box)
     gtk_box_remove (box, child);
 }
 
-static GtkWidget *
-diff_label (const char *markup)
-{
-  GtkWidget *label = gtk_label_new (NULL);
-
-  gtk_label_set_markup (GTK_LABEL (label), markup);
-  gtk_label_set_selectable (GTK_LABEL (label), TRUE);
-  gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
-  gtk_label_set_yalign (GTK_LABEL (label), 0.0f);
-  gtk_widget_set_hexpand (label, TRUE);
-  gtk_widget_add_css_class (label, "xd-diff-text");
-  return label;
-}
-
 static void
 fill_parsed_rows (GtkBox    *box,
                   GPtrArray *lines,
@@ -49,11 +36,15 @@ fill_parsed_rows (GtkBox    *box,
                   guint      limit)
 {
   g_autofree char *markup = NULL;
+  g_autoptr (GArray) kinds = NULL;
+  GtkWidget *text = xd_diff_text_new ();
 
   clear_box (box);
   markup = xd_unified_diff_markup (
-    lines, show_file_headers, limit);
-  gtk_box_append (box, diff_label (markup));
+    lines, show_file_headers, limit, &kinds);
+  xd_diff_text_set_rows (XD_DIFF_TEXT (text), markup, kinds);
+  gtk_widget_set_hexpand (text, TRUE);
+  gtk_box_append (box, text);
 }
 
 static void
@@ -154,10 +145,13 @@ setup_virtual_chunk (GtkSignalListItemFactory *factory,
                      GtkListItem              *item,
                      gpointer                  user_data)
 {
-  GtkWidget *label = diff_label ("");
+  GtkWidget *text = xd_diff_text_new ();
 
-  gtk_widget_add_css_class (label, "xd-diff-chunk");
-  gtk_list_item_set_child (item, label);
+  gtk_widget_set_hexpand (text, TRUE);
+  gtk_widget_add_css_class (
+    GTK_WIDGET (xd_diff_text_get_label (XD_DIFF_TEXT (text))),
+    "xd-diff-chunk");
+  gtk_list_item_set_child (item, text);
 }
 
 static void
@@ -173,12 +167,13 @@ bind_virtual_chunk (GtkSignalListItemFactory *factory,
   guint64 start = g_ascii_strtoull (value, &at, 10);
   guint64 end = at != NULL && *at == ':'
     ? g_ascii_strtoull (at + 1, NULL, 10) : start;
+  g_autoptr (GArray) kinds = NULL;
   g_autofree char *markup = xd_unified_diff_markup_slice (
     diff->lines, diff->show_file_headers,
-    (guint) MIN (start, G_MAXUINT), (guint) MIN (end, G_MAXUINT));
+    (guint) MIN (start, G_MAXUINT), (guint) MIN (end, G_MAXUINT), &kinds);
 
-  gtk_label_set_markup (
-    GTK_LABEL (gtk_list_item_get_child (item)), markup);
+  xd_diff_text_set_rows (
+    XD_DIFF_TEXT (gtk_list_item_get_child (item)), markup, kinds);
 }
 
 static void
@@ -186,7 +181,8 @@ unbind_virtual_chunk (GtkSignalListItemFactory *factory,
                       GtkListItem              *item,
                       gpointer                  user_data)
 {
-  gtk_label_set_text (GTK_LABEL (gtk_list_item_get_child (item)), "");
+  xd_diff_text_set_rows (
+    XD_DIFF_TEXT (gtk_list_item_get_child (item)), "", NULL);
 }
 
 GtkWidget *

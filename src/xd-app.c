@@ -127,6 +127,16 @@ static const char *XD_STYLE =
   " { background-color: #0a0a0c; }\n"
 
   /*
+   * A popover is not one of those surfaces.
+   *
+   * GTK puts the "background" class on every popover, so the rule above filled
+   * the popover's own square rectangle -- which showed as lighter corners
+   * around the rounded panel inside it. The panel paints the menu; the popover
+   * itself carries nothing.
+   */
+  "popover.background { background: none; background-color: transparent; }\n"
+
+  /*
    * Everything above the base is white over it, never a colour of its own.
    *
    * Three hand-picked near-blacks did not sit together -- the terminal read
@@ -231,6 +241,22 @@ static const char *XD_STYLE =
   " border-radius: 8px; }\n"
   ".xd-composer button:checked label, .xd-composer button:checked image"
   " { color: #6bb2f8; }\n"
+  /*
+   * A picker is not a mode.
+   *
+   * GTK marks a menu button as checked for as long as its menu is open, so the
+   * rule above painted every dropdown blue while it was being read -- as if
+   * opening the list had already changed something. Blue belongs to the modes;
+   * a picker only lifts while it is open.
+   */
+  ".xd-composer menubutton > button:checked,"
+  " .xd-composer dropdown > button:checked"
+  " { background: alpha(#ffffff, 0.10); }\n"
+  ".xd-composer menubutton > button:checked label,"
+  " .xd-composer menubutton > button:checked image,"
+  " .xd-composer dropdown > button:checked label,"
+  " .xd-composer dropdown > button:checked image"
+  " { color: alpha(#ffffff, 0.95); }\n"
   /* Elsewhere -- the terminal and diff toggles in the header -- checked is a
    * plain lift, which the flat background rules above would otherwise
    * swallow. */
@@ -316,6 +342,18 @@ static const char *XD_STYLE =
   ".xd-image-button:hover, .xd-image-button:active"
   " { background: none; box-shadow: none; }\n"
   ".xd-image-viewer { background: transparent; }\n"
+  /*
+   * The opened image floats on the dimmed window.
+   *
+   * A dialog is what dims what is behind it, but its sheet is a panel with a
+   * fill, a shadow and an outline -- which covered the conversation instead of
+   * darkening it. The sheet paints nothing here, so only the dialog's own
+   * dimming stands between the picture and the window.
+   */
+  "dialog.xd-image-dialog, dialog.xd-image-dialog > *,"
+  " dialog.xd-image-dialog sheet"
+  " { background: none; background-color: transparent; box-shadow: none;"
+  " outline: none; border: none; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
   /* The list widgets inside paint their own lighter slab over the popover's

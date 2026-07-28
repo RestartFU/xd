@@ -2863,7 +2863,65 @@ test_send_during_turn_queues (void)
     g_autoptr (XdChat) stored =
       xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
 
-    g_assert_cmpstr (stored->queued, ==, "follow up");
+    g_assert_cmpuint (stored->queue->len, ==, 1);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up");
+  }
+
+  /*
+   * A third message waits behind the second rather than replacing it: two
+   * things to do next are two turns, in the order they were asked for.
+   */
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    RemoteReply second = { 0 };
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "queue");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "and then this");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &second);
+
+    {
+      g_autoptr (XdChat) stored =
+        xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+      g_assert_cmpuint (stored->queue->len, ==, 2);
+      g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up");
+      g_assert_cmpstr (g_ptr_array_index (stored->queue, 1), ==, "and then this");
+    }
+
+    /* Dropping one by position leaves the others where they were. */
+    {
+      g_autoptr (JsonBuilder) drop = json_builder_new ();
+      RemoteReply dropped = { 0 };
+      g_autoptr (XdChat) stored = NULL;
+
+      json_builder_begin_object (drop);
+      json_builder_set_member_name (drop, "op");
+      json_builder_add_string_value (drop, "drop-queue");
+      json_builder_set_member_name (drop, "chat");
+      json_builder_add_string_value (drop, daemon.chat_id);
+      json_builder_set_member_name (drop, "index");
+      json_builder_add_int_value (drop, 0);
+      json_builder_end_object (drop);
+
+      call_remote_request (client, drop, &dropped);
+
+      stored = xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+      g_assert_cmpuint (stored->queue->len, ==, 1);
+      g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "and then this");
+
+      json_object_unref (dropped.reply);
+      g_free (dropped.wait.failure);
+    }
+
+    json_object_unref (second.reply);
+    g_free (second.wait.failure);
   }
 
   /*
@@ -3096,7 +3154,8 @@ test_steer_starts_an_idle_remote_queue (void)
     g_autoptr (XdChat) stored =
       xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
 
-    g_assert_cmpstr (stored->queued, ==, "follow up now");
+    g_assert_cmpuint (stored->queue->len, ==, 1);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up now");
   }
 
   {
@@ -3118,7 +3177,7 @@ test_steer_starts_an_idle_remote_queue (void)
     g_autoptr (XdChat) stored =
       xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
 
-    g_assert_null (stored->queued);
+    g_assert_cmpuint (stored->queue->len, ==, 0);
   }
 
   if (old_path != NULL)
@@ -3296,7 +3355,8 @@ test_a_joining_device_sees_an_active_turn (void)
     g_autoptr (XdChat) stored =
       xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
 
-    g_assert_cmpstr (stored->queued, ==, "follow up");
+    g_assert_cmpuint (stored->queue->len, ==, 1);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up");
   }
 
   g_signal_handlers_disconnect_by_data (sender, &queues[0]);
@@ -3475,7 +3535,7 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
   stored.storage = daemon.storage;
   stored.chat_id = daemon.chat_id;
   wait_until (live_turn_was_stored, &stored);
-  g_assert_true (xd_storage_set_queued (
+  g_assert_true (xd_storage_queue_append (
     daemon.storage, daemon.chat_id, "user queued this", &error));
   g_assert_no_error (error);
 
@@ -3509,7 +3569,8 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
 
   chat = xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
   g_assert_no_error (error);
-  g_assert_cmpstr (chat->queued, ==, "user queued this");
+  g_assert_cmpuint (chat->queue->len, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "user queued this");
 
   messages = xd_storage_list_messages (
     daemon.storage, daemon.chat_id, &error);

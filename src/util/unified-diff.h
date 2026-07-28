@@ -25,6 +25,14 @@ typedef struct
 void       xd_diff_line_free       (XdDiffLine *line);
 
 /*
+ * The colour a changed line sits on, or NULL for a line that sits on nothing.
+ *
+ * Returned as a literal so callers may compare the pointers of two rows to
+ * decide whether they belong to the same block of colour.
+ */
+const char *xd_diff_line_background (XdDiffLineKind kind);
+
+/*
  * Turns Git's unified output into display rows.
  *
  * File boundaries are retained for multi-file inline patches. Other plumbing
@@ -43,10 +51,16 @@ guint      xd_unified_diff_display_rows (GPtrArray *lines,
  *
  * A single layout keeps inline diffs cheap for the transcript scroller;
  * @limit zero means all rows. The returned markup is always valid.
+ *
+ * The markup carries no line backgrounds: Pango would paint them over the
+ * glyphs only, leaving the line spacing and the space past a short line bare.
+ * @row_kinds, when asked for, returns the kind of each rendered row as a
+ * guint8 so the widget drawing the layout can paint whole rows instead.
  */
 char      *xd_unified_diff_markup  (GPtrArray *lines,
                                     gboolean   show_file_headers,
-                                    guint      limit);
+                                    guint      limit,
+                                    GArray   **row_kinds);
 
 /*
  * Formats one raw parsed-line range without a truncation footer.
@@ -57,6 +71,7 @@ char      *xd_unified_diff_markup  (GPtrArray *lines,
 char      *xd_unified_diff_markup_slice (GPtrArray *lines,
                                          gboolean   show_file_headers,
                                          guint      start,
-                                         guint      end);
+                                         guint      end,
+                                         GArray   **row_kinds);
 
 G_END_DECLS

@@ -1,6 +1,7 @@
 #include "storage.h"
 
 #include <errno.h>
+#include <json-glib/json-glib.h>
 #include <sqlite3.h>
 
 #define XD_STORAGE_SCHEMA_VERSION 15
@@ -99,7 +100,7 @@ xd_chat_free (XdChat *self)
   g_free (self->model);
   g_free (self->effort);
   g_free (self->access);
-  g_free (self->queued);
+  g_clear_pointer (&self->queue, g_ptr_array_unref);
   g_free (self);
 }
 
@@ -549,6 +550,66 @@ xd_storage_create_chat (XdStorage   *self,
   return g_steal_pointer (&id);
 }
 
+/*
+ * The queue is stored in one column, as a JSON array.
+ *
+ * A row written before the queue could hold more than one message holds the
+ * message itself rather than an array; it reads back as a queue of one, so an
+ * instruction typed before an update is still answered after it.
+ */
+static GPtrArray *
+queue_from_column (const char *stored)
+{
+  GPtrArray *messages = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (JsonParser) parser = NULL;
+  JsonNode *root;
+  JsonArray *array;
+
+  if (stored == NULL || *stored == '\0')
+    return messages;
+
+  parser = json_parser_new ();
+  if (!json_parser_load_from_data (parser, stored, -1, NULL) ||
+      (root = json_parser_get_root (parser)) == NULL ||
+      !JSON_NODE_HOLDS_ARRAY (root))
+    {
+      g_ptr_array_add (messages, g_strdup (stored));
+      return messages;
+    }
+
+  array = json_node_get_array (root);
+  for (guint i = 0; i < json_array_get_length (array); i++)
+    {
+      const char *text = json_array_get_string_element (array, i);
+
+      if (text != NULL && *text != '\0')
+        g_ptr_array_add (messages, g_strdup (text));
+    }
+
+  return messages;
+}
+
+static char *
+queue_to_column (GPtrArray *messages)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonGenerator) generator = json_generator_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  if (messages == NULL || messages->len == 0)
+    return NULL;
+
+  json_builder_begin_array (builder);
+  for (guint i = 0; i < messages->len; i++)
+    json_builder_add_string_value (builder, g_ptr_array_index (messages, i));
+  json_builder_end_array (builder);
+
+  root = json_builder_get_root (builder);
+  json_generator_set_root (generator, root);
+
+  return json_generator_to_data (generator, NULL);
+}
+
 static XdChat *
 chat_from_row (sqlite3_stmt *stmt)
 {
@@ -567,7 +628,11 @@ chat_from_row (sqlite3_stmt *stmt)
   chat->updated_at = sqlite3_column_int64 (stmt, 10);
   chat->terminal_open = sqlite3_column_int (stmt, 11) != 0;
   chat->diff_open     = sqlite3_column_int (stmt, 12) != 0;
-  chat->queued        = column_text (stmt, 13);
+  {
+    g_autofree char *stored = column_text (stmt, 13);
+
+    chat->queue = queue_from_column (stored);
+  }
   chat->new_worktree  = sqlite3_column_int (stmt, 14) != 0;
 
   return chat;
@@ -911,17 +976,115 @@ xd_storage_use_worktree (XdStorage   *self,
 }
 
 gboolean
-xd_storage_set_queued (XdStorage   *self,
-                       const char  *chat_id,
-                       const char  *text,
-                       GError     **error)
+xd_storage_set_queue (XdStorage   *self,
+                      const char  *chat_id,
+                      GPtrArray   *messages,
+                      GError     **error)
 {
+  g_autofree char *stored = NULL;
+
   g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  stored = queue_to_column (messages);
 
   return update_chat_column (self,
                              "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?;",
-                             text, chat_id, "Cannot update the queued message",
+                             stored, chat_id, "Cannot update the queue",
                              error);
+}
+
+/*
+ * The queue lives in one column, so changing it means reading it first.
+ *
+ * Nothing races here: the daemon owns its chats and a local window owns its
+ * own, and both work on a main loop.
+ */
+static GPtrArray *
+load_queue (XdStorage   *self,
+            const char  *chat_id,
+            GError     **error)
+{
+  g_autoptr (XdChat) chat = xd_storage_get_chat (self, chat_id, error);
+
+  if (chat == NULL)
+    return NULL;
+
+  return g_steal_pointer (&chat->queue);
+}
+
+gboolean
+xd_storage_queue_append (XdStorage   *self,
+                         const char  *chat_id,
+                         const char  *text,
+                         GError     **error)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (text != NULL && *text != '\0', FALSE);
+
+  messages = load_queue (self, chat_id, error);
+  if (messages == NULL)
+    return FALSE;
+
+  g_ptr_array_add (messages, g_strdup (text));
+
+  return xd_storage_set_queue (self, chat_id, messages, error);
+}
+
+gboolean
+xd_storage_queue_remove (XdStorage   *self,
+                         const char  *chat_id,
+                         guint        position,
+                         GError     **error)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  messages = load_queue (self, chat_id, error);
+  if (messages == NULL)
+    return FALSE;
+
+  if (position >= messages->len)
+    return TRUE;
+
+  g_ptr_array_remove_index (messages, position);
+
+  return xd_storage_set_queue (self, chat_id, messages, error);
+}
+
+gboolean
+xd_storage_queue_take_first (XdStorage   *self,
+                             const char  *chat_id,
+                             char       **text,
+                             GError     **error)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  g_autofree char *first = NULL;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  if (text != NULL)
+    *text = NULL;
+
+  messages = load_queue (self, chat_id, error);
+  if (messages == NULL)
+    return FALSE;
+
+  if (messages->len == 0)
+    return TRUE;
+
+  first = g_strdup (g_ptr_array_index (messages, 0));
+  g_ptr_array_remove_index (messages, 0);
+
+  if (!xd_storage_set_queue (self, chat_id, messages, error))
+    return FALSE;
+
+  if (text != NULL)
+    *text = g_steal_pointer (&first);
+
+  return TRUE;
 }
 
 gboolean
