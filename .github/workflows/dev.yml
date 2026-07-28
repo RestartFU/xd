@@ -9,6 +9,11 @@
 #
 #   https://github.com/<owner>/<repo>/releases/download/dev/xd-nightly-linux-x86_64.tar.gz
 #
+# The commit it was built from is published beside it as commit.txt, which is
+# what the update check reads: a dev build looks every twenty-five seconds from
+# both the window and the daemon, and the GitHub API allows sixty unauthenticated
+# requests an hour.
+#
 #   curl -fsSL https://github.com/<owner>/<repo>/releases/download/dev/install.sh | sh -s -- --dev
 #
 # Linux is the only thing published: it is what these builds are tried on. The
@@ -65,6 +70,13 @@ jobs:
           tar -czf xd-nightly-linux-x86_64.tar.gz xd-nightly
           sha256sum xd-nightly-linux-x86_64.tar.gz > xd-nightly-linux-x86_64.tar.gz.sha256
 
+          # The commit, on a line of its own, for the update check to read.
+          # A dev build looks every twenty-five seconds from both the window and
+          # the daemon, which is far past the sixty unauthenticated API requests
+          # GitHub allows in an hour; a release asset is served past that limit.
+          printf '%s\n' "${{ github.event.pull_request.head.sha || github.sha }}" \
+            > commit.txt
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -108,6 +120,7 @@ jobs:
             --notes "$notes" \
             xd-nightly-linux-x86_64.tar.gz \
             xd-nightly-linux-x86_64.tar.gz.sha256 \
+            commit.txt \
             scripts/install.sh
 
   # Compiled and tested, never published: the point is to hear about a branch

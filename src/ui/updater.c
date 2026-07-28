@@ -16,12 +16,11 @@
  * environment back -- curl is the host's, and must load the host's OpenSSL.
  */
 
-/* Often enough that a build pushed while the window is open turns up in it.
- * One request every five minutes is nothing to GitHub and nothing to a
- * network; the first waits a moment, because starting up is busy and this is
- * not. */
+/* Often enough that a build pushed while the window is open turns up in it --
+ * how often is the channel's to say, since a dev build is watched far more
+ * closely than a nightly. The first check waits a moment either way, because
+ * starting up is busy and this is not. */
 #define FIRST_CHECK_SECONDS 8
-#define EVERY_SECONDS       (60 * 5)
 
 typedef enum
 {
@@ -194,7 +193,7 @@ on_checked (GObject      *source,
   g_autoptr (GBytes) out = NULL;
   g_autoptr (GError) error = NULL;
   g_autofree char *latest = NULL;
-  const char *json;
+  const char *body;
   gsize length;
 
   if (!g_subprocess_communicate_finish (G_SUBPROCESS (source), result,
@@ -206,12 +205,12 @@ on_checked (GObject      *source,
       return;
     }
 
-  json = g_bytes_get_data (out, &length);
-  if (json == NULL || length == 0)
+  body = g_bytes_get_data (out, &length);
+  if (body == NULL || length == 0)
     return;
 
-  latest = xd_update_channel_latest_from_json (
-    xd_update_channel_current (), json);
+  latest = xd_update_channel_latest_from_reply (
+    xd_update_channel_current (), body);
 
   if (xd_update_channel_is_newer (xd_update_channel_current (), latest) &&
       self->state == STATE_QUIET)
@@ -270,7 +269,9 @@ check_now (gpointer user_data)
     return G_SOURCE_CONTINUE;
 
   self->repeating = TRUE;
-  self->check_id = g_timeout_add_seconds (EVERY_SECONDS, check_now, self);
+  self->check_id = g_timeout_add_seconds (
+    xd_update_channel_poll_seconds (xd_update_channel_current ()),
+    check_now, self);
 
   return G_SOURCE_REMOVE;
 }

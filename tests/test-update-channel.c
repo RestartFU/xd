@@ -28,7 +28,12 @@ test_current_channel_is_this_build (void)
   g_assert_cmpstr (xd_update_channel_tag (XD_UPDATE_CHANNEL_DEV), ==, "dev");
 }
 
-/* A rolling channel asks for its own tag; a release asks for the newest one. */
+/*
+ * A release asks for the newest release, a nightly for its own tag -- and a dev
+ * build for the commit written beside its bundle, because the API allows sixty
+ * unauthenticated requests an hour and a dev build looks every twenty-five
+ * seconds from two processes at once.
+ */
 static void
 test_each_channel_checks_its_own_release (void)
 {
@@ -40,7 +45,8 @@ test_each_channel_checks_its_own_release (void)
 
   g_assert_true (g_str_has_suffix (release, "/releases/latest"));
   g_assert_true (g_str_has_suffix (nightly, "/releases/tags/nightly"));
-  g_assert_true (g_str_has_suffix (dev, "/releases/tags/dev"));
+  g_assert_true (g_str_has_suffix (dev, "/releases/download/dev/commit.txt"));
+  g_assert_null (strstr (dev, "api.github.com"));
 }
 
 /*
@@ -68,6 +74,23 @@ test_each_channel_installs_what_it_checked (void)
   g_assert_nonnull (strstr (dev, "--dev"));
 }
 
+/*
+ * A dev build is watched while it is being pushed to, so it looks often. The
+ * window and the daemon read this same answer: one of them polling on its own
+ * schedule would mean a machine where the client offers a build the daemon has
+ * not noticed, or the reverse.
+ */
+static void
+test_a_dev_build_looks_often (void)
+{
+  g_assert_cmpuint (xd_update_channel_poll_seconds (XD_UPDATE_CHANNEL_DEV),
+                    ==, 25);
+  g_assert_cmpuint (xd_update_channel_poll_seconds (XD_UPDATE_CHANNEL_NIGHTLY),
+                    ==, 60 * 5);
+  g_assert_cmpuint (xd_update_channel_poll_seconds (XD_UPDATE_CHANNEL_RELEASE),
+                    ==, 60 * 5);
+}
+
 static void
 test_rolling_releases_are_named_by_commit (void)
 {
@@ -75,21 +98,39 @@ test_rolling_releases_are_named_by_commit (void)
     "{\"tag_name\":\"dev\","
     " \"target_commitish\":\"1234567890abcdef1234567890abcdef12345678\"}";
   g_autofree char *nightly =
-    xd_update_channel_latest_from_json (XD_UPDATE_CHANNEL_NIGHTLY, reply);
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_NIGHTLY, reply);
   g_autofree char *dev =
-    xd_update_channel_latest_from_json (XD_UPDATE_CHANNEL_DEV, reply);
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_DEV, reply);
   g_autofree char *release =
-    xd_update_channel_latest_from_json (XD_UPDATE_CHANNEL_RELEASE, reply);
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_RELEASE, reply);
 
   g_assert_cmpstr (nightly, ==, "1234567890abcdef1234567890abcdef12345678");
-  g_assert_cmpstr (dev, ==, nightly);
   g_assert_cmpstr (release, ==, "dev");
 
-  /* Nothing usable is not the same as something newer. */
+  /* A dev build is answered by the commit itself, on its own line. */
+  g_assert_null (dev);
+
+  {
+    g_autofree char *plain = xd_update_channel_latest_from_reply (
+      XD_UPDATE_CHANNEL_DEV, "1234567890abcdef1234567890abcdef12345678\n");
+
+    g_assert_cmpstr (plain, ==, "1234567890abcdef1234567890abcdef12345678");
+  }
+
+  /* Nothing usable is not the same as something newer: an error page, a
+   * truncated file or an empty one must not read as a new commit. */
   g_assert_null (
-    xd_update_channel_latest_from_json (XD_UPDATE_CHANNEL_DEV, "not json"));
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_DEV, "not a commit"));
   g_assert_null (
-    xd_update_channel_latest_from_json (XD_UPDATE_CHANNEL_DEV, NULL));
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_DEV, "<html>404"));
+  g_assert_null (
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_DEV, "abc123"));
+  g_assert_null (
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_DEV, "  \n"));
+  g_assert_null (
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_DEV, NULL));
+  g_assert_null (
+    xd_update_channel_latest_from_reply (XD_UPDATE_CHANNEL_NIGHTLY, "not json"));
 }
 
 static void
@@ -139,6 +180,8 @@ main (int   argc,
                    test_each_channel_checks_its_own_release);
   g_test_add_func ("/update-channel/installs-what-it-checked",
                    test_each_channel_installs_what_it_checked);
+  g_test_add_func ("/update-channel/dev-looks-often",
+                   test_a_dev_build_looks_often);
   g_test_add_func ("/update-channel/rolling-named-by-commit",
                    test_rolling_releases_are_named_by_commit);
   g_test_add_func ("/update-channel/newer-compares-identity",
