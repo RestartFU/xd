@@ -315,7 +315,7 @@ static const char *XD_STYLE =
   " background: none; border: none; box-shadow: none; }\n"
   ".xd-image-button:hover, .xd-image-button:active"
   " { background: none; box-shadow: none; }\n"
-  ".xd-image-viewer { background-color: alpha(#000000, 0.86); }\n"
+  ".xd-image-viewer { background: transparent; }\n"
   /* The dropdown's open list: room for the two lines, a rounded hover, and
    * no band of selection colour behind the one already chosen. */
   /* The list widgets inside paint their own lighter slab over the popover's
@@ -335,13 +335,6 @@ static const char *XD_STYLE =
   "popover listview > row:selected { background: alpha(#ffffff, 0.07); }\n"
   "popover listview > row:hover:not(:selected)"
   " { background: alpha(#ffffff, 0.05); }\n"
-  ".xd-picker-list { background: none; }\n"
-  ".xd-picker-list > row { border-radius: 10px; }\n"
-  ".xd-picker-list > row:selected"
-  " { background: alpha(#ffffff, 0.07); }\n"
-  ".xd-picker-list > row:hover:not(:selected)"
-  " { background: alpha(#ffffff, 0.05); }\n"
-
   /* Nothing has a scrollbar except the transcript, and that one is a thin
    * overlay: everywhere else the content says how long it is. */
   /* GTK fades the edge of a scrolled view to say there is more past it. The

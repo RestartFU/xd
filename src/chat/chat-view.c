@@ -507,9 +507,18 @@ on_scroll_adjustment_changed (GtkAdjustment *adjustment,
                               gpointer       user_data)
 {
   XdChatView *self = user_data;
+  double bottom =
+    MAX (gtk_adjustment_get_lower (adjustment),
+         gtk_adjustment_get_upper (adjustment) -
+         gtk_adjustment_get_page_size (adjustment));
 
   if (self->follow_bottom)
     queue_bottom_pin (self);
+  else if (gtk_adjustment_get_value (adjustment) >= bottom - 1.0)
+    {
+      self->follow_bottom = TRUE;
+      self->history_bottom_distance = -1;
+    }
   else if (self->history_bottom_distance >= 0)
     {
       double value =
@@ -530,16 +539,26 @@ on_transcript_scrolled (GtkEventControllerScroll *controller,
 {
   XdChatView *self = user_data;
 
-  self->follow_bottom = FALSE;
-  self->history_bottom_distance = -1;
+  if (dy != 0)
+    {
+      self->follow_bottom = FALSE;
+      self->history_bottom_distance = -1;
+    }
   return GDK_EVENT_PROPAGATE;
 }
 
-/* Joining, sending, and new output all explicitly resume bottom following. */
+/*
+ * New output follows only while the user is already at the bottom.
+ *
+ * Sending and opening a chat opt back in before reaching here. Merely
+ * appending agent output must not pull someone away from earlier text.
+ */
 static void
 queue_scroll_to_bottom (XdChatView *self)
 {
-  self->follow_bottom = TRUE;
+  if (!self->follow_bottom)
+    return;
+
   self->history_bottom_distance = -1;
   set_scroll_at_bottom (
     gtk_scrolled_window_get_vadjustment (self->scroller));
@@ -1877,7 +1896,8 @@ on_remote_options_received (GObject      *source,
    */
   if (self->pending_remote_messages != NULL)
     {
-      begin_bottom_jump (self);
+      if (self->follow_bottom)
+        begin_bottom_jump (self);
       clear_transcript (self);
       end_remote_turn (self);
       render_transcript (self, self->pending_remote_messages,
@@ -4834,8 +4854,7 @@ build_composer (XdChatView *self)
     };
 
     self->workspace_chooser =
-      xd_option_picker_new ("Choose Workspace",
-                            workspaces, workspace_descriptions);
+      xd_option_picker_new (workspaces, workspace_descriptions);
     gtk_widget_set_tooltip_text (
       GTK_WIDGET (self->workspace_chooser),
       "Where this chat works; locked after the first message");
@@ -4875,16 +4894,14 @@ build_composer (XdChatView *self)
       accesses[i] = ai_access_label (access_choices[i]);
 
     self->effort_chooser =
-      xd_option_picker_new ("Choose Reasoning Effort",
-                            efforts, effort_descriptions);
+      xd_option_picker_new (efforts, effort_descriptions);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->effort_chooser),
                                  "How hard the model is asked to think");
     g_signal_connect (self->effort_chooser, "notify::selected",
                       G_CALLBACK (on_effort_selected), self);
 
     self->access_chooser =
-      xd_option_picker_new ("Choose Access",
-                            accesses, access_descriptions);
+      xd_option_picker_new (accesses, access_descriptions);
     gtk_widget_set_tooltip_text (GTK_WIDGET (self->access_chooser),
                                  "What the assistant may do in the working "
                                  "directory");

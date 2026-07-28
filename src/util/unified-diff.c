@@ -219,20 +219,55 @@ escaped_display_text (const char *text)
   return g_markup_escape_text (shown, -1);
 }
 
-static void
-start_markup_row (GString *markup,
-                  guint    rendered)
+typedef struct
 {
-  if (rendered > 0)
-    g_string_append_c (markup, '\n');
+  GString *text;
+  const char *background;
+  guint rendered;
+} MarkupBuilder;
+
+/*
+ * Keep consecutive changed lines inside one background span.
+ *
+ * Closing every span before its newline leaves a fractional Pango line box
+ * uncovered, which shows as a dark seam between otherwise adjacent rows.
+ */
+static void
+start_markup_row (MarkupBuilder *builder,
+                  const char    *background)
+{
+  if (builder->rendered > 0)
+    g_string_append_c (builder->text, '\n');
+
+  if (g_strcmp0 (builder->background, background) != 0)
+    {
+      if (builder->background != NULL)
+        g_string_append (builder->text, "</span>");
+      if (background != NULL)
+        g_string_append_printf (
+          builder->text, "<span background=\"%s\">", background);
+
+      builder->background = background;
+    }
+
+  builder->rendered++;
 }
 
 static void
-append_file_markup (GString          *markup,
+finish_markup (MarkupBuilder *builder)
+{
+  if (builder->background != NULL)
+    {
+      g_string_append (builder->text, "</span>");
+      builder->background = NULL;
+    }
+}
+
+static void
+append_file_markup (MarkupBuilder    *builder,
                     GPtrArray        *lines,
                     guint             position,
-                    const XdDiffLine *line,
-                    guint             rendered)
+                    const XdDiffLine *line)
 {
   g_autofree char *path = escaped_display_text (line->text);
   guint additions = 0;
@@ -250,9 +285,9 @@ append_file_markup (GString          *markup,
         deletions++;
     }
 
-  start_markup_row (markup, rendered);
+  start_markup_row (builder, NULL);
   g_string_append_printf (
-    markup,
+    builder->text,
     "<span weight=\"bold\">%s</span>"
     "  <span foreground=\"#57e389\">+%u</span>"
     "  <span foreground=\"#f66151\">−%u</span>",
@@ -260,25 +295,23 @@ append_file_markup (GString          *markup,
 }
 
 static void
-append_full_line_markup (GString          *markup,
-                         const XdDiffLine *line,
-                         guint             rendered)
+append_full_line_markup (MarkupBuilder    *builder,
+                         const XdDiffLine *line)
 {
   g_autofree char *text = escaped_display_text (line->text);
 
-  start_markup_row (markup, rendered);
+  start_markup_row (builder, NULL);
   if (line->kind == XD_DIFF_LINE_HUNK)
     g_string_append_printf (
-      markup, "<span foreground=\"#78aeed\">%s</span>", text);
+      builder->text, "<span foreground=\"#78aeed\">%s</span>", text);
   else
     g_string_append_printf (
-      markup, "<span foreground=\"#9a9996\">%s</span>", text);
+      builder->text, "<span foreground=\"#9a9996\">%s</span>", text);
 }
 
 static void
-append_code_line_markup (GString          *markup,
-                         const XdDiffLine *line,
-                         guint             rendered)
+append_code_line_markup (MarkupBuilder    *builder,
+                         const XdDiffLine *line)
 {
   g_autofree char *text = escaped_display_text (line->text);
   g_autofree char *old_line =
@@ -304,19 +337,17 @@ append_code_line_markup (GString          *markup,
       background = "#3a1d1b";
     }
 
-  start_markup_row (markup, rendered);
+  start_markup_row (builder, background);
   if (background != NULL)
     g_string_append_printf (
-      markup,
-      "<span background=\"%s\">"
+      builder->text,
       "<span foreground=\"#c0bfbc\">%s %s</span>"
       " <span foreground=\"%s\" weight=\"bold\">%s</span>"
-      " <span foreground=\"%s\">%s</span>"
-      "</span>",
-      background, old_line, new_line, colour, marker, colour, text);
+      " <span foreground=\"%s\">%s</span>",
+      old_line, new_line, colour, marker, colour, text);
   else
     g_string_append_printf (
-      markup,
+      builder->text,
       "<span foreground=\"#77767b\">%s %s</span>"
       " <span foreground=\"%s\" weight=\"bold\">%s</span> %s",
       old_line, new_line, colour, marker, text);
@@ -328,14 +359,14 @@ xd_unified_diff_markup (GPtrArray *lines,
                         guint      limit)
 {
   g_autoptr (GString) markup = g_string_new (NULL);
-  guint rendered = 0;
+  MarkupBuilder builder = { .text = markup };
   guint total;
 
   g_return_val_if_fail (lines != NULL, g_strdup (""));
 
   total = xd_unified_diff_display_rows (lines, show_file_headers);
   for (guint i = 0;
-       i < lines->len && (limit == 0 || rendered < limit);
+       i < lines->len && (limit == 0 || builder.rendered < limit);
        i++)
     {
       XdDiffLine *line = g_ptr_array_index (lines, i);
@@ -344,30 +375,31 @@ xd_unified_diff_markup (GPtrArray *lines,
         {
           if (!show_file_headers)
             continue;
-          append_file_markup (markup, lines, i, line, rendered);
+          append_file_markup (&builder, lines, i, line);
         }
       else if (line->kind == XD_DIFF_LINE_HUNK ||
                line->kind == XD_DIFF_LINE_META)
         {
-          append_full_line_markup (markup, line, rendered);
+          append_full_line_markup (&builder, line);
         }
       else
         {
-          append_code_line_markup (markup, line, rendered);
+          append_code_line_markup (&builder, line);
         }
-
-      rendered++;
     }
 
-  if (rendered < total)
+  if (builder.rendered < total)
     {
-      start_markup_row (markup, rendered);
+      guint rendered = builder.rendered;
+
+      start_markup_row (&builder, NULL);
       g_string_append_printf (
         markup,
         "<span foreground=\"#9a9996\">Showing first %u of %u rows</span>",
         rendered, total);
     }
 
+  finish_markup (&builder);
   return g_string_free (g_steal_pointer (&markup), FALSE);
 }
 
@@ -378,7 +410,7 @@ xd_unified_diff_markup_slice (GPtrArray *lines,
                               guint      end)
 {
   g_autoptr (GString) markup = g_string_new (NULL);
-  guint rendered = 0;
+  MarkupBuilder builder = { .text = markup };
 
   g_return_val_if_fail (lines != NULL, g_strdup (""));
 
@@ -391,20 +423,19 @@ xd_unified_diff_markup_slice (GPtrArray *lines,
         {
           if (!show_file_headers)
             continue;
-          append_file_markup (markup, lines, i, line, rendered);
+          append_file_markup (&builder, lines, i, line);
         }
       else if (line->kind == XD_DIFF_LINE_HUNK ||
                line->kind == XD_DIFF_LINE_META)
         {
-          append_full_line_markup (markup, line, rendered);
+          append_full_line_markup (&builder, line);
         }
       else
         {
-          append_code_line_markup (markup, line, rendered);
+          append_code_line_markup (&builder, line);
         }
-
-      rendered++;
     }
 
+  finish_markup (&builder);
   return g_string_free (g_steal_pointer (&markup), FALSE);
 }

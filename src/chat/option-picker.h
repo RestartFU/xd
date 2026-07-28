@@ -10,11 +10,11 @@ G_DECLARE_FINAL_TYPE (XdOptionPicker, xd_option_picker, XD, OPTION_PICKER, AdwBi
 /*
  * Compact choice button for the composer.
  *
- * The button names the current value. Activating it opens a compact dialog
- * with descriptive rows instead of a native dropdown surface.
+ * The button names the current value. Its popover uses the same rounded,
+ * descriptive rows as xd's other pickers instead of GtkDropDown's native
+ * list surface.
  */
-XdOptionPicker *xd_option_picker_new          (const char        *title,
-                                               const char *const *labels,
+XdOptionPicker *xd_option_picker_new          (const char *const *labels,
                                                const char *const *descriptions);
 
 void            xd_option_picker_set_choices  (XdOptionPicker    *self,

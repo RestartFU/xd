@@ -693,6 +693,7 @@ handle_new_folder (Connection *connection,
     }
 
   send_done (connection, settings->id);
+  broadcast_tree (connection->server);
 }
 
 static void

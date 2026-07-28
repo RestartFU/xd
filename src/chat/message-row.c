@@ -1072,7 +1072,35 @@ static void
 close_image_viewer (GtkButton *button,
                     gpointer   user_data)
 {
-  adw_dialog_close (ADW_DIALOG (user_data));
+  gtk_popover_popdown (GTK_POPOVER (user_data));
+}
+
+static void
+on_image_viewer_closed (GtkPopover   *popover,
+                        GCancellable *cancellable)
+{
+  g_object_ref (popover);
+  g_cancellable_cancel (cancellable);
+  gtk_widget_unparent (GTK_WIDGET (popover));
+  g_object_unref (popover);
+}
+
+static void
+on_image_viewer_background_pressed (GtkGestureClick *gesture,
+                                    int              n_press,
+                                    double           x,
+                                    double           y,
+                                    gpointer         user_data)
+{
+  GtkWidget *background =
+    gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  GtkWidget *picture =
+    g_object_get_data (G_OBJECT (background), "image-picture");
+  GtkWidget *target =
+    gtk_widget_pick (background, x, y, GTK_PICK_DEFAULT);
+
+  if (target != picture)
+    gtk_popover_popdown (GTK_POPOVER (user_data));
 }
 
 static void
@@ -1081,22 +1109,19 @@ open_image_viewer (GtkButton *button,
 {
   ImageOpenRequest *open_request = user_data;
   g_autoptr (GCancellable) cancellable = g_cancellable_new ();
-  AdwDialog *dialog = ADW_DIALOG (adw_dialog_new ());
+  GtkPopover *popover = GTK_POPOVER (gtk_popover_new ());
   GtkWidget *overlay = gtk_overlay_new ();
   GtkWidget *stack = gtk_stack_new ();
   GtkWidget *picture = gtk_picture_new ();
   GtkWidget *spinner = gtk_spinner_new ();
   GtkWidget *unavailable = gtk_label_new ("Image unavailable");
   GtkWidget *close = gtk_button_new_from_icon_name ("window-close-symbolic");
+  GtkGesture *background_click = gtk_gesture_click_new ();
   ImageLoadRequest *load_request;
 
-  adw_dialog_set_title (dialog, "Image");
-  adw_dialog_set_content_width (dialog, 1100);
-  adw_dialog_set_content_height (dialog, 720);
-
   gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
-  gtk_widget_set_hexpand (picture, TRUE);
-  gtk_widget_set_vexpand (picture, TRUE);
+  gtk_widget_set_halign (picture, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (picture, GTK_ALIGN_CENTER);
   gtk_widget_set_margin_top (picture, 24);
   gtk_widget_set_margin_bottom (picture, 24);
   gtk_widget_set_margin_start (picture, 24);
@@ -1116,6 +1141,13 @@ open_image_viewer (GtkButton *button,
   gtk_widget_set_hexpand (stack, TRUE);
   gtk_widget_set_vexpand (stack, TRUE);
   gtk_widget_add_css_class (stack, "xd-image-viewer");
+  gtk_widget_set_size_request (stack, 1100, 720);
+  g_object_set_data (G_OBJECT (stack), "image-picture", picture);
+  g_signal_connect (
+    background_click, "pressed",
+    G_CALLBACK (on_image_viewer_background_pressed), popover);
+  gtk_widget_add_controller (
+    stack, GTK_EVENT_CONTROLLER (background_click));
 
   gtk_widget_add_css_class (close, "circular");
   gtk_widget_add_css_class (close, "osd");
@@ -1125,15 +1157,18 @@ open_image_viewer (GtkButton *button,
   gtk_widget_set_margin_end (close, 12);
   gtk_widget_set_tooltip_text (close, "Close");
   g_signal_connect (close, "clicked",
-                    G_CALLBACK (close_image_viewer), dialog);
+                    G_CALLBACK (close_image_viewer), popover);
 
   gtk_overlay_set_child (GTK_OVERLAY (overlay), stack);
   gtk_overlay_add_overlay (GTK_OVERLAY (overlay), close);
-  adw_dialog_set_child (dialog, overlay);
+  gtk_popover_set_child (popover, overlay);
+  gtk_popover_set_has_arrow (popover, FALSE);
+  gtk_popover_set_autohide (popover, TRUE);
+  gtk_widget_set_parent (GTK_WIDGET (popover), GTK_WIDGET (button));
 
-  g_signal_connect_swapped (dialog, "closed",
-                            G_CALLBACK (g_cancellable_cancel), cancellable);
-  g_object_set_data_full (G_OBJECT (dialog), "image-cancellable",
+  g_signal_connect (popover, "closed",
+                    G_CALLBACK (on_image_viewer_closed), cancellable);
+  g_object_set_data_full (G_OBJECT (popover), "image-cancellable",
                           g_object_ref (cancellable), g_object_unref);
 
   load_request = image_load_request_new (
@@ -1164,7 +1199,7 @@ open_image_viewer (GtkButton *button,
       start_viewer_decode (load_request, decode);
     }
 
-  adw_dialog_present (dialog, GTK_WIDGET (button));
+  gtk_popover_popup (popover);
 }
 
 /*

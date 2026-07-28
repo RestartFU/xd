@@ -308,16 +308,16 @@ restore_active_chat (XdWindow *self)
 }
 
 static void
-on_search_action (GtkWidget  *widget,
-                  const char *action_name,
-                  GVariant   *parameter)
+on_search_action (GSimpleAction *action,
+                  GVariant      *parameter,
+                  gpointer       user_data)
 {
-  XdWindow *self = XD_WINDOW (widget);
+  XdWindow *self = user_data;
 
   if (self->storage == NULL)
     return;
 
-  xd_search_dialog_present (widget, self->storage, self->tree,
+  xd_search_dialog_present (GTK_WIDGET (self), self->storage, self->tree,
                             on_search_result_chosen, self);
 }
 
@@ -370,6 +370,14 @@ on_close_request (GtkWindow *window,
 XdWindow *
 xd_window_new (XdApplication *app)
 {
+  static const GActionEntry actions[] = {
+    { .name = "search", .activate = on_search_action },
+  };
+  static const char *search_accels[] = {
+    "<Control>k",
+    "<Control>f",
+    NULL,
+  };
   g_autofree char *workspaces_root = NULL;
   g_autofree char *db_path = NULL;
   g_autoptr (GError) error = NULL;
@@ -379,6 +387,17 @@ xd_window_new (XdApplication *app)
 
   self = g_object_new (XD_TYPE_WINDOW, "application", app, NULL);
   self->settings = g_object_ref (xd_application_get_settings (app));
+
+  /*
+   * Search is a real window action, rather than a widget-class binding named
+   * as one. Application accelerators resolve it from whichever child owns
+   * focus, including the composer and dialogs, without re-entering GTK's
+   * widget binding machinery.
+   */
+  g_action_map_add_action_entries (
+    G_ACTION_MAP (self), actions, G_N_ELEMENTS (actions), self);
+  gtk_application_set_accels_for_action (
+    GTK_APPLICATION (app), "win.search", search_accels);
   self->discord_presence = xd_discord_presence_new ();
 
   gtk_window_set_default_size (GTK_WINDOW (self),
@@ -481,14 +500,8 @@ xd_window_class_init (XdWindowClass *klass)
 
   object_class->dispose = xd_window_dispose;
 
-  gtk_widget_class_install_action (widget_class, "win.search", NULL,
-                                   on_search_action);
   gtk_widget_class_install_action (widget_class, "win.pair-remote", NULL,
                                    on_pair_remote_action);
-  gtk_widget_class_add_binding_action (widget_class, GDK_KEY_k, GDK_CONTROL_MASK,
-                                       "win.search", NULL);
-  gtk_widget_class_add_binding_action (widget_class, GDK_KEY_f, GDK_CONTROL_MASK,
-                                       "win.search", NULL);
 }
 
 static void

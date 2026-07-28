@@ -124,6 +124,32 @@ test_colours_complete_changed_lines (void)
 }
 
 static void
+test_groups_consecutive_line_backgrounds (void)
+{
+  static const char *patch =
+    "@@ -1,2 +1,2 @@\n"
+    "-old one\n"
+    "-old two\n"
+    "+new one\n"
+    "+new two\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, FALSE, 0);
+  const char *removed = strstr (markup, "background=\"#3a1d1b\"");
+  const char *added = strstr (markup, "background=\"#183522\"");
+  g_autoptr (GError) error = NULL;
+
+  g_assert_nonnull (removed);
+  g_assert_nonnull (added);
+  g_assert_null (strstr (removed + 1, "background=\"#3a1d1b\""));
+  g_assert_null (strstr (added + 1, "background=\"#183522\""));
+  g_assert_true (pango_parse_markup (
+    markup, -1, 0, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+}
+
+static void
 test_formats_independent_slices (void)
 {
   static const char *patch =
@@ -170,6 +196,8 @@ main (int   argc,
                    test_formats_one_safe_layout);
   g_test_add_func ("/unified-diff/colours-complete-changed-lines",
                    test_colours_complete_changed_lines);
+  g_test_add_func ("/unified-diff/groups-consecutive-line-backgrounds",
+                   test_groups_consecutive_line_backgrounds);
   g_test_add_func ("/unified-diff/formats-independent-slices",
                    test_formats_independent_slices);
 
