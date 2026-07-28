@@ -326,7 +326,20 @@ static const char *XD_STYLE =
    * full-width buttons -- correct for GNOME, foreign here. Same panel tone
    * as the menus, same radius, buttons that read as the composer's do.
    */
-  "dialog, .dialog-content, alertdialog > * { background-color: #16161b; }\n"
+  /*
+   * The fill belongs to the sheet, not to the dialog.
+   *
+   * A dialog's own node covers the whole window -- the dimming it puts over
+   * what is behind is inside it. Filling that node painted an opaque slab
+   * across the window instead, so opening one made the conversation vanish
+   * rather than recede. Only the panel in the middle is a panel.
+   */
+  /* The sheet carries the "background" class the surfaces rule names, and one
+   * class outranks two element names -- so the panel is reached by saying
+   * both, or every dialog quietly takes the window's own black instead. */
+  "dialog { background: none; background-color: transparent; }\n"
+  "dialog sheet.background, .dialog-content, alertdialog > *"
+  " { background-color: #16161b; }\n"
   ".dialog-content, alertdialog { border-radius: 14px;"
   " border: 1px solid alpha(#ffffff, 0.10); }\n"
   "alertdialog .title { font-size: 1.05em; font-weight: 700; }\n"
