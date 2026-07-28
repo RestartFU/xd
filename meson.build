@@ -42,7 +42,19 @@ gnome = import('gnome')
 cc = meson.get_compiler('c')
 is_windows = host_machine.system() == 'windows'
 is_macos = host_machine.system() == 'darwin'
-has_server = not is_windows and not is_macos
+
+#
+# Every platform hosts the daemon.
+#
+# The client is about to stop having a second way to do anything: it adopts or
+# spawns a daemon and talks to it, locally as well as remotely, so a machine
+# that cannot serve is a machine xd cannot run on. The daemon's own code is
+# already portable -- server.c and turn.c use nothing Unix-only -- and a shell
+# is the single exception, which Windows takes as a stub the way its client
+# already does.
+#
+has_server = true
+has_daemon_terminal = not is_windows
 
 glib_dep      = dependency('glib-2.0', version: '>= 2.72')
 gio_dep       = dependency('gio-2.0')
@@ -61,7 +73,7 @@ else
   vte_dep      = dependency('vte-2.91-gtk4')
 endif
 
-if has_server
+if has_daemon_terminal
   util_dep     = cc.find_library('util')
 else
   util_dep     = declare_dependency()

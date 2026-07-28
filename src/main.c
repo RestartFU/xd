@@ -489,6 +489,13 @@ print_version (void)
 static gboolean
 repair_daemon_cwd (GError **error)
 {
+#ifdef G_OS_WIN32
+  /*
+   * Windows holds a directory open while it is anyone's working directory, so
+   * the deleted-cwd this repairs cannot arise there.
+   */
+  return TRUE;
+#else
   g_autofree char *cwd = getcwd (NULL, 0);
   int saved_errno;
 
@@ -508,6 +515,7 @@ repair_daemon_cwd (GError **error)
                "Cannot select a working directory for the daemon: %s",
                g_strerror (saved_errno));
   return FALSE;
+#endif
 }
 #endif
 

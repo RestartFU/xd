@@ -5,7 +5,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glib-unix.h>
+/* forkpty is the same call on both; BSD keeps it in util.h, glibc in pty.h. */
+#ifdef __APPLE__
+#include <util.h>
+#else
 #include <pty.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>

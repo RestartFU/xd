@@ -38,8 +38,15 @@ if has_server
   xd_core_sources += files(
     'remote/server.c',
     'remote/turn.c',
-    'remote/terminal.c',
   )
+
+  # A pty is the daemon's only platform-specific part; Windows serves every
+  # other op and refuses this one, which is what the client already does.
+  if has_daemon_terminal
+    xd_core_sources += files('remote/terminal.c')
+  else
+    xd_core_sources += files('remote/terminal-stub.c')
+  endif
 endif
 
 # Pango, but not GTK: the Markdown converter validates the markup it produces,
