@@ -1792,7 +1792,7 @@ test_the_daemon_lists_its_directories (void)
 }
 
 static void
-test_remote_files_are_browsed_and_read (void)
+test_remote_files_are_browsed_read_and_written (void)
 {
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
@@ -1802,6 +1802,7 @@ test_remote_files_are_browsed_and_read (void)
   g_autofree char *note = NULL;
   RemoteReply listed = { 0 };
   RemoteReply read = { 0 };
+  RemoteReply written = { 0 };
   gboolean saw_source = FALSE;
   gboolean saw_note = FALSE;
 
@@ -1874,10 +1875,34 @@ test_remote_files_are_browsed_and_read (void)
       ==, "remote preview\n");
   }
 
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    g_autofree char *content = NULL;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "file-browse");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "action");
+    json_builder_add_string_value (builder, "write");
+    json_builder_set_member_name (builder, "path");
+    json_builder_add_string_value (builder, "notes.txt");
+    json_builder_set_member_name (builder, "content");
+    json_builder_add_string_value (builder, "remote edit\n");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &written);
+    g_assert_true (g_file_get_contents (note, &content, NULL, NULL));
+    g_assert_cmpstr (content, ==, "remote edit\n");
+  }
+
   json_object_unref (listed.reply);
   json_object_unref (read.reply);
+  json_object_unref (written.reply);
   g_free (listed.wait.failure);
   g_free (read.wait.failure);
+  g_free (written.wait.failure);
   g_remove (note);
   g_rmdir (source_dir);
   daemon_stop (&daemon);
@@ -3856,7 +3881,7 @@ main (int argc, char *argv[])
   ADD ("/remote/a-first-message-names-the-chat", test_a_first_message_names_the_chat);
   ADD ("/remote/images-are-uploaded-to-the-daemon", test_images_are_uploaded_to_the_daemon);
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
-  ADD ("/remote/files-are-browsed-and-read", test_remote_files_are_browsed_and_read);
+  ADD ("/remote/files-are-browsed-read-and-written", test_remote_files_are_browsed_read_and_written);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
   ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);

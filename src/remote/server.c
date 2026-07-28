@@ -1347,6 +1347,54 @@ handle_file_browse (Connection *connection,
       return;
     }
 
+  if (g_strcmp0 (action, "write") == 0)
+    {
+      const char *content = member_string (request, "content");
+      g_autoptr (GFile) file = g_file_new_for_path (path);
+      g_autoptr (GFileInfo) info = NULL;
+      g_autoptr (JsonBuilder) builder = json_builder_new ();
+      gsize length;
+
+      if (content == NULL)
+        {
+          send_error (connection, "file-browse write needs content.");
+          return;
+        }
+
+      length = strlen (content);
+      if (length > FILE_PREVIEW_LIMIT)
+        {
+          send_error (connection, "Files larger than 1 MB cannot be saved here.");
+          return;
+        }
+
+      info = g_file_query_info (
+        file, G_FILE_ATTRIBUTE_STANDARD_TYPE,
+        G_FILE_QUERY_INFO_NONE, NULL, &error);
+      if (info == NULL)
+        {
+          send_error (connection, error->message);
+          return;
+        }
+      if (g_file_info_get_file_type (info) != G_FILE_TYPE_REGULAR)
+        {
+          send_error (connection, "Only regular files can be edited.");
+          return;
+        }
+      if (!g_file_set_contents (path, content, (gssize) length, &error))
+        {
+          send_error (connection, error->message);
+          return;
+        }
+
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "ok");
+      json_builder_add_boolean_value (builder, TRUE);
+      json_builder_end_object (builder);
+      send_json (connection, builder);
+      return;
+    }
+
   send_error (connection, "No such file-browse action.");
 }
 

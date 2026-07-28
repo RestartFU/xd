@@ -25,6 +25,7 @@ typedef struct
 {
   XdFilePane *pane;
   char *path;
+  char *content;
   GFileInputStream *stream;
 } FileRequest;
 
@@ -34,24 +35,31 @@ struct _XdFilePane
 
   char *workdir;
   char *path;                 /* relative to the chat's working directory */
+  char *file_path;            /* file currently open in the editor */
   XdRemoteClient *remote;
   char *chat_id;
   GCancellable *cancellable;
 
   GtkButton *back;
+  GtkButton *save;
+  GtkWidget *refresh;
   GtkLabel *path_label;
   GtkListBox *entries;
   GtkStack *stack;
   AdwStatusPage *status;
+  AdwToastOverlay *toasts;
+  GtkTextView *editor;
   GtkTextBuffer *preview;
   GtkTextTag *tags[XD_SYNTAX_TOKEN_COUNT];
   gboolean showing_preview;
+  gboolean saving;
 };
 
 G_DEFINE_FINAL_TYPE (XdFilePane, xd_file_pane, ADW_TYPE_BIN)
 
 static void show_directory (XdFilePane *self, const char *path);
 static void show_file (XdFilePane *self, const char *path);
+static void save_file (XdFilePane *self);
 
 static void
 file_entry_free (FileEntry *entry)
@@ -90,6 +98,7 @@ file_request_free (FileRequest *request)
   g_clear_object (&request->stream);
   g_clear_object (&request->pane);
   g_free (request->path);
+  g_free (request->content);
   g_free (request);
 }
 
@@ -135,6 +144,25 @@ local_path (XdFilePane *self,
 }
 
 static void
+update_editor_actions (XdFilePane *self)
+{
+  gboolean modified =
+    self->preview != NULL && gtk_text_buffer_get_modified (self->preview);
+
+  gtk_widget_set_visible (GTK_WIDGET (self->save), self->showing_preview);
+  gtk_widget_set_sensitive (
+    GTK_WIDGET (self->save),
+    self->showing_preview && modified && !self->saving);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->editor), !self->saving);
+  gtk_widget_set_sensitive (
+    GTK_WIDGET (self->back),
+    !self->saving &&
+    (self->showing_preview ||
+     (self->path != NULL && *self->path != '\0')));
+  gtk_widget_set_sensitive (self->refresh, !self->saving);
+}
+
+static void
 set_header_path (XdFilePane *self,
                  const char *path)
 {
@@ -148,9 +176,7 @@ set_header_path (XdFilePane *self,
 
   gtk_label_set_label (self->path_label, label);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->path_label), label);
-  gtk_widget_set_sensitive (GTK_WIDGET (self->back),
-                            self->showing_preview ||
-                            (self->path != NULL && *self->path != '\0'));
+  update_editor_actions (self);
 }
 
 static void
@@ -226,6 +252,7 @@ fill_entries (XdFilePane *self,
 
   g_free (self->path);
   self->path = g_strdup (path != NULL ? path : "");
+  g_clear_pointer (&self->file_path, g_free);
   self->showing_preview = FALSE;
   set_header_path (self, self->path);
 
@@ -318,9 +345,13 @@ show_preview_text (XdFilePane *self,
 {
   gtk_text_buffer_set_text (self->preview, text, length);
   highlight_preview (self, path);
+  gtk_text_buffer_set_modified (self->preview, FALSE);
+  g_free (self->file_path);
+  self->file_path = g_strdup (path);
   self->showing_preview = TRUE;
   set_header_path (self, path);
   gtk_stack_set_visible_child_name (self->stack, "preview");
+  gtk_widget_grab_focus (GTK_WIDGET (self->editor));
 }
 
 /* --- local reads ---------------------------------------------------------- */
@@ -437,6 +468,7 @@ static void
 call_remote (XdFilePane         *self,
              const char         *action,
              const char         *path,
+             const char         *content,
              GAsyncReadyCallback callback,
              FileRequest        *request)
 {
@@ -452,6 +484,11 @@ call_remote (XdFilePane         *self,
   json_builder_add_string_value (builder, action);
   json_builder_set_member_name (builder, "path");
   json_builder_add_string_value (builder, path != NULL ? path : "");
+  if (content != NULL)
+    {
+      json_builder_set_member_name (builder, "content");
+      json_builder_add_string_value (builder, content);
+    }
   json_builder_end_object (builder);
 
   root = json_builder_get_root (builder);
@@ -556,6 +593,114 @@ on_remote_file_read (GObject      *source,
   file_request_free (request);
 }
 
+/* --- writes --------------------------------------------------------------- */
+
+static void
+show_toast (XdFilePane *self,
+            const char *message)
+{
+  adw_toast_overlay_add_toast (self->toasts, adw_toast_new (message));
+}
+
+static void
+finish_save (FileRequest *request,
+             GError      *error)
+{
+  XdFilePane *self = request->pane;
+
+  self->saving = FALSE;
+
+  if (error != NULL)
+    {
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        show_toast (self, error->message);
+    }
+  else
+    {
+      gtk_text_buffer_set_modified (self->preview, FALSE);
+      show_toast (self, "File saved");
+    }
+
+  update_editor_actions (self);
+  file_request_free (request);
+}
+
+static void
+on_local_file_saved (GObject      *source,
+                     GAsyncResult *result,
+                     gpointer      user_data)
+{
+  FileRequest *request = user_data;
+  g_autoptr (GError) error = NULL;
+
+  g_file_replace_contents_finish (
+    G_FILE (source), result, NULL, &error);
+  finish_save (request, error);
+}
+
+static void
+on_remote_file_saved (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  FileRequest *request = user_data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (JsonObject) reply = NULL;
+
+  reply = xd_remote_client_call_finish (
+    XD_REMOTE_CLIENT (source), result, &error);
+  finish_save (request, error);
+}
+
+static char *
+editor_text (XdFilePane *self)
+{
+  GtkTextIter start;
+  GtkTextIter end;
+
+  gtk_text_buffer_get_bounds (self->preview, &start, &end);
+  return gtk_text_buffer_get_text (self->preview, &start, &end, FALSE);
+}
+
+static void
+save_file (XdFilePane *self)
+{
+  FileRequest *request;
+
+  if (!self->showing_preview || self->saving ||
+      !gtk_text_buffer_get_modified (self->preview) ||
+      self->file_path == NULL)
+    return;
+
+  request = file_request_new (self, self->file_path);
+  request->content = editor_text (self);
+  if (strlen (request->content) > FILE_PREVIEW_LIMIT)
+    {
+      show_toast (self, "Files larger than 1 MB cannot be saved here.");
+      file_request_free (request);
+      return;
+    }
+
+  self->saving = TRUE;
+  update_editor_actions (self);
+
+  if (self->remote != NULL)
+    {
+      call_remote (self, "write", request->path, request->content,
+                   on_remote_file_saved, request);
+      return;
+    }
+
+  {
+    g_autofree char *full = local_path (self, request->path);
+    g_autoptr (GFile) file = g_file_new_for_path (full);
+
+    g_file_replace_contents_async (
+      file, request->content, strlen (request->content), NULL, FALSE,
+      G_FILE_CREATE_NONE, self->cancellable, on_local_file_saved, request);
+  }
+}
+
 /* --- navigation ----------------------------------------------------------- */
 
 static void
@@ -574,6 +719,7 @@ show_directory (XdFilePane *self,
 
   reset_request (self);
   self->showing_preview = FALSE;
+  g_clear_pointer (&self->file_path, g_free);
   g_free (self->path);
   self->path = g_strdup (requested);
   set_header_path (self, self->path);
@@ -582,7 +728,8 @@ show_directory (XdFilePane *self,
 
   if (self->remote != NULL)
     {
-      call_remote (self, "list", request->path, on_remote_listed, request);
+      call_remote (self, "list", request->path, NULL,
+                   on_remote_listed, request);
       return;
     }
 
@@ -604,17 +751,20 @@ static void
 show_file (XdFilePane *self,
            const char *path)
 {
+  g_autofree char *requested = g_strdup (path);
   FileRequest *request;
 
   reset_request (self);
   self->showing_preview = TRUE;
-  set_header_path (self, path);
+  g_free (self->file_path);
+  self->file_path = g_strdup (requested);
+  set_header_path (self, requested);
   show_status (self, "Loading…", NULL);
-  request = file_request_new (self, path);
+  request = file_request_new (self, requested);
 
   if (self->remote != NULL)
     {
-      call_remote (self, "read", request->path,
+      call_remote (self, "read", request->path, NULL,
                    on_remote_file_read, request);
       return;
     }
@@ -652,7 +802,14 @@ on_back_clicked (GtkButton *button,
 
   if (self->showing_preview)
     {
+      if (gtk_text_buffer_get_modified (self->preview))
+        {
+          show_toast (self, "Save or undo changes before going back.");
+          return;
+        }
+
       self->showing_preview = FALSE;
+      g_clear_pointer (&self->file_path, g_free);
       set_header_path (self, self->path);
       gtk_stack_set_visible_child_name (self->stack, "entries");
       return;
@@ -665,6 +822,30 @@ on_back_clicked (GtkButton *button,
   }
 }
 
+static void
+on_buffer_modified (GtkTextBuffer *buffer,
+                    gpointer       user_data)
+{
+  update_editor_actions (user_data);
+}
+
+static gboolean
+on_editor_key (GtkEventControllerKey *controller,
+               guint                  keyval,
+               guint                  keycode,
+               GdkModifierType        state,
+               gpointer               user_data)
+{
+  if ((state & GDK_CONTROL_MASK) != 0 &&
+      (keyval == GDK_KEY_s || keyval == GDK_KEY_S))
+    {
+      save_file (user_data);
+      return GDK_EVENT_STOP;
+    }
+
+  return GDK_EVENT_PROPAGATE;
+}
+
 void
 xd_file_pane_refresh (XdFilePane *self)
 {
@@ -672,6 +853,18 @@ xd_file_pane_refresh (XdFilePane *self)
 
   if (!gtk_widget_is_visible (GTK_WIDGET (self)))
     return;
+
+  if (self->showing_preview)
+    {
+      if (gtk_text_buffer_get_modified (self->preview))
+        {
+          show_toast (self, "Save or undo changes before reloading.");
+          return;
+        }
+
+      show_file (self, self->file_path);
+      return;
+    }
 
   show_directory (self, self->path);
 }
@@ -729,6 +922,7 @@ xd_file_pane_dispose (GObject *object)
   g_clear_object (&self->remote);
   g_clear_pointer (&self->workdir, g_free);
   g_clear_pointer (&self->path, g_free);
+  g_clear_pointer (&self->file_path, g_free);
   g_clear_pointer (&self->chat_id, g_free);
 
   G_OBJECT_CLASS (xd_file_pane_parent_class)->dispose (object);
@@ -745,11 +939,10 @@ xd_file_pane_init (XdFilePane *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
-  GtkWidget *refresh =
-    gtk_button_new_from_icon_name ("view-refresh-symbolic");
   GtkWidget *entries_window = gtk_scrolled_window_new ();
   GtkWidget *preview_window = gtk_scrolled_window_new ();
   GtkWidget *preview_view = gtk_text_view_new ();
+  GtkEventController *keys;
 
   self->cancellable = g_cancellable_new ();
   self->path = g_strdup ("");
@@ -768,14 +961,26 @@ xd_file_pane_init (XdFilePane *self)
   gtk_widget_set_hexpand (GTK_WIDGET (self->path_label), TRUE);
   gtk_widget_add_css_class (GTK_WIDGET (self->path_label), "heading");
 
-  gtk_widget_add_css_class (refresh, "flat");
-  gtk_widget_set_tooltip_text (refresh, "Read again");
-  g_signal_connect_swapped (refresh, "clicked",
+  self->save = GTK_BUTTON (
+    gtk_button_new_from_icon_name ("document-save-symbolic"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->save), "flat");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->save), "Save (Ctrl+S)");
+  gtk_widget_set_visible (GTK_WIDGET (self->save), FALSE);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->save), FALSE);
+  g_signal_connect_swapped (self->save, "clicked",
+                            G_CALLBACK (save_file), self);
+
+  self->refresh =
+    gtk_button_new_from_icon_name ("view-refresh-symbolic");
+  gtk_widget_add_css_class (self->refresh, "flat");
+  gtk_widget_set_tooltip_text (self->refresh, "Read again");
+  g_signal_connect_swapped (self->refresh, "clicked",
                             G_CALLBACK (xd_file_pane_refresh), self);
 
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->back));
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->path_label));
-  gtk_box_append (GTK_BOX (header), refresh);
+  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->save));
+  gtk_box_append (GTK_BOX (header), self->refresh);
   gtk_widget_set_margin_start (header, 6);
   gtk_widget_set_margin_end (header, 6);
   gtk_widget_set_margin_top (header, 6);
@@ -792,8 +997,9 @@ xd_file_pane_init (XdFilePane *self)
     GTK_SCROLLED_WINDOW (entries_window),
     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 
-  gtk_text_view_set_editable (GTK_TEXT_VIEW (preview_view), FALSE);
-  gtk_text_view_set_cursor_visible (GTK_TEXT_VIEW (preview_view), FALSE);
+  self->editor = GTK_TEXT_VIEW (preview_view);
+  gtk_text_view_set_editable (self->editor, TRUE);
+  gtk_text_view_set_cursor_visible (self->editor, TRUE);
   gtk_text_view_set_monospace (GTK_TEXT_VIEW (preview_view), TRUE);
   gtk_text_view_set_wrap_mode (GTK_TEXT_VIEW (preview_view), GTK_WRAP_NONE);
   gtk_text_view_set_left_margin (GTK_TEXT_VIEW (preview_view), 12);
@@ -803,6 +1009,13 @@ xd_file_pane_init (XdFilePane *self)
   gtk_widget_add_css_class (preview_view, "xd-file-preview");
   self->preview =
     gtk_text_view_get_buffer (GTK_TEXT_VIEW (preview_view));
+  g_signal_connect (self->preview, "modified-changed",
+                    G_CALLBACK (on_buffer_modified), self);
+  keys = gtk_event_controller_key_new ();
+  gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
+  g_signal_connect (keys, "key-pressed",
+                    G_CALLBACK (on_editor_key), self);
+  gtk_widget_add_controller (preview_view, keys);
 
   /* One tag per token kind, made once: a file is thousands of tokens and
    * every one of them is an existing tag being pointed at again. */
@@ -836,5 +1049,8 @@ xd_file_pane_init (XdFilePane *self)
   gtk_box_append (
     GTK_BOX (box), gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
-  adw_bin_set_child (ADW_BIN (self), box);
+
+  self->toasts = ADW_TOAST_OVERLAY (adw_toast_overlay_new ());
+  adw_toast_overlay_set_child (self->toasts, box);
+  adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->toasts));
 }
