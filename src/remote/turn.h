@@ -34,6 +34,17 @@ XdDaemonTurn *xd_daemon_turn_new       (XdStorage    *storage,
                                         const char   *root_path);
 
 /*
+ * Where the chat sessions live, keyed by chat id and owned by the caller.
+ *
+ * A turn ends and is thrown away; the process that answered it can be worth
+ * keeping, so it is held here instead and borrowed by whichever turn comes
+ * next. Unset, every turn gets a process of its own, which is what a turn
+ * created only to resolve a working directory wants.
+ */
+void          xd_daemon_turn_set_sessions (XdDaemonTurn *self,
+                                           GHashTable   *sessions);
+
+/*
  * Starts @prompt as a turn in @chat_id.
  *
  * The user's message is stored first, so it is in the transcript whatever

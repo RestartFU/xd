@@ -56,6 +56,16 @@ struct _XdRemoteServer
   /* Turns in flight, by chat. One per chat is the rule, and this is what
    * enforces it. chat id -> XdDaemonTurn*. */
   GHashTable *turns;
+
+  /*
+   * The agent process behind each chat, outliving the turns it answers.
+   *
+   * A turn is finished and discarded; the CLI that ran it can usually take the
+   * next one, and keeping it is what leaves a background shell, a watch or a
+   * build still running for the message after this one. chat id ->
+   * XdChatSession*.
+   */
+  GHashTable *sessions;
   gboolean quiescing;
   GTask *quiesce_task;
 
@@ -1045,6 +1055,10 @@ handle_delete_chat (Connection *connection,
       return;
     }
 
+  /* The chat is gone, so the agent kept for its next turn is waiting for a
+   * message that will never come. */
+  g_hash_table_remove (connection->server->sessions, chat_id);
+
   {
     GHashTableIter iter;
     gpointer value;
@@ -1952,6 +1966,7 @@ start_daemon_turn (XdRemoteServer  *self,
   }
 
   turn = xd_daemon_turn_new (self->storage, self->root_path);
+  xd_daemon_turn_set_sessions (turn, self->sessions);
 
   running = g_new0 (Running, 1);
   running->server = self;
@@ -1974,6 +1989,7 @@ start_daemon_turn (XdRemoteServer  *self,
     }
 
   g_hash_table_insert (self->turns, g_strdup (chat_id), turn);
+
 
   /* Everyone watching sees the message arrive and the work start, including
    * the device that sent it -- one path, so every screen agrees. */
@@ -3734,6 +3750,7 @@ xd_remote_server_dispose (GObject *object)
   if (self->storage != NULL)
     g_signal_handlers_disconnect_by_data (self->storage, self);
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  g_clear_pointer (&self->sessions, g_hash_table_unref);
   g_clear_pointer (&self->command_sets, g_hash_table_unref);
   if (self->terminals != NULL)
     {
@@ -3772,6 +3789,10 @@ xd_remote_server_init (XdRemoteServer *self)
   self->connections = g_ptr_array_new ();
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal,
                                        g_free, g_object_unref);
+  /* Dropping a session is what ends its process, so the table owning them is
+   * also what stops them: emptying it leaves nothing behind. */
+  self->sessions = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                          g_free, g_object_unref);
   self->command_sets = g_hash_table_new_full (
     g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_strfreev);
   self->terminals = g_hash_table_new_full (g_str_hash, g_str_equal,

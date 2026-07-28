@@ -33,6 +33,7 @@ struct _XdDaemonTurn
   char *root_path;
 
   XdChatSession *session;
+  GHashTable *sessions;    /* unowned; the daemon outlives its turns */
   char *chat_id;
   char *backend_id;
   char *model_id;
@@ -640,15 +641,6 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   self->text = g_string_new (NULL);
   self->segment = g_string_new (NULL);
   self->items = g_ptr_array_new_with_free_func ((GDestroyNotify) item_free);
-  self->session = xd_chat_session_new (backend);
-
-  g_signal_connect (self->session, "session-started",
-                    G_CALLBACK (on_session_started), self);
-  g_signal_connect (self->session, "commands", G_CALLBACK (on_commands), self);
-  g_signal_connect (self->session, "text-delta", G_CALLBACK (on_text_delta), self);
-  g_signal_connect (self->session, "tool-use", G_CALLBACK (on_tool_use), self);
-  g_signal_connect (self->session, "usage", G_CALLBACK (on_usage), self);
-  g_signal_connect (self->session, "finished", G_CALLBACK (on_finished), self);
 
   spec.prompt = full_prompt;
   spec.workdir = workdir;
@@ -661,13 +653,54 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
    * overwriting it. */
   spec.access = chat->plan ? AI_ACCESS_PLAN : ai_access_from_string (chat->access);
 
-  if (!xd_chat_session_start (self->session, &spec, error))
-    {
-      xd_storage_append_message (self->storage, chat_id, "error",
-                                 (*error)->message, NULL, NULL, NULL);
-      g_clear_object (&self->session);
-      return FALSE;
-    }
+  /*
+   * A turn is a short-lived thing; the process answering it need not be.
+   *
+   * The chat's session is kept by the daemon and borrowed here, so a CLI that
+   * can take a second turn is given one instead of being restarted -- which is
+   * what leaves anything the agent started still running. Where it cannot, a
+   * new one takes its place in the pool and the old one ends.
+   */
+  {
+    XdChatSession *pooled = self->sessions != NULL
+      ? g_hash_table_lookup (self->sessions, chat_id) : NULL;
+    gboolean continuing =
+      pooled != NULL && xd_chat_session_can_continue (pooled, backend, &spec);
+    gboolean started;
+
+    self->session = continuing ? g_object_ref (pooled)
+                               : xd_chat_session_new (backend);
+
+    g_signal_connect (self->session, "session-started",
+                      G_CALLBACK (on_session_started), self);
+    g_signal_connect (self->session, "commands", G_CALLBACK (on_commands), self);
+    g_signal_connect (self->session, "text-delta", G_CALLBACK (on_text_delta), self);
+    g_signal_connect (self->session, "tool-use", G_CALLBACK (on_tool_use), self);
+    g_signal_connect (self->session, "usage", G_CALLBACK (on_usage), self);
+    g_signal_connect (self->session, "finished", G_CALLBACK (on_finished), self);
+
+    started = continuing
+      ? xd_chat_session_continue (self->session, &spec, error)
+      : xd_chat_session_start (self->session, &spec, error);
+
+    if (!started)
+      {
+        xd_storage_append_message (self->storage, chat_id, "error",
+                                   (*error)->message, NULL, NULL, NULL);
+
+        /* Whatever was pooled either failed us or was never usable. */
+        if (self->sessions != NULL)
+          g_hash_table_remove (self->sessions, chat_id);
+
+        g_signal_handlers_disconnect_by_data (self->session, self);
+        g_clear_object (&self->session);
+        return FALSE;
+      }
+
+    if (!continuing && self->sessions != NULL)
+      g_hash_table_insert (self->sessions, g_strdup (chat_id),
+                           g_object_ref (self->session));
+  }
 
   start_diff_tracker (self);
 
@@ -771,6 +804,15 @@ xd_daemon_turn_new (XdStorage  *storage,
   self->root_path = g_strdup (root_path);
 
   return self;
+}
+
+void
+xd_daemon_turn_set_sessions (XdDaemonTurn *self,
+                             GHashTable   *sessions)
+{
+  g_return_if_fail (XD_IS_DAEMON_TURN (self));
+
+  self->sessions = sessions;
 }
 
 static void
