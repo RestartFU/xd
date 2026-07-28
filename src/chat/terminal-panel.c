@@ -27,6 +27,7 @@ struct _XdTerminalPanel
 
   AdwTabBar *bar;
   GtkLabel *title;          /* stands in for the tab bar while it is hidden */
+  GtkSizeGroup *title_side_size;
   GtkStack *stack;
   GHashTable *views;        /* chat id -> AdwTabView, owned by the stack */
 };
@@ -64,6 +65,7 @@ static const char *TERMINAL_PALETTE[16] = {
 static char *view_key (XdTerminalPanel *self, const char *chat_id);
 static AdwTabView *ensure_view (XdTerminalPanel *self, const char *chat_id);
 static void load_remote_sessions (XdTerminalPanel *self);
+static void claim_remote_viewport_size (VteTerminal *terminal);
 
 static VteTerminal *
 terminal_for_page (AdwTabPage *page)
@@ -148,6 +150,16 @@ on_title_source_changed (GObject    *object,
                          GParamSpec *pspec,
                          gpointer    user_data)
 {
+  update_title (XD_TERMINAL_PANEL (user_data));
+}
+
+static void
+on_selected_page_changed (AdwTabView *view,
+                          GParamSpec *pspec,
+                          gpointer    user_data)
+{
+  claim_remote_viewport_size (
+    terminal_for_page (adw_tab_view_get_selected_page (view)));
   update_title (XD_TERMINAL_PANEL (user_data));
 }
 
@@ -586,6 +598,20 @@ send_remote_resize (XdTerminalPanel *self,
                                g_object_ref (self));
 }
 
+/*
+ * A selected remote terminal owns the next canonical resize. The VTE itself
+ * stays at daemon geometry until that resize comes back in the ordered event
+ * stream, so every attached emulator continues to interpret output alike.
+ */
+static void
+claim_remote_viewport_size (VteTerminal *terminal)
+{
+  if (terminal != NULL &&
+      g_object_get_data (G_OBJECT (terminal), "remote-terminal") != NULL)
+    g_object_set_data (G_OBJECT (terminal), "remote-claim-size",
+                       GINT_TO_POINTER (TRUE));
+}
+
 static gboolean
 watch_remote_size (GtkWidget     *widget,
                    GdkFrameClock *clock,
@@ -602,6 +628,9 @@ watch_remote_size (GtkWidget     *widget,
   const char *id = g_object_get_data (G_OBJECT (terminal), "remote-terminal");
   GtkWidget *container =
     g_object_get_data (G_OBJECT (terminal), "remote-container");
+  gboolean claim_size =
+    g_object_get_data (G_OBJECT (terminal), "remote-claim-size") != NULL;
+  gboolean have_viewport_size = FALSE;
 
   /*
    * Terminal itself is fixed to daemon's canonical geometry. Its scrollable
@@ -619,8 +648,12 @@ watch_remote_size (GtkWidget     *widget,
         {
           columns = MAX (width / char_width, 1);
           rows = MAX (height / char_height, 1);
+          have_viewport_size = TRUE;
         }
     }
+
+  if (claim_size && !have_viewport_size)
+    return G_SOURCE_CONTINUE;
 
   /* A canonical size received from the daemon can itself cause a GTK
    * allocation. Observe that allocation without echoing it back as a new
@@ -628,15 +661,21 @@ watch_remote_size (GtkWidget     *widget,
   if (g_object_get_data (G_OBJECT (terminal), "remote-applying-size") != NULL)
     {
       g_object_set_data (G_OBJECT (terminal), "remote-applying-size", NULL);
-      g_object_set_data (G_OBJECT (terminal), "remote-columns",
-                         GUINT_TO_POINTER (columns));
-      g_object_set_data (G_OBJECT (terminal), "remote-rows",
-                         GUINT_TO_POINTER (rows));
-      return G_SOURCE_CONTINUE;
+
+      if (!claim_size)
+        {
+          g_object_set_data (G_OBJECT (terminal), "remote-columns",
+                             GUINT_TO_POINTER (columns));
+          g_object_set_data (G_OBJECT (terminal), "remote-rows",
+                             GUINT_TO_POINTER (rows));
+          return G_SOURCE_CONTINUE;
+        }
     }
 
+  g_object_set_data (G_OBJECT (terminal), "remote-claim-size", NULL);
+
   if (id != NULL && columns > 0 && rows > 0 &&
-      (columns != old_columns || rows != old_rows))
+      (claim_size || columns != old_columns || rows != old_rows))
     {
       g_object_set_data (G_OBJECT (terminal), "remote-columns",
                          GUINT_TO_POINTER (columns));
@@ -666,6 +705,10 @@ add_remote_session (XdTerminalPanel *self,
 
       terminal = VTE_TERMINAL (vte_terminal_new ());
       configure_terminal (terminal);
+      gtk_widget_set_hexpand (GTK_WIDGET (terminal), FALSE);
+      gtk_widget_set_vexpand (GTK_WIDGET (terminal), FALSE);
+      gtk_widget_set_halign (GTK_WIDGET (terminal), GTK_ALIGN_START);
+      gtk_widget_set_valign (GTK_WIDGET (terminal), GTK_ALIGN_START);
       vte_terminal_set_size (terminal, columns, rows);
       g_object_set_data_full (G_OBJECT (terminal), "remote-terminal",
                               g_strdup (id), g_free);
@@ -750,6 +793,9 @@ add_remote_session (XdTerminalPanel *self,
                          GUINT_TO_POINTER (rows));
       vte_terminal_set_size (terminal, columns, rows);
     }
+
+  if (terminal == current_terminal (self))
+    claim_remote_viewport_size (terminal);
 
   return terminal;
 }
@@ -1055,7 +1101,7 @@ ensure_view (XdTerminalPanel *self,
       view = ADW_TAB_VIEW (adw_tab_view_new ());
       g_signal_connect (view, "close-page", G_CALLBACK (on_close_page), self);
       g_signal_connect (view, "notify::selected-page",
-                        G_CALLBACK (on_title_source_changed), self);
+                        G_CALLBACK (on_selected_page_changed), self);
       g_signal_connect (view, "page-attached",
                         G_CALLBACK (on_page_attached), self);
       g_signal_connect (view, "page-detached",
@@ -1125,6 +1171,7 @@ xd_terminal_panel_set_chat (XdTerminalPanel *self,
   view = ensure_view (self, chat_id);
   gtk_stack_set_visible_child (self->stack, GTK_WIDGET (view));
   adw_tab_bar_set_view (self->bar, view);
+  claim_remote_viewport_size (current_terminal (self));
   update_title (self);
 
   if (self->remote != NULL)
@@ -1304,6 +1351,7 @@ xd_terminal_panel_finalize (GObject *object)
   if (self->remote != NULL)
     g_signal_handlers_disconnect_by_data (self->remote, self);
   g_clear_object (&self->remote);
+  g_clear_object (&self->title_side_size);
   g_clear_pointer (&self->pending_kills, g_hash_table_unref);
   g_clear_pointer (&self->views, g_hash_table_unref);
   g_free (self->chat_id);
@@ -1328,6 +1376,9 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *header = gtk_overlay_new ();
   GtkWidget *tabs = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *title_start = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *title_end = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
   GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
   GtkWidget *kill_button = gtk_button_new_from_icon_name ("user-trash-symbolic");
@@ -1341,7 +1392,8 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_label_set_xalign (self->title, 0.5f);
   gtk_widget_add_css_class (GTK_WIDGET (self->title), "heading");
   gtk_widget_set_visible (GTK_WIDGET (self->title), FALSE);
-  gtk_widget_set_halign (GTK_WIDGET (self->title), GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->title), TRUE);
+  gtk_widget_set_halign (GTK_WIDGET (self->title), GTK_ALIGN_FILL);
   gtk_widget_set_valign (GTK_WIDGET (self->title), GTK_ALIGN_CENTER);
   gtk_widget_set_can_target (GTK_WIDGET (self->title), FALSE);
 
@@ -1370,10 +1422,20 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_widget_set_margin_start (controls, 4);
   gtk_widget_set_margin_end (controls, 8);
 
+  self->title_side_size = gtk_size_group_new (GTK_SIZE_GROUP_HORIZONTAL);
+  gtk_size_group_add_widget (self->title_side_size, controls);
+  gtk_size_group_add_widget (self->title_side_size, title_start);
+  gtk_size_group_add_widget (self->title_side_size, title_end);
+
+  gtk_box_append (GTK_BOX (title_row), title_start);
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->title));
+  gtk_box_append (GTK_BOX (title_row), title_end);
+  gtk_widget_set_can_target (title_row, FALSE);
+
   gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->bar));
   gtk_box_append (GTK_BOX (tabs), controls);
   gtk_overlay_set_child (GTK_OVERLAY (header), tabs);
-  gtk_overlay_add_overlay (GTK_OVERLAY (header), GTK_WIDGET (self->title));
+  gtk_overlay_add_overlay (GTK_OVERLAY (header), title_row);
   gtk_box_append (GTK_BOX (box), header);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
 
