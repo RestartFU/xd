@@ -532,6 +532,14 @@ on_scroll_adjustment_changed (GtkAdjustment *adjustment,
     }
 }
 
+/*
+ * A wheel that cannot move the transcript is not a decision to stop following
+ * it. Rolling down while already at the bottom is how someone checks they are
+ * there, and rolling up against the top of a short chat does nothing at all;
+ * neither changes the value, so nothing would ever put following back.
+ *
+ * Only leaving the bottom does, and only upwards, with somewhere to go.
+ */
 static gboolean
 on_transcript_scrolled (GtkEventControllerScroll *controller,
                         double                    dx,
@@ -539,8 +547,12 @@ on_transcript_scrolled (GtkEventControllerScroll *controller,
                         gpointer                  user_data)
 {
   XdChatView *self = user_data;
+  GtkAdjustment *adjustment =
+    gtk_scrolled_window_get_vadjustment (self->scroller);
 
-  if (dy != 0)
+  if (dy < 0 &&
+      gtk_adjustment_get_value (adjustment) >
+      gtk_adjustment_get_lower (adjustment))
     {
       self->follow_bottom = FALSE;
       self->history_bottom_distance = -1;
