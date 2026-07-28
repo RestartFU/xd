@@ -720,10 +720,8 @@ add_remote_session (XdTerminalPanel *self,
       gtk_widget_add_tick_callback (GTK_WIDGET (terminal), watch_remote_size,
                                     self, NULL);
 
-      /* Selected sessions claim this viewport as canonical geometry. A
-       * horizontal bar only steals a terminal row while that resize settles. */
       gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
-                                      GTK_POLICY_NEVER,
+                                      GTK_POLICY_AUTOMATIC,
                                       GTK_POLICY_AUTOMATIC);
       gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
                                      GTK_WIDGET (terminal));

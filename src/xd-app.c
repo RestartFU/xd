@@ -420,15 +420,23 @@ static const char *XD_STYLE =
   /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
    * enough width that the title and its close button stop fighting. */
   "tabbar { background: none; box-shadow: none; }\n"
-  "tabbar tabbox { background: none; margin: 0; padding: 0; }\n"
+  /*
+   * AdwTabBox lays its tabs out with a fixed gap before the first one, after
+   * the last one and between neighbours, and it clips each tab to its own
+   * box -- a shadow or an outline on the tab cannot reach into that gap. The
+   * gap is left of the fill, so a selected tab showed a sliver of bare bar
+   * beside it. Widening the box past the bar and every tab past its slot
+   * paints through the gaps instead; the overhang lands outside the
+   * scrolled area and is clipped.
+   */
+  "tabbar tabbox { background: none; margin: 0 -12px; padding: 0; }\n"
+  "tabbar tabbox > tabboxchild { margin: 0 -4px; }\n"
   "tabbar tabbox > separator { min-width: 0; min-height: 0; margin: 0;"
   " background: none; opacity: 0; }\n"
   "tabbar tab { border-radius: 0; margin: 0; padding: 5px 8px;"
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
-  " { background: alpha(#ffffff, 0.10);"
-  " box-shadow: -5px 0 alpha(#ffffff, 0.10),"
-  " 5px 0 alpha(#ffffff, 0.10); }\n"
+  " { background: alpha(#ffffff, 0.10); }\n"
   /* No X on the tabs: the trash can kills the selected session, and one way
    * to do a destructive thing is enough. */
   "tabbar tab button { opacity: 0; min-width: 0; min-height: 0;"
