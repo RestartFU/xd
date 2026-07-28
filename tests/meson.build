@@ -17,6 +17,7 @@ xd_tests = {
   'host-launch': 'test-host-launch.c',
   'subagent-tool': 'test-subagent-tool.c',
   'unified-diff': 'test-unified-diff.c',
+  'update-channel': 'test-update-channel.c',
   'workflow-run': 'test-workflow-run.c',
   'worktree': 'test-worktree.c',
   'discord-presence': 'test-discord-presence.c',

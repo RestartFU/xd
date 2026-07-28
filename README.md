@@ -44,6 +44,17 @@ own — it installs beside a release rather than over it, and neither edits the
 other's work. `sh -s -- --uninstall` takes it away again and leaves that
 directory alone.
 
+To try a pull request, there is a dev build: the same thing built from a branch,
+published on every push to that pull request. It uses the nightly's paths and
+installs over it on purpose, and from then on the update button and
+`xd serve --auto-update` follow the branch rather than master. Linux only.
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install.sh | sh -s -- --dev
+```
+
+Running the nightly line again puts the nightly back.
+
 Windows, x86_64:
 
 ```powershell

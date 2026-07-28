@@ -1,8 +1,7 @@
 #include "updater.h"
 
 #include "util/host-launch.h"
-
-#include <json-glib/json-glib.h>
+#include "util/update-channel.h"
 
 /*
  * Asking GitHub, now and then, whether there is a newer build.
@@ -186,58 +185,6 @@ spawn (XdUpdater           *self,
 
 /* --- is there a newer one? -------------------------------------------------- */
 
-/*
- * What the latest build is called.
- *
- * A nightly is one rolling release whose commit changes, so what identifies it
- * is the commit it was built from. A release is a tag, so what identifies it
- * is the tag.
- */
-static char *
-latest_from (const char *json)
-{
-  g_autoptr (JsonParser) parser = json_parser_new ();
-  JsonObject *release;
-
-  if (!json_parser_load_from_data (parser, json, -1, NULL) ||
-      !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser)))
-    return NULL;
-
-  release = json_node_get_object (json_parser_get_root (parser));
-
-  if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
-    return g_strdup (json_object_get_string_member_with_default (
-                       release, "target_commitish", NULL));
-
-  return g_strdup (json_object_get_string_member_with_default (release,
-                                                               "tag_name", NULL));
-}
-
-/* True when @latest is something other than what is running. */
-static gboolean
-is_newer (const char *latest)
-{
-  if (latest == NULL || *latest == '\0')
-    return FALSE;
-
-  if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
-    {
-      /* The API gives the whole commit; this build knows its own short one. */
-      if (XD_COMMIT[0] == '\0')
-        return FALSE;
-
-      return !g_str_has_prefix (latest, XD_COMMIT);
-    }
-
-  /* Tags are written v1.2.3; the version is not. Compared against the bare
-   * version rather than the string shown to people, which carries the commit
-   * as well. */
-  if (latest[0] == 'v')
-    latest++;
-
-  return g_strcmp0 (latest, XD_VERSION) != 0;
-}
-
 static void
 on_checked (GObject      *source,
             GAsyncResult *result,
@@ -263,9 +210,11 @@ on_checked (GObject      *source,
   if (json == NULL || length == 0)
     return;
 
-  latest = latest_from (json);
+  latest = xd_update_channel_latest_from_json (
+    xd_update_channel_current (), json);
 
-  if (is_newer (latest) && self->state == STATE_QUIET)
+  if (xd_update_channel_is_newer (xd_update_channel_current (), latest) &&
+      self->state == STATE_QUIET)
     set_state (self, STATE_AVAILABLE);
 }
 
@@ -280,9 +229,7 @@ look (XdUpdater *self)
   if (self->state != STATE_QUIET || self->install_dir == NULL)
     return;
 
-  url = g_strcmp0 (XD_CHANNEL, "nightly") == 0
-    ? g_strdup ("https://api.github.com/repos/" XD_REPO "/releases/tags/nightly")
-    : g_strdup ("https://api.github.com/repos/" XD_REPO "/releases/latest");
+  url = xd_update_channel_check_url (xd_update_channel_current ());
 
   {
     const char *argv[] = {
@@ -349,13 +296,6 @@ on_installed (GObject      *source,
   set_state (self, STATE_FAILED);
 }
 
-/*
- * The same one-line install anyone would run.
- *
- * Published beside the build it installs, so the script and the bundle are
- * from the same commit -- and it is the script that knows where things go,
- * which keeps that knowledge in one place rather than two.
- */
 static void
 install (XdUpdater *self)
 {
@@ -368,12 +308,7 @@ install (XdUpdater *self)
    * installer. A launch failure changes it to the retry state below. */
   set_state (self, STATE_UPDATING);
 
-  if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
-    line = g_strdup ("curl -fsSL https://github.com/" XD_REPO
-                     "/releases/download/nightly/install.sh | sh");
-  else
-    line = g_strdup ("curl -fsSL https://github.com/" XD_REPO
-                     "/releases/latest/download/install.sh | sh -s -- --release");
+  line = xd_update_channel_install_command (xd_update_channel_current ());
 
   {
     const char *argv[] = { "sh", "-c", line, NULL };

@@ -17,9 +17,16 @@ project('xd', 'c',
 # as it was -- it is where existing installs keep everything, including the
 # token a paired device is known by.
 #
+#
+# A dev build is a nightly by every path it touches -- same application id,
+# settings, data directory and install directory -- and differs only in where
+# it looks for its next update: the rolling dev release a pull request
+# publishes. That is what makes it useful for trying a branch, and it is also
+# why it deliberately replaces the nightly rather than sitting beside it.
+#
 profile = get_option('profile')
 
-if profile == 'nightly'
+if profile == 'nightly' or profile == 'dev'
   app_id        = 'com.restartfu.Xd.Nightly'
   app_name      = 'xd (Nightly)'
   app_data_name = 'xd-nightly'
@@ -72,6 +79,8 @@ version_string = meson.project_version()
 
 if profile == 'nightly'
   version_string += '-nightly'
+elif profile == 'dev'
+  version_string += '-dev'
 endif
 
 if get_option('commit') != ''
@@ -82,7 +91,7 @@ add_project_arguments([
   '-DG_LOG_DOMAIN="xd"',
   '-DXD_VERSION_STRING="' + version_string + '"',
   '-DXD_COMMIT="' + get_option('commit') + '"',
-  '-DXD_CHANNEL="' + (profile == 'nightly' ? 'nightly' : 'release') + '"',
+  '-DXD_CHANNEL="' + (profile == 'default' ? 'release' : profile) + '"',
   '-DXD_REPO="RestartFU/xd"',
   '-DXD_APP_ID="' + app_id + '"',
   '-DXD_APP_NAME="' + app_name + '"',

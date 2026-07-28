@@ -5,7 +5,11 @@
 #   curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 #
 # "sh -s -- --release" installs the newest tagged release instead of the
-# nightly; the two live side by side. It takes itself away again with:
+# nightly; the two live side by side. "sh -s -- --dev" takes the rolling dev
+# release a pull request published: that is a nightly built from a branch, and
+# it installs to the nightly's own paths -- over the nightly, on purpose, so a
+# branch can be tried where the nightly already runs. It takes itself away
+# again with:
 #
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
 #
@@ -32,12 +36,14 @@ REPO=RestartFU/xd
 
 # The nightly by default, since it is the one that is always there. --release
 # takes the newest tagged release instead; the two install side by side and
-# neither touches the other's chats.
+# neither touches the other's chats. --dev takes the dev release, which is a
+# nightly built from a branch and uses the nightly's paths.
 CHANNEL=nightly
 
 for argument in "$@"; do
   case "$argument" in
     --release|--stable) CHANNEL=release ;;
+    --dev) CHANNEL=dev ;;
   esac
 done
 
@@ -47,10 +53,12 @@ if [ "$CHANNEL" = release ]; then
   ASSET=xd-linux-x86_64.tar.gz
   BASE="https://github.com/$REPO/releases/latest/download"
 else
+  # A dev build is a nightly in every path it touches; only the release it
+  # comes from is different.
   NAME=xd-nightly
   APP_ID=com.restartfu.Xd.Nightly
   ASSET=xd-nightly-linux-x86_64.tar.gz
-  BASE="https://github.com/$REPO/releases/download/nightly"
+  BASE="https://github.com/$REPO/releases/download/$CHANNEL"
 fi
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"

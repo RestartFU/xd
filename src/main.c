@@ -16,7 +16,7 @@
 
 #if XD_HAS_SERVER
 #include "remote/server.h"
-#include <json-glib/json-glib.h>
+#include "util/update-channel.h"
 #include <unistd.h>
 #endif
 
@@ -252,37 +252,6 @@ daemon_install_dir (void)
   return g_steal_pointer (&dir);
 }
 
-static char *
-daemon_latest_from_json (const char *json)
-{
-  g_autoptr (JsonParser) parser = json_parser_new ();
-  JsonObject *release;
-
-  if (!json_parser_load_from_data (parser, json, -1, NULL) ||
-      !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser)))
-    return NULL;
-
-  release = json_node_get_object (json_parser_get_root (parser));
-  return g_strdup (json_object_get_string_member_with_default (
-    release, g_strcmp0 (XD_CHANNEL, "nightly") == 0
-      ? "target_commitish" : "tag_name", NULL));
-}
-
-static gboolean
-daemon_update_is_newer (const char *latest)
-{
-  if (latest == NULL || *latest == '\0')
-    return FALSE;
-
-  if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
-    return XD_COMMIT[0] != '\0' && !g_str_has_prefix (latest, XD_COMMIT);
-
-  if (latest[0] == 'v')
-    latest++;
-
-  return g_strcmp0 (latest, XD_VERSION) != 0;
-}
-
 static GSubprocess *
 daemon_spawn_host (GSubprocessFlags   flags,
                    const char *const *argv,
@@ -346,11 +315,7 @@ on_daemon_quiesced (GObject      *source,
       return;
     }
 
-  line = g_strcmp0 (XD_CHANNEL, "nightly") == 0
-    ? g_strdup ("curl -fsSL https://github.com/" XD_REPO
-                "/releases/download/nightly/install.sh | sh")
-    : g_strdup ("curl -fsSL https://github.com/" XD_REPO
-                "/releases/latest/download/install.sh | sh -s -- --release");
+  line = xd_update_channel_install_command (xd_update_channel_current ());
 
   {
     const char *argv[] = { "sh", "-c", line, NULL };
@@ -390,8 +355,10 @@ on_daemon_update_checked (GObject      *source,
     }
 
   json = g_bytes_get_data (out, &length);
-  latest = json != NULL && length > 0 ? daemon_latest_from_json (json) : NULL;
-  if (!daemon_update_is_newer (latest))
+  latest = json != NULL && length > 0
+    ? xd_update_channel_latest_from_json (xd_update_channel_current (), json)
+    : NULL;
+  if (!xd_update_channel_is_newer (xd_update_channel_current (), latest))
     {
       updater->busy = FALSE;
       return;
@@ -414,10 +381,7 @@ daemon_update_check (DaemonUpdater *updater)
     return;
 
   updater->busy = TRUE;
-  url = g_strcmp0 (XD_CHANNEL, "nightly") == 0
-    ? g_strdup ("https://api.github.com/repos/" XD_REPO
-                "/releases/tags/nightly")
-    : g_strdup ("https://api.github.com/repos/" XD_REPO "/releases/latest");
+  url = xd_update_channel_check_url (xd_update_channel_current ());
 
   {
     const char *argv[] = {

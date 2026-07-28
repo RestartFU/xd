@@ -1,9 +1,12 @@
 option('profile',
   type: 'combo',
-  choices: ['default', 'nightly'],
+  choices: ['default', 'nightly', 'dev'],
   value: 'default',
   description: 'Which build this is. A nightly installs beside a release: ' +
-               'its own application id, settings, data directory and workspaces.',
+               'its own application id, settings, data directory and ' +
+               'workspaces. A dev build is a nightly that updates from the ' +
+               'rolling dev release instead, so a branch can be tried on the ' +
+               'machines that already run the nightly.',
 )
 
 option('commit',
