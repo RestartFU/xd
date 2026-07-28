@@ -116,6 +116,42 @@ test_classifies_go (void)
   g_assert_nonnull (strstr (record, "number:nil\n"));
 }
 
+/*
+ * The type of a composite literal is a type, and the space is what says so:
+ * gofmt writes "Vec3{40}" tight and "if ok {" loose.
+ */
+static void
+test_names_a_composite_literal_type (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *literal = scan (
+    XD_SYNTAX_GO,
+    "\tpk := &packet.PlayerAuthInput{Position: mgl32.Vec3{40, 70, 40}}",
+    &state, NULL);
+  g_autofree char *block = NULL;
+
+  g_assert_nonnull (strstr (literal, "type:PlayerAuthInput\n"));
+  g_assert_nonnull (strstr (literal, "type:Vec3\n"));
+
+  /* The package qualifier stays plain, as does anything before a loose one. */
+  g_assert_null (strstr (literal, "type:packet\n"));
+  g_assert_null (strstr (literal, "type:mgl32\n"));
+
+  block = scan (XD_SYNTAX_GO, "\tif ok {", &state, NULL);
+  g_assert_null (strstr (block, "type:ok\n"));
+}
+
+/* C's braces follow a keyword or an equals sign, never a bare type name. */
+static void
+test_leaves_c_braces_alone (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *record = scan (
+    XD_SYNTAX_C, "  while (running) { total = 1; }", &state, NULL);
+
+  g_assert_null (strstr (record, "type:running\n"));
+}
+
 /* This project writes calls with a space before the bracket. */
 static void
 test_sees_calls_across_a_space (void)
@@ -218,6 +254,10 @@ main (int   argc,
                    test_hands_back_every_byte);
   g_test_add_func ("/syntax/classifies-c", test_classifies_c);
   g_test_add_func ("/syntax/classifies-go", test_classifies_go);
+  g_test_add_func ("/syntax/names-a-composite-literal-type",
+                   test_names_a_composite_literal_type);
+  g_test_add_func ("/syntax/leaves-c-braces-alone",
+                   test_leaves_c_braces_alone);
   g_test_add_func ("/syntax/sees-calls-across-a-space",
                    test_sees_calls_across_a_space);
   g_test_add_func ("/syntax/colours-the-included-path",
