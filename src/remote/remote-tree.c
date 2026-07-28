@@ -51,6 +51,21 @@ static void set_root_state (XdRemoteTree *self, XdNodeState state);
 /* --- reconciling ---------------------------------------------------------- */
 
 /*
+ * A row with no daemon id is an inline editor owned by the client.
+ *
+ * The sidebar inserts one while a new folder or chat is being named. A tree
+ * reply knows nothing about that placeholder, so treating the reply as an
+ * exhaustive list would remove the entry while the user is typing.
+ */
+static gboolean
+is_client_placeholder (XdNode *node)
+{
+  return xd_node_get_kind (node) == XD_NODE_FOLDER
+    ? xd_node_get_folder_id (node) == NULL
+    : xd_node_get_chat_id (node) == NULL;
+}
+
+/*
  * Brings @store to exactly @desired, moving as little as possible.
  *
  * Positions before the one being looked at already match, so a node that is
@@ -62,10 +77,29 @@ reconcile_children (GListStore *store,
                     GPtrArray  *desired)
 {
   GListModel *model = G_LIST_MODEL (store);
+  g_autoptr (GPtrArray) target =
+    g_ptr_array_new_with_free_func (g_object_unref);
 
   for (guint i = 0; i < desired->len; i++)
+    g_ptr_array_add (target, g_object_ref (g_ptr_array_index (desired, i)));
+
+  /*
+   * Keep client placeholders at their current positions while reconciling
+   * every daemon-owned row around them. Their row, entry text and focus then
+   * survive a refresh that finishes while the user is naming something.
+   */
+  for (guint i = 0; i < g_list_model_get_n_items (model); i++)
     {
-      XdNode *wanted = g_ptr_array_index (desired, i);
+      g_autoptr (XdNode) node = g_list_model_get_item (model, i);
+
+      if (is_client_placeholder (node))
+        g_ptr_array_insert (target, MIN (i, target->len),
+                            g_steal_pointer (&node));
+    }
+
+  for (guint i = 0; i < target->len; i++)
+    {
+      XdNode *wanted = g_ptr_array_index (target, i);
       guint at;
 
       if (i < g_list_model_get_n_items (model))
@@ -82,8 +116,8 @@ reconcile_children (GListStore *store,
       g_list_store_insert (store, i, wanted);
     }
 
-  while (g_list_model_get_n_items (model) > desired->len)
-    g_list_store_remove (store, desired->len);
+  while (g_list_model_get_n_items (model) > target->len)
+    g_list_store_remove (store, target->len);
 }
 
 static int
