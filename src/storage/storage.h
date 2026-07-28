@@ -310,6 +310,11 @@ gboolean    xd_storage_update_message  (XdStorage   *self,
                                         const char  *content,
                                         GError     **error);
 
+/* Removes an empty live row after it turns out to contain only control markup. */
+gboolean    xd_storage_delete_message  (XdStorage   *self,
+                                        gint64       message_id,
+                                        GError     **error);
+
 /* Oldest first. Elements are XdMessage*. */
 GPtrArray  *xd_storage_list_messages   (XdStorage   *self,
                                         const char  *chat_id,

@@ -188,6 +188,43 @@ test_requires_a_repository (void)
   remove_tree (dir);
 }
 
+static void
+test_registered_path_stays_in_repository (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *dir = g_dir_make_tmp ("xd-worktree-path-XXXXXX", &error);
+  g_autofree char *repo = g_build_filename (dir, "repo", NULL);
+  g_autofree char *other = g_build_filename (dir, "other", NULL);
+  g_autofree char *linked = g_build_filename (dir, "linked", NULL);
+  g_autofree char *resolved = NULL;
+  const char *init[] = { "git", "init", "-q", NULL };
+  const char *identity[] = {
+    "git", "-c", "user.name=xd", "-c", "user.email=xd@example.com",
+    "commit", "--allow-empty", "-qm", "initial", NULL
+  };
+  const char *add[] = {
+    "git", "worktree", "add", "-q", "-b", "linked", NULL, "HEAD", NULL
+  };
+
+  g_assert_no_error (error);
+  g_assert_cmpint (g_mkdir (repo, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (other, 0700), ==, 0);
+  run (repo, init);
+  run (repo, identity);
+  add[6] = linked;
+  run (repo, add);
+
+  resolved = xd_worktree_registered_path (repo, linked);
+  g_assert_nonnull (resolved);
+  g_assert_true (xd_worktree_path_equal (resolved, linked));
+
+  g_clear_pointer (&resolved, g_free);
+  resolved = xd_worktree_registered_path (repo, other);
+  g_assert_null (resolved);
+
+  remove_tree (dir);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -196,6 +233,8 @@ main (int   argc,
 
   g_test_add_func ("/worktree/create-and-reuse", test_create_and_reuse);
   g_test_add_func ("/worktree/requires-repository", test_requires_a_repository);
+  g_test_add_func ("/worktree/registered-path",
+                   test_registered_path_stays_in_repository);
 
   return g_test_run ();
 }

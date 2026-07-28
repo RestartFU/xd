@@ -22,6 +22,7 @@
 #include "util/git-info.h"
 #include "util/subagent-tool.h"
 #include "util/workflow-run.h"
+#include "util/workspace-block.h"
 #include "util/worktree.h"
 
 /*
@@ -993,10 +994,16 @@ append_reply (XdChatView *self,
               gboolean    answerable)
 {
   g_autoptr (XdAsk) ask = NULL;
+  g_autofree char *workspace = NULL;
+  g_autofree char *without_workspace = NULL;
   g_autofree char *prose = NULL;
+  const char *shown = text;
   XdMessageRow *row;
 
-  ask = xd_ask_parse (text, &prose);
+  workspace = xd_workspace_block_parse (text, &without_workspace);
+  if (workspace != NULL)
+    shown = without_workspace;
+  ask = xd_ask_parse (shown, &prose);
 
   {
     g_autofree char *said = NULL;
@@ -1007,7 +1014,7 @@ append_reply (XdChatView *self,
       said = *prose != '\0' ? g_strdup_printf ("%s\n\n**%s**", prose, ask->question)
                             : g_strdup_printf ("**%s**", ask->question);
 
-    row = append_row (self, XD_MESSAGE_ASSISTANT, said != NULL ? said : text);
+    row = append_row (self, XD_MESSAGE_ASSISTANT, said != NULL ? said : shown);
     xd_message_row_set_source (row, source);
   }
 
@@ -1584,12 +1591,22 @@ on_remote_messages (GObject      *source,
 static void
 close_remote_segment (XdChatView *self)
 {
+  g_autofree char *workspace = NULL;
+  g_autofree char *without_workspace = NULL;
+  const char *text;
+
   if (self->remote_said == NULL || self->remote_said->len == 0)
     return;
 
+  text = self->remote_said->str;
+  workspace =
+    xd_workspace_block_parse (self->remote_said->str, &without_workspace);
+  if (workspace != NULL)
+    text = without_workspace;
+
   {
-    gsize visible = xd_ask_visible_length (self->remote_said->str);
-    g_autofree char *prose = g_strndup (self->remote_said->str, visible);
+    gsize visible = xd_ask_visible_length (text);
+    g_autofree char *prose = g_strndup (text, visible);
 
     g_strchomp (prose);
     if (*prose != '\0')
@@ -1769,8 +1786,38 @@ on_remote_event (XdRemoteClient *client,
 
   if (g_strcmp0 (name, "tool") == 0 && text != NULL)
     {
+      const char *workdir = member_string (event, "workdir", NULL);
+      const char *context = member_string (event, "context", NULL);
+
       close_remote_segment (self);
+      if (workdir != NULL)
+        {
+          g_autofree char *tooltip = g_strdup_printf (
+            "Terminal on %s in %s",
+            xd_remote_client_get_host (self->remote), workdir);
+
+          if (context != NULL)
+            {
+              gtk_label_set_label (self->context_label, context);
+              gtk_widget_set_tooltip_text (
+                GTK_WIDGET (self->context_label), context);
+            }
+          xd_terminal_panel_set_workdir (self->terminal, workdir);
+          xd_file_pane_set_workdir (self->files, workdir);
+          xd_diff_pane_set_workdir (self->diff, workdir);
+          gtk_widget_set_sensitive (
+            GTK_WIDGET (self->terminal_button), TRUE);
+          gtk_widget_set_sensitive (GTK_WIDGET (self->file_button), TRUE);
+          gtk_widget_set_sensitive (GTK_WIDGET (self->diff_button), TRUE);
+          gtk_widget_set_tooltip_text (
+            GTK_WIDGET (self->terminal_button), tooltip);
+          gtk_widget_set_tooltip_text (
+            GTK_WIDGET (self->file_button), "Browse files");
+          gtk_widget_set_tooltip_text (
+            GTK_WIDGET (self->diff_button), "Changed files");
+        }
       show_tool_use (self, text);
+      xd_diff_pane_refresh (self->diff);
       queue_scroll_to_bottom (self);
       return;
     }
@@ -2011,9 +2058,7 @@ on_remote_options_received (GObject      *source,
             }
           else
             {
-              XdMessageRow *row = append_row (self, XD_MESSAGE_ASSISTANT, text);
-
-              xd_message_row_set_source (row, self->remote_label);
+              append_reply (self, text, self->remote_label, FALSE);
             }
         }
 
@@ -2387,6 +2432,56 @@ on_text_delta (XdChatSession *session,
 }
 
 /*
+ * Moves the chat only to a checkout Git already associates with its current
+ * repository. The agent can point xd at work it created without gaining a way
+ * to enlarge the next turn's write sandbox to an unrelated directory.
+ */
+static gboolean
+switch_turn_workspace (Turn       *turn,
+                       const char *reported)
+{
+  XdChatView *self = turn->view;
+  g_autofree char *workdir =
+    xd_worktree_registered_path (turn->workdir, reported);
+  g_autoptr (GError) error = NULL;
+
+  if (workdir == NULL)
+    {
+      g_warning ("ignoring unregistered workspace reported by agent: %s",
+                 reported);
+      return FALSE;
+    }
+
+  if (xd_worktree_path_equal (turn->workdir, workdir))
+    return TRUE;
+
+  if (!xd_storage_set_workdir (
+        self->storage, turn->chat_id, workdir, &error))
+    {
+      g_warning ("cannot switch to the agent's workspace: %s", error->message);
+      return FALSE;
+    }
+
+  g_free (turn->workdir);
+  turn->workdir = g_steal_pointer (&workdir);
+  g_clear_pointer (&turn->diff_tracker, xd_git_diff_tracker_free);
+  turn->diff_tracker = xd_git_diff_tracker_new (turn->workdir);
+
+  if (turn_is_visible (turn))
+    {
+      g_autoptr (XdChat) chat =
+        xd_storage_get_chat (self->storage, turn->chat_id, NULL);
+
+      if (chat != NULL)
+        update_context_bar (self, chat);
+      xd_diff_pane_refresh (self->diff);
+      xd_git_actions_refresh (self->git_actions);
+    }
+
+  return TRUE;
+}
+
+/*
  * Ends the message being written, if there is one.
  *
  * An agent that works in steps says something, uses a tool, then says
@@ -2399,28 +2494,44 @@ static void
 close_segment (Turn     *turn,
                gboolean  answerable)
 {
+  g_autofree char *reported = NULL;
+  g_autofree char *without_workspace = NULL;
+  const char *text;
+
   if (turn->segment->len == 0)
     return;
 
+  text = turn->segment->str;
+  reported =
+    xd_workspace_block_parse (turn->segment->str, &without_workspace);
+  if (reported != NULL && switch_turn_workspace (turn, reported))
+    text = without_workspace;
+
+  if (*text == '\0')
+    {
+      g_string_truncate (turn->segment, 0);
+      return;
+    }
+
   /* Held rather than written until the turn ends, alongside its tool calls,
    * so interruption can store the exact order that happened. */
-  remember_turn_item (turn, FALSE, turn->segment->str);
+  remember_turn_item (turn, FALSE, text);
 
   if (turn_is_visible (turn))
     {
       g_autoptr (XdAsk) ask = answerable
-        ? xd_ask_parse (turn->segment->str, NULL) : NULL;
+        ? xd_ask_parse (text, NULL) : NULL;
 
       if (ask != NULL)
         {
-          append_reply (turn->view, turn->segment->str, turn->label, TRUE);
+          append_reply (turn->view, text, turn->label, TRUE);
         }
       else
         {
           /* Hide a question block until the turn finishes and it can become
            * buttons, rather than briefly showing its machine-facing markup. */
-          gsize visible = xd_ask_visible_length (turn->segment->str);
-          g_autofree char *prose = g_strndup (turn->segment->str, visible);
+          gsize visible = xd_ask_visible_length (text);
+          g_autofree char *prose = g_strndup (text, visible);
 
           g_strchomp (prose);
           if (*prose != '\0')

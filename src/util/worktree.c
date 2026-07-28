@@ -360,6 +360,34 @@ xd_worktree_list (const char  *workdir,
 }
 
 char *
+xd_worktree_registered_path (const char *workdir,
+                             const char *requested)
+{
+  g_autoptr (GPtrArray) worktrees = NULL;
+  g_autofree char *normalized = NULL;
+
+  if (workdir == NULL || requested == NULL ||
+      !g_path_is_absolute (requested) ||
+      !g_file_test (requested, G_FILE_TEST_IS_DIR))
+    return NULL;
+
+  worktrees = xd_worktree_list (workdir, NULL);
+  if (worktrees == NULL)
+    return NULL;
+
+  normalized = normalize_worktree_path (requested);
+  for (guint i = 0; i < worktrees->len; i++)
+    {
+      XdWorktreeInfo *item = g_ptr_array_index (worktrees, i);
+
+      if (xd_worktree_path_equal (item->path, normalized))
+        return g_strdup (item->path);
+    }
+
+  return NULL;
+}
+
+char *
 xd_worktree_create (const char  *workdir,
                     const char  *chat_id,
                     const char  *name_hint,
