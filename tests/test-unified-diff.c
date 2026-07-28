@@ -226,6 +226,100 @@ test_formats_independent_slices (void)
   g_assert_null (strstr (plain, "Showing first"));
 }
 
+/*
+ * Code in a language the app can read keeps an editor's colours; the row's
+ * background and its marker are what say which side of the change it is on.
+ */
+static void
+test_colours_code_by_language (void)
+{
+  static const char *patch =
+    "diff --git a/src/a.c b/src/a.c\n"
+    "@@ -1,2 +1,2 @@\n"
+    "-  static int gone = 1;\n"
+    "+  static int kept = 2;\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+  g_autofree char *plain = NULL;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (
+    pango_parse_markup (markup, -1, 0, NULL, &plain, NULL, &error));
+  g_assert_no_error (error);
+
+  /* Nothing of the line goes missing on its way through the lexer. */
+  g_assert_nonnull (strstr (plain, "static int gone = 1;"));
+  g_assert_nonnull (strstr (plain, "static int kept = 2;"));
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">static</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">2</span>"));
+}
+
+/* A file whose language is unknown keeps the plain green-and-red reading. */
+static void
+test_leaves_unknown_languages_alone (void)
+{
+  static const char *patch =
+    "diff --git a/notes.txt b/notes.txt\n"
+    "@@ -1 +1 @@\n"
+    "-removed line\n"
+    "+added line\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#f66151\">removed line"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#57e389\">added line"));
+}
+
+/*
+ * The two sides of a hunk are two texts. A block comment opened by a removed
+ * line must not grey out the added line beside it.
+ */
+static void
+test_keeps_the_hunk_sides_apart (void)
+{
+  static const char *patch =
+    "diff --git a/src/a.c b/src/a.c\n"
+    "@@ -1,3 +1,3 @@\n"
+    "-  x = 1; /* opened\n"
+    "+  return 2;\n"
+    " };\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">return</span>"));
+}
+
+/*
+ * A chunk of the virtualized pane renders alone but does not read alone: the
+ * language and any open comment were decided further up the patch.
+ */
+static void
+test_primes_a_slice_from_what_precedes_it (void)
+{
+  static const char *patch =
+    "diff --git a/src/a.c b/src/a.c\n"
+    "@@ -1,4 +1,4 @@\n"
+    " /* a comment that\n"
+    "-   runs past int\n"
+    "+   runs past int too\n"
+    " */\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *whole =
+    xd_unified_diff_markup_slice (lines, TRUE, 3, 5, NULL);
+
+  /* Rendered without its opening line, "int" is still inside the comment. */
+  g_assert_null (strstr (whole, "foreground=\"#dc8add\">int</span>"));
+  g_assert_nonnull (strstr (whole, "foreground=\"#8b8e8f\""));
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -246,6 +340,14 @@ main (int   argc,
                    test_counts_every_rendered_row);
   g_test_add_func ("/unified-diff/formats-independent-slices",
                    test_formats_independent_slices);
+  g_test_add_func ("/unified-diff/colours-code-by-language",
+                   test_colours_code_by_language);
+  g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
+                   test_leaves_unknown_languages_alone);
+  g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",
+                   test_keeps_the_hunk_sides_apart);
+  g_test_add_func ("/unified-diff/primes-a-slice-from-what-precedes-it",
+                   test_primes_a_slice_from_what_precedes_it);
 
   return g_test_run ();
 }
