@@ -3,16 +3,25 @@
 #include <string.h>
 
 /*
- * The tests link the default profile, so the running channel is the release
- * one. Everything else takes the channel as an argument, which is what lets all
- * three be checked from one build -- and the point of these tests is that a
- * channel cannot end up checking one release and installing another.
+ * These run against whichever profile was built -- the suite is part of every
+ * one of them -- so nothing here may assume which channel is current. What can
+ * be checked is that the current one is the channel this build says it is, and
+ * everything else takes its channel as an argument: all three are then covered
+ * from a single build, and the point of these tests is that a channel cannot
+ * end up checking one release and installing another.
  */
 static void
 test_current_channel_is_this_build (void)
 {
-  g_assert_cmpint (xd_update_channel_current (), ==,
-                   XD_UPDATE_CHANNEL_RELEASE);
+  XdUpdateChannel current = xd_update_channel_current ();
+
+  if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
+    g_assert_cmpint (current, ==, XD_UPDATE_CHANNEL_NIGHTLY);
+  else if (g_strcmp0 (XD_CHANNEL, "dev") == 0)
+    g_assert_cmpint (current, ==, XD_UPDATE_CHANNEL_DEV);
+  else
+    g_assert_cmpint (current, ==, XD_UPDATE_CHANNEL_RELEASE);
+
   g_assert_null (xd_update_channel_tag (XD_UPDATE_CHANNEL_RELEASE));
   g_assert_cmpstr (xd_update_channel_tag (XD_UPDATE_CHANNEL_NIGHTLY), ==,
                    "nightly");
@@ -86,13 +95,28 @@ test_rolling_releases_are_named_by_commit (void)
 static void
 test_newer_compares_what_identifies_the_build (void)
 {
-  /* This build carries no commit, so a rolling channel has nothing to compare
-   * and must not offer an update it cannot reason about. */
-  g_assert_false (xd_update_channel_is_newer (
-    XD_UPDATE_CHANNEL_DEV, "1234567890abcdef1234567890abcdef12345678"));
-
   g_assert_false (xd_update_channel_is_newer (XD_UPDATE_CHANNEL_DEV, NULL));
   g_assert_false (xd_update_channel_is_newer (XD_UPDATE_CHANNEL_DEV, ""));
+
+  if (XD_COMMIT[0] == '\0')
+    {
+      /* Built outside a checkout: a rolling channel has nothing to compare
+       * against, and must not offer an update it cannot reason about. */
+      g_assert_false (xd_update_channel_is_newer (
+        XD_UPDATE_CHANNEL_DEV, "1234567890abcdef1234567890abcdef12345678"));
+    }
+  else
+    {
+      /* The API gives the whole commit; this build knows its own short one. */
+      g_autofree char *same =
+        g_strconcat (XD_COMMIT, "0123456789abcdef0123456789abcdef", NULL);
+      g_autofree char *other = g_strdup (same);
+
+      other[0] = other[0] == 'a' ? 'b' : 'a';
+
+      g_assert_false (xd_update_channel_is_newer (XD_UPDATE_CHANNEL_DEV, same));
+      g_assert_true (xd_update_channel_is_newer (XD_UPDATE_CHANNEL_DEV, other));
+    }
 
   /* A release compares tags against the version, with the v the tags carry. */
   g_assert_false (
