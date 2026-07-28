@@ -3819,6 +3819,12 @@ test_an_interrupted_turn_keeps_its_timeline (void)
  */
 static const char *running_test = "(none)";
 
+/*
+ * Windows has neither SIGALRM nor alarm, so the suite runs there without a
+ * watchdog and relies on meson's own timeout. Naming the stuck test is a
+ * convenience for reading a hung log, not something the suite asserts on.
+ */
+#ifndef G_OS_WIN32
 static void
 on_stuck (int signal_number)
 {
@@ -3831,6 +3837,7 @@ on_stuck (int signal_number)
 
   _exit (99);
 }
+#endif
 
 typedef struct
 {
@@ -3859,12 +3866,14 @@ main (int argc, char *argv[])
   g_test_init (&argc, &argv, NULL);
 
   /* Under meson's own 180; overridable so the watchdog itself can be tried. */
+#ifndef G_OS_WIN32
   {
     const char *seconds = g_getenv ("XD_TEST_WATCHDOG");
 
     signal (SIGALRM, on_stuck);
     alarm (seconds != NULL ? (guint) g_ascii_strtoull (seconds, NULL, 10) : 150);
   }
+#endif
 
   ADD ("/remote/pair-hello-tree", test_pair_hello_tree);
   ADD ("/remote/client-pairs-and-reads-the-tree", test_client_pairs_and_reads_the_tree);

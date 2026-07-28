@@ -7,6 +7,7 @@
 #include <glib-unix.h>
 /* forkpty is the same call on both; BSD keeps it in util.h, glibc in pty.h. */
 #ifdef __APPLE__
+#include <crt_externs.h>
 #include <util.h>
 #else
 #include <pty.h>
@@ -371,7 +372,17 @@ xd_remote_terminal_new (const char  *chat_id,
       if (chdir (workdir) != 0)
         _exit (126);
 
-      execvpe (shell, argv, env);
+      /*
+       * execvpe is glibc's alone. Replacing the environment and then execing
+       * is the same two steps it folds into one call, and this is the child of
+       * a fork about to be replaced, so nothing outlives the assignment.
+       */
+#ifdef __APPLE__
+      *_NSGetEnviron () = env;
+#else
+      environ = env;
+#endif
+      execvp (shell, argv);
       _exit (127);
     }
 
