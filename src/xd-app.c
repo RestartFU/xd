@@ -426,7 +426,9 @@ static const char *XD_STYLE =
   "tabbar tab { border-radius: 0; margin: 0; padding: 5px 8px;"
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
-  " { background: alpha(#ffffff, 0.10); }\n"
+  " { background: alpha(#ffffff, 0.10);"
+  " box-shadow: -5px 0 alpha(#ffffff, 0.10),"
+  " 5px 0 alpha(#ffffff, 0.10); }\n"
   /* No X on the tabs: the trash can kills the selected session, and one way
    * to do a destructive thing is enough. */
   "tabbar tab button { opacity: 0; min-width: 0; min-height: 0;"
