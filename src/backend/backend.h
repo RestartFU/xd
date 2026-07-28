@@ -112,6 +112,19 @@ struct _AiBackend
   GPtrArray *(*build_argv) (const AiBackend *self,
                             const AiRunSpec *spec);
 
+  /*
+   * One turn, encoded for a CLI that reads its prompts from stdin.
+   *
+   * NULL means this backend takes its prompt in argv and exits when the turn
+   * is over, which is one process per turn. A backend that provides this is
+   * asked once and then kept: the process lives across turns, so whatever the
+   * agent left running -- a watch, a build, a background shell -- is still
+   * there for the next one. The caller owns the returned line and appends the
+   * newline itself.
+   */
+  char *(*encode_turn) (const AiBackend *self,
+                        const AiRunSpec *spec);
+
   /* @root is one parsed line of output. */
   void (*parse_object) (AiParser    *parser,
                         JsonObject  *root,

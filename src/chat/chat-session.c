@@ -3,6 +3,8 @@
 #include "settings/agent-secrets.h"
 #include "util/host-launch.h"
 
+#include <string.h>
+
 #ifndef G_OS_WIN32
 #include <signal.h>
 #endif
@@ -23,12 +25,30 @@ struct _XdChatSession
   GSubprocess *process;
   GDataInputStream *stdout_stream;
   GDataInputStream *stderr_stream;
+  GOutputStream *stdin_stream;    /* held open only by a streaming backend */
   GCancellable *cancellable;
   GString *stderr_text;
 
+  /*
+   * What the running process was launched with.
+   *
+   * Model, effort and access are argv, so they are fixed for as long as the
+   * process lives. A turn that wants different ones cannot be handed to it and
+   * needs a new one -- which is why these are kept rather than the process
+   * simply being reused for anything.
+   */
+  gboolean streaming;
+  char *session_id;               /* last one the backend reported */
+  char *launched_model;
+  char *launched_system_prompt;
+  char *launched_workdir;
+  AiEffort launched_effort;
+  AiAccess launched_access;
+
   guint kill_timeout_id;
   gboolean stopping;
-  gboolean finished;
+  gboolean turn_complete;         /* the result line landed; finish after it */
+  gboolean finished;              /* of the current turn, not of the process */
 };
 
 enum
@@ -82,6 +102,14 @@ on_process_waited (GObject      *source,
   g_autoptr (XdChatSession) self = user_data;
   g_autoptr (GError) error = NULL;
 
+  /*
+   * A streaming process is not supposed to be gone. If a turn was still in
+   * flight it is now unanswerable and has to be reported; if none was, the
+   * chat simply has no process any more and the next turn starts one.
+   */
+  if (self->streaming)
+    self->stdin_stream = NULL;
+
   if (g_subprocess_wait_check_finish (G_SUBPROCESS (source), result, &error))
     {
       finish (self, TRUE, NULL);
@@ -120,6 +148,8 @@ on_event (const AiEvent *event,
   switch (event->type)
     {
     case AI_EVENT_SESSION_STARTED:
+      g_free (self->session_id);
+      self->session_id = g_strdup (event->session_id);
       g_signal_emit (self, signals[SIGNAL_SESSION_STARTED], 0, event->session_id);
       break;
 
@@ -146,7 +176,24 @@ on_event (const AiEvent *event,
     case AI_EVENT_RESULT:
       /* The backend reported the id only at the end; keep it either way. */
       if (event->session_id != NULL)
-        g_signal_emit (self, signals[SIGNAL_SESSION_STARTED], 0, event->session_id);
+        {
+          g_free (self->session_id);
+          self->session_id = g_strdup (event->session_id);
+          g_signal_emit (self, signals[SIGNAL_SESSION_STARTED], 0, event->session_id);
+        }
+
+      /*
+       * For a process that exits when the turn does, the exit is the end and
+       * saying so here would be early -- stderr may still explain a failure.
+       * A streaming process outlives its turn, so this line is the only thing
+       * that says the turn is over.
+       *
+       * Noted rather than acted on: one line can carry several events, and
+       * whoever handles "finished" is entitled to drop the turn, which would
+       * leave the rest of the line being parsed into freed memory.
+       */
+      if (self->streaming)
+        self->turn_complete = TRUE;
       break;
 
     case AI_EVENT_ERROR:
@@ -192,7 +239,15 @@ on_line_read (GObject      *source,
 
   ai_parser_feed_line (self->parser, line, on_event, self);
 
+  /* Reading continues first: the process is still there between turns, and
+   * whoever handles "finished" may start the next one straight away. */
   read_next_line (self);
+
+  if (self->turn_complete)
+    {
+      self->turn_complete = FALSE;
+      finish (self, TRUE, NULL);
+    }
 }
 
 static void
@@ -226,6 +281,37 @@ on_stderr_line (GObject      *source,
 
 /* --- lifecycle ------------------------------------------------------------ */
 
+/*
+ * Hands one turn to a process that reads them from stdin.
+ *
+ * Written synchronously: it is a single short line into a pipe with a whole
+ * turn about to follow it, and an async write here would only add a way for
+ * two turns to interleave on the same descriptor.
+ */
+static gboolean
+write_turn (XdChatSession    *self,
+            const AiRunSpec  *spec,
+            GError          **error)
+{
+  g_autofree char *line = self->backend->encode_turn (self->backend, spec);
+  g_autofree char *framed = NULL;
+
+  if (line == NULL)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "The turn could not be encoded.");
+      return FALSE;
+    }
+
+  framed = g_strconcat (line, "\n", NULL);
+
+  if (!g_output_stream_write_all (self->stdin_stream, framed, strlen (framed),
+                                  NULL, NULL, error))
+    return FALSE;
+
+  return g_output_stream_flush (self->stdin_stream, NULL, error);
+}
+
 XdChatSession *
 xd_chat_session_new (const AiBackend *backend)
 {
@@ -257,6 +343,8 @@ xd_chat_session_start (XdChatSession    *self,
   g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
   g_return_val_if_fail (spec != NULL, FALSE);
   g_return_val_if_fail (self->process == NULL, FALSE);
+
+  self->streaming = self->backend->encode_turn != NULL;
 
   secrets = xd_agent_secrets_load (NULL, &local_error);
   if (secrets == NULL)
@@ -311,9 +399,23 @@ xd_chat_session_start (XdChatSession    *self,
       return FALSE;
     }
 
-  /* codex reads stdin when it is a pipe and appends it to the prompt, so it
-   * has to see end-of-file straight away. */
-  g_output_stream_close (g_subprocess_get_stdin_pipe (self->process), NULL, NULL);
+  if (self->streaming)
+    {
+      self->stdin_stream = g_subprocess_get_stdin_pipe (self->process);
+
+      self->launched_model = g_strdup (effective.model);
+      self->launched_system_prompt = g_strdup (effective.system_prompt);
+      self->launched_workdir = g_strdup (effective.workdir);
+      self->launched_effort = effective.effort;
+      self->launched_access = effective.access;
+    }
+  else
+    {
+      /* codex reads stdin when it is a pipe and appends it to the prompt, so
+       * it has to see end-of-file straight away. */
+      g_output_stream_close (g_subprocess_get_stdin_pipe (self->process),
+                             NULL, NULL);
+    }
 
   self->stdout_stream =
     g_data_input_stream_new (g_subprocess_get_stdout_pipe (self->process));
@@ -326,6 +428,22 @@ xd_chat_session_start (XdChatSession    *self,
   g_buffered_input_stream_set_buffer_size (G_BUFFERED_INPUT_STREAM (self->stdout_stream),
                                            1 << 20);
 
+  /*
+   * The first turn goes out before anything is listening for the answer.
+   * Failing here means the process was never given the prompt, and returning
+   * with reads already queued would leave them to land on a caller that has
+   * been told the turn never started.
+   */
+  if (self->streaming && !write_turn (self, &effective, error))
+    {
+      g_subprocess_force_exit (self->process);
+      self->stdin_stream = NULL;
+      g_clear_object (&self->stdout_stream);
+      g_clear_object (&self->stderr_stream);
+      g_clear_object (&self->process);
+      return FALSE;
+    }
+
   read_next_line (self);
 
   g_data_input_stream_read_line_async (self->stderr_stream, G_PRIORITY_LOW,
@@ -333,6 +451,81 @@ xd_chat_session_start (XdChatSession    *self,
                                        g_object_ref (self));
 
   return TRUE;
+}
+
+/*
+ * Whether a turn can be handed to the process that is already running.
+ *
+ * Everything compared here is argv, decided when the process started and not
+ * changeable afterwards. Someone who switches model mid-chat gets a new
+ * process, which is what they would have got before any of this.
+ */
+static gboolean
+matches_launch (XdChatSession   *self,
+                const AiRunSpec *spec)
+{
+  return g_strcmp0 (self->launched_model, spec->model) == 0 &&
+         g_strcmp0 (self->launched_workdir, spec->workdir) == 0 &&
+         self->launched_effort == spec->effort &&
+         self->launched_access == spec->access;
+}
+
+gboolean
+xd_chat_session_can_continue (XdChatSession   *self,
+                              const AiRunSpec *spec)
+{
+  g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
+  g_return_val_if_fail (spec != NULL, FALSE);
+
+  return self->streaming && self->process != NULL &&
+         self->stdin_stream != NULL && !self->stopping &&
+         self->finished && matches_launch (self, spec);
+}
+
+gboolean
+xd_chat_session_continue (XdChatSession    *self,
+                          const AiRunSpec  *spec,
+                          GError          **error)
+{
+  g_autoptr (XdAgentSecrets) secrets = NULL;
+  g_autofree char *secret_prompt = NULL;
+  g_autofree char *system_prompt = NULL;
+  AiRunSpec effective;
+
+  g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
+  g_return_val_if_fail (spec != NULL, FALSE);
+
+  if (!xd_chat_session_can_continue (self, spec))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "This turn needs a process of its own.");
+      return FALSE;
+    }
+
+  /* The secrets prompt was appended to the system prompt in argv and is
+   * already in effect; only the turn's own text is new. */
+  effective = *spec;
+  secrets = xd_agent_secrets_load (NULL, NULL);
+  if (secrets != NULL)
+    secret_prompt = xd_agent_secrets_prompt (secrets);
+  if (secret_prompt != NULL)
+    {
+      system_prompt = g_strdup (self->launched_system_prompt);
+      effective.system_prompt = system_prompt;
+    }
+
+  self->finished = FALSE;
+  self->stopping = FALSE;
+  g_string_truncate (self->stderr_text, 0);
+
+  /* The parser remembers what it has already handed out, so that a reply
+   * streamed as deltas and then repeated whole is not shown twice. That memory
+   * is about one turn; carrying it into the next would swallow the new one. */
+  ai_parser_free (self->parser);
+  self->parser = ai_parser_new (self->backend);
+  ai_parser_set_model (self->parser, effective.model);
+
+  return write_turn (self, &effective, error);
 }
 
 static gboolean
@@ -390,9 +583,15 @@ xd_chat_session_dispose (GObject *object)
 
   g_clear_handle_id (&self->kill_timeout_id, g_source_remove);
 
-  if (self->process != NULL && !self->finished)
+  /*
+   * A streaming process is idle between turns rather than gone, so "the turn
+   * finished" no longer means there is nothing to stop. Letting go of the
+   * session is what ends it, and not doing this left one behind per chat.
+   */
+  if (self->process != NULL && (self->streaming || !self->finished))
     g_subprocess_force_exit (self->process);
 
+  self->stdin_stream = NULL;
   g_cancellable_cancel (self->cancellable);
 
   g_clear_object (&self->stdout_stream);
@@ -409,6 +608,10 @@ xd_chat_session_finalize (GObject *object)
   XdChatSession *self = XD_CHAT_SESSION (object);
 
   g_clear_pointer (&self->parser, ai_parser_free);
+  g_clear_pointer (&self->session_id, g_free);
+  g_clear_pointer (&self->launched_model, g_free);
+  g_clear_pointer (&self->launched_system_prompt, g_free);
+  g_clear_pointer (&self->launched_workdir, g_free);
   g_string_free (self->stderr_text, TRUE);
 
   G_OBJECT_CLASS (xd_chat_session_parent_class)->finalize (object);

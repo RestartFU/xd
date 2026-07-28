@@ -1560,6 +1560,10 @@ test_images_are_uploaded_to_the_daemon (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-image-upload\","
@@ -2878,6 +2882,10 @@ test_send_during_turn_queues (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-send-race\"}'\n"
@@ -3082,6 +3090,10 @@ test_slow_git_snapshot_does_not_stall_other_chats (void)
   g_assert_true (g_file_set_contents (
     claude_program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-concurrent-chat\"}'\n"
@@ -3187,6 +3199,10 @@ test_steer_starts_an_idle_remote_queue (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-steered\"}'\n"
@@ -3293,6 +3309,10 @@ test_a_joining_device_sees_an_active_turn (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-running\"}'\n"
@@ -3495,6 +3515,10 @@ test_a_live_turn_is_already_durable (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-live-durable\"}'\n"
@@ -3569,6 +3593,10 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-update-resume\"}'\n"
@@ -3725,6 +3753,10 @@ test_an_interrupted_turn_keeps_its_timeline (void)
   g_assert_true (g_file_set_contents (
     program,
     "#!/bin/sh\n"
+    /* The turn arrives on stdin now, so a stand-in waits for one the way the
+     * real CLI does. Exiting before it is read would leave xd writing a
+     * prompt into a pipe with nothing on the other end. */
+    "read -r _turn || exit 1\n"
     "printf '%s\\n' "
     "'{\"type\":\"system\",\"subtype\":\"init\","
     "\"session_id\":\"test-interrupted\"}'\n"

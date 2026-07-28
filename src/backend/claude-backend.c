@@ -3,13 +3,18 @@
 /*
  * Claude Code, driven non-interactively.
  *
- *   claude -p <prompt> --output-format stream-json --verbose
+ *   claude -p --input-format stream-json --output-format stream-json --verbose
  *          --include-partial-messages [--model M] [--append-system-prompt S]
  *          [--resume SESSION]
  *
  * The output is one JSON object per line. A "system"/"init" line opens the
  * session and carries the id needed to resume it, "stream_event" lines carry
  * token deltas, and a final "result" line repeats the whole reply.
+ *
+ * The prompt is not in argv: it arrives on stdin, one JSON line per turn, and
+ * the process stays up between them. That is what lets a background shell the
+ * agent started still be there on the next message -- with a prompt in argv the
+ * process ends when the turn does, and takes everything it started with it.
  *
  * No permission flags are passed: in print mode the CLI already refuses tool
  * use by default, which is what we want for a chat window.
@@ -46,8 +51,12 @@ claude_build_argv (const AiBackend *self,
       g_ptr_array_add (argv, g_strdup (spec->resume_session_id));
     }
 
+  /* -p with nothing after it: the prompt comes over stdin instead, which is
+   * what keeps one process across the turns of a chat. */
   g_ptr_array_add (argv, g_strdup ("-p"));
-  g_ptr_array_add (argv, g_strdup (spec->prompt));
+
+  g_ptr_array_add (argv, g_strdup ("--input-format"));
+  g_ptr_array_add (argv, g_strdup ("stream-json"));
 
   g_ptr_array_add (argv, g_strdup ("--output-format"));
   g_ptr_array_add (argv, g_strdup ("stream-json"));
@@ -77,6 +86,46 @@ claude_build_argv (const AiBackend *self,
   g_ptr_array_add (argv, NULL);
 
   return argv;
+}
+
+/*
+ * One turn, as the CLI's streaming input expects it.
+ *
+ * The same envelope a user message has on the way out, which is what makes it
+ * readable: type "user", a message with a role and content parts.
+ */
+static char *
+claude_encode_turn (const AiBackend *self,
+                    const AiRunSpec *spec)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonGenerator) generator = json_generator_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "type");
+  json_builder_add_string_value (builder, "user");
+  json_builder_set_member_name (builder, "message");
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "role");
+  json_builder_add_string_value (builder, "user");
+  json_builder_set_member_name (builder, "content");
+  json_builder_begin_array (builder);
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "type");
+  json_builder_add_string_value (builder, "text");
+  json_builder_set_member_name (builder, "text");
+  json_builder_add_string_value (
+    builder, spec->prompt != NULL ? spec->prompt : "");
+  json_builder_end_object (builder);
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  json_generator_set_root (generator, root);
+
+  return json_generator_to_data (generator, NULL);
 }
 
 static void
@@ -520,5 +569,6 @@ const AiBackend xd_claude_backend = {
   .models = claude_models,
   .n_models = G_N_ELEMENTS (claude_models),
   .build_argv = claude_build_argv,
+  .encode_turn = claude_encode_turn,
   .parse_object = claude_parse_object,
 };

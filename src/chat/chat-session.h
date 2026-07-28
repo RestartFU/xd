@@ -29,6 +29,24 @@ gboolean       xd_chat_session_start       (XdChatSession    *self,
                                             const AiRunSpec  *spec,
                                             GError          **error);
 
+/*
+ * Runs another turn on the process that is already up.
+ *
+ * A backend whose CLI takes its prompt in argv ends when the turn does, so
+ * there is nothing to continue and this refuses. Where it succeeds, the
+ * process was never restarted -- which is the point: anything the agent left
+ * running is still running, and there is no start-up cost between messages.
+ *
+ * Refuses a turn the running process cannot serve, notably one that changed
+ * model, effort, access or working directory, all of which are fixed in argv.
+ * Ask first with can_continue, and start a new session when it says no.
+ */
+gboolean       xd_chat_session_can_continue (XdChatSession   *self,
+                                             const AiRunSpec *spec);
+gboolean       xd_chat_session_continue    (XdChatSession    *self,
+                                            const AiRunSpec  *spec,
+                                            GError          **error);
+
 /* Asks the child to stop, then insists if it does not. */
 void           xd_chat_session_cancel      (XdChatSession    *self);
 
