@@ -20,7 +20,7 @@ remote tree implementation in place of the filesystem one.
 
 ## Pairing
 
-The daemon prints a code (`4F2K-9QX1`) good for sixty seconds and one use. A
+The daemon prints a code (`4F2K-9QX1`) good for five minutes and one use. A
 client sends it once and receives a long-lived device token, kept in its
 settings. The daemon keeps paired devices in a table with names and last-seen
 times, each revocable on its own.
@@ -45,12 +45,11 @@ at once are therefore ordered by the daemon rather than racing in the
 database, and neither can end up holding a version of the truth the other
 does not have.
 
-Every change is an entry in an append-only event log with a monotonic id:
-messages, folder and chat edits, model and effort changes, turn events. On
-connecting, a client takes a snapshot and the id it was taken at; from then
-on it applies events as they arrive. Reconnecting resumes from the last id it
-saw, so a device that was closed, asleep or off the network catches up on
-exactly what it missed instead of reloading everything or silently drifting.
+Events are live notifications, not a durable log: they have no ids and the
+daemon does not replay them. On every connection and reconnection, a client
+reloads the tree and every open chat, transcript, and terminal list before it
+continues applying live events. Reloading is the recovery path for a device
+that was closed, asleep, or off the network.
 
 Turn output fans out to every subscriber, not only the device that sent the
 message. Watching a chat from a second machine shows the same reply arriving

@@ -91,12 +91,17 @@ Docker is the only requirement. Nothing is installed on the host.
 ```sh
 ./scripts/build.sh     # -> ./dist, a self-contained bundle
 ./scripts/test.sh      # headless test suite
+make mobile-test       # shared Kotlin tests
+make mobile-android    # -> ./dist/mobile/xd-mobile-debug.apk
 ```
 
 `build.sh` produces a relocatable directory containing the binary, its whole
 library closure (including the dynamic loader), GTK's support data and a
 launcher. It runs on any glibc x86_64 host, including distributions with no
 system GTK such as NixOS.
+
+Mobile builds use their own Docker image and also require nothing beyond
+Docker. See [mobile development](docs/mobile.md).
 
 ## Run
 
@@ -145,6 +150,7 @@ noise is cosmetic.
 | `src/backend/`  | Agent CLI argv building and JSONL parsing             |
 | `src/settings/` | Per-folder `.xd.json` settings and inheritance        |
 | `src/storage/`  | SQLite: chats, messages, full-text search             |
+| `mobile/`       | KMP shared library and native mobile clients          |
 | `tests/`        | Headless tests, no GTK required                       |
 
 Workspace folders are real directories (default `~/Workspaces`), so they can be

@@ -32,6 +32,9 @@ name: dev
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - 'mobile/**'
+      - 'docs/**'
   workflow_dispatch:
 
 # One at a time per pull request, newest wins: two pushes in a row would
