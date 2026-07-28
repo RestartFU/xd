@@ -1777,14 +1777,61 @@ on_turn_text (XdDaemonTurn *turn,
   broadcast_event (running->server, "text", running->chat_id, "text", delta);
 }
 
+static char *
+describe_turn_context (const char *workdir)
+{
+  g_autoptr (XdGitInfo) git = xd_git_info_for_path (workdir);
+  g_autoptr (GString) text = g_string_new (NULL);
+  g_autofree char *shown = NULL;
+
+  if (workdir == NULL)
+    return g_strdup ("No working directory");
+
+  shown = g_str_has_prefix (workdir, g_get_home_dir ())
+    ? g_strconcat ("~", workdir + strlen (g_get_home_dir ()), NULL)
+    : g_strdup (workdir);
+
+  if (git == NULL)
+    return g_strdup_printf ("%s — not a repository", shown);
+
+  if (git->branch != NULL)
+    g_string_append_printf (text, "%s %s", git->detached ? "detached at" : "⎇",
+                            git->branch);
+  g_string_append_printf (text, "%s%s", text->len > 0 ? " · " : "", git->name);
+  if (git->linked_worktree)
+    g_string_append (text, " (worktree)");
+  g_string_append_printf (text, " · %s", shown);
+
+  return g_string_free (g_steal_pointer (&text), FALSE);
+}
+
 static void
 on_turn_tool (XdDaemonTurn *turn,
               const char   *name,
               gpointer      user_data)
 {
   Running *running = user_data;
+  const char *workdir = xd_daemon_turn_get_workdir (turn);
+  g_autofree char *context = describe_turn_context (workdir);
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
 
-  broadcast_event (running->server, "tool", running->chat_id, "text", name);
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "event");
+  json_builder_add_string_value (builder, "tool");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, running->chat_id);
+  json_builder_set_member_name (builder, "text");
+  json_builder_add_string_value (builder, name);
+  if (workdir != NULL)
+    {
+      json_builder_set_member_name (builder, "workdir");
+      json_builder_add_string_value (builder, workdir);
+    }
+  json_builder_set_member_name (builder, "context");
+  json_builder_add_string_value (builder, context);
+  json_builder_end_object (builder);
+
+  broadcast (running->server, builder);
 }
 
 static gboolean forget_turn (gpointer user_data);

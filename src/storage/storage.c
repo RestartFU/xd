@@ -1617,6 +1617,34 @@ xd_storage_update_message (XdStorage   *self,
   return ok;
 }
 
+gboolean
+xd_storage_delete_message (XdStorage   *self,
+                           gint64       message_id,
+                           GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (message_id > 0, FALSE);
+
+  if (sqlite3_prepare_v2 (self->db,
+                          "DELETE FROM messages WHERE id = ?;",
+                          -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot remove the message");
+      return FALSE;
+    }
+
+  sqlite3_bind_int64 (stmt, 1, message_id);
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot remove the message");
+
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
 static XdMessage *
 message_from_row (sqlite3_stmt *stmt)
 {
