@@ -8,6 +8,8 @@
 #include "util/ask-block.h"
 #include "util/git-diff.h"
 #include "util/workflow-run.h"
+#include "util/workspace-block.h"
+#include "util/worktree.h"
 
 #include <string.h>
 
@@ -40,6 +42,7 @@ struct _XdDaemonTurn
   XdGitDiffTracker *diff_tracker;
   GCancellable *diff_cancellable;
   guint diff_timeout_id;
+  guint diff_generation;
   GString *text;            /* everything said this turn */
   GString *segment;         /* what belongs to the message being written */
   gint64 segment_message_id; /* live row extended as this segment streams */
@@ -69,14 +72,28 @@ static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (XdDaemonTurn, xd_daemon_turn, G_TYPE_OBJECT)
 
+typedef struct
+{
+  char *workdir;
+  guint generation;
+} DiffInit;
+
+static void
+diff_init_free (DiffInit *init)
+{
+  g_free (init->workdir);
+  g_free (init);
+}
+
 static void
 build_diff_tracker (GTask        *task,
                     gpointer      source_object,
                     gpointer      task_data,
                     GCancellable *cancellable)
 {
+  DiffInit *init = task_data;
   XdGitDiffTracker *tracker =
-    xd_git_diff_tracker_new_cancellable (task_data, cancellable);
+    xd_git_diff_tracker_new_cancellable (init->workdir, cancellable);
 
   if (g_cancellable_is_cancelled (cancellable))
     {
@@ -107,8 +124,14 @@ on_diff_tracker_ready (GObject      *source,
 {
   g_autoptr (XdDaemonTurn) self = user_data;
   g_autoptr (GError) error = NULL;
-  XdGitDiffTracker *tracker =
+  g_autoptr (XdGitDiffTracker) tracker =
     g_task_propagate_pointer (G_TASK (result), &error);
+  DiffInit *init = g_task_get_task_data (G_TASK (result));
+
+  /* A workspace report can start a newer snapshot while this one is still
+   * running. An old checkout must never replace the new tracker. */
+  if (init->generation != self->diff_generation)
+    return;
 
   g_clear_handle_id (&self->diff_timeout_id, g_source_remove);
   g_clear_object (&self->diff_cancellable);
@@ -116,7 +139,7 @@ on_diff_tracker_ready (GObject      *source,
   if (tracker != NULL)
     {
       g_clear_pointer (&self->diff_tracker, xd_git_diff_tracker_free);
-      self->diff_tracker = tracker;
+      self->diff_tracker = g_steal_pointer (&tracker);
     }
 }
 
@@ -124,11 +147,15 @@ static void
 start_diff_tracker (XdDaemonTurn *self)
 {
   g_autoptr (GTask) task = NULL;
+  DiffInit *init = g_new0 (DiffInit, 1);
 
+  self->diff_generation++;
   self->diff_cancellable = g_cancellable_new ();
   task = g_task_new (NULL, self->diff_cancellable,
                      on_diff_tracker_ready, g_object_ref (self));
-  g_task_set_task_data (task, g_strdup (self->workdir), g_free);
+  init->workdir = g_strdup (self->workdir);
+  init->generation = self->diff_generation;
+  g_task_set_task_data (task, init, (GDestroyNotify) diff_init_free);
   g_task_run_in_thread (task, build_diff_tracker);
 
   /*
@@ -329,11 +356,75 @@ remember (XdDaemonTurn *self,
   g_ptr_array_add (self->items, item);
 }
 
+static gboolean
+switch_workspace (XdDaemonTurn *self,
+                  const char   *reported)
+{
+  g_autofree char *workdir =
+    xd_worktree_registered_path (self->workdir, reported);
+  g_autoptr (GError) error = NULL;
+
+  if (workdir == NULL)
+    {
+      g_warning ("ignoring unregistered workspace reported by agent: %s",
+                 reported);
+      return FALSE;
+    }
+
+  if (xd_worktree_path_equal (self->workdir, workdir))
+    return TRUE;
+
+  if (!xd_storage_set_workdir (
+        self->storage, self->chat_id, workdir, &error))
+    {
+      g_warning ("cannot switch to the agent's workspace: %s", error->message);
+      return FALSE;
+    }
+
+  g_free (self->workdir);
+  self->workdir = g_steal_pointer (&workdir);
+
+  g_clear_handle_id (&self->diff_timeout_id, g_source_remove);
+  if (self->diff_cancellable != NULL)
+    g_cancellable_cancel (self->diff_cancellable);
+  g_clear_object (&self->diff_cancellable);
+  g_clear_pointer (&self->diff_tracker, xd_git_diff_tracker_free);
+  start_diff_tracker (self);
+
+  return TRUE;
+}
+
 static void
 close_segment (XdDaemonTurn *self)
 {
+  g_autofree char *reported = NULL;
+  g_autofree char *without_workspace = NULL;
+  g_autoptr (GError) error = NULL;
+
   if (self->segment->len == 0)
     return;
+
+  reported =
+    xd_workspace_block_parse (self->segment->str, &without_workspace);
+  if (reported != NULL && switch_workspace (self, reported))
+    {
+      g_string_assign (self->segment, without_workspace);
+
+      if (self->segment_message_id != 0 &&
+          !(self->segment->len > 0
+              ? xd_storage_update_message (
+                  self->storage, self->segment_message_id,
+                  self->segment->str, &error)
+              : xd_storage_delete_message (
+                  self->storage, self->segment_message_id, &error)))
+        g_warning ("cannot hide workspace control markup: %s", error->message);
+    }
+
+  if (self->segment->len == 0)
+    {
+      self->segment_message_id = 0;
+      return;
+    }
 
   remember (self, FALSE, self->segment->str);
   g_string_truncate (self->segment, 0);
@@ -617,6 +708,14 @@ xd_daemon_turn_get_label (XdDaemonTurn *self)
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
 
   return self->label;
+}
+
+const char *
+xd_daemon_turn_get_workdir (XdDaemonTurn *self)
+{
+  g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
+
+  return self->workdir;
 }
 
 gint64

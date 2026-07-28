@@ -62,6 +62,7 @@ char         *xd_daemon_turn_resolve_workdir (XdDaemonTurn *self,
 
 /* Who is answering: the model and effort the turn actually started on. */
 const char   *xd_daemon_turn_get_label (XdDaemonTurn *self);
+const char   *xd_daemon_turn_get_workdir (XdDaemonTurn *self);
 
 /* Last finished transcript row when this turn started. Live output has larger
  * ids and is replayed from the turn until it ends. */

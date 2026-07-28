@@ -14,6 +14,7 @@ xd_core_sources = files(
   'util/unified-diff.c',
   'util/update-channel.c',
   'util/workflow-run.c',
+  'util/workspace-block.c',
   'util/worktree.c',
   'util/host-launch.c',
   'util/app-paths.c',

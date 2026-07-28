@@ -201,6 +201,30 @@ test_messages_round_trip (Fixture       *fixture,
 }
 
 static void
+test_live_message_can_be_removed (Fixture       *fixture,
+                                  gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (GPtrArray) messages = NULL;
+  gint64 message_id = 0;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_true (xd_storage_append_message_with_id (
+    fixture->storage, chat_id, "assistant", "<workspace>",
+    NULL, NULL, &message_id, &error));
+  g_assert_cmpint (message_id, >, 0);
+  g_assert_true (xd_storage_delete_message (
+    fixture->storage, message_id, &error));
+  g_assert_no_error (error);
+
+  messages = xd_storage_list_messages (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (messages->len, ==, 0);
+}
+
+static void
 test_recent_messages_are_bounded (Fixture       *fixture,
                                   gconstpointer  user_data)
 {
@@ -744,6 +768,7 @@ main (int   argc,
   ADD ("/storage/new-chats-inherit-agent", test_new_chats_inherit_last_changed_agent);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
+  ADD ("/storage/live-message-removed", test_live_message_can_be_removed);
   ADD ("/storage/recent-messages-bounded", test_recent_messages_are_bounded);
   ADD ("/storage/sessions-per-backend", test_sessions_are_per_backend);
   ADD ("/storage/forget-one-session", test_forgetting_one_session);

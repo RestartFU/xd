@@ -19,6 +19,7 @@ xd_tests = {
   'unified-diff': 'test-unified-diff.c',
   'update-channel': 'test-update-channel.c',
   'workflow-run': 'test-workflow-run.c',
+  'workspace-block': 'test-workspace-block.c',
   'worktree': 'test-worktree.c',
   'discord-presence': 'test-discord-presence.c',
   'node': 'test-node.c',

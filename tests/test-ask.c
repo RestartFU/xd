@@ -186,6 +186,9 @@ test_instructions_require_reporting_links (void)
                             "Do not leave a resolvable #number as bare text"));
   g_assert_nonnull (strstr (instructions, "<input>"));
   g_assert_nonnull (strstr (instructions, "This shows a text field"));
+  g_assert_nonnull (
+    strstr (instructions,
+            "<workspace>/absolute/path/to/checkout</workspace>"));
 }
 
 int
