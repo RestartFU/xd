@@ -1330,7 +1330,7 @@ static void
 xd_terminal_panel_init (XdTerminalPanel *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  GtkWidget *tabs = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *tabs = gtk_center_box_new ();
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
   GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
   GtkWidget *kill_button = gtk_button_new_from_icon_name ("user-trash-symbolic");
@@ -1341,11 +1341,10 @@ xd_terminal_panel_init (XdTerminalPanel *self)
 
   self->title = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_ellipsize (self->title, PANGO_ELLIPSIZE_END);
-  gtk_label_set_xalign (self->title, 0.0f);
+  gtk_label_set_xalign (self->title, 0.5f);
   gtk_widget_add_css_class (GTK_WIDGET (self->title), "heading");
   gtk_widget_set_visible (GTK_WIDGET (self->title), FALSE);
   gtk_widget_set_valign (GTK_WIDGET (self->title), GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_start (GTK_WIDGET (self->title), 12);
 
   self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
   adw_tab_bar_set_autohide (self->bar, TRUE);
@@ -1371,9 +1370,11 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_widget_set_margin_start (controls, 4);
   gtk_widget_set_margin_end (controls, 8);
 
-  gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->title));
-  gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->bar));
-  gtk_box_append (GTK_BOX (tabs), controls);
+  gtk_center_box_set_start_widget (GTK_CENTER_BOX (tabs),
+                                   GTK_WIDGET (self->bar));
+  gtk_center_box_set_center_widget (GTK_CENTER_BOX (tabs),
+                                    GTK_WIDGET (self->title));
+  gtk_center_box_set_end_widget (GTK_CENTER_BOX (tabs), controls);
   gtk_box_append (GTK_BOX (box), tabs);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
 
