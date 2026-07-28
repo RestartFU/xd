@@ -474,7 +474,13 @@ static const char *XD_STYLE =
   ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
   " font-family: \"JetBrains Mono\", monospace; font-size: 1em;"
   " line-height: 1; }\n"
-  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px; }\n"
+  /* The list paints nothing of its own: GtkListView carries the view
+   * background, which is a grey the rest of the window left behind, and it
+   * showed as a lighter slab down the whole pane. Transparent lets the pane's
+   * own black through, hairline divider and all -- the same thing the file
+   * list does beside it. */
+  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px;"
+  " background: transparent; }\n"
   ".xd-diff-text.xd-diff-chunk { padding-top: 0; padding-bottom: 0; }\n"
   "listview.xd-diff-list > row { min-height: 0; margin: 0; padding: 0;"
   " border-radius: 0; }\n"
