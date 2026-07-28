@@ -472,10 +472,16 @@ matches_launch (XdChatSession   *self,
 
 gboolean
 xd_chat_session_can_continue (XdChatSession   *self,
+                              const AiBackend *backend,
                               const AiRunSpec *spec)
 {
   g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
   g_return_val_if_fail (spec != NULL, FALSE);
+
+  /* Switching a chat from claude to codex leaves a perfectly healthy process
+   * that is the wrong one to say this to. */
+  if (backend != self->backend)
+    return FALSE;
 
   return self->streaming && self->process != NULL &&
          self->stdin_stream != NULL && !self->stopping &&
@@ -495,7 +501,7 @@ xd_chat_session_continue (XdChatSession    *self,
   g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
   g_return_val_if_fail (spec != NULL, FALSE);
 
-  if (!xd_chat_session_can_continue (self, spec))
+  if (!xd_chat_session_can_continue (self, self->backend, spec))
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                            "This turn needs a process of its own.");

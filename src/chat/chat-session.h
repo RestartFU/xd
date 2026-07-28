@@ -41,7 +41,14 @@ gboolean       xd_chat_session_start       (XdChatSession    *self,
  * model, effort, access or working directory, all of which are fixed in argv.
  * Ask first with can_continue, and start a new session when it says no.
  */
+/*
+ * @backend is passed rather than assumed: a session belongs to the CLI it was
+ * created for, and a caller keeping one per chat has to notice when the chat
+ * has been switched to another. Handing a claude turn to codex would otherwise
+ * look exactly like continuing.
+ */
 gboolean       xd_chat_session_can_continue (XdChatSession   *self,
+                                             const AiBackend *backend,
                                              const AiRunSpec *spec);
 gboolean       xd_chat_session_continue    (XdChatSession    *self,
                                             const AiRunSpec  *spec,
