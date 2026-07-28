@@ -33,6 +33,16 @@ typedef struct
   GIOStream *stream;
   GQueue *outgoing;            /* complete JSON lines, oldest first */
   gsize outgoing_bytes;
+
+  /*
+   * What stops an in-flight read or write before the stream under it closes.
+   *
+   * Without this the fd went away while GIO still had a source polling it.
+   * Linux reports that as POLLNVAL on the one entry and carries on, so it was
+   * invisible there; BSD fails the whole poll with EBADF, which GLib treats as
+   * fatal -- so the daemon only died of it on macOS.
+   */
+  GCancellable *cancellable;
   guint refs;
   gboolean authed;
   gboolean writing;
@@ -121,6 +131,7 @@ connection_unref (Connection *connection)
     return;
 
   g_clear_pointer (&connection->outgoing, outgoing_free);
+  g_clear_object (&connection->cancellable);
   g_clear_object (&connection->in);
   g_clear_object (&connection->stream);
   g_free (connection);
@@ -161,8 +172,8 @@ write_next_json (Connection *connection)
 
   connection->writing = TRUE;
   g_output_stream_write_all_async (
-    connection->out, line, strlen (line), G_PRIORITY_DEFAULT, NULL,
-    on_json_written, connection_ref (connection));
+    connection->out, line, strlen (line), G_PRIORITY_DEFAULT,
+    connection->cancellable, on_json_written, connection_ref (connection));
 }
 
 /*
@@ -3339,6 +3350,10 @@ connection_close (Connection *connection)
   if (connection->server != NULL)
     g_ptr_array_remove_fast (connection->server->connections, connection);
 
+  /* Before the close, never after: the point is that no source is left
+   * polling the fd this is about to take away. */
+  g_cancellable_cancel (connection->cancellable);
+
   if (connection->stream != NULL)
     g_io_stream_close (connection->stream, NULL, NULL);
 }
@@ -3489,7 +3504,8 @@ static void
 read_next_request (Connection *connection)
 {
   g_data_input_stream_read_line_async (connection->in, G_PRIORITY_DEFAULT,
-                                       NULL, on_line_read, connection);
+                                       connection->cancellable,
+                                       on_line_read, connection);
 }
 
 static void
@@ -3526,6 +3542,7 @@ on_incoming (GSocketService    *service,
   connection = g_new0 (Connection, 1);
   connection->refs = 1;
   connection->server = self;
+  connection->cancellable = g_cancellable_new ();
   connection->outgoing = g_queue_new ();
   g_ptr_array_add (self->connections, connection);
   connection->stream = g_object_ref (tls);
@@ -3533,7 +3550,8 @@ on_incoming (GSocketService    *service,
   connection->out = g_io_stream_get_output_stream (tls);
 
   g_tls_connection_handshake_async (G_TLS_CONNECTION (tls), G_PRIORITY_DEFAULT,
-                                    NULL, on_handshake, connection);
+                                    connection->cancellable, on_handshake,
+                                    connection);
 
   return TRUE;
 }
@@ -3723,6 +3741,10 @@ xd_remote_server_dispose (GObject *object)
           connection->server = NULL;
           connection->authed = FALSE;
           connection->closed = TRUE;
+
+          /* connection_close would remove from the array being walked, so it
+           * is done by hand here -- including stopping the pending reads. */
+          g_cancellable_cancel (connection->cancellable);
 
           if (connection->stream != NULL)
             g_io_stream_close (connection->stream, NULL, NULL);
