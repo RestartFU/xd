@@ -1719,7 +1719,14 @@ on_selection_changed (GtkSingleSelection *selection,
   if (row != NULL)
     node = gtk_tree_list_row_get_item (row);
 
-  if (node == self->selected)
+  /*
+   * Reconciliation can remove and reinsert the selected row in one main-loop
+   * turn. GtkSingleSelection reports a brief empty selection between those
+   * operations. Empty selection does not close the current chat, so it must
+   * not erase the node identity used to recognize the same row when it comes
+   * back.
+   */
+  if (node == NULL || node == self->selected)
     return;
 
   /* A real selection made while a remote is still connecting wins over what

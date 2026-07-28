@@ -5,6 +5,7 @@ typedef struct
   char *label;
   char *description;
   GtkLabel *row_label;
+  GtkLabel *description_label;
   GtkImage *check;
   GtkListBoxRow *row;
 } Choice;
@@ -130,6 +131,7 @@ append_choice (XdOptionPicker *self,
   choice->label = g_strdup (label);
   choice->description = g_strdup (description);
   choice->row_label = GTK_LABEL (gtk_label_new (label));
+  choice->description_label = GTK_LABEL (detail);
   choice->check = GTK_IMAGE (
     gtk_image_new_from_icon_name ("object-select-symbolic"));
   choice->row = GTK_LIST_BOX_ROW (row);
@@ -159,13 +161,33 @@ append_choice (XdOptionPicker *self,
   g_ptr_array_add (self->choices, choice);
 }
 
+static void
+update_choice (Choice     *choice,
+               const char *label,
+               const char *description)
+{
+  if (g_strcmp0 (choice->label, label) != 0)
+    {
+      g_free (choice->label);
+      choice->label = g_strdup (label);
+      gtk_label_set_label (choice->row_label, label);
+    }
+
+  if (g_strcmp0 (choice->description, description) != 0)
+    {
+      g_free (choice->description);
+      choice->description = g_strdup (description);
+      gtk_label_set_label (choice->description_label, description);
+    }
+}
+
 void
 xd_option_picker_set_choices (XdOptionPicker    *self,
                               const char *const *labels,
                               const char *const *descriptions)
 {
-  GtkWidget *child;
   guint old_selected;
+  guint length = 0;
 
   g_return_if_fail (XD_IS_OPTION_PICKER (self));
   g_return_if_fail (labels != NULL);
@@ -173,14 +195,30 @@ xd_option_picker_set_choices (XdOptionPicker    *self,
 
   old_selected = self->selected;
 
-  while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->list))) != NULL)
-    gtk_list_box_remove (self->list, child);
-  g_ptr_array_set_size (self->choices, 0);
+  /*
+   * Keep existing rows alive. Remote metadata can arrive while this popover is
+   * open; replacing every row then makes GTK dismiss it. Updating rows in
+   * place also avoids rebuilding identical static pickers.
+   */
+  for (; labels[length] != NULL; length++)
+    {
+      if (length < self->choices->len)
+        update_choice (g_ptr_array_index (self->choices, length),
+                       labels[length], descriptions[length]);
+      else
+        append_choice (self, labels[length], descriptions[length]);
+    }
+
+  while (self->choices->len > length)
+    {
+      Choice *choice =
+        g_ptr_array_index (self->choices, self->choices->len - 1);
+
+      gtk_list_box_remove (self->list, GTK_WIDGET (choice->row));
+      g_ptr_array_remove_index (self->choices, self->choices->len - 1);
+    }
+
   self->selected = 0;
-
-  for (guint i = 0; labels[i] != NULL; i++)
-    append_choice (self, labels[i], descriptions[i]);
-
   sync_selection (self);
 
   if (old_selected != 0)
@@ -273,6 +311,7 @@ xd_option_picker_init (XdOptionPicker *self)
   GtkWidget *button_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget *popover = gtk_popover_new ();
   GtkWidget *panel = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *scroller = gtk_scrolled_window_new ();
 
   self->choices =
     g_ptr_array_new_with_free_func ((GDestroyNotify) choice_free);
@@ -292,7 +331,21 @@ xd_option_picker_init (XdOptionPicker *self)
   g_signal_connect (self->list, "row-activated",
                     G_CALLBACK (on_row_activated), self);
 
-  gtk_box_append (GTK_BOX (panel), GTK_WIDGET (self->list));
+  /*
+   * A repository can have dozens of worktrees. Let short pickers keep their
+   * natural height, but cap long ones so the popover can fit on screen and
+   * scroll instead of being dismissed by the display server.
+   */
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_max_content_height (
+    GTK_SCROLLED_WINDOW (scroller), 420);
+  gtk_scrolled_window_set_propagate_natural_height (
+    GTK_SCROLLED_WINDOW (scroller), TRUE);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
+                                 GTK_WIDGET (self->list));
+
+  gtk_box_append (GTK_BOX (panel), scroller);
   gtk_widget_add_css_class (panel, "xd-menu");
   gtk_popover_set_child (GTK_POPOVER (popover), panel);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);

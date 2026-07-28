@@ -16,6 +16,7 @@ xd_tests = {
   'git-head-watch': 'test-git-head-watch.c',
   'host-launch': 'test-host-launch.c',
   'subagent-tool': 'test-subagent-tool.c',
+  'syntax': 'test-syntax.c',
   'unified-diff': 'test-unified-diff.c',
   'update-channel': 'test-update-channel.c',
   'workflow-run': 'test-workflow-run.c',

@@ -2,7 +2,18 @@
 
 #include <string.h>
 
+#include "util/syntax.h"
+
 #define FILE_PREVIEW_LIMIT (1024 * 1024)
+
+/*
+ * Past this the file stops being coloured, and stays readable.
+ *
+ * Every token is a tag applied to the buffer, and a tag is a buffer edit;
+ * a generated file of a hundred thousand lines would spend longer being
+ * painted than anyone spends looking at it.
+ */
+#define HIGHLIGHT_LINE_LIMIT 8000
 
 typedef struct
 {
@@ -33,6 +44,7 @@ struct _XdFilePane
   GtkStack *stack;
   AdwStatusPage *status;
   GtkTextBuffer *preview;
+  GtkTextTag *tags[XD_SYNTAX_TOKEN_COUNT];
   gboolean showing_preview;
 };
 
@@ -223,6 +235,81 @@ fill_entries (XdFilePane *self,
     gtk_stack_set_visible_child_name (self->stack, "entries");
 }
 
+typedef struct
+{
+  XdFilePane *pane;
+  int offset;   /* characters from the start of the buffer */
+} HighlightCursor;
+
+static void
+apply_token_tag (XdSyntaxToken token,
+                 const char   *text,
+                 gsize         length,
+                 gpointer      user_data)
+{
+  HighlightCursor *cursor = user_data;
+  GtkTextTag *tag = cursor->pane->tags[token];
+  int characters = (int) g_utf8_strlen (text, (gssize) length);
+
+  if (tag != NULL)
+    {
+      GtkTextIter start;
+      GtkTextIter end;
+
+      gtk_text_buffer_get_iter_at_offset (
+        cursor->pane->preview, &start, cursor->offset);
+      gtk_text_buffer_get_iter_at_offset (
+        cursor->pane->preview, &end, cursor->offset + characters);
+      gtk_text_buffer_apply_tag (cursor->pane->preview, tag, &start, &end);
+    }
+
+  cursor->offset += characters;
+}
+
+/*
+ * Colours the file that is already in the buffer.
+ *
+ * The buffer is filled first and tagged afterwards rather than being built
+ * token by token: the text has to survive a language this does not know, and
+ * an unknown language is then simply a pass that does nothing.
+ */
+static void
+highlight_preview (XdFilePane *self,
+                   const char *path)
+{
+  XdSyntaxLanguage language = xd_syntax_language_for_path (path);
+  XdSyntaxState state = { 0 };
+  HighlightCursor cursor = { .pane = self, .offset = 0 };
+  GtkTextIter start;
+  GtkTextIter end;
+  g_autofree char *text = NULL;
+  guint rows = 0;
+
+  gtk_text_buffer_get_bounds (self->preview, &start, &end);
+  gtk_text_buffer_remove_all_tags (self->preview, &start, &end);
+
+  if (language == XD_SYNTAX_NONE)
+    return;
+
+  text = gtk_text_buffer_get_text (self->preview, &start, &end, FALSE);
+
+  for (const char *at = text; rows < HIGHLIGHT_LINE_LIMIT; rows++)
+    {
+      const char *newline = strchr (at, '\n');
+      g_autofree char *line =
+        newline != NULL ? g_strndup (at, (gsize) (newline - at))
+                        : g_strdup (at);
+
+      xd_syntax_scan_line (language, line, &state, apply_token_tag, &cursor);
+
+      if (newline == NULL)
+        break;
+
+      cursor.offset++;   /* the newline itself */
+      at = newline + 1;
+    }
+}
+
 static void
 show_preview_text (XdFilePane *self,
                    const char *path,
@@ -230,6 +317,7 @@ show_preview_text (XdFilePane *self,
                    gssize      length)
 {
   gtk_text_buffer_set_text (self->preview, text, length);
+  highlight_preview (self, path);
   self->showing_preview = TRUE;
   set_header_path (self, path);
   gtk_stack_set_visible_child_name (self->stack, "preview");
@@ -715,6 +803,18 @@ xd_file_pane_init (XdFilePane *self)
   gtk_widget_add_css_class (preview_view, "xd-file-preview");
   self->preview =
     gtk_text_view_get_buffer (GTK_TEXT_VIEW (preview_view));
+
+  /* One tag per token kind, made once: a file is thousands of tokens and
+   * every one of them is an existing tag being pointed at again. */
+  for (guint token = 0; token < XD_SYNTAX_TOKEN_COUNT; token++)
+    {
+      const char *colour = xd_syntax_token_colour (token);
+
+      if (colour != NULL)
+        self->tags[token] = gtk_text_buffer_create_tag (
+          self->preview, NULL, "foreground", colour, NULL);
+    }
+
   gtk_scrolled_window_set_child (
     GTK_SCROLLED_WINDOW (preview_window), preview_view);
   gtk_scrolled_window_set_policy (

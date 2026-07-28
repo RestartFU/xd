@@ -1045,6 +1045,49 @@ test_folders_and_chats_are_managed_from_the_client (void)
   daemon_stop (&daemon);
 }
 
+/*
+ * A tree refresh can finish while the sidebar is showing an inline editor for
+ * a new folder or chat. Those rows have no daemon id yet and must survive the
+ * authoritative server snapshot until the user submits or cancels them.
+ */
+static void
+test_tree_refresh_keeps_client_placeholders (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autoptr (XdNode) folder_placeholder = NULL;
+  g_autoptr (XdNode) chat_placeholder = NULL;
+  XdNode *root;
+  XdNode *folder;
+  Wait loading = { 0 };
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  root = xd_remote_tree_get_root (tree);
+  folder = child_at (root, 0);
+
+  folder_placeholder = xd_node_new_folder (NULL, "New Folder", NULL);
+  xd_node_set_parent (folder_placeholder, root);
+  g_list_store_insert (xd_node_get_children (root), 0, folder_placeholder);
+
+  chat_placeholder =
+    xd_node_new_chat (NULL, "New Chat", folder);
+  g_list_store_insert (xd_node_get_children (folder), 0, chat_placeholder);
+
+  g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &loading);
+  xd_remote_tree_refresh (tree);
+  wait_for (&loading);
+  g_signal_handlers_disconnect_by_data (tree, &loading);
+
+  g_assert_true (child_at (root, 0) == folder_placeholder);
+  g_assert_true (child_at (folder, 0) == chat_placeholder);
+
+  daemon_stop (&daemon);
+}
+
 static void
 set_remote_agent_option (XdRemoteClient *client,
                          const char     *chat_id,
@@ -3802,6 +3845,7 @@ main (int argc, char *argv[])
   ADD ("/remote/client-pairs-and-reads-the-tree", test_client_pairs_and_reads_the_tree);
   ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
   ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
+  ADD ("/remote/tree-refresh-keeps-client-placeholders", test_tree_refresh_keeps_client_placeholders);
   ADD ("/remote/new-chat-inherits-last-changed-agent", test_remote_new_chat_inherits_last_changed_agent);
   ADD ("/remote/folder-context-is-managed-from-the-client", test_folder_context_is_managed_from_the_client);
   ADD ("/remote/agent-secrets-are-managed-without-reading-values", test_agent_secrets_are_managed_without_reading_values);

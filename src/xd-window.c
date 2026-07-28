@@ -151,7 +151,20 @@ on_node_selected (XdSidebar *sidebar,
                   XdNode    *node,
                   gpointer   user_data)
 {
-  show_chat (user_data, node);
+  XdWindow *self = user_data;
+
+  /*
+   * Model changes can produce more than one selection notification around the
+   * same node. Reopening the chat takes focus back to the composer, dismissing
+   * an open picker or finishing an inline editor in the sidebar.
+   *
+   * Activation remains separate below, so deliberately opening the row still
+   * does what the user asked.
+   */
+  if (xd_chat_view_get_chat (self->chat_view) == node)
+    return;
+
+  show_chat (self, node);
 }
 
 /*

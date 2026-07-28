@@ -11,6 +11,7 @@ xd_core_sources = files(
   'util/git-head-watch.c',
   'util/git-info.c',
   'util/subagent-tool.c',
+  'util/syntax.c',
   'util/unified-diff.c',
   'util/update-channel.c',
   'util/workflow-run.c',

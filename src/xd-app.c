@@ -101,7 +101,7 @@ static const char *XD_STYLE =
   " --sidebar-fg-color: #f2f2f4;"
   " --sidebar-backdrop-color: #060607;"
   " --secondary-sidebar-bg-color: #060607;"
-  " --popover-bg-color: #101013;"
+  " --popover-bg-color: #141416;"
   " --dialog-bg-color: #101013;"
   " --card-bg-color: #101013;"
   "}\n"
@@ -304,13 +304,18 @@ static const char *XD_STYLE =
    */
   "popover > contents { background: none; border: none; box-shadow: none;"
   " padding: 0; }\n"
-  "popover listview { background-color: #16161b;"
+  /*
+   * Match the composer's 4% white lift over #0a0a0c. Keeping the resolved
+   * colour solid avoids a translucent popover changing tone with whatever
+   * happens to sit behind it.
+   */
+  "popover listview { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
-  ".xd-menu { background-color: #16161b;"
+  ".xd-menu { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 6px; }\n"
-  ".xd-menu-popover > contents { background-color: #16161b;"
+  ".xd-menu-popover > contents { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
@@ -420,7 +425,19 @@ static const char *XD_STYLE =
   /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
    * enough width that the title and its close button stop fighting. */
   "tabbar { background: none; box-shadow: none; }\n"
-  "tabbar tabbox { background: none; margin: 0; padding: 0; }\n"
+  /*
+   * AdwTabBox lays its tabs out with a fixed gap before the first one, after
+   * the last one and between neighbours, and it clips each tab to its own
+   * box -- a shadow or an outline on the tab cannot reach into that gap. The
+   * gap is left of the fill, so a selected tab showed a sliver of bare bar
+   * beside it. Widening the box past the bar and every tab past its slot
+   * paints through the gaps instead; the overhang lands outside the
+   * scrolled area and is clipped.
+   */
+  "tabbar tabbox { background: none; margin: 0 -12px; padding: 0; }\n"
+  "tabbar tabbox > tabboxchild { margin: 0 -4px; }\n"
+  "tabbar tabbox > separator { min-width: 0; min-height: 0; margin: 0;"
+  " background: none; opacity: 0; }\n"
   "tabbar tab { border-radius: 0; margin: 0; padding: 5px 8px;"
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
