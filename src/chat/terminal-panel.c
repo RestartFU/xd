@@ -1347,6 +1347,7 @@ xd_terminal_panel_init (XdTerminalPanel *self)
 
   self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
   adw_tab_bar_set_autohide (self->bar, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->bar), "inline");
   g_signal_connect (self->bar, "notify::tabs-revealed",
                     G_CALLBACK (on_title_source_changed), self);
 

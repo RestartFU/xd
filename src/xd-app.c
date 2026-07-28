@@ -421,6 +421,8 @@ static const char *XD_STYLE =
    * enough width that the title and its close button stop fighting. */
   "tabbar { background: none; box-shadow: none; }\n"
   "tabbar tabbox { background: none; margin: 0; padding: 0; }\n"
+  "tabbar tabbox > separator { min-width: 0; min-height: 0; margin: 0;"
+  " background: none; opacity: 0; }\n"
   "tabbar tab { border-radius: 0; margin: 0; padding: 5px 8px;"
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
