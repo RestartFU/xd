@@ -666,10 +666,6 @@ add_remote_session (XdTerminalPanel *self,
 
       terminal = VTE_TERMINAL (vte_terminal_new ());
       configure_terminal (terminal);
-      gtk_widget_set_hexpand (GTK_WIDGET (terminal), FALSE);
-      gtk_widget_set_vexpand (GTK_WIDGET (terminal), FALSE);
-      gtk_widget_set_halign (GTK_WIDGET (terminal), GTK_ALIGN_START);
-      gtk_widget_set_valign (GTK_WIDGET (terminal), GTK_ALIGN_START);
       vte_terminal_set_size (terminal, columns, rows);
       g_object_set_data_full (G_OBJECT (terminal), "remote-terminal",
                               g_strdup (id), g_free);
@@ -1330,7 +1326,8 @@ static void
 xd_terminal_panel_init (XdTerminalPanel *self)
 {
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  GtkWidget *tabs = gtk_center_box_new ();
+  GtkWidget *header = gtk_overlay_new ();
+  GtkWidget *tabs = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
   GtkWidget *new_button = gtk_button_new_from_icon_name ("list-add-symbolic");
   GtkWidget *kill_button = gtk_button_new_from_icon_name ("user-trash-symbolic");
@@ -1344,7 +1341,9 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_label_set_xalign (self->title, 0.5f);
   gtk_widget_add_css_class (GTK_WIDGET (self->title), "heading");
   gtk_widget_set_visible (GTK_WIDGET (self->title), FALSE);
+  gtk_widget_set_halign (GTK_WIDGET (self->title), GTK_ALIGN_CENTER);
   gtk_widget_set_valign (GTK_WIDGET (self->title), GTK_ALIGN_CENTER);
+  gtk_widget_set_can_target (GTK_WIDGET (self->title), FALSE);
 
   self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
   adw_tab_bar_set_autohide (self->bar, TRUE);
@@ -1370,12 +1369,11 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_widget_set_margin_start (controls, 4);
   gtk_widget_set_margin_end (controls, 8);
 
-  gtk_center_box_set_start_widget (GTK_CENTER_BOX (tabs),
-                                   GTK_WIDGET (self->bar));
-  gtk_center_box_set_center_widget (GTK_CENTER_BOX (tabs),
-                                    GTK_WIDGET (self->title));
-  gtk_center_box_set_end_widget (GTK_CENTER_BOX (tabs), controls);
-  gtk_box_append (GTK_BOX (box), tabs);
+  gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->bar));
+  gtk_box_append (GTK_BOX (tabs), controls);
+  gtk_overlay_set_child (GTK_OVERLAY (header), tabs);
+  gtk_overlay_add_overlay (GTK_OVERLAY (header), GTK_WIDGET (self->title));
+  gtk_box_append (GTK_BOX (box), header);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
 
   adw_bin_set_child (ADW_BIN (self), box);
