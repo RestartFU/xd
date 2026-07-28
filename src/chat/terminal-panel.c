@@ -26,6 +26,7 @@ struct _XdTerminalPanel
   gboolean chat_is_remote;
 
   AdwTabBar *bar;
+  GtkLabel *title;          /* stands in for the tab bar while it is hidden */
   GtkStack *stack;
   GHashTable *views;        /* chat id -> AdwTabView, owned by the stack */
 };
@@ -122,6 +123,55 @@ current_terminal (XdTerminalPanel *self)
   page = adw_tab_view_get_selected_page (view);
 
   return terminal_for_page (page);
+}
+
+/*
+ * A single session leaves the tab bar hidden, and with it the only place the
+ * session was named. The label takes over there, showing the selected page's
+ * title until a second tab brings the bar back.
+ */
+static void
+update_title (XdTerminalPanel *self)
+{
+  AdwTabView *view = current_view (self);
+  AdwTabPage *page = view != NULL ? adw_tab_view_get_selected_page (view) : NULL;
+  const char *title = page != NULL ? adw_tab_page_get_title (page) : NULL;
+
+  gtk_label_set_label (self->title, title != NULL ? title : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->title),
+                          title != NULL &&
+                          !adw_tab_bar_get_tabs_revealed (self->bar));
+}
+
+static void
+on_title_source_changed (GObject    *object,
+                         GParamSpec *pspec,
+                         gpointer    user_data)
+{
+  update_title (XD_TERMINAL_PANEL (user_data));
+}
+
+static void
+on_page_attached (AdwTabView *view,
+                  AdwTabPage *page,
+                  int         position,
+                  gpointer    user_data)
+{
+  XdTerminalPanel *self = user_data;
+
+  /* Pages are appended before they are titled, so follow the title too. */
+  g_signal_connect_object (page, "notify::title",
+                           G_CALLBACK (on_title_source_changed), self, 0);
+  update_title (self);
+}
+
+static void
+on_page_detached (AdwTabView *view,
+                  AdwTabPage *page,
+                  int         position,
+                  gpointer    user_data)
+{
+  update_title (XD_TERMINAL_PANEL (user_data));
 }
 
 static gboolean
@@ -1008,6 +1058,12 @@ ensure_view (XdTerminalPanel *self,
     {
       view = ADW_TAB_VIEW (adw_tab_view_new ());
       g_signal_connect (view, "close-page", G_CALLBACK (on_close_page), self);
+      g_signal_connect (view, "notify::selected-page",
+                        G_CALLBACK (on_title_source_changed), self);
+      g_signal_connect (view, "page-attached",
+                        G_CALLBACK (on_page_attached), self);
+      g_signal_connect (view, "page-detached",
+                        G_CALLBACK (on_page_detached), self);
       gtk_stack_add_named (self->stack, GTK_WIDGET (view), key);
       g_hash_table_insert (self->views, g_strdup (key), view);
     }
@@ -1066,12 +1122,14 @@ xd_terminal_panel_set_chat (XdTerminalPanel *self,
   if (chat_id == NULL)
     {
       adw_tab_bar_set_view (self->bar, NULL);
+      update_title (self);
       return;
     }
 
   view = ensure_view (self, chat_id);
   gtk_stack_set_visible_child (self->stack, GTK_WIDGET (view));
   adw_tab_bar_set_view (self->bar, view);
+  update_title (self);
 
   if (self->remote != NULL)
     load_remote_sessions (self);
@@ -1185,7 +1243,10 @@ xd_terminal_panel_forget_chat (XdTerminalPanel *self,
     }
 
   if (g_strcmp0 (self->chat_id, chat_id) == 0)
-    adw_tab_bar_set_view (self->bar, NULL);
+    {
+      adw_tab_bar_set_view (self->bar, NULL);
+      update_title (self);
+    }
 }
 
 /* --- the buttons ----------------------------------------------------------- */
@@ -1278,8 +1339,18 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   self->pending_kills =
     g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
+  self->title = GTK_LABEL (gtk_label_new (NULL));
+  gtk_label_set_ellipsize (self->title, PANGO_ELLIPSIZE_END);
+  gtk_label_set_xalign (self->title, 0.0f);
+  gtk_widget_add_css_class (GTK_WIDGET (self->title), "heading");
+  gtk_widget_set_visible (GTK_WIDGET (self->title), FALSE);
+  gtk_widget_set_valign (GTK_WIDGET (self->title), GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->title), 12);
+
   self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
   adw_tab_bar_set_autohide (self->bar, TRUE);
+  g_signal_connect (self->bar, "notify::tabs-revealed",
+                    G_CALLBACK (on_title_source_changed), self);
 
   self->stack = GTK_STACK (gtk_stack_new ());
   gtk_widget_set_vexpand (GTK_WIDGET (self->stack), TRUE);
@@ -1300,6 +1371,7 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_widget_set_margin_start (controls, 4);
   gtk_widget_set_margin_end (controls, 8);
 
+  gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->title));
   gtk_box_append (GTK_BOX (tabs), GTK_WIDGET (self->bar));
   gtk_box_append (GTK_BOX (tabs), controls);
   gtk_box_append (GTK_BOX (box), tabs);
