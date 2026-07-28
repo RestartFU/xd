@@ -288,7 +288,7 @@ append_file_markup (MarkupBuilder    *builder,
   start_markup_row (builder, line->kind);
   g_string_append_printf (
     builder->text,
-    "<span weight=\"bold\">%s</span>"
+    "<span foreground=\"#ffbe6f\" weight=\"bold\">%s</span>"
     "  <span foreground=\"#57e389\">+%u</span>"
     "  <span foreground=\"#f66151\">−%u</span>",
     path, additions, deletions);

@@ -97,6 +97,8 @@ test_formats_one_safe_layout (void)
   g_assert_nonnull (strstr (plain, "src/a.c  +1  −1"));
   g_assert_nonnull (strstr (plain, "old <value>"));
   g_assert_nonnull (strstr (plain, "Showing first 3 of 5 rows"));
+  g_assert_nonnull (strstr (
+    markup, "foreground=\"#ffbe6f\" weight=\"bold\">src/a.c</span>"));
   g_assert_nonnull (strstr (markup, "foreground=\"#f66151\""));
 }
 
