@@ -19,6 +19,7 @@ xd_tests = {
   'syntax': 'test-syntax.c',
   'unified-diff': 'test-unified-diff.c',
   'update-channel': 'test-update-channel.c',
+  'branch-build': 'test-branch-build.c',
   'workflow-run': 'test-workflow-run.c',
   'workspace-block': 'test-workspace-block.c',
   'worktree': 'test-worktree.c',

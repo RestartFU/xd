@@ -44,16 +44,13 @@ own — it installs beside a release rather than over it, and neither edits the
 other's work. `sh -s -- --uninstall` takes it away again and leaves that
 directory alone.
 
-To try a pull request, there is a dev build: the same thing built from a branch,
-published on every push to that pull request. It uses the nightly's paths and
-installs over it on purpose, and from then on the update button and
-`xd serve --auto-update` follow the branch rather than master. Linux only.
-
-```sh
-curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install.sh | sh -s -- --dev
-```
-
-Running the nightly line again puts the nightly back.
+To try a pull request or a branch, the nightly builds it. The button beside the
+update button in the sidebar takes a pull request link, a branch link, a number
+or a branch name; it fetches that code, builds the bundle the way the nightly is
+built and installs the result over itself, then offers the restart. What it is
+given is remembered, so trying the next commit on the same branch is opening it
+and pressing the one button. Docker and git are what it needs, and Linux is
+where it runs; the update button is the way back to master's nightly.
 
 Windows, x86_64:
 
