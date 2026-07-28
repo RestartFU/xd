@@ -56,16 +56,24 @@ typedef struct
   const char *const *keywords;
   const char *const *types;
   const char *const *constants;
-  gboolean raw_strings;    /* Go's backtick string, which spans lines */
-  gboolean directives;     /* C's # lines */
+  gboolean raw_strings;         /* Go's backtick string, which spans lines */
+  gboolean directives;          /* C's # lines */
+  gboolean composite_literals;  /* Go's Type{...} */
 } Language;
 
 static const Language C_LANGUAGE = {
-  C_KEYWORDS, C_TYPES, C_CONSTANTS, FALSE, TRUE,
+  .keywords = C_KEYWORDS,
+  .types = C_TYPES,
+  .constants = C_CONSTANTS,
+  .directives = TRUE,
 };
 
 static const Language GO_LANGUAGE = {
-  GO_KEYWORDS, GO_TYPES, GO_CONSTANTS, TRUE, FALSE,
+  .keywords = GO_KEYWORDS,
+  .types = GO_TYPES,
+  .constants = GO_CONSTANTS,
+  .raw_strings = TRUE,
+  .composite_literals = TRUE,
 };
 
 static const Language *
@@ -271,6 +279,14 @@ scan_word (Emitter        *emitter,
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
   else if (word_listed (language->constants, at, length))
     append_token (emitter, XD_SYNTAX_TOKEN_NUMBER, at, length);
+  /*
+   * A composite literal names a type: Vec3{40, 70, 40}. The space is what
+   * tells it apart from a block -- gofmt writes the literal tight and "if ok
+   * {" loose -- so this one brace is looked for where it is, not past the
+   * whitespace the call below skips.
+   */
+  else if (language->composite_literals && *scan == '{')
+    append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
   else if (*after == '(')
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else
