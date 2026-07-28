@@ -158,6 +158,15 @@ struct _XdChatView
 
   GHashTable *turns;            /* chat id -> Turn* */
 
+  /*
+   * The agent process behind each chat, outliving the turns it answers.
+   *
+   * A turn ends and is discarded; the CLI that ran it can usually take the
+   * next one. Holding it here is what leaves the agent's own background work
+   * running between messages. chat id -> XdChatSession*.
+   */
+  GHashTable *sessions;
+
   GtkWidget *header;            /* owned by the toolbar */
   AdwWindowTitle *title;
   GtkStack *stack;
@@ -2315,6 +2324,11 @@ turn_free (gpointer data)
 {
   Turn *turn = data;
 
+  /* The session can outlive the turn now, so it has to be told this listener
+   * is gone rather than being left pointing at freed memory. */
+  if (turn->session != NULL)
+    g_signal_handlers_disconnect_by_data (turn->session, turn);
+
   g_clear_object (&turn->session);
   g_clear_pointer (&turn->chat_id, g_free);
   g_clear_pointer (&turn->backend_id, g_free);
@@ -2953,24 +2967,13 @@ start_turn (XdChatView *self,
   turn->segment = g_string_new (NULL);
   turn->items =
     g_ptr_array_new_with_free_func ((GDestroyNotify) turn_item_free);
-  turn->session = xd_chat_session_new (backend);
+  /* The session is chosen once the spec is built, since whether the chat's
+   * existing agent can take this turn depends on what the turn asks for. */
+
   /* Taken now rather than when the reply lands: the model can be changed
    * while the agent is still working, and what answered is whatever was
    * running when the turn started. */
   turn->label = reply_title (chat);
-
-  g_signal_connect (turn->session, "session-started",
-                    G_CALLBACK (on_session_started), turn);
-  g_signal_connect (turn->session, "commands",
-                    G_CALLBACK (on_commands), turn);
-  g_signal_connect (turn->session, "text-delta",
-                    G_CALLBACK (on_text_delta), turn);
-  g_signal_connect (turn->session, "tool-use",
-                    G_CALLBACK (on_tool_use), turn);
-  g_signal_connect (turn->session, "usage",
-                    G_CALLBACK (on_usage), turn);
-  g_signal_connect (turn->session, "finished",
-                    G_CALLBACK (on_turn_finished), turn);
 
   g_hash_table_insert (self->turns, g_strdup (chat->id), turn);
   set_working (self, TRUE);
@@ -3011,14 +3014,56 @@ start_turn (XdChatView *self,
   spec.access = chat->plan ? AI_ACCESS_PLAN
                            : ai_access_from_string (chat->access);
 
-  if (!xd_chat_session_start (turn->session, &spec, &error))
-    {
-      append_row (self, XD_MESSAGE_ERROR, error->message);
-      xd_storage_append_message (self->storage, chat->id, "error",
-                                 error->message, NULL, NULL, NULL);
-      g_hash_table_remove (self->turns, chat->id);
-      set_working (self, FALSE);
-    }
+  /*
+   * The chat's agent answers again if it can.
+   *
+   * Keeping the process is what leaves whatever it started -- a background
+   * shell, a watch, a build -- still there for the next message. Anything the
+   * running one cannot serve, notably a changed model, effort, access,
+   * directory or backend, takes a new process and ends the old one.
+   */
+  {
+    XdChatSession *pooled = g_hash_table_lookup (self->sessions, chat->id);
+    gboolean continuing =
+      pooled != NULL && xd_chat_session_can_continue (pooled, backend, &spec);
+    gboolean started;
+
+    turn->session = continuing ? g_object_ref (pooled)
+                               : xd_chat_session_new (backend);
+
+    g_signal_connect (turn->session, "session-started",
+                      G_CALLBACK (on_session_started), turn);
+    g_signal_connect (turn->session, "commands",
+                      G_CALLBACK (on_commands), turn);
+    g_signal_connect (turn->session, "text-delta",
+                      G_CALLBACK (on_text_delta), turn);
+    g_signal_connect (turn->session, "tool-use",
+                      G_CALLBACK (on_tool_use), turn);
+    g_signal_connect (turn->session, "usage",
+                      G_CALLBACK (on_usage), turn);
+    g_signal_connect (turn->session, "finished",
+                      G_CALLBACK (on_turn_finished), turn);
+
+    started = continuing
+      ? xd_chat_session_continue (turn->session, &spec, &error)
+      : xd_chat_session_start (turn->session, &spec, &error);
+
+    if (!started)
+      {
+        append_row (self, XD_MESSAGE_ERROR, error->message);
+        xd_storage_append_message (self->storage, chat->id, "error",
+                                   error->message, NULL, NULL, NULL);
+        /* Whatever was pooled either failed us or was never usable. */
+        g_hash_table_remove (self->sessions, chat->id);
+        g_hash_table_remove (self->turns, chat->id);
+        set_working (self, FALSE);
+      }
+    else if (!continuing)
+      {
+        g_hash_table_insert (self->sessions, g_strdup (chat->id),
+                             g_object_ref (turn->session));
+      }
+  }
 
   update_send_button (self);
 }
@@ -4272,6 +4317,10 @@ forget_chat_sessions (XdChatView *self,
     activate_empty_transcript (self);
   remove_transcript_page (self, page);
   xd_terminal_panel_forget_chat (self->terminal, xd_node_get_chat_id (chat));
+
+  /* Nor an agent, which would otherwise sit waiting for a message that
+   * cannot come. */
+  g_hash_table_remove (self->sessions, xd_node_get_chat_id (chat));
 }
 
 static int
@@ -5333,6 +5382,8 @@ xd_chat_view_dispose (GObject *object)
     xd_node_set_active (self->chat, FALSE);
   g_clear_object (&self->chat);
   g_clear_pointer (&self->turns, g_hash_table_unref);
+  /* Dropping a session ends its process, so emptying this stops them all. */
+  g_clear_pointer (&self->sessions, g_hash_table_unref);
   g_queue_clear (&self->transcript_lru);
   g_clear_pointer (&self->transcript_pages, g_hash_table_unref);
   g_clear_pointer (&self->attachments, g_ptr_array_unref);
@@ -5362,6 +5413,8 @@ xd_chat_view_init (XdChatView *self)
   GtkWidget *empty = adw_status_page_new ();
 
   self->turns = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, turn_free);
+  self->sessions = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                         g_free, g_object_unref);
   self->transcript_pages = g_hash_table_new_full (
     g_str_hash, g_str_equal, NULL, (GDestroyNotify) transcript_page_free);
   g_queue_init (&self->transcript_lru);

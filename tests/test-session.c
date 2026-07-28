@@ -54,6 +54,55 @@ static const AiBackend stub_backend = {
   .parse_object = stub_parse_object,
 };
 
+/*
+ * A CLI that takes its turns on stdin, the way claude does with
+ * --input-format stream-json: it answers each line and waits for the next
+ * rather than exiting, which is the whole point of keeping it.
+ *
+ * Every launch appends to a file, so the test can tell one process answering
+ * twice from two processes answering once -- which is the only thing that
+ * distinguishes this feature from what came before it.
+ */
+static char *stream_launch_log;
+
+static GPtrArray *
+stream_build_argv (const AiBackend *self,
+                   const AiRunSpec *spec)
+{
+  GPtrArray *argv = g_ptr_array_new_with_free_func (g_free);
+  g_autofree char *script = g_strdup_printf (
+    "printf 'x' >> %s\n"
+    "while IFS= read -r line; do "
+    "  printf '%%s\\n' '{\"type\":\"result\",\"subtype\":\"success\","
+    "\"session_id\":\"kept\",\"is_error\":false,\"result\":\"ok\"}'; "
+    "done\n",
+    stream_launch_log);
+
+  g_ptr_array_add (argv, g_strdup (self->program));
+  g_ptr_array_add (argv, g_strdup ("-c"));
+  g_ptr_array_add (argv, g_steal_pointer (&script));
+  g_ptr_array_add (argv, NULL);
+
+  return argv;
+}
+
+static char *
+stream_encode_turn (const AiBackend *self,
+                    const AiRunSpec *spec)
+{
+  return g_strdup_printf ("{\"prompt\":\"%s\"}",
+                          spec->prompt != NULL ? spec->prompt : "");
+}
+
+static const AiBackend stream_backend = {
+  .id = "stream",
+  .display_name = "Stream",
+  .program = "sh",
+  .build_argv = stream_build_argv,
+  .encode_turn = stream_encode_turn,
+  .parse_object = stub_parse_object,
+};
+
 static const AiBackend missing_backend = {
   .id = "missing",
   .display_name = "Missing",
@@ -296,6 +345,61 @@ test_agent_secret_reaches_process_not_prompt (void)
   g_rmdir (directory);
 }
 
+
+/*
+ * The point of the whole change: a second turn reuses the first one's process.
+ *
+ * Counted by launches rather than by anything the session reports, because a
+ * session that quietly restarted would look identical from the outside and is
+ * exactly the failure worth catching.
+ */
+static void
+test_reuses_the_process_for_a_second_turn (void)
+{
+  g_autoptr (XdChatSession) session = xd_chat_session_new (&stream_backend);
+  g_autoptr (GError) error = NULL;
+  g_autofree char *dir = g_dir_make_tmp ("xd-stream-XXXXXX", NULL);
+  g_autofree char *launches = NULL;
+  AiRunSpec spec = { 0 };
+  Run first = { 0 };
+  Run second = { 0 };
+
+  stream_launch_log = g_build_filename (dir, "launches", NULL);
+  spec.prompt = "one";
+
+  run_init (&first, session);
+  g_assert_true (xd_chat_session_start (session, &spec, &error));
+  g_assert_no_error (error);
+  g_timeout_add_seconds (10, on_timeout, &first);
+  g_main_loop_run (first.loop);
+  g_assert_true (first.finished);
+  g_assert_true (first.success);
+
+  /* The turn is over and the process is not: that is the difference. */
+  g_assert_true (xd_chat_session_can_continue (session, &stream_backend, &spec));
+
+  /* The first run's handlers are still on the session, and its Run is about
+   * to stop being valid: one session outliving several turns is new, and so
+   * is having to take listeners off it. */
+  g_signal_handlers_disconnect_by_data (session, &first);
+  run_clear (&first);
+  run_init (&second, session);
+
+  spec.prompt = "two";
+  g_assert_true (xd_chat_session_continue (session, &spec, &error));
+  g_assert_no_error (error);
+  g_timeout_add_seconds (10, on_timeout, &second);
+  g_main_loop_run (second.loop);
+  g_assert_true (second.finished);
+  g_assert_true (second.success);
+
+  g_assert_true (g_file_get_contents (stream_launch_log, &launches, NULL, NULL));
+  g_assert_cmpstr (launches, ==, "x");
+
+  run_clear (&second);
+  g_clear_pointer (&stream_launch_log, g_free);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -320,6 +424,8 @@ main (int   argc,
   g_test_add_func ("/session/nonzero-exit", test_nonzero_exit_is_a_failure);
   g_test_add_func ("/session/agent-secret-environment",
                    test_agent_secret_reaches_process_not_prompt);
+  g_test_add_func ("/session/reuses-the-process-for-a-second-turn",
+                   test_reuses_the_process_for_a_second_turn);
 
   {
     int status = g_test_run ();
