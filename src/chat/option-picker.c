@@ -311,6 +311,7 @@ xd_option_picker_init (XdOptionPicker *self)
   GtkWidget *button_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget *popover = gtk_popover_new ();
   GtkWidget *panel = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *scroller = gtk_scrolled_window_new ();
 
   self->choices =
     g_ptr_array_new_with_free_func ((GDestroyNotify) choice_free);
@@ -330,7 +331,21 @@ xd_option_picker_init (XdOptionPicker *self)
   g_signal_connect (self->list, "row-activated",
                     G_CALLBACK (on_row_activated), self);
 
-  gtk_box_append (GTK_BOX (panel), GTK_WIDGET (self->list));
+  /*
+   * A repository can have dozens of worktrees. Let short pickers keep their
+   * natural height, but cap long ones so the popover can fit on screen and
+   * scroll instead of being dismissed by the display server.
+   */
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_max_content_height (
+    GTK_SCROLLED_WINDOW (scroller), 420);
+  gtk_scrolled_window_set_propagate_natural_height (
+    GTK_SCROLLED_WINDOW (scroller), TRUE);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller),
+                                 GTK_WIDGET (self->list));
+
+  gtk_box_append (GTK_BOX (panel), scroller);
   gtk_widget_add_css_class (panel, "xd-menu");
   gtk_popover_set_child (GTK_POPOVER (popover), panel);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
