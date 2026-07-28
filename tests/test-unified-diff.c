@@ -97,6 +97,8 @@ test_formats_one_safe_layout (void)
   g_assert_nonnull (strstr (plain, "src/a.c  +1  −1"));
   g_assert_nonnull (strstr (plain, "old <value>"));
   g_assert_nonnull (strstr (plain, "Showing first 3 of 5 rows"));
+  g_assert_nonnull (strstr (
+    markup, "foreground=\"#ffbe6f\" weight=\"bold\">src/a.c</span>"));
   g_assert_nonnull (strstr (markup, "foreground=\"#f66151\""));
 }
 
@@ -157,6 +159,7 @@ test_reports_row_kinds_without_backgrounds (void)
   /* An added line with no text of its own still colours its whole row. */
   g_assert_cmpint (g_array_index (kinds, guint8, 5), ==, XD_DIFF_LINE_ADDED);
 
+  g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_FILE), ==, "#000000");
   g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_ADDED), ==, "#183522");
   g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_REMOVED), ==, "#3a1d1b");
   g_assert_null (xd_diff_line_background (XD_DIFF_LINE_CONTEXT));

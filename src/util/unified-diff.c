@@ -222,6 +222,8 @@ escaped_display_text (const char *text)
 const char *
 xd_diff_line_background (XdDiffLineKind kind)
 {
+  if (kind == XD_DIFF_LINE_FILE)
+    return "#000000";
   if (kind == XD_DIFF_LINE_ADDED)
     return "#183522";
   if (kind == XD_DIFF_LINE_REMOVED)
@@ -288,7 +290,7 @@ append_file_markup (MarkupBuilder    *builder,
   start_markup_row (builder, line->kind);
   g_string_append_printf (
     builder->text,
-    "<span weight=\"bold\">%s</span>"
+    "<span foreground=\"#ffbe6f\" weight=\"bold\">%s</span>"
     "  <span foreground=\"#57e389\">+%u</span>"
     "  <span foreground=\"#f66151\">−%u</span>",
     path, additions, deletions);
