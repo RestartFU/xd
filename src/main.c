@@ -210,8 +210,10 @@ ensure_certificate (GError **error)
   return g_tls_certificate_new_from_files (cert_path, key_path, error);
 }
 
+/* How often the daemon looks is the channel's to say, the same as it is for the
+ * window: a dev build is being waited on, and this is the half of the pair that
+ * updates without anyone there to press anything. */
 #define DAEMON_UPDATE_FIRST_SECONDS 8
-#define DAEMON_UPDATE_EVERY_SECONDS (60 * 5)
 
 typedef struct
 {
@@ -343,7 +345,7 @@ on_daemon_update_checked (GObject      *source,
   g_autoptr (GBytes) out = NULL;
   g_autoptr (GError) error = NULL;
   g_autofree char *latest = NULL;
-  const char *json;
+  const char *body;
   gsize length;
 
   if (!g_subprocess_communicate_finish (
@@ -354,9 +356,9 @@ on_daemon_update_checked (GObject      *source,
       return;
     }
 
-  json = g_bytes_get_data (out, &length);
-  latest = json != NULL && length > 0
-    ? xd_update_channel_latest_from_json (xd_update_channel_current (), json)
+  body = g_bytes_get_data (out, &length);
+  latest = body != NULL && length > 0
+    ? xd_update_channel_latest_from_reply (xd_update_channel_current (), body)
     : NULL;
   if (!xd_update_channel_is_newer (xd_update_channel_current (), latest))
     {
@@ -459,7 +461,8 @@ daemon_updater_init (DaemonUpdater *updater,
   updater->first_check_id = g_timeout_add_seconds (
     DAEMON_UPDATE_FIRST_SECONDS, daemon_update_first_check, updater);
   updater->repeating_check_id = g_timeout_add_seconds (
-    DAEMON_UPDATE_EVERY_SECONDS, daemon_update_repeating_check, updater);
+    xd_update_channel_poll_seconds (xd_update_channel_current ()),
+    daemon_update_repeating_check, updater);
 }
 
 static void

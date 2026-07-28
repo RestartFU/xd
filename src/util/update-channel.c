@@ -1,6 +1,7 @@
 #include "update-channel.h"
 
 #include <json-glib/json-glib.h>
+#include <string.h>
 
 XdUpdateChannel
 xd_update_channel_current (void)
@@ -36,6 +37,12 @@ xd_update_channel_check_url (XdUpdateChannel channel)
 {
   const char *tag = xd_update_channel_tag (channel);
 
+  /* The commit, published beside the bundle it built: a dev build asks for this
+   * every twenty-five seconds, which is far past what the API allows an hour. */
+  if (channel == XD_UPDATE_CHANNEL_DEV)
+    return g_strdup_printf (
+      "https://github.com/" XD_REPO "/releases/download/%s/commit.txt", tag);
+
   /* Not /releases/latest for a rolling channel: that resolves to the newest
    * full release, and both rolling releases are prereleases. */
   if (tag != NULL)
@@ -43,6 +50,15 @@ xd_update_channel_check_url (XdUpdateChannel channel)
       "https://api.github.com/repos/" XD_REPO "/releases/tags/%s", tag);
 
   return g_strdup ("https://api.github.com/repos/" XD_REPO "/releases/latest");
+}
+
+guint
+xd_update_channel_poll_seconds (XdUpdateChannel channel)
+{
+  if (channel == XD_UPDATE_CHANNEL_DEV)
+    return 25;
+
+  return 60 * 5;
 }
 
 /*
@@ -72,15 +88,40 @@ xd_update_channel_install_command (XdUpdateChannel channel)
                    "/releases/latest/download/install.sh | sh -s -- --release");
 }
 
+/* One commit on a line of its own, and nothing that only looks like one. */
+static char *
+commit_from_body (const char *body)
+{
+  g_autofree char *commit = g_strdup (body);
+  gsize length;
+
+  commit = g_strstrip (commit);
+  length = strlen (commit);
+
+  if (length < 7 || length > 40)
+    return NULL;
+
+  for (gsize i = 0; i < length; i++)
+    if (!g_ascii_isxdigit (commit[i]))
+      return NULL;
+
+  return g_steal_pointer (&commit);
+}
+
 char *
-xd_update_channel_latest_from_json (XdUpdateChannel  channel,
-                                    const char      *json)
+xd_update_channel_latest_from_reply (XdUpdateChannel  channel,
+                                     const char      *body)
 {
   g_autoptr (JsonParser) parser = json_parser_new ();
   JsonObject *release;
 
-  if (json == NULL ||
-      !json_parser_load_from_data (parser, json, -1, NULL) ||
+  if (body == NULL)
+    return NULL;
+
+  if (channel == XD_UPDATE_CHANNEL_DEV)
+    return commit_from_body (body);
+
+  if (!json_parser_load_from_data (parser, body, -1, NULL) ||
       !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser)))
     return NULL;
 
