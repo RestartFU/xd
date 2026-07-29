@@ -34,6 +34,7 @@ typedef enum
   XD_SYNTAX_JSON,
   XD_SYNTAX_YAML,
   XD_SYNTAX_TOML,
+  XD_SYNTAX_V,
 } XdSyntaxLanguage;
 
 typedef enum

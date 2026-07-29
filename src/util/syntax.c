@@ -125,6 +125,27 @@ static const char *const TOML_CONSTANTS[] = {
   "false", "true", NULL,
 };
 
+static const char *const V_KEYWORDS[] = {
+  "as", "asm", "assert", "atomic", "break", "const", "continue", "defer",
+  "else", "enum", "fn", "for", "go", "goto", "if", "implements", "import",
+  "in", "interface", "is", "isreftype", "lock", "match", "module", "mut",
+  "or", "pub", "return", "rlock", "select", "shared", "sizeof", "spawn",
+  "static", "struct", "type", "typeof", "union", "unsafe", "volatile",
+  "__global", "__offsetof",
+  NULL,
+};
+
+static const char *const V_TYPES[] = {
+  "any", "bool", "byte", "byteptr", "char", "charptr", "f32", "f64",
+  "i8", "i16", "int", "i64", "i128", "isize", "map", "rune", "string",
+  "u8", "u16", "u32", "u64", "u128", "usize", "voidptr",
+  NULL,
+};
+
+static const char *const V_CONSTANTS[] = {
+  "false", "none", "true", NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -149,14 +170,20 @@ typedef struct
   gboolean composite_literals;  /* Go's Type{...} */
   gboolean bang_functions;       /* Rust's macro_name! */
   gboolean generic_functions;    /* Rust's function_name<T>(...) */
+  gboolean square_generic_functions; /* V's function_name[T](...) */
   gboolean rust_lifetimes;       /* Rust's 'name */
   gboolean rust_strings;         /* Rust's r#"..."# strings */
-  gboolean nested_block_comments; /* Rust's nested block comments */
+  gboolean nested_block_comments; /* languages with nested block comments */
   gboolean bare_keys;            /* YAML and TOML unquoted keys */
   gboolean quoted_keys;          /* JSON, YAML and TOML quoted keys */
   gboolean table_headers;        /* TOML's [table] and [[array]] */
   gboolean yaml_references;      /* YAML anchors, aliases and tags */
   gboolean tilde_constant;       /* YAML's null shorthand */
+  gboolean prefixed_raw_strings; /* V's r'...' and r"..." strings */
+  gboolean backtick_literals;    /* V's rune literals */
+  gboolean at_attributes;        /* V's @[attribute] */
+  gboolean dollar_directives;    /* V's $if and compile-time calls */
+  gboolean shebangs;             /* executable scripts' #! line */
   char key_delimiter;            /* ':' for mappings, '=' for assignments */
 } Language;
 
@@ -253,6 +280,24 @@ static const Language TOML_LANGUAGE = {
   .key_delimiter = '=',
 };
 
+static const Language V_LANGUAGE = {
+  .keywords = V_KEYWORDS,
+  .types = V_TYPES,
+  .constants = V_CONSTANTS,
+  .directives = TRUE,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
+  .capitalized_types = TRUE,
+  .composite_literals = TRUE,
+  .square_generic_functions = TRUE,
+  .nested_block_comments = TRUE,
+  .prefixed_raw_strings = TRUE,
+  .backtick_literals = TRUE,
+  .at_attributes = TRUE,
+  .dollar_directives = TRUE,
+  .shebangs = TRUE,
+};
+
 static const Language *
 language_table (XdSyntaxLanguage language)
 {
@@ -274,6 +319,8 @@ language_table (XdSyntaxLanguage language)
     return &YAML_LANGUAGE;
   if (language == XD_SYNTAX_TOML)
     return &TOML_LANGUAGE;
+  if (language == XD_SYNTAX_V)
+    return &V_LANGUAGE;
 
   return NULL;
 }
@@ -325,6 +372,8 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_YAML;
   if (g_strcmp0 (dot, ".toml") == 0)
     return XD_SYNTAX_TOML;
+  if (g_strcmp0 (dot, ".v") == 0 || g_strcmp0 (dot, ".vsh") == 0)
+    return XD_SYNTAX_V;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -480,6 +529,23 @@ scan_quoted_key (Emitter    *emitter,
   return scan;
 }
 
+static const char *
+scan_prefixed_raw_string (Emitter    *emitter,
+                          const char *at)
+{
+  const char *scan = at + 2;
+  char quote = at[1];
+
+  while (*scan != '\0' && *scan != quote)
+    scan++;
+
+  if (*scan == quote)
+    scan++;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, (gsize) (scan - at));
+  return scan;
+}
+
 /*
  * A Make expansion is one token. Nested expansions using the same brackets
  * advance the depth; ordinary parentheses inside shell text do not.
@@ -584,6 +650,30 @@ followed_by_generic_call (const char *at)
   return depth == 0 && *at == '(';
 }
 
+static gboolean
+followed_by_square_generic_call (const char *at)
+{
+  guint depth = 0;
+
+  if (*at != '[')
+    return FALSE;
+
+  do
+    {
+      if (*at == '[')
+        depth++;
+      else if (*at == ']')
+        depth--;
+      at++;
+    }
+  while (*at != '\0' && depth > 0);
+
+  while (*at == ' ' || *at == '\t')
+    at++;
+
+  return depth == 0 && *at == '(';
+}
+
 static const char *
 scan_word (Emitter        *emitter,
            const Language *language,
@@ -624,7 +714,9 @@ scan_word (Emitter        *emitter,
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
   else if (*after == '(' ||
            (language->bang_functions && *after == '!') ||
-           (language->generic_functions && followed_by_generic_call (after)))
+           (language->generic_functions && followed_by_generic_call (after)) ||
+           (language->square_generic_functions &&
+            followed_by_square_generic_call (after)))
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else
     append_plain (emitter, at, length);
@@ -732,6 +824,62 @@ scan_yaml_reference (Emitter    *emitter,
 
   while (is_word_byte (*scan) || *scan == '-' || *scan == '.' ||
          *scan == '/' || *scan == ':')
+    scan++;
+
+  if (scan == at + 1)
+    return NULL;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static const char *
+scan_at_attribute (Emitter    *emitter,
+                   const char *at)
+{
+  const char *scan = at + 2;
+  guint depth = 1;
+
+  while (*scan != '\0' && depth > 0)
+    {
+      if (*scan == '\'' || *scan == '"')
+        {
+          char quote = *scan++;
+
+          while (*scan != '\0' && *scan != quote)
+            scan += (*scan == '\\' && scan[1] != '\0') ? 2 : 1;
+          if (*scan == quote)
+            scan++;
+        }
+      else if (*scan == '[')
+        {
+          depth++;
+          scan++;
+        }
+      else if (*scan == ']')
+        {
+          depth--;
+          scan++;
+        }
+      else
+        {
+          scan++;
+        }
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static const char *
+scan_dollar_directive (Emitter    *emitter,
+                       const char *at)
+{
+  const char *scan = at + 1;
+
+  while (is_word_byte (*scan))
     scan++;
 
   if (scan == at + 1)
@@ -1058,6 +1206,12 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;
         }
+      else if (table->shebangs && at == line &&
+               at[0] == '#' && at[1] == '!')
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
+          return;
+        }
       else if (table->hash_comments && *at == '#' &&
                starts_the_line (line, at))
         {
@@ -1080,6 +1234,10 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
                starts_the_line (line, at))
         {
           at = scan_table_header (&emitter, at);
+        }
+      else if (table->at_attributes && at[0] == '@' && at[1] == '[')
+        {
+          at = scan_at_attribute (&emitter, at);
         }
       else if (table->triple_strings &&
                (strncmp (at, "\"\"\"", 3) == 0 ||
@@ -1119,6 +1277,11 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
                 return;
             }
         }
+      else if (table->prefixed_raw_strings && at[0] == 'r' &&
+               (at[1] == '\'' || at[1] == '"'))
+        {
+          at = scan_prefixed_raw_string (&emitter, at);
+        }
       else if (table->rust_lifetimes && *at == '\'' &&
                (g_ascii_isalpha (at[1]) || at[1] == '_'))
         {
@@ -1135,6 +1298,10 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           at = scan_quoted_key (&emitter, at, *at);
         }
       else if (*at == '"' || *at == '\'')
+        {
+          at = scan_quoted (&emitter, at, *at);
+        }
+      else if (table->backtick_literals && *at == '`')
         {
           at = scan_quoted (&emitter, at, *at);
         }
@@ -1160,6 +1327,20 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       else if (table->directives && *at == '#' && starts_the_line (line, at))
         {
           at = scan_directive (&emitter, at);
+        }
+      else if (table->dollar_directives && *at == '$')
+        {
+          const char *after = scan_dollar_directive (&emitter, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
         }
       else if (table->yaml_references &&
                (*at == '&' || *at == '*' || *at == '!'))

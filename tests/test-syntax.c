@@ -92,6 +92,10 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_YAML);
   g_assert_cmpint (xd_syntax_language_for_path ("Cargo.toml"),
                    ==, XD_SYNTAX_TOML);
+  g_assert_cmpint (xd_syntax_language_for_path ("main.v"),
+                   ==, XD_SYNTAX_V);
+  g_assert_cmpint (xd_syntax_language_for_path ("deploy.vsh"),
+                   ==, XD_SYNTAX_V);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -300,6 +304,41 @@ test_classifies_toml (void)
   g_assert_nonnull (strstr (enabled, "number:true\n"));
 }
 
+static void
+test_classifies_v (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *attribute = scan (
+    XD_SYNTAX_V, "@[json: 'userName']", &state, NULL);
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_V, "pub fn decode[T](name string) ?User {", &state, NULL);
+  g_autofree char *body = scan (
+    XD_SYNTAX_V,
+    "user := User{name: r'Ada\\n'}; println(user); letter := `V` // done",
+    &state, NULL);
+  g_autofree char *compile_time = scan (
+    XD_SYNTAX_V, "$if linux { assert true }", &state, NULL);
+  g_autofree char *shebang = scan (
+    XD_SYNTAX_V, "#!/usr/bin/env -S v", &state, NULL);
+
+  g_assert_nonnull (strstr (attribute, "preproc:@[json: 'userName']\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:pub\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:fn\n"));
+  g_assert_nonnull (strstr (declaration, "function:decode\n"));
+  g_assert_nonnull (strstr (declaration, "type:T\n"));
+  g_assert_nonnull (strstr (declaration, "type:string\n"));
+  g_assert_nonnull (strstr (declaration, "type:User\n"));
+  g_assert_nonnull (strstr (body, "type:User\n"));
+  g_assert_nonnull (strstr (body, "string:r'Ada\\n'\n"));
+  g_assert_nonnull (strstr (body, "function:println\n"));
+  g_assert_nonnull (strstr (body, "string:`V`\n"));
+  g_assert_nonnull (strstr (body, "comment:// done\n"));
+  g_assert_nonnull (strstr (compile_time, "preproc:$if\n"));
+  g_assert_nonnull (strstr (compile_time, "keyword:assert\n"));
+  g_assert_nonnull (strstr (compile_time, "number:true\n"));
+  g_assert_nonnull (strstr (shebang, "comment:#!/usr/bin/env -S v\n"));
+}
+
 /*
  * The type of a composite literal is a type, and the space is what says so:
  * gofmt writes "Vec3{40}" tight and "if ok {" loose.
@@ -484,6 +523,24 @@ test_carries_a_nested_rust_comment (void)
   g_assert_nonnull (strstr (closed, "function:main\n"));
 }
 
+static void
+test_carries_a_nested_v_comment (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *opened = scan (
+    XD_SYNTAX_V, "/* outer /* inner */ still", &state, NULL);
+  g_autofree char *closed = NULL;
+
+  g_assert_cmpuint (state.in_comment, ==, 1);
+  g_assert_nonnull (
+    strstr (opened, "comment:/* outer /* inner */ still\n"));
+
+  closed = scan (XD_SYNTAX_V, "comment */ fn main() {}", &state, NULL);
+  g_assert_false (state.in_comment);
+  g_assert_nonnull (strstr (closed, "keyword:fn\n"));
+  g_assert_nonnull (strstr (closed, "function:main\n"));
+}
+
 /* A language this cannot read is handed straight back, uncoloured. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -533,6 +590,7 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-json", test_classifies_json);
   g_test_add_func ("/syntax/classifies-yaml", test_classifies_yaml);
   g_test_add_func ("/syntax/classifies-toml", test_classifies_toml);
+  g_test_add_func ("/syntax/classifies-v", test_classifies_v);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
@@ -553,6 +611,8 @@ main (int   argc,
                    test_carries_a_rust_raw_string);
   g_test_add_func ("/syntax/carries-a-nested-rust-comment",
                    test_carries_a_nested_rust_comment);
+  g_test_add_func ("/syntax/carries-a-nested-v-comment",
+                   test_carries_a_nested_v_comment);
   g_test_add_func ("/syntax/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/syntax/survives-unterminated-text",
