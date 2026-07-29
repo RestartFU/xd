@@ -54,6 +54,46 @@ describe Xd::Daemon::Server do
     end
   end
 
+  it "replaces a stale socket but not a live daemon" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-server-stale-#{Random::Secure.hex(12)}"
+    )
+    socket_path = File.join(directory, "daemon.sock")
+    first_store = Xd::Storage::Store.new(
+      File.join(directory, "first.db")
+    )
+    second_store = Xd::Storage::Store.new(
+      File.join(directory, "second.db")
+    )
+    first = Xd::Daemon::Server.new(Xd::Daemon::Engine.new(first_store))
+    second = Xd::Daemon::Server.new(Xd::Daemon::Engine.new(second_store))
+
+    begin
+      first.listen_local(socket_path)
+      expect_raises(IO::Error, /already running/) do
+        second.listen_local(socket_path)
+      end
+      first.close
+      File.exists?(socket_path).should be_false
+
+      # A crashed daemon leaves only the socket inode.
+      stale = UNIXServer.new(socket_path)
+      stale.close
+      second.listen_local(socket_path)
+      UNIXSocket.open(socket_path) do |client|
+        client.puts %({"op":"ping"})
+        JSON.parse(client.gets.not_nil!)["ok"].as_bool.should be_true
+      end
+    ensure
+      first.close
+      second.close
+      first_store.close
+      second_store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "fans mutation events to every connected local client after response" do
     directory = File.join(
       Dir.tempdir,

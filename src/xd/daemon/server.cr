@@ -27,6 +27,18 @@ module Xd
               "Refusing to replace non-socket local endpoint: #{path}"
             )
           end
+
+          live = begin
+            probe = UNIXSocket.new(path)
+            probe.close
+            true
+          rescue IO::Error
+            false
+          end
+          if live
+            raise IO::Error.new("Local daemon is already running at #{path}")
+          end
+          File.delete(path)
         end
 
         directory = Path[path].dirname
@@ -84,6 +96,7 @@ module Xd
         local : UNIXServer? = nil
         remote : TCPServer? = nil
         clients = [] of IO
+        local_path : String? = nil
 
         @lock.synchronize do
           return if @closed
@@ -92,6 +105,8 @@ module Xd
           remote = @remote_listener
           @local_listener = nil
           @remote_listener = nil
+          local_path = @local_path
+          @local_path = nil
           clients = @clients.dup
           @clients.clear
         end
@@ -103,6 +118,10 @@ module Xd
             client.close
           rescue IO::Error
           end
+        end
+        if path = local_path
+          info = File.info?(path, follow_symlinks: false)
+          File.delete?(path) if info.try(&.type.socket?)
         end
       end
 
