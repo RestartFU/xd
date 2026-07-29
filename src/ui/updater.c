@@ -1,5 +1,6 @@
 #include "updater.h"
 
+#include "branch-build-dialog.h"
 #include "util/host-launch.h"
 #include "util/update-channel.h"
 
@@ -16,10 +17,9 @@
  * environment back -- curl is the host's, and must load the host's OpenSSL.
  */
 
-/* Often enough that a build pushed while the window is open turns up in it --
- * how often is the channel's to say, since a dev build is watched far more
- * closely than a nightly. The first check waits a moment either way, because
- * starting up is busy and this is not. */
+/* Often enough that a build published while the window is open turns up in it.
+ * The first check waits a moment, because starting up is busy and this is
+ * not. */
 #define FIRST_CHECK_SECONDS 8
 
 typedef enum
@@ -36,6 +36,10 @@ struct _XdUpdater
   AdwBin parent_instance;
 
   GtkButton *button;
+  /* Always there on a nightly, unlike the update button beside it: a branch
+   * can be built at any moment, and a button that appeared only when there
+   * was something to install would not be a way to ask for one. */
+  GtkButton *branch;
   State state;
   char *trouble;
 
@@ -133,7 +137,12 @@ show_state (XdUpdater *self)
       break;
     }
 
-  gtk_widget_set_visible (GTK_WIDGET (self), icon != NULL);
+  /* The row is there for whichever of the two buttons has something to be
+   * there for. */
+  gtk_widget_set_visible (GTK_WIDGET (self->button), icon != NULL);
+  gtk_widget_set_visible (
+    GTK_WIDGET (self),
+    icon != NULL || gtk_widget_get_visible (GTK_WIDGET (self->branch)));
 
   if (icon == NULL)
     return;
@@ -269,9 +278,8 @@ check_now (gpointer user_data)
     return G_SOURCE_CONTINUE;
 
   self->repeating = TRUE;
-  self->check_id = g_timeout_add_seconds (
-    xd_update_channel_poll_seconds (xd_update_channel_current ()),
-    check_now, self);
+  self->check_id = g_timeout_add_seconds (XD_UPDATE_POLL_SECONDS,
+                                          check_now, self);
 
   return G_SOURCE_REMOVE;
 }
@@ -350,6 +358,30 @@ restart (XdUpdater *self)
   g_application_quit (g_application_get_default ());
 }
 
+/* --- a branch, built here --------------------------------------------------- */
+
+/*
+ * The build is installed; what is running is still the old copy.
+ *
+ * Which is exactly where an update leaves things, so it lands in the same
+ * state and the same button offers the same restart -- there is no second way
+ * to be holding a newly installed build.
+ */
+static void
+on_branch_installed (gpointer user_data)
+{
+  set_state (XD_UPDATER (user_data), STATE_DONE);
+}
+
+static void
+on_branch_clicked (GtkButton *button,
+                   gpointer   user_data)
+{
+  XdUpdater *self = user_data;
+
+  xd_branch_build_dialog_present (GTK_WIDGET (self), on_branch_installed, self);
+}
+
 static void
 on_clicked (GtkButton *button,
             gpointer   user_data)
@@ -415,6 +447,8 @@ xd_updater_class_init (XdUpdaterClass *klass)
 static void
 xd_updater_init (XdUpdater *self)
 {
+  GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+
   self->cancellable = g_cancellable_new ();
   self->install_dir = find_install_dir ();
   self->state = STATE_QUIET;
@@ -424,10 +458,38 @@ xd_updater_init (XdUpdater *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->button), "xd-update");
   g_signal_connect (self->button, "clicked", G_CALLBACK (on_clicked), self);
 
-  adw_bin_set_child (ADW_BIN (self), GTK_WIDGET (self->button));
+  self->branch = GTK_BUTTON (
+    gtk_button_new_from_icon_name ("applications-engineering-symbolic"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->branch), "flat");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->branch),
+                               "Build a pull request or a branch and install it");
+  gtk_accessible_update_property (
+    GTK_ACCESSIBLE (self->branch),
+    GTK_ACCESSIBLE_PROPERTY_LABEL, "Build a branch",
+    -1);
+  g_signal_connect (self->branch, "clicked",
+                    G_CALLBACK (on_branch_clicked), self);
 
-  /* Invisible until there is something to say. */
-  gtk_widget_set_visible (GTK_WIDGET (self), FALSE);
+  /*
+   * Only on the nightly, and only where the installer put things.
+   *
+   * A release is not a build to replace with a branch, and a checkout builds
+   * with make: in both, this would install over something it does not own.
+   */
+  gtk_widget_set_visible (
+    GTK_WIDGET (self->branch),
+    self->install_dir != NULL &&
+    xd_update_channel_current () == XD_UPDATE_CHANNEL_NIGHTLY);
+
+  gtk_box_append (GTK_BOX (row), GTK_WIDGET (self->button));
+  gtk_box_append (GTK_BOX (row), GTK_WIDGET (self->branch));
+  adw_bin_set_child (ADW_BIN (self), row);
+
+  /* The update button waits until it has something to say; the row stays for
+   * whatever else is in it. */
+  gtk_widget_set_visible (GTK_WIDGET (self->button), FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (self),
+                          gtk_widget_get_visible (GTK_WIDGET (self->branch)));
 
   if (self->install_dir != NULL)
     self->check_id = g_timeout_add_seconds (FIRST_CHECK_SECONDS, check_now, self);

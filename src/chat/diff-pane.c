@@ -234,8 +234,8 @@ show_read_error (XdDiffPane *self,
 static void
 clear_diff (XdDiffPane *self)
 {
-  xd_diff_view_fill_virtualized (
-    self->diff_lines, "", TRUE, NULL, NULL);
+  xd_diff_view_fill_file_sections (
+    self->diff_lines, "", NULL, NULL);
 }
 
 static void
@@ -261,10 +261,9 @@ on_diff_read (GObject      *source,
       return;
     }
 
-  clear_diff (self);
-
   if (output == NULL || *output == '\0')
     {
+      clear_diff (self);
       gtk_label_set_label (self->summary, "No changes");
       gtk_stack_set_visible_child_name (GTK_STACK (self->stack), "empty");
       return;
@@ -281,8 +280,8 @@ on_diff_read (GObject      *source,
         at++;
     }
 
-  xd_diff_view_fill_virtualized (
-    self->diff_lines, output, TRUE, &additions, &deletions);
+  xd_diff_view_fill_file_sections (
+    self->diff_lines, output, &additions, &deletions);
 
   {
     g_autofree char *summary = g_strdup_printf (
@@ -495,7 +494,7 @@ xd_diff_pane_init (XdDiffPane *self)
   gtk_widget_set_margin_bottom (header, 6);
 
   self->diff_lines = GTK_LIST_VIEW (
-    xd_diff_view_new_virtualized ());
+    xd_diff_view_new_file_sections ());
   gtk_widget_set_hexpand (GTK_WIDGET (self->diff_lines), TRUE);
 
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (diff_window),

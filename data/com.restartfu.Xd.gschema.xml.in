@@ -137,5 +137,15 @@
       <summary>Sidebar width</summary>
     </key>
 
+    <key name="build-source" type="s">
+      <default>''</default>
+      <summary>Pull request or branch to build from</summary>
+      <description>
+        Kept exactly as it was typed -- a link, a number or a branch name --
+        so the same branch can be rebuilt after every commit without being
+        looked up and pasted again. Empty until a branch has been built once.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

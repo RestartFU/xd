@@ -102,7 +102,7 @@ static const char *XD_STYLE =
   " --sidebar-backdrop-color: #060607;"
   " --secondary-sidebar-bg-color: #060607;"
   " --popover-bg-color: #141416;"
-  " --dialog-bg-color: #101013;"
+  " --dialog-bg-color: #16161b;"
   " --card-bg-color: #101013;"
   "}\n"
 
@@ -122,8 +122,17 @@ static const char *XD_STYLE =
    * surface sits a little above the one behind it, with a hairline edge
    * where they meet -- which is what reads as glass.
    */
+  /*
+   * The "background" class is not on the list.
+   *
+   * GTK and libadwaita put it on things that are not this window: every
+   * popover, and the panel a dialog floats in the middle of the screen. Both
+   * then had to be undone by name, and the dialog's panel is a widget whose
+   * name has already changed once between libadwaita versions. The window
+   * node is the window; the rest of this list is xd's own classes.
+   */
   ".xd-surface, .xd-surface > *, .xd-sidebar, .xd-sidebar > *,"
-  " window, .background, headerbar, .toolbar"
+  " window, headerbar, .toolbar"
   " { background-color: #0a0a0c; }\n"
 
   /*
@@ -207,6 +216,7 @@ static const char *XD_STYLE =
   " opacity: 0; }\n"
   ".xd-divider-left { border-left: 1px solid #2a2a2d; }\n"
   ".xd-divider-top { border-top: 1px solid #2a2a2d; }\n"
+  ".xd-divider-bottom { border-bottom: 1px solid #2a2a2d; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
@@ -298,12 +308,13 @@ static const char *XD_STYLE =
    * The surface and contents are rendered at the window system's mercy --
    * surface alpha, renderer, scale -- and every sharp-corner report traced
    * back to them. A child widget's rounded background is ordinary scene
-   * geometry, identical under every renderer. Contents carry nothing, and
-   * zero padding makes the surface exactly the panel's rectangle, so there
-   * is no ring around it left to mispaint.
+   * geometry, identical under every renderer. Contents carry nothing. One
+   * transparent pixel keeps the child's antialiased border inside the native
+   * surface; flush against that surface, its outer half was clipped into a
+   * visibly cut edge.
    */
   "popover > contents { background: none; border: none; box-shadow: none;"
-  " padding: 0; }\n"
+  " padding: 1px; }\n"
   /*
    * Match the composer's 4% white lift over #0a0a0c. Keeping the resolved
    * colour solid avoids a translucent popover changing tone with whatever
@@ -326,7 +337,28 @@ static const char *XD_STYLE =
    * full-width buttons -- correct for GNOME, foreign here. Same panel tone
    * as the menus, same radius, buttons that read as the composer's do.
    */
-  "dialog, .dialog-content, alertdialog > * { background-color: #16161b; }\n"
+  /*
+   * The panel is painted where libadwaita paints it.
+   *
+   * A dialog's own node covers the whole window: the dimming that puts what
+   * is behind into the background is a child of it, and the panel is another.
+   * Filling that node painted an opaque slab across the window instead, so
+   * opening one made the conversation vanish rather than recede -- and
+   * reaching past it to the panel by name found a widget that libadwaita has
+   * already renamed once, which leaves a dialog with no panel at all where
+   * the name does not match.
+   *
+   * So nothing here paints the panel. --dialog-bg-color is what libadwaita
+   * reads for it, wherever it has moved that widget to, and the rules under
+   * this one are the shape and the colours inside it. The tone is the menus'
+   * again, which is where a dialog belongs.
+   */
+  /* Said again for the versions that read the variable and the ones that do
+   * not: where the panel is still the widget called a sheet, this names it.
+   * Neither of these can reach the node that covers the window, which is the
+   * property that matters. */
+  "dialog sheet, dialog sheet.background, dialog .sheet,"
+  " .dialog-content, alertdialog > * { background-color: #16161b; }\n"
   ".dialog-content, alertdialog { border-radius: 14px;"
   " border: 1px solid alpha(#ffffff, 0.10); }\n"
   "alertdialog .title { font-size: 1.05em; font-weight: 700; }\n"
@@ -474,13 +506,20 @@ static const char *XD_STYLE =
   ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
   " font-family: \"JetBrains Mono\", monospace; font-size: 1em;"
   " line-height: 1; }\n"
-  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px; }\n"
+  /* The list paints nothing of its own: GtkListView carries the view
+   * background, which is a grey the rest of the window left behind, and it
+   * showed as a lighter slab down the whole pane. Transparent lets the pane's
+   * own black through, hairline divider and all -- the same thing the file
+   * list does beside it. */
+  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px;"
+  " background: transparent; }\n"
   ".xd-diff-text.xd-diff-chunk { padding-top: 0; padding-bottom: 0; }\n"
   "listview.xd-diff-list > row { min-height: 0; margin: 0; padding: 0;"
   " border-radius: 0; }\n"
   "listview.xd-diff-list > row:hover"
   " { background: none; }\n"
-  ".xd-diff-expander > title { padding: 9px 12px; }\n"
+  ".xd-diff-expander > title { padding: 9px 12px;"
+  " background-color: #2a2a2d; }\n"
 
   /* Repository browser: the list and preview share the same quiet side pane
    * as changes, so files read like navigation rather than message cards. */
@@ -527,6 +566,15 @@ static const char *XD_STYLE =
    * than to a form, so naming something does not make the tree jump. */
   ".xd-inline-entry { min-height: 0; padding: 0 4px; }\n";
 
+/*
+ * Above everything, including the user's own gtk.css.
+ *
+ * The application priority is where an app puts styling a desktop is welcome
+ * to override, and none of this is that: xd is one designed surface, and a
+ * theme reaching into the middle of it does not produce a themed xd, it
+ * produces a broken one. What is above this is xd's own panel styles, which
+ * is the only thing that should be.
+ */
 static void
 load_style (void)
 {
@@ -535,7 +583,7 @@ load_style (void)
   gtk_css_provider_load_from_string (provider, XD_STYLE);
   gtk_style_context_add_provider_for_display (gdk_display_get_default (),
                                               GTK_STYLE_PROVIDER (provider),
-                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+                                              GTK_STYLE_PROVIDER_PRIORITY_USER + 1);
 }
 
 static gboolean

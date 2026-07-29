@@ -1,0 +1,123 @@
+# Every commit pushed to a pull request, built and tested.
+#
+# Nothing is published. A branch is tried by building it: the nightly's own
+# build button fetches it, builds the bundle the same way this does and
+# installs the result over itself, so there is no rolling release to keep
+# moving and no third kind of build that can break on its own.
+#
+# All three clients are built here, because a branch that breaks Windows or
+# macOS should say so before it is merged rather than after.
+#
+# Built from the pull request's head commit rather than the merge commit GitHub
+# hands to `pull_request` runs: what is checked is the code that was pushed.
+
+name: pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# One at a time per pull request, newest wins: an older push is not worth a
+# runner once a newer one exists.
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # Everything is built in Docker, so the runner needs nothing else. Both
+      # builds share layers, which is why the tests are cheap to gate on.
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the bundle
+        run: ./scripts/build.sh --build-arg PROFILE=nightly
+
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-json-glib
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-cmark
+
+      - name: Build and test the Windows client
+        shell: msys2 {0}
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          meson setup build-windows \
+            --prefix="$MINGW_PREFIX" \
+            --buildtype=release \
+            -Dprofile=nightly \
+            -Dcommit="${HEAD_SHA:0:7}"
+          meson compile -C build-windows
+          meson test -C build-windows --print-errorlogs
+          ./build-windows/src/xd.exe --version
+
+  macos:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install native dependencies
+        run: >-
+          brew install
+          meson
+          ninja
+          pkgconf
+          gtk4
+          libadwaita
+          json-glib
+          sqlite
+          vte3
+          glib-networking
+          librsvg
+          cmark
+
+      - name: Build and test the Apple Silicon app
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          meson setup build-macos \
+            --prefix="$PWD/macos-prefix" \
+            --buildtype=release \
+            -Dprofile=nightly \
+            -Dcommit="${HEAD_SHA:0:7}"
+          meson compile -C build-macos
+          meson test -C build-macos --print-errorlogs
+          ./build-macos/src/xd --version

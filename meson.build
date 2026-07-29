@@ -18,15 +18,13 @@ project('xd', 'c',
 # token a paired device is known by.
 #
 #
-# A dev build is a nightly by every path it touches -- same application id,
-# settings, data directory and install directory -- and differs only in where
-# it looks for its next update: the rolling dev release a pull request
-# publishes. That is what makes it useful for trying a branch, and it is also
-# why it deliberately replaces the nightly rather than sitting beside it.
+# A branch is tried by building it: the nightly builds it from source and
+# installs the result over itself, so what comes out is a nightly like any
+# other and there is no third kind of build to keep working.
 #
 profile = get_option('profile')
 
-if profile == 'nightly' or profile == 'dev'
+if profile == 'nightly'
   app_id        = 'com.restartfu.Xd.Nightly'
   app_name      = 'xd (Nightly)'
   app_data_name = 'xd-nightly'
@@ -91,8 +89,6 @@ version_string = meson.project_version()
 
 if profile == 'nightly'
   version_string += '-nightly'
-elif profile == 'dev'
-  version_string += '-dev'
 endif
 
 if get_option('commit') != ''

@@ -568,7 +568,7 @@ make_text_label (XdMessageRow *self)
 }
 
 /*
- * A fenced block gets a card of its own.
+ * A fenced block or table grid gets a card of its own.
  *
  * Pango markup cannot draw a padded, rounded background behind a run of
  * text, so a code block that stays inside the label can only ever be
@@ -577,7 +577,8 @@ make_text_label (XdMessageRow *self)
 static GtkWidget *
 make_code_card (XdMessageRow *self,
                 const char   *code,
-                gboolean      diff)
+                gboolean      diff,
+                gboolean      wrap)
 {
   GtkWidget *card = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *content;
@@ -605,7 +606,25 @@ make_code_card (XdMessageRow *self,
       gtk_label_set_xalign (GTK_LABEL (label), 0.0f);
       gtk_label_set_selectable (GTK_LABEL (label), TRUE);
       gtk_widget_add_css_class (label, "xd-body");
-      content = label;
+
+      if (wrap)
+        {
+          content = label;
+        }
+      else
+        {
+          GtkWidget *scroller = gtk_scrolled_window_new ();
+
+          gtk_label_set_wrap (GTK_LABEL (label), FALSE);
+          gtk_scrolled_window_set_policy (
+            GTK_SCROLLED_WINDOW (scroller),
+            GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+          gtk_scrolled_window_set_propagate_natural_height (
+            GTK_SCROLLED_WINDOW (scroller), TRUE);
+          gtk_scrolled_window_set_child (
+            GTK_SCROLLED_WINDOW (scroller), label);
+          content = scroller;
+        }
     }
 
   gtk_widget_set_hexpand (content, TRUE);
@@ -1309,6 +1328,96 @@ clear_body (XdMessageRow *self)
     gtk_box_remove (GTK_BOX (self->body), child);
 }
 
+static gboolean
+line_is_blank (const char *line)
+{
+  for (const char *at = line; *at != '\0'; at++)
+    if (!g_ascii_isspace (*at))
+      return FALSE;
+
+  return TRUE;
+}
+
+static void
+append_line (GString    *text,
+             const char *line)
+{
+  if (text->len > 0)
+    g_string_append_c (text, '\n');
+  g_string_append (text, line);
+}
+
+static void
+append_markdown_prose (XdMessageRow *self,
+                       GString      *prose)
+{
+  GtkWidget *label;
+  g_autofree char *markup = NULL;
+
+  while (prose->len > 0 && prose->str[prose->len - 1] == '\n')
+    g_string_truncate (prose, prose->len - 1);
+  if (prose->len == 0)
+    return;
+
+  markup = xd_markdown_to_pango (prose->str);
+  label = make_text_label (self);
+  gtk_label_set_markup (GTK_LABEL (label), markup);
+  gtk_box_append (GTK_BOX (self->body), label);
+  g_string_truncate (prose, 0);
+}
+
+/*
+ * Markdown tables already become aligned box-drawing grids. Pull complete
+ * table paragraphs out of prose so each grid gets the same padded, rounded
+ * card as a fenced code block.
+ */
+static void
+append_markdown_chunk (XdMessageRow *self,
+                       const char   *text)
+{
+  g_auto (GStrv) lines = g_strsplit (text, "\n", -1);
+  g_autoptr (GString) prose = g_string_new (NULL);
+  guint line = 0;
+
+  while (lines[line] != NULL)
+    {
+      g_autoptr (GString) paragraph = g_string_new (NULL);
+      g_autofree char *grid = NULL;
+      guint end;
+
+      if (line_is_blank (lines[line]))
+        {
+          append_line (prose, lines[line]);
+          line++;
+          continue;
+        }
+
+      for (end = line; lines[end] != NULL && !line_is_blank (lines[end]); end++)
+        append_line (paragraph, lines[end]);
+
+      if (strchr (paragraph->str, '|') != NULL &&
+          strchr (paragraph->str, '\n') != NULL)
+        grid = xd_markdown_table_to_text (paragraph->str);
+      if (grid == NULL)
+        {
+          for (; line < end; line++)
+            append_line (prose, lines[line]);
+          continue;
+        }
+
+      append_markdown_prose (self, prose);
+      gtk_box_append (GTK_BOX (self->body),
+                      make_code_card (self, grid, FALSE, FALSE));
+      line = end;
+
+      /* Body spacing replaces blank lines around the card. */
+      while (lines[line] != NULL && line_is_blank (lines[line]))
+        line++;
+    }
+
+  append_markdown_prose (self, prose);
+}
+
 /* Replies are Markdown; other rows stay literal except that URLs are links. */
 static void
 render_body (XdMessageRow *self)
@@ -1377,19 +1486,12 @@ render_body (XdMessageRow *self)
           {
             if (chunk->len > 0)
               {
-                GtkWidget *piece;
-
                 if (in_fence)
-                  piece = make_code_card (self, chunk->str, diff_fence);
+                  gtk_box_append (
+                    GTK_BOX (self->body),
+                    make_code_card (self, chunk->str, diff_fence, TRUE));
                 else
-                  {
-                    g_autofree char *markup = xd_markdown_to_pango (chunk->str);
-
-                    piece = make_text_label (self);
-                    gtk_label_set_markup (GTK_LABEL (piece), markup);
-                  }
-
-                gtk_box_append (GTK_BOX (self->body), piece);
+                  append_markdown_chunk (self, chunk->str);
                 g_string_truncate (chunk, 0);
               }
 
@@ -1406,19 +1508,12 @@ render_body (XdMessageRow *self)
 
     if (chunk->len > 0)
       {
-        GtkWidget *piece;
-
         if (in_fence)
-          piece = make_code_card (self, chunk->str, diff_fence);
+          gtk_box_append (
+            GTK_BOX (self->body),
+            make_code_card (self, chunk->str, diff_fence, TRUE));
         else
-          {
-            g_autofree char *markup = xd_markdown_to_pango (chunk->str);
-
-            piece = make_text_label (self);
-            gtk_label_set_markup (GTK_LABEL (piece), markup);
-          }
-
-        gtk_box_append (GTK_BOX (self->body), piece);
+          append_markdown_chunk (self, chunk->str);
       }
   }
 }

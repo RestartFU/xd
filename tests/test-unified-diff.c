@@ -257,6 +257,198 @@ test_colours_code_by_language (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">2</span>"));
 }
 
+static void
+test_colours_dockerfile (void)
+{
+  static const char *patch =
+    "diff --git a/Dockerfile b/Dockerfile\n"
+    "@@ -1 +1 @@\n"
+    "-FROM debian:bookworm\n"
+    "+FROM debian:trixie\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">FROM</span>"));
+}
+
+static void
+test_colours_kotlin (void)
+{
+  static const char *patch =
+    "diff --git a/src/Main.kt b/src/Main.kt\n"
+    "@@ -1 +1 @@\n"
+    "-val answer: Int = 41\n"
+    "+val answer: Int = 42\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">val</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">Int</span>"));
+}
+
+static void
+test_colours_makefile (void)
+{
+  static const char *patch =
+    "diff --git a/Makefile b/Makefile\n"
+    "@@ -1 +1 @@\n"
+    "-include config-old.mk\n"
+    "+include config.mk\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">include</span>"));
+}
+
+static void
+test_colours_rust (void)
+{
+  static const char *patch =
+    "diff --git a/src/lib.rs b/src/lib.rs\n"
+    "@@ -1 +1 @@\n"
+    "-let answer: i32 = 41;\n"
+    "+let answer: i32 = 42;\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">let</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">i32</span>"));
+}
+
+static void
+test_colours_json (void)
+{
+  static const char *patch =
+    "diff --git a/package.json b/package.json\n"
+    "@@ -1 +1 @@\n"
+    "-{\"enabled\": false}\n"
+    "+{\"enabled\": true}\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (
+    strstr (markup, "foreground=\"#78aeed\">&quot;enabled&quot;</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">true</span>"));
+}
+
+static void
+test_colours_yaml (void)
+{
+  static const char *patch =
+    "diff --git a/compose.yaml b/compose.yaml\n"
+    "@@ -1 +1 @@\n"
+    "-enabled: false\n"
+    "+enabled: true\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">enabled</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">true</span>"));
+}
+
+static void
+test_colours_toml (void)
+{
+  static const char *patch =
+    "diff --git a/Cargo.toml b/Cargo.toml\n"
+    "@@ -1 +1 @@\n"
+    "-edition = \"2021\"\n"
+    "+edition = \"2024\"\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">edition</span>"));
+  g_assert_nonnull (
+    strstr (markup, "foreground=\"#f8e45c\">&quot;2024&quot;</span>"));
+}
+
+static void
+test_colours_v (void)
+{
+  static const char *patch =
+    "diff --git a/src/main.v b/src/main.v\n"
+    "@@ -1 +1 @@\n"
+    "-fn answer() int { return 41 }\n"
+    "+fn answer() int { return 42 }\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">fn</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#99c1f1\">answer</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">int</span>"));
+}
+
+static void
+test_colours_odin (void)
+{
+  static const char *patch =
+    "diff --git a/src/main.odin b/src/main.odin\n"
+    "@@ -1 +1 @@\n"
+    "-answer :: proc() -> int { return 41 }\n"
+    "+answer :: proc() -> int { return 42 }\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#99c1f1\">answer</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">proc</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">int</span>"));
+}
+
+static void
+test_colours_ruby (void)
+{
+  static const char *patch =
+    "diff --git a/lib/answer.rb b/lib/answer.rb\n"
+    "@@ -1 +1 @@\n"
+    "-def answer = 41\n"
+    "+def answer = 42\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">def</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#99c1f1\">answer</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">42</span>"));
+}
+
+static void
+test_colours_crystal (void)
+{
+  static const char *patch =
+    "diff --git a/src/answer.cr b/src/answer.cr\n"
+    "@@ -1 +1 @@\n"
+    "-def answer : Int32 = 41\n"
+    "+def answer : Int32 = 42\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">def</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#99c1f1\">answer</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">Int32</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">42</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -342,6 +534,20 @@ main (int   argc,
                    test_formats_independent_slices);
   g_test_add_func ("/unified-diff/colours-code-by-language",
                    test_colours_code_by_language);
+  g_test_add_func ("/unified-diff/colours-dockerfile",
+                   test_colours_dockerfile);
+  g_test_add_func ("/unified-diff/colours-kotlin", test_colours_kotlin);
+  g_test_add_func ("/unified-diff/colours-makefile",
+                   test_colours_makefile);
+  g_test_add_func ("/unified-diff/colours-rust", test_colours_rust);
+  g_test_add_func ("/unified-diff/colours-json", test_colours_json);
+  g_test_add_func ("/unified-diff/colours-yaml", test_colours_yaml);
+  g_test_add_func ("/unified-diff/colours-toml", test_colours_toml);
+  g_test_add_func ("/unified-diff/colours-v", test_colours_v);
+  g_test_add_func ("/unified-diff/colours-odin", test_colours_odin);
+  g_test_add_func ("/unified-diff/colours-ruby", test_colours_ruby);
+  g_test_add_func ("/unified-diff/colours-crystal",
+                   test_colours_crystal);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",

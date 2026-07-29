@@ -14,8 +14,8 @@ G_BEGIN_DECLS
  * is the one part neither consumer can use: the diff draws its own row
  * backgrounds behind a single shared layout, and would have to be rewritten
  * around a foreign text view to gain nothing. What is left is a token scanner,
- * and a token scanner for two languages is small enough to keep here, where it
- * also costs the bundled builds nothing.
+ * and a token scanner for this small language set is compact enough to keep
+ * here, where it also costs the bundled builds nothing.
  *
  * Scanning is per line and stateful, because that is what a diff can offer:
  * hunks are fragments, and the old and new sides of one hunk are two different
@@ -27,6 +27,17 @@ typedef enum
   XD_SYNTAX_NONE = 0,
   XD_SYNTAX_C,
   XD_SYNTAX_GO,
+  XD_SYNTAX_DOCKERFILE,
+  XD_SYNTAX_KOTLIN,
+  XD_SYNTAX_MAKEFILE,
+  XD_SYNTAX_RUST,
+  XD_SYNTAX_JSON,
+  XD_SYNTAX_YAML,
+  XD_SYNTAX_TOML,
+  XD_SYNTAX_V,
+  XD_SYNTAX_ODIN,
+  XD_SYNTAX_RUBY,
+  XD_SYNTAX_CRYSTAL,
 } XdSyntaxLanguage;
 
 typedef enum
@@ -52,8 +63,16 @@ typedef enum
  */
 typedef struct
 {
-  guint8 in_comment;      /* inside a block comment */
-  guint8 in_raw_string;   /* inside Go's backtick string */
+  guint8 in_comment;         /* block-comment depth */
+  guint8 in_raw_string;      /* inside a backtick raw string */
+  guint8 in_triple_string;   /* inside a triple-quoted string */
+  guint8 triple_quote;       /* delimiter used by that string */
+  guint8 in_rust_raw_string; /* inside Rust's raw string */
+  guint8 rust_raw_hashes;    /* delimiter width of that raw string */
+  guint8 in_heredoc;         /* inside a Ruby or Crystal heredoc */
+  guint8 heredoc_indent;     /* its terminator may be indented */
+  guint8 crystal_macro_close; /* '%' or '}' while inside macro delimiters */
+  char heredoc_delimiter[32];
 } XdSyntaxState;
 
 /* XD_SYNTAX_NONE for a path in a language this does not know. */

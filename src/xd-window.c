@@ -254,6 +254,86 @@ on_pair_remote_action (GtkWidget  *widget,
   xd_remote_pair_dialog_present (widget, self->settings, on_remote_paired, self);
 }
 
+static void
+remove_remote (XdWindow *self)
+{
+  XdNode *chat;
+  g_autofree char *active = NULL;
+
+  if (self->remote_client == NULL)
+    return;
+
+  chat = xd_chat_view_get_chat (self->chat_view);
+  if (chat != NULL && self->remote_tree != NULL &&
+      xd_remote_tree_owns (self->remote_tree, chat))
+    xd_chat_view_set_chat (self->chat_view, NULL);
+
+  if (self->presence_node != NULL && self->remote_tree != NULL &&
+      xd_remote_tree_owns (self->remote_tree, self->presence_node))
+    set_presence_node (self, NULL);
+
+  xd_sidebar_set_remote (self->sidebar, NULL);
+  xd_remote_client_stop (self->remote_client);
+  g_clear_object (&self->remote_tree);
+  g_clear_object (&self->remote_client);
+
+  /*
+   * Token first: should this process stop between settings writes, startup
+   * still refuses to connect without all three credentials.
+   */
+  g_settings_set_string (self->settings, "remote-token", "");
+  g_settings_set_string (self->settings, "remote-certificate", "");
+  g_settings_set_string (self->settings, "remote-host", "");
+  g_settings_reset (self->settings, "remote-port");
+
+  active = g_settings_get_string (self->settings, "active-chat");
+  if (g_str_has_prefix (active, ACTIVE_CHAT_REMOTE))
+    g_settings_set_string (self->settings, "active-chat", "");
+}
+
+static void
+on_remove_remote_response (GObject      *source,
+                           GAsyncResult *result,
+                           gpointer      user_data)
+{
+  g_autoptr (XdWindow) self = user_data;
+  const char *response;
+
+  response = adw_alert_dialog_choose_finish (ADW_ALERT_DIALOG (source), result);
+  if (g_strcmp0 (response, "remove") == 0)
+    remove_remote (self);
+}
+
+static void
+on_remove_remote_action (GtkWidget  *widget,
+                         const char *action_name,
+                         GVariant   *parameter)
+{
+  XdWindow *self = XD_WINDOW (widget);
+  g_autofree char *body = NULL;
+  AdwAlertDialog *dialog;
+
+  if (self->remote_client == NULL)
+    return;
+
+  body = g_strdup_printf (
+    "“%s” will be removed from this device. Its workspaces and chats will "
+    "stay on the remote machine. Pair again to reconnect.",
+    xd_remote_client_get_host (self->remote_client));
+  dialog = ADW_ALERT_DIALOG (
+    adw_alert_dialog_new ("Remove Remote Connection?", body));
+  adw_alert_dialog_add_responses (dialog,
+                                  "cancel", "Cancel",
+                                  "remove", "Remove",
+                                  NULL);
+  adw_alert_dialog_set_response_appearance (dialog, "remove",
+                                            ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_default_response (dialog, "cancel");
+  adw_alert_dialog_set_close_response (dialog, "cancel");
+  adw_alert_dialog_choose (dialog, widget, NULL,
+                           on_remove_remote_response, g_object_ref (self));
+}
+
 /*
  * The remote this device already paired with, brought back at startup.
  *
@@ -515,6 +595,8 @@ xd_window_class_init (XdWindowClass *klass)
 
   gtk_widget_class_install_action (widget_class, "win.pair-remote", NULL,
                                    on_pair_remote_action);
+  gtk_widget_class_install_action (widget_class, "win.remove-remote", NULL,
+                                   on_remove_remote_action);
 }
 
 static void

@@ -58,6 +58,7 @@ ensure_style (void)
 
 typedef struct
 {
+  grefcount refs;
   GtkWindow *window;
   XdRemoteTree *remote;         /* NULL: this machine */
 
@@ -77,11 +78,44 @@ typedef struct
 
 static void show_directory (Browser *self, const char *path);
 
-static void
-browser_free (Browser *self)
+static Browser *
+browser_ref (Browser *self)
 {
+  g_ref_count_inc (&self->refs);
+  return self;
+}
+
+static void
+browser_unref (Browser *self)
+{
+  if (!g_ref_count_dec (&self->refs))
+    return;
+
+  g_clear_object (&self->entries);
+  g_clear_object (&self->selection);
+  g_clear_object (&self->cancellable);
+  g_clear_object (&self->remote);
+  g_free (self->path);
+  g_free (self);
+}
+
+static void
+browser_window_gone (Browser *self)
+{
+  /*
+   * Directory reads finish asynchronously. Destroying the window cancels
+   * them, but cancellation still completes their callbacks; keep this state
+   * alive until those callbacks have released it and make them ignore the
+   * widgets that went away with the window.
+   */
+  self->window = NULL;
+  self->path_label = NULL;
+  self->trouble = NULL;
+  self->list_view = NULL;
+
   /* Dismissed rather than answered: the caller is still waiting to hear
-   * something, and "nothing was picked" is an answer. */
+   * something, and "nothing was picked" is an answer. Do not delay it until
+   * an outstanding remote request happens to return. */
   if (!self->answered)
     {
       self->answered = TRUE;
@@ -89,10 +123,7 @@ browser_free (Browser *self)
     }
 
   g_cancellable_cancel (self->cancellable);
-  g_clear_object (&self->cancellable);
-  g_clear_object (&self->remote);
-  g_free (self->path);
-  g_free (self);
+  browser_unref (self);
 }
 
 static void
@@ -137,9 +168,16 @@ on_remote_listed (const char        *path,
 {
   Browser *self = user_data;
 
+  if (self->window == NULL)
+    {
+      browser_unref (self);
+      return;
+    }
+
   if (path != NULL)
     {
       fill (self, path, entries);
+      browser_unref (self);
       return;
     }
 
@@ -151,6 +189,7 @@ on_remote_listed (const char        *path,
    */
   gtk_label_set_label (self->trouble, trouble);
   gtk_widget_set_visible (GTK_WIDGET (self->trouble), TRUE);
+  browser_unref (self);
 }
 
 static void
@@ -165,8 +204,11 @@ on_local_listed (GObject      *source,
   g_autofree char *path = NULL;
 
   enumerator = g_file_enumerate_children_finish (G_FILE (source), result, &error);
-  if (enumerator == NULL)
-    return;
+  if (enumerator == NULL || self->window == NULL)
+    {
+      browser_unref (self);
+      return;
+    }
 
   for (;;)
     {
@@ -187,6 +229,7 @@ on_local_listed (GObject      *source,
 
   path = g_file_get_path (G_FILE (source));
   fill (self, path, (const char *const *) names->pdata);
+  browser_unref (self);
 }
 
 static void
@@ -195,7 +238,8 @@ show_directory (Browser    *self,
 {
   if (self->remote != NULL)
     {
-      xd_remote_tree_list_dir (self->remote, path, on_remote_listed, self);
+      xd_remote_tree_list_dir (self->remote, path, self->cancellable,
+                               on_remote_listed, browser_ref (self));
       return;
     }
 
@@ -208,7 +252,8 @@ show_directory (Browser    *self,
                                      G_FILE_ATTRIBUTE_STANDARD_TYPE ","
                                      G_FILE_ATTRIBUTE_STANDARD_IS_HIDDEN,
                                      G_FILE_QUERY_INFO_NONE, G_PRIORITY_DEFAULT,
-                                     self->cancellable, on_local_listed, self);
+                                     self->cancellable, on_local_listed,
+                                     browser_ref (self));
   }
 }
 
@@ -379,6 +424,7 @@ xd_dir_browser_present (GtkWidget       *parent,
   ensure_style ();
 
   self = g_new0 (Browser, 1);
+  g_ref_count_init (&self->refs);
   self->remote = remote != NULL ? g_object_ref (remote) : NULL;
   self->chosen = chosen;
   self->user_data = user_data;
@@ -464,7 +510,7 @@ xd_dir_browser_present (GtkWidget       *parent,
   }
 
   g_object_set_data_full (G_OBJECT (window), "browser", self,
-                          (GDestroyNotify) browser_free);
+                          (GDestroyNotify) browser_window_gone);
 
   show_directory (self, start);
 

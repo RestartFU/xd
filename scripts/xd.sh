@@ -40,6 +40,7 @@ export XD_HOST_LOCALE_ARCHIVE="${LOCALE_ARCHIVE-}"
 export XD_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
 export XD_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
 export XD_HOST_GTK_PATH="${GTK_PATH-}"
+export XD_HOST_GTK_THEME="${GTK_THEME-}"
 
 # GNOME sessions export these to point GTK/GIO at host plugins (ibus, dconf,
 # gvfs). Those .so files are built against the host's glib and GTK; dlopening
@@ -47,6 +48,15 @@ export XD_HOST_GTK_PATH="${GTK_PATH-}"
 # touches local files and stores settings in the keyfile backend.
 unset GIO_EXTRA_MODULES GTK_PATH GTK_MODULES GTK_IM_MODULE_FILE
 unset GTK_EXE_PREFIX GTK_DATA_PREFIX LOCALE_ARCHIVE
+
+# GTK_THEME is a desktop saying which theme its applications wear, and xd is
+# not wearing one: libadwaita stands down when that variable is set, taking
+# with it the stylesheet everything here is written against -- black surfaces
+# become grey, a dialog's panel is painted by nobody, and the app arrives
+# looking like a different program. The value is handed back to anything xd
+# launches for the user; see src/util/host-launch.c. The same is done in the
+# program itself, for the builds that start without this launcher.
+unset GTK_THEME
 export GIO_MODULE_DIR="$HERE/lib/gio/modules"
 export GTK_IM_MODULE=gtk-im-context-simple
 

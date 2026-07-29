@@ -210,9 +210,9 @@ ensure_certificate (GError **error)
   return g_tls_certificate_new_from_files (cert_path, key_path, error);
 }
 
-/* How often the daemon looks is the channel's to say, the same as it is for the
- * window: a dev build is being waited on, and this is the half of the pair that
- * updates without anyone there to press anything. */
+/* The daemon looks as often as the window does -- the interval is shared, so
+ * one of them cannot end up offering a build the other has not noticed. This
+ * is the half of the pair that updates with nobody there to press anything. */
 #define DAEMON_UPDATE_FIRST_SECONDS 8
 
 typedef struct
@@ -461,8 +461,7 @@ daemon_updater_init (DaemonUpdater *updater,
   updater->first_check_id = g_timeout_add_seconds (
     DAEMON_UPDATE_FIRST_SECONDS, daemon_update_first_check, updater);
   updater->repeating_check_id = g_timeout_add_seconds (
-    xd_update_channel_poll_seconds (xd_update_channel_current ()),
-    daemon_update_repeating_check, updater);
+    XD_UPDATE_POLL_SECONDS, daemon_update_repeating_check, updater);
 }
 
 static void
@@ -673,6 +672,30 @@ main (int argc, char *argv[])
 
   if (argc > 1 && g_strcmp0 (argv[1], "serve") == 0)
     return run_serve (argc, argv);
+
+  /*
+   * A theme forced from outside is not a theme xd has.
+   *
+   * GTK_THEME names a theme for GTK to load, and libadwaita answers it by not
+   * loading its stylesheet at all -- which takes with it the dimming under a
+   * dialog, every colour the palette here is written as an override of, and
+   * the widget styling this app's own sheet is a refinement of. Sessions
+   * export it globally so GTK3 applications follow the desktop; xd carries
+   * its whole look, down to the base its surfaces are shades of, so following
+   * anything else leaves it half painted rather than themed.
+   */
+  /* Recorded the way the bundle's launcher records what it overrides, so a
+   * terminal or an editor started from xd is still the desktop's; see
+   * util/host-launch.c. Skipped where the launcher has already noted it,
+   * which is where GTK_THEME is gone from here to read. */
+  if (g_getenv ("XD_HOST_GTK_THEME") == NULL)
+    {
+      const char *theme = g_getenv ("GTK_THEME");
+
+      g_setenv ("XD_HOST_GTK_THEME", theme != NULL ? theme : "", TRUE);
+    }
+
+  g_unsetenv ("GTK_THEME");
 
   {
     g_autoptr (XdApplication) app = xd_application_new ();

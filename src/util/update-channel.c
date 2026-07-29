@@ -9,9 +9,6 @@ xd_update_channel_current (void)
   if (g_strcmp0 (XD_CHANNEL, "nightly") == 0)
     return XD_UPDATE_CHANNEL_NIGHTLY;
 
-  if (g_strcmp0 (XD_CHANNEL, "dev") == 0)
-    return XD_UPDATE_CHANNEL_DEV;
-
   return XD_UPDATE_CHANNEL_RELEASE;
 }
 
@@ -22,9 +19,6 @@ xd_update_channel_tag (XdUpdateChannel channel)
     {
     case XD_UPDATE_CHANNEL_NIGHTLY:
       return "nightly";
-
-    case XD_UPDATE_CHANNEL_DEV:
-      return "dev";
 
     case XD_UPDATE_CHANNEL_RELEASE:
     default:
@@ -37,14 +31,8 @@ xd_update_channel_check_url (XdUpdateChannel channel)
 {
   const char *tag = xd_update_channel_tag (channel);
 
-  /* The commit, published beside the bundle it built: a dev build asks for this
-   * every twenty-five seconds, which is far past what the API allows an hour. */
-  if (channel == XD_UPDATE_CHANNEL_DEV)
-    return g_strdup_printf (
-      "https://github.com/" XD_REPO "/releases/download/%s/commit.txt", tag);
-
-  /* Not /releases/latest for a rolling channel: that resolves to the newest
-   * full release, and both rolling releases are prereleases. */
+  /* Not /releases/latest for the rolling channel: that resolves to the newest
+   * full release, and the nightly is a prerelease. */
   if (tag != NULL)
     return g_strdup_printf (
       "https://api.github.com/repos/" XD_REPO "/releases/tags/%s", tag);
@@ -52,32 +40,17 @@ xd_update_channel_check_url (XdUpdateChannel channel)
   return g_strdup ("https://api.github.com/repos/" XD_REPO "/releases/latest");
 }
 
-guint
-xd_update_channel_poll_seconds (XdUpdateChannel channel)
-{
-  if (channel == XD_UPDATE_CHANNEL_DEV)
-    return 25;
-
-  return 60 * 5;
-}
-
 /*
  * The same one-line install anyone would run.
  *
  * The script is published beside the build it installs, so the two are from
  * the same commit -- and it is the script that knows where things go, which
- * keeps that in one place rather than two. A dev build tells it which of the
- * rolling releases to take, since both install to the same paths.
+ * keeps that in one place rather than two.
  */
 char *
 xd_update_channel_install_command (XdUpdateChannel channel)
 {
   const char *tag = xd_update_channel_tag (channel);
-
-  if (channel == XD_UPDATE_CHANNEL_DEV)
-    return g_strdup_printf (
-      "curl -fsSL https://github.com/" XD_REPO
-      "/releases/download/%s/install.sh | sh -s -- --dev", tag);
 
   if (tag != NULL)
     return g_strdup_printf (
@@ -86,26 +59,6 @@ xd_update_channel_install_command (XdUpdateChannel channel)
 
   return g_strdup ("curl -fsSL https://github.com/" XD_REPO
                    "/releases/latest/download/install.sh | sh -s -- --release");
-}
-
-/* One commit on a line of its own, and nothing that only looks like one. */
-static char *
-commit_from_body (const char *body)
-{
-  g_autofree char *commit = g_strdup (body);
-  gsize length;
-
-  commit = g_strstrip (commit);
-  length = strlen (commit);
-
-  if (length < 7 || length > 40)
-    return NULL;
-
-  for (gsize i = 0; i < length; i++)
-    if (!g_ascii_isxdigit (commit[i]))
-      return NULL;
-
-  return g_steal_pointer (&commit);
 }
 
 char *
@@ -117,9 +70,6 @@ xd_update_channel_latest_from_reply (XdUpdateChannel  channel,
 
   if (body == NULL)
     return NULL;
-
-  if (channel == XD_UPDATE_CHANNEL_DEV)
-    return commit_from_body (body);
 
   if (!json_parser_load_from_data (parser, body, -1, NULL) ||
       !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser)))

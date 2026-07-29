@@ -966,6 +966,7 @@ on_dir_listed (GObject      *source,
 void
 xd_remote_tree_list_dir (XdRemoteTree    *self,
                          const char      *path,
+                         GCancellable    *cancellable,
                          XdRemoteDirFunc  callback,
                          gpointer         user_data)
 {
@@ -979,7 +980,9 @@ xd_remote_tree_list_dir (XdRemoteTree    *self,
   listing->user_data = user_data;
 
   xd_remote_client_call_op_async (self->client, "list-dir", "path", path,
-                                  self->cancellable, on_dir_listed, listing);
+                                  cancellable != NULL ? cancellable
+                                                      : self->cancellable,
+                                  on_dir_listed, listing);
 }
 
 void

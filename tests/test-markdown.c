@@ -222,6 +222,31 @@ test_tables (void)
 }
 
 static void
+test_table_grid_text (void)
+{
+  static const char *table =
+    "| metric | old | new |\n"
+    "|---|---|---|\n"
+    "| ack_rtt_p50 | 269ms | 41ms |\n"
+    "| corrections | 0 | 0 |";
+  g_autofree char *grid = xd_markdown_table_to_text (table);
+  g_autofree char *prose =
+    xd_markdown_table_to_text ("Run foo | bar.\nStill prose.");
+  g_autofree char *mixed =
+    xd_markdown_table_to_text ("Results:\n\n"
+                               "| old | new |\n|---|---|\n| 1 | 2 |");
+
+  g_assert_nonnull (grid);
+  g_assert_nonnull (strstr (grid, "metric"));
+  g_assert_nonnull (strstr (grid, "ack_rtt_p50"));
+  g_assert_nonnull (strstr (grid, "\xe2\x94\x82"));
+  g_assert_nonnull (strstr (grid, "\xe2\x94\xbc"));
+  g_assert_null (strstr (grid, "<tt>"));
+  g_assert_null (prose);
+  g_assert_null (mixed);
+}
+
+static void
 test_pipe_prose_is_not_a_table (void)
 {
   g_autofree char *out = xd_markdown_to_pango (
@@ -280,6 +305,7 @@ main (int   argc,
   g_test_add_func ("/markdown/commonmark-blocks", test_commonmark_blocks);
   g_test_add_func ("/markdown/commonmark-inline", test_commonmark_inline_nesting);
   g_test_add_func ("/markdown/tables", test_tables);
+  g_test_add_func ("/markdown/table-grid-text", test_table_grid_text);
   g_test_add_func ("/markdown/pipe-prose", test_pipe_prose_is_not_a_table);
   g_test_add_func ("/markdown/images-and-unsafe-links",
                    test_images_and_unsafe_links);
