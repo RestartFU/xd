@@ -516,12 +516,37 @@ test_app_server_streams_resumes_and_interrupts (void)
   g_rmdir (secrets_directory);
 }
 
+/*
+ * getline is POSIX and MinGW has none, and this helper is compiled everywhere.
+ * Reading a character at a time is slower than it needs to be and is reading
+ * one short JSON line per turn, so the difference is not measurable.
+ */
+static char *
+read_stdin_line (void)
+{
+  GString *line = g_string_new (NULL);
+  int c;
+
+  while ((c = fgetc (stdin)) != EOF)
+    {
+      g_string_append_c (line, (char) c);
+      if (c == '\n')
+        break;
+    }
+
+  if (line->len == 0)
+    {
+      g_string_free (line, TRUE);
+      return NULL;
+    }
+
+  return g_string_free (line, FALSE);
+}
+
 static int
 run_app_server_child (void)
 {
   g_autoptr (JsonParser) parser = json_parser_new ();
-  g_autofree char *line = NULL;
-  size_t capacity = 0;
   FILE *count;
 
   if (g_strcmp0 (g_getenv ("XD_TEST_TOKEN"), "server-secret") != 0)
@@ -533,8 +558,10 @@ run_app_server_child (void)
   fputs ("server\n", count);
   fclose (count);
 
-  while (getline (&line, &capacity, stdin) >= 0)
+  for (;;)
     {
+      g_autofree char *line = read_stdin_line ();
+
       JsonNode *root_node;
       JsonObject *root;
       JsonObject *params;

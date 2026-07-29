@@ -3484,12 +3484,20 @@ connection_close (Connection *connection)
   if (connection->server != NULL)
     g_ptr_array_remove_fast (connection->server->connections, connection);
 
-  /* Before the close, never after: the point is that no source is left
-   * polling the fd this is about to take away. */
+  /*
+   * Cancelled, not closed.
+   *
+   * Cancelling does not finish the read in flight; that lands on a later
+   * iteration, and the source polling the descriptor lives until it does.
+   * Closing here would take the descriptor away underneath that source --
+   * which Linux reports as POLLNVAL on the one entry and carries on from, and
+   * BSD turns into an EBADF that fails the whole poll and is fatal to GLib.
+   *
+   * The stream closes when the last reference to it goes, which is after the
+   * cancelled read has completed and let go of the connection. Nothing is
+   * leaked by waiting, and nothing polls a descriptor that has gone.
+   */
   g_cancellable_cancel (connection->cancellable);
-
-  if (connection->stream != NULL)
-    g_io_stream_close (connection->stream, NULL, NULL);
 }
 
 static void
@@ -3898,11 +3906,9 @@ xd_remote_server_dispose (GObject *object)
           connection->closed = TRUE;
 
           /* connection_close would remove from the array being walked, so it
-           * is done by hand here -- including stopping the pending reads. */
+           * is done by hand here. Cancelled rather than closed, for the same
+           * reason: the read in flight still owns the descriptor's source. */
           g_cancellable_cancel (connection->cancellable);
-
-          if (connection->stream != NULL)
-            g_io_stream_close (connection->stream, NULL, NULL);
         }
     }
 
