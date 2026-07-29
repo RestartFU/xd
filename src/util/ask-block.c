@@ -62,7 +62,15 @@ xd_ask_instructions (void)
     "[#35](https://github.com/owner/repo/issues/35) and "
     "[PR #12](https://github.com/owner/repo/pull/12). Do not leave a "
     "resolvable #number as bare text.\n"
-    "</issue_links>";
+    "</issue_links>\n\n"
+    "<workspace_reporting>\n"
+    "If you move the work to another Git worktree, report the new checkout "
+    "root on its own line as:\n\n"
+    "<workspace>/absolute/path/to/checkout</workspace>\n\n"
+    "Report it as soon as the new worktree becomes the directory where you "
+    "are working. Use an absolute path. Do not report ordinary subdirectory "
+    "changes or emit the tag when the checkout did not change.\n"
+    "</workspace_reporting>";
 }
 
 

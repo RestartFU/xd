@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "syntax.h"
+
 #define DISPLAY_LINE_BYTES 1024
 
 void
@@ -222,6 +224,8 @@ escaped_display_text (const char *text)
 const char *
 xd_diff_line_background (XdDiffLineKind kind)
 {
+  if (kind == XD_DIFF_LINE_FILE)
+    return "#000000";
   if (kind == XD_DIFF_LINE_ADDED)
     return "#183522";
   if (kind == XD_DIFF_LINE_REMOVED)
@@ -235,6 +239,17 @@ typedef struct
   GString *text;
   GArray *kinds;  /* guint8 per rendered row; NULL when the caller wants none */
   guint rendered;
+
+  /*
+   * What the code lines are being read as, and where the lexer got to.
+   *
+   * The two sides of a hunk are two different texts -- a block comment opened
+   * on the old side is not open on the new one -- so each carries its own
+   * state, and a context line advances both.
+   */
+  XdSyntaxLanguage language;
+  XdSyntaxState old_state;
+  XdSyntaxState new_state;
 } MarkupBuilder;
 
 /*
@@ -288,7 +303,7 @@ append_file_markup (MarkupBuilder    *builder,
   start_markup_row (builder, line->kind);
   g_string_append_printf (
     builder->text,
-    "<span weight=\"bold\">%s</span>"
+    "<span foreground=\"#ffbe6f\" weight=\"bold\">%s</span>"
     "  <span foreground=\"#57e389\">+%u</span>"
     "  <span foreground=\"#f66151\">−%u</span>",
     path, additions, deletions);
@@ -310,10 +325,76 @@ append_full_line_markup (MarkupBuilder    *builder,
 }
 
 static void
+emit_markup_token (XdSyntaxToken token,
+                   const char   *text,
+                   gsize         length,
+                   gpointer      user_data)
+{
+  GString *markup = user_data;
+  const char *colour = xd_syntax_token_colour (token);
+  g_autofree char *escaped = g_markup_escape_text (text, (gssize) length);
+
+  if (colour == NULL)
+    g_string_append (markup, escaped);
+  else
+    g_string_append_printf (
+      markup, "<span foreground=\"%s\">%s</span>", colour, escaped);
+}
+
+/* The side of the hunk a line belongs to; context lines belong to both. */
+static XdSyntaxState *
+line_state (MarkupBuilder  *builder,
+            XdDiffLineKind  kind)
+{
+  return kind == XD_DIFF_LINE_REMOVED ? &builder->old_state
+                                      : &builder->new_state;
+}
+
+/*
+ * Runs a line through the side that is not the one being drawn.
+ *
+ * Only context lines exist on both sides. Without this the old side would
+ * never see them and would still think it was inside whatever the last
+ * removed line left open.
+ */
+static void
+advance_other_state (MarkupBuilder    *builder,
+                     const XdDiffLine *line,
+                     const char       *text)
+{
+  if (line->kind != XD_DIFF_LINE_CONTEXT)
+    return;
+
+  xd_syntax_scan_line (
+    builder->language, text, &builder->old_state, NULL, NULL);
+}
+
+/* A new file resets the reading: language, and both sides' lexer state. */
+static void
+begin_file (MarkupBuilder *builder,
+            const char    *path)
+{
+  builder->language = xd_syntax_language_for_path (path);
+  builder->old_state = (XdSyntaxState) { 0 };
+  builder->new_state = (XdSyntaxState) { 0 };
+}
+
+/*
+ * A hunk resets it too: the lines Git skipped over could have opened or
+ * closed anything, so carrying state across the gap guesses.
+ */
+static void
+begin_hunk (MarkupBuilder *builder)
+{
+  builder->old_state = (XdSyntaxState) { 0 };
+  builder->new_state = (XdSyntaxState) { 0 };
+}
+
+static void
 append_code_line_markup (MarkupBuilder    *builder,
                          const XdDiffLine *line)
 {
-  g_autofree char *text = escaped_display_text (line->text);
+  g_autofree char *shown = display_text (line->text);
   g_autofree char *old_line =
     line->old_line > 0 ? g_strdup_printf ("%4u", line->old_line)
                        : g_strdup ("    ");
@@ -336,19 +417,34 @@ append_code_line_markup (MarkupBuilder    *builder,
     }
 
   start_markup_row (builder, line->kind);
-  if (changed)
-    g_string_append_printf (
-      builder->text,
-      "<span foreground=\"#c0bfbc\">%s %s</span>"
-      " <span foreground=\"%s\" weight=\"bold\">%s</span>"
-      " <span foreground=\"%s\">%s</span>",
-      old_line, new_line, colour, marker, colour, text);
+  g_string_append_printf (
+    builder->text,
+    "<span foreground=\"%s\">%s %s</span>"
+    " <span foreground=\"%s\" weight=\"bold\">%s</span> ",
+    changed ? "#c0bfbc" : "#77767b", old_line, new_line, colour, marker);
+
+  /*
+   * In a language this can read, the code keeps an editor's colours and the
+   * row's own background and marker say which side it is on. Elsewhere the
+   * whole line takes the side's colour, which is all the signal there is.
+   */
+  if (builder->language != XD_SYNTAX_NONE)
+    {
+      advance_other_state (builder, line, shown);
+      xd_syntax_scan_line (builder->language, shown,
+                           line_state (builder, line->kind),
+                           emit_markup_token, builder->text);
+    }
   else
-    g_string_append_printf (
-      builder->text,
-      "<span foreground=\"#77767b\">%s %s</span>"
-      " <span foreground=\"%s\" weight=\"bold\">%s</span> %s",
-      old_line, new_line, colour, marker, text);
+    {
+      g_autofree char *text = g_markup_escape_text (shown, -1);
+
+      if (changed)
+        g_string_append_printf (
+          builder->text, "<span foreground=\"%s\">%s</span>", colour, text);
+      else
+        g_string_append (builder->text, text);
+    }
 }
 
 /* One entry per rendered row, so the widget can colour whole rows. */
@@ -384,12 +480,17 @@ xd_unified_diff_markup (GPtrArray *lines,
 
       if (line->kind == XD_DIFF_LINE_FILE)
         {
+          begin_file (&builder, line->text);
           if (!show_file_headers)
             continue;
           append_file_markup (&builder, lines, i, line);
         }
-      else if (line->kind == XD_DIFF_LINE_HUNK ||
-               line->kind == XD_DIFF_LINE_META)
+      else if (line->kind == XD_DIFF_LINE_HUNK)
+        {
+          begin_hunk (&builder);
+          append_full_line_markup (&builder, line);
+        }
+      else if (line->kind == XD_DIFF_LINE_META)
         {
           append_full_line_markup (&builder, line);
         }
@@ -413,6 +514,64 @@ xd_unified_diff_markup (GPtrArray *lines,
   return g_string_free (g_steal_pointer (&markup), FALSE);
 }
 
+/*
+ * Catches a chunk up to what came before it.
+ *
+ * A chunk is rendered on its own, but its code is not: which language it is
+ * and whether a comment is open were decided further up the patch. Both are
+ * recovered by looking back -- the language to the file the chunk falls in,
+ * the lexer state to the start of its hunk, which is as far back as any state
+ * survives.
+ */
+static void
+prime_slice (MarkupBuilder *builder,
+             GPtrArray     *lines,
+             guint          start)
+{
+  guint resume = 0;
+
+  for (guint i = start; i > 0; i--)
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i - 1);
+
+      if (line->kind == XD_DIFF_LINE_FILE)
+        {
+          begin_file (builder, line->text);
+          break;
+        }
+    }
+
+  if (builder->language == XD_SYNTAX_NONE)
+    return;
+
+  for (guint i = start; i > 0; i--)
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i - 1);
+
+      if (line->kind == XD_DIFF_LINE_HUNK || line->kind == XD_DIFF_LINE_FILE)
+        {
+          resume = i;
+          break;
+        }
+    }
+
+  for (guint i = resume; i < start; i++)
+    {
+      XdDiffLine *line = g_ptr_array_index (lines, i);
+      g_autofree char *shown = NULL;
+
+      if (line->kind != XD_DIFF_LINE_CONTEXT &&
+          line->kind != XD_DIFF_LINE_ADDED &&
+          line->kind != XD_DIFF_LINE_REMOVED)
+        continue;
+
+      shown = display_text (line->text);
+      advance_other_state (builder, line, shown);
+      xd_syntax_scan_line (builder->language, shown,
+                           line_state (builder, line->kind), NULL, NULL);
+    }
+}
+
 char *
 xd_unified_diff_markup_slice (GPtrArray *lines,
                               gboolean   show_file_headers,
@@ -426,18 +585,26 @@ xd_unified_diff_markup_slice (GPtrArray *lines,
   g_return_val_if_fail (lines != NULL, g_strdup (""));
 
   end = MIN (end, lines->len);
-  for (guint i = MIN (start, end); i < end; i++)
+  start = MIN (start, end);
+  prime_slice (&builder, lines, start);
+
+  for (guint i = start; i < end; i++)
     {
       XdDiffLine *line = g_ptr_array_index (lines, i);
 
       if (line->kind == XD_DIFF_LINE_FILE)
         {
+          begin_file (&builder, line->text);
           if (!show_file_headers)
             continue;
           append_file_markup (&builder, lines, i, line);
         }
-      else if (line->kind == XD_DIFF_LINE_HUNK ||
-               line->kind == XD_DIFF_LINE_META)
+      else if (line->kind == XD_DIFF_LINE_HUNK)
+        {
+          begin_hunk (&builder);
+          append_full_line_markup (&builder, line);
+        }
+      else if (line->kind == XD_DIFF_LINE_META)
         {
           append_full_line_markup (&builder, line);
         }

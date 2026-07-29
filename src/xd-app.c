@@ -101,8 +101,8 @@ static const char *XD_STYLE =
   " --sidebar-fg-color: #f2f2f4;"
   " --sidebar-backdrop-color: #060607;"
   " --secondary-sidebar-bg-color: #060607;"
-  " --popover-bg-color: #101013;"
-  " --dialog-bg-color: #101013;"
+  " --popover-bg-color: #141416;"
+  " --dialog-bg-color: #16161b;"
   " --card-bg-color: #101013;"
   "}\n"
 
@@ -122,8 +122,17 @@ static const char *XD_STYLE =
    * surface sits a little above the one behind it, with a hairline edge
    * where they meet -- which is what reads as glass.
    */
+  /*
+   * The "background" class is not on the list.
+   *
+   * GTK and libadwaita put it on things that are not this window: every
+   * popover, and the panel a dialog floats in the middle of the screen. Both
+   * then had to be undone by name, and the dialog's panel is a widget whose
+   * name has already changed once between libadwaita versions. The window
+   * node is the window; the rest of this list is xd's own classes.
+   */
   ".xd-surface, .xd-surface > *, .xd-sidebar, .xd-sidebar > *,"
-  " window, .background, headerbar, .toolbar"
+  " window, headerbar, .toolbar"
   " { background-color: #0a0a0c; }\n"
 
   /*
@@ -304,13 +313,18 @@ static const char *XD_STYLE =
    */
   "popover > contents { background: none; border: none; box-shadow: none;"
   " padding: 0; }\n"
-  "popover listview { background-color: #16161b;"
+  /*
+   * Match the composer's 4% white lift over #0a0a0c. Keeping the resolved
+   * colour solid avoids a translucent popover changing tone with whatever
+   * happens to sit behind it.
+   */
+  "popover listview { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
-  ".xd-menu { background-color: #16161b;"
+  ".xd-menu { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 6px; }\n"
-  ".xd-menu-popover > contents { background-color: #16161b;"
+  ".xd-menu-popover > contents { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
@@ -321,7 +335,28 @@ static const char *XD_STYLE =
    * full-width buttons -- correct for GNOME, foreign here. Same panel tone
    * as the menus, same radius, buttons that read as the composer's do.
    */
-  "dialog, .dialog-content, alertdialog > * { background-color: #16161b; }\n"
+  /*
+   * The panel is painted where libadwaita paints it.
+   *
+   * A dialog's own node covers the whole window: the dimming that puts what
+   * is behind into the background is a child of it, and the panel is another.
+   * Filling that node painted an opaque slab across the window instead, so
+   * opening one made the conversation vanish rather than recede -- and
+   * reaching past it to the panel by name found a widget that libadwaita has
+   * already renamed once, which leaves a dialog with no panel at all where
+   * the name does not match.
+   *
+   * So nothing here paints the panel. --dialog-bg-color is what libadwaita
+   * reads for it, wherever it has moved that widget to, and the rules under
+   * this one are the shape and the colours inside it. The tone is the menus'
+   * again, which is where a dialog belongs.
+   */
+  /* Said again for the versions that read the variable and the ones that do
+   * not: where the panel is still the widget called a sheet, this names it.
+   * Neither of these can reach the node that covers the window, which is the
+   * property that matters. */
+  "dialog sheet, dialog sheet.background, dialog .sheet,"
+  " .dialog-content, alertdialog > * { background-color: #16161b; }\n"
   ".dialog-content, alertdialog { border-radius: 14px;"
   " border: 1px solid alpha(#ffffff, 0.10); }\n"
   "alertdialog .title { font-size: 1.05em; font-weight: 700; }\n"
@@ -420,7 +455,19 @@ static const char *XD_STYLE =
   /* The terminal's tabs: the chosen one carries a fill, and every tab keeps
    * enough width that the title and its close button stop fighting. */
   "tabbar { background: none; box-shadow: none; }\n"
-  "tabbar tabbox { background: none; margin: 0; padding: 0; }\n"
+  /*
+   * AdwTabBox lays its tabs out with a fixed gap before the first one, after
+   * the last one and between neighbours, and it clips each tab to its own
+   * box -- a shadow or an outline on the tab cannot reach into that gap. The
+   * gap is left of the fill, so a selected tab showed a sliver of bare bar
+   * beside it. Widening the box past the bar and every tab past its slot
+   * paints through the gaps instead; the overhang lands outside the
+   * scrolled area and is clipped.
+   */
+  "tabbar tabbox { background: none; margin: 0 -12px; padding: 0; }\n"
+  "tabbar tabbox > tabboxchild { margin: 0 -4px; }\n"
+  "tabbar tabbox > separator { min-width: 0; min-height: 0; margin: 0;"
+  " background: none; opacity: 0; }\n"
   "tabbar tab { border-radius: 0; margin: 0; padding: 5px 8px;"
   " min-width: 110px; }\n"
   "tabbar tab:selected, tabbar tab:checked"
@@ -457,7 +504,13 @@ static const char *XD_STYLE =
   ".xd-diff-text { min-width: 480px; padding: 7px 10px;"
   " font-family: \"JetBrains Mono\", monospace; font-size: 1em;"
   " line-height: 1; }\n"
-  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px; }\n"
+  /* The list paints nothing of its own: GtkListView carries the view
+   * background, which is a grey the rest of the window left behind, and it
+   * showed as a lighter slab down the whole pane. Transparent lets the pane's
+   * own black through, hairline divider and all -- the same thing the file
+   * list does beside it. */
+  "listview.xd-diff-list { padding-top: 7px; padding-bottom: 7px;"
+  " background: transparent; }\n"
   ".xd-diff-text.xd-diff-chunk { padding-top: 0; padding-bottom: 0; }\n"
   "listview.xd-diff-list > row { min-height: 0; margin: 0; padding: 0;"
   " border-radius: 0; }\n"

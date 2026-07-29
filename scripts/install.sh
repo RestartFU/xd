@@ -5,11 +5,11 @@
 #   curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 #
 # "sh -s -- --release" installs the newest tagged release instead of the
-# nightly; the two live side by side. "sh -s -- --dev" takes the rolling dev
-# release a pull request published: that is a nightly built from a branch, and
-# it installs to the nightly's own paths -- over the nightly, on purpose, so a
-# branch can be tried where the nightly already runs. It takes itself away
-# again with:
+# nightly; the two live side by side. "sh -s -- --from DIR" installs a bundle
+# that is already built, which is how the nightly installs a branch it built
+# from source: nothing is downloaded, and the rest of this -- the paths, the
+# command, the icon, the menu entry -- is the same as for a download, because
+# it is the same script. It takes itself away again with:
 #
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
 #
@@ -34,17 +34,28 @@ set -eu
 
 REPO=RestartFU/xd
 
+say () { printf '%s\n' "$*"; }
+die () { printf 'install: %s\n' "$*" >&2; exit 1; }
+
 # The nightly by default, since it is the one that is always there. --release
 # takes the newest tagged release instead; the two install side by side and
-# neither touches the other's chats. --dev takes the dev release, which is a
-# nightly built from a branch and uses the nightly's paths.
+# neither touches the other's chats.
 CHANNEL=nightly
 
-for argument in "$@"; do
-  case "$argument" in
+# A bundle already on this machine, from --from: a build of a branch, which is
+# a nightly and installs to the nightly's paths.
+SOURCE=
+UNINSTALL=no
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --release|--stable) CHANNEL=release ;;
-    --dev) CHANNEL=dev ;;
+    --from) [ "$#" -ge 2 ] || die "--from needs a directory."
+            SOURCE=$2; shift ;;
+    --from=*) SOURCE=${1#--from=} ;;
+    --uninstall) UNINSTALL=yes ;;
   esac
+  shift
 done
 
 if [ "$CHANNEL" = release ]; then
@@ -53,8 +64,6 @@ if [ "$CHANNEL" = release ]; then
   ASSET=xd-linux-x86_64.tar.gz
   BASE="https://github.com/$REPO/releases/latest/download"
 else
-  # A dev build is a nightly in every path it touches; only the release it
-  # comes from is different.
   NAME=xd-nightly
   APP_ID=com.restartfu.Xd.Nightly
   ASSET=xd-nightly-linux-x86_64.tar.gz
@@ -66,9 +75,6 @@ OPT="$HOME/.local/opt/$NAME"
 BIN="$HOME/.local/bin/$NAME"
 DESKTOP="$DATA_HOME/applications/$APP_ID.desktop"
 
-say () { printf '%s\n' "$*"; }
-die () { printf 'install: %s\n' "$*" >&2; exit 1; }
-
 uninstall () {
   rm -rf "$OPT"
   rm -f "$BIN" "$DESKTOP" \
@@ -79,9 +85,7 @@ uninstall () {
   exit 0
 }
 
-for argument in "$@"; do
-  [ "$argument" = "--uninstall" ] && uninstall
-done
+[ "$UNINSTALL" = yes ] && uninstall
 
 # --- what this machine is ---------------------------------------------------
 
@@ -92,31 +96,47 @@ case "$(uname -m)" in
   *) die "only x86_64 is published so far; found $(uname -m)." ;;
 esac
 
-command -v curl >/dev/null 2>&1 || die "curl is needed."
-command -v tar  >/dev/null 2>&1 || die "tar is needed."
-
-# --- fetch ------------------------------------------------------------------
+# --- the bundle -------------------------------------------------------------
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
-say "Downloading the $CHANNEL build…"
-curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET" "$BASE/$ASSET" \
-  || die "cannot download $BASE/$ASSET"
+if [ -n "$SOURCE" ]; then
+  # Already built, here on this machine. Copied into the staging directory
+  # rather than moved, so a failure later leaves the build where it was and
+  # the same one line below installs either kind.
+  [ -x "$SOURCE/xd.sh" ] || die "$SOURCE is not a built bundle."
 
-# Published beside the tarball, so a truncated or tampered download is caught
-# before anything is unpacked.
-if curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET.sha256" \
-     "$BASE/$ASSET.sha256" 2>/dev/null; then
-  if command -v sha256sum >/dev/null 2>&1; then
-    ( cd "$WORK" && sha256sum -c "$ASSET.sha256" >/dev/null ) \
-      || die "the download does not match its checksum."
+  # And it is a build of what is being installed. A bundle built as the
+  # default profile carries the release's application id, and installing it to
+  # the nightly's paths would leave a copy that answers to neither.
+  [ -f "$SOURCE/share/applications/$APP_ID.desktop" ] \
+    || die "the build in $SOURCE is not a $NAME build; build it with PROFILE=$CHANNEL."
+
+  say "Installing the build in $SOURCE…"
+  cp -a "$SOURCE" "$WORK/$NAME"
+else
+  command -v curl >/dev/null 2>&1 || die "curl is needed."
+  command -v tar  >/dev/null 2>&1 || die "tar is needed."
+
+  say "Downloading the $CHANNEL build…"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET" "$BASE/$ASSET" \
+    || die "cannot download $BASE/$ASSET"
+
+  # Published beside the tarball, so a truncated or tampered download is caught
+  # before anything is unpacked.
+  if curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET.sha256" \
+       "$BASE/$ASSET.sha256" 2>/dev/null; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      ( cd "$WORK" && sha256sum -c "$ASSET.sha256" >/dev/null ) \
+        || die "the download does not match its checksum."
+    fi
   fi
-fi
 
-say "Unpacking…"
-tar -xzf "$WORK/$ASSET" -C "$WORK"
-[ -x "$WORK/$NAME/xd.sh" ] || die "the archive is not what was expected."
+  say "Unpacking…"
+  tar -xzf "$WORK/$ASSET" -C "$WORK"
+  [ -x "$WORK/$NAME/xd.sh" ] || die "the archive is not what was expected."
+fi
 
 # --- install ----------------------------------------------------------------
 
@@ -143,7 +163,9 @@ ICON_THEME="$DATA_HOME/icons/hicolor"
 ICON_DIR="$ICON_THEME/scalable/apps"
 
 mkdir -p "$ICON_DIR"
-cp -f "$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg" "$ICON_DIR/$APP_ID.svg"
+if [ -f "$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg" ]; then
+  cp -f "$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg" "$ICON_DIR/$APP_ID.svg"
+fi
 
 if [ -f "$OPT/share/applications/$APP_ID.desktop" ]; then
   sed -e "s|^Exec=.*|Exec=$BIN|" \

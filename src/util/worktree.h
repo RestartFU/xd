@@ -28,6 +28,15 @@ GPtrArray *xd_worktree_list      (const char      *workdir,
                                   GError         **error);
 
 /*
+ * Resolves @requested to one checkout registered with the repository
+ * containing @workdir. This is deliberately narrower than accepting any
+ * directory: a model must not expand a later turn's write sandbox by naming
+ * an unrelated path.
+ */
+char      *xd_worktree_registered_path (const char *workdir,
+                                        const char *requested);
+
+/*
  * Creates the private checkout used by a new chat.
  *
  * The checkout starts at the current HEAD. @name_hint becomes a readable

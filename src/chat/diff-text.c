@@ -13,9 +13,9 @@ G_DEFINE_FINAL_TYPE (XdDiffText, xd_diff_text, GTK_TYPE_WIDGET)
 static void
 append_row_block (GtkSnapshot *snapshot,
                   const char  *colour,
-                  int          top,
-                  int          bottom,
-                  int          width)
+                  float        top,
+                  float        bottom,
+                  float        width)
 {
   GdkRGBA rgba;
 
@@ -48,15 +48,26 @@ xd_diff_text_snapshot (GtkWidget   *widget,
     {
       PangoLayout *layout = gtk_label_get_layout (GTK_LABEL (self->label));
       PangoLayoutIter *iter = pango_layout_get_iter (layout);
+      const graphene_point_t label_point = GRAPHENE_POINT_INIT (0, 0);
+      graphene_point_t label_origin;
       const char *block_colour = NULL;
-      int block_top = 0;
-      int block_bottom = 0;
-      int origin_x = 0;
+      float block_top = 0;
+      float block_bottom = 0;
       int origin_y = 0;
       guint row = 0;
 
+      /*
+       * GtkLabel's coordinates begin at its content box. CSS padding moves
+       * that box inside this parent, so layout offsets alone are not parent
+       * coordinates. Inline diffs have vertical padding; ignoring this
+       * transform painted every changed-row background above its text.
+       */
+      if (!gtk_widget_compute_point (
+            self->label, widget, &label_point, &label_origin))
+        graphene_point_init (&label_origin, 0, 0);
+
       gtk_label_get_layout_offsets (
-        GTK_LABEL (self->label), &origin_x, &origin_y);
+        GTK_LABEL (self->label), NULL, &origin_y);
 
       do
         {
@@ -66,12 +77,17 @@ xd_diff_text_snapshot (GtkWidget   *widget,
             ? xd_diff_line_background (
                 g_array_index (self->rows, guint8, row))
             : NULL;
-          int top = 0;
-          int bottom = 0;
+          int top_units = 0;
+          int bottom_units = 0;
+          float top;
+          float bottom;
 
-          pango_layout_iter_get_line_yrange (iter, &top, &bottom);
-          top = origin_y + PANGO_PIXELS (top);
-          bottom = origin_y + PANGO_PIXELS (bottom);
+          pango_layout_iter_get_line_yrange (
+            iter, &top_units, &bottom_units);
+          top = label_origin.y + origin_y +
+                (float) top_units / PANGO_SCALE;
+          bottom = label_origin.y + origin_y +
+                   (float) bottom_units / PANGO_SCALE;
 
           if (colour != block_colour || top != block_bottom)
             {
