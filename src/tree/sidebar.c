@@ -1162,13 +1162,26 @@ on_row_right_clicked (GtkGestureClick *gesture,
                       gpointer         user_data)
 {
   GtkPopover *popover = user_data;
+  GtkWidget *box =
+    gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
   GdkRectangle at = { (int) x, (int) y, 1, 1 };
 
   if (gtk_popover_menu_get_menu_model (GTK_POPOVER_MENU (popover)) == NULL)
     return;
 
+  if (gtk_widget_get_parent (GTK_WIDGET (popover)) == NULL)
+    gtk_widget_set_parent (GTK_WIDGET (popover), box);
+
   gtk_popover_set_pointing_to (popover, &at);
   gtk_popover_popup (popover);
+}
+
+static void
+on_row_menu_closed (GtkPopover *popover,
+                    gpointer    user_data)
+{
+  if (gtk_widget_get_parent (GTK_WIDGET (popover)) != NULL)
+    gtk_widget_unparent (GTK_WIDGET (popover));
 }
 
 /*
@@ -1397,14 +1410,15 @@ on_item_setup (GtkSignalListItemFactory *factory,
     gtk_widget_add_controller (entry, focus);
   }
 
-  gtk_widget_set_parent (popover, box);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
   gtk_widget_set_halign (popover, GTK_ALIGN_START);
-  g_object_set_data (G_OBJECT (item), "context-menu", popover);
-
   /* Read back when a menu item starts a rename: the entry has to wait for its
-   * own menu to finish closing. */
-  g_object_set_data (G_OBJECT (box), "menu", popover);
+   * own menu to finish closing. Keep it off the widget hierarchy until it is
+   * opened: a recycled list row can otherwise be disposed underneath it. */
+  g_object_set_data_full (G_OBJECT (box), "menu",
+                          g_object_ref_sink (popover), g_object_unref);
+  g_signal_connect (popover, "closed",
+                    G_CALLBACK (on_row_menu_closed), NULL);
 
   gesture = gtk_gesture_click_new ();
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (gesture), GDK_BUTTON_SECONDARY);
@@ -1424,22 +1438,6 @@ on_item_setup (GtkSignalListItemFactory *factory,
 
   gtk_tree_expander_set_child (GTK_TREE_EXPANDER (expander), box);
   gtk_list_item_set_child (item, expander);
-}
-
-/* A popover added with set_parent() has to be taken back off by hand. */
-static void
-on_item_teardown (GtkSignalListItemFactory *factory,
-                  GtkListItem              *item,
-                  gpointer                  user_data)
-{
-  GtkWidget *popover = g_object_get_data (G_OBJECT (item), "context-menu");
-
-  /* The row may have been taken apart already, in which case its menu went
-   * with it and there is nothing here to detach. */
-  if (popover != NULL && GTK_IS_WIDGET (popover))
-    gtk_widget_unparent (popover);
-
-  g_object_set_data (G_OBJECT (item), "context-menu", NULL);
 }
 
 static GMenuModel *
@@ -1606,7 +1604,7 @@ on_item_bind (GtkSignalListItemFactory *factory,
     gboolean is_folder = xd_node_get_kind (node) == XD_NODE_FOLDER;
     gboolean is_remote_root = self->remote != NULL &&
       node == xd_remote_tree_get_root (self->remote);
-    GtkWidget *popover = g_object_get_data (G_OBJECT (item), "context-menu");
+    GtkWidget *popover = g_object_get_data (G_OBJECT (box), "menu");
     g_autoptr (GMenuModel) menu = NULL;
 
     /* The same menu wherever the row lives: what each item does is settled
@@ -1692,6 +1690,21 @@ on_item_unbind (GtkSignalListItemFactory *factory,
       g_signal_handler_disconnect (row, GPOINTER_TO_SIZE (handler));
       g_object_set_data (G_OBJECT (item), "expanded-handler", NULL);
     }
+
+  /* A row can disappear while its menu is still closing. Pop it down while
+   * the anchor box is intact; ::closed detaches it from the hierarchy. */
+  {
+    GtkWidget *expander = gtk_list_item_get_child (item);
+    GtkWidget *box = gtk_tree_expander_get_child (GTK_TREE_EXPANDER (expander));
+    GtkWidget *popover = g_object_get_data (G_OBJECT (box), "menu");
+
+    if (gtk_widget_get_parent (popover) != NULL)
+      {
+        gtk_popover_popdown (GTK_POPOVER (popover));
+        if (gtk_widget_get_parent (popover) != NULL)
+          gtk_widget_unparent (popover);
+      }
+  }
 }
 
 /*
@@ -2010,7 +2023,6 @@ xd_sidebar_init (XdSidebar *self)
   g_signal_connect (factory, "setup", G_CALLBACK (on_item_setup), self);
   g_signal_connect (factory, "bind", G_CALLBACK (on_item_bind), self);
   g_signal_connect (factory, "unbind", G_CALLBACK (on_item_unbind), self);
-  g_signal_connect (factory, "teardown", G_CALLBACK (on_item_teardown), self);
 
   self->list_view = GTK_LIST_VIEW (gtk_list_view_new (NULL, factory));
   gtk_list_view_set_single_click_activate (self->list_view, FALSE);
