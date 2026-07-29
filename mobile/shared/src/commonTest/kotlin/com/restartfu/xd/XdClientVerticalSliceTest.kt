@@ -291,7 +291,7 @@ class XdClientVerticalSliceTest {
     }
 
     @Test
-    fun lifecycleEventWinsOverInFlightTreeSnapshot() = runTest {
+    fun wireNewerLifecycleEventWinsOverInFlightTreeSnapshot() = runTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
@@ -313,11 +313,10 @@ class XdClientVerticalSliceTest {
         runCurrent()
         assertEquals("tree", socket.opAt(2))
 
-        socket.receive("""{"event":"turn-started","chat":"chat","label":"Codex"}""")
-        runCurrent()
-        assertTrue(client.tree.value.chats.single().working)
-
-        socket.receive(treeReply(working = false))
+        socket.receive(
+            treeReply(working = false),
+            """{"event":"turn-started","chat":"chat","label":"Codex"}""",
+        )
         runCurrent()
         assertTrue(client.tree.value.chats.single().working)
 
@@ -330,11 +329,47 @@ class XdClientVerticalSliceTest {
         assertTrue(client.tree.value.chats.isEmpty())
     }
 
+    @Test
+    fun treeRefreshRequestsAreConflatedWhileRefreshRuns() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+        socket.receive(treeReply(working = false))
+        runCurrent()
+
+        socket.receive(
+            """{"event":"tree"}""",
+            """{"event":"tree"}""",
+            """{"event":"tree"}""",
+        )
+        runCurrent()
+        assertEquals(2, socket.countOps("tree"))
+
+        socket.receive(treeReply(working = false))
+        runCurrent()
+        assertEquals(3, socket.countOps("tree"))
+        socket.receive(treeReply(working = false))
+        runCurrent()
+        assertEquals(3, socket.countOps("tree"))
+    }
+
     private fun FakeSocket.opAt(index: Int): String {
         val line = writes[index].decodeToString()
         return Regex(""""op":"([^"]+)"""").find(line)?.groupValues?.get(1)
             ?: error("No op in $line")
     }
+
+    private fun FakeSocket.countOps(op: String): Int =
+        writes.count { it.decodeToString().contains(""""op":"$op"""") }
 
     private fun chatReply(
         working: Boolean,

@@ -15,6 +15,7 @@ import com.restartfu.xd.store.ChatSessionCore
 import com.restartfu.xd.store.TreeStore
 import com.restartfu.xd.time.currentEpochMillis
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
@@ -29,6 +30,7 @@ public class XdClient(
 ) {
     private val actor = ConnectionActor(socketFactory, credentials, scope)
     private val treeStore = TreeStore(actor)
+    private val treeRefreshRequests = Channel<Unit>(Channel.CONFLATED)
     private val sessions = MutableStateFlow<Map<String, SessionEntry>>(emptyMap())
 
     public val link: StateFlow<Link> = actor.link
@@ -38,9 +40,12 @@ public class XdClient(
 
     init {
         scope.launch {
+            for (ignored in treeRefreshRequests) treeStore.refresh()
+        }
+        scope.launch {
             actor.link.collect { value ->
                 if (value is Link.Up) {
-                    launch { treeStore.refresh() }
+                    requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
                         entry.core.requestReload()
                     }
@@ -52,11 +57,15 @@ public class XdClient(
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
                 if (eventName == "tree") {
-                    launch { treeStore.refresh() }
+                    requestTreeRefresh()
                 }
                 val chatId = (event.value["chat"] as? JsonPrimitive)?.contentOrNull
                 if (chatId != null && eventName in TURN_LIFECYCLE_EVENTS) {
-                    treeStore.setChatWorking(chatId, eventName == "turn-started")
+                    treeStore.setChatWorking(
+                        chatId = chatId,
+                        working = eventName == "turn-started",
+                        sequence = event.sequence,
+                    )
                 }
                 sessions.value.values.forEach { entry ->
                     // Preserve wire order: text/tool transitions are not
@@ -94,12 +103,17 @@ public class XdClient(
         while (true) {
             val before = sessions.value
             val existing = before[chatId]
-            chosen = existing?.core ?: ChatSessionCore(
-                chatId = chatId,
-                actor = actor,
-                scope = scope,
-                nowMillis = ::nowMillis,
-            )
+            val created = if (existing == null) {
+                ChatSessionCore(
+                    chatId = chatId,
+                    actor = actor,
+                    scope = scope,
+                    nowMillis = ::nowMillis,
+                )
+            } else {
+                null
+            }
+            chosen = existing?.core ?: checkNotNull(created)
             val after = before + (
                 chatId to SessionEntry(
                     core = chosen,
@@ -107,6 +121,7 @@ public class XdClient(
                 )
             )
             if (sessions.compareAndSet(before, after)) break
+            created?.shutdown()
         }
         if (chosen.state.value.title.isEmpty() && actor.link.value is Link.Up) {
             chosen.requestReload()
@@ -155,6 +170,10 @@ public class XdClient(
     }
 
     private fun nowMillis(): Long = currentEpochMillis()
+
+    private fun requestTreeRefresh() {
+        treeRefreshRequests.trySend(Unit)
+    }
 
     private companion object {
         val TURN_LIFECYCLE_EVENTS = setOf("turn-started", "turn-finished")

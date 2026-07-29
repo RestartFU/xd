@@ -288,15 +288,11 @@ internal class ChatSessionCore(
             "turn-finished" -> apply(TranscriptInput.TurnFinished, event.sequence)
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
             "commands" -> {
-                val commands = (value["commands"] as? JsonArray)
-                    ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-                    .orEmpty()
+                val commands = value.requiredStringArray("commands") ?: return
                 apply(TranscriptInput.Commands(commands), event.sequence)
             }
             "queued" -> {
-                val queue = (value["queue"] as? JsonArray)
-                    ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-                    .orEmpty()
+                val queue = value.requiredStringArray("queue") ?: return
                 apply(TranscriptInput.Queued(queue), event.sequence)
             }
         }
@@ -371,6 +367,17 @@ internal class ChatSessionCore(
         stateMutex.withLock {
             check(!invalidated) { "This chat belongs to a forgotten remote" }
         }
+    }
+
+    private fun JsonObject.requiredStringArray(name: String): List<String>? {
+        val values = this[name] as? JsonArray ?: return null
+        val decoded = mutableListOf<String>()
+        for (value in values) {
+            val primitive = value as? JsonPrimitive ?: return null
+            if (!primitive.isString) return null
+            decoded += primitive.content
+        }
+        return decoded
     }
 
     private suspend fun clearReloadAfterCancellation() {

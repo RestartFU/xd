@@ -14,6 +14,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -153,6 +155,61 @@ class ChatSessionCoreTest {
         )
 
         assertEquals("", core.state.value.liveSegment)
+    }
+
+    @Test
+    fun malformedQueuedEventDoesNotReplaceAuthoritativeQueue() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(
+            factory,
+            MemoryCredentialStore(
+                StoredCredentials(
+                    host = "daemon",
+                    port = 4001,
+                    token = "token",
+                    certificateDer = byteArrayOf(1, 2, 3),
+                ),
+            ),
+            backgroundScope,
+        )
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        runCurrent()
+        runCurrent()
+
+        val core = ChatSessionCore("chat", actor, backgroundScope) { 10_000L }
+        core.onEvent(
+            SequencedEvent(
+                sequence = 2,
+                value = buildJsonObject {
+                    put("event", "queued")
+                    put("chat", "chat")
+                    put("queue", JsonArray(listOf(JsonPrimitive("safe"))))
+                },
+            ),
+        )
+        core.onEvent(
+            SequencedEvent(
+                sequence = 3,
+                value = buildJsonObject {
+                    put("event", "queued")
+                    put("chat", "chat")
+                    put(
+                        "queue",
+                        JsonArray(
+                            listOf(
+                                JsonPrimitive("wrong"),
+                                JsonPrimitive(1),
+                            ),
+                        ),
+                    )
+                },
+            ),
+        )
+
+        assertEquals(listOf("safe"), core.state.value.queue)
     }
 
     private fun com.restartfu.xd.net.FakeSocket.countOps(op: String): Int =

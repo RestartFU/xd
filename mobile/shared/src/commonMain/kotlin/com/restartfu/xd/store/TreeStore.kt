@@ -22,6 +22,7 @@ internal class TreeStore(
     private val _state = MutableStateFlow(TreeSnapshot())
     private var lifecycleVersion = 0L
     private var clearVersion = 0L
+    private var snapshotSequence = 0L
     private val workingEvents = mutableMapOf<String, WorkingEvent>()
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
@@ -38,10 +39,16 @@ internal class TreeStore(
     suspend fun setChatWorking(
         chatId: String,
         working: Boolean,
+        sequence: Long,
     ) {
         stateMutex.withLock {
+            if (sequence <= snapshotSequence) return
+            if ((workingEvents[chatId]?.sequence ?: Long.MIN_VALUE) >= sequence) return
             lifecycleVersion += 1
-            workingEvents[chatId] = WorkingEvent(lifecycleVersion, working)
+            workingEvents[chatId] = WorkingEvent(
+                sequence = sequence,
+                working = working,
+            )
             _state.value = _state.value.copy(
                 chats = _state.value.chats.map { chat ->
                     if (chat.id == chatId) chat.copy(working = working) else chat
@@ -57,10 +64,14 @@ internal class TreeStore(
                 lifecycleVersion
             }
             try {
-                val value = actor.call(Ops.tree())
-                val reply = actor.decodeReply(value) { it.decodeReply<TreeReply>() }
+                val result = actor.callSequenced(Ops.tree())
+                val reply = actor.decodeReply(result.value) {
+                    it.decodeReply<TreeReply>()
+                }
                 stateMutex.withLock {
                     if (clearVersion > versionBefore) return@withLock
+                    snapshotSequence = maxOf(snapshotSequence, result.sequence)
+                    val authoritativeSequence = snapshotSequence
                     _state.value = TreeSnapshot(
                         folders = reply.folders.map {
                             Folder(id = it.id, name = it.name, parentId = it.parent)
@@ -72,13 +83,17 @@ internal class TreeStore(
                                 title = it.title,
                                 backend = it.backend,
                                 working = workingEvents[it.id]
-                                    ?.takeIf { event -> event.version > versionBefore }
+                                    ?.takeIf { event ->
+                                        event.sequence > authoritativeSequence
+                                    }
                                     ?.working
                                     ?: it.working,
                             )
                         },
                     )
-                    workingEvents.entries.removeAll { it.value.version <= versionBefore }
+                    workingEvents.entries.removeAll {
+                        it.value.sequence <= authoritativeSequence
+                    }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -94,7 +109,7 @@ internal class TreeStore(
     }
 
     private data class WorkingEvent(
-        val version: Long,
+        val sequence: Long,
         val working: Boolean,
     )
 }
