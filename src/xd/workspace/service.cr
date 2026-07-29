@@ -45,6 +45,13 @@ module Xd
         found || raise Error.new("No such folder on the daemon.")
       end
 
+      def folder_ids(folder_id : String) : Array(String)
+        folder = find_folder(folder_id)
+        ancestor_paths(folder).compact_map do |path|
+          SettingsFile.load?(path).try(&.id)
+        end
+      end
+
       def create_folder(parent_id : String?, name : String) : String
         validate_name!(name)
         parent = parent_id ? find_folder(parent_id) : @root

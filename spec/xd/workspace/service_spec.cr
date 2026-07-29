@@ -117,6 +117,7 @@ describe Xd::Workspace::Service do
       resolved.instructions.should eq(
         "Always answer in French.\n\nThis is a Go codebase."
       )
+      service.folder_ids(child_id).should eq([parent_id, child_id])
     end
   end
 
