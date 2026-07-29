@@ -12,6 +12,7 @@ xd_tests = {
   'agent-secrets': 'test-agent-secrets.c',
   'markdown': 'test-markdown.c',
   'text-reveal': 'test-text-reveal.c',
+  'voice-data': 'test-voice-data.c',
   'ask': 'test-ask.c',
   'git-diff': 'test-git-diff.c',
   'git-head-watch': 'test-git-head-watch.c',

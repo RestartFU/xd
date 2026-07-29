@@ -7,6 +7,7 @@ xd_core_sources = files(
   'settings/settings-resolver.c',
   'util/markdown.c',
   'util/text-reveal.c',
+  'util/voice-data.c',
   'util/ask-block.c',
   'util/git-diff.c',
   'util/git-head-watch.c',
@@ -101,6 +102,10 @@ endif
 xd_app_deps = [glib_dep, gio_dep, gtk_dep, adw_dep, json_dep, sqlite_dep]
 if not is_windows
   xd_app_deps += [gio_unix_dep, vte_dep]
+endif
+if has_voice
+  xd_sources += files('chat/voice-input.c')
+  xd_app_deps += [pulse_simple_dep, soup_dep]
 endif
 
 executable('xd',
