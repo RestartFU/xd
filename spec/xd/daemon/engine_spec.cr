@@ -150,4 +150,40 @@ describe Xd::Daemon::Engine do
       chat["queue"].as_a.map(&.as_s).should eq(["next"])
     end
   end
+
+  it "owns workspace and chat mutations behind the same protocol" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      created = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Lunar",
+      }.to_json)
+      folder_id = created["id"].as_s
+
+      engine.dispatch(local, {
+        "op"      => "set-folder-context",
+        "folder"  => folder_id,
+        "context" => "Use Crystal.",
+      }.to_json).success?.should be_true
+
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder_id,
+        "title"  => "Port daemon",
+      }.to_json)
+      chat.success?.should be_true
+
+      tree = engine.dispatch(local, %({"op":"tree"}))
+      tree["folders"].as_a.map { |folder| folder["name"].as_s }
+        .should eq(["Lunar"])
+      tree["chats"].as_a.map { |item| item["id"].as_s }
+        .should eq([chat["id"].as_s])
+
+      context = engine.dispatch(local, {
+        "op"     => "folder-context",
+        "folder" => folder_id,
+      }.to_json)
+      context["context"].as_s.should eq("Use Crystal.")
+    end
+  end
 end

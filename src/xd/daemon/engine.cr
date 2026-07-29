@@ -2,6 +2,7 @@ require "digest/sha256"
 require "random/secure"
 require "../protocol/message"
 require "../storage/workflow_state"
+require "../workspace/service"
 require "./connection"
 
 module Xd
@@ -22,9 +23,14 @@ module Xd
 
       def initialize(
         @store : Storage::Store,
+        workspaces : Workspace::Service? = nil,
         @clock : Proc(Time::Instant) = -> { Time.instant },
         @token_generator : Proc(String) = -> { Random::Secure.base64(32) },
       )
+        @workspaces = workspaces || Workspace::Service.new(
+          File.join(Path[@store.path].dirname, "Workspaces"),
+          @store
+        )
       end
 
       def arm_pairing(ttl : Time::Span) : String
@@ -53,6 +59,22 @@ module Xd
             pair(connection, request)
           when Protocol::Operation::Hello
             hello(connection, request)
+          when Protocol::Operation::Tree
+            tree
+          when Protocol::Operation::NewFolder
+            new_folder(request)
+          when Protocol::Operation::RenameFolder
+            rename_folder(request)
+          when Protocol::Operation::MoveFolder
+            move_folder(request)
+          when Protocol::Operation::TrashFolder
+            trash_folder(request)
+          when Protocol::Operation::FolderContext
+            folder_context(request)
+          when Protocol::Operation::SetFolderContext
+            set_folder_context(request)
+          when Protocol::Operation::NewChat
+            new_chat(request)
           when Protocol::Operation::Messages
             messages(request)
           when Protocol::Operation::RenameChat
@@ -81,6 +103,8 @@ module Xd
         Protocol::Response.error(error.message || "Invalid request")
       rescue error : DeviceStoreError
         Protocol::Response.error(error.message || "Storage error")
+      rescue error : Workspace::Error
+        Protocol::Response.error(error.message || "Workspace error")
       end
 
       private def pair(
@@ -129,6 +153,135 @@ module Xd
 
       private def token_hash(token : String) : String
         Digest::SHA256.hexdigest(token)
+      end
+
+      private def tree : Protocol::Response
+        snapshot = @workspaces.snapshot
+
+        folders = snapshot.folders.map do |folder|
+          fields = {
+            "id"   => JSON::Any.new(folder.id),
+            "name" => JSON::Any.new(folder.name),
+          }
+          if parent = folder.parent
+            fields["parent"] = JSON::Any.new(parent)
+          end
+          JSON::Any.new(fields)
+        end
+        chats = snapshot.chats.map do |chat|
+          JSON::Any.new({
+            "id"      => JSON::Any.new(chat.id),
+            "folder"  => JSON::Any.new(chat.folder),
+            "title"   => json_any(chat.title),
+            "backend" => JSON::Any.new(chat.backend),
+            "working" => JSON::Any.new(chat.working),
+          })
+        end
+
+        Protocol::Response.ok({
+          "folders" => JSON::Any.new(folders),
+          "chats"   => JSON::Any.new(chats),
+        })
+      end
+
+      private def new_folder(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        name = request.string(
+          "name",
+          "A folder name cannot be empty or hidden, or contain a path separator."
+        )
+        id = @workspaces.create_folder(request.string?("parent"), name)
+        Protocol::Response.ok({"id" => JSON::Any.new(id)})
+      end
+
+      private def rename_folder(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        name = request.string(
+          "name",
+          "A folder name cannot be empty or hidden, or contain a path separator."
+        )
+        @workspaces.rename_folder(folder_id, name)
+        Protocol::Response.ok
+      end
+
+      private def move_folder(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        @workspaces.move_folder(folder_id, request.string?("parent"))
+        Protocol::Response.ok
+      end
+
+      private def trash_folder(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        @workspaces.trash_folder(folder_id)
+        Protocol::Response.ok
+      end
+
+      private def folder_context(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        Protocol::Response.ok({
+          "context" => json_any(@workspaces.folder_context(folder_id)),
+        })
+      end
+
+      private def set_folder_context(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        unless request.member?("context")
+          raise Protocol::Error.new("set-folder-context needs context.")
+        end
+
+        node = request.body["context"]
+        context = node.as_s?
+        unless context || node.raw.nil?
+          raise Protocol::Error.new("Folder context must be text or null.")
+        end
+
+        @workspaces.set_folder_context(folder_id, context)
+        Protocol::Response.ok
+      end
+
+      private def new_chat(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        settings = @workspaces.resolve(folder_id)
+        chat_id = @store.create_chat(
+          folder_id,
+          request.string?("title") || "New Chat",
+          settings.backend,
+          settings.model,
+          nil,
+          request.string?("workdir")
+        )
+        Protocol::Response.ok({"id" => JSON::Any.new(chat_id)})
       end
 
       private def messages(request : Protocol::Request) : Protocol::Response
@@ -215,7 +368,13 @@ module Xd
         fields["has_messages"] = JSON::Any.new(
           @store.last_message_id(stored.id) > 0
         )
-        fields["workdir"] = JSON::Any.new(stored.workdir) if stored.workdir
+        begin
+          fields["workdir"] = JSON::Any.new(
+            @workspaces.resolve_workdir(stored.folder_id, stored.workdir)
+          )
+        rescue Workspace::Error
+          # Orphaned chats remain readable even when their folder disappeared.
+        end
 
         Protocol::Response.ok(fields)
       end
