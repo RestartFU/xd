@@ -22,6 +22,8 @@ module Xd
       TrashFolder
       FolderContext
       SetFolderContext
+      FolderSettings
+      SetFolderSettings
       NewChat
       RenameChat
       DeleteChat
@@ -58,6 +60,8 @@ module Xd
         when TrashFolder     then "trash-folder"
         when FolderContext   then "folder-context"
         when SetFolderContext then "set-folder-context"
+        when FolderSettings  then "folder-settings"
+        when SetFolderSettings then "set-folder-settings"
         when NewChat         then "new-chat"
         when RenameChat      then "rename-chat"
         when DeleteChat      then "delete-chat"
@@ -97,6 +101,8 @@ module Xd
         when "trash-folder"      then TrashFolder
         when "folder-context"    then FolderContext
         when "set-folder-context" then SetFolderContext
+        when "folder-settings"   then FolderSettings
+        when "set-folder-settings" then SetFolderSettings
         when "new-chat"          then NewChat
         when "rename-chat"       then RenameChat
         when "delete-chat"       then DeleteChat

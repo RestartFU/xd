@@ -196,7 +196,7 @@ describe Xd::Daemon::Engine do
   end
 
   it "owns workspace and chat mutations behind the same protocol" do
-    with_daemon_engine do |_store, engine|
+    with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
       created = engine.dispatch(local, {
         "op"   => "new-folder",
@@ -228,6 +228,29 @@ describe Xd::Daemon::Engine do
         "folder" => folder_id,
       }.to_json)
       context["context"].as_s.should eq("Use Crystal.")
+
+      project = File.join(Path[store.path].dirname, "project")
+      Dir.mkdir(project)
+      configured = engine.dispatch(local, {
+        "op"      => "set-folder-settings",
+        "folder"  => folder_id,
+        "backend" => "codex",
+        "model"   => "gpt-5.4",
+        "workdir" => project,
+        "repo"    => nil,
+      }.to_json)
+      configured.success?.should be_true
+
+      settings = engine.dispatch(local, {
+        "op"     => "folder-settings",
+        "folder" => folder_id,
+      }.to_json)
+      settings["backend"].as_s.should eq("codex")
+      settings["model"].as_s.should eq("gpt-5.4")
+      settings["workdir"].as_s.should eq(project)
+      settings["repo"].raw.should be_nil
+      settings["effective_backend"].as_s.should eq("codex")
+      settings["effective_workdir"].as_s.should eq(project)
     end
   end
 

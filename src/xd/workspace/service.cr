@@ -133,6 +133,26 @@ module Xd
         SettingsFile.save(settings, path)
       end
 
+      def folder_settings(folder_id : String) : Settings
+        SettingsFile.ensure(find_folder(folder_id))
+      end
+
+      def set_folder_settings(
+        folder_id : String,
+        backend : String?,
+        model : String?,
+        workdir : String?,
+        repo : String?,
+      ) : Nil
+        path = find_folder(folder_id)
+        settings = SettingsFile.ensure(path)
+        settings.backend = clean(backend)
+        settings.model = clean(model)
+        settings.workdir = directory_setting(workdir, "working directory")
+        settings.repo = directory_setting(repo, "repository")
+        SettingsFile.save(settings, path)
+      end
+
       def resolve(
         folder_id : String,
         default_backend : String = "claude",
@@ -251,6 +271,25 @@ module Xd
 
       private def within_root?(path : String) : Bool
         path == @root || path.starts_with?(@root + File::SEPARATOR)
+      end
+
+      private def clean(value : String?) : String?
+        stripped = value.try(&.strip)
+        stripped if stripped && !stripped.empty?
+      end
+
+      private def directory_setting(
+        value : String?,
+        label : String,
+      ) : String?
+        path = clean(value)
+        return nil unless path
+
+        expanded = File.expand_path(path)
+        unless File.directory?(expanded)
+          raise Error.new("The #{label} must be an existing directory.")
+        end
+        expanded
       end
 
       private def validate_name!(name : String) : Nil

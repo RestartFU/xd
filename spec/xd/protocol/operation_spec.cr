@@ -6,8 +6,7 @@ describe Xd::Protocol::Operation do
       Xd::Protocol::Operation::Invalid
     ))
 
-    # Guard parity with the C daemon while it remains migration oracle.
-    operations.size.should eq(33)
+    operations.size.should eq(35)
 
     operations.each do |operation|
       operation.wire_name.should_not be_empty

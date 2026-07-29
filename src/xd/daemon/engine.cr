@@ -166,6 +166,10 @@ module Xd
           folder_context(request)
         when Protocol::Operation::SetFolderContext
           set_folder_context(request)
+        when Protocol::Operation::FolderSettings
+          folder_settings(request)
+        when Protocol::Operation::SetFolderSettings
+          set_folder_settings(request)
         when Protocol::Operation::NewChat
           new_chat(request)
         when Protocol::Operation::Messages
@@ -456,6 +460,67 @@ module Xd
 
         @workspaces.set_folder_context(folder_id, context)
         Protocol::Response.ok
+      end
+
+      private def folder_settings(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        settings = @workspaces.folder_settings(folder_id)
+        effective = @workspaces.resolve(folder_id)
+        Protocol::Response.ok({
+          "backend"          => json_any(settings.backend),
+          "model"            => json_any(settings.model),
+          "workdir"          => json_any(settings.workdir),
+          "repo"             => json_any(settings.repo),
+          "effective_backend" => JSON::Any.new(effective.backend),
+          "effective_model"   => json_any(effective.model),
+          "effective_workdir" => JSON::Any.new(effective.workdir),
+          "effective_repo"    => json_any(effective.repo),
+        })
+      end
+
+      private def set_folder_settings(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        folder_id = request.string(
+          "folder",
+          "That request needs a folder."
+        )
+        names = {"backend", "model", "workdir", "repo"}
+        unless names.all? { |name| request.member?(name) }
+          raise Protocol::Error.new(
+            "set-folder-settings needs backend, model, workdir, and repo."
+          )
+        end
+
+        backend = nullable_text(request, "backend")
+        if backend && Agent::Catalog.lookup(backend).nil?
+          raise Protocol::Error.new("No such agent backend.")
+        end
+        @workspaces.set_folder_settings(
+          folder_id,
+          backend,
+          nullable_text(request, "model"),
+          nullable_text(request, "workdir"),
+          nullable_text(request, "repo")
+        )
+        Protocol::Response.ok
+      end
+
+      private def nullable_text(
+        request : Protocol::Request,
+        name : String,
+      ) : String?
+        node = request.body[name]
+        return nil if node.raw.nil?
+
+        node.as_s? || raise Protocol::Error.new(
+          "#{name} must be text or null."
+        )
       end
 
       private def new_chat(
