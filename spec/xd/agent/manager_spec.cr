@@ -101,6 +101,8 @@ describe Xd::Agent::Manager do
       store.get_chat(chat_id).daemon_working.should be_true
       store.get_chat(chat_id).title.should eq("inspect this")
       launcher.specs.first.prompt.should eq("inspect this")
+      launcher.specs.first.system_prompt.not_nil!
+        .should contain("<asking_the_user>")
       launcher.environments.first["DISABLE_AUTOUPDATER"].should eq("1")
 
       launcher.emit(0, Xd::Agent::Event.new(
@@ -173,6 +175,33 @@ describe Xd::Agent::Manager do
         .select(&.role.==("user"))
         .map(&.content)
         .should eq(["first", "second"])
+    end
+  end
+
+  it "hides an ask block while streaming and reports waiting" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      manager.send(chat_id, "decide")
+
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "Context.<as"
+      ))
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "k>\nChoose?\n- First\n- Second\n</ask>"
+      ))
+      launcher.finish(0, true)
+
+      streamed = events.select(&.[0].==("text"))
+      streamed.map { |event| event[1]["text"].as_s }.should eq(["Context."])
+      stored = store.list_messages(chat_id).find(&.role.==("assistant"))
+        .not_nil!.content
+      stored.should eq(
+        "Context.<ask>\nChoose?\n- First\n- Second\n</ask>"
+      )
+      finished = events.reverse.find(&.[0].==("turn-finished")).not_nil!
+      finished[1]["waiting"].as_bool.should be_true
     end
   end
 

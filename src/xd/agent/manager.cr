@@ -9,6 +9,7 @@ require "./conversation"
 require "./environment"
 require "./exec_session"
 require "./executable"
+require "./ask"
 require "./secrets"
 
 module Xd
@@ -112,6 +113,7 @@ module Xd
         property commands = [] of String
         property segment = ""
         property segment_message_id = 0_i64
+        property visible_segment_bytes = 0
         property context_used = 0_u64
         property context_window = 0_u64
 
@@ -292,6 +294,7 @@ module Xd
           secrets = Secrets.effective(folder_ids)
           system_prompt = [
             settings.instructions,
+            Ask::INSTRUCTIONS,
             secrets.prompt,
           ].compact.reject(&.empty?).join("\n\n")
           system_prompt = nil if system_prompt.empty?
@@ -421,6 +424,16 @@ module Xd
             return if text.empty?
 
             turn.segment += text
+            visible_bytes = Ask.visible_bytes(turn.segment)
+            visible_text = if visible_bytes > turn.visible_segment_bytes
+                             turn.segment.byte_slice(
+                               turn.visible_segment_bytes,
+                               visible_bytes - turn.visible_segment_bytes
+                             )
+                           else
+                             ""
+                           end
+            turn.visible_segment_bytes = visible_bytes
             if turn.segment_message_id == 0
               turn.segment_message_id = @store.append_message(
                 turn.chat_id,
@@ -434,11 +447,13 @@ module Xd
                 turn.segment
               )
             end
-            event_name = "text"
-            fields = {
-              "chat" => JSON::Any.new(turn.chat_id),
-              "text" => JSON::Any.new(text),
-            }
+            unless visible_text.empty?
+              event_name = "text"
+              fields = {
+                "chat" => JSON::Any.new(turn.chat_id),
+                "text" => JSON::Any.new(visible_text),
+              }
+            end
           when EventType::ToolUse
             close_segment(turn)
             text = event.text || "Used a tool"
@@ -475,6 +490,7 @@ module Xd
         end
         return unless accepted
 
+        asked = Ask.parse(turn.segment).try(&.ask)
         close_segment(turn)
         elapsed = Math.max(
           (Time.instant - turn.started_at).total_seconds.to_i64,
@@ -512,7 +528,7 @@ module Xd
         fields = {
           "chat"    => JSON::Any.new(turn.chat_id),
           "ok"      => JSON::Any.new(success),
-          "waiting" => JSON::Any.new(false),
+          "waiting" => JSON::Any.new(!asked.nil?),
         }
         fields["error"] = JSON::Any.new(message) if message
         publish("turn-finished", fields)
@@ -535,6 +551,7 @@ module Xd
         return if turn.segment.empty?
         turn.segment = ""
         turn.segment_message_id = 0_i64
+        turn.visible_segment_bytes = 0
       end
 
       private def publish_queue(chat_id : String) : Nil
