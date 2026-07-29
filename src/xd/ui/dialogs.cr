@@ -73,7 +73,7 @@ module Xd
         window.present
       end
 
-      private def shell(
+      def shell(
         parent : Gtk::Window,
         title : String,
       ) : {Gtk::Window, Gtk::Box, Gtk::Box}

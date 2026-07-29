@@ -1,6 +1,7 @@
 require "json"
 require "gtk4"
 require "./dialogs"
+require "./folder_dialogs"
 
 module Xd
   module UI
@@ -24,6 +25,7 @@ module Xd
         @on_chat_deleted : Proc(String, Nil),
       )
         @selected_folder = nil
+        @dialogs = FolderDialogs.new(@parent, @call)
         @rows = Gtk::Box.new(:vertical, 2)
         @rows.margin_top = 6
         @rows.margin_bottom = 6
@@ -49,6 +51,11 @@ module Xd
         new_chat.add_css_class("flat")
         new_chat.clicked_signal.connect { prompt_new_chat(@selected_folder) }
 
+        secrets = Gtk::Button.new_with_label("Keys")
+        secrets.tooltip_text = "Global agent secrets"
+        secrets.add_css_class("flat")
+        secrets.clicked_signal.connect { @dialogs.secrets }
+
         header = Gtk::Box.new(:horizontal, 6)
         header.margin_top = 8
         header.margin_bottom = 8
@@ -57,6 +64,7 @@ module Xd
         header.append(title)
         header.append(new_workspace)
         header.append(new_chat)
+        header.append(secrets)
 
         @widget = Gtk::Box.new(:vertical, 0)
         @widget.width_request = 300
@@ -195,6 +203,18 @@ module Xd
         end
         add_choice(choices, popover, "Rename…") do
           prompt_rename_folder(folder_id)
+        end
+        add_choice(choices, popover, "Settings…") do
+          @dialogs.settings(folder_id, @folder_names[folder_id])
+        end
+        add_choice(choices, popover, "Agent Context…") do
+          @dialogs.context(folder_id, @folder_names[folder_id])
+        end
+        add_choice(choices, popover, "Agent Secrets…") do
+          @dialogs.secrets(
+            folder_id,
+            "#{@folder_names[folder_id]} Agent Secrets"
+          )
         end
 
         if @folder_parents[folder_id]?
