@@ -503,11 +503,26 @@ xd_message_row_make_workflow (XdMessageRow *self,
       g_timeout_add_seconds (10, poll_workflow_status, self);
 }
 
+static void
+on_subagent_toggled (GtkToggleButton *toggle,
+                     gpointer         user_data)
+{
+  GtkImage *indicator = GTK_IMAGE (user_data);
+
+  gtk_image_set_from_icon_name (
+    indicator,
+    gtk_toggle_button_get_active (toggle)
+      ? "pan-down-symbolic"
+      : "pan-end-symbolic");
+}
+
 void
 xd_message_row_make_subagent (XdMessageRow *self,
                               GtkWidget    *activity)
 {
-  GtkWidget *expander;
+  GtkWidget *toggle;
+  GtkWidget *header;
+  GtkWidget *indicator;
 
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
@@ -524,24 +539,44 @@ xd_message_row_make_subagent (XdMessageRow *self,
   g_object_ref (activity);
   gtk_box_remove (GTK_BOX (gtk_widget_get_parent (activity)), activity);
 
-  expander = gtk_expander_new (NULL);
-  gtk_expander_set_expanded (GTK_EXPANDER (expander), FALSE);
-  gtk_widget_set_hexpand (expander, TRUE);
+  toggle = gtk_toggle_button_new ();
+  header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  indicator = gtk_image_new_from_icon_name ("pan-end-symbolic");
+  gtk_widget_add_css_class (toggle, "xd-subagent-toggle");
+  gtk_widget_set_hexpand (toggle, TRUE);
+  gtk_widget_set_hexpand (header, TRUE);
+  gtk_widget_set_valign (indicator, GTK_ALIGN_START);
+  gtk_widget_set_margin_top (indicator, 3);
+  gtk_widget_set_margin_top (header, 12);
+  gtk_widget_set_margin_bottom (header, 12);
+  gtk_widget_set_margin_start (header, 14);
+  gtk_widget_set_margin_end (header, 14);
 
   g_object_ref (self->body);
   gtk_box_remove (GTK_BOX (self->card), self->body);
-  gtk_expander_set_label_widget (GTK_EXPANDER (expander), self->body);
+  gtk_widget_set_margin_top (self->body, 0);
+  gtk_widget_set_margin_bottom (self->body, 0);
+  gtk_widget_set_margin_start (self->body, 0);
+  gtk_widget_set_margin_end (self->body, 0);
+  gtk_box_append (GTK_BOX (header), indicator);
+  gtk_box_append (GTK_BOX (header), self->body);
   g_object_unref (self->body);
+  gtk_button_set_child (GTK_BUTTON (toggle), header);
 
   gtk_widget_set_margin_start (activity, 12);
   gtk_widget_set_margin_end (activity, 0);
-  gtk_expander_set_child (GTK_EXPANDER (expander), activity);
-  g_object_bind_property (expander, "expanded",
+  g_object_bind_property (toggle, "active",
                           activity, "expanded",
                           G_BINDING_SYNC_CREATE);
-  g_object_unref (activity);
+  g_object_bind_property (toggle, "active",
+                          activity, "visible",
+                          G_BINDING_SYNC_CREATE);
+  g_signal_connect (toggle, "toggled",
+                    G_CALLBACK (on_subagent_toggled), indicator);
 
-  gtk_box_append (GTK_BOX (self->card), expander);
+  gtk_box_append (GTK_BOX (self->card), toggle);
+  gtk_box_append (GTK_BOX (self->card), activity);
+  g_object_unref (activity);
 }
 
 /* One prose label, configured the way every piece of message text is. */
