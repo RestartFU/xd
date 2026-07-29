@@ -20,6 +20,7 @@ module Xd
     class Engine
       @pairing : Pairing?
       @mutex = Mutex.new
+      @next_event_id = 0_i64
 
       def initialize(
         @store : Storage::Store,
@@ -47,64 +48,83 @@ module Xd
       end
 
       def dispatch(connection : Connection, line : String) : Protocol::Response
+        process(connection, line).response
+      end
+
+      def process(connection : Connection, line : String) : Protocol::Outcome
         request = Protocol::Request.parse(line)
 
         @mutex.synchronize do
           if request.operation.authentication_required? && !connection.authenticated
-            return Protocol::Response.error("Not authenticated. Say hello first.")
+            return Protocol::Outcome.new(
+              Protocol::Response.error(
+                "Not authenticated. Say hello first."
+              ),
+              [] of Protocol::Event
+            )
           end
 
-          case request.operation
-          when Protocol::Operation::Pair
-            pair(connection, request)
-          when Protocol::Operation::Hello
-            hello(connection, request)
-          when Protocol::Operation::Tree
-            tree
-          when Protocol::Operation::NewFolder
-            new_folder(request)
-          when Protocol::Operation::RenameFolder
-            rename_folder(request)
-          when Protocol::Operation::MoveFolder
-            move_folder(request)
-          when Protocol::Operation::TrashFolder
-            trash_folder(request)
-          when Protocol::Operation::FolderContext
-            folder_context(request)
-          when Protocol::Operation::SetFolderContext
-            set_folder_context(request)
-          when Protocol::Operation::NewChat
-            new_chat(request)
-          when Protocol::Operation::Messages
-            messages(request)
-          when Protocol::Operation::RenameChat
-            rename_chat(request)
-          when Protocol::Operation::DeleteChat
-            delete_chat(request)
-          when Protocol::Operation::Chat
-            chat(request)
-          when Protocol::Operation::SetOption
-            set_option(request)
-          when Protocol::Operation::Queue
-            queue(request)
-          when Protocol::Operation::DropQueue
-            drop_queue(request)
-          when Protocol::Operation::EditQueue
-            edit_queue(request)
-          when Protocol::Operation::SteerQueue
-            steer_queue(request)
-          when Protocol::Operation::Ping
-            Protocol::Response.ok
-          else
-            Protocol::Response.error("Operation not migrated yet")
-          end
+          response = dispatch_request(connection, request)
+          events = response.success? ? events_for(request) :
+                                       [] of Protocol::Event
+          Protocol::Outcome.new(response, events)
         end
       rescue error : Protocol::Error
-        Protocol::Response.error(error.message || "Invalid request")
+        failed_outcome(error.message || "Invalid request")
       rescue error : DeviceStoreError
-        Protocol::Response.error(error.message || "Storage error")
+        failed_outcome(error.message || "Storage error")
       rescue error : Workspace::Error
-        Protocol::Response.error(error.message || "Workspace error")
+        failed_outcome(error.message || "Workspace error")
+      end
+
+      private def dispatch_request(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        case request.operation
+        when Protocol::Operation::Pair
+          pair(connection, request)
+        when Protocol::Operation::Hello
+          hello(connection, request)
+        when Protocol::Operation::Tree
+          tree
+        when Protocol::Operation::NewFolder
+          new_folder(request)
+        when Protocol::Operation::RenameFolder
+          rename_folder(request)
+        when Protocol::Operation::MoveFolder
+          move_folder(request)
+        when Protocol::Operation::TrashFolder
+          trash_folder(request)
+        when Protocol::Operation::FolderContext
+          folder_context(request)
+        when Protocol::Operation::SetFolderContext
+          set_folder_context(request)
+        when Protocol::Operation::NewChat
+          new_chat(request)
+        when Protocol::Operation::Messages
+          messages(request)
+        when Protocol::Operation::RenameChat
+          rename_chat(request)
+        when Protocol::Operation::DeleteChat
+          delete_chat(request)
+        when Protocol::Operation::Chat
+          chat(request)
+        when Protocol::Operation::SetOption
+          set_option(request)
+        when Protocol::Operation::Queue
+          queue(request)
+        when Protocol::Operation::DropQueue
+          drop_queue(request)
+        when Protocol::Operation::EditQueue
+          edit_queue(request)
+        when Protocol::Operation::SteerQueue
+          steer_queue(request)
+        when Protocol::Operation::Ping
+          Protocol::Response.ok
+        else
+          Protocol::Response.error("Operation not migrated yet")
+        end
       end
 
       private def pair(
@@ -502,6 +522,58 @@ module Xd
 
       private def json_any(value) : JSON::Any
         JSON.parse(value.to_json)
+      end
+
+      private def events_for(
+        request : Protocol::Request,
+      ) : Array(Protocol::Event)
+        case request.operation
+        when Protocol::Operation::NewFolder,
+             Protocol::Operation::RenameFolder,
+             Protocol::Operation::MoveFolder,
+             Protocol::Operation::TrashFolder,
+             Protocol::Operation::NewChat,
+             Protocol::Operation::RenameChat,
+             Protocol::Operation::DeleteChat
+          [protocol_event("tree")]
+        when Protocol::Operation::SetOption
+          fields = {} of String => JSON::Any
+          if chat_id = request.string?("chat")
+            fields["chat"] = JSON::Any.new(chat_id)
+          end
+          [protocol_event("changed", fields)]
+        when Protocol::Operation::Queue,
+             Protocol::Operation::DropQueue,
+             Protocol::Operation::EditQueue,
+             Protocol::Operation::SteerQueue
+          chat_id = request.string?("chat")
+          return [] of Protocol::Event unless chat_id
+
+          queued = @store.get_chat(chat_id).queue
+          fields = {
+            "chat"  => JSON::Any.new(chat_id),
+            "queue" => json_any(queued),
+          }
+          fields["text"] = JSON::Any.new(queued.first) unless queued.empty?
+          [protocol_event("queued", fields)]
+        else
+          [] of Protocol::Event
+        end
+      end
+
+      private def protocol_event(
+        name : String,
+        fields = {} of String => JSON::Any,
+      ) : Protocol::Event
+        @next_event_id += 1
+        Protocol::Event.new(name, @next_event_id, fields)
+      end
+
+      private def failed_outcome(message : String) : Protocol::Outcome
+        Protocol::Outcome.new(
+          Protocol::Response.error(message),
+          [] of Protocol::Event
+        )
       end
     end
   end

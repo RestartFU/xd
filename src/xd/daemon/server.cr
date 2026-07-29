@@ -16,7 +16,8 @@ module Xd
       @closed = false
 
       def initialize(@engine : Engine)
-        @session = Session.new(@engine)
+        @events = EventBus.new
+        @session = Session.new(@engine, @events)
       end
 
       def listen_local(path : String) : Nil

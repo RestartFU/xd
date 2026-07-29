@@ -79,5 +79,31 @@ module Xd
         String.build { |io| to_json(io) }
       end
     end
+
+    class Event
+      getter body : Hash(String, JSON::Any)
+
+      def initialize(name : String, id : Int64, fields)
+        @body = {
+          "event" => JSON::Any.new(name),
+          "id"    => JSON::Any.new(id),
+        }
+        fields.each { |key, value| @body[key] = value }
+      end
+
+      def [](name : String) : JSON::Any
+        @body[name]
+      end
+
+      def to_json(io : IO) : Nil
+        @body.to_json(io)
+      end
+
+      def to_json : String
+        String.build { |io| to_json(io) }
+      end
+    end
+
+    record Outcome, response : Response, events : Array(Event)
   end
 end

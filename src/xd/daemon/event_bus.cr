@@ -1,0 +1,28 @@
+require "../protocol/message"
+
+module Xd
+  module Daemon
+    class EventBus
+      @subscribers = {} of Int64 => Proc(Protocol::Event, Nil)
+      @next_id = 0_i64
+      @lock = Mutex.new
+
+      def subscribe(&subscriber : Protocol::Event ->) : Int64
+        @lock.synchronize do
+          @next_id += 1
+          @subscribers[@next_id] = subscriber
+          @next_id
+        end
+      end
+
+      def unsubscribe(id : Int64) : Nil
+        @lock.synchronize { @subscribers.delete(id) }
+      end
+
+      def publish(event : Protocol::Event) : Nil
+        subscribers = @lock.synchronize { @subscribers.values.dup }
+        subscribers.each { |subscriber| subscriber.call(event) }
+      end
+    end
+  end
+end
