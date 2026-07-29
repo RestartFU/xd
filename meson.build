@@ -64,10 +64,20 @@ pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
 cmark_dep     = dependency('libcmark', version: '>= 0.30')
 
+#
+# Voice is the window's, and only the window's.
+#
+# Nothing under test needs it -- util/voice-data.c is core and parses; it is
+# chat/voice-input.c that listens and transcribes. Asking for these as
+# required would make every build that only wants the tests compile
+# whisper.cpp first, which is minutes of CPU for a library it never links.
+#
 if has_voice
-  pulse_simple_dep = dependency('libpulse-simple')
-  soup_dep         = dependency('libsoup-3.0')
-  whisper_dep      = dependency('whisper', version: '>= 1.9.1')
+  pulse_simple_dep = dependency('libpulse-simple', required: false)
+  soup_dep         = dependency('libsoup-3.0', required: false)
+  whisper_dep      = dependency('whisper', version: '>= 1.9.1', required: false)
+
+  has_voice = pulse_simple_dep.found() and soup_dep.found() and whisper_dep.found()
 endif
 
 if is_windows

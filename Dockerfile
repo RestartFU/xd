@@ -67,11 +67,8 @@ RUN git clone --quiet --depth 1 --branch v1.9.1 \
  && cmake --build /whisper/build --parallel \
  && cmake --install /whisper/build
 
-# --- stage 3: compile -------------------------------------------------------
-FROM deps AS build
-
-COPY --from=whisper /usr/local/ /usr/local/
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+# --- stage 3: the sources ---------------------------------------------------
+FROM deps AS sources
 
 # Which build this is: "nightly" gives the app its own id, settings, data
 # directory and workspaces, so it installs beside a release rather than over
@@ -88,14 +85,32 @@ COPY data ./data
 COPY src ./src
 COPY tests ./tests
 
+# --- stage 4: headless tests (CI gate: docker build --target test .) --------
+#
+# From the sources rather than from the compiled app, so the gate does not wait
+# on whisper.cpp. Voice is the window's: nothing the tests touch links it, and
+# meson leaves it out when it is not there.
+FROM sources AS test
+
+ARG PROFILE=default
+ARG COMMIT=
+
+RUN meson setup /build --prefix=/usr --buildtype=release \
+      -Dprofile="$PROFILE" -Dcommit="$COMMIT" \
+ && meson test -C /build --print-errorlogs
+
+# --- stage 5: compile the app, voice and all --------------------------------
+FROM sources AS build
+
+ARG PROFILE=default
+ARG COMMIT=
+
+COPY --from=whisper /usr/local/ /usr/local/
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+
 RUN meson setup /build --prefix=/usr --buildtype=release \
       -Dprofile="$PROFILE" -Dcommit="$COMMIT" \
  && meson compile -C /build
-
-# --- stage 4: headless tests (CI gate: docker build --target test .) --------
-FROM build AS test
-
-RUN meson test -C /build --print-errorlogs
 
 # --- stage 5: assemble the redistributable bundle ---------------------------
 FROM build AS staging
