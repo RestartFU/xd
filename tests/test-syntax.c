@@ -82,6 +82,8 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_MAKEFILE);
   g_assert_cmpint (xd_syntax_language_for_path ("rules.mk"),
                    ==, XD_SYNTAX_MAKEFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("src/main.rs"),
+                   ==, XD_SYNTAX_RUST);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -207,6 +209,33 @@ test_classifies_makefile (void)
   g_assert_null (strstr (escaped, "comment:#literal\n"));
 }
 
+static void
+test_classifies_rust (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_RUST,
+    "pub async fn load<'a>(path: &'a str) -> Result<String, Error> {",
+    &state, NULL);
+  g_autofree char *body = scan (
+    XD_SYNTAX_RUST,
+    "println!(r#\"value // {}\"#, 42); let letter = 'x';", &state, NULL);
+
+  g_assert_nonnull (strstr (declaration, "keyword:pub\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:async\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:fn\n"));
+  g_assert_nonnull (strstr (declaration, "function:load\n"));
+  g_assert_nonnull (strstr (declaration, "preproc:'a\n"));
+  g_assert_nonnull (strstr (declaration, "type:str\n"));
+  g_assert_nonnull (strstr (declaration, "type:Result\n"));
+  g_assert_nonnull (strstr (declaration, "type:String\n"));
+  g_assert_nonnull (strstr (declaration, "type:Error\n"));
+  g_assert_nonnull (strstr (body, "function:println\n"));
+  g_assert_nonnull (strstr (body, "string:r#\"value // {}\"#\n"));
+  g_assert_nonnull (strstr (body, "number:42\n"));
+  g_assert_nonnull (strstr (body, "string:'x'\n"));
+}
+
 /*
  * The type of a composite literal is a type, and the space is what says so:
  * gofmt writes "Vec3{40}" tight and "if ok {" loose.
@@ -327,6 +356,48 @@ test_carries_a_kotlin_triple_string (void)
   g_assert_nonnull (strstr (closed, "function:trimIndent\n"));
 }
 
+static void
+test_carries_a_rust_raw_string (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *opened = scan (
+    XD_SYNTAX_RUST, "let json = r##\"{ \"kind\":", &state, NULL);
+  g_autofree char *inside = NULL;
+  g_autofree char *closed = NULL;
+
+  g_assert_true (state.in_rust_raw_string);
+  g_assert_null (strstr (opened, "string:\"kind\"\n"));
+
+  inside = scan (XD_SYNTAX_RUST, "// still string", &state, NULL);
+  g_assert_true (state.in_rust_raw_string);
+  g_assert_null (strstr (inside, "comment:// still string\n"));
+
+  closed = scan (XD_SYNTAX_RUST, "}\"##; fn done() {}", &state, NULL);
+  g_assert_false (state.in_rust_raw_string);
+  g_assert_nonnull (strstr (closed, "string:}\"##\n"));
+  g_assert_nonnull (strstr (closed, "keyword:fn\n"));
+  g_assert_nonnull (strstr (closed, "function:done\n"));
+}
+
+static void
+test_carries_a_nested_rust_comment (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *opened = scan (
+    XD_SYNTAX_RUST, "/* outer /* inner */ still", &state, NULL);
+  g_autofree char *closed = NULL;
+
+  g_assert_cmpuint (state.in_comment, ==, 1);
+  g_assert_nonnull (
+    strstr (opened, "comment:/* outer /* inner */ still\n"));
+
+  closed = scan (XD_SYNTAX_RUST, "comment */ fn main() {}", &state, NULL);
+  g_assert_false (state.in_comment);
+  g_assert_nonnull (strstr (closed, "comment:comment */\n"));
+  g_assert_nonnull (strstr (closed, "keyword:fn\n"));
+  g_assert_nonnull (strstr (closed, "function:main\n"));
+}
+
 /* A language this cannot read is handed straight back, uncoloured. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -372,6 +443,7 @@ main (int   argc,
                    test_classifies_dockerfile);
   g_test_add_func ("/syntax/classifies-kotlin", test_classifies_kotlin);
   g_test_add_func ("/syntax/classifies-makefile", test_classifies_makefile);
+  g_test_add_func ("/syntax/classifies-rust", test_classifies_rust);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
@@ -386,6 +458,10 @@ main (int   argc,
                    test_carries_a_go_raw_string);
   g_test_add_func ("/syntax/carries-a-kotlin-triple-string",
                    test_carries_a_kotlin_triple_string);
+  g_test_add_func ("/syntax/carries-a-rust-raw-string",
+                   test_carries_a_rust_raw_string);
+  g_test_add_func ("/syntax/carries-a-nested-rust-comment",
+                   test_carries_a_nested_rust_comment);
   g_test_add_func ("/syntax/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/syntax/survives-unterminated-text",

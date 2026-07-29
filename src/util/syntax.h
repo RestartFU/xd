@@ -30,6 +30,7 @@ typedef enum
   XD_SYNTAX_DOCKERFILE,
   XD_SYNTAX_KOTLIN,
   XD_SYNTAX_MAKEFILE,
+  XD_SYNTAX_RUST,
 } XdSyntaxLanguage;
 
 typedef enum
@@ -55,9 +56,11 @@ typedef enum
  */
 typedef struct
 {
-  guint8 in_comment;      /* inside a block comment */
-  guint8 in_raw_string;   /* inside Go's backtick string */
-  guint8 in_triple_string; /* inside Kotlin's triple-quoted string */
+  guint8 in_comment;         /* block-comment depth */
+  guint8 in_raw_string;      /* inside Go's backtick string */
+  guint8 in_triple_string;   /* inside Kotlin's triple-quoted string */
+  guint8 in_rust_raw_string; /* inside Rust's raw string */
+  guint8 rust_raw_hashes;    /* delimiter width of that raw string */
 } XdSyntaxState;
 
 /* XD_SYNTAX_NONE for a path in a language this does not know. */

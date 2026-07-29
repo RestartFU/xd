@@ -89,6 +89,29 @@ static const char *const MAKEFILE_KEYWORDS[] = {
   NULL,
 };
 
+static const char *const RUST_KEYWORDS[] = {
+  "abstract", "as", "async", "await", "become", "box", "break", "const",
+  "continue", "crate", "do", "dyn", "else", "enum", "extern", "final", "fn",
+  "for", "gen", "if", "impl", "in", "let", "loop", "macro", "macro_rules",
+  "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return",
+  "self", "static", "struct", "super", "trait", "try", "type", "typeof",
+  "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+  NULL,
+};
+
+static const char *const RUST_TYPES[] = {
+  "bool", "char", "str",
+  "i8", "i16", "i32", "i64", "i128", "isize",
+  "u8", "u16", "u32", "u64", "u128", "usize",
+  "f32", "f64",
+  "Self", "String", "Vec", "Option", "Result", "Box",
+  NULL,
+};
+
+static const char *const RUST_CONSTANTS[] = {
+  "false", "None", "true", NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -101,14 +124,19 @@ typedef struct
   gboolean raw_strings;         /* Go's backtick string, which spans lines */
   gboolean triple_strings;      /* Kotlin's triple-quoted string */
   gboolean directives;          /* C's # lines */
-  gboolean slash_comments;       /* C, Go and Kotlin's // comments */
-  gboolean block_comments;       /* C, Go and Kotlin's block comments */
+  gboolean slash_comments;       /* C-like // comments */
+  gboolean block_comments;       /* C-like block comments */
   gboolean hash_comments;        /* Dockerfile's leading # comments */
   gboolean inline_hash_comments; /* Make's unescaped # comments */
   gboolean make_variables;       /* Make's $(...), ${...} and $x */
   gboolean case_insensitive;     /* Dockerfile instructions */
-  gboolean capitalized_types;    /* Kotlin's user-defined types */
+  gboolean capitalized_types;    /* user-defined types */
   gboolean composite_literals;  /* Go's Type{...} */
+  gboolean bang_functions;       /* Rust's macro_name! */
+  gboolean generic_functions;    /* Rust's function_name<T>(...) */
+  gboolean rust_lifetimes;       /* Rust's 'name */
+  gboolean rust_strings;         /* Rust's r#"..."# strings */
+  gboolean nested_block_comments; /* Rust's nested block comments */
 } Language;
 
 static const Language C_LANGUAGE = {
@@ -156,6 +184,20 @@ static const Language MAKEFILE_LANGUAGE = {
   .make_variables = TRUE,
 };
 
+static const Language RUST_LANGUAGE = {
+  .keywords = RUST_KEYWORDS,
+  .types = RUST_TYPES,
+  .constants = RUST_CONSTANTS,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
+  .capitalized_types = TRUE,
+  .bang_functions = TRUE,
+  .generic_functions = TRUE,
+  .rust_lifetimes = TRUE,
+  .rust_strings = TRUE,
+  .nested_block_comments = TRUE,
+};
+
 static const Language *
 language_table (XdSyntaxLanguage language)
 {
@@ -169,6 +211,8 @@ language_table (XdSyntaxLanguage language)
     return &KOTLIN_LANGUAGE;
   if (language == XD_SYNTAX_MAKEFILE)
     return &MAKEFILE_LANGUAGE;
+  if (language == XD_SYNTAX_RUST)
+    return &RUST_LANGUAGE;
 
   return NULL;
 }
@@ -212,6 +256,8 @@ xd_syntax_language_for_path (const char *path)
   if (g_strcmp0 (dot, ".mk") == 0 || g_strcmp0 (dot, ".mak") == 0 ||
       g_strcmp0 (dot, ".make") == 0)
     return XD_SYNTAX_MAKEFILE;
+  if (g_strcmp0 (dot, ".rs") == 0)
+    return XD_SYNTAX_RUST;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -411,6 +457,30 @@ scan_number (Emitter    *emitter,
   return scan;
 }
 
+static gboolean
+followed_by_generic_call (const char *at)
+{
+  guint depth = 0;
+
+  if (*at != '<')
+    return FALSE;
+
+  do
+    {
+      if (*at == '<')
+        depth++;
+      else if (*at == '>')
+        depth--;
+      at++;
+    }
+  while (*at != '\0' && depth > 0);
+
+  while (*at == ' ' || *at == '\t')
+    at++;
+
+  return depth == 0 && *at == '(';
+}
+
 static const char *
 scan_word (Emitter        *emitter,
            const Language *language,
@@ -449,7 +519,9 @@ scan_word (Emitter        *emitter,
    */
   else if (language->composite_literals && *scan == '{')
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
-  else if (*after == '(')
+  else if (*after == '(' ||
+           (language->bang_functions && *after == '!') ||
+           (language->generic_functions && followed_by_generic_call (after)))
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else
     append_plain (emitter, at, length);
@@ -522,6 +594,146 @@ scan_directive (Emitter    *emitter,
   return scan;
 }
 
+static const char *
+scan_nested_comment (Emitter    *emitter,
+                     const char *at,
+                     guint8     *depth,
+                     gboolean    opening)
+{
+  const char *scan = at;
+
+  if (opening)
+    {
+      *depth = 1;
+      scan += 2;
+    }
+
+  while (*scan != '\0')
+    {
+      if (scan[0] == '/' && scan[1] == '*')
+        {
+          if (*depth < G_MAXUINT8)
+            (*depth)++;
+          scan += 2;
+        }
+      else if (scan[0] == '*' && scan[1] == '/')
+        {
+          (*depth)--;
+          scan += 2;
+          if (*depth == 0)
+            break;
+        }
+      else
+        {
+          scan++;
+        }
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_COMMENT, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static gboolean
+rust_raw_string_opening (const char  *at,
+                         const char **contents,
+                         guint8      *hashes)
+{
+  const char *scan = at;
+  guint count = 0;
+
+  if (scan[0] == 'r')
+    scan++;
+  else if ((scan[0] == 'b' || scan[0] == 'c') && scan[1] == 'r')
+    scan += 2;
+  else
+    return FALSE;
+
+  while (*scan == '#')
+    {
+      if (count == G_MAXUINT8)
+        return FALSE;
+      count++;
+      scan++;
+    }
+
+  if (*scan != '"')
+    return FALSE;
+
+  *contents = scan + 1;
+  *hashes = (guint8) count;
+  return TRUE;
+}
+
+static const char *
+rust_raw_string_close (const char *at,
+                       guint8      hashes)
+{
+  const char *quote = at;
+
+  while ((quote = strchr (quote, '"')) != NULL)
+    {
+      guint i;
+
+      for (i = 0; i < hashes && quote[i + 1] == '#'; i++)
+        ;
+
+      if (i == hashes)
+        return quote + 1 + hashes;
+
+      quote++;
+    }
+
+  return NULL;
+}
+
+static const char *
+scan_rust_raw_string (Emitter       *emitter,
+                      const char    *at,
+                      XdSyntaxState *state,
+                      gboolean       opening)
+{
+  const char *contents = at;
+  const char *close;
+  guint8 hashes = state->rust_raw_hashes;
+
+  if (opening && !rust_raw_string_opening (at, &contents, &hashes))
+    return NULL;
+
+  close = rust_raw_string_close (contents, hashes);
+  if (close == NULL)
+    {
+      append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, strlen (at));
+      state->in_rust_raw_string = TRUE;
+      state->rust_raw_hashes = hashes;
+      return at + strlen (at);
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                (gsize) (close - at));
+  state->in_rust_raw_string = FALSE;
+  state->rust_raw_hashes = 0;
+  return close;
+}
+
+static const char *
+scan_rust_lifetime (Emitter    *emitter,
+                    const char *at)
+{
+  const char *scan = at + 2;
+
+  while (is_word_byte (*scan))
+    scan++;
+
+  /* A closing apostrophe makes this an ordinary character literal. */
+  if (*scan == '\'')
+    return NULL;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
 void
 xd_syntax_scan_line (XdSyntaxLanguage   language,
                      const char        *line,
@@ -547,18 +759,28 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
 
   if (state->in_comment)
     {
-      const char *close = strstr (at, "*/");
-
-      if (close == NULL)
+      if (table->nested_block_comments)
         {
-          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
-          return;
+          at = scan_nested_comment (&emitter, at, &state->in_comment, FALSE);
+          if (state->in_comment)
+            return;
         }
+      else
+        {
+          const char *close = strstr (at, "*/");
 
-      append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at,
-                    (gsize) (close + 2 - at));
-      at = close + 2;
-      state->in_comment = FALSE;
+          if (close == NULL)
+            {
+              append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at,
+                            strlen (at));
+              return;
+            }
+
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at,
+                        (gsize) (close + 2 - at));
+          at = close + 2;
+          state->in_comment = FALSE;
+        }
     }
   else if (state->in_raw_string)
     {
@@ -590,11 +812,26 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       at = close + 3;
       state->in_triple_string = FALSE;
     }
+  else if (state->in_rust_raw_string)
+    {
+      at = scan_rust_raw_string (&emitter, at, state, FALSE);
+      if (state->in_rust_raw_string)
+        return;
+    }
 
   while (*at != '\0')
     {
       if (table->block_comments && at[0] == '/' && at[1] == '*')
         {
+          if (table->nested_block_comments)
+            {
+              at = scan_nested_comment (&emitter, at, &state->in_comment,
+                                        TRUE);
+              if (state->in_comment)
+                return;
+              continue;
+            }
+
           const char *close = strstr (at + 2, "*/");
 
           if (close == NULL)
@@ -639,6 +876,34 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           append_token (&emitter, XD_SYNTAX_TOKEN_STRING, at,
                         (gsize) (close + 3 - at));
           at = close + 3;
+        }
+      else if (table->rust_strings &&
+               (at[0] == 'r' ||
+                ((at[0] == 'b' || at[0] == 'c') && at[1] == 'r')))
+        {
+          const char *after = scan_rust_raw_string (
+            &emitter, at, state, TRUE);
+
+          if (after == NULL)
+            {
+              at = scan_word (&emitter, table, at);
+            }
+          else
+            {
+              at = after;
+              if (state->in_rust_raw_string)
+                return;
+            }
+        }
+      else if (table->rust_lifetimes && *at == '\'' &&
+               (g_ascii_isalpha (at[1]) || at[1] == '_'))
+        {
+          const char *after = scan_rust_lifetime (&emitter, at);
+
+          if (after == NULL)
+            at = scan_quoted (&emitter, at, *at);
+          else
+            at = after;
         }
       else if (*at == '"' || *at == '\'')
         {

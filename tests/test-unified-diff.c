@@ -306,6 +306,23 @@ test_colours_makefile (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">include</span>"));
 }
 
+static void
+test_colours_rust (void)
+{
+  static const char *patch =
+    "diff --git a/src/lib.rs b/src/lib.rs\n"
+    "@@ -1 +1 @@\n"
+    "-let answer: i32 = 41;\n"
+    "+let answer: i32 = 42;\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">let</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">i32</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -396,6 +413,7 @@ main (int   argc,
   g_test_add_func ("/unified-diff/colours-kotlin", test_colours_kotlin);
   g_test_add_func ("/unified-diff/colours-makefile",
                    test_colours_makefile);
+  g_test_add_func ("/unified-diff/colours-rust", test_colours_rust);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",
