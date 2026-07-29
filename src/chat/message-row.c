@@ -186,6 +186,25 @@ xd_message_row_new_remote (XdMessageKind   kind,
   return message_row_new (kind, text, remote);
 }
 
+/*
+ * Redraws one assistant row after streaming has been quiet for a moment.
+ *
+ * The caller deliberately throttles this: rebuilding Markdown for every token
+ * is expensive and makes partially written syntax flash between forms.
+ */
+void
+xd_message_row_set_text (XdMessageRow *self,
+                         const char   *text)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+
+  if (g_strcmp0 (self->text->str, text) == 0)
+    return;
+
+  g_string_assign (self->text, text != NULL ? text : "");
+  render_body (self);
+}
+
 static void
 make_info_card (XdMessageRow *self,
                 const char   *css_class)

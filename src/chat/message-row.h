@@ -20,14 +20,17 @@ G_DECLARE_FINAL_TYPE (XdMessageRow, xd_message_row, XD, MESSAGE_ROW, AdwBin)
 /*
  * One message in the transcript.
  *
- * Rows represent complete messages. Turn progress belongs to the transcript's
- * working marker, so incomplete assistant text does not allocate blank space.
+ * Rows usually represent complete messages. A live assistant row can be
+ * updated after streaming pauses, while turn progress remains in the
+ * transcript's working marker.
  */
 XdMessageRow *xd_message_row_new         (XdMessageKind  kind,
                                           const char    *text);
 XdMessageRow *xd_message_row_new_remote  (XdMessageKind   kind,
                                           const char     *text,
                                           XdRemoteClient *remote);
+void          xd_message_row_set_text    (XdMessageRow   *self,
+                                          const char     *text);
 void          xd_message_row_make_workflow (XdMessageRow *self,
                                              const char   *run_id,
                                              const char   *url);

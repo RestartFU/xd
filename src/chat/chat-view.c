@@ -64,6 +64,8 @@ typedef struct
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
   GPtrArray *items;         /* finished speech and tools, in timeline order */
+  XdMessageRow *live_row;   /* weak: quiet streaming text currently on screen */
+  guint live_render;
   gboolean resumed;
   gboolean is_retry;
   gboolean had_tool;
@@ -87,6 +89,7 @@ typedef struct
 #define CONTENT_WIDTH 1040
 #define TRANSCRIPT_PAGE_SIZE 100
 #define TRANSCRIPT_CACHE_SIZE 4
+#define LIVE_TEXT_QUIET_MSEC 350
 
 typedef enum
 {
@@ -130,10 +133,10 @@ struct _XdChatView
   /*
    * A turn running on the daemon, as far as this window can see it.
    *
-   * The text arrives in pieces like a local one's, and is held the same way --
-   * shown when the message is what it is going to be rather than reflowing on
-   * every token. What is not held here is the truth: the daemon has written it
-   * down by the time the turn ends, and the transcript is read again then.
+   * The text arrives in pieces like a local one's. A short quiet gap updates
+   * its live row without reflowing on every token. What is not held here is
+   * the truth: the daemon has written it down by the time the turn ends, and
+   * the transcript is read again then.
    */
   /*
    * The dots at the foot of the transcript while a turn is running.
@@ -151,6 +154,8 @@ struct _XdChatView
   gboolean remote_working;
   gint64 remote_started_at;       /* monotonic usec on this device */
   GString *remote_said;
+  XdMessageRow *remote_live_row;   /* weak */
+  guint remote_live_render;
   char *remote_label;
 
   /* The last message the transcript on screen was drawn from, so a write made
@@ -1038,6 +1043,112 @@ append_reply (XdChatView *self,
     append_choices (self, ask, answerable);
 }
 
+static void
+release_live_row (XdMessageRow **slot)
+{
+  if (*slot == NULL)
+    return;
+
+  g_object_remove_weak_pointer (G_OBJECT (*slot), (gpointer *) slot);
+  *slot = NULL;
+}
+
+static void
+discard_live_row (XdMessageRow **slot)
+{
+  GtkWidget *row;
+  GtkWidget *parent;
+
+  if (*slot == NULL)
+    return;
+
+  row = GTK_WIDGET (*slot);
+  parent = gtk_widget_get_parent (row);
+  release_live_row (slot);
+
+  if (GTK_IS_BOX (parent))
+    gtk_box_remove (GTK_BOX (parent), row);
+}
+
+/*
+ * Hides control blocks even while their closing tag has not arrived yet.
+ *
+ * Completed workspace blocks can be parsed out normally. A partial block at
+ * the end must be held like a partial <ask>, or streaming would briefly expose
+ * an implementation detail as ordinary prose.
+ */
+static gsize
+workspace_visible_length (const char *text)
+{
+  static const char marker[] = "<workspace>";
+  const char *at;
+
+  if (text == NULL)
+    return 0;
+
+  for (at = strchr (text, '<'); at != NULL; at = strchr (at + 1, '<'))
+    {
+      gsize remaining;
+      gsize compared;
+
+      if (at != text && at[-1] != '\n')
+        continue;
+
+      remaining = strlen (at);
+      compared = MIN (remaining, sizeof marker - 1);
+      if (strncmp (at, marker, compared) == 0)
+        return at - text;
+    }
+
+  return strlen (text);
+}
+
+static char *
+visible_stream_text (const char *text)
+{
+  g_autofree char *workspace = NULL;
+  g_autofree char *without_workspace = NULL;
+  const char *shown = text;
+  gsize visible;
+  char *prose;
+
+  workspace = xd_workspace_block_parse (text, &without_workspace);
+  if (workspace != NULL)
+    shown = without_workspace;
+
+  visible = MIN (xd_ask_visible_length (shown),
+                 workspace_visible_length (shown));
+  prose = g_strndup (shown, visible);
+  g_strchomp (prose);
+
+  return prose;
+}
+
+static void
+show_live_text (XdChatView    *self,
+                XdMessageRow **slot,
+                const char    *text,
+                const char    *source)
+{
+  g_autofree char *prose = visible_stream_text (text);
+
+  if (*prose == '\0')
+    return;
+
+  if (*slot == NULL)
+    {
+      *slot = append_row (self, XD_MESSAGE_ASSISTANT, prose);
+      g_object_add_weak_pointer (G_OBJECT (*slot), (gpointer *) slot);
+      xd_message_row_set_source (*slot, source);
+    }
+  else
+    {
+      xd_message_row_set_text (*slot, prose);
+    }
+
+  queue_scroll_to_bottom (self);
+}
+
 /* Duration is turn metadata, not a later answer to a question. */
 static gboolean
 reply_is_answerable (GPtrArray *messages,
@@ -1622,12 +1733,34 @@ on_remote_messages (GObject      *source,
 
 /* --- a turn running on the daemon ------------------------------------------ */
 
+static gboolean
+render_remote_live_text (gpointer user_data)
+{
+  XdChatView *self = user_data;
+
+  self->remote_live_render = 0;
+  if (self->remote_working &&
+      self->remote_said != NULL &&
+      self->remote_said->len > 0)
+    show_live_text (self, &self->remote_live_row,
+                    self->remote_said->str, self->remote_label);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+schedule_remote_live_text (XdChatView *self)
+{
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
+  self->remote_live_render =
+    g_timeout_add (LIVE_TEXT_QUIET_MSEC, render_remote_live_text, self);
+}
+
 /*
  * Ends the message being streamed, if there is one.
  *
- * The same rule as a local turn: text is shown when the message is finished
- * rather than as it arrives, because Markdown read character by character
- * renders as its own source until the syntax closes.
+ * Quiet text may already own a live row. Finalize that row rather than adding
+ * the same speech again when a tool starts.
  */
 static void
 close_remote_segment (XdChatView *self)
@@ -1636,6 +1769,7 @@ close_remote_segment (XdChatView *self)
   g_autofree char *without_workspace = NULL;
   const char *text;
 
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
   if (self->remote_said == NULL || self->remote_said->len == 0)
     return;
 
@@ -1652,18 +1786,20 @@ close_remote_segment (XdChatView *self)
     g_strchomp (prose);
     if (*prose != '\0')
       {
-        XdMessageRow *row = append_row (self, XD_MESSAGE_ASSISTANT, prose);
-
-        xd_message_row_set_source (row, self->remote_label);
+        show_live_text (self, &self->remote_live_row,
+                        prose, self->remote_label);
       }
   }
 
+  release_live_row (&self->remote_live_row);
   g_string_truncate (self->remote_said, 0);
 }
 
 static void
 end_remote_turn (XdChatView *self)
 {
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
+  release_live_row (&self->remote_live_row);
   self->remote_working = FALSE;
   self->remote_started_at = 0;
   g_clear_pointer (&self->remote_label, g_free);
@@ -1822,6 +1958,7 @@ on_remote_event (XdRemoteClient *client,
         self->remote_said = g_string_new (NULL);
 
       g_string_append (self->remote_said, text);
+      schedule_remote_live_text (self);
       return;
     }
 
@@ -2110,6 +2247,7 @@ on_remote_options_received (GObject      *source,
             self->remote_said = g_string_new (NULL);
 
           g_string_assign (self->remote_said, segment);
+          schedule_remote_live_text (self);
         }
 
       queue_scroll_to_bottom (self);
@@ -2356,6 +2494,8 @@ turn_free (gpointer data)
 {
   Turn *turn = data;
 
+  g_clear_handle_id (&turn->live_render, g_source_remove);
+  release_live_row (&turn->live_row);
   g_clear_object (&turn->session);
   g_clear_pointer (&turn->chat_id, g_free);
   g_clear_pointer (&turn->backend_id, g_free);
@@ -2452,6 +2592,19 @@ on_commands (XdChatSession    *session,
   store_commands (turn->view, scope, commands);
 }
 
+static gboolean
+render_live_text (gpointer user_data)
+{
+  Turn *turn = user_data;
+
+  turn->live_render = 0;
+  if (turn_is_visible (turn) && turn->segment->len > 0)
+    show_live_text (turn->view, &turn->live_row,
+                    turn->segment->str, turn->label);
+
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_text_delta (XdChatSession *session,
                const char    *delta,
@@ -2463,13 +2616,13 @@ on_text_delta (XdChatSession *session,
   g_string_append (turn->segment, delta);
 
   /*
-   * The text is not shown, or allocated a row, as it arrives.
-   *
-   * A message half-written reflows on every token, and Markdown read
-   * character by character renders as its own source until the syntax closes.
-   * The turn-level working marker already shows progress; a blank message row
-   * would only reserve unexplained space until this segment is complete.
+   * Reveal a message once the stream pauses, even if a foreground server keeps
+   * the turn itself alive indefinitely. Resetting the timer avoids rebuilding
+   * Markdown for every token during ordinary continuous output.
    */
+  g_clear_handle_id (&turn->live_render, g_source_remove);
+  turn->live_render =
+    g_timeout_add (LIVE_TEXT_QUIET_MSEC, render_live_text, turn);
 }
 
 /*
@@ -2539,6 +2692,7 @@ close_segment (Turn     *turn,
   g_autofree char *without_workspace = NULL;
   const char *text;
 
+  g_clear_handle_id (&turn->live_render, g_source_remove);
   if (turn->segment->len == 0)
     return;
 
@@ -2550,6 +2704,10 @@ close_segment (Turn     *turn,
 
   if (*text == '\0')
     {
+      if (turn_is_visible (turn))
+        discard_live_row (&turn->live_row);
+      else
+        release_live_row (&turn->live_row);
       g_string_truncate (turn->segment, 0);
       return;
     }
@@ -2565,6 +2723,7 @@ close_segment (Turn     *turn,
 
       if (ask != NULL)
         {
+          discard_live_row (&turn->live_row);
           append_reply (turn->view, text, turn->label, TRUE);
         }
       else
@@ -2577,14 +2736,13 @@ close_segment (Turn     *turn,
           g_strchomp (prose);
           if (*prose != '\0')
             {
-              XdMessageRow *row =
-                append_row (turn->view, XD_MESSAGE_ASSISTANT, prose);
-
-              xd_message_row_set_source (row, turn->label);
+              show_live_text (turn->view, &turn->live_row,
+                              prose, turn->label);
             }
         }
     }
 
+  release_live_row (&turn->live_row);
   g_string_truncate (turn->segment, 0);
 }
 
@@ -5300,6 +5458,9 @@ xd_chat_view_set_chat (XdChatView *self,
   turn = current_turn (self);
   if (turn != NULL && rebuilt)
     {
+      /* Any weak row belonged to the transcript that was just replaced. */
+      release_live_row (&turn->live_row);
+
       /* The finished parts of this turn live only in memory until it ends,
        * so the rebuilt transcript has to replay them or they vanish until
        * the chat is next reopened. */
@@ -5320,11 +5481,20 @@ xd_chat_view_set_chat (XdChatView *self,
             }
         }
 
+      /* The current stretch has not joined @items yet. It still belongs on
+       * screen when returning to a chat whose turn never stopped. */
+      if (turn->segment->len > 0)
+        show_live_text (self, &turn->live_row,
+                        turn->segment->str, turn->label);
+
       /* The transcript was rebuilt, and the marker went with it. */
       set_working (self, TRUE);
     }
   else if (turn != NULL)
     {
+      if (turn->segment->len > 0)
+        show_live_text (self, &turn->live_row,
+                        turn->segment->str, turn->label);
       set_working (self, TRUE);
     }
   else if (self->queue->len > 0)
@@ -5685,6 +5855,8 @@ xd_chat_view_dispose (GObject *object)
     }
 
   g_clear_handle_id (&self->working_timer, g_source_remove);
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
+  release_live_row (&self->remote_live_row);
   self->working_label = NULL;
   self->working_dots = NULL;
   g_cancellable_cancel (self->fetching);
