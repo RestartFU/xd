@@ -594,9 +594,11 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   g_autofree char *handover = NULL;
   g_autofree char *full_prompt = NULL;
   g_autofree char *instructions = NULL;
+  g_auto (GStrv) folder_ids = NULL;
   const AiBackend *backend;
   g_autofree char *workdir = NULL;
   const char *model;
+  XdNode *folder;
   AiRunSpec spec = { 0 };
 
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), FALSE);
@@ -638,8 +640,8 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
 
   /* Resolved per turn rather than at creation, so editing a folder's
    * instructions or model takes effect on the next message. */
-  resolved = xd_settings_resolve (folder_chain (self, chat->folder_id, chain),
-                                  chat->backend);
+  folder = folder_chain (self, chat->folder_id, chain);
+  resolved = xd_settings_resolve (folder, chat->backend);
 
   workdir = resolve_workdir (self, chat, resolved);
   model = chat->model != NULL ? chat->model : resolved->model;
@@ -649,9 +651,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
     : g_strdup (xd_ask_instructions ());
 
   {
-    g_autofree char *place =
-      xd_settings_describe_place (folder_chain (self, chat->folder_id, chain),
-                                  workdir);
+    g_autofree char *place = xd_settings_describe_place (folder, workdir);
 
     if (place != NULL)
       {
@@ -684,6 +684,8 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
 
   spec.prompt = full_prompt;
   spec.workdir = workdir;
+  folder_ids = xd_node_folder_ids (folder);
+  spec.folder_ids = (const char *const *) folder_ids;
   spec.model = model;
   spec.system_prompt = instructions;
   spec.resume_session_id = resume_session_id;

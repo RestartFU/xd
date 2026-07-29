@@ -44,6 +44,24 @@ default_path (void)
   return xd_app_agent_secrets_path ();
 }
 
+static char *
+folder_path (const char *folder_id)
+{
+  g_autofree char *global = NULL;
+  g_autofree char *directory = NULL;
+  g_autofree char *digest = NULL;
+  g_autofree char *filename = NULL;
+
+  g_return_val_if_fail (folder_id != NULL && *folder_id != '\0', NULL);
+
+  global = default_path ();
+  directory = g_strconcat (global, ".d", NULL);
+  digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256, folder_id, -1);
+  filename = g_strconcat (digest, ".json", NULL);
+
+  return g_build_filename (directory, filename, NULL);
+}
+
 static XdAgentSecrets *
 secrets_new (const char *path)
 {
@@ -126,6 +144,54 @@ xd_agent_secrets_load (const char  *path,
 #endif
 
   return g_steal_pointer (&self);
+}
+
+XdAgentSecrets *
+xd_agent_secrets_load_for_folder (const char  *folder_id,
+                                  GError     **error)
+{
+  g_autofree char *path = NULL;
+
+  g_return_val_if_fail (folder_id != NULL && *folder_id != '\0', NULL);
+
+  path = folder_path (folder_id);
+  return xd_agent_secrets_load (path, error);
+}
+
+static void
+overlay (XdAgentSecrets *target,
+         XdAgentSecrets *source)
+{
+  GHashTableIter iter;
+  gpointer name;
+  gpointer value;
+
+  g_hash_table_iter_init (&iter, source->values);
+  while (g_hash_table_iter_next (&iter, &name, &value))
+    g_hash_table_replace (target->values, g_strdup (name), g_strdup (value));
+}
+
+XdAgentSecrets *
+xd_agent_secrets_load_effective (const char *const *folder_ids,
+                                 GError          **error)
+{
+  g_autoptr (XdAgentSecrets) effective = xd_agent_secrets_load (NULL, error);
+
+  if (effective == NULL)
+    return NULL;
+
+  for (gsize i = 0; folder_ids != NULL && folder_ids[i] != NULL; i++)
+    {
+      g_autoptr (XdAgentSecrets) folder = NULL;
+
+      folder = xd_agent_secrets_load_for_folder (folder_ids[i], error);
+      if (folder == NULL)
+        return NULL;
+
+      overlay (effective, folder);
+    }
+
+  return g_steal_pointer (&effective);
 }
 
 static gint

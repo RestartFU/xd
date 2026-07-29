@@ -94,4 +94,7 @@ XdNode      *xd_node_get_parent     (XdNode *self);
 void         xd_node_set_parent     (XdNode *self,
                                      XdNode *parent);
 
+/* Stable folder ids from the outermost ancestor through @self. */
+GStrv        xd_node_folder_ids     (XdNode *self);
+
 G_END_DECLS

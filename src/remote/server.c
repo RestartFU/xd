@@ -1407,14 +1407,27 @@ handle_file_browse (Connection *connection,
  * credentials.
  */
 static void
-handle_agent_secrets (Connection *connection)
+handle_agent_secrets (Connection *connection,
+                      JsonObject *request)
 {
   g_autoptr (XdAgentSecrets) secrets = NULL;
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) names = NULL;
+  g_autofree char *folder_path = NULL;
+  const char *folder_id = member_string (request, "folder");
 
-  secrets = xd_agent_secrets_load (NULL, &error);
+  if (folder_id != NULL)
+    {
+      folder_path = folder_argument (
+        connection, request, "folder", FALSE);
+      if (folder_path == NULL)
+        return;
+    }
+
+  secrets = folder_id != NULL
+    ? xd_agent_secrets_load_for_folder (folder_id, &error)
+    : xd_agent_secrets_load (NULL, &error);
   if (secrets == NULL)
     {
       send_error (connection, error->message);
@@ -1444,6 +1457,8 @@ handle_set_agent_secrets (Connection *connection,
   g_auto (GStrv) old_names = NULL;
   JsonNode *entries_node;
   JsonArray *entries;
+  g_autofree char *folder_path = NULL;
+  const char *folder_id = member_string (request, "folder");
 
   entries_node = json_object_get_member (request, "entries");
   if (entries_node == NULL || !JSON_NODE_HOLDS_ARRAY (entries_node))
@@ -1452,7 +1467,17 @@ handle_set_agent_secrets (Connection *connection,
       return;
     }
 
-  secrets = xd_agent_secrets_load (NULL, &error);
+  if (folder_id != NULL)
+    {
+      folder_path = folder_argument (
+        connection, request, "folder", FALSE);
+      if (folder_path == NULL)
+        return;
+    }
+
+  secrets = folder_id != NULL
+    ? xd_agent_secrets_load_for_folder (folder_id, &error)
+    : xd_agent_secrets_load (NULL, &error);
   if (secrets == NULL)
     {
       send_error (connection, error->message);
@@ -3487,7 +3512,7 @@ dispatch (Connection *connection,
   else if (g_strcmp0 (op, "file-browse") == 0)
     handle_file_browse (connection, request);
   else if (g_strcmp0 (op, "agent-secrets") == 0)
-    handle_agent_secrets (connection);
+    handle_agent_secrets (connection, request);
   else if (g_strcmp0 (op, "set-agent-secrets") == 0)
     handle_set_agent_secrets (connection, request);
   /* The daemon is the only writer: a client sends what it wants done and this

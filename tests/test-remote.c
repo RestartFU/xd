@@ -732,6 +732,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
   g_autoptr (XdAgentSecrets) stored = NULL;
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) environment = NULL;
+  XdNode *folder;
 
   daemon_start (&daemon);
   path = g_build_filename (daemon.dir, "agent-secrets.json", NULL);
@@ -739,12 +740,13 @@ test_agent_secrets_are_managed_without_reading_values (void)
 
   client = xd_remote_client_new ("127.0.0.1", daemon.port);
   tree = paired_tree (&daemon, client);
+  folder = child_at (xd_remote_tree_get_root (tree), 0);
 
   {
     AgentSecretsWait read = { .tree = tree };
 
     xd_remote_tree_get_agent_secrets_async (
-      tree, NULL, on_agent_secrets_read, &read);
+      tree, NULL, NULL, on_agent_secrets_read, &read);
     wait_for (&read.wait);
     g_assert_true (read.wait.ok);
     g_assert_null (read.names[0]);
@@ -759,7 +761,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait saved = { .tree = tree };
 
     xd_remote_tree_set_agent_secrets_async (
-      tree, entries, G_N_ELEMENTS (entries), NULL,
+      tree, NULL, entries, G_N_ELEMENTS (entries), NULL,
       on_agent_secrets_saved, &saved);
     wait_for (&saved.wait);
     g_assert_true (saved.wait.ok);
@@ -770,7 +772,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait read = { .tree = tree };
 
     xd_remote_tree_get_agent_secrets_async (
-      tree, NULL, on_agent_secrets_read, &read);
+      tree, NULL, NULL, on_agent_secrets_read, &read);
     wait_for (&read.wait);
     g_assert_true (read.wait.ok);
     g_assert_cmpstr (read.names[0], ==, "CLOUDFLARE_API_TOKEN");
@@ -788,7 +790,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait saved = { .tree = tree };
 
     xd_remote_tree_set_agent_secrets_async (
-      tree, entries, G_N_ELEMENTS (entries), NULL,
+      tree, NULL, entries, G_N_ELEMENTS (entries), NULL,
       on_agent_secrets_saved, &saved);
     wait_for (&saved.wait);
     g_assert_true (saved.wait.ok);
@@ -808,7 +810,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait saved = { .tree = tree };
 
     xd_remote_tree_set_agent_secrets_async (
-      tree, NULL, 0, NULL, on_agent_secrets_saved, &saved);
+      tree, NULL, NULL, 0, NULL, on_agent_secrets_saved, &saved);
     wait_for (&saved.wait);
     g_assert_true (saved.wait.ok);
     g_free (saved.wait.failure);
@@ -822,6 +824,44 @@ test_agent_secrets_are_managed_without_reading_values (void)
 
     g_assert_null (names[0]);
   }
+
+  /* A folder store is separate from global and still never returns values. */
+  {
+    const XdAgentSecretUpdate entries[] = {
+      { "FOLDER_TOKEN", "folder-secret-value" },
+    };
+    AgentSecretsWait saved = { .tree = tree };
+
+    xd_remote_tree_set_agent_secrets_async (
+      tree, folder, entries, G_N_ELEMENTS (entries), NULL,
+      on_agent_secrets_saved, &saved);
+    wait_for (&saved.wait);
+    g_assert_true (saved.wait.ok);
+    g_free (saved.wait.failure);
+  }
+
+  {
+    AgentSecretsWait read = { .tree = tree };
+
+    xd_remote_tree_get_agent_secrets_async (
+      tree, folder, NULL, on_agent_secrets_read, &read);
+    wait_for (&read.wait);
+    g_assert_true (read.wait.ok);
+    g_assert_cmpstr (read.names[0], ==, "FOLDER_TOKEN");
+    g_assert_null (read.names[1]);
+    g_assert_cmpstr (read.names[0], !=, "folder-secret-value");
+    g_strfreev (read.names);
+    g_free (read.wait.failure);
+  }
+
+  g_clear_pointer (&stored, xd_agent_secrets_free);
+  stored = xd_agent_secrets_load_for_folder ("folder-1", &error);
+  g_assert_no_error (error);
+  g_clear_pointer (&environment, g_strfreev);
+  environment = g_new0 (char *, 1);
+  environment = xd_agent_secrets_apply_environment (stored, environment);
+  g_assert_cmpstr (g_environ_getenv (environment, "FOLDER_TOKEN"),
+                   ==, "folder-secret-value");
 
   if (old_override != NULL)
     g_setenv ("XD_AGENT_SECRETS_FILE", old_override, TRUE);

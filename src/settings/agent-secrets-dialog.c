@@ -19,6 +19,7 @@ struct _SecretsPrompt
   grefcount refs;
   GtkWindow *window;           /* weak */
   XdRemoteTree *remote;
+  XdNode *folder;
   XdAgentSecrets *local;
   GCancellable *cancellable;
   GPtrArray *rows;             /* SecretRow* */
@@ -49,6 +50,7 @@ secrets_prompt_unref (SecretsPrompt *prompt)
 
   g_clear_object (&prompt->cancellable);
   g_clear_object (&prompt->remote);
+  g_clear_object (&prompt->folder);
   g_clear_pointer (&prompt->local, xd_agent_secrets_free);
   g_clear_pointer (&prompt->rows, g_ptr_array_unref);
   g_free (prompt);
@@ -329,7 +331,8 @@ save_secrets (SecretsPrompt *prompt)
       set_busy (prompt, TRUE);
       prompt->cancellable = g_cancellable_new ();
       xd_remote_tree_set_agent_secrets_async (
-        prompt->remote, updates, entries->len, prompt->cancellable,
+        prompt->remote, prompt->folder, updates, entries->len,
+        prompt->cancellable,
         on_remote_saved, secrets_prompt_ref (prompt));
       return;
     }
@@ -451,7 +454,8 @@ hint (const char *key,
 
 void
 xd_agent_secrets_dialog_present (GtkWidget    *parent,
-                                 XdRemoteTree *remote)
+                                 XdRemoteTree *remote,
+                                 XdNode       *folder)
 {
   SecretsPrompt *prompt;
   GtkWindow *parent_window;
@@ -471,6 +475,7 @@ xd_agent_secrets_dialog_present (GtkWidget    *parent,
 
   g_return_if_fail (GTK_IS_WIDGET (parent));
   g_return_if_fail (remote == NULL || XD_IS_REMOTE_TREE (remote));
+  g_return_if_fail (folder == NULL || XD_IS_NODE (folder));
 
   xd_panel_style_ensure ();
 
@@ -478,6 +483,7 @@ xd_agent_secrets_dialog_present (GtkWidget    *parent,
   prompt = g_new0 (SecretsPrompt, 1);
   g_ref_count_init (&prompt->refs);
   prompt->remote = remote != NULL ? g_object_ref (remote) : NULL;
+  prompt->folder = folder != NULL ? g_object_ref (folder) : NULL;
   prompt->rows =
     g_ptr_array_new_with_free_func ((GDestroyNotify) secret_row_free);
 
@@ -492,19 +498,38 @@ xd_agent_secrets_dialog_present (GtkWidget    *parent,
   gtk_window_set_default_size (GTK_WINDOW (window), 700, 500);
   gtk_widget_add_css_class (window, "xd-panel");
 
-  title = gtk_label_new (remote != NULL
-                         ? "Agent Secrets · Remote Machine"
-                         : "Agent Secrets · This Machine");
+  if (folder != NULL)
+    {
+      g_autofree char *text =
+        g_strdup_printf ("Agent Secrets · %s", xd_node_get_name (folder));
+
+      title = gtk_label_new (text);
+    }
+  else
+    title = gtk_label_new (remote != NULL
+                           ? "Agent Secrets · Remote Machine"
+                           : "Agent Secrets · This Machine");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
   gtk_widget_add_css_class (title, "title-3");
 
-  description = gtk_label_new (
-    remote != NULL
-      ? "Stored in a private per-user file on the remote machine. Values never "
-        "enter the prompt; remote agent processes receive them as environment "
-        "variables."
-      : "Stored in a private per-user file on this machine. Values never enter "
-        "the prompt; agent processes receive them as environment variables.");
+  if (folder != NULL)
+    description = gtk_label_new (
+      remote != NULL
+        ? "Stored privately on the remote machine, outside the workspace. "
+          "This folder inherits global and parent secrets; values set here "
+          "override them for this folder and its children."
+        : "Stored privately on this machine, outside the workspace. This "
+          "folder inherits global and parent secrets; values set here override "
+          "them for this folder and its children.");
+  else
+    description = gtk_label_new (
+      remote != NULL
+        ? "Stored in a private per-user file on the remote machine. Values "
+          "never enter the prompt; remote agent processes receive them as "
+          "environment variables."
+        : "Stored in a private per-user file on this machine. Values never "
+          "enter the prompt; agent processes receive them as environment "
+          "variables.");
   gtk_label_set_xalign (GTK_LABEL (description), 0.0f);
   gtk_label_set_wrap (GTK_LABEL (description), TRUE);
   gtk_widget_add_css_class (description, "dim-label");
@@ -601,7 +626,7 @@ xd_agent_secrets_dialog_present (GtkWidget    *parent,
       show_status (prompt, "Loading secret names…", FALSE);
       prompt->cancellable = g_cancellable_new ();
       xd_remote_tree_get_agent_secrets_async (
-        remote, prompt->cancellable, on_remote_loaded,
+        remote, folder, prompt->cancellable, on_remote_loaded,
         secrets_prompt_ref (prompt));
     }
   else
@@ -609,7 +634,10 @@ xd_agent_secrets_dialog_present (GtkWidget    *parent,
       g_autoptr (GError) error = NULL;
       g_auto (GStrv) names = NULL;
 
-      prompt->local = xd_agent_secrets_load (NULL, &error);
+      prompt->local = folder != NULL
+        ? xd_agent_secrets_load_for_folder (
+            xd_node_get_folder_id (folder), &error)
+        : xd_agent_secrets_load (NULL, &error);
       if (prompt->local == NULL)
         {
           gtk_widget_set_sensitive (GTK_WIDGET (prompt->rows_box), FALSE);

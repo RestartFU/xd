@@ -98,11 +98,11 @@ gboolean        xd_remote_tree_set_folder_context_finish (
                                               GError      **error);
 
 /*
- * Global secrets on the daemon.
+ * Global or folder-specific secrets on the daemon.
  *
  * Listing returns names only. During save, a NULL value keeps an existing
  * value; new names need a non-NULL value. Names omitted from @entries are
- * removed.
+ * removed. @folder is NULL for the global store.
  */
 typedef struct
 {
@@ -112,6 +112,7 @@ typedef struct
 
 void            xd_remote_tree_get_agent_secrets_async (
                                               XdRemoteTree        *self,
+                                              XdNode              *folder,
                                               GCancellable        *cancellable,
                                               GAsyncReadyCallback  callback,
                                               gpointer             user_data);
@@ -121,6 +122,7 @@ GStrv           xd_remote_tree_get_agent_secrets_finish (
                                               GError      **error);
 void            xd_remote_tree_set_agent_secrets_async (
                                               XdRemoteTree              *self,
+                                              XdNode                    *folder,
                                               const XdAgentSecretUpdate *entries,
                                               gsize                      n_entries,
                                               GCancellable              *cancellable,

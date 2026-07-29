@@ -304,14 +304,20 @@ test_agent_secret_reaches_process_not_prompt (void)
   g_autoptr (GError) error = NULL;
   g_autofree char *directory = NULL;
   g_autofree char *path = NULL;
+  g_autofree char *scope_directory = NULL;
+  g_autofree char *scope_digest = NULL;
+  g_autofree char *scope_filename = NULL;
+  g_autofree char *scope_path = NULL;
   g_autofree char *fixture = NULL;
+  const char *folder_ids[] = { "session-folder", NULL };
   AiRunSpec spec = { .system_prompt = "existing instructions" };
   Run run = { 0 };
 
   directory = g_dir_make_tmp ("xd-session-secrets-XXXXXX", &error);
   g_assert_no_error (error);
   path = g_build_filename (directory, "agent-secrets.json", NULL);
-  secrets = xd_agent_secrets_load (path, &error);
+  g_setenv ("XD_AGENT_SECRETS_FILE", path, TRUE);
+  secrets = xd_agent_secrets_load_for_folder (folder_ids[0], &error);
   g_assert_no_error (error);
   g_assert_true (
     xd_agent_secrets_set (secrets, "XD_TEST_TOKEN", "super-secret", &error));
@@ -321,7 +327,7 @@ test_agent_secret_reaches_process_not_prompt (void)
   fixture = g_build_filename (g_getenv ("G_TEST_SRCDIR"), "fixtures",
                               "claude-stream.jsonl", NULL);
   spec.prompt = fixture;
-  g_setenv ("XD_AGENT_SECRETS_FILE", path, TRUE);
+  spec.folder_ids = folder_ids;
 
   run_init (&run, session);
   g_assert_true (xd_chat_session_start (session, &spec, &error));
@@ -338,6 +344,13 @@ test_agent_secret_reaches_process_not_prompt (void)
 
   run_clear (&run);
   g_unsetenv ("XD_AGENT_SECRETS_FILE");
+  scope_directory = g_strconcat (path, ".d", NULL);
+  scope_digest =
+    g_compute_checksum_for_string (G_CHECKSUM_SHA256, folder_ids[0], -1);
+  scope_filename = g_strconcat (scope_digest, ".json", NULL);
+  scope_path = g_build_filename (scope_directory, scope_filename, NULL);
+  g_remove (scope_path);
+  g_rmdir (scope_directory);
   g_remove (path);
   g_rmdir (directory);
 }

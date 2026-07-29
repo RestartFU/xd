@@ -844,7 +844,22 @@ on_agent_secrets (GtkWidget  *widget,
     return;
 
   xd_agent_secrets_dialog_present (
-    GTK_WIDGET (self), remote ? self->remote : NULL);
+    GTK_WIDGET (self), remote ? self->remote : NULL, NULL);
+}
+
+static void
+on_folder_secrets (GtkWidget  *widget,
+                   const char *action_name,
+                   GVariant   *target)
+{
+  XdSidebar *self = XD_SIDEBAR (widget);
+  XdNode *folder = node_from_target (self, target);
+
+  if (folder == NULL)
+    return;
+
+  xd_agent_secrets_dialog_present (
+    GTK_WIDGET (self), is_remote_row (folder) ? self->remote : NULL, folder);
 }
 
 typedef struct
@@ -1471,6 +1486,7 @@ build_row_menu (XdNode *node)
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) rename = NULL;
   g_autoptr (GMenuItem) context = NULL;
+  g_autoptr (GMenuItem) secrets = NULL;
   g_autoptr (GMenuItem) settings = NULL;
   g_autoptr (GMenuItem) trash = NULL;
 
@@ -1500,8 +1516,12 @@ build_row_menu (XdNode *node)
     context, "sidebar.folder-context", target);
   g_menu_append_item (menu, context);
 
-  /* The rest of the settings still edit a local dotfile directly. Agent
-   * context has its own daemon operation and is available on both sides. */
+  secrets = g_menu_item_new ("Agent Secrets…", NULL);
+  g_menu_item_set_action_and_target_value (
+    secrets, "sidebar.folder-secrets", target);
+  g_menu_append_item (menu, secrets);
+
+  /* The rest of the settings still edit a local dotfile directly. */
   if (!remote)
     {
       settings = g_menu_item_new ("Folder Settings…", NULL);
@@ -2002,6 +2022,8 @@ xd_sidebar_class_init (XdSidebarClass *klass)
                                    on_folder_context);
   gtk_widget_class_install_action (widget_class, "sidebar.agent-secrets", "s",
                                    on_agent_secrets);
+  gtk_widget_class_install_action (widget_class, "sidebar.folder-secrets", "s",
+                                   on_folder_secrets);
   gtk_widget_class_install_action (widget_class, "sidebar.refresh-remote", "s",
                                    on_refresh_remote);
 }

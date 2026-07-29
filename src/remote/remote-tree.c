@@ -785,14 +785,30 @@ xd_remote_tree_set_folder_context_finish (XdRemoteTree *self,
 
 void
 xd_remote_tree_get_agent_secrets_async (XdRemoteTree        *self,
+                                        XdNode              *folder,
                                         GCancellable        *cancellable,
                                         GAsyncReadyCallback  callback,
                                         gpointer             user_data)
 {
-  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
 
-  xd_remote_client_call_op_async (self->client, "agent-secrets", NULL, NULL,
-                                  cancellable, callback, user_data);
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (folder == NULL || XD_IS_NODE (folder));
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "agent-secrets");
+  if (folder != NULL)
+    {
+      json_builder_set_member_name (builder, "folder");
+      json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    }
+  json_builder_end_object (builder);
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->client, request, cancellable,
+                               callback, user_data);
 }
 
 GStrv
@@ -845,6 +861,7 @@ xd_remote_tree_get_agent_secrets_finish (XdRemoteTree  *self,
 void
 xd_remote_tree_set_agent_secrets_async (
                                        XdRemoteTree              *self,
+                                       XdNode                    *folder,
                                        const XdAgentSecretUpdate *entries,
                                        gsize                      n_entries,
                                        GCancellable              *cancellable,
@@ -855,11 +872,17 @@ xd_remote_tree_set_agent_secrets_async (
   g_autoptr (JsonNode) request = NULL;
 
   g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (folder == NULL || XD_IS_NODE (folder));
   g_return_if_fail (entries != NULL || n_entries == 0);
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "op");
   json_builder_add_string_value (builder, "set-agent-secrets");
+  if (folder != NULL)
+    {
+      json_builder_set_member_name (builder, "folder");
+      json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    }
   json_builder_set_member_name (builder, "entries");
   json_builder_begin_array (builder);
   for (gsize i = 0; i < n_entries; i++)

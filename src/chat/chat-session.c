@@ -274,7 +274,7 @@ xd_chat_session_start (XdChatSession    *self,
   g_return_val_if_fail (spec != NULL, FALSE);
   g_return_val_if_fail (self->process == NULL, FALSE);
 
-  secrets = xd_agent_secrets_load (NULL, &local_error);
+  secrets = xd_agent_secrets_load_effective (spec->folder_ids, &local_error);
   if (secrets == NULL)
     {
       g_prefix_error (&local_error, "Cannot load agent secrets: ");

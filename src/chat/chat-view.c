@@ -2939,6 +2939,7 @@ start_turn (XdChatView *self,
   g_autofree char *handover = NULL;
   g_autofree char *full_prompt = NULL;
   g_autofree char *system_prompt = NULL;
+  g_auto (GStrv) folder_ids = NULL;
   const AiBackend *backend;
   AiRunSpec spec = { 0 };
   Turn *turn;
@@ -3030,6 +3031,8 @@ start_turn (XdChatView *self,
 
   spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
+  folder_ids = xd_node_folder_ids (xd_node_get_parent (self->chat));
+  spec.folder_ids = (const char *const *) folder_ids;
   turn->workdir = g_strdup (spec.workdir);
   turn->diff_tracker = xd_git_diff_tracker_new (turn->workdir);
   /* The chat's own pick wins; the folder chain is the fallback. */

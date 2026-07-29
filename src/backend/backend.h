@@ -80,6 +80,7 @@ typedef struct
   const char *system_prompt;      /* NULL: no extra instructions */
   const char *resume_session_id;  /* NULL: start a new session */
   const char *workdir;            /* NULL: inherit ours */
+  const char *const *folder_ids;  /* outermost to innermost secret scopes */
   AiEffort effort;
   AiAccess access;
 } AiRunSpec;
