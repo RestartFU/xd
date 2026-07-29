@@ -9,6 +9,9 @@ targets:
     main: src/xd.cr
 
 dependencies:
+  gtk4:
+    github: hugopl/gtk4.cr
+    version: 0.18.0
   sqlite3:
     github: crystal-lang/crystal-sqlite3
     version: 0.23.0

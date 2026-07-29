@@ -10,11 +10,18 @@
 # Pin the multi-platform manifest, not only the tag. Developers need Docker,
 # never a host Crystal compiler. This stage remains separate while the
 # behavior-parity suite is moved module by module from C.
-FROM crystallang/crystal:1.21.0@sha256:32b7b908a8c3625ebd629053daf48b6f469deaf74aeb71ad101895096b1665fa AS crystal
+FROM crystallang/crystal:1.21.0@sha256:32b7b908a8c3625ebd629053daf48b6f469deaf74aeb71ad101895096b1665fa AS crystal-toolchain
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libsqlite3-dev \
+ && apt-get install -y --no-install-recommends \
+      gir1.2-gtk-4.0 \
+      gobject-introspection \
+      libgirepository1.0-dev \
+      libgtk-4-dev \
+      libsqlite3-dev \
  && rm -rf /var/lib/apt/lists/*
+
+FROM crystal-toolchain AS crystal
 
 WORKDIR /src
 COPY shard.yml shard.lock ./
