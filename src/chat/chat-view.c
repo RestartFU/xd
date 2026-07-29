@@ -145,6 +145,7 @@ struct _XdChatView
    */
   GtkWidget *working_row;
   GtkLabel *working_label;
+  XdDots *working_dots;
   guint working_timer;
 
   gboolean remote_working;
@@ -328,6 +329,8 @@ static void on_plan_toggled (GtkToggleButton *toggle,
 static XdMessageRow *append_row (XdChatView    *self,
                                  XdMessageKind  kind,
                                  const char    *text);
+static void set_working_animation (XdChatView *self,
+                                   gboolean    animated);
 static const char *workdir_for (const XdChat              *chat,
                                 const XdEffectiveSettings *resolved);
 static gboolean restore_original_workdir (XdChatView                *self,
@@ -495,6 +498,7 @@ begin_bottom_jump (XdChatView *self)
 {
   self->follow_bottom = TRUE;
   self->history_bottom_distance = -1;
+  set_working_animation (self, TRUE);
   self->bottom_jump_upper = -1;
   self->bottom_jump_page_size = -1;
   self->bottom_jump_stable_frames = 0;
@@ -528,6 +532,7 @@ on_scroll_adjustment_changed (GtkAdjustment *adjustment,
     {
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
+      set_working_animation (self, TRUE);
     }
   else if (self->history_bottom_distance >= 0)
     {
@@ -565,6 +570,7 @@ on_transcript_scrolled (GtkEventControllerScroll *controller,
     {
       self->follow_bottom = FALSE;
       self->history_bottom_distance = -1;
+      set_working_animation (self, FALSE);
     }
   return GDK_EVENT_PROPAGATE;
 }
@@ -648,6 +654,8 @@ on_tool_group_expanded (GtkExpander *expander,
 {
   if (gtk_expander_get_expanded (expander))
     render_tool_group (expander);
+  else
+    gtk_expander_set_child (expander, NULL);
 }
 
 /*
@@ -1285,6 +1293,29 @@ update_working_label (gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+static void
+set_working_animation (XdChatView *self,
+                       gboolean    animated)
+{
+  if (self->working_label == NULL)
+    return;
+
+  if (animated)
+    {
+      update_working_label (self);
+      if (self->working_timer == 0)
+        self->working_timer =
+          g_timeout_add_seconds (1, update_working_label, self);
+    }
+  else
+    {
+      g_clear_handle_id (&self->working_timer, g_source_remove);
+    }
+
+  if (self->working_dots != NULL)
+    xd_dots_set_animated (self->working_dots, animated);
+}
+
 /*
  * Shows that the turn is still going, for as long as it is.
  *
@@ -1300,6 +1331,7 @@ set_working (XdChatView *self,
     {
       g_clear_handle_id (&self->working_timer, g_source_remove);
       self->working_label = NULL;
+      self->working_dots = NULL;
 
       if (self->working_row != NULL)
         gtk_box_remove (self->transcript, self->working_row);
@@ -1309,23 +1341,25 @@ set_working (XdChatView *self,
 
   if (self->working_row != NULL)
     {
-      update_working_label (self);
+      if (self->follow_bottom)
+        update_working_label (self);
       return;
     }
 
   {
-    GtkWidget *dots = GTK_WIDGET (xd_dots_new ());
+    self->working_dots = xd_dots_new ();
 
     self->working_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
     self->working_label = GTK_LABEL (gtk_label_new ("Working for 0s"));
     gtk_label_set_xalign (self->working_label, 0.0f);
     gtk_widget_add_css_class (GTK_WIDGET (self->working_label), "caption");
     gtk_widget_add_css_class (GTK_WIDGET (self->working_label), "dim-label");
-    gtk_widget_add_css_class (dots, "caption");
-    gtk_widget_add_css_class (dots, "dim-label");
+    gtk_widget_add_css_class (GTK_WIDGET (self->working_dots), "caption");
+    gtk_widget_add_css_class (GTK_WIDGET (self->working_dots), "dim-label");
     gtk_box_append (GTK_BOX (self->working_row),
                     GTK_WIDGET (self->working_label));
-    gtk_box_append (GTK_BOX (self->working_row), dots);
+    gtk_box_append (GTK_BOX (self->working_row),
+                    GTK_WIDGET (self->working_dots));
   }
 
   gtk_widget_set_halign (self->working_row, GTK_ALIGN_START);
@@ -1333,8 +1367,7 @@ set_working (XdChatView *self,
   gtk_widget_set_margin_top (self->working_row, 6);
 
   gtk_box_append (self->transcript, self->working_row);
-  update_working_label (self);
-  self->working_timer = g_timeout_add_seconds (1, update_working_label, self);
+  set_working_animation (self, self->follow_bottom);
 }
 
 static void
@@ -5653,6 +5686,7 @@ xd_chat_view_dispose (GObject *object)
 
   g_clear_handle_id (&self->working_timer, g_source_remove);
   self->working_label = NULL;
+  self->working_dots = NULL;
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);

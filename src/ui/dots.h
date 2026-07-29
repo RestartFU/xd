@@ -20,5 +20,7 @@ G_DECLARE_FINAL_TYPE (XdDots, xd_dots, XD, DOTS, AdwBin)
  * of view and windows in the background cost nothing.
  */
 XdDots *xd_dots_new (void);
+void    xd_dots_set_animated (XdDots   *self,
+                              gboolean  animated);
 
 G_END_DECLS
