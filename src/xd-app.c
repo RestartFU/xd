@@ -307,12 +307,13 @@ static const char *XD_STYLE =
    * The surface and contents are rendered at the window system's mercy --
    * surface alpha, renderer, scale -- and every sharp-corner report traced
    * back to them. A child widget's rounded background is ordinary scene
-   * geometry, identical under every renderer. Contents carry nothing, and
-   * zero padding makes the surface exactly the panel's rectangle, so there
-   * is no ring around it left to mispaint.
+   * geometry, identical under every renderer. Contents carry nothing. One
+   * transparent pixel keeps the child's antialiased border inside the native
+   * surface; flush against that surface, its outer half was clipped into a
+   * visibly cut edge.
    */
   "popover > contents { background: none; border: none; box-shadow: none;"
-  " padding: 0; }\n"
+  " padding: 1px; }\n"
   /*
    * Match the composer's 4% white lift over #0a0a0c. Keeping the resolved
    * colour solid avoids a translucent popover changing tone with whatever
