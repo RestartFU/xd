@@ -8,6 +8,17 @@ private def parse_response(response : Xd::Protocol::Response) : JSON::Any
   JSON.parse(response.to_json)
 end
 
+private def engine_git(workdir : String, *arguments : String) : Nil
+  status = Process.run(
+    "git",
+    arguments,
+    chdir: workdir,
+    output: Process::Redirect::Close,
+    error: Process::Redirect::Close
+  )
+  status.success?.should be_true
+end
+
 private class EngineSessionHandle < Xd::Agent::SessionHandle
   getter canceled = false
 
@@ -323,6 +334,71 @@ describe Xd::Daemon::Engine do
       else
         ENV.delete("XD_AGENT_SECRETS_FILE")
       end
+    end
+  end
+
+  it "creates and selects worktrees through the shared engine" do
+    launcher = EngineLauncher.new
+
+    with_daemon_engine(launcher: launcher) do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Repository",
+      }.to_json)["id"].as_s
+      repository = File.join(
+        Path[store.path].dirname,
+        "Workspaces",
+        "Repository"
+      )
+      engine_git(repository, "init", "-q", "-b", "main")
+      engine_git(repository, "config", "user.email", "test@example.com")
+      engine_git(repository, "config", "user.name", "Test")
+      File.write(File.join(repository, "tracked.txt"), "initial\n")
+      engine_git(repository, "add", "tracked.txt")
+      engine_git(repository, "commit", "-q", "-m", "initial")
+
+      first = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+      engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => first,
+        "option" => "new-worktree",
+        "value"  => "true",
+      }.to_json).success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "send",
+        "chat" => first,
+        "text" => "Fix parser",
+      }.to_json).success?.should be_true
+
+      created = launcher.specs.first.workdir.not_nil!
+      created.should_not eq(repository)
+      File.directory?(created).should be_true
+      first_state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => first,
+      }.to_json)
+      first_state["linked_worktree"].as_bool.should be_true
+      first_state["worktrees"].as_a.size.should eq(2)
+
+      second = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+      selected = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => second,
+        "option" => "workspace",
+        "value"  => created,
+      }.to_json)
+      selected.success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => second,
+      }.to_json)["workdir"].as_s.should eq(created)
     end
   end
 

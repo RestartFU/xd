@@ -6,6 +6,7 @@ require "../protocol/message"
 require "../storage/workflow_state"
 require "../version"
 require "../workspace/service"
+require "../workspace/worktrees"
 require "./connection"
 require "./event_bus"
 require "./filesystem"
@@ -49,6 +50,7 @@ module Xd
         @events = EventBus.new
         @filesystem = Filesystem.new(@store, @workspaces)
         @images = Images.new
+        @git_worktrees = Workspace::Worktrees.new(@store, @workspaces)
         @repository = Repository.new(@store, @workspaces, @filesystem)
         @terminals = Terminals.new(
           @filesystem,
@@ -62,7 +64,8 @@ module Xd
           launcher || Agent::ProcessLauncher.new(VERSION),
           ->(name : String, fields : Hash(String, JSON::Any)) {
             publish_async_event(name, fields)
-          }
+          },
+          @git_worktrees
         )
       end
 
@@ -115,6 +118,8 @@ module Xd
         failed_outcome(error.message || "Storage error")
       rescue error : Workspace::Error
         failed_outcome(error.message || "Workspace error")
+      rescue error : Workspace::Worktrees::Error
+        failed_outcome(error.message || "Worktree error")
       rescue error : Agent::Secrets::Error
         failed_outcome(error.message || "Agent secrets error")
       rescue error : Agent::Manager::Error
@@ -587,11 +592,18 @@ module Xd
           @store.last_message_id(stored.id) > 0
         )
         begin
-          fields["workdir"] = JSON::Any.new(
-            @workspaces.resolve_workdir(stored.folder_id, stored.workdir)
-          )
-        rescue Workspace::Error
+          state = @git_worktrees.state(stored)
+          fields["workdir"] = JSON::Any.new(state.workdir)
+          fields["linked_worktree"] = JSON::Any.new(state.linked)
+          fields["worktrees"] = worktrees_json(state.worktrees)
+        rescue Workspace::Error | Workspace::Worktrees::Error
           # Orphaned chats remain readable even when their folder disappeared.
+          begin
+            fields["workdir"] = JSON::Any.new(
+              @git_worktrees.resolve(stored)
+            )
+          rescue Workspace::Error
+          end
         end
 
         Protocol::Response.ok(fields)
@@ -626,6 +638,8 @@ module Xd
           @store.set_backend(chat_id, backend)
         when "new-worktree"
           @store.set_new_worktree(chat_id, value == "true")
+        when "workspace"
+          @git_worktrees.select(@store.get_chat(chat_id), value)
         else
           raise Protocol::Error.new("No such option.")
         end
@@ -845,6 +859,24 @@ module Xd
           }
           if label = message.label
             fields["label"] = JSON::Any.new(label)
+          end
+          JSON::Any.new(fields)
+        end
+        JSON::Any.new(values)
+      end
+
+      private def worktrees_json(
+        rows : Array(Workspace::Worktree),
+      ) : JSON::Any
+        values = rows.map do |item|
+          fields = {
+            "path"     => JSON::Any.new(item.path),
+            "detached" => JSON::Any.new(item.detached),
+            "main"     => JSON::Any.new(item.main),
+            "current"  => JSON::Any.new(item.current),
+          }
+          if branch = item.branch
+            fields["branch"] = JSON::Any.new(branch)
           end
           JSON::Any.new(fields)
         end

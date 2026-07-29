@@ -2,6 +2,7 @@ require "json"
 require "set"
 require "../storage/workflow_state"
 require "../workspace/service"
+require "../workspace/worktrees"
 require "./catalog"
 require "./codex_app_server"
 require "./conversation"
@@ -132,13 +133,17 @@ module Xd
       @command_sets = {} of String => Array(String)
       @mutex = Mutex.new
       @closed = false
+      @worktree_service : Workspace::Worktrees
 
       def initialize(
         @store : Storage::Store,
         @workspaces : Workspace::Service,
         @launcher : Launcher = ProcessLauncher.new("unknown"),
         @on_event : Proc(String, Hash(String, JSON::Any), Nil) = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
+        worktree_service : Workspace::Worktrees? = nil,
       )
+        @worktree_service = worktree_service ||
+                            Workspace::Worktrees.new(@store, @workspaces)
       end
 
       def send(chat_id : String, text : String) : SendResult
@@ -266,6 +271,10 @@ module Xd
             publish("tree")
           end
 
+          workdir = @worktree_service.prepare(
+            chat,
+            Conversation.title(text)
+          )
           @store.append_message(chat_id, "user", text)
           user_stored = true
           transcript_message_id = @store.last_message_id(chat_id)
@@ -277,10 +286,6 @@ module Xd
 
           settings = @workspaces.resolve(chat.folder_id, chat.backend)
           folder_ids = @workspaces.folder_ids(chat.folder_id)
-          workdir = @workspaces.resolve_workdir(
-            chat.folder_id,
-            chat.workdir
-          )
           model = chat.model || settings.model || backend.default_model
           effort = chat.effort ? Effort.from_wire(chat.effort) : backend.default_effort
           access = chat.plan ? Access::Plan : Access.from_wire(chat.access)
