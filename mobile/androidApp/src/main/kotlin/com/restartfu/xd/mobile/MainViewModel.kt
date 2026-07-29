@@ -37,6 +37,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     is PairResult.Success -> Unit
                     is PairResult.Failure -> _error.value = result.message
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 _error.value = error.message ?: "Could not pair with the daemon"
             } finally {
@@ -48,8 +50,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun forget() {
         _error.value = null
         viewModelScope.launch {
-            runCatching { client.forget() }
-                .onFailure { _error.value = it.message ?: "Could not forget the remote" }
+            try {
+                client.forget()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not forget the remote"
+            }
         }
     }
 
@@ -59,9 +66,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         _error.value = null
         viewModelScope.launch {
-            runCatching { client.createChat(folderId = folderId, title = null) }
-                .onSuccess(onCreated)
-                .onFailure { _error.value = it.message ?: "Could not create a chat" }
+            try {
+                onCreated(client.createChat(folderId = folderId, title = null))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not create a chat"
+            }
         }
     }
 }
@@ -96,11 +107,47 @@ class ChatViewModel(
     }
 
     fun cancel() {
-        viewModelScope.launch { runCatching { session.cancel() } }
+        viewModelScope.launch {
+            try {
+                session.cancel()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // Connection state already exposes the failure.
+            }
+        }
+    }
+
+    fun enqueue(
+        text: String,
+        onQueued: () -> Unit,
+    ) {
+        if (_sending.value) return
+        _sending.value = true
+        viewModelScope.launch {
+            try {
+                session.enqueue(text)
+                onQueued()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // Queue changes and failures arrive through session state.
+            } finally {
+                _sending.value = false
+            }
+        }
     }
 
     fun dropQueued(index: Int) {
-        viewModelScope.launch { runCatching { session.dropQueued(index) } }
+        viewModelScope.launch {
+            try {
+                session.dropQueued(index)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // Queue changes and failures arrive through session state.
+            }
+        }
     }
 
     fun loadOlder() {

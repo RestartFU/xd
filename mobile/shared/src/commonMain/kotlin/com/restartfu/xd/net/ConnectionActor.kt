@@ -11,6 +11,7 @@ import com.restartfu.xd.protocol.WireJson
 import com.restartfu.xd.protocol.decodeReply
 import com.restartfu.xd.protocol.requireSuccess
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
@@ -85,8 +87,9 @@ internal class ConnectionActor(
     private val assembler = LineAssembler()
     private val _link = MutableStateFlow<Link>(Link.Idle)
     private val _hasCredentials = MutableStateFlow(false)
+    private val _credentialsReady = MutableStateFlow(false)
     private val _events = MutableSharedFlow<SequencedEvent>(extraBufferCapacity = 1024)
-    private var credentials: StoredCredentials? = credentialStore.load()
+    private var credentials: StoredCredentials? = null
     private var socket: PlatformSocket? = null
     private var leafCertificateDer: ByteArray? = null
     private var generation: Long = 0
@@ -102,12 +105,11 @@ internal class ConnectionActor(
 
     val link: StateFlow<Link> = _link.asStateFlow()
     val hasCredentials: StateFlow<Boolean> = _hasCredentials.asStateFlow()
+    val credentialsReady: StateFlow<Boolean> = _credentialsReady.asStateFlow()
     val events: SharedFlow<SequencedEvent> = _events.asSharedFlow()
 
     init {
-        _hasCredentials.value = credentials != null
         scope.launch { run() }
-        mailbox.trySend(Message.Poke)
     }
 
     fun poke() {
@@ -159,6 +161,10 @@ internal class ConnectionActor(
     }
 
     private suspend fun run() {
+        credentials = credentialStore.load()
+        _hasCredentials.value = credentials != null
+        _credentialsReady.value = true
+        mailbox.trySend(Message.Poke)
         for (message in mailbox) {
             when (message) {
                 Message.Poke -> handlePoke()
@@ -214,13 +220,15 @@ internal class ConnectionActor(
         connect()
     }
 
-    private fun handleForget(message: Message.Forget) {
+    private suspend fun handleForget(message: Message.Forget) {
         retryJob?.cancel()
         retryJob = null
         pairing?.result?.complete(PairResult.Failure("Pairing cancelled"))
         pairing = null
         try {
             credentialStore.clear()
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             message.done.completeExceptionally(error)
             return
@@ -278,7 +286,9 @@ internal class ConnectionActor(
 
         val greetingGeneration = generation
         scope.launch {
-            val result = runCatching { reply.await() }
+            val result = runCatching {
+                withTimeout(GREETING_TIMEOUT_MILLIS) { reply.await() }
+            }
             mailbox.send(Message.GreetingFinished(greetingGeneration, result))
         }
     }
@@ -300,7 +310,7 @@ internal class ConnectionActor(
         }
     }
 
-    private fun handleGreeting(message: Message.GreetingFinished) {
+    private suspend fun handleGreeting(message: Message.GreetingFinished) {
         if (message.generation != generation || socket == null) return
         val raw = message.result.getOrElse {
             return handleClosed(
@@ -348,8 +358,14 @@ internal class ConnectionActor(
             pairing = null
             wanted = false
             closeCurrent(error)
-            _link.value = Link.Fatal(FatalReason.UNKNOWN_DEVICE, error.message.orEmpty())
+            _link.value = if (attempt == null) {
+                Link.Fatal(FatalReason.UNKNOWN_DEVICE, error.message.orEmpty())
+            } else {
+                Link.Idle
+            }
             attempt?.result?.complete(PairResult.Failure(error.message.orEmpty()))
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
             val attempt = pairing
             pairing = null
@@ -364,10 +380,12 @@ internal class ConnectionActor(
         if (message.generation != generation) return
         val reason = message.failure
         val text = reason?.message ?: "Daemon closed the connection"
+        val old = socket
         socket = null
         leafCertificateDer = null
         assembler.reset()
         calls.failAll(DisconnectedException(text))
+        old?.close()
 
         val attempt = pairing
         if (attempt != null) {
@@ -540,6 +558,7 @@ internal class ConnectionActor(
     }
 
     private companion object {
+        const val GREETING_TIMEOUT_MILLIS = 15_000L
         const val PROTOCOL_VERSION = 1
     }
 }

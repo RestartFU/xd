@@ -62,6 +62,8 @@ public object Ops {
                     "attachments",
                     buildJsonArray {
                         images.forEach { image ->
+                            val encodedLength = ((image.bytes.size + 2) / 3) * 4
+                            Limits.validateEncodedImageLength(encodedLength)
                             add(
                                 buildJsonObject {
                                     put("mime", Limits.PNG_MIME)
@@ -94,11 +96,12 @@ public object Ops {
     public fun cancel(chatId: String): JsonObject = withChat("cancel", chatId)
 
     public fun newChat(
-        folderId: String?,
+        folderId: String,
         title: String? = null,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
-        if (folderId != null) put("folder", folderId)
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        put("folder", folderId)
         if (!title.isNullOrBlank()) put("title", title)
     }
 

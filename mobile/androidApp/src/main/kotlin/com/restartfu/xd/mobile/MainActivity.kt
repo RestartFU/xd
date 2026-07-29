@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile
 
+import android.app.Activity
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -31,9 +32,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -46,12 +49,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -79,7 +82,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            MaterialTheme(
+                colorScheme = if (androidx.compose.foundation.isSystemInDarkTheme()) {
+                    darkColorScheme()
+                } else {
+                    lightColorScheme()
+                },
+            ) {
                 Surface(Modifier.fillMaxSize()) {
                     XdMobileApp(model)
                 }
@@ -91,14 +100,20 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun XdMobileApp(model: MainViewModel) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val activity = LocalContext.current as? Activity
     val hasCredentials by model.client.hasCredentials.collectAsStateWithLifecycle()
+    val credentialsReady by model.client.credentialsReady.collectAsStateWithLifecycle()
     val link by model.client.link.collectAsStateWithLifecycle()
 
     DisposableEffect(lifecycleOwner, model.client) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> model.client.poke()
-                Lifecycle.Event.ON_STOP -> model.client.goBackground()
+                Lifecycle.Event.ON_STOP -> {
+                    if (activity?.isChangingConfigurations != true) {
+                        model.client.goBackground()
+                    }
+                }
                 else -> Unit
             }
         }
@@ -106,7 +121,11 @@ private fun XdMobileApp(model: MainViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    if (!hasCredentials) {
+    if (!credentialsReady) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+    } else if (!hasCredentials) {
         PairScreen(model)
     } else if (link is Link.Fatal) {
         FatalScreen(link as Link.Fatal, model::forget)
@@ -264,7 +283,7 @@ private fun TreeScreen(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
-    val expanded = remember { mutableStateMapOf<String, Boolean>() }
+    var expandedIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     val roots = tree.folders.filter { it.parentId == null }
     val children = tree.folders.groupBy(Folder::parentId)
     val chats = tree.chats.groupBy(ChatSummary::folderId)
@@ -305,7 +324,21 @@ private fun TreeScreen(
                 }
                 LazyColumn(contentPadding = PaddingValues(bottom = 88.dp)) {
                     roots.forEach { folder ->
-                        folderRows(folder, 0, children, chats, expanded, openChat)
+                        folderRows(
+                            folder = folder,
+                            depth = 0,
+                            children = children,
+                            chats = chats,
+                            expanded = expandedIds.toSet(),
+                            toggle = { id ->
+                                expandedIds = if (id in expandedIds) {
+                                    expandedIds - id
+                                } else {
+                                    expandedIds + id
+                                }
+                            },
+                            openChat = openChat,
+                        )
                     }
                 }
             }
@@ -384,22 +417,23 @@ private fun androidx.compose.foundation.lazy.LazyListScope.folderRows(
     depth: Int,
     children: Map<String?, List<Folder>>,
     chats: Map<String, List<ChatSummary>>,
-    expanded: MutableMap<String, Boolean>,
+    expanded: Set<String>,
+    toggle: (String) -> Unit,
     openChat: (String) -> Unit,
 ) {
     item(key = "folder-${folder.id}") {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { expanded[folder.id] = expanded[folder.id] != true }
+                .clickable { toggle(folder.id) }
                 .padding(start = (16 + depth * 16).dp, top = 12.dp, bottom = 12.dp),
         ) {
-            Text(if (expanded[folder.id] == true) "▾" else "▸")
+            Text(if (folder.id in expanded) "▾" else "▸")
             Spacer(Modifier.width(8.dp))
             Text(folder.name, style = MaterialTheme.typography.titleMedium)
         }
     }
-    if (expanded[folder.id] == true) {
+    if (folder.id in expanded) {
         chats[folder.id].orEmpty().forEach { chat ->
             item(key = "chat-${chat.id}") {
                 Row(
@@ -420,7 +454,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.folderRows(
             }
         }
         children[folder.id].orEmpty().forEach { child ->
-            folderRows(child, depth + 1, children, chats, expanded, openChat)
+            folderRows(child, depth + 1, children, chats, expanded, toggle, openChat)
         }
     }
 }
@@ -517,26 +551,31 @@ private fun ChatScreen(
                         maxLines = 5,
                     )
                     Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            if (state.working) {
-                                model.cancel()
-                            } else {
+                    if (state.working) {
+                        Button(
+                            onClick = {
+                                val text = composer
+                                model.enqueue(text) {
+                                    if (composer == text) composer = ""
+                                }
+                            },
+                            enabled = !sending && composer.isNotBlank(),
+                        ) {
+                            Text(if (sending) "Queueing…" else "Queue")
+                        }
+                        TextButton(onClick = model::cancel) { Text("Cancel") }
+                    } else {
+                        Button(
+                            onClick = {
                                 val text = composer
                                 model.send(text) {
                                     if (composer == text) composer = ""
                                 }
-                            }
-                        },
-                        enabled = state.working || (!sending && composer.isNotBlank()),
-                    ) {
-                        Text(
-                            when {
-                                state.working -> "Cancel"
-                                sending -> "Sending…"
-                                else -> "Send"
                             },
-                        )
+                            enabled = !sending && composer.isNotBlank(),
+                        ) {
+                            Text(if (sending) "Sending…" else "Send")
+                        }
                     }
                 }
             }
@@ -581,7 +620,12 @@ private fun ChatScreen(
 @Composable
 private fun TranscriptRow(item: TranscriptItem) {
     if (item.kind == TranscriptKind.TOOL) {
-        AssistChip(onClick = {}, label = { Text(item.text) })
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = MaterialTheme.shapes.small,
+        ) {
+            Text(item.text, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+        }
         return
     }
     val user = item.kind == TranscriptKind.USER

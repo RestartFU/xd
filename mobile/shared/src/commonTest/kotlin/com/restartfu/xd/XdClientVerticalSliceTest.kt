@@ -3,6 +3,7 @@ package com.restartfu.xd
 import com.restartfu.xd.credentials.MemoryCredentialStore
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.net.FakeSocketFactory
+import com.restartfu.xd.net.FakeSocket
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import kotlin.test.Test
@@ -162,7 +163,39 @@ class XdClientVerticalSliceTest {
         session.close()
     }
 
-    private fun com.restartfu.xd.net.FakeSocket.opAt(index: Int): String {
+    @Test
+    fun lifecycleEventWinsOverInFlightTreeSnapshot() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+
+        socket.receive(treeReply(working = false))
+        runCurrent()
+        assertFalse(client.tree.value.chats.single().working)
+
+        socket.receive("""{"event":"tree"}""")
+        runCurrent()
+        assertEquals("tree", socket.opAt(2))
+
+        socket.receive("""{"event":"turn-started","chat":"chat","label":"Codex"}""")
+        runCurrent()
+        assertTrue(client.tree.value.chats.single().working)
+
+        socket.receive(treeReply(working = false))
+        runCurrent()
+        assertTrue(client.tree.value.chats.single().working)
+    }
+
+    private fun FakeSocket.opAt(index: Int): String {
         val line = writes[index].decodeToString()
         return Regex(""""op":"([^"]+)"""").find(line)?.groupValues?.get(1)
             ?: error("No op in $line")
@@ -187,4 +220,9 @@ class XdClientVerticalSliceTest {
         total: Int = 2,
     ): String =
         """{"ok":true,"total_messages":$total,"last_message_id":2,"messages":[$rows]}"""
+
+    private fun treeReply(working: Boolean): String =
+        """{"ok":true,"folders":[{"id":"folder","name":"Work"}],""" +
+            """"chats":[{"id":"chat","folder":"folder","title":"Hello",""" +
+            """"backend":"codex","working":$working}]}"""
 }

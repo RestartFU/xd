@@ -30,28 +30,31 @@ class AndroidSocketTest {
         val received = ByteArrayOutputStream()
         val done = CountDownLatch(1)
 
-        AndroidSocket(2_000).connect(
-            "127.0.0.1",
-            server.localPort,
-            null,
-            listener(
-                connected = { connected.set(it) },
-                bytes = { chunk ->
-                    synchronized(received) {
-                        received.write(chunk)
-                    }
-                },
-                closed = { done.countDown() },
-            ),
-        )
+        try {
+            AndroidSocket(2_000).connect(
+                "127.0.0.1",
+                server.localPort,
+                null,
+                listener(
+                    connected = { connected.set(it) },
+                    bytes = { chunk ->
+                        synchronized(received) {
+                            received.write(chunk)
+                        }
+                    },
+                    closed = { done.countDown() },
+                ),
+            )
 
-        assertTrue(done.await(5, TimeUnit.SECONDS))
-        assertContentEquals(fixture.certificateDer, connected.get())
-        assertEquals(
-            "one\n",
-            synchronized(received) { received.toByteArray().decodeToString() },
-        )
-        server.close()
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            assertContentEquals(fixture.certificateDer, connected.get())
+            assertEquals(
+                "one\n",
+                synchronized(received) { received.toByteArray().decodeToString() },
+            )
+        } finally {
+            server.close()
+        }
     }
 
     @Test
@@ -65,23 +68,26 @@ class AndroidSocketTest {
         val done = CountDownLatch(1)
         val failure = AtomicReference<SocketFailure?>()
 
-        AndroidSocket(2_000).connect(
-            "127.0.0.1",
-            server.localPort,
-            fixture.certificateDer,
-            listener(
-                connected = { connected.countDown() },
-                closed = {
-                    failure.set(it)
-                    done.countDown()
-                },
-            ),
-        )
+        try {
+            AndroidSocket(2_000).connect(
+                "127.0.0.1",
+                server.localPort,
+                fixture.certificateDer,
+                listener(
+                    connected = { connected.countDown() },
+                    closed = {
+                        failure.set(it)
+                        done.countDown()
+                    },
+                ),
+            )
 
-        assertTrue(connected.await(5, TimeUnit.SECONDS))
-        assertTrue(done.await(5, TimeUnit.SECONDS))
-        assertEquals(null, failure.get())
-        server.close()
+            assertTrue(connected.await(5, TimeUnit.SECONDS))
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            assertEquals(null, failure.get())
+        } finally {
+            server.close()
+        }
     }
 
     @Test
@@ -93,21 +99,24 @@ class AndroidSocketTest {
         val done = CountDownLatch(1)
         val failure = AtomicReference<SocketFailure?>()
 
-        AndroidSocket(2_000).connect(
-            "127.0.0.1",
-            server.localPort,
-            byteArrayOf(1, 2, 3),
-            listener(
-                closed = {
-                    failure.set(it)
-                    done.countDown()
-                },
-            ),
-        )
+        try {
+            AndroidSocket(2_000).connect(
+                "127.0.0.1",
+                server.localPort,
+                byteArrayOf(1, 2, 3),
+                listener(
+                    closed = {
+                        failure.set(it)
+                        done.countDown()
+                    },
+                ),
+            )
 
-        assertTrue(done.await(5, TimeUnit.SECONDS))
-        assertEquals(SocketFailureKind.PIN_MISMATCH, assertNotNull(failure.get()).kind)
-        server.close()
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            assertEquals(SocketFailureKind.PIN_MISMATCH, assertNotNull(failure.get()).kind)
+        } finally {
+            server.close()
+        }
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.restartfu.xd.store
 
 import com.restartfu.xd.model.ChatState
+import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.LiveItemReply
@@ -29,7 +30,7 @@ class TranscriptMachineTest {
         assertEquals(20, state.state.startedAtMillis)
         assertNull(state.state.pendingUser)
         assertEquals(
-            listOf(TranscriptEffect.Refetch(RefetchTarget.MESSAGES)),
+            listOf(TranscriptEffect.Refetch),
             state.effects,
         )
     }
@@ -54,14 +55,23 @@ class TranscriptMachineTest {
         val before = ChatState(
             chatId = "chat",
             working = true,
+            liveItems = listOf(
+                TranscriptItem(
+                    id = "live-tool",
+                    kind = TranscriptKind.TOOL,
+                    text = "Bash",
+                    live = true,
+                ),
+            ),
             liveSegment = "partial",
         )
         val result = reduce(before, TranscriptInput.TurnFinished)
 
         assertEquals(false, result.state.working)
         assertEquals("", result.state.liveSegment)
+        assertTrue(result.state.liveItems.isEmpty())
         assertEquals(
-            listOf(TranscriptEffect.Refetch(RefetchTarget.MESSAGES)),
+            listOf(TranscriptEffect.Refetch),
             result.effects,
         )
     }
@@ -73,7 +83,7 @@ class TranscriptMachineTest {
                 .effects.isEmpty(),
         )
         assertEquals(
-            listOf(TranscriptEffect.Refetch(RefetchTarget.MESSAGES)),
+            listOf(TranscriptEffect.Refetch),
             reduce(ChatState("chat"), TranscriptInput.Changed).effects,
         )
     }
@@ -196,10 +206,7 @@ class TranscriptMachineTest {
             reduce(pending, TranscriptInput.PendingTimedOut("old")).effects.isEmpty(),
         )
         assertEquals(
-            listOf(
-                TranscriptEffect.Refetch(RefetchTarget.CHAT),
-                TranscriptEffect.Refetch(RefetchTarget.MESSAGES),
-            ),
+            listOf(TranscriptEffect.Refetch),
             reduce(pending, TranscriptInput.PendingTimedOut("new")).effects,
         )
     }

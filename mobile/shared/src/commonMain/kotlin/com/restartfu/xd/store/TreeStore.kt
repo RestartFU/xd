@@ -7,6 +7,7 @@ import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.TreeReply
 import com.restartfu.xd.protocol.decodeReply
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,7 +18,10 @@ internal class TreeStore(
     private val actor: ConnectionActor,
 ) {
     private val refreshMutex = Mutex()
+    private val stateMutex = Mutex()
     private val _state = MutableStateFlow(TreeSnapshot())
+    private var lifecycleVersion = 0L
+    private val workingEvents = mutableMapOf<String, WorkingEvent>()
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
 
@@ -25,7 +29,9 @@ internal class TreeStore(
         chatId: String,
         working: Boolean,
     ) {
-        refreshMutex.withLock {
+        stateMutex.withLock {
+            lifecycleVersion += 1
+            workingEvents[chatId] = WorkingEvent(lifecycleVersion, working)
             _state.value = _state.value.copy(
                 chats = _state.value.chats.map { chat ->
                     if (chat.id == chatId) chat.copy(working = working) else chat
@@ -36,29 +42,47 @@ internal class TreeStore(
 
     suspend fun refresh() {
         refreshMutex.withLock {
-            _state.value = _state.value.copy(loading = true, error = null)
+            val versionBefore = stateMutex.withLock {
+                _state.value = _state.value.copy(loading = true, error = null)
+                lifecycleVersion
+            }
             try {
                 val reply = actor.call(Ops.tree()).decodeReply<TreeReply>()
-                _state.value = TreeSnapshot(
-                    folders = reply.folders.map {
-                        Folder(id = it.id, name = it.name, parentId = it.parent)
-                    },
-                    chats = reply.chats.map {
-                        ChatSummary(
-                            id = it.id,
-                            folderId = it.folder,
-                            title = it.title,
-                            backend = it.backend,
-                            working = it.working,
-                        )
-                    },
-                )
+                stateMutex.withLock {
+                    _state.value = TreeSnapshot(
+                        folders = reply.folders.map {
+                            Folder(id = it.id, name = it.name, parentId = it.parent)
+                        },
+                        chats = reply.chats.map {
+                            ChatSummary(
+                                id = it.id,
+                                folderId = it.folder,
+                                title = it.title,
+                                backend = it.backend,
+                                working = workingEvents[it.id]
+                                    ?.takeIf { event -> event.version > versionBefore }
+                                    ?.working
+                                    ?: it.working,
+                            )
+                        },
+                    )
+                    workingEvents.entries.removeAll { it.value.version <= versionBefore }
+                }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
-                _state.value = _state.value.copy(
-                    loading = false,
-                    error = error.message ?: "Could not load the workspace tree",
-                )
+                stateMutex.withLock {
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        error = error.message ?: "Could not load the workspace tree",
+                    )
+                }
             }
         }
     }
+
+    private data class WorkingEvent(
+        val version: Long,
+        val working: Boolean,
+    )
 }

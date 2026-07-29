@@ -28,38 +28,51 @@ public class LineAssembler(
         if (chunk.isEmpty()) return emptyList()
 
         val lines = mutableListOf<String>()
-        for (byte in chunk) {
-            if (byte == LF) {
-                if (size > 0) {
-                    lines += try {
-                        bytes.decodeToString(
-                            startIndex = 0,
-                            endIndex = size,
-                            throwOnInvalidSequence = true,
-                        )
-                    } catch (error: Throwable) {
-                        throw InvalidUtf8Exception(error)
-                    }
-                }
-                size = 0
-                continue
+        var start = 0
+        while (start < chunk.size) {
+            var end = start
+            while (end < chunk.size && chunk[end] != LF) end += 1
+            val count = end - start
+            if (count > maxLineBytes - size) throw LineTooLongException(maxLineBytes)
+            if (count > 0) {
+                ensureCapacity(size + count)
+                chunk.copyInto(bytes, destinationOffset = size, startIndex = start, endIndex = end)
+                size += count
             }
 
-            if (size >= maxLineBytes) throw LineTooLongException(maxLineBytes)
-            ensureCapacity(size + 1)
-            bytes[size++] = byte
+            if (end < chunk.size) {
+                if (size > 0) {
+                    lines += decodeLine()
+                }
+                size = 0
+                start = end + 1
+            } else {
+                start = end
+            }
         }
         return lines
     }
 
     public fun reset() {
         size = 0
+        val initialCapacity = INITIAL_CAPACITY.coerceAtMost(maxLineBytes)
+        if (bytes.size > initialCapacity) bytes = ByteArray(initialCapacity)
     }
 
     private fun ensureCapacity(required: Int) {
         if (required <= bytes.size) return
         val grown = (bytes.size.coerceAtLeast(1) * 2).coerceAtMost(maxLineBytes)
         bytes = bytes.copyOf(grown.coerceAtLeast(required))
+    }
+
+    private fun decodeLine(): String = try {
+        bytes.decodeToString(
+            startIndex = 0,
+            endIndex = size,
+            throwOnInvalidSequence = true,
+        )
+    } catch (error: Throwable) {
+        throw InvalidUtf8Exception(error)
     }
 
     public companion object {

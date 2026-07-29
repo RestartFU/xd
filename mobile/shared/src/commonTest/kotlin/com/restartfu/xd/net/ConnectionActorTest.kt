@@ -178,6 +178,52 @@ class ConnectionActorTest {
         assertEquals(FatalReason.PROTOCOL, assertIs<Link.Fatal>(actor.link.value).reason)
     }
 
+    @Test
+    fun pairingGreetingTimesOut() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
+        val result = async {
+            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+        }
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+
+        advanceTimeBy(15_000)
+        runCurrent()
+
+        val failure = assertIs<PairResult.Failure>(result.await())
+        assertTrue(failure.message.contains("Timed out", ignoreCase = true))
+        assertEquals(Link.Idle, actor.link.value)
+        assertTrue(factory.latest.closed)
+    }
+
+    @Test
+    fun refusedPairingCanBeRetried() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
+        val first = async {
+            actor.pair("daemon", 4001, "BAD1-CODE", "Phone")
+        }
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receive("""{"ok":false,"error":"expired code"}""")
+        runCurrent()
+
+        assertIs<PairResult.Failure>(first.await())
+        assertEquals(Link.Idle, actor.link.value)
+
+        val second = async {
+            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+        }
+        runCurrent()
+        assertEquals(2, factory.sockets.size)
+        actor.goBackground()
+        runCurrent()
+        assertIs<PairResult.Failure>(second.await())
+    }
+
     private suspend fun kotlinx.coroutines.test.TestScope.connectedActor(
         factory: FakeSocketFactory,
     ): ConnectionActor {

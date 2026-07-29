@@ -8,6 +8,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class CallQueueTest {
@@ -23,8 +24,8 @@ class CallQueueTest {
         queue.acceptReply(SequencedReply(2, reply("two")))
 
         assertEquals(listOf("{\"op\":\"first\"}\n", "{\"op\":\"second\"}\n"), writes)
-        assertEquals("one", first.await().value["value"].toString().trim('"'))
-        assertEquals("two", second.await().value["value"].toString().trim('"'))
+        assertEquals("one", first.await().value.getValue("value").jsonPrimitive.content)
+        assertEquals("two", second.await().value.getValue("value").jsonPrimitive.content)
     }
 
     @Test
@@ -42,7 +43,10 @@ class CallQueueTest {
         assertFalse(live.isCompleted)
         queue.acceptReply(SequencedReply(2, reply("belongs to live")))
 
-        assertEquals("belongs to live", live.await().value["value"].toString().trim('"'))
+        assertEquals(
+            "belongs to live",
+            live.await().value.getValue("value").jsonPrimitive.content,
+        )
         assertEquals(0, queue.size)
     }
 

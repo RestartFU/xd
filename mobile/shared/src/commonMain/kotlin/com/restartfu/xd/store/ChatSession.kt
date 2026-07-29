@@ -10,6 +10,8 @@ import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.PngAttachment
 import com.restartfu.xd.protocol.decodeReply
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +64,7 @@ internal class ChatSessionCore(
 ) {
     private val stateMutex = Mutex()
     private val reloadMutex = Mutex()
+    private val sendMutex = Mutex()
     private val _state = MutableStateFlow(ChatState(chatId = chatId))
     private var pendingSequence = 0L
     private var pendingTimer: Job? = null
@@ -104,6 +107,8 @@ internal class ChatSessionCore(
                     effects
                 }
                 if (replayEffects.isNotEmpty()) scope.launch { reload() }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 stateMutex.withLock {
                     reloadInProgress = false
@@ -146,6 +151,8 @@ internal class ChatSessionCore(
                     ).state
                     messageLimit = nextLimit
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 stateMutex.withLock {
                     _state.value = _state.value.copy(
@@ -160,20 +167,39 @@ internal class ChatSessionCore(
     suspend fun send(
         text: String,
         images: List<PngAttachment>,
-    ) {
+    ) = sendMutex.withLock {
         require(text.isNotEmpty() || images.isNotEmpty())
-        val pendingId = "pending-${++pendingSequence}"
-        apply(TranscriptInput.OptimisticSend(pendingId, text, nowMillis()))
-        pendingTimer?.cancel()
-        pendingTimer = scope.launch {
-            delay(PENDING_TIMEOUT_MILLIS)
-            apply(TranscriptInput.PendingTimedOut(pendingId))
+        lateinit var timer: Job
+        var oldTimer: Job? = null
+        val pendingId = stateMutex.withLock {
+            val id = "pending-${++pendingSequence}"
+            val optimistic = TranscriptInput.OptimisticSend(id, text, nowMillis())
+            val transition = TranscriptMachine.reduce(
+                _state.value,
+                optimistic,
+            )
+            _state.value = transition.state
+            if (reloadInProgress) {
+                inputsDuringReload += BufferedInput(
+                    sequence = null,
+                    input = optimistic,
+                )
+            }
+            timer = scope.launch(start = CoroutineStart.LAZY) {
+                delay(PENDING_TIMEOUT_MILLIS)
+                apply(TranscriptInput.PendingTimedOut(id))
+            }
+            oldTimer = pendingTimer
+            pendingTimer = timer
+            id
         }
+        oldTimer?.cancel()
+        timer.start()
         try {
             actor.call(Ops.send(chatId, text, images))
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
-            pendingTimer?.cancel()
-            pendingTimer = null
             apply(
                 TranscriptInput.SendFailed(
                     pendingId,
@@ -182,6 +208,7 @@ internal class ChatSessionCore(
             )
             throw error
         }
+        Unit
     }
 
     suspend fun call(request: JsonObject) {
@@ -219,26 +246,37 @@ internal class ChatSessionCore(
     }
 
     fun shutdown() {
-        pendingTimer?.cancel()
-        pendingTimer = null
+        scope.launch {
+            val timer = stateMutex.withLock {
+                pendingTimer.also { pendingTimer = null }
+            }
+            timer?.cancel()
+        }
     }
 
     private suspend fun apply(
         input: TranscriptInput,
         sequence: Long? = null,
     ) {
+        var timerToCancel: Job? = null
         val effects = stateMutex.withLock {
             val transition = TranscriptMachine.reduce(_state.value, input)
             _state.value = transition.state
             if (reloadInProgress && input !is TranscriptInput.Loaded) {
                 inputsDuringReload += BufferedInput(sequence, input)
             }
+            if (
+                input is TranscriptInput.TurnStarted ||
+                input is TranscriptInput.Queued ||
+                input is TranscriptInput.SendFailed ||
+                input is TranscriptInput.PendingTimedOut
+            ) {
+                timerToCancel = pendingTimer
+                pendingTimer = null
+            }
             transition.effects
         }
-        if (input is TranscriptInput.TurnStarted || input is TranscriptInput.Queued) {
-            pendingTimer?.cancel()
-            pendingTimer = null
-        }
+        timerToCancel?.cancel()
         if (effects.isNotEmpty()) {
             scope.launch { reload() }
         }

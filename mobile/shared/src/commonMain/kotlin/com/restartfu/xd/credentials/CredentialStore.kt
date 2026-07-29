@@ -9,12 +9,12 @@ public data class StoredCredentials(
 
 public interface CredentialStore {
     /** Returns null when any member is absent or unreadable. */
-    public fun load(): StoredCredentials?
+    public suspend fun load(): StoredCredentials?
 
     /** Persists all members as one credential record. */
-    public fun save(credentials: StoredCredentials)
+    public suspend fun save(credentials: StoredCredentials)
 
-    public fun clear()
+    public suspend fun clear()
 }
 
 internal class MemoryCredentialStore(
@@ -22,13 +22,13 @@ internal class MemoryCredentialStore(
 ) : CredentialStore {
     private var credentials: StoredCredentials? = initial?.copyStored()
 
-    override fun load(): StoredCredentials? = credentials?.copyStored()
+    override suspend fun load(): StoredCredentials? = credentials?.copyStored()
 
-    override fun save(credentials: StoredCredentials) {
+    override suspend fun save(credentials: StoredCredentials) {
         this.credentials = credentials.copyStored()
     }
 
-    override fun clear() {
+    override suspend fun clear() {
         credentials = null
     }
 }

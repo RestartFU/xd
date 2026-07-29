@@ -40,6 +40,17 @@ class OpsTest {
         }
     }
 
+    @Test
+    fun newChatRequiresAFolder() {
+        assertFailsWith<IllegalArgumentException> {
+            Ops.newChat("")
+        }
+        assertEquals(
+            "folder",
+            Ops.newChat("folder").getValue("folder").jsonPrimitive.content,
+        )
+    }
+
     private companion object {
         val PNG_HEADER = byteArrayOf(
             0x89.toByte(),

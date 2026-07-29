@@ -90,6 +90,8 @@ internal class AndroidSocket(
         port: Int,
         pin: ByteArray?,
     ) {
+        var terminalReason: SocketFailure? = null
+        var reachedEof = false
         try {
             if (closed.get()) throw EOFException("Socket was closed")
             val context = SSLContext.getInstance("TLS")
@@ -118,14 +120,16 @@ internal class AndroidSocket(
             while (!closed.get()) {
                 val count = active.inputStream.read(buffer)
                 if (count < 0) {
-                    finish(null)
-                    return
+                    reachedEof = true
+                    break
                 }
                 if (count > 0) listener?.onBytes(buffer.copyOf(count))
             }
-            finish(SocketFailure(SocketFailureKind.CANCELLED, "Socket closed"))
+            if (!reachedEof && closed.get()) {
+                terminalReason = SocketFailure(SocketFailureKind.CANCELLED, "Socket closed")
+            }
         } catch (error: Throwable) {
-            finish(error.toSocketFailure())
+            terminalReason = error.toSocketFailure()
         } finally {
             try {
                 socket?.close()
@@ -134,6 +138,7 @@ internal class AndroidSocket(
             }
             socket = null
         }
+        finish(terminalReason)
     }
 
     private fun finish(reason: SocketFailure?) {

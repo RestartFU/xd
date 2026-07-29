@@ -6,13 +6,8 @@ import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.MessagesReply
 
-public enum class RefetchTarget {
-    CHAT,
-    MESSAGES,
-}
-
 public sealed interface TranscriptEffect {
-    public data class Refetch(val target: RefetchTarget) : TranscriptEffect
+    public data object Refetch : TranscriptEffect
 }
 
 public sealed interface TranscriptInput {
@@ -76,7 +71,7 @@ public object TranscriptMachine {
                 pendingUser = null,
                 error = null,
             ),
-            listOf(TranscriptEffect.Refetch(RefetchTarget.MESSAGES)),
+            listOf(TranscriptEffect.Refetch),
         )
         is TranscriptInput.Text -> TranscriptTransition(
             state.copy(liveSegment = state.liveSegment + input.delta),
@@ -113,14 +108,14 @@ public object TranscriptMachine {
                 liveSegment = "",
                 pendingUser = null,
             ),
-            listOf(TranscriptEffect.Refetch(RefetchTarget.MESSAGES)),
+            listOf(TranscriptEffect.Refetch),
         )
         TranscriptInput.Changed -> TranscriptTransition(
             state,
             if (state.working) {
                 emptyList()
             } else {
-                listOf(TranscriptEffect.Refetch(RefetchTarget.MESSAGES))
+                listOf(TranscriptEffect.Refetch)
             },
         )
         is TranscriptInput.Queued -> TranscriptTransition(
@@ -143,10 +138,7 @@ public object TranscriptMachine {
             } else {
                 TranscriptTransition(
                     state.copy(pendingUser = null),
-                    listOf(
-                        TranscriptEffect.Refetch(RefetchTarget.CHAT),
-                        TranscriptEffect.Refetch(RefetchTarget.MESSAGES),
-                    ),
+                    listOf(TranscriptEffect.Refetch),
                 )
             }
         }

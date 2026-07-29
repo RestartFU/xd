@@ -41,6 +41,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       # Everything is built in Docker, so the runner needs nothing else. Both
       # builds share layers, which is why the tests are cheap to gate on.
@@ -73,6 +75,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -149,6 +153,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install native dependencies
         run: >-
@@ -196,6 +202,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Decode the Android signing key
         env:
@@ -246,6 +254,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v5
         with:

@@ -10,6 +10,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -27,9 +29,9 @@ public class AndroidCredentialStore(
 ) : CredentialStore {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
-    override fun load(): StoredCredentials? {
-        val record = preferences.getString(RECORD, null) ?: return null
-        return runCatching {
+    override suspend fun load(): StoredCredentials? = withContext(Dispatchers.IO) {
+        val record = preferences.getString(RECORD, null) ?: return@withContext null
+        runCatching {
             val separator = record.indexOf(':')
             require(separator > 0 && separator < record.lastIndex)
             val iv = Base64.decode(record.substring(0, separator), Base64.NO_WRAP)
@@ -40,7 +42,7 @@ public class AndroidCredentialStore(
         }.getOrNull()
     }
 
-    override fun save(credentials: StoredCredentials) {
+    override suspend fun save(credentials: StoredCredentials): Unit = withContext(Dispatchers.IO) {
         require(credentials.host.isNotBlank())
         require(credentials.port in 1..65535)
         require(credentials.token.isNotBlank())
@@ -65,7 +67,7 @@ public class AndroidCredentialStore(
         }
     }
 
-    override fun clear() {
+    override suspend fun clear(): Unit = withContext(Dispatchers.IO) {
         check(preferences.edit().remove(RECORD).commit()) {
             "Could not clear remote credentials"
         }
@@ -73,12 +75,12 @@ public class AndroidCredentialStore(
 
     private fun decode(value: String): StoredCredentials {
         val objectValue = WireJson.parseToJsonElement(value).jsonObject
-        val host = objectValue.jsonObjectValue("host")
+        val host = objectValue.stringValue("host")
         val port = objectValue["port"]?.jsonPrimitive?.intOrNull
             ?: error("Missing credential port")
-        val token = objectValue.jsonObjectValue("token")
+        val token = objectValue.stringValue("token")
         val certificate = Base64.decode(
-            objectValue.jsonObjectValue("certificate"),
+            objectValue.stringValue("certificate"),
             Base64.NO_WRAP,
         )
         require(host.isNotBlank() && port in 1..65535)
@@ -86,25 +88,25 @@ public class AndroidCredentialStore(
         return StoredCredentials(host, port, token, certificate)
     }
 
-    private fun key(): SecretKey {
+    private fun key(): SecretKey = synchronized(KEY_LOCK) {
         val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-        (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
-        generator.init(
-            KeyGenParameterSpec.Builder(
-                KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        (store.getKey(KEY_ALIAS, null) as? SecretKey) ?: run {
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .build(),
             )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build(),
-        )
-        return generator.generateKey()
+            generator.generateKey()
+        }
     }
 
-    private fun JsonObject.jsonObjectValue(name: String): String =
+    private fun JsonObject.stringValue(name: String): String =
         this[name]?.jsonPrimitive?.contentOrNull
             ?: error("Missing credential $name")
 
@@ -115,5 +117,6 @@ public class AndroidCredentialStore(
         const val KEY_ALIAS = "xd-remote-credentials-v1"
         const val CIPHER = "AES/GCM/NoPadding"
         const val TAG_BITS = 128
+        val KEY_LOCK = Any()
     }
 }

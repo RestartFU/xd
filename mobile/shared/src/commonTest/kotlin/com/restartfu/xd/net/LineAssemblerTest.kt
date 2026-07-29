@@ -47,4 +47,21 @@ class LineAssemblerTest {
             assembler.append(byteArrayOf(5))
         }
     }
+
+    @Test
+    fun acceptsExactlyTheCap() {
+        val assembler = LineAssembler(maxLineBytes = 4)
+
+        assertEquals(listOf("abcd"), assembler.append("abcd\n".encodeToByteArray()))
+    }
+
+    @Test
+    fun resetDiscardsAPartialLine() {
+        val assembler = LineAssembler()
+        assembler.append("discard".encodeToByteArray())
+
+        assembler.reset()
+
+        assertEquals(listOf("keep"), assembler.append("keep\n".encodeToByteArray()))
+    }
 }

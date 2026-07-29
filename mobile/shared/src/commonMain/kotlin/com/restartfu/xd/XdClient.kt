@@ -32,6 +32,7 @@ public class XdClient(
 
     public val link: StateFlow<Link> = actor.link
     public val hasCredentials: StateFlow<Boolean> = actor.hasCredentials
+    public val credentialsReady: StateFlow<Boolean> = actor.credentialsReady
     public val tree: StateFlow<TreeSnapshot> = treeStore.state
 
     init {
@@ -111,7 +112,7 @@ public class XdClient(
     }
 
     public suspend fun createChat(
-        folderId: String?,
+        folderId: String,
         title: String?,
     ): String {
         val reply = actor.call(Ops.newChat(folderId, title)).decodeReply<DoneReply>()
