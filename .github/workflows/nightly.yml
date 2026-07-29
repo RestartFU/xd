@@ -41,13 +41,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Everything is built in Docker, so the runner needs nothing else. Both
-      # builds share layers, which is why the tests are cheap to gate on.
+      # Master fills the layer cache that pull requests read from, so a branch
+      # does not build whisper.cpp from source before its first check.
+      - uses: docker/setup-buildx-action@v3
+
+      # Everything is built in Docker, so the runner needs nothing else. The
+      # tests build from the sources rather than from the finished app, so the
+      # gate does not wait on whisper at all.
       - name: Run the headless tests
         run: ./scripts/test.sh
 
       - name: Build the bundle
-        run: ./scripts/build.sh --build-arg PROFILE=nightly
+        run: |
+          ./scripts/build.sh --build-arg PROFILE=nightly \
+            --cache-from type=gha --cache-to type=gha,mode=max
 
       - name: Pack it
         run: |
