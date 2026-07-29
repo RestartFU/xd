@@ -130,19 +130,22 @@ current_terminal (XdTerminalPanel *self)
 /*
  * A single session leaves the tab bar hidden, and with it the only place the
  * session was named. The label takes over there, showing the selected page's
- * title until a second tab brings the bar back.
+ * title until a second tab brings the bar back. Switch the two directly:
+ * AdwTabBar's autohide animation visibly drags terminal text when a new
+ * session is created.
  */
 static void
 update_title (XdTerminalPanel *self)
 {
   AdwTabView *view = current_view (self);
   AdwTabPage *page = view != NULL ? adw_tab_view_get_selected_page (view) : NULL;
+  gboolean show_tabs = view != NULL && adw_tab_view_get_n_pages (view) > 1;
   const char *title = page != NULL ? adw_tab_page_get_title (page) : NULL;
 
   gtk_label_set_label (self->title, title != NULL ? title : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->bar), show_tabs);
   gtk_widget_set_visible (GTK_WIDGET (self->title),
-                          title != NULL &&
-                          !adw_tab_bar_get_tabs_revealed (self->bar));
+                          title != NULL && !show_tabs);
 }
 
 static void
@@ -1398,10 +1401,9 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_widget_set_can_target (GTK_WIDGET (self->title), FALSE);
 
   self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
-  adw_tab_bar_set_autohide (self->bar, TRUE);
+  adw_tab_bar_set_autohide (self->bar, FALSE);
   gtk_widget_add_css_class (GTK_WIDGET (self->bar), "inline");
-  g_signal_connect (self->bar, "notify::tabs-revealed",
-                    G_CALLBACK (on_title_source_changed), self);
+  gtk_widget_set_visible (GTK_WIDGET (self->bar), FALSE);
 
   self->stack = GTK_STACK (gtk_stack_new ());
   gtk_widget_set_vexpand (GTK_WIDGET (self->stack), TRUE);
