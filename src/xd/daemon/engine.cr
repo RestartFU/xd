@@ -10,6 +10,7 @@ require "./connection"
 require "./event_bus"
 require "./filesystem"
 require "./images"
+require "./repository"
 
 module Xd
   module Daemon
@@ -45,6 +46,7 @@ module Xd
         @events = EventBus.new
         @filesystem = Filesystem.new(@store, @workspaces)
         @images = Images.new
+        @repository = Repository.new(@store, @workspaces, @filesystem)
         @agents = Agent::Manager.new(
           @store,
           @workspaces,
@@ -103,6 +105,8 @@ module Xd
         failed_outcome(error.message || "Filesystem error")
       rescue error : Images::Error
         failed_outcome(error.message || "Image error")
+      rescue error : Repository::Error
+        failed_outcome(error.message || "Repository error")
       end
 
       def close : Nil
@@ -166,6 +170,8 @@ module Xd
           steer_queue(request)
         when Protocol::Operation::Cancel
           cancel(request)
+        when Protocol::Operation::DiffRead
+          diff_read(request)
         when Protocol::Operation::Ping
           Protocol::Response.ok
         else
@@ -638,6 +644,21 @@ module Xd
         chat_id = request.string("chat", "cancel needs a chat id")
         @agents.cancel(chat_id)
         Protocol::Response.ok
+      end
+
+      private def diff_read(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        message = "diff-read needs a chat and read type."
+        chat_id = request.string("chat", message)
+        kind = request.string("read", message)
+        output = @repository.read(
+          chat_id,
+          kind,
+          request.string?("path"),
+          request.string?("base")
+        )
+        Protocol::Response.ok({"output" => JSON::Any.new(output)})
       end
 
       private def drop_queue(
