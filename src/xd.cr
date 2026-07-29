@@ -1,4 +1,5 @@
 require "./xd/protocol/operation"
+require "./xd/daemon/engine"
 
 module Xd
   VERSION = "0.1.0"
