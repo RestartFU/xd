@@ -1,0 +1,252 @@
+require "db"
+require "sqlite3"
+require "uri"
+require "../daemon/device_store"
+require "./schema"
+
+module Xd
+  module Storage
+    class Store < Daemon::DeviceStore
+      getter path : String
+
+      @database : DB::Database
+
+      def initialize(
+        @path : String,
+        @clock : Proc(Int64) = -> { Time.utc.to_unix },
+      )
+        directory = Path[@path].dirname
+        Dir.mkdir_p(directory, 0o700) unless directory.to_s == "."
+
+        @database = open_database(@path)
+        begin
+          migrate
+        rescue error
+          @database.close
+          raise error
+        end
+      end
+
+      def close : Nil
+        @database.close
+      end
+
+      def schema_version : Int32
+        @database.query_one(
+          "SELECT value FROM meta WHERE key = 'schema_version'",
+          as: String
+        ).to_i
+      end
+
+      def add_device(token_hash : String, name : String) : Nil
+        now = @clock.call
+        @database.exec(
+          <<-SQL,
+            INSERT INTO devices (token_hash, name, created_at, last_seen)
+            VALUES (?, ?, ?, ?)
+            SQL
+          token_hash,
+          name.empty? ? "device" : name,
+          now,
+          now
+        )
+      rescue error : DB::Error
+        raise Daemon::DeviceStoreError.new(
+          "Cannot pair the device: #{error.message}"
+        )
+      end
+
+      def device_name(token_hash : String) : String?
+        @database.query_one?(
+          <<-SQL,
+            UPDATE devices
+               SET last_seen = ?
+             WHERE token_hash = ?
+            RETURNING name
+            SQL
+          @clock.call,
+          token_hash,
+          as: String
+        )
+      rescue error : DB::Error
+        raise Daemon::DeviceStoreError.new(
+          "Cannot authenticate the device: #{error.message}"
+        )
+      end
+
+      private def migrate : Nil
+        @database.transaction do |transaction|
+          connection = transaction.connection
+          BASE_SCHEMA.each { |statement| connection.exec(statement) }
+
+          version = connection.query_one?(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            as: String
+          ).try(&.to_i) || 0
+
+          connection.exec(
+            "ALTER TABLE chats ADD COLUMN workdir TEXT"
+          ) if version < 2
+          connection.exec(
+            "ALTER TABLE chats ADD COLUMN model TEXT"
+          ) if version < 3
+
+          if version < 4
+            connection.exec <<-SQL
+              INSERT OR IGNORE INTO chat_sessions (
+                chat_id, backend, session_id
+              )
+              SELECT id, backend, session_id
+                FROM chats
+               WHERE session_id IS NOT NULL
+              SQL
+          end
+
+          if version == 4
+            connection.exec <<-SQL
+              CREATE TABLE chat_sessions_new (
+                chat_id         TEXT NOT NULL
+                                REFERENCES chats (id) ON DELETE CASCADE,
+                backend         TEXT NOT NULL,
+                session_id      TEXT,
+                last_message_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, backend)
+              )
+              SQL
+            connection.exec <<-SQL
+              INSERT OR IGNORE INTO chat_sessions_new (
+                chat_id, backend, session_id
+              )
+              SELECT chat_id, backend, session_id FROM chat_sessions
+              SQL
+            connection.exec "DROP TABLE chat_sessions"
+            connection.exec(
+              "ALTER TABLE chat_sessions_new RENAME TO chat_sessions"
+            )
+          end
+
+          connection.exec(
+            "ALTER TABLE chats ADD COLUMN plan INTEGER NOT NULL DEFAULT 0"
+          ) if version < 7
+
+          if version < 10
+            connection.exec <<-SQL
+              CREATE TABLE IF NOT EXISTS devices (
+                token_hash TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_seen  INTEGER NOT NULL
+              )
+              SQL
+          end
+
+          connection.exec(
+            "ALTER TABLE chats ADD COLUMN queued TEXT"
+          ) if version < 11
+          connection.exec(
+            "ALTER TABLE chats ADD COLUMN new_worktree INTEGER NOT NULL DEFAULT 0"
+          ) if version < 12
+
+          if version < 13
+            connection.exec(
+              "ALTER TABLE chat_sessions " \
+              "ADD COLUMN context_used INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.exec(
+              "ALTER TABLE chat_sessions " \
+              "ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.exec(
+              "ALTER TABLE chat_sessions ADD COLUMN context_model TEXT"
+            )
+          end
+
+          if version < 9
+            connection.exec(
+              "ALTER TABLE chats " \
+              "ADD COLUMN terminal_open INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.exec(
+              "ALTER TABLE chats " \
+              "ADD COLUMN diff_open INTEGER NOT NULL DEFAULT 0"
+            )
+          end
+
+          connection.exec(
+            "ALTER TABLE messages ADD COLUMN label TEXT"
+          ) if version < 8
+
+          if version < 6
+            connection.exec "ALTER TABLE chats ADD COLUMN effort TEXT"
+            connection.exec "ALTER TABLE chats ADD COLUMN access TEXT"
+          end
+
+          if version < 14
+            AGENT_DEFAULTS_SCHEMA.each do |statement|
+              connection.exec(statement)
+            end
+          end
+
+          connection.exec(
+            "ALTER TABLE chats " \
+            "ADD COLUMN resume_after_restart INTEGER NOT NULL DEFAULT 0"
+          ) if version < 15
+          connection.exec(
+            "ALTER TABLE chats ADD COLUMN original_workdir TEXT"
+          ) if version < 16
+
+          if version < 17
+            connection.exec(
+              "ALTER TABLE chats " \
+              "ADD COLUMN last_user_message_at INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.exec <<-SQL
+              UPDATE chats
+                 SET last_user_message_at = COALESCE(
+                   (
+                     SELECT MAX(messages.created_at) * 1000000
+                       FROM messages
+                      WHERE messages.chat_id = chats.id
+                        AND messages.role = 'user'
+                   ),
+                   chats.created_at * 1000000
+                 )
+              SQL
+            connection.exec <<-SQL
+              CREATE INDEX chats_folder_user_message
+                          ON chats (folder_id, last_user_message_at DESC)
+              SQL
+          end
+
+          connection.exec(
+            "ALTER TABLE chats " \
+            "ADD COLUMN daemon_working INTEGER NOT NULL DEFAULT 0"
+          ) if version < 18
+
+          connection.exec(
+            <<-SQL,
+              INSERT INTO meta (key, value)
+              VALUES ('schema_version', ?)
+              ON CONFLICT (key) DO UPDATE SET value = excluded.value
+              SQL
+            SCHEMA_VERSION.to_s
+          )
+        end
+      rescue error : DB::Error
+        raise Daemon::DeviceStoreError.new(
+          "Cannot migrate the chat database: #{error.message}"
+        )
+      end
+
+      private def open_database(path : String) : DB::Database
+        uri = "sqlite3://#{URI.encode_path(path)}" \
+              "?journal_mode=wal&synchronous=normal&foreign_keys=on"
+        DB.open(uri)
+      rescue error : DB::Error
+        raise Daemon::DeviceStoreError.new(
+          "Cannot open the chat database: #{error.message}"
+        )
+      end
+    end
+  end
+end

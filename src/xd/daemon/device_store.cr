@@ -1,5 +1,8 @@
 module Xd
   module Daemon
+    class DeviceStoreError < Exception
+    end
+
     abstract class DeviceStore
       abstract def add_device(token_hash : String, name : String) : Nil
       abstract def device_name(token_hash : String) : String?

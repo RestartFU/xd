@@ -61,6 +61,8 @@ module Xd
         end
       rescue error : Protocol::Error
         Protocol::Response.error(error.message || "Invalid request")
+      rescue error : DeviceStoreError
+        Protocol::Response.error(error.message || "Storage error")
       end
 
       private def pair(

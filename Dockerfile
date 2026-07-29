@@ -12,8 +12,14 @@
 # behavior-parity suite is moved module by module from C.
 FROM crystallang/crystal:1.21.0@sha256:32b7b908a8c3625ebd629053daf48b6f469deaf74aeb71ad101895096b1665fa AS crystal
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsqlite3-dev \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
-COPY shard.yml ./
+COPY shard.yml shard.lock ./
+RUN shards install --production --frozen
+
 COPY src/xd.cr ./src/xd.cr
 COPY src/xd ./src/xd
 COPY spec ./spec

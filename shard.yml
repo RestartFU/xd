@@ -8,5 +8,10 @@ targets:
   xd:
     main: src/xd.cr
 
+dependencies:
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+    version: 0.23.0
+
 crystal: 1.21.0
 license: MIT
