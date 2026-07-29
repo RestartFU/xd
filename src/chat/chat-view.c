@@ -279,6 +279,10 @@ static void show_queued (XdChatView *self);
 static void set_queue (XdChatView *self, GPtrArray *messages);
 static void clear_queue (XdChatView *self);
 static void steer_queued_at (XdChatView *self, guint position);
+static void edit_queued_at (XdChatView *self,
+                            guint       position,
+                            const char *old_text,
+                            const char *new_text);
 static Turn *current_turn (XdChatView *self);
 static gboolean send_remote_message (XdChatView *self, const char *text);
 static void cancel_remote_turn (XdChatView *self);
@@ -3318,6 +3322,138 @@ paste_image (XdChatView *self)
 
 static void drop_queued_at (XdChatView *self, guint position);
 
+static gboolean
+save_queued_editor (GObject    *source,
+                    XdChatView *self)
+{
+  GtkTextView *editor = g_object_get_data (source, "editor");
+  const char *old_text = g_object_get_data (source, "old-text");
+  guint position =
+    GPOINTER_TO_UINT (g_object_get_data (source, "position")) - 1;
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer (editor);
+  GtkTextIter start, end;
+  g_autofree char *text = NULL;
+
+  gtk_text_buffer_get_bounds (buffer, &start, &end);
+  text = gtk_text_buffer_get_text (buffer, &start, &end, FALSE);
+  g_strstrip (text);
+
+  if (*text == '\0')
+    return FALSE;
+
+  edit_queued_at (self, position, old_text, text);
+  return TRUE;
+}
+
+static void
+on_queued_edit_saved (GtkButton *button,
+                      gpointer   user_data)
+{
+  save_queued_editor (G_OBJECT (button), user_data);
+}
+
+static void
+on_queued_edit_cancelled (GtkButton *button,
+                          gpointer   user_data)
+{
+  show_queued (user_data);
+}
+
+static gboolean
+on_queued_editor_key (GtkEventControllerKey *controller,
+                      guint                  keyval,
+                      guint                  keycode,
+                      GdkModifierType        state,
+                      gpointer               user_data)
+{
+  if (keyval == GDK_KEY_Escape)
+    {
+      show_queued (user_data);
+      return GDK_EVENT_STOP;
+    }
+
+  if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) &&
+      !(state & GDK_SHIFT_MASK))
+    {
+      save_queued_editor (G_OBJECT (controller), user_data);
+      return GDK_EVENT_STOP;
+    }
+
+  return GDK_EVENT_PROPAGATE;
+}
+
+static void
+on_queued_row_edited (GtkButton *button,
+                      gpointer   user_data)
+{
+  GtkWidget *row = gtk_widget_get_parent (GTK_WIDGET (button));
+  GtkWidget *label = g_object_get_data (G_OBJECT (button), "label");
+  GtkWidget *steer = g_object_get_data (G_OBJECT (button), "steer");
+  GtkWidget *drop = g_object_get_data (G_OBJECT (button), "drop");
+  GtkWidget *icon = gtk_widget_get_first_child (row);
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+  GtkWidget *editor = gtk_text_view_new ();
+  GtkWidget *save =
+    gtk_button_new_from_icon_name ("document-save-symbolic");
+  GtkWidget *cancel =
+    gtk_button_new_from_icon_name ("window-close-symbolic");
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (editor));
+  GtkTextIter end;
+  GtkEventController *keys = gtk_event_controller_key_new ();
+  const char *text = gtk_label_get_text (GTK_LABEL (label));
+  gpointer position = g_object_get_data (G_OBJECT (button), "position");
+
+  gtk_text_view_set_wrap_mode (GTK_TEXT_VIEW (editor), GTK_WRAP_WORD_CHAR);
+  gtk_text_view_set_top_margin (GTK_TEXT_VIEW (editor), 6);
+  gtk_text_view_set_bottom_margin (GTK_TEXT_VIEW (editor), 6);
+  gtk_text_view_set_left_margin (GTK_TEXT_VIEW (editor), 8);
+  gtk_text_view_set_right_margin (GTK_TEXT_VIEW (editor), 8);
+  gtk_text_buffer_set_text (buffer, text, -1);
+  gtk_text_buffer_get_end_iter (buffer, &end);
+  gtk_text_buffer_place_cursor (buffer, &end);
+
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_max_content_height (
+    GTK_SCROLLED_WINDOW (scroller), 120);
+  gtk_scrolled_window_set_propagate_natural_height (
+    GTK_SCROLLED_WINDOW (scroller), TRUE);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), editor);
+  gtk_widget_set_hexpand (scroller, TRUE);
+  gtk_widget_add_css_class (scroller, "card");
+
+  gtk_widget_add_css_class (save, "flat");
+  gtk_widget_set_tooltip_text (save, "Save queued message");
+  gtk_widget_add_css_class (cancel, "flat");
+  gtk_widget_set_tooltip_text (cancel, "Cancel editing");
+
+  g_object_set_data (G_OBJECT (save), "editor", editor);
+  g_object_set_data (G_OBJECT (save), "position", position);
+  g_object_set_data_full (G_OBJECT (save), "old-text",
+                          g_strdup (text), g_free);
+  g_signal_connect (save, "clicked",
+                    G_CALLBACK (on_queued_edit_saved), user_data);
+  g_signal_connect (cancel, "clicked",
+                    G_CALLBACK (on_queued_edit_cancelled), user_data);
+
+  g_object_set_data (G_OBJECT (keys), "editor", editor);
+  g_object_set_data (G_OBJECT (keys), "position", position);
+  g_object_set_data_full (G_OBJECT (keys), "old-text",
+                          g_strdup (text), g_free);
+  g_signal_connect (keys, "key-pressed",
+                    G_CALLBACK (on_queued_editor_key), user_data);
+  gtk_widget_add_controller (editor, keys);
+
+  gtk_widget_set_visible (label, FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (button), FALSE);
+  gtk_widget_set_visible (steer, FALSE);
+  gtk_widget_set_visible (drop, FALSE);
+  gtk_box_insert_child_after (GTK_BOX (row), scroller, icon);
+  gtk_box_append (GTK_BOX (row), save);
+  gtk_box_append (GTK_BOX (row), cancel);
+  gtk_widget_grab_focus (editor);
+}
+
 static void
 on_queued_row_dropped (GtkButton *button,
                        gpointer   user_data)
@@ -3361,6 +3497,8 @@ show_queued (XdChatView *self)
       GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
       GtkWidget *icon = gtk_image_new_from_icon_name ("document-send-symbolic");
       GtkWidget *label = gtk_label_new (g_ptr_array_index (self->queue, i));
+      GtkWidget *edit =
+        gtk_button_new_from_icon_name ("document-edit-symbolic");
       GtkWidget *steer =
         gtk_button_new_from_icon_name ("media-skip-forward-symbolic");
       GtkWidget *drop = gtk_button_new_from_icon_name ("window-close-symbolic");
@@ -3376,6 +3514,15 @@ show_queued (XdChatView *self)
       g_signal_connect (drop, "clicked",
                         G_CALLBACK (on_queued_row_dropped), self);
 
+      gtk_widget_add_css_class (edit, "flat");
+      gtk_widget_set_tooltip_text (edit, "Edit queued message");
+      g_object_set_data (G_OBJECT (edit), "position", GUINT_TO_POINTER (i + 1));
+      g_object_set_data (G_OBJECT (edit), "label", label);
+      g_object_set_data (G_OBJECT (edit), "steer", steer);
+      g_object_set_data (G_OBJECT (edit), "drop", drop);
+      g_signal_connect (edit, "clicked",
+                        G_CALLBACK (on_queued_row_edited), self);
+
       gtk_widget_add_css_class (steer, "flat");
       gtk_widget_set_tooltip_text (steer, "Send this now, interrupting the agent");
       g_object_set_data (G_OBJECT (steer), "position", GUINT_TO_POINTER (i + 1));
@@ -3384,6 +3531,7 @@ show_queued (XdChatView *self)
 
       gtk_box_append (GTK_BOX (row), icon);
       gtk_box_append (GTK_BOX (row), label);
+      gtk_box_append (GTK_BOX (row), edit);
       gtk_box_append (GTK_BOX (row), steer);
       gtk_box_append (GTK_BOX (row), drop);
       gtk_box_append (GTK_BOX (self->queued_bar), row);
@@ -3490,6 +3638,33 @@ send_remote_steer (XdChatView *self,
                                on_remote_queue_set, g_object_ref (self));
 }
 
+static void
+send_remote_queue_edit (XdChatView *self,
+                        guint       position,
+                        const char *old_text,
+                        const char *new_text)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "edit-queue");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
+  json_builder_set_member_name (builder, "index");
+  json_builder_add_int_value (builder, position);
+  json_builder_set_member_name (builder, "old-text");
+  json_builder_add_string_value (builder, old_text);
+  json_builder_set_member_name (builder, "text");
+  json_builder_add_string_value (builder, new_text);
+  json_builder_end_object (builder);
+
+  request = json_builder_get_root (builder);
+  xd_remote_client_call_async (self->remote, request, NULL,
+                               on_remote_queue_set, g_object_ref (self));
+}
+
 /* The queue on screen is what gets written: one order, kept in both places. */
 static gboolean
 store_local_queue (XdChatView *self)
@@ -3546,6 +3721,42 @@ drop_queued_at (XdChatView *self,
     send_remote_queue_op (self, NULL, (int) position);
   else if (!store_local_queue (self))
     return;
+
+  show_queued (self);
+}
+
+static void
+edit_queued_at (XdChatView *self,
+                guint       position,
+                const char *old_text,
+                const char *new_text)
+{
+  g_autofree char *previous = NULL;
+
+  if (position >= self->queue->len ||
+      g_strcmp0 (g_ptr_array_index (self->queue, position), old_text) != 0)
+    {
+      show_queued (self);
+      return;
+    }
+
+  if (g_strcmp0 (old_text, new_text) == 0)
+    {
+      show_queued (self);
+      return;
+    }
+
+  previous = g_ptr_array_index (self->queue, position);
+  g_ptr_array_index (self->queue, position) = g_strdup (new_text);
+
+  if (self->remote != NULL)
+    send_remote_queue_edit (self, position, old_text, new_text);
+  else if (!store_local_queue (self))
+    {
+      g_free (g_ptr_array_index (self->queue, position));
+      g_ptr_array_index (self->queue, position) =
+        g_steal_pointer (&previous);
+    }
 
   show_queued (self);
 }

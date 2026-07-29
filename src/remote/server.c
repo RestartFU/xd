@@ -2356,6 +2356,43 @@ handle_steer_queue (Connection *connection,
 }
 
 static void
+handle_edit_queue (Connection *connection,
+                   JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *old_text = member_string (request, "old-text");
+  const char *text = member_string (request, "text");
+  gint64 index;
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL || old_text == NULL || text == NULL || *text == '\0' ||
+      !json_object_has_member (request, "index"))
+    {
+      send_error (
+        connection, "edit-queue needs a chat id, queue index, and text.");
+      return;
+    }
+
+  index = json_object_get_int_member (request, "index");
+  if (index < 0 || index > G_MAXUINT)
+    {
+      send_error (connection, "That queue index is invalid.");
+      return;
+    }
+
+  if (!xd_storage_queue_replace (self->storage, chat_id, (guint) index,
+                                 old_text, text, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  send_done (connection, NULL);
+  broadcast_stored_queue (self, chat_id);
+}
+
+static void
 handle_queue (Connection *connection,
               JsonObject *request,
               gboolean    drop)
@@ -3497,6 +3534,8 @@ dispatch (Connection *connection,
     handle_queue (connection, request, FALSE);
   else if (g_strcmp0 (op, "drop-queue") == 0)
     handle_queue (connection, request, TRUE);
+  else if (g_strcmp0 (op, "edit-queue") == 0)
+    handle_edit_queue (connection, request);
   else if (g_strcmp0 (op, "steer-queue") == 0)
     handle_steer_queue (connection, request);
   else if (g_strcmp0 (op, "cancel") == 0)

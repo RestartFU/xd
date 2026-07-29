@@ -703,6 +703,21 @@ test_queue_keeps_every_message (Fixture       *fixture,
   g_assert_cmpstr (g_ptr_array_index (chat->queue, 1), ==, "first thing");
   g_assert_cmpstr (g_ptr_array_index (chat->queue, 2), ==, "second thing");
 
+  /* Editing changes only the selected message. */
+  g_assert_true (xd_storage_queue_replace (
+    fixture->storage, chat_id, 1, "first thing", "edited first thing", &error));
+  g_assert_false (xd_storage_queue_replace (
+    fixture->storage, chat_id, 1, "first thing", "stale edit", &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+  g_clear_error (&error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "third thing");
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 1), ==,
+                   "edited first thing");
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 2), ==, "second thing");
+
   /* Dropping one leaves the rest in their promoted order. */
   g_assert_true (xd_storage_queue_remove (fixture->storage, chat_id, 2, &error));
 
@@ -712,7 +727,7 @@ test_queue_keeps_every_message (Fixture       *fixture,
   g_assert_cmpstr (first, ==, "third thing");
   g_assert_true (xd_storage_queue_take_first (
     fixture->storage, chat_id, &second, &error));
-  g_assert_cmpstr (second, ==, "first thing");
+  g_assert_cmpstr (second, ==, "edited first thing");
 
   g_clear_pointer (&chat, xd_chat_free);
   chat = xd_storage_get_chat (fixture->storage, chat_id, &error);

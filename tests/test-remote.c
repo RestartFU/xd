@@ -2954,12 +2954,39 @@ test_send_during_turn_queues (void)
     call_remote_request (client, builder, &second);
 
     {
+      g_autoptr (JsonBuilder) edit = json_builder_new ();
+      RemoteReply edited = { 0 };
       g_autoptr (XdChat) stored =
         xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
 
       g_assert_cmpuint (stored->queue->len, ==, 2);
       g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up");
       g_assert_cmpstr (g_ptr_array_index (stored->queue, 1), ==, "and then this");
+
+      json_builder_begin_object (edit);
+      json_builder_set_member_name (edit, "op");
+      json_builder_add_string_value (edit, "edit-queue");
+      json_builder_set_member_name (edit, "chat");
+      json_builder_add_string_value (edit, daemon.chat_id);
+      json_builder_set_member_name (edit, "index");
+      json_builder_add_int_value (edit, 1);
+      json_builder_set_member_name (edit, "old-text");
+      json_builder_add_string_value (edit, "and then this");
+      json_builder_set_member_name (edit, "text");
+      json_builder_add_string_value (edit, "edited follow up");
+      json_builder_end_object (edit);
+
+      call_remote_request (client, edit, &edited);
+
+      g_clear_pointer (&stored, xd_chat_free);
+      stored = xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+      g_assert_cmpuint (stored->queue->len, ==, 2);
+      g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up");
+      g_assert_cmpstr (g_ptr_array_index (stored->queue, 1), ==,
+                       "edited follow up");
+
+      json_object_unref (edited.reply);
+      g_free (edited.wait.failure);
     }
 
     /* Dropping one by position leaves the others where they were. */
@@ -2981,7 +3008,8 @@ test_send_during_turn_queues (void)
 
       stored = xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
       g_assert_cmpuint (stored->queue->len, ==, 1);
-      g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "and then this");
+      g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==,
+                       "edited follow up");
 
       json_object_unref (dropped.reply);
       g_free (dropped.wait.failure);
