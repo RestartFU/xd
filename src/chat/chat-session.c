@@ -29,6 +29,7 @@ struct _XdChatSession
   guint kill_timeout_id;
   gboolean stopping;
   gboolean finished;
+  char *backend_error;
 };
 
 enum
@@ -84,7 +85,7 @@ on_process_waited (GObject      *source,
 
   if (g_subprocess_wait_check_finish (G_SUBPROCESS (source), result, &error))
     {
-      finish (self, TRUE, NULL);
+      finish (self, self->backend_error == NULL, self->backend_error);
       return;
     }
 
@@ -98,7 +99,10 @@ on_process_waited (GObject      *source,
   {
     const char *tail = stderr_tail (self);
 
-    finish (self, FALSE, tail != NULL ? tail : error->message);
+    finish (self, FALSE,
+            tail != NULL ? tail
+                         : self->backend_error != NULL ? self->backend_error
+                                                       : error->message);
   }
 }
 
@@ -147,13 +151,25 @@ on_event (const AiEvent *event,
       /* The backend reported the id only at the end; keep it either way. */
       if (event->session_id != NULL)
         g_signal_emit (self, signals[SIGNAL_SESSION_STARTED], 0, event->session_id);
+      g_clear_pointer (&self->backend_error, g_free);
       break;
 
     case AI_EVENT_ERROR:
       /* Interrupting a CLI makes it report the turn as failed, which is true
        * from its side and misleading from ours: the user stopped it, and
        * being told the backend died is both wrong and alarming. */
-      finish (self, self->stopping, self->stopping ? NULL : event->text);
+      /*
+       * A streamed error is not necessarily terminal. Codex emits one while
+       * reconnecting, then carries on with the same turn. Wait for process
+       * exit; a later result clears it, while a real failed exit reports it.
+       * This also keeps the turn registered, preventing a second process from
+       * resuming the same backend session concurrently.
+       */
+      if (!self->stopping)
+        {
+          g_free (self->backend_error);
+          self->backend_error = g_strdup (event->text);
+        }
       break;
 
     default:
@@ -409,6 +425,7 @@ xd_chat_session_finalize (GObject *object)
   XdChatSession *self = XD_CHAT_SESSION (object);
 
   g_clear_pointer (&self->parser, ai_parser_free);
+  g_clear_pointer (&self->backend_error, g_free);
   g_string_free (self->stderr_text, TRUE);
 
   G_OBJECT_CLASS (xd_chat_session_parent_class)->finalize (object);

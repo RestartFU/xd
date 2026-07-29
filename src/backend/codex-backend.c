@@ -421,7 +421,10 @@ codex_parse_object (AiParser    *parser,
   if (g_strcmp0 (type, "turn.failed") == 0 || g_strcmp0 (type, "error") == 0)
     {
       JsonObject *error = ai_json_get_object (root, "error");
-      const char *message = ai_json_get_string (error, "message");
+      const char *message = ai_json_get_string (root, "message");
+
+      if (message == NULL)
+        message = ai_json_get_string (error, "message");
 
       emit (callback, user_data, AI_EVENT_ERROR,
             message != NULL ? message : "The turn failed", NULL);

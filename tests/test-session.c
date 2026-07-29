@@ -36,6 +36,7 @@ stub_build_argv (const AiBackend *self,
 }
 
 extern const AiBackend xd_claude_backend;
+extern const AiBackend xd_codex_backend;
 
 static void
 stub_parse_object (AiParser    *parser,
@@ -60,6 +61,23 @@ static const AiBackend missing_backend = {
   .program = "xd-definitely-not-installed",
   .build_argv = stub_build_argv,
   .parse_object = stub_parse_object,
+};
+
+static void
+codex_parse_object (AiParser    *parser,
+                    JsonObject  *root,
+                    AiEventFunc  callback,
+                    gpointer     user_data)
+{
+  xd_codex_backend.parse_object (parser, root, callback, user_data);
+}
+
+static const AiBackend codex_stub_backend = {
+  .id = "codex-stub",
+  .display_name = "Codex Stub",
+  .program = "cat",
+  .build_argv = stub_build_argv,
+  .parse_object = codex_parse_object,
 };
 
 static char *secret_child_program;
@@ -251,6 +269,34 @@ test_nonzero_exit_is_a_failure (void)
 }
 
 static void
+test_recoverable_backend_error_does_not_end_turn (void)
+{
+  g_autoptr (XdChatSession) session =
+    xd_chat_session_new (&codex_stub_backend);
+  g_autoptr (GError) error = NULL;
+  g_autofree char *fixture = NULL;
+  AiRunSpec spec = { 0 };
+  Run run = { 0 };
+
+  fixture = g_build_filename (g_getenv ("G_TEST_SRCDIR"), "fixtures",
+                              "codex-recoverable-error.jsonl", NULL);
+  spec.prompt = fixture;
+  run_init (&run, session);
+
+  g_assert_true (xd_chat_session_start (session, &spec, &error));
+  g_assert_no_error (error);
+
+  g_timeout_add_seconds (10, on_timeout, &run);
+  g_main_loop_run (run.loop);
+
+  g_assert_true (run.finished);
+  g_assert_true (run.success);
+  g_assert_cmpstr (run.text->str, ==, "still working");
+
+  run_clear (&run);
+}
+
+static void
 test_agent_secret_reaches_process_not_prompt (void)
 {
   g_autoptr (XdChatSession) session = xd_chat_session_new (&secret_backend);
@@ -318,6 +364,8 @@ main (int   argc,
   g_test_add_func ("/session/streams", test_streams_a_transcript);
   g_test_add_func ("/session/missing-program", test_missing_program_explains_itself);
   g_test_add_func ("/session/nonzero-exit", test_nonzero_exit_is_a_failure);
+  g_test_add_func ("/session/recoverable-backend-error",
+                   test_recoverable_backend_error_does_not_end_turn);
   g_test_add_func ("/session/agent-secret-environment",
                    test_agent_secret_reaches_process_not_prompt);
 
