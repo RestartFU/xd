@@ -6,8 +6,8 @@ module Xd
       extend self
 
       HANDOVER_LIMIT_BYTES = 12_000
-      TITLE_LENGTH = 48
-      HANDOVER_OPEN =
+      TITLE_LENGTH         =     48
+      HANDOVER_OPEN        =
         "[Part of this conversation happened with a different assistant, " \
         "so you have not seen it. It is reproduced below verbatim. Treat it " \
         "as part of the conversation you are already in: continue from it, " \
@@ -50,9 +50,7 @@ module Xd
       def join(handover : String?, prompt : String) : String
         return prompt unless handover && !handover.empty?
 
-        command?(prompt) ?
-          "#{prompt}\n\n#{handover}" :
-          "#{handover}\n\n#{prompt}"
+        command?(prompt) ? "#{prompt}\n\n#{handover}" : "#{handover}\n\n#{prompt}"
       end
 
       def title(prompt : String) : String?
@@ -60,9 +58,7 @@ module Xd
         return nil if first_line.empty?
 
         characters = first_line.chars
-        characters.size > TITLE_LENGTH ?
-          "#{characters.first(TITLE_LENGTH).join}…" :
-          first_line
+        characters.size > TITLE_LENGTH ? "#{characters.first(TITLE_LENGTH).join}…" : first_line
       end
 
       private def command?(prompt : String) : Bool

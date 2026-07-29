@@ -1,0 +1,532 @@
+require "json"
+require "set"
+require "../storage/workflow_state"
+require "../workspace/service"
+require "./catalog"
+require "./codex_app_server"
+require "./conversation"
+require "./environment"
+require "./exec_session"
+require "./executable"
+require "./secrets"
+
+module Xd
+  module Agent
+    abstract class SessionHandle
+      abstract def cancel : Nil
+    end
+
+    class CallbackHandle < SessionHandle
+      def initialize(@callback : Proc(Nil))
+      end
+
+      def cancel : Nil
+        @callback.call
+      end
+    end
+
+    abstract class Launcher
+      abstract def start(
+        backend : Backend,
+        spec : RunSpec,
+        environment : Hash(String, String),
+        secret_names : Array(String),
+        on_event : Proc(Event, Nil),
+        on_finished : Proc(Bool, String?, Nil),
+      ) : SessionHandle
+
+      def close : Nil
+      end
+    end
+
+    class ProcessLauncher < Launcher
+      def initialize(version : String)
+        @codex = CodexPool.new(version: version)
+      end
+
+      def start(
+        backend : Backend,
+        spec : RunSpec,
+        environment : Hash(String, String),
+        secret_names : Array(String),
+        on_event : Proc(Event, Nil),
+        on_finished : Proc(Bool, String?, Nil),
+      ) : SessionHandle
+        case backend.transport
+        when Transport::Exec
+          arguments = backend.build_argv(spec)
+          arguments[0] = Executable.resolve(backend.program)
+          session = ExecSession.new(
+            backend,
+            spec,
+            environment,
+            on_event,
+            on_finished,
+            arguments
+          )
+          session.start
+          CallbackHandle.new(-> { session.cancel })
+        when Transport::CodexAppServer
+          turn = @codex.start(
+            spec,
+            environment,
+            secret_names,
+            on_event,
+            on_finished
+          )
+          CallbackHandle.new(-> { turn.cancel })
+        else
+          raise ArgumentError.new(
+            "Unsupported transport for #{backend.display_name}"
+          )
+        end
+      end
+
+      def close : Nil
+        @codex.close
+      end
+    end
+
+    enum SendResult
+      Started
+      Queued
+    end
+
+    class Manager
+      class Error < Exception
+      end
+
+      private class ActiveTurn
+        getter chat_id : String
+        getter backend : Backend
+        getter model : String
+        getter effort : Effort
+        getter label : String
+        getter workdir : String
+        getter transcript_message_id : Int64
+        getter started_at : Time::Instant
+        property handle : SessionHandle?
+        property cancel_requested = false
+        property finished = false
+        property commands = [] of String
+        property segment = ""
+        property segment_message_id = 0_i64
+        property context_used = 0_u64
+        property context_window = 0_u64
+
+        def initialize(
+          @chat_id,
+          @backend,
+          @model,
+          @effort,
+          @label,
+          @workdir,
+          @transcript_message_id,
+          @started_at = Time.instant,
+        )
+        end
+      end
+
+      @turns = {} of String => ActiveTurn
+      @starting = Set(String).new
+      @mutex = Mutex.new
+      @closed = false
+
+      def initialize(
+        @store : Storage::Store,
+        @workspaces : Workspace::Service,
+        @launcher : Launcher = ProcessLauncher.new("unknown"),
+        @on_event : Proc(String, Hash(String, JSON::Any), Nil) = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
+      )
+      end
+
+      def send(chat_id : String, text : String) : SendResult
+        if text.empty?
+          raise Error.new("A message needs a chat and something to say.")
+        end
+
+        queued = @mutex.synchronize do
+          raise Error.new("The daemon is stopping.") if @closed
+
+          if @turns.has_key?(chat_id) || @starting.includes?(chat_id)
+            @store.queue_append(chat_id, text)
+            true
+          else
+            @starting << chat_id
+            false
+          end
+        end
+
+        if queued
+          publish_queue(chat_id)
+          return SendResult::Queued
+        end
+
+        start_turn(chat_id, text)
+        SendResult::Started
+      rescue error : Error
+        raise error
+      rescue error
+        fail_start(chat_id, error)
+      end
+
+      def cancel(chat_id : String) : Nil
+        handle : SessionHandle? = nil
+        queued : String? = nil
+
+        @mutex.synchronize do
+          raise Error.new("The daemon is stopping.") if @closed
+
+          if turn = @turns[chat_id]?
+            if current = turn.handle
+              handle = current
+            else
+              turn.cancel_requested = true
+            end
+          elsif !@starting.includes?(chat_id)
+            queued = @store.queue_take_first(chat_id)
+            @starting << chat_id if queued
+          end
+        end
+
+        if text = queued
+          publish_queue(chat_id)
+          start_turn(chat_id, text)
+        else
+          handle.try(&.cancel)
+        end
+      rescue error : Error
+        raise error
+      rescue error
+        fail_start(chat_id, error)
+      end
+
+      def running?(chat_id : String) : Bool
+        @mutex.synchronize do
+          @turns.has_key?(chat_id) || @starting.includes?(chat_id)
+        end
+      end
+
+      def commands(chat_id : String) : Array(String)
+        @mutex.synchronize do
+          @turns[chat_id]?.try(&.commands.dup) || [] of String
+        end
+      end
+
+      def close : Nil
+        turns = @mutex.synchronize do
+          return if @closed
+          @closed = true
+          current = @turns.values.dup
+          @turns.clear
+          @starting.clear
+          current
+        end
+
+        turns.each do |turn|
+          @store.set_daemon_working(turn.chat_id, false)
+          turn.handle.try(&.cancel)
+        rescue Storage::Error
+        end
+        @launcher.close
+      end
+
+      private def start_turn(chat_id : String, text : String) : Nil
+        user_stored : Bool = false
+        begin
+          chat = @store.get_chat(chat_id)
+          backend = Catalog.lookup(chat.backend)
+          unless backend
+            raise Error.new("Unknown backend \"#{chat.backend}\".")
+          end
+
+          if chat.title == "New Chat" &&
+             @store.last_message_id(chat_id) == 0 &&
+             (title = Conversation.title(text))
+            @store.set_chat_title(chat_id, title)
+            publish("tree")
+          end
+
+          @store.append_message(chat_id, "user", text)
+          user_stored = true
+          transcript_message_id = @store.last_message_id(chat_id)
+          last_seen = @store.get_last_seen(chat_id, backend.id)
+          prompt = Conversation.join(
+            Conversation.handover(@store, chat_id, last_seen),
+            text
+          )
+
+          settings = @workspaces.resolve(chat.folder_id, chat.backend)
+          folder_ids = @workspaces.folder_ids(chat.folder_id)
+          workdir = @workspaces.resolve_workdir(
+            chat.folder_id,
+            chat.workdir
+          )
+          model = chat.model || settings.model || backend.default_model
+          effort = chat.effort ? Effort.from_wire(chat.effort) : backend.default_effort
+          access = chat.plan ? Access::Plan : Access.from_wire(chat.access)
+          secrets = Secrets.effective(folder_ids)
+          system_prompt = [
+            settings.instructions,
+            secrets.prompt,
+          ].compact.reject(&.empty?).join("\n\n")
+          system_prompt = nil if system_prompt.empty?
+          spec = RunSpec.new(
+            prompt,
+            model: model,
+            system_prompt: system_prompt,
+            resume_session_id: @store.get_session_id(chat_id, backend.id),
+            workdir: workdir,
+            folder_ids: folder_ids,
+            effort: effort,
+            access: access
+          )
+          turn = ActiveTurn.new(
+            chat_id,
+            backend,
+            model,
+            effort,
+            "#{backend.model_label(model)} · #{effort.label}",
+            workdir,
+            transcript_message_id
+          )
+
+          @mutex.synchronize do
+            raise Error.new("The daemon is stopping.") if @closed
+            @starting.delete(chat_id)
+            @turns[chat_id] = turn
+          end
+
+          environment = secrets.environment(Environment.host)
+          handle = @launcher.start(
+            backend,
+            spec,
+            environment,
+            secrets.names,
+            ->(event : Event) { receive(turn, event) },
+            ->(ok : Bool, message : String?) { finish(turn, ok, message) }
+          )
+
+          cancel = @mutex.synchronize do
+            current = @turns[chat_id]?
+            if current.same?(turn) && !turn.finished
+              turn.handle = handle
+              turn.cancel_requested
+            else
+              true
+            end
+          end
+          if cancel
+            handle.cancel
+            return
+          end
+
+          @store.set_daemon_working(chat_id, true)
+          publish("turn-started", {
+            "chat"  => JSON::Any.new(chat_id),
+            "label" => JSON::Any.new(turn.label),
+          })
+        rescue error : Error
+          cleanup_failed_start(chat_id, user_stored, error.message)
+          raise error
+        rescue error
+          cleanup_failed_start(chat_id, user_stored, error.message)
+          raise Error.new(error.message || "Cannot start the agent")
+        end
+      end
+
+      private def cleanup_failed_start(
+        chat_id : String,
+        user_stored : Bool,
+        message : String?,
+      ) : Nil
+        @mutex.synchronize do
+          @starting.delete(chat_id)
+          @turns.delete(chat_id)
+        end
+        if user_stored && message
+          @store.append_message(chat_id, "error", message)
+          publish("changed", {"chat" => JSON::Any.new(chat_id)})
+        end
+        @store.set_daemon_working(chat_id, false)
+      rescue Storage::Error
+      end
+
+      private def fail_start(chat_id : String, error : Exception) : NoReturn
+        @mutex.synchronize do
+          @starting.delete(chat_id)
+          @turns.delete(chat_id)
+        end
+        raise Error.new(error.message || "Cannot start the agent")
+      end
+
+      private def receive(turn : ActiveTurn, event : Event) : Nil
+        event_name : String? = nil
+        fields = {} of String => JSON::Any
+
+        @mutex.synchronize do
+          current = @turns[turn.chat_id]?
+          return unless current.same?(turn) && !turn.finished
+
+          if session_id = event.session_id
+            @store.set_session_id(
+              turn.chat_id,
+              turn.backend.id,
+              session_id
+            )
+          end
+
+          case event.type
+          when EventType::Commands
+            commands = event.commands || [] of String
+            turn.commands = commands.dup
+            event_name = "commands"
+            fields = {
+              "chat"     => JSON::Any.new(turn.chat_id),
+              "backend"  => JSON::Any.new(turn.backend.id),
+              "commands" => json_any(commands),
+            }
+          when EventType::TextDelta
+            text = event.text || ""
+            return if text.empty?
+
+            turn.segment += text
+            if turn.segment_message_id == 0
+              turn.segment_message_id = @store.append_message(
+                turn.chat_id,
+                "assistant",
+                turn.segment,
+                label: turn.label
+              )
+            else
+              @store.update_message(
+                turn.segment_message_id,
+                turn.segment
+              )
+            end
+            event_name = "text"
+            fields = {
+              "chat" => JSON::Any.new(turn.chat_id),
+              "text" => JSON::Any.new(text),
+            }
+          when EventType::ToolUse
+            close_segment(turn)
+            text = event.text || "Used a tool"
+            @store.append_message(turn.chat_id, "tool", text)
+            event_name = "tool"
+            fields = {
+              "chat"    => JSON::Any.new(turn.chat_id),
+              "text"    => JSON::Any.new(text),
+              "workdir" => JSON::Any.new(turn.workdir),
+              "context" => JSON::Any.new(turn.workdir),
+            }
+          when EventType::Usage
+            turn.context_used = event.context_used
+            turn.context_window = event.context_window
+          else
+          end
+        end
+
+        publish(event_name, fields) if event_name
+      rescue error : Storage::Error
+        STDERR.puts "xd: cannot store agent event: #{error.message}"
+      end
+
+      private def finish(
+        turn : ActiveTurn,
+        success : Bool,
+        message : String?,
+      ) : Nil
+        accepted = @mutex.synchronize do
+          current = @turns[turn.chat_id]?
+          next false unless current.same?(turn) && !turn.finished
+          turn.finished = true
+          true
+        end
+        return unless accepted
+
+        close_segment(turn)
+        elapsed = Math.max(
+          (Time.instant - turn.started_at).total_seconds.to_i64,
+          0_i64
+        )
+        @store.append_message(turn.chat_id, "duration", elapsed.to_s)
+        if turn.context_used > 0 && turn.context_window > 0
+          @store.set_context_usage(
+            turn.chat_id,
+            turn.backend.id,
+            turn.model,
+            turn.context_used,
+            turn.context_window
+          )
+        end
+        if !success && message
+          @store.append_message(turn.chat_id, "error", message)
+        end
+        @store.set_last_seen(
+          turn.chat_id,
+          turn.backend.id,
+          @store.last_message_id(turn.chat_id)
+        )
+
+        next_text : String? = nil
+        @mutex.synchronize do
+          current = @turns[turn.chat_id]?
+          @turns.delete(turn.chat_id) if current.same?(turn)
+          unless @closed
+            next_text = @store.queue_take_first(turn.chat_id)
+            @starting << turn.chat_id if next_text
+          end
+        end
+
+        fields = {
+          "chat"    => JSON::Any.new(turn.chat_id),
+          "ok"      => JSON::Any.new(success),
+          "waiting" => JSON::Any.new(false),
+        }
+        fields["error"] = JSON::Any.new(message) if message
+        publish("turn-finished", fields)
+
+        if text = next_text
+          publish_queue(turn.chat_id)
+          begin
+            start_turn(turn.chat_id, text)
+          rescue error : Error
+            STDERR.puts "xd: cannot start queued turn: #{error.message}"
+          end
+        else
+          @store.set_daemon_working(turn.chat_id, false)
+        end
+      rescue error : Storage::Error
+        STDERR.puts "xd: cannot finish agent turn: #{error.message}"
+      end
+
+      private def close_segment(turn : ActiveTurn) : Nil
+        return if turn.segment.empty?
+        turn.segment = ""
+        turn.segment_message_id = 0_i64
+      end
+
+      private def publish_queue(chat_id : String) : Nil
+        queued = @store.get_chat(chat_id).queue
+        fields = {
+          "chat"  => JSON::Any.new(chat_id),
+          "queue" => json_any(queued),
+        }
+        fields["text"] = JSON::Any.new(queued.first) unless queued.empty?
+        publish("queued", fields)
+      end
+
+      private def publish(
+        name : String?,
+        fields = {} of String => JSON::Any,
+      ) : Nil
+        @on_event.call(name, fields) if name
+      end
+
+      private def json_any(value) : JSON::Any
+        JSON.parse(value.to_json)
+      end
+    end
+  end
+end
