@@ -82,6 +82,13 @@ static const char *const DOCKERFILE_KEYWORDS[] = {
   NULL,
 };
 
+static const char *const MAKEFILE_KEYWORDS[] = {
+  "define", "else", "endef", "endif", "export", "ifdef", "ifeq", "ifndef",
+  "ifneq", "include", "override", "private", "sinclude", "undefine",
+  "unexport", "vpath",
+  NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -97,6 +104,8 @@ typedef struct
   gboolean slash_comments;       /* C, Go and Kotlin's // comments */
   gboolean block_comments;       /* C, Go and Kotlin's block comments */
   gboolean hash_comments;        /* Dockerfile's leading # comments */
+  gboolean inline_hash_comments; /* Make's unescaped # comments */
+  gboolean make_variables;       /* Make's $(...), ${...} and $x */
   gboolean case_insensitive;     /* Dockerfile instructions */
   gboolean capitalized_types;    /* Kotlin's user-defined types */
   gboolean composite_literals;  /* Go's Type{...} */
@@ -139,6 +148,14 @@ static const Language DOCKERFILE_LANGUAGE = {
   .case_insensitive = TRUE,
 };
 
+static const Language MAKEFILE_LANGUAGE = {
+  .keywords = MAKEFILE_KEYWORDS,
+  .types = NO_WORDS,
+  .constants = NO_WORDS,
+  .inline_hash_comments = TRUE,
+  .make_variables = TRUE,
+};
+
 static const Language *
 language_table (XdSyntaxLanguage language)
 {
@@ -150,6 +167,8 @@ language_table (XdSyntaxLanguage language)
     return &DOCKERFILE_LANGUAGE;
   if (language == XD_SYNTAX_KOTLIN)
     return &KOTLIN_LANGUAGE;
+  if (language == XD_SYNTAX_MAKEFILE)
+    return &MAKEFILE_LANGUAGE;
 
   return NULL;
 }
@@ -174,6 +193,12 @@ xd_syntax_language_for_path (const char *path)
       g_ascii_strncasecmp (path, "Containerfile.", 14) == 0)
     return XD_SYNTAX_DOCKERFILE;
 
+  if (g_ascii_strcasecmp (path, "Makefile") == 0 ||
+      g_ascii_strncasecmp (path, "Makefile.", 9) == 0 ||
+      g_ascii_strcasecmp (path, "GNUmakefile") == 0 ||
+      g_ascii_strcasecmp (path, "BSDmakefile") == 0)
+    return XD_SYNTAX_MAKEFILE;
+
   dot = strrchr (path, '.');
   if (dot == NULL)
     return XD_SYNTAX_NONE;
@@ -184,6 +209,9 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_C;
   if (g_strcmp0 (dot, ".kt") == 0 || g_strcmp0 (dot, ".kts") == 0)
     return XD_SYNTAX_KOTLIN;
+  if (g_strcmp0 (dot, ".mk") == 0 || g_strcmp0 (dot, ".mak") == 0 ||
+      g_strcmp0 (dot, ".make") == 0)
+    return XD_SYNTAX_MAKEFILE;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -304,6 +332,51 @@ scan_quoted (Emitter    *emitter,
 }
 
 /*
+ * A Make expansion is one token. Nested expansions using the same brackets
+ * advance the depth; ordinary parentheses inside shell text do not.
+ */
+static const char *
+scan_make_variable (Emitter    *emitter,
+                    const char *at)
+{
+  const char *scan = at + 1;
+
+  if (*scan == '(' || *scan == '{')
+    {
+      char open = *scan;
+      char close = open == '(' ? ')' : '}';
+      guint depth = 1;
+
+      scan++;
+      while (*scan != '\0' && depth > 0)
+        {
+          if (scan[0] == '$' && scan[1] == open)
+            {
+              depth++;
+              scan += 2;
+            }
+          else if (*scan == close)
+            {
+              depth--;
+              scan++;
+            }
+          else
+            {
+              scan++;
+            }
+        }
+    }
+  else if (*scan != '\0')
+    {
+      scan++;
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+/*
  * One numeric literal, in whatever spelling either language allows.
  *
  * Bases, exponents, Go's digit separators and C's suffixes all live inside a
@@ -394,6 +467,21 @@ starts_the_line (const char *line,
       return FALSE;
 
   return TRUE;
+}
+
+static gboolean
+is_escaped (const char *line,
+            const char *at)
+{
+  guint backslashes = 0;
+
+  while (at > line && at[-1] == '\\')
+    {
+      backslashes++;
+      at--;
+    }
+
+  return backslashes % 2 != 0;
 }
 
 static const char *
@@ -531,6 +619,12 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;
         }
+      else if (table->inline_hash_comments && *at == '#' &&
+               !is_escaped (line, at))
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
+          return;
+        }
       else if (table->triple_strings && strncmp (at, "\"\"\"", 3) == 0)
         {
           const char *close = strstr (at + 3, "\"\"\"");
@@ -549,6 +643,10 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       else if (*at == '"' || *at == '\'')
         {
           at = scan_quoted (&emitter, at, *at);
+        }
+      else if (table->make_variables && *at == '$')
+        {
+          at = scan_make_variable (&emitter, at);
         }
       else if (table->raw_strings && *at == '`')
         {

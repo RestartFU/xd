@@ -29,6 +29,7 @@ typedef enum
   XD_SYNTAX_GO,
   XD_SYNTAX_DOCKERFILE,
   XD_SYNTAX_KOTLIN,
+  XD_SYNTAX_MAKEFILE,
 } XdSyntaxLanguage;
 
 typedef enum

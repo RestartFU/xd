@@ -74,9 +74,15 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_DOCKERFILE);
   g_assert_cmpint (xd_syntax_language_for_path ("image.dockerfile"),
                    ==, XD_SYNTAX_DOCKERFILE);
-  g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
-                   ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path ("Makefile"),
+                   ==, XD_SYNTAX_MAKEFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("build/Makefile.release"),
+                   ==, XD_SYNTAX_MAKEFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("GNUmakefile"),
+                   ==, XD_SYNTAX_MAKEFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("rules.mk"),
+                   ==, XD_SYNTAX_MAKEFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
 
@@ -175,6 +181,30 @@ test_classifies_kotlin (void)
   g_assert_nonnull (strstr (function, "function:greet\n"));
   g_assert_nonnull (strstr (function, "string:\"Hello, $name\"\n"));
   g_assert_nonnull (strstr (function, "comment:// welcome\n"));
+}
+
+static void
+test_classifies_makefile (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *directive = scan (
+    XD_SYNTAX_MAKEFILE, "include config.mk", &state, NULL);
+  g_autofree char *recipe = scan (
+    XD_SYNTAX_MAKEFILE,
+    "\t$(CC) -o \"$@\" $(call output,$(objects)) # link", &state, NULL);
+  g_autofree char *jobs = scan (
+    XD_SYNTAX_MAKEFILE, "JOBS ?= 8", &state, NULL);
+  g_autofree char *escaped = scan (
+    XD_SYNTAX_MAKEFILE, "HASH := \\#literal", &state, NULL);
+
+  g_assert_nonnull (strstr (directive, "keyword:include\n"));
+  g_assert_nonnull (strstr (recipe, "preproc:$(CC)\n"));
+  g_assert_nonnull (
+    strstr (recipe, "preproc:$(call output,$(objects))\n"));
+  g_assert_nonnull (strstr (recipe, "string:\"$@\"\n"));
+  g_assert_nonnull (strstr (recipe, "comment:# link\n"));
+  g_assert_nonnull (strstr (jobs, "number:8\n"));
+  g_assert_null (strstr (escaped, "comment:#literal\n"));
 }
 
 /*
@@ -341,6 +371,7 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-dockerfile",
                    test_classifies_dockerfile);
   g_test_add_func ("/syntax/classifies-kotlin", test_classifies_kotlin);
+  g_test_add_func ("/syntax/classifies-makefile", test_classifies_makefile);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
