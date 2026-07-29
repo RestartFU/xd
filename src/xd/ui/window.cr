@@ -1,5 +1,6 @@
 require "base64"
 require "gtk4"
+require "../agent/ask"
 require "../daemon/client"
 require "./chat_controls"
 require "./sidebar"
@@ -197,11 +198,13 @@ module Xd
         return unless response
 
         clear(@transcript)
-        response["messages"].as_a.each do |message|
+        messages = response["messages"].as_a
+        messages.each_with_index do |message, index|
           add_message(
             message["role"].as_s,
             message["content"].as_s,
-            message["label"]?.try(&.as_s?)
+            message["label"]?.try(&.as_s?),
+            reply_answerable?(messages, index)
           )
         end
         @stream_label = nil
@@ -212,12 +215,20 @@ module Xd
         role : String,
         content : String,
         label : String? = nil,
+        answerable : Bool = false,
       ) : Gtk::Label?
         if role == "duration"
           @status.text = "Finished in #{content}s"
           return
         end
 
+        parsed = role == "assistant" ? Agent::Ask.parse(content) : nil
+        shown = if parsed
+                  [parsed.remainder, parsed.ask.question]
+                    .reject(&.empty?).join("\n\n")
+                else
+                  content
+                end
         heading = case role
                   when "user"      then "You"
                   when "assistant" then label || "Assistant"
@@ -225,7 +236,7 @@ module Xd
                   when "error"     then "Error"
                   else                  role.capitalize
                   end
-        text = content.empty? ? heading : "#{heading}\n#{content}"
+        text = shown.empty? ? heading : "#{heading}\n#{shown}"
         row = Gtk::Label.new(text)
         row.xalign = 0_f32
         row.wrap = true
@@ -234,7 +245,60 @@ module Xd
         row.add_css_class("xd-message")
         row.add_css_class("xd-message-#{role}")
         @transcript.append(row)
+        append_ask(parsed.ask) if parsed && answerable
         row
+      end
+
+      private def reply_answerable?(
+        messages : Array(JSON::Any),
+        position : Int,
+      ) : Bool
+        return false unless messages[position]["role"].as_s == "assistant"
+
+        ((position + 1)...messages.size).all? do |index|
+          messages[index]["role"].as_s == "duration"
+        end
+      end
+
+      private def append_ask(ask : Agent::Ask) : Nil
+        choices = Gtk::Box.new(:vertical, 5)
+        choices.add_css_class("xd-ask")
+
+        ask.options.each do |option|
+          answer = option
+          button = Gtk::Button.new_with_label(answer)
+          button.hexpand = true
+          button.halign = :fill
+          button.add_css_class("xd-choice")
+          button.clicked_signal.connect { answer_ask(answer) }
+          choices.append(button)
+        end
+
+        if ask.accepts_input
+          input = Gtk::Entry.new
+          input.hexpand = true
+          input.placeholder_text = "Type your answer"
+          input.activate_signal.connect { answer_ask(input.text) }
+
+          send = Gtk::Button.new_with_label("Send")
+          send.add_css_class("suggested-action")
+          send.clicked_signal.connect { answer_ask(input.text) }
+
+          row = Gtk::Box.new(:horizontal, 6)
+          row.append(input)
+          row.append(send)
+          choices.append(row)
+        end
+
+        @transcript.append(choices)
+      end
+
+      private def answer_ask(answer : String) : Nil
+        text = answer.strip
+        return if text.empty?
+
+        @entry.text = text
+        send_message
       end
 
       private def send_message : Nil
@@ -387,7 +451,15 @@ module Xd
           @status.text = "Working…"
           @stream_label = nil
           load_chat_state
-        when "turn-finished", "changed"
+        when "turn-finished"
+          if active_event?(event)
+            load_messages
+            load_chat_state
+            if event["waiting"]?.try(&.as_bool?) == true
+              @status.text = "Waiting for your answer"
+            end
+          end
+        when "changed"
           if active_event?(event)
             load_messages
             load_chat_state

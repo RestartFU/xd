@@ -40,6 +40,18 @@ module Xd
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;
       }
+      .xd-ask {
+        margin: 0 14px 8px 14px;
+      }
+      .xd-choice {
+        background: alpha(#ffffff, 0.045);
+        border: 1px solid alpha(#ffffff, 0.10);
+        border-radius: 9px;
+        padding: 8px 10px;
+      }
+      .xd-choice:hover {
+        background: alpha(#ffffff, 0.09);
+      }
       .xd-controls button {
         min-height: 26px;
         padding: 3px 8px;
