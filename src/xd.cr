@@ -1,5 +1,5 @@
 require "./xd/protocol/operation"
-require "./xd/storage/chats"
+require "./xd/storage/messages"
 require "./xd/daemon/engine"
 
 module Xd

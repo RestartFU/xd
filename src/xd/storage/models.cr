@@ -45,6 +45,15 @@ module Xd
       end
     end
 
+    record Message,
+      id : Int64,
+      chat_id : String,
+      role : String,
+      content : String,
+      raw_json : String?,
+      created_at : Int64,
+      label : String?
+
     def self.queue_from_column(stored : Nil) : Array(String)
       [] of String
     end
