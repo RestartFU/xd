@@ -38,6 +38,43 @@ RUN crystal spec --error-trace \
  && crystal build src/xd.cr --release --no-debug -o /crystal-build/xd \
  && /crystal-build/xd --version
 
+# --- bundled agent CLIs ----------------------------------------------------
+#
+# Both agents are official native Linux builds. Keep Codex's whole package:
+# its binary discovers the bundled ripgrep, sandbox and shell relative to its
+# package metadata. Claude is renamed because libexec/claude is a small wrapper
+# that starts it through the bundle's loader on hosts such as NixOS.
+FROM debian:trixie-slim AS agent-binaries
+
+ARG CODEX_VERSION=0.146.0
+ARG CODEX_SHA256=3c89125af1d7c98abec8beb551292ef99daca52e204e5852a9139feae2c467e5
+ARG CLAUDE_VERSION=2.1.220
+ARG CLAUDE_SHA256=674f61f20ff306f3100cf9200e4c36c4b70278b5bef2884549819b942a89c863
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    test "$(dpkg --print-architecture)" = amd64; \
+    mkdir -p /agents/codex-package /downloads; \
+    curl --fail --location --silent --show-error \
+      "https://releases.openai.com/codex/releases/${CODEX_VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz" \
+      --output /downloads/codex.tar.gz; \
+    printf '%s  %s\n' "$CODEX_SHA256" /downloads/codex.tar.gz \
+      | sha256sum --check; \
+    tar -xzf /downloads/codex.tar.gz -C /agents/codex-package; \
+    ln -s codex-package/bin/codex /agents/codex; \
+    curl --fail --location --silent --show-error \
+      "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" \
+      --output /agents/claude-bin; \
+    printf '%s  %s\n' "$CLAUDE_SHA256" /agents/claude-bin \
+      | sha256sum --check; \
+    chmod 0755 /agents/claude-bin; \
+    /agents/codex --version | grep -F "$CODEX_VERSION"; \
+    /agents/claude-bin --version | grep -F "$CLAUDE_VERSION"; \
+    rm -rf /downloads
+
 # --- stage 1: build + runtime dependencies ----------------------------------
 FROM debian:trixie-slim AS deps
 
@@ -135,8 +172,11 @@ FROM build AS staging
 
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
+COPY --from=agent-binaries /agents/ /stage/usr/libexec/
+COPY scripts/claude.sh /stage/usr/libexec/claude
 
 RUN DESTDIR=/stage meson install -C /build --no-rebuild --quiet \
+ && chmod 0755 /stage/usr/libexec/claude \
  && bash /usr/local/bin/bundle.sh /stage /out /usr/local/share/xd-launcher.sh
 
 # --- stage 6: export --------------------------------------------------------

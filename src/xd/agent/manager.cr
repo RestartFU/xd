@@ -301,6 +301,11 @@ module Xd
           end
 
           environment = secrets.environment(Environment.host)
+          if backend.id == "claude"
+            # App releases own bundled CLI updates. Letting Claude replace
+            # itself would make installed bytes diverge from signed bundles.
+            environment["DISABLE_AUTOUPDATER"] = "1"
+          end
           handle = @launcher.start(
             backend,
             spec,

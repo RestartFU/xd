@@ -19,13 +19,14 @@ LAUNCHER="${3:?launcher template}"
 ARCH_DIR=/usr/lib/x86_64-linux-gnu
 PIXBUF_LOADERS="$ARCH_DIR/gdk-pixbuf-2.0/2.10.0/loaders"
 
-mkdir -p "$OUT"/{bin,lib,share,etc}
+mkdir -p "$OUT"/{bin,lib,libexec,share,etc}
 
 # Deliberately empty: GIO_MODULE_DIR points here so the app cannot pick up the
 # host's GIO modules. See scripts/xd.sh.
 mkdir -p "$OUT/lib/gio/modules"
 
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
+cp -a "$STAGE/usr/libexec/." "$OUT/libexec/"
 
 # Whisper installs outside Debian's dynamic linker cache, and ggml discovers
 # its best CPU backend at runtime. Carry both the linked core and every backend
@@ -52,6 +53,7 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 # enough. NSS modules are added by hand: they are opened by name, never linked.
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
+  "$OUT/libexec/claude-bin" \
   "$OUT/lib"/libwhisper.so* \
   "$OUT/lib"/libggml.so* \
   "$OUT/lib"/libggml-base.so* \
