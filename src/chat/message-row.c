@@ -514,6 +514,11 @@ on_subagent_toggled (GtkToggleButton *toggle,
     gtk_toggle_button_get_active (toggle)
       ? "pan-down-symbolic"
       : "pan-end-symbolic");
+  gtk_widget_set_tooltip_text (
+    GTK_WIDGET (toggle),
+    gtk_toggle_button_get_active (toggle)
+      ? "Hide subagent activity"
+      : "Show subagent activity");
 }
 
 void
@@ -543,6 +548,7 @@ xd_message_row_make_subagent (XdMessageRow *self,
   header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   indicator = gtk_image_new_from_icon_name ("pan-end-symbolic");
   gtk_widget_add_css_class (toggle, "xd-subagent-toggle");
+  gtk_widget_set_tooltip_text (toggle, "Show subagent activity");
   gtk_widget_set_hexpand (toggle, TRUE);
   gtk_widget_set_hexpand (header, TRUE);
   gtk_widget_set_valign (indicator, GTK_ALIGN_START);
