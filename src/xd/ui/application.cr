@@ -13,6 +13,12 @@ module Xd
       }
       .xd-sidebar { background: #060607; }
       .xd-chat { background: #0a0a0c; }
+      .xd-tool-panel { background: #08080a; }
+      .xd-terminal {
+        background: #060607;
+        color: #f2f2f4;
+        padding: 8px;
+      }
       .xd-sidebar button.flat {
         background: transparent;
         border: 0;

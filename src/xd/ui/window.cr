@@ -3,6 +3,7 @@ require "gtk4"
 require "../daemon/client"
 require "./chat_controls"
 require "./sidebar"
+require "./tool_panel"
 
 module Xd
   module UI
@@ -21,13 +22,16 @@ module Xd
         @stream_label = nil
         @widget = Gtk::ApplicationWindow.new(application)
         @widget.title = "xd"
-        @widget.set_default_size(1180, 760)
+        @widget.set_default_size(1380, 820)
 
         @sidebar = Sidebar.new(
           @widget,
           ->(request : Hash(String, JSON::Any)) { call(request) },
           ->(id : String, title : String) { open_chat(id, title) },
           ->(id : String) { chat_deleted(id) }
+        )
+        @tool_panel = ToolPanel.new(
+          ->(request : Hash(String, JSON::Any)) { call(request) }
         )
 
         @chat_title = Gtk::Label.new("Select a chat")
@@ -41,6 +45,16 @@ module Xd
         chat_header.margin_start = 18
         chat_header.margin_end = 18
         chat_header.append(@chat_title)
+        {
+          "Files"    => "files",
+          "Diff"     => "diff",
+          "Terminal" => "terminal",
+        }.each do |label, page|
+          button = Gtk::Button.new_with_label(label)
+          button.add_css_class("flat")
+          button.clicked_signal.connect { @tool_panel.toggle(page) }
+          chat_header.append(button)
+        end
 
         @controls = ChatControls.new(
           ->(option : String, value : String?) {
@@ -111,6 +125,8 @@ module Xd
         root.append(@sidebar.widget)
         root.append(Gtk::Separator.new(:vertical))
         root.append(chat)
+        root.append(Gtk::Separator.new(:vertical))
+        root.append(@tool_panel.widget)
         @widget.child = root
 
         @client.subscribe do |event|
@@ -142,6 +158,7 @@ module Xd
         @entry.sensitive = true
         @send.sensitive = true
         @controls.sensitive = true
+        @tool_panel.chat = id
         load_chat_state
         load_messages
         @entry.grab_focus
@@ -161,6 +178,8 @@ module Xd
         @send.remove_css_class("destructive-action")
         @send.add_css_class("suggested-action")
         @controls.sensitive = false
+        @tool_panel.chat = nil
+        @tool_panel.widget.visible = false
         clear(@transcript)
         clear(@queue_box)
         @queue_box.visible = false
@@ -339,6 +358,7 @@ module Xd
       end
 
       private def handle_event(event : Hash(String, JSON::Any)) : Nil
+        @tool_panel.handle_event(event)
         name = event["event"]?.try(&.as_s?) || return
         case name
         when "tree"
