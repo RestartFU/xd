@@ -2,6 +2,7 @@ require "../../spec_helper"
 require "file_utils"
 require "random/secure"
 require "socket"
+require "../../../src/xd/daemon/certificate"
 require "../../../src/xd/daemon/server"
 
 describe Xd::Daemon::Server do
@@ -85,6 +86,58 @@ describe Xd::Daemon::Server do
           second_event.should eq(first_event)
           first_event["id"].as_i64.should eq(1)
         end
+      end
+    ensure
+      server.close
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
+  it "serves the same session engine over TLS" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-server-tls-#{Random::Secure.hex(12)}"
+    )
+    database_path = File.join(directory, "chats.db")
+    certificate = File.join(directory, "certificate.pem")
+    key = File.join(directory, "private-key.pem")
+    store = Xd::Storage::Store.new(database_path)
+    engine = Xd::Daemon::Engine.new(
+      store,
+      token_generator: -> { "tls-token" }
+    )
+    code = engine.arm_pairing(1.minute)
+    server = Xd::Daemon::Server.new(engine)
+
+    begin
+      Xd::Daemon::Certificate.ensure_pair(certificate, key)
+      port = server.listen_remote(
+        "127.0.0.1",
+        0,
+        certificate,
+        key
+      )
+      context = OpenSSL::SSL::Context::Client.new
+      context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
+      socket = TCPSocket.new("127.0.0.1", port)
+
+      OpenSSL::SSL::Socket::Client.open(
+        socket,
+        context,
+        sync_close: true
+      ) do |client|
+        client.puts({
+          "op"   => "pair",
+          "code" => code,
+          "name" => "tls-test",
+        }.to_json)
+        client.flush
+        JSON.parse(client.gets.not_nil!)["token"].as_s.should eq("tls-token")
+
+        client.puts %({"op":"ping"})
+        client.flush
+        JSON.parse(client.gets.not_nil!)["ok"].as_bool.should be_true
       end
     ensure
       server.close
