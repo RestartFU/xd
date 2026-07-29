@@ -57,7 +57,8 @@ internal class TreeStore(
                 lifecycleVersion
             }
             try {
-                val reply = actor.call(Ops.tree()).decodeReply<TreeReply>()
+                val value = actor.call(Ops.tree())
+                val reply = actor.decodeReply(value) { it.decodeReply<TreeReply>() }
                 stateMutex.withLock {
                     if (clearVersion > versionBefore) return@withLock
                     _state.value = TreeSnapshot(

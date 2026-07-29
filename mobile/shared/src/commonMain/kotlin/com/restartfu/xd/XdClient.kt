@@ -84,6 +84,7 @@ public class XdClient(
     public suspend fun forget() {
         actor.forget()
         treeStore.clear()
+        takeSessions().values.forEach { it.core.invalidate() }
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -116,8 +117,17 @@ public class XdClient(
         folderId: String,
         title: String?,
     ): String {
-        val reply = actor.call(Ops.newChat(folderId, title)).decodeReply<DoneReply>()
+        val value = actor.call(Ops.newChat(folderId, title))
+        val reply = actor.decodeReply(value) { it.decodeReply<DoneReply>() }
         return reply.id ?: error("The daemon did not return the new chat id")
+    }
+
+    private fun takeSessions(): Map<String, SessionEntry> {
+        while (true) {
+            val before = sessions.value
+            if (before.isEmpty()) return emptyMap()
+            if (sessions.compareAndSet(before, emptyMap())) return before
+        }
     }
 
     private fun releaseChat(

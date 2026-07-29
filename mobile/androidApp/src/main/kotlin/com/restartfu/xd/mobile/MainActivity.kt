@@ -104,6 +104,7 @@ private fun XdMobileApp(model: MainViewModel) {
     val hasCredentials by model.client.hasCredentials.collectAsStateWithLifecycle()
     val credentialsReady by model.client.credentialsReady.collectAsStateWithLifecycle()
     val link by model.client.link.collectAsStateWithLifecycle()
+    val operationError by model.error.collectAsStateWithLifecycle()
 
     DisposableEffect(lifecycleOwner, model.client) {
         val observer = LifecycleEventObserver { _, event ->
@@ -128,7 +129,7 @@ private fun XdMobileApp(model: MainViewModel) {
     } else if (!hasCredentials) {
         PairScreen(model)
     } else if (link is Link.Fatal) {
-        FatalScreen(link as Link.Fatal, model::forget)
+        FatalScreen(link as Link.Fatal, operationError, model::forget)
     } else {
         ConnectedNavigation(model, link)
     }
@@ -219,6 +220,7 @@ private fun PairScreen(model: MainViewModel) {
 @Composable
 private fun FatalScreen(
     fatal: Link.Fatal,
+    operationError: String?,
     forget: () -> Unit,
 ) {
     val pinMismatch = fatal.reason == FatalReason.PIN_MISMATCH
@@ -241,6 +243,10 @@ private fun FatalScreen(
                 fatal.message
             },
         )
+        operationError?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it, color = MaterialTheme.colorScheme.error)
+        }
         Spacer(Modifier.height(24.dp))
         Button(onClick = forget) { Text("Forget and re-pair") }
     }
@@ -495,6 +501,7 @@ private fun ChatScreen(
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
+    val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val items = state.visibleItems
@@ -558,7 +565,12 @@ private fun ChatScreen(
                         ) {
                             Text(if (sending) "Queueing…" else "Queue")
                         }
-                        TextButton(onClick = model::cancel) { Text("Cancel") }
+                        TextButton(
+                            onClick = model::cancel,
+                            enabled = !cancelling,
+                        ) {
+                            Text(if (cancelling) "Cancelling…" else "Cancel")
+                        }
                     } else {
                         Button(
                             onClick = model::send,

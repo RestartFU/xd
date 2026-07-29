@@ -57,10 +57,19 @@ class XdClientVerticalSliceTest {
         assertEquals("Earlier", session.state.value.messages.single().text)
         assertTrue(session.state.value.hasOlderMessages)
 
-        val loadingOlder = async { session.loadOlder() }
+        val cancelledOlder = async { session.loadOlder() }
         runCurrent()
         assertEquals("messages", socket.opAt(4))
-        assertTrue(socket.writes[4].decodeToString().contains(""""limit":300"""))
+        cancelledOlder.cancel()
+        runCurrent()
+        assertFalse(session.state.value.loadingOlder)
+        socket.receive(messagesReply("""{"role":"user","content":"Ignored","at":0}"""))
+        runCurrent()
+
+        val loadingOlder = async { session.loadOlder() }
+        runCurrent()
+        assertEquals("messages", socket.opAt(5))
+        assertTrue(socket.writes[5].decodeToString().contains(""""limit":300"""))
         socket.receive(
             messagesReply(
                 """{"role":"user","content":"Oldest","at":0},""" +
@@ -74,7 +83,7 @@ class XdClientVerticalSliceTest {
 
         val sending = async { session.send("Next") }
         runCurrent()
-        assertEquals("send", socket.opAt(5))
+        assertEquals("send", socket.opAt(6))
         assertEquals("Next", session.state.value.pendingUser?.text)
         socket.receive("""{"ok":true}""")
         runCurrent()
@@ -84,11 +93,11 @@ class XdClientVerticalSliceTest {
         runCurrent()
         assertTrue(session.state.value.working)
         assertTrue(client.tree.value.chats.single().working)
-        assertEquals("chat", socket.opAt(6))
+        assertEquals("chat", socket.opAt(7))
         socket.receive("""{"event":"text","chat":"chat","text":"Hel"}""")
         socket.receive(chatReply(working = true, segment = "Hel"))
         runCurrent()
-        assertEquals("messages", socket.opAt(7))
+        assertEquals("messages", socket.opAt(8))
         socket.receive("""{"event":"text","chat":"chat","text":"lo"}""")
         socket.receive(messagesReply("""{"role":"user","content":"Next","at":2}"""))
         runCurrent()
@@ -97,10 +106,10 @@ class XdClientVerticalSliceTest {
         socket.receive("""{"event":"turn-finished","chat":"chat","ok":true,"waiting":false}""")
         runCurrent()
         assertFalse(client.tree.value.chats.single().working)
-        assertEquals("chat", socket.opAt(8))
+        assertEquals("chat", socket.opAt(9))
         socket.receive(chatReply(working = false))
         runCurrent()
-        assertEquals("messages", socket.opAt(9))
+        assertEquals("messages", socket.opAt(10))
         socket.receive(
             messagesReply(
                 """{"role":"user","content":"Next","at":2},""" +
@@ -118,16 +127,21 @@ class XdClientVerticalSliceTest {
 
         val cancelling = async { runCatching { session.cancel() } }
         runCurrent()
-        assertEquals("cancel", socket.opAt(10))
+        assertEquals("cancel", socket.opAt(11))
         socket.receive("""{"ok":false,"error":"cancel rejected"}""")
         runCurrent()
         assertTrue(cancelling.await().isFailure)
         assertEquals("cancel rejected", session.state.value.error)
 
-        session.close()
         client.forget()
         assertTrue(client.tree.value.chats.isEmpty())
         assertTrue(client.tree.value.folders.isEmpty())
+        assertTrue(session.state.value.messages.isEmpty())
+        assertTrue(session.state.value.title.isEmpty())
+        val forgottenCall = runCatching { session.cancel() }
+        assertTrue(forgottenCall.isFailure)
+        assertTrue(forgottenCall.exceptionOrNull()?.message.orEmpty().contains("forgotten"))
+        session.close()
     }
 
     @Test
@@ -173,6 +187,67 @@ class XdClientVerticalSliceTest {
         assertEquals("send rejected", session.state.value.error)
         assertTrue(session.state.value.messages.isEmpty())
         session.close()
+    }
+
+    @Test
+    fun mutationFailureDuringReloadRemainsVisible() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+        socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
+        runCurrent()
+
+        val session = client.openChat("chat")
+        runCurrent()
+        val cancelling = async { runCatching { session.cancel() } }
+        runCurrent()
+        socket.receive(chatReply(working = false))
+        runCurrent()
+        socket.receive("""{"ok":false,"error":"cancel rejected"}""")
+        runCurrent()
+        assertTrue(cancelling.await().isFailure)
+        socket.receive(messagesReply("", total = 0))
+        runCurrent()
+
+        assertEquals("cancel rejected", session.state.value.error)
+        session.close()
+    }
+
+    @Test
+    fun malformedTreeReplyMakesProtocolFatal() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+
+        socket.receive("""{"ok":true,"folders":"invalid","chats":[]}""")
+        runCurrent()
+        runCurrent()
+
+        assertEquals(
+            com.restartfu.xd.net.FatalReason.PROTOCOL,
+            assertIs<Link.Fatal>(client.link.value).reason,
+        )
+        assertTrue(socket.closed)
     }
 
     @Test

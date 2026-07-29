@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -70,23 +72,34 @@ internal class ChatSessionCore(
     private var pendingTimer: Job? = null
     private var messageLimit = MESSAGE_PAGE_SIZE
     private var reloadInProgress = false
+    private var snapshotSequence = 0L
+    private var invalidated = false
     private val inputsDuringReload = mutableListOf<BufferedInput>()
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
     suspend fun reload() {
         reloadMutex.withLock {
-            stateMutex.withLock {
+            val shouldReload = stateMutex.withLock {
+                if (invalidated) return@withLock false
                 reloadInProgress = true
                 inputsDuringReload.clear()
                 _state.value = _state.value.copy(loading = true, error = null)
+                true
             }
+            if (!shouldReload) return@withLock
             try {
                 val chatReply = actor.callSequenced(Ops.chat(chatId))
-                val chat = chatReply.value.decodeReply<ChatReply>()
-                val messages = actor.call(Ops.messages(chatId, messageLimit))
-                    .decodeReply<MessagesReply>()
+                val chat = actor.decodeReply(chatReply.value) {
+                    it.decodeReply<ChatReply>()
+                }
+                val messagesValue = actor.call(Ops.messages(chatId, messageLimit))
+                val messages = actor.decodeReply(messagesValue) {
+                    it.decodeReply<MessagesReply>()
+                }
                 val replayEffects = stateMutex.withLock {
+                    if (invalidated) return@withLock emptyList()
+                    snapshotSequence = maxOf(snapshotSequence, chatReply.sequence)
                     var transition = TranscriptMachine.reduce(
                         _state.value,
                         TranscriptInput.Loaded(chat, messages, nowMillis()),
@@ -108,9 +121,11 @@ internal class ChatSessionCore(
                 }
                 if (replayEffects.isNotEmpty()) scope.launch { reload() }
             } catch (error: CancellationException) {
+                clearReloadAfterCancellation()
                 throw error
             } catch (error: Throwable) {
                 stateMutex.withLock {
+                    if (invalidated) return@withLock
                     reloadInProgress = false
                     inputsDuringReload.clear()
                     _state.value = _state.value.copy(
@@ -125,7 +140,11 @@ internal class ChatSessionCore(
     suspend fun loadOlder() {
         reloadMutex.withLock {
             val shouldLoad = stateMutex.withLock {
-                if (!_state.value.hasOlderMessages || _state.value.loadingOlder) {
+                if (
+                    invalidated ||
+                    !_state.value.hasOlderMessages ||
+                    _state.value.loadingOlder
+                ) {
                     false
                 } else {
                     _state.value = _state.value.copy(
@@ -142,9 +161,12 @@ internal class ChatSessionCore(
                 Int.MAX_VALUE.toLong(),
             ).toInt()
             try {
-                val messages = actor.call(Ops.messages(chatId, nextLimit))
-                    .decodeReply<MessagesReply>()
+                val messagesValue = actor.call(Ops.messages(chatId, nextLimit))
+                val messages = actor.decodeReply(messagesValue) {
+                    it.decodeReply<MessagesReply>()
+                }
                 stateMutex.withLock {
+                    if (invalidated) return@withLock
                     _state.value = TranscriptMachine.reduce(
                         _state.value,
                         TranscriptInput.MessagesLoaded(messages),
@@ -152,9 +174,17 @@ internal class ChatSessionCore(
                     messageLimit = nextLimit
                 }
             } catch (error: CancellationException) {
+                withContext(NonCancellable) {
+                    stateMutex.withLock {
+                        if (!invalidated) {
+                            _state.value = _state.value.copy(loadingOlder = false)
+                        }
+                    }
+                }
                 throw error
             } catch (error: Throwable) {
                 stateMutex.withLock {
+                    if (invalidated) return@withLock
                     _state.value = _state.value.copy(
                         loadingOlder = false,
                         error = error.message ?: "Could not load older messages",
@@ -168,6 +198,7 @@ internal class ChatSessionCore(
         text: String,
         images: List<PngAttachment>,
     ) = sendMutex.withLock {
+        ensureActive()
         require(text.isNotEmpty() || images.isNotEmpty())
         lateinit var timer: Job
         var oldTimer: Job? = null
@@ -212,21 +243,23 @@ internal class ChatSessionCore(
     }
 
     suspend fun call(request: JsonObject) {
+        ensureActive()
         try {
             actor.call(request)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            stateMutex.withLock {
-                _state.value = _state.value.copy(
-                    error = error.message ?: "The daemon refused the request",
-                )
-            }
+            apply(
+                TranscriptInput.RequestFailed(
+                    error.message ?: "The daemon refused the request",
+                ),
+            )
             throw error
         }
     }
 
     suspend fun onEvent(event: SequencedEvent) {
+        if (stateMutex.withLock { invalidated }) return
         val value = event.value
         val eventChat = (value["chat"] as? JsonPrimitive)?.contentOrNull
         if (eventChat != null && eventChat != chatId) return
@@ -265,12 +298,32 @@ internal class ChatSessionCore(
         }
     }
 
+    suspend fun invalidate() {
+        val timer = stateMutex.withLock {
+            invalidated = true
+            reloadInProgress = false
+            inputsDuringReload.clear()
+            messageLimit = MESSAGE_PAGE_SIZE
+            snapshotSequence = 0L
+            pendingSequence = 0L
+            _state.value = ChatState(chatId = chatId)
+            pendingTimer.also { pendingTimer = null }
+        }
+        timer?.cancel()
+    }
+
     private suspend fun apply(
         input: TranscriptInput,
         sequence: Long? = null,
     ) {
         var timerToCancel: Job? = null
         val effects = stateMutex.withLock {
+            if (
+                invalidated ||
+                (sequence != null && sequence <= snapshotSequence)
+            ) {
+                return@withLock emptyList()
+            }
             val transition = TranscriptMachine.reduce(_state.value, input)
             _state.value = transition.state
             if (reloadInProgress && input !is TranscriptInput.Loaded) {
@@ -290,6 +343,24 @@ internal class ChatSessionCore(
         timerToCancel?.cancel()
         if (effects.isNotEmpty()) {
             scope.launch { reload() }
+        }
+    }
+
+    private suspend fun ensureActive() {
+        stateMutex.withLock {
+            check(!invalidated) { "This chat belongs to a forgotten remote" }
+        }
+    }
+
+    private suspend fun clearReloadAfterCancellation() {
+        withContext(NonCancellable) {
+            stateMutex.withLock {
+                if (!invalidated) {
+                    reloadInProgress = false
+                    inputsDuringReload.clear()
+                    _state.value = _state.value.copy(loading = false)
+                }
+            }
         }
     }
 

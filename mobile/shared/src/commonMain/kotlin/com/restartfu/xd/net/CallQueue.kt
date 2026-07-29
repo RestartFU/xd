@@ -39,6 +39,9 @@ internal class CallQueue(
 
     suspend fun call(request: JsonObject): SequencedReply = enqueue(request).await()
 
+    fun contains(response: CompletableDeferred<SequencedReply>): Boolean =
+        response in pending
+
     fun acceptReply(reply: SequencedReply) {
         val response = pending.removeFirstOrNull()
         if (response == null) {

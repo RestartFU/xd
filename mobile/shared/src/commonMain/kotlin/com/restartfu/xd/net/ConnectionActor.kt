@@ -14,6 +14,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -157,7 +158,36 @@ internal class ConnectionActor(
     suspend fun callSequenced(request: JsonObject): SequencedReply {
         val response = CompletableDeferred<SequencedReply>()
         mailbox.send(Message.Call(request, response))
-        return response.await().also { it.value.requireSuccess() }
+        val reply = try {
+            withTimeout(CALL_TIMEOUT_MILLIS) { response.await() }
+        } catch (error: TimeoutCancellationException) {
+            mailbox.send(Message.CallTimedOut(response))
+            throw DisconnectedException("Daemon did not answer the request in time")
+        }
+        return try {
+            reply.also { it.value.requireSuccess() }
+        } catch (error: RemoteProtocolException) {
+            reportProtocolFailure(error)
+            throw error
+        }
+    }
+
+    suspend fun <T> decodeReply(
+        value: JsonObject,
+        decode: (JsonObject) -> T,
+    ): T {
+        return try {
+            decode(value)
+        } catch (error: RemoteProtocolException) {
+            reportProtocolFailure(error)
+            throw error
+        }
+    }
+
+    private suspend fun reportProtocolFailure(error: RemoteProtocolException) {
+        val done = CompletableDeferred<Unit>()
+        mailbox.send(Message.ProtocolFailure(error, done))
+        done.await()
     }
 
     private suspend fun run() {
@@ -176,6 +206,8 @@ internal class ConnectionActor(
                 is Message.SocketBytes -> handleBytes(message)
                 is Message.SocketClosed -> handleClosed(message)
                 is Message.GreetingFinished -> handleGreeting(message)
+                is Message.CallTimedOut -> handleCallTimedOut(message)
+                is Message.ProtocolFailure -> handleProtocolFailure(message)
                 is Message.Retry -> handleRetry()
             }
         }
@@ -192,6 +224,7 @@ internal class ConnectionActor(
     }
 
     private fun handleBackground() {
+        val fatal = _link.value as? Link.Fatal
         wanted = false
         retryJob?.cancel()
         retryJob = null
@@ -200,7 +233,7 @@ internal class ConnectionActor(
         )
         pairing = null
         closeCurrent(DisconnectedException("App moved to background"))
-        _link.value = Link.Idle
+        _link.value = fatal ?: Link.Idle
     }
 
     private fun handlePair(message: Message.Pair) {
@@ -257,6 +290,24 @@ internal class ConnectionActor(
                 ),
             )
         }
+    }
+
+    private fun handleCallTimedOut(message: Message.CallTimedOut) {
+        if (!calls.contains(message.response)) return
+        handleClosed(
+            Message.SocketClosed(
+                generation,
+                SocketFailure(
+                    SocketFailureKind.IO,
+                    "Daemon did not answer the request in time",
+                ),
+            ),
+        )
+    }
+
+    private fun handleProtocolFailure(message: Message.ProtocolFailure) {
+        protocolFatal("Daemon sent a reply with an invalid shape", message.error)
+        message.done.complete(Unit)
     }
 
     private fun handleConnected(message: Message.SocketConnected) {
@@ -536,6 +587,15 @@ internal class ConnectionActor(
             val response: CompletableDeferred<SequencedReply>,
         ) : Message
 
+        data class CallTimedOut(
+            val response: CompletableDeferred<SequencedReply>,
+        ) : Message
+
+        data class ProtocolFailure(
+            val error: RemoteProtocolException,
+            val done: CompletableDeferred<Unit>,
+        ) : Message
+
         data class SocketConnected(
             val generation: Long,
             val certificateDer: ByteArray,
@@ -559,6 +619,7 @@ internal class ConnectionActor(
 
     private companion object {
         const val GREETING_TIMEOUT_MILLIS = 15_000L
+        const val CALL_TIMEOUT_MILLIS = 30_000L
         const val PROTOCOL_VERSION = 1
     }
 }

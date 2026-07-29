@@ -149,6 +149,45 @@ class ConnectionActorTest {
     }
 
     @Test
+    fun backgroundingPreservesFatalState() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(
+            factory,
+            MemoryCredentialStore(credentials()),
+            backgroundScope,
+        )
+        runCurrent()
+
+        factory.latest.fail(SocketFailureKind.PIN_MISMATCH, "certificate changed")
+        runCurrent()
+        actor.goBackground()
+        runCurrent()
+        actor.poke()
+        runCurrent()
+
+        assertEquals(
+            FatalReason.PIN_MISMATCH,
+            assertIs<Link.Fatal>(actor.link.value).reason,
+        )
+        assertEquals(1, factory.sockets.size)
+    }
+
+    @Test
+    fun unansweredCallClosesConnectionAndFailsQueue() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        val call = async { runCatching { actor.call(com.restartfu.xd.protocol.Ops.ping()) } }
+        runCurrent()
+
+        advanceTimeBy(30_000)
+        runCurrent()
+
+        assertTrue(call.await().isFailure)
+        assertTrue(factory.latest.closed)
+        assertIs<Link.Down>(actor.link.value)
+    }
+
+    @Test
     fun malformedJsonIsProtocolFatal() = runTest {
         val factory = FakeSocketFactory()
         val actor = connectedActor(factory)

@@ -42,6 +42,8 @@ public sealed interface TranscriptInput {
         val id: String,
         val message: String,
     ) : TranscriptInput
+
+    public data class RequestFailed(val message: String) : TranscriptInput
 }
 
 public data class TranscriptTransition(
@@ -150,6 +152,9 @@ public object TranscriptMachine {
                 },
                 error = input.message,
             ),
+        )
+        is TranscriptInput.RequestFailed -> TranscriptTransition(
+            state.copy(error = input.message),
         )
     }
 

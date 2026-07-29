@@ -96,9 +96,11 @@ class ChatViewModel(
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
     private val _sending = MutableStateFlow(false)
+    private val _cancelling = MutableStateFlow(false)
     private val _droppingQueued = MutableStateFlow(false)
     private val _draft = MutableStateFlow("")
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
+    val cancelling: StateFlow<Boolean> = _cancelling.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
 
     fun updateDraft(value: String) {
@@ -114,7 +116,15 @@ class ChatViewModel(
     }
 
     fun cancel() {
-        launchGuarded { session.cancel() }
+        val before = state.value
+        launchGuarded(_cancelling) {
+            session.cancel()
+            withTimeoutOrNull(CANCEL_EVENT_TIMEOUT_MILLIS) {
+                state.first {
+                    !it.working || it.startedAtMillis != before.startedAtMillis
+                }
+            }
+        }
     }
 
     fun enqueue() {
@@ -173,5 +183,6 @@ class ChatViewModel(
 
     private companion object {
         const val QUEUE_EVENT_TIMEOUT_MILLIS = 5_000L
+        const val CANCEL_EVENT_TIMEOUT_MILLIS = 5_000L
     }
 }
