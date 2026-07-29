@@ -266,10 +266,12 @@ internal class ChatSessionCore(
     suspend fun onEvent(event: SequencedEvent) {
         if (stateMutex.withLock { invalidated }) return
         val value = event.value
+        val eventName = (value["event"] as? JsonPrimitive)?.contentOrNull
         val eventChat = (value["chat"] as? JsonPrimitive)?.contentOrNull
+        if (eventName in CHAT_SCOPED_EVENTS && eventChat == null) return
         if (eventChat != null && eventChat != chatId) return
 
-        when ((value["event"] as? JsonPrimitive)?.contentOrNull) {
+        when (eventName) {
             "turn-started" -> apply(
                 TranscriptInput.TurnStarted(
                     label = (value["label"] as? JsonPrimitive)?.contentOrNull,
@@ -386,6 +388,14 @@ internal class ChatSessionCore(
     private companion object {
         const val MESSAGE_PAGE_SIZE = 150
         const val PENDING_TIMEOUT_MILLIS = 10_000L
+        val CHAT_SCOPED_EVENTS = setOf(
+            "commands",
+            "turn-started",
+            "text",
+            "tool",
+            "turn-finished",
+            "queued",
+        )
     }
 
     private data class BufferedInput(

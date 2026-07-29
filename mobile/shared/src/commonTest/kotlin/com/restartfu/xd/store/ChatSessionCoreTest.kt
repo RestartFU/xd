@@ -119,6 +119,42 @@ class ChatSessionCoreTest {
         )
     }
 
+    @Test
+    fun chatScopedEventWithoutChatIdIsIgnored() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(
+            factory,
+            MemoryCredentialStore(
+                StoredCredentials(
+                    host = "daemon",
+                    port = 4001,
+                    token = "token",
+                    certificateDer = byteArrayOf(1, 2, 3),
+                ),
+            ),
+            backgroundScope,
+        )
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        runCurrent()
+        runCurrent()
+
+        val core = ChatSessionCore("chat", actor, backgroundScope) { 10_000L }
+        core.onEvent(
+            SequencedEvent(
+                sequence = 2,
+                value = buildJsonObject {
+                    put("event", "text")
+                    put("text", "wrong chat")
+                },
+            ),
+        )
+
+        assertEquals("", core.state.value.liveSegment)
+    }
+
     private fun com.restartfu.xd.net.FakeSocket.countOps(op: String): Int =
         writes.count { it.decodeToString().contains(""""op":"$op"""") }
 

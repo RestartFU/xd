@@ -42,13 +42,16 @@ internal class CallQueue(
     fun contains(response: CompletableDeferred<SequencedReply>): Boolean =
         response in pending
 
-    fun acceptReply(reply: SequencedReply) {
+    fun acceptReply(
+        reply: SequencedReply,
+    ): CompletableDeferred<SequencedReply>? {
         val response = pending.removeFirstOrNull()
         if (response == null) {
             onUnanswerableReply(reply.value)
-            return
+            return null
         }
         response.complete(reply)
+        return response
     }
 
     fun failAll(error: Throwable) {

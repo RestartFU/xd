@@ -219,6 +219,35 @@ class ConnectionActorTest {
     }
 
     @Test
+    fun cancelledCallerStillLeavesAnActiveConnectionWatchdog() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        val abandoned = async {
+            actor.call(com.restartfu.xd.protocol.Ops.ping())
+        }
+        runCurrent()
+
+        abandoned.cancel()
+        advanceTimeBy(30_000)
+        runCurrent()
+
+        assertTrue(factory.latest.closed)
+        assertIs<Link.Down>(actor.link.value)
+    }
+
+    @Test
+    fun inboundBufferOverflowClosesSocket() = runTest {
+        val factory = FakeSocketFactory()
+        connectedActor(factory)
+
+        repeat(1_100) {
+            factory.latest.receive("""{"event":"changed"}""")
+        }
+
+        assertTrue(factory.latest.closed)
+    }
+
+    @Test
     fun malformedJsonIsProtocolFatal() = runTest {
         val factory = FakeSocketFactory()
         val actor = connectedActor(factory)

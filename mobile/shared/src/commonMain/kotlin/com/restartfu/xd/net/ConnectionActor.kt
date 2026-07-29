@@ -24,7 +24,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
@@ -75,15 +74,15 @@ internal data class SequencedEvent(
 /**
  * Owns connection state and is the only coroutine touching protocol queues.
  *
- * Socket callbacks only append messages to an unlimited channel. Parsing,
- * greeting, FIFO matching, and reconnect decisions happen in [run].
+ * Socket callbacks append messages to a bounded channel. Parsing, greeting,
+ * FIFO matching, and reconnect decisions happen in [run].
  */
 internal class ConnectionActor(
     private val socketFactory: PlatformSocketFactory,
     private val credentialStore: CredentialStore,
     private val scope: CoroutineScope,
 ) {
-    private val mailbox = Channel<Message>(Channel.UNLIMITED)
+    private val mailbox = Channel<Message>(MAILBOX_CAPACITY)
     private val backoff = Backoff()
     private val assembler = LineAssembler()
     private val _link = MutableStateFlow<Link>(Link.Idle)
@@ -98,6 +97,8 @@ internal class ConnectionActor(
     private var wanted: Boolean = true
     private var retryJob: Job? = null
     private var pairing: PairAttempt? = null
+    private val callTimeouts =
+        mutableMapOf<CompletableDeferred<SequencedReply>, Job>()
     private val calls = CallQueue(
         write = { bytes ->
             socket?.send(bytes) ?: throw NotConnectedException()
@@ -114,11 +115,11 @@ internal class ConnectionActor(
     }
 
     fun poke() {
-        mailbox.trySend(Message.Poke)
+        sendToMailbox(Message.Poke)
     }
 
     fun goBackground() {
-        mailbox.trySend(Message.Background)
+        sendToMailbox(Message.Background)
     }
 
     suspend fun pair(
@@ -158,13 +159,7 @@ internal class ConnectionActor(
     suspend fun callSequenced(request: JsonObject): SequencedReply {
         val response = CompletableDeferred<SequencedReply>()
         mailbox.send(Message.Call(request, response))
-        val reply = withTimeoutOrNull(CALL_TIMEOUT_MILLIS) {
-            response.await()
-        }
-        if (reply == null) {
-            mailbox.send(Message.CallTimedOut(response))
-            throw DisconnectedException("Daemon did not answer the request in time")
-        }
+        val reply = response.await()
         return try {
             reply.also { it.value.requireSuccess() }
         } catch (error: RemoteProtocolException) {
@@ -283,8 +278,12 @@ internal class ConnectionActor(
 
         try {
             calls.enqueue(message.request, message.response)
+            callTimeouts[message.response] = scope.launch {
+                delay(CALL_TIMEOUT_MILLIS)
+                mailbox.send(Message.CallTimedOut(message.response))
+            }
         } catch (error: Throwable) {
-            mailbox.trySend(
+            handleClosed(
                 Message.SocketClosed(
                     generation,
                     SocketFailure(SocketFailureKind.IO, error.message ?: "Write failed"),
@@ -355,6 +354,7 @@ internal class ConnectionActor(
                     _events.emit(SequencedEvent(sequence, objectValue))
                 } else {
                     calls.acceptReply(SequencedReply(sequence, objectValue))
+                        ?.let { callTimeouts.remove(it)?.cancel() }
                 }
             }
         } catch (error: Throwable) {
@@ -436,6 +436,7 @@ internal class ConnectionActor(
         socket = null
         leafCertificateDer = null
         assembler.reset()
+        cancelCallTimeouts()
         calls.failAll(DisconnectedException(text))
         old?.close()
 
@@ -502,24 +503,39 @@ internal class ConnectionActor(
         socket = created
         val listener = object : PlatformSocketListener {
             override fun onConnected(leafCertificateDer: ByteArray) {
-                mailbox.trySend(
+                sendToMailbox(
                     Message.SocketConnected(thisGeneration, leafCertificateDer.copyOf()),
                 )
             }
 
             override fun onBytes(chunk: ByteArray) {
-                mailbox.trySend(Message.SocketBytes(thisGeneration, chunk.copyOf()))
+                if (
+                    mailbox.trySend(
+                        Message.SocketBytes(thisGeneration, chunk.copyOf()),
+                    ).isFailure
+                ) {
+                    created.close()
+                    sendToMailbox(
+                        Message.SocketClosed(
+                            thisGeneration,
+                            SocketFailure(
+                                SocketFailureKind.IO,
+                                "Inbound protocol buffer overflow",
+                            ),
+                        ),
+                    )
+                }
             }
 
             override fun onClosed(reason: SocketFailure?) {
-                mailbox.trySend(Message.SocketClosed(thisGeneration, reason))
+                sendToMailbox(Message.SocketClosed(thisGeneration, reason))
             }
         }
 
         try {
             created.connect(host, port, pin?.copyOf(), listener)
         } catch (error: Throwable) {
-            mailbox.trySend(
+            handleClosed(
                 Message.SocketClosed(
                     thisGeneration,
                     SocketFailure(SocketFailureKind.IO, error.message ?: "Connect failed"),
@@ -556,8 +572,20 @@ internal class ConnectionActor(
         socket = null
         leafCertificateDer = null
         assembler.reset()
+        cancelCallTimeouts()
         calls.failAll(error)
         old?.close()
+    }
+
+    private fun cancelCallTimeouts() {
+        callTimeouts.values.forEach(Job::cancel)
+        callTimeouts.clear()
+    }
+
+    private fun sendToMailbox(message: Message) {
+        if (mailbox.trySend(message).isFailure) {
+            scope.launch { mailbox.send(message) }
+        }
     }
 
     private data class PairAttempt(
@@ -621,6 +649,7 @@ internal class ConnectionActor(
     private companion object {
         const val GREETING_TIMEOUT_MILLIS = 15_000L
         const val CALL_TIMEOUT_MILLIS = 30_000L
+        const val MAILBOX_CAPACITY = 64
         const val PROTOCOL_VERSION = 1
     }
 }
