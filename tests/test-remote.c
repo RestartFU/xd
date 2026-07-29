@@ -232,6 +232,28 @@ on_done (Wait *wait)
   wait->done = TRUE;
 }
 
+/*
+ * Whether this machine can stand in for an agent CLI.
+ *
+ * The stand-ins below are shell scripts, and a shell script is not something
+ * Windows can execute: there is no shebang for CreateProcess to honour. What
+ * these tests need is a CLI that answers on cue, and writing one on the spot
+ * is only possible where a script is executable.
+ *
+ * The daemon's own spawning is not what goes untested by this -- every other
+ * test here still runs against it.
+ */
+static gboolean
+can_fake_a_cli (void)
+{
+#ifdef G_OS_WIN32
+  g_test_skip ("a shell script cannot stand in for a CLI on Windows");
+  return FALSE;
+#else
+  return TRUE;
+#endif
+}
+
 /* --- the wire, by hand ----------------------------------------------------- */
 
 typedef struct
@@ -1633,6 +1655,9 @@ live_turn_was_stored (gpointer user_data)
 static void
 test_images_are_uploaded_to_the_daemon (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
@@ -3009,6 +3034,9 @@ steer_started_queued_turn (gpointer user_data)
 static void
 test_send_during_turn_queues (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
@@ -3233,6 +3261,9 @@ test_send_during_turn_queues (void)
 static void
 test_slow_git_snapshot_does_not_stall_other_chats (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
@@ -3406,6 +3437,9 @@ test_opening_an_idle_chat_keeps_its_queue (void)
 static void
 test_steer_starts_an_idle_remote_queue (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
@@ -3555,6 +3589,9 @@ test_steer_starts_an_idle_remote_queue (void)
 static void
 test_a_joining_device_sees_an_active_turn (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) sender = NULL;
   g_autoptr (XdRemoteClient) joining = NULL;
@@ -3772,6 +3809,9 @@ on_server_quiesced (GObject      *source,
 static void
 test_a_live_turn_is_already_durable (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdDaemonTurn) turn = NULL;
   g_autoptr (GPtrArray) messages = NULL;
@@ -3840,6 +3880,9 @@ test_a_live_turn_is_already_durable (void)
 static void
 test_a_restarted_daemon_resumes_interrupted_work (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
@@ -4006,6 +4049,9 @@ on_interrupted_turn_finished (XdDaemonTurn *turn,
 static void
 test_an_interrupted_turn_keeps_its_timeline (void)
 {
+  if (!can_fake_a_cli ())
+    return;
+
   Daemon daemon = { 0 };
   g_autoptr (XdDaemonTurn) turn = NULL;
   g_autoptr (XdStorage) reopened = NULL;
