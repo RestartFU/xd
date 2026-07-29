@@ -12,11 +12,15 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val client: XdClient = (application as XdApplication).client
     private val _pairing = MutableStateFlow(false)
+    private val _forgetting = MutableStateFlow(false)
+    private val _creatingChat = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
 
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
@@ -48,6 +52,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun forget() {
+        if (_forgetting.value) return
+        _forgetting.value = true
         _error.value = null
         viewModelScope.launch {
             try {
@@ -56,6 +62,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 throw error
             } catch (error: Throwable) {
                 _error.value = error.message ?: "Could not forget the remote"
+            } finally {
+                _forgetting.value = false
             }
         }
     }
@@ -64,6 +72,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         folderId: String,
         onCreated: (String) -> Unit,
     ) {
+        if (_creatingChat.value) return
+        _creatingChat.value = true
         _error.value = null
         viewModelScope.launch {
             try {
@@ -72,6 +82,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 throw error
             } catch (error: Throwable) {
                 _error.value = error.message ?: "Could not create a chat"
+            } finally {
+                _creatingChat.value = false
             }
         }
     }
@@ -84,74 +96,64 @@ class ChatViewModel(
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
     private val _sending = MutableStateFlow(false)
+    private val _droppingQueued = MutableStateFlow(false)
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
 
     fun send(
         text: String,
         onSent: () -> Unit,
     ) {
-        if (_sending.value) return
-        _sending.value = true
-        viewModelScope.launch {
-            try {
+        launchGuarded(_sending) {
                 session.send(text)
                 onSent()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                // ChatSession exposes the failure through its state.
-            } finally {
-                _sending.value = false
-            }
         }
     }
 
     fun cancel() {
-        viewModelScope.launch {
-            try {
-                session.cancel()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                // Connection state already exposes the failure.
-            }
-        }
+        launchGuarded { session.cancel() }
     }
 
     fun enqueue(
         text: String,
         onQueued: () -> Unit,
     ) {
-        if (_sending.value) return
-        _sending.value = true
-        viewModelScope.launch {
-            try {
+        launchGuarded(_sending) {
                 session.enqueue(text)
                 onQueued()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                // Queue changes and failures arrive through session state.
-            } finally {
-                _sending.value = false
-            }
         }
     }
 
     fun dropQueued(index: Int) {
-        viewModelScope.launch {
-            try {
-                session.dropQueued(index)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                // Queue changes and failures arrive through session state.
+        val before = state.value.queue
+        launchGuarded(_droppingQueued) {
+            session.dropQueued(index)
+            withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
+                state.first { it.queue != before }
             }
         }
     }
 
     fun loadOlder() {
-        viewModelScope.launch { session.loadOlder() }
+        launchGuarded { session.loadOlder() }
+    }
+
+    private fun launchGuarded(
+        guard: MutableStateFlow<Boolean>? = null,
+        block: suspend () -> Unit,
+    ) {
+        if (guard?.value == true) return
+        guard?.value = true
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // ChatSession records mutation failures in state.
+            } finally {
+                guard?.value = false
+            }
+        }
     }
 
     override fun onCleared() {
@@ -165,5 +167,9 @@ class ChatViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             ChatViewModel(client, chatId) as T
+    }
+
+    private companion object {
+        const val QUEUE_EVENT_TIMEOUT_MILLIS = 5_000L
     }
 }

@@ -58,7 +58,6 @@ public object TranscriptMachine {
         is TranscriptInput.MessagesLoaded -> TranscriptTransition(
             state.withMessages(input.messages).copy(
                 loadingOlder = false,
-                error = null,
             ),
         )
         is TranscriptInput.TurnStarted -> TranscriptTransition(

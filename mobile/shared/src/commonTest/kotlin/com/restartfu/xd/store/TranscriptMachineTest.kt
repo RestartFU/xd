@@ -196,6 +196,17 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun messagesReloadPreservesANewerMutationError() {
+        val result = reduce(
+            ChatState("chat", error = "queue rejected", loadingOlder = true),
+            TranscriptInput.MessagesLoaded(messages()),
+        ).state
+
+        assertEquals("queue rejected", result.error)
+        assertEquals(false, result.loadingOlder)
+    }
+
+    @Test
     fun pendingTimeoutRequestsChatAndMessagesOnlyForCurrentPendingRow() {
         val pending = reduce(
             ChatState("chat"),

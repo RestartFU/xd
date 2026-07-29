@@ -212,7 +212,18 @@ internal class ChatSessionCore(
     }
 
     suspend fun call(request: JsonObject) {
-        actor.call(request)
+        try {
+            actor.call(request)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            stateMutex.withLock {
+                _state.value = _state.value.copy(
+                    error = error.message ?: "The daemon refused the request",
+                )
+            }
+            throw error
+        }
     }
 
     suspend fun onEvent(event: SequencedEvent) {

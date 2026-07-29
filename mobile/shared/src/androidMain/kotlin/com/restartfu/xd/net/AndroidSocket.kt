@@ -9,9 +9,12 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.security.cert.CertificateException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.LinkedBlockingQueue
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
+import kotlin.concurrent.thread
 
 public class AndroidSocketFactory(
     private val connectTimeoutMillis: Int = 10_000,
@@ -37,13 +40,17 @@ internal class AndroidSocket(
 
     private val closed = AtomicBoolean(false)
     private val callbackFinished = AtomicBoolean(false)
-    private val writeLock = Any()
+    private val writes = LinkedBlockingQueue<ByteArray>()
+    private val writerFailure = AtomicReference<SocketFailure?>()
 
     @Volatile
     private var socket: SSLSocket? = null
 
     @Volatile
     private var listener: PlatformSocketListener? = null
+
+    @Volatile
+    private var writer: Thread? = null
 
     override fun connect(
         host: String,
@@ -69,11 +76,8 @@ internal class AndroidSocket(
 
     override fun send(bytes: ByteArray) {
         check(!closed.get()) { "Socket is closed" }
-        synchronized(writeLock) {
-            val active = socket ?: error("Socket is not connected")
-            active.outputStream.write(bytes)
-            active.outputStream.flush()
-        }
+        check(socket != null) { "Socket is not connected" }
+        writes.add(bytes.copyOf())
     }
 
     override fun close() {
@@ -83,6 +87,7 @@ internal class AndroidSocket(
         } catch (_: IOException) {
             // Closing is best effort and idempotent.
         }
+        writer?.interrupt()
     }
 
     private fun runConnection(
@@ -114,6 +119,9 @@ internal class AndroidSocket(
             if (closed.get()) throw EOFException("Socket was closed")
             val certificate = active.session.peerCertificates.firstOrNull()?.encoded
                 ?: throw SSLException("The daemon supplied no certificate")
+            writer = thread(name = "xd-mobile-tls-writer", isDaemon = true) {
+                runWriter(active)
+            }
             listener?.onConnected(certificate.copyOf())
 
             val buffer = ByteArray(READ_BUFFER_BYTES)
@@ -129,7 +137,7 @@ internal class AndroidSocket(
                 terminalReason = SocketFailure(SocketFailureKind.CANCELLED, "Socket closed")
             }
         } catch (error: Throwable) {
-            terminalReason = error.toSocketFailure()
+            terminalReason = writerFailure.get() ?: error.toSocketFailure()
         } finally {
             try {
                 socket?.close()
@@ -137,8 +145,31 @@ internal class AndroidSocket(
                 // Reader already ended.
             }
             socket = null
+            writer?.interrupt()
+            writer = null
         }
         finish(terminalReason)
+    }
+
+    private fun runWriter(active: SSLSocket) {
+        try {
+            while (!closed.get()) {
+                val bytes = writes.take()
+                active.outputStream.write(bytes)
+                active.outputStream.flush()
+            }
+        } catch (_: InterruptedException) {
+            // Normal shutdown wakes a writer waiting for work.
+        } catch (error: Throwable) {
+            if (!closed.get()) {
+                writerFailure.compareAndSet(null, error.toSocketFailure())
+                try {
+                    active.close()
+                } catch (_: IOException) {
+                    // Closing the reader is best effort.
+                }
+            }
+        }
     }
 
     private fun finish(reason: SocketFailure?) {

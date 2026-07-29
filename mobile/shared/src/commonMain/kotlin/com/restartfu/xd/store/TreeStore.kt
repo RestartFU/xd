@@ -25,6 +25,14 @@ internal class TreeStore(
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
 
+    suspend fun clear() {
+        stateMutex.withLock {
+            lifecycleVersion += 1
+            workingEvents.clear()
+            _state.value = TreeSnapshot()
+        }
+    }
+
     suspend fun setChatWorking(
         chatId: String,
         working: Boolean,

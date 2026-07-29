@@ -83,6 +83,7 @@ public class XdClient(
 
     public suspend fun forget() {
         actor.forget()
+        treeStore.clear()
     }
 
     public fun openChat(chatId: String): ChatSession {

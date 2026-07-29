@@ -115,7 +115,19 @@ class XdClientVerticalSliceTest {
             session.state.value.messages.map { it.kind },
         )
         assertEquals("Done", session.state.value.messages.last().text)
+
+        val cancelling = async { runCatching { session.cancel() } }
+        runCurrent()
+        assertEquals("cancel", socket.opAt(10))
+        socket.receive("""{"ok":false,"error":"cancel rejected"}""")
+        runCurrent()
+        assertTrue(cancelling.await().isFailure)
+        assertEquals("cancel rejected", session.state.value.error)
+
         session.close()
+        client.forget()
+        assertTrue(client.tree.value.chats.isEmpty())
+        assertTrue(client.tree.value.folders.isEmpty())
     }
 
     @Test
