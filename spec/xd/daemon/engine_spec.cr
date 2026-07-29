@@ -1,4 +1,5 @@
 require "../../spec_helper"
+require "base64"
 require "file_utils"
 require "random/secure"
 require "../../../src/xd/daemon/engine"
@@ -309,6 +310,90 @@ describe Xd::Daemon::Engine do
       else
         ENV.delete("XD_AGENT_SECRETS_FILE")
       end
+    end
+  end
+
+  it "routes terminal sessions through the shared daemon engine" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Terminal",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+
+      seen = [] of Xd::Protocol::Event
+      subscription = engine.events.subscribe { |event| seen << event }
+      opened = engine.process(local, {
+        "op"      => "terminal-open",
+        "chat"    => chat,
+        "columns" => 100,
+        "rows"    => 30,
+      }.to_json)
+      opened.response.success?.should be_true
+      opened.events.map { |event| event["event"].as_s }
+        .should eq(["terminal-opened"])
+      opened.after_write.not_nil!.call
+      terminal_id = opened.response["id"].as_s
+
+      engine.dispatch(local, {
+        "op"       => "terminal-input",
+        "terminal" => terminal_id,
+        "data"     => Base64.strict_encode(
+          "printf '\\nENGINE_PTY_OK\\n'\n"
+        ),
+      }.to_json).success?.should be_true
+
+      deadline = Time.instant + 3.seconds
+      until seen.any? { |event|
+              event["event"].as_s == "terminal-output" &&
+              Base64.decode_string(event["data"].as_s)
+                .includes?("ENGINE_PTY_OK")
+            }
+        fail "terminal output did not arrive" if Time.instant >= deadline
+        sleep 10.milliseconds
+      end
+
+      listed = engine.dispatch(local, {
+        "op"   => "terminal-list",
+        "chat" => chat,
+      }.to_json)
+      row = listed["terminals"].as_a.first
+      row["id"].as_s.should eq(terminal_id)
+      row["columns"].as_i.should eq(100)
+      replay = row["replay"].as_a
+        .compact_map { |item| item["data"]?.try(&.as_s?) }
+        .map { |data| Base64.decode_string(data) }
+        .join
+      replay.should contain("ENGINE_PTY_OK")
+
+      resized = engine.process(local, {
+        "op"       => "terminal-resize",
+        "terminal" => terminal_id,
+        "columns"  => 120,
+        "rows"     => 40,
+      }.to_json)
+      resized.response.success?.should be_true
+      resized.events.first["event"].as_s.should eq("terminal-resized")
+      resized.events.first["columns"].as_i.should eq(120)
+
+      reused = engine.process(local, {
+        "op"    => "terminal-open",
+        "chat"  => chat,
+        "reuse" => true,
+      }.to_json)
+      reused.response["id"].as_s.should eq(terminal_id)
+      reused.events.should be_empty
+      reused.after_write.should be_nil
+
+      engine.dispatch(local, {
+        "op"       => "terminal-kill",
+        "terminal" => terminal_id,
+      }.to_json).success?.should be_true
+      engine.events.unsubscribe(subscription)
     end
   end
 end

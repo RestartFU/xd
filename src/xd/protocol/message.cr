@@ -104,6 +104,9 @@ module Xd
       end
     end
 
-    record Outcome, response : Response, events : Array(Event)
+    record Outcome,
+      response : Response,
+      events : Array(Event),
+      after_write : Proc(Nil)? = nil
   end
 end

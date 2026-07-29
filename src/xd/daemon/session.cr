@@ -49,9 +49,13 @@ module Xd
             next if line.empty?
 
             outcome = @engine.process(connection, line)
-            writer.write(outcome.response)
-            if events = @events
-              outcome.events.each { |event| events.publish(event) }
+            begin
+              writer.write(outcome.response)
+              if events = @events
+                outcome.events.each { |event| events.publish(event) }
+              end
+            ensure
+              outcome.after_write.try(&.call)
             end
           end
         ensure

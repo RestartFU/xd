@@ -11,6 +11,7 @@ require "./event_bus"
 require "./filesystem"
 require "./images"
 require "./repository"
+require "./terminals"
 
 module Xd
   module Daemon
@@ -31,6 +32,8 @@ module Xd
       @command_mutex = Mutex.new
       @event_mutex = Mutex.new
       @next_event_id = 0_i64
+      @command_events = [] of Protocol::Event
+      @after_write : Proc(Nil)?
 
       def initialize(
         @store : Storage::Store,
@@ -47,12 +50,18 @@ module Xd
         @filesystem = Filesystem.new(@store, @workspaces)
         @images = Images.new
         @repository = Repository.new(@store, @workspaces, @filesystem)
+        @terminals = Terminals.new(
+          @filesystem,
+          ->(name : String, fields : Hash(String, JSON::Any)) {
+            publish_async_event(name, fields)
+          }
+        )
         @agents = Agent::Manager.new(
           @store,
           @workspaces,
           launcher || Agent::ProcessLauncher.new(VERSION),
           ->(name : String, fields : Hash(String, JSON::Any)) {
-            publish_agent_event(name, fields)
+            publish_async_event(name, fields)
           }
         )
       end
@@ -71,13 +80,17 @@ module Xd
       end
 
       def dispatch(connection : Connection, line : String) : Protocol::Response
-        process(connection, line).response
+        outcome = process(connection, line)
+        outcome.after_write.try(&.call)
+        outcome.response
       end
 
       def process(connection : Connection, line : String) : Protocol::Outcome
         request = Protocol::Request.parse(line)
 
         @command_mutex.synchronize do
+          @command_events.clear
+          @after_write = nil
           if request.operation.authentication_required? && !connection.authenticated
             return Protocol::Outcome.new(
               Protocol::Response.error(
@@ -88,8 +101,13 @@ module Xd
           end
 
           response = dispatch_request(connection, request)
-          events = response.success? ? events_for(request) : [] of Protocol::Event
-          Protocol::Outcome.new(response, events)
+          events = if response.success?
+                     events_for(request) + @command_events
+                   else
+                     [] of Protocol::Event
+                   end
+          after_write = response.success? ? @after_write : nil
+          Protocol::Outcome.new(response, events, after_write)
         end
       rescue error : Protocol::Error
         failed_outcome(error.message || "Invalid request")
@@ -107,9 +125,12 @@ module Xd
         failed_outcome(error.message || "Image error")
       rescue error : Repository::Error
         failed_outcome(error.message || "Repository error")
+      rescue error : Terminals::Error
+        failed_outcome(error.message || "Terminal error")
       end
 
       def close : Nil
+        @terminals.close
         @agents.close
       end
 
@@ -172,6 +193,16 @@ module Xd
           cancel(request)
         when Protocol::Operation::DiffRead
           diff_read(request)
+        when Protocol::Operation::TerminalList
+          terminal_list(request)
+        when Protocol::Operation::TerminalOpen
+          terminal_open(request)
+        when Protocol::Operation::TerminalInput
+          terminal_input(request)
+        when Protocol::Operation::TerminalResize
+          terminal_resize(request)
+        when Protocol::Operation::TerminalKill
+          terminal_kill(request)
         when Protocol::Operation::Ping
           Protocol::Response.ok
         else
@@ -661,6 +692,96 @@ module Xd
         Protocol::Response.ok({"output" => JSON::Any.new(output)})
       end
 
+      private def terminal_list(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string(
+          "chat",
+          "terminal-list needs a chat id."
+        )
+        Protocol::Response.ok({
+          "terminals" => JSON::Any.new(@terminals.list(chat_id)),
+        })
+      end
+
+      private def terminal_open(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string(
+          "chat",
+          "terminal-open needs a chat id."
+        )
+        columns = request.int?("columns") || Terminal::DEFAULT_COLUMNS
+        rows = request.int?("rows") || Terminal::DEFAULT_ROWS
+        reuse = request.body["reuse"]?.try(&.as_bool?) || false
+        opened = @terminals.open(chat_id, columns, rows, reuse)
+        terminal = opened.terminal
+
+        if opened.created
+          @command_events << protocol_event("terminal-opened", {
+            "chat"     => JSON::Any.new(terminal.chat_id),
+            "terminal" => JSON::Any.new(terminal.id),
+            "title"    => JSON::Any.new(terminal.title),
+            "columns"  => JSON::Any.new(terminal.columns.to_i64),
+            "rows"     => JSON::Any.new(terminal.rows.to_i64),
+          })
+          @after_write = -> { @terminals.start(terminal.id) }
+        end
+
+        Protocol::Response.ok({
+          "id" => JSON::Any.new(terminal.id),
+        })
+      end
+
+      private def terminal_input(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        terminal_id = request.string(
+          "terminal",
+          "A terminal id is required."
+        )
+        data = request.string(
+          "data",
+          "terminal-input needs data."
+        )
+        @terminals.input(terminal_id, data)
+        Protocol::Response.ok
+      end
+
+      private def terminal_resize(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        terminal_id = request.string(
+          "terminal",
+          "A terminal id is required."
+        )
+        columns = request.int?("columns") || Terminal::DEFAULT_COLUMNS
+        rows = request.int?("rows") || Terminal::DEFAULT_ROWS
+        terminal, width, height = @terminals.resize(
+          terminal_id,
+          columns,
+          rows
+        )
+        @command_events << protocol_event("terminal-resized", {
+          "chat"     => JSON::Any.new(terminal.chat_id),
+          "terminal" => JSON::Any.new(terminal.id),
+          "columns"  => JSON::Any.new(width.to_i64),
+          "rows"     => JSON::Any.new(height.to_i64),
+        })
+        Protocol::Response.ok
+      end
+
+      private def terminal_kill(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        terminal_id = request.string(
+          "terminal",
+          "A terminal id is required."
+        )
+        @terminals.kill(terminal_id)
+        Protocol::Response.ok
+      end
+
       private def drop_queue(
         request : Protocol::Request,
       ) : Protocol::Response
@@ -779,7 +900,7 @@ module Xd
         end
       end
 
-      private def publish_agent_event(
+      private def publish_async_event(
         name : String,
         fields : Hash(String, JSON::Any),
       ) : Nil
