@@ -1502,8 +1502,9 @@ build_row_menu (XdNode *node)
 /*
  * The remote's own row, which is the machine rather than a folder on it.
  *
- * It can hold new workspaces and it can be refreshed; it cannot be renamed or
- * thrown away, because neither means anything to do to a computer.
+ * It can hold new workspaces, be refreshed, or be forgotten by this device.
+ * Removing the connection is a window action because the window owns both the
+ * saved credentials and the client; it does not delete anything on the remote.
  */
 static GMenuModel *
 build_remote_menu (XdNode *node)
@@ -1511,9 +1512,11 @@ build_remote_menu (XdNode *node)
   g_autoptr (GVariant) target =
     g_variant_ref_sink (g_variant_new_string (xd_node_get_path (node)));
   GMenu *menu = g_menu_new ();
+  GMenu *section = g_menu_new ();
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) secrets = NULL;
   g_autoptr (GMenuItem) refresh = NULL;
+  g_autoptr (GMenuItem) remove = NULL;
 
   new_folder = g_menu_item_new ("New Workspace", NULL);
   g_menu_item_set_action_and_target_value (new_folder, "sidebar.new-folder", target);
@@ -1527,6 +1530,11 @@ build_remote_menu (XdNode *node)
   refresh = g_menu_item_new ("Refresh", NULL);
   g_menu_item_set_action_and_target_value (refresh, "sidebar.refresh-remote", target);
   g_menu_append_item (menu, refresh);
+
+  remove = g_menu_item_new ("Remove Connection…", "win.remove-remote");
+  g_menu_append_item (section, remove);
+  g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
+  g_object_unref (section);
 
   return G_MENU_MODEL (menu);
 }
@@ -1854,6 +1862,20 @@ xd_sidebar_set_remote (XdSidebar    *self,
 
   if (self->remote != NULL)
     {
+      if (self->selected != NULL &&
+          xd_remote_tree_owns (self->remote, self->selected))
+        {
+          gtk_selection_model_unselect_all (
+            GTK_SELECTION_MODEL (self->selection));
+          g_clear_object (&self->selected);
+        }
+
+      if (self->restore_chat_remote)
+        {
+          g_clear_pointer (&self->restore_chat_id, g_free);
+          self->restore_chat_remote = FALSE;
+        }
+
       g_signal_handlers_disconnect_by_data (self->remote, self);
 
       if (g_list_store_find (self->roots,
