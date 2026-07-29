@@ -1436,6 +1436,7 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_box_append (GTK_BOX (tabs), controls);
   gtk_overlay_set_child (GTK_OVERLAY (header), tabs);
   gtk_overlay_add_overlay (GTK_OVERLAY (header), title_row);
+  gtk_widget_add_css_class (header, "xd-divider-bottom");
   gtk_box_append (GTK_BOX (box), header);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->stack));
 

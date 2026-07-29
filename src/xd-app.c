@@ -216,6 +216,7 @@ static const char *XD_STYLE =
   " opacity: 0; }\n"
   ".xd-divider-left { border-left: 1px solid #2a2a2d; }\n"
   ".xd-divider-top { border-top: 1px solid #2a2a2d; }\n"
+  ".xd-divider-bottom { border-bottom: 1px solid #2a2a2d; }\n"
 
   /* The tree: rows sized to their text, and rounded so a selection reads as
    * a highlight rather than as a band across the pane. */
