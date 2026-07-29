@@ -159,7 +159,7 @@ test_reports_row_kinds_without_backgrounds (void)
   /* An added line with no text of its own still colours its whole row. */
   g_assert_cmpint (g_array_index (kinds, guint8, 5), ==, XD_DIFF_LINE_ADDED);
 
-  g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_FILE), ==, "#000000");
+  g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_FILE), ==, "#2a2a2d");
   g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_ADDED), ==, "#183522");
   g_assert_cmpstr (xd_diff_line_background (XD_DIFF_LINE_REMOVED), ==, "#3a1d1b");
   g_assert_null (xd_diff_line_background (XD_DIFF_LINE_CONTEXT));
