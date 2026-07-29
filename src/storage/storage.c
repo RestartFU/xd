@@ -4,7 +4,7 @@
 #include <json-glib/json-glib.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 17
+#define XD_STORAGE_SCHEMA_VERSION 18
 
 struct _XdStorage
 {
@@ -27,8 +27,10 @@ enum
 
 static guint signals[N_SIGNALS];
 
-/* SQLite writes several times per statement; one event out the far side is
- * enough, and a moment late costs nothing. */
+/* SQLite writes several times per statement. Cap notifications rather than
+ * waiting for complete silence: a streamed reply can write continuously for
+ * minutes, and a resettable debounce made every other process look frozen
+ * until the turn stopped. */
 #define SETTLE_MS 400
 
 G_DEFINE_FINAL_TYPE (XdStorage, xd_storage, G_TYPE_OBJECT)
@@ -54,8 +56,8 @@ on_file_changed (GFileMonitor      *monitor,
 {
   XdStorage *self = user_data;
 
-  g_clear_handle_id (&self->settled_id, g_source_remove);
-  self->settled_id = g_timeout_add (SETTLE_MS, on_settled, self);
+  if (self->settled_id == 0)
+    self->settled_id = g_timeout_add (SETTLE_MS, on_settled, self);
 }
 
 void
@@ -434,6 +436,17 @@ migrate (XdStorage  *self,
         error))
     return FALSE;
 
+  /* A daemon and a local window are separate processes. Persist only whether
+   * the daemon owns a turn; the streamed transcript itself is already stored
+   * in messages as it arrives. */
+  if (version < 18 &&
+      !exec_sql (
+        self,
+        "ALTER TABLE chats ADD COLUMN"
+        " daemon_working INTEGER NOT NULL DEFAULT 0;",
+        error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          XD_STORAGE_SCHEMA_VERSION);
@@ -668,6 +681,7 @@ chat_from_row (sqlite3_stmt *stmt)
   }
   chat->new_worktree  = sqlite3_column_int (stmt, 14) != 0;
   chat->original_workdir = column_text (stmt, 15);
+  chat->daemon_working = sqlite3_column_int (stmt, 16) != 0;
 
   return chat;
 }
@@ -675,7 +689,7 @@ chat_from_row (sqlite3_stmt *stmt)
 #define CHAT_COLUMNS \
   "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
   " created_at, updated_at, terminal_open, diff_open, queued, new_worktree,"\
-  " original_workdir"
+  " original_workdir, daemon_working"
 
 XdChat *
 xd_storage_get_chat (XdStorage   *self,
@@ -781,6 +795,56 @@ xd_storage_set_chat_title (XdStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?;",
                              title, chat_id, "Cannot rename the chat", error);
+}
+
+gboolean
+xd_storage_set_daemon_working (XdStorage   *self,
+                               const char  *chat_id,
+                               gboolean     working,
+                               GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats SET daemon_working = ? WHERE id = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot update the daemon turn");
+      return FALSE;
+    }
+
+  sqlite3_bind_int (stmt, 1, working);
+  bind_text (stmt, 2, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    {
+      if (sqlite3_errcode (self->db) != SQLITE_OK)
+        set_sqlite_error (error, self->db, "Cannot update the daemon turn");
+      else
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                     "No chat %s", chat_id);
+    }
+
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+gboolean
+xd_storage_clear_daemon_working (XdStorage  *self,
+                                 GError    **error)
+{
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  return exec_sql (self,
+                   "UPDATE chats SET daemon_working = 0"
+                   " WHERE daemon_working != 0;",
+                   error);
 }
 
 char *

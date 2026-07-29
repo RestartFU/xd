@@ -20,6 +20,7 @@ typedef struct
   gboolean plan;      /* think it through, change nothing */
   gboolean terminal_open;  /* the panes this chat was left with */
   gboolean diff_open;
+  gboolean daemon_working; /* a turn owned by the local daemon */
   guint64 context_used;    /* transient when sent to a remote client */
   guint64 context_window;
   gint64 created_at;
@@ -70,11 +71,13 @@ const char *xd_storage_get_path        (XdStorage   *self);
  * mention those, and without it a window shows a conversation that stopped
  * being true while it was on screen.
  *
- * Coalesced, since one statement is several writes.
+ * Throttled, since one statement is several writes and a live stream may
+ * never become completely quiet.
  */
 
 /*
- * Watches the database for writes, and emits ::changed when it settles.
+ * Watches the database for writes, emitting ::changed at a bounded rate while
+ * writes continue.
  *
  * More than one process works on this file: a window and the daemon serving
  * the same chats to other devices, at least. SQLite tells a connection nothing
@@ -221,6 +224,21 @@ gboolean    xd_storage_set_plan        (XdStorage   *self,
                                         const char  *chat_id,
                                         gboolean     plan,
                                         GError     **error);
+
+/*
+ * Cross-process turn ownership.
+ *
+ * A window and `xd serve` use separate processes but share this database.
+ * This bit lets the window distinguish a live daemon stream from an ordinary
+ * metadata write, keep the chat marked working, and leave queued messages for
+ * the daemon rather than accidentally starting a second local turn.
+ */
+gboolean    xd_storage_set_daemon_working (XdStorage *self,
+                                           const char *chat_id,
+                                           gboolean    working,
+                                           GError    **error);
+gboolean    xd_storage_clear_daemon_working (XdStorage *self,
+                                             GError    **error);
 
 XdChat     *xd_storage_get_chat        (XdStorage   *self,
                                         const char  *chat_id,

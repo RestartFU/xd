@@ -164,6 +164,13 @@ struct _XdChatView
   XdTextReveal remote_reveal;
   char *remote_label;
 
+  /* Same machine, different process: `xd serve` owns this local chat's turn.
+   * Its live transcript arrives through SQLite rather than remote events. */
+  gboolean daemon_working;
+  gint64 daemon_started_at;
+  gint64 daemon_live_message_id;
+  XdMessageRow *daemon_live_row; /* weak */
+
   /* The last message the transcript on screen was drawn from, so a write made
    * by something else can be told from one this window just made. */
   gint64 rendered_message_id;
@@ -1028,7 +1035,7 @@ append_choices (XdChatView  *self,
  * question was answered when it was asked, and reopening the chat must not
  * offer it again.
  */
-static void
+static XdMessageRow *
 append_reply (XdChatView *self,
               const char *text,
               const char *source,
@@ -1061,6 +1068,8 @@ append_reply (XdChatView *self,
 
   if (ask != NULL)
     append_choices (self, ask, answerable);
+
+  return row;
 }
 
 static void
@@ -1425,6 +1434,8 @@ clear_transcript (XdChatView *self)
   GtkWidget *child;
 
   /* It is about to be taken out with everything else. Stop its timer too. */
+  release_live_row (&self->daemon_live_row);
+  self->daemon_live_message_id = 0;
   set_working (self, FALSE);
   retire_open_questions (self);
 
@@ -1452,8 +1463,11 @@ static gint64
 working_seconds (XdChatView *self)
 {
   Turn *turn = current_turn (self);
-  gint64 started_at = turn != NULL ? turn->started_at
-                                   : self->remote_started_at;
+  gint64 started_at = turn != NULL
+                        ? turn->started_at
+                        : self->remote != NULL
+                            ? self->remote_started_at
+                            : self->daemon_started_at;
 
   if (started_at <= 0)
     return 0;
@@ -1682,8 +1696,17 @@ render_transcript (XdChatView *self,
       if (g_strcmp0 (message->role, "duration") == 0)
         continue;
       else if (g_strcmp0 (message->role, "assistant") == 0)
-        append_reply (self, message->content, message->label,
-                      reply_is_answerable (messages, i));
+        {
+          if (self->daemon_working && i + 1 == messages->len)
+            {
+              show_live_text (self, &self->daemon_live_row,
+                              message->content, message->label);
+              self->daemon_live_message_id = message->id;
+            }
+          else
+            append_reply (self, message->content, message->label,
+                          reply_is_answerable (messages, i));
+        }
       else if (g_strcmp0 (message->role, "tool") == 0)
         show_tool_use (self, message->content);
       else
@@ -1721,6 +1744,79 @@ load_transcript (XdChatView *self)
     }
 
   render_transcript (self, messages, total);
+}
+
+/*
+ * Mirrors a daemon-owned local turn without rebuilding the transcript.
+ *
+ * New durable rows append once. The current assistant row keeps its database
+ * id while its content grows, so that one widget is updated in place. A full
+ * render at turn finish restores rich Markdown, duration placement and any
+ * completed question controls.
+ */
+static gboolean
+sync_daemon_transcript (XdChatView *self,
+                        GError    **error)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  gint64 after_id = self->rendered_message_id;
+
+  if (self->daemon_live_row != NULL && self->daemon_live_message_id > 0)
+    after_id = self->daemon_live_message_id - 1;
+
+  messages = xd_storage_list_messages_since (
+    self->storage, xd_node_get_chat_id (self->chat), after_id, error);
+  if (messages == NULL)
+    return FALSE;
+
+  for (guint i = 0; i < messages->len; i++)
+    {
+      XdMessage *message = g_ptr_array_index (messages, i);
+
+      if (message->id == self->daemon_live_message_id &&
+          self->daemon_live_row != NULL)
+        {
+          show_live_text (self, &self->daemon_live_row,
+                          message->content, message->label);
+          self->rendered_message_id =
+            MAX (self->rendered_message_id, message->id);
+          continue;
+        }
+
+      release_live_row (&self->daemon_live_row);
+      self->daemon_live_message_id = 0;
+
+      if (g_strcmp0 (message->role, "duration") == 0)
+        {
+          self->rendered_message_id =
+            MAX (self->rendered_message_id, message->id);
+          continue;
+        }
+      else if (g_strcmp0 (message->role, "assistant") == 0)
+        {
+          show_live_text (self, &self->daemon_live_row,
+                          message->content, message->label);
+          self->daemon_live_message_id = message->id;
+        }
+      else if (g_strcmp0 (message->role, "tool") == 0)
+        {
+          show_tool_use (self, message->content);
+        }
+      else
+        {
+          append_row (self, xd_message_kind_from_role (message->role),
+                      message->content);
+        }
+
+      self->rendered_message_id =
+        MAX (self->rendered_message_id, message->id);
+    }
+
+  keep_working_last (self);
+  if (self->follow_bottom)
+    queue_scroll_to_bottom (self);
+
+  return TRUE;
 }
 
 /* --- transcripts from a daemon -------------------------------------------- */
@@ -2513,12 +2609,22 @@ on_storage_changed (XdStorage *storage,
   XdChatView *self = user_data;
   g_autoptr (XdChat) chat = NULL;
   const char *chat_id;
+  gboolean was_daemon_working;
+  g_autoptr (GError) error = NULL;
 
   if (self->chat == NULL || self->remote != NULL)
     return;
 
   chat_id = xd_node_get_chat_id (self->chat);
   chat = xd_storage_get_chat (self->storage, chat_id, NULL);
+  was_daemon_working = self->daemon_working;
+  self->daemon_working = chat != NULL && chat->daemon_working;
+
+  if (self->daemon_working && !was_daemon_working)
+    self->daemon_started_at = g_get_monotonic_time ();
+  else if (!self->daemon_working)
+    self->daemon_started_at = 0;
+
   if (chat != NULL)
     set_queue (self, chat->queue);
 
@@ -2528,19 +2634,39 @@ on_storage_changed (XdStorage *storage,
   if (chat != NULL)
     update_context_bar (self, chat);
 
+  if (self->daemon_working)
+    xd_node_set_state (self->chat, XD_NODE_WORKING);
+  else if (was_daemon_working)
+    xd_node_set_state (self->chat, xd_node_is_active (self->chat)
+                                     ? XD_NODE_IDLE : XD_NODE_DONE);
+
   /* Another window may have queued this while this one owned the turn. Once
    * that turn is gone, the persisted instruction still runs. */
-  if (self->queue->len > 0)
+  if (!self->daemon_working && self->queue->len > 0)
     {
       send_queued (self);
       return;
     }
 
-  if (xd_storage_last_message_id (self->storage, chat_id) ==
-      self->rendered_message_id)
+  if (!self->daemon_working && !was_daemon_working &&
+      xd_storage_last_message_id (self->storage, chat_id) ==
+        self->rendered_message_id)
     return;
 
-  load_transcript (self);
+  if (self->daemon_working)
+    {
+      if (!sync_daemon_transcript (self, &error))
+        {
+          g_warning ("cannot mirror the daemon turn: %s", error->message);
+          return;
+        }
+    }
+  else
+    {
+      /* Final render restores rich content and the measured duration. */
+      load_transcript (self);
+    }
+  set_working (self, self->daemon_working);
   queue_scroll_to_bottom (self);
 }
 
@@ -4180,6 +4306,12 @@ steer_queued_at (XdChatView *self,
     send_remote_steer (self, position, text);
   else if (turn != NULL)
     xd_chat_session_cancel (turn->session);
+  else if (self->daemon_working)
+    {
+      /* This process cannot signal a turn owned by `xd serve`. Keep the
+       * selected order durable; the daemon will consume it when it finishes. */
+      return;
+    }
   else
     send_queued (self);
   /* The queued text goes out when the turn reports that it has stopped. */
@@ -4392,7 +4524,7 @@ send_current_message (XdChatView *self)
         return;
 
       /* One turn at a time, so anything typed meanwhile waits for it. */
-      if (current_turn (self) != NULL)
+      if (current_turn (self) != NULL || self->daemon_working)
         queue_message (self, text);
       else if (!send_message (self, text))
         gtk_text_buffer_set_text (
@@ -4421,7 +4553,7 @@ send_current_message (XdChatView *self)
 
   forget_attachments (self);
 
-  if (current_turn (self) != NULL)
+  if (current_turn (self) != NULL || self->daemon_working)
     queue_message (self, message->str);
   else if (!send_message (self, message->str))
     gtk_text_buffer_set_text (
@@ -5778,6 +5910,10 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
       retire_open_questions (self);
       leave_current_transcript (self, keep_previous);
       end_remote_turn (self);
+      release_live_row (&self->daemon_live_row);
+      self->daemon_live_message_id = 0;
+      self->daemon_working = FALSE;
+      self->daemon_started_at = 0;
       use_command_scope (self, NULL);
     }
 
@@ -5858,6 +5994,10 @@ xd_chat_view_set_chat (XdChatView *self,
       retire_open_questions (self);
       leave_current_transcript (self, keep_previous);
       end_remote_turn (self);
+      release_live_row (&self->daemon_live_row);
+      self->daemon_live_message_id = 0;
+      self->daemon_working = FALSE;
+      self->daemon_started_at = 0;
     }
 
   set_remote (self, NULL);
@@ -5905,6 +6045,11 @@ xd_chat_view_set_chat (XdChatView *self,
 
     if (record != NULL)
       {
+        self->daemon_working = record->daemon_working;
+        if (self->daemon_working && self->daemon_started_at == 0)
+          self->daemon_started_at = g_get_monotonic_time ();
+        if (self->daemon_working)
+          cached = FALSE;
         use_command_scope (self, record->backend);
         update_context_bar (self, record);
         if (changed)
@@ -5983,6 +6128,11 @@ xd_chat_view_set_chat (XdChatView *self,
           show_live_text (self, &turn->live_row,
                           turn->segment->str, turn->label);
         }
+      set_working (self, TRUE);
+    }
+  else if (self->daemon_working)
+    {
+      xd_node_set_state (self->chat, XD_NODE_WORKING);
       set_working (self, TRUE);
     }
   else if (self->queue->len > 0)
@@ -6359,6 +6509,7 @@ xd_chat_view_dispose (GObject *object)
   g_clear_handle_id (&self->working_timer, g_source_remove);
   g_clear_handle_id (&self->remote_live_render, g_source_remove);
   release_live_row (&self->remote_live_row);
+  release_live_row (&self->daemon_live_row);
   self->working_label = NULL;
   self->working_dots = NULL;
 #if XD_HAS_VOICE

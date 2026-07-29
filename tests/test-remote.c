@@ -1690,6 +1690,14 @@ test_images_are_uploaded_to_the_daemon (void)
   while (g_main_context_pending (NULL))
     g_main_context_iteration (NULL, FALSE);
 
+  {
+    g_autoptr (XdChat) stored_chat =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_nonnull (stored_chat);
+    g_assert_false (stored_chat->daemon_working);
+  }
+
   /* Command metadata survives the turn on the daemon, so a device opening
    * this chat later gets the same installed command list. */
   {
@@ -3576,6 +3584,14 @@ test_a_joining_device_sees_an_active_turn (void)
   stored_turn.storage = daemon.storage;
   stored_turn.chat_id = daemon.chat_id;
   wait_until (live_turn_was_stored, &stored_turn);
+
+  {
+    g_autoptr (XdChat) stored_chat =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_nonnull (stored_chat);
+    g_assert_true (stored_chat->daemon_working);
+  }
 
   if (old_path != NULL)
     g_setenv ("PATH", old_path, TRUE);

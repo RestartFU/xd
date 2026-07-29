@@ -269,6 +269,27 @@ find_chat (XdNode     *folder,
   return NULL;
 }
 
+static void
+sync_daemon_state (XdNode      *node,
+                   const XdChat *chat)
+{
+  gboolean was_working = GPOINTER_TO_INT (
+    g_object_get_data (G_OBJECT (node), "xd-daemon-working"));
+
+  if (chat->daemon_working)
+    {
+      g_object_set_data (G_OBJECT (node), "xd-daemon-working",
+                         GINT_TO_POINTER (TRUE));
+      xd_node_set_state (node, XD_NODE_WORKING);
+    }
+  else if (was_working)
+    {
+      g_object_set_data (G_OBJECT (node), "xd-daemon-working", NULL);
+      xd_node_set_state (node, xd_node_is_active (node)
+                               ? XD_NODE_IDLE : XD_NODE_DONE);
+    }
+}
+
 /*
  * Brings a folder's chats to what the database says, moving as little as
  * possible.
@@ -314,6 +335,7 @@ load_chats (XdFsTree *self,
         {
           node = xd_node_new_chat (chat->id, chat->title, folder);
           xd_node_set_icon_name (node, backend_icon (chat->backend));
+          sync_daemon_state (node, chat);
           g_list_store_insert (children, first + i, node);
           g_object_unref (node);
           continue;
@@ -321,6 +343,7 @@ load_chats (XdFsTree *self,
 
       xd_node_set_name (node, chat->title);
       xd_node_set_icon_name (node, backend_icon (chat->backend));
+      sync_daemon_state (node, chat);
 
       if (at != first + i)
         {

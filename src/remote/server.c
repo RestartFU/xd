@@ -2000,6 +2000,16 @@ start_daemon_turn (XdRemoteServer  *self,
       return FALSE;
     }
 
+  if (!xd_storage_set_daemon_working (
+        self->storage, chat_id, TRUE, error))
+    {
+      g_signal_handlers_disconnect_by_data (turn, running);
+      xd_daemon_turn_cancel (turn);
+      running_free (running);
+      g_object_unref (turn);
+      return FALSE;
+    }
+
   g_hash_table_insert (self->turns, g_strdup (chat_id), turn);
 
   /* Everyone watching sees the message arrive and the work start, including
@@ -2225,12 +2235,21 @@ static gboolean
 forget_turn (gpointer user_data)
 {
   Running *running = user_data;
+  gboolean still_working = FALSE;
 
   g_hash_table_remove (running->server->turns, running->chat_id);
   if (running->server->quiescing)
     complete_quiesce (running->server);
   else
-    start_queued (running->server, running->chat_id);
+    still_working = start_queued (running->server, running->chat_id);
+
+  /* Keep ownership continuous while a queued turn replaces this one. A brief
+   * false value would let the local window race the daemon for that queue. */
+  if (!still_working &&
+      !xd_storage_set_daemon_working (
+        running->server->storage, running->chat_id, FALSE, NULL))
+    g_warning ("cannot clear the daemon turn state");
+
   running_free (running);
 
   return G_SOURCE_REMOVE;
@@ -3388,9 +3407,10 @@ on_local_change_settled (gpointer user_data)
 static void
 queue_local_change (XdRemoteServer *self)
 {
-  g_clear_handle_id (&self->local_change_id, g_source_remove);
-  self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
-                                         on_local_change_settled, self);
+  /* Continuous streamed writes must not postpone the notification forever. */
+  if (self->local_change_id == 0)
+    self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
+                                           on_local_change_settled, self);
 }
 
 static void
@@ -3692,6 +3712,11 @@ xd_remote_server_new (XdStorage        *storage,
         return NULL;
     }
 
+  /* A hard process stop cannot clear its flags. Once this server owns the
+   * listening socket, no old daemon can still own any of these turns. */
+  if (!xd_storage_clear_daemon_working (storage, error))
+    return NULL;
+
   g_signal_connect (self->service, "incoming", G_CALLBACK (on_incoming), self);
   g_socket_service_start (self->service);
 
@@ -3851,7 +3876,11 @@ xd_remote_server_dispose (GObject *object)
   g_clear_handle_id (&self->local_change_id, g_source_remove);
   g_clear_object (&self->tree_watch);
   if (self->storage != NULL)
-    g_signal_handlers_disconnect_by_data (self->storage, self);
+    {
+      g_signal_handlers_disconnect_by_data (self->storage, self);
+      if (!xd_storage_clear_daemon_working (self->storage, NULL))
+        g_warning ("cannot clear daemon turn state while stopping");
+    }
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->command_sets, g_hash_table_unref);
   if (self->terminals != NULL)

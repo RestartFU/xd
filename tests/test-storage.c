@@ -123,6 +123,39 @@ test_chats_follow_latest_user_message (Fixture       *fixture,
 }
 
 static void
+test_daemon_turn_state_is_shared (Fixture       *fixture,
+                                  gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (XdChat) chat = NULL;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_false (chat->daemon_working);
+
+  g_assert_true (xd_storage_set_daemon_working (
+    fixture->storage, chat_id, TRUE, &error));
+  g_assert_no_error (error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_true (chat->daemon_working);
+
+  g_assert_true (xd_storage_clear_daemon_working (
+    fixture->storage, &error));
+  g_assert_no_error (error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_false (chat->daemon_working);
+}
+
+static void
 test_new_chats_inherit_last_changed_agent (Fixture       *fixture,
                                            gconstpointer  user_data)
 {
@@ -873,6 +906,8 @@ main (int   argc,
   ADD ("/storage/create-and-list", test_create_and_list);
   ADD ("/storage/chats-follow-latest-user-message",
        test_chats_follow_latest_user_message);
+  ADD ("/storage/daemon-turn-state-is-shared",
+       test_daemon_turn_state_is_shared);
   ADD ("/storage/new-chats-inherit-agent", test_new_chats_inherit_last_changed_agent);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
