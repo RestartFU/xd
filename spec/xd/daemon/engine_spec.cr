@@ -186,4 +186,46 @@ describe Xd::Daemon::Engine do
       context["context"].as_s.should eq("Use Crystal.")
     end
   end
+
+  it "manages secret names without returning their values" do
+    old_path = ENV["XD_AGENT_SECRETS_FILE"]?
+    directory = File.join(
+      Dir.tempdir,
+      "xd-engine-secrets-#{Random::Secure.hex(12)}"
+    )
+    ENV["XD_AGENT_SECRETS_FILE"] = File.join(directory, "secrets.json")
+
+    begin
+      with_daemon_engine do |_store, engine|
+        local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+        saved = engine.dispatch(local, {
+          "op" => "set-agent-secrets",
+          "entries" => [
+            {"name" => "API_TOKEN", "value" => "never-over-wire"},
+          ],
+        }.to_json)
+        saved.success?.should be_true
+
+        listed = engine.dispatch(local, %({"op":"agent-secrets"}))
+        listed["names"].as_a.map(&.as_s).should eq(["API_TOKEN"])
+        listed.to_json.should_not contain("never-over-wire")
+
+        kept = engine.dispatch(local, {
+          "op"      => "set-agent-secrets",
+          "entries" => [{"name" => "API_TOKEN"}],
+        }.to_json)
+        kept.success?.should be_true
+        Xd::Agent::Secrets.load
+          .environment({} of String => String)["API_TOKEN"]
+          .should eq("never-over-wire")
+      end
+    ensure
+      if old_path
+        ENV["XD_AGENT_SECRETS_FILE"] = old_path
+      else
+        ENV.delete("XD_AGENT_SECRETS_FILE")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
 end

@@ -34,6 +34,11 @@ module Xd
       File.join(data_dir, "server-key.pem")
     end
 
+    def agent_secrets : String
+      ENV["XD_AGENT_SECRETS_FILE"]? ||
+        File.join(data_dir, "agent-secrets.json")
+    end
+
     private def data_home : String
       {% if flag?(:win32) %}
         ENV["LOCALAPPDATA"]? || File.join(Path.home, "AppData", "Local")

@@ -1,5 +1,6 @@
 require "digest/sha256"
 require "random/secure"
+require "../agent/secrets"
 require "../protocol/message"
 require "../storage/workflow_state"
 require "../workspace/service"
@@ -75,6 +76,8 @@ module Xd
         failed_outcome(error.message || "Storage error")
       rescue error : Workspace::Error
         failed_outcome(error.message || "Workspace error")
+      rescue error : Agent::Secrets::Error
+        failed_outcome(error.message || "Agent secrets error")
       end
 
       private def dispatch_request(
@@ -86,6 +89,10 @@ module Xd
           pair(connection, request)
         when Protocol::Operation::Hello
           hello(connection, request)
+        when Protocol::Operation::AgentSecrets
+          agent_secrets(request)
+        when Protocol::Operation::SetAgentSecrets
+          set_agent_secrets(request)
         when Protocol::Operation::Tree
           tree
         when Protocol::Operation::NewFolder
@@ -169,6 +176,91 @@ module Xd
           "device"  => JSON::Any.new(name),
           "version" => JSON::Any.new(PROTOCOL_VERSION),
         })
+      end
+
+      private def agent_secrets(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        secrets = secrets_for(request)
+        Protocol::Response.ok({
+          "names" => json_any(secrets.names),
+        })
+      end
+
+      private def set_agent_secrets(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        entries = request.body["entries"]?.try(&.as_a?)
+        unless entries
+          raise Protocol::Error.new(
+            "set-agent-secrets needs an entries array."
+          )
+        end
+
+        secrets = secrets_for(request)
+        desired = {} of String => String?
+
+        entries.each do |node|
+          entry = node.as_h?
+          unless entry
+            raise Protocol::Error.new(
+              "Every secret entry must be an object."
+            )
+          end
+
+          name = entry["name"]?.try(&.as_s?)
+          unless Agent::Secrets.valid_name?(name)
+            raise Protocol::Error.new(
+              "A secret has an invalid environment name."
+            )
+          end
+          name = name.not_nil!
+          if desired.has_key?(name)
+            raise Protocol::Error.new("Secret names must be unique.")
+          end
+
+          if entry.has_key?("value")
+            value = entry["value"].as_s?
+            unless value
+              raise Protocol::Error.new(
+                "A secret value must be text."
+              )
+            end
+            if value.empty?
+              raise Protocol::Error.new(
+                "A replacement secret needs a value."
+              )
+            end
+            desired[name] = value
+          else
+            unless secrets.includes?(name)
+              raise Protocol::Error.new(
+                "A new secret needs a value."
+              )
+            end
+            desired[name] = nil
+          end
+        end
+
+        secrets.names.each do |name|
+          secrets.remove(name) unless desired.has_key?(name)
+        end
+        desired.each do |name, value|
+          secrets.set(name, value) if value
+        end
+        secrets.save
+        Protocol::Response.ok
+      end
+
+      private def secrets_for(
+        request : Protocol::Request,
+      ) : Agent::Secrets
+        if folder_id = request.string?("folder")
+          @workspaces.find_folder(folder_id)
+          Agent::Secrets.for_folder(folder_id)
+        else
+          Agent::Secrets.load
+        end
       end
 
       private def token_hash(token : String) : String
