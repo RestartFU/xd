@@ -96,6 +96,8 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_V);
   g_assert_cmpint (xd_syntax_language_for_path ("deploy.vsh"),
                    ==, XD_SYNTAX_V);
+  g_assert_cmpint (xd_syntax_language_for_path ("game/main.odin"),
+                   ==, XD_SYNTAX_ODIN);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -339,6 +341,43 @@ test_classifies_v (void)
   g_assert_nonnull (strstr (shebang, "comment:#!/usr/bin/env -S v\n"));
 }
 
+static void
+test_classifies_odin (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *package = scan (
+    XD_SYNTAX_ODIN, "package main", &state, NULL);
+  g_autofree char *attribute = scan (
+    XD_SYNTAX_ODIN, "@(private)", &state, NULL);
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_ODIN,
+    "fibonacci :: #force_inline proc($T: typeid, n: int) -> int {",
+    &state, NULL);
+  g_autofree char *body = scan (
+    XD_SYNTAX_ODIN,
+    "user := User{name = \"Ada\"}; fmt.println(user, nil, 42)", &state, NULL);
+  g_autofree char *file_tag = scan (
+    XD_SYNTAX_ODIN, "#+test", &state, NULL);
+  g_autofree char *undefined = scan (
+    XD_SYNTAX_ODIN, "value: int = ---", &state, NULL);
+
+  g_assert_nonnull (strstr (package, "keyword:package\n"));
+  g_assert_nonnull (strstr (attribute, "preproc:@(private)\n"));
+  g_assert_nonnull (strstr (declaration, "function:fibonacci\n"));
+  g_assert_nonnull (strstr (declaration, "preproc:#force_inline\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:proc\n"));
+  g_assert_nonnull (strstr (declaration, "preproc:$T\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:typeid\n"));
+  g_assert_nonnull (strstr (declaration, "type:int\n"));
+  g_assert_nonnull (strstr (body, "type:User\n"));
+  g_assert_nonnull (strstr (body, "string:\"Ada\"\n"));
+  g_assert_nonnull (strstr (body, "function:println\n"));
+  g_assert_nonnull (strstr (body, "number:nil\n"));
+  g_assert_nonnull (strstr (body, "number:42\n"));
+  g_assert_nonnull (strstr (file_tag, "preproc:#+test\n"));
+  g_assert_nonnull (strstr (undefined, "number:---\n"));
+}
+
 /*
  * The type of a composite literal is a type, and the space is what says so:
  * gofmt writes "Vec3{40}" tight and "if ok {" loose.
@@ -541,6 +580,43 @@ test_carries_a_nested_v_comment (void)
   g_assert_nonnull (strstr (closed, "function:main\n"));
 }
 
+static void
+test_carries_odin_state (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *raw_opened = scan (
+    XD_SYNTAX_ODIN, "data := `line // still raw", &state, NULL);
+  g_autofree char *raw_inside = NULL;
+  g_autofree char *raw_closed = NULL;
+  g_autofree char *comment_opened = NULL;
+  g_autofree char *comment_closed = NULL;
+
+  g_assert_true (state.in_raw_string);
+  g_assert_null (strstr (raw_opened, "comment:// still raw\n"));
+
+  raw_inside = scan (XD_SYNTAX_ODIN, "/* still raw", &state, NULL);
+  g_assert_true (state.in_raw_string);
+  g_assert_null (strstr (raw_inside, "comment:/* still raw\n"));
+
+  raw_closed = scan (XD_SYNTAX_ODIN, "last`; #load(\"data.bin\")",
+                     &state, NULL);
+  g_assert_false (state.in_raw_string);
+  g_assert_nonnull (strstr (raw_closed, "string:last`\n"));
+  g_assert_nonnull (strstr (raw_closed, "preproc:#load\n"));
+
+  comment_opened = scan (
+    XD_SYNTAX_ODIN, "/* outer /* inner */ still", &state, NULL);
+  g_assert_cmpuint (state.in_comment, ==, 1);
+  g_assert_nonnull (
+    strstr (comment_opened, "comment:/* outer /* inner */ still\n"));
+
+  comment_closed = scan (
+    XD_SYNTAX_ODIN, "comment */ main :: proc() {}", &state, NULL);
+  g_assert_false (state.in_comment);
+  g_assert_nonnull (strstr (comment_closed, "keyword:proc\n"));
+  g_assert_nonnull (strstr (comment_closed, "function:main\n"));
+}
+
 /* A language this cannot read is handed straight back, uncoloured. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -591,6 +667,7 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-yaml", test_classifies_yaml);
   g_test_add_func ("/syntax/classifies-toml", test_classifies_toml);
   g_test_add_func ("/syntax/classifies-v", test_classifies_v);
+  g_test_add_func ("/syntax/classifies-odin", test_classifies_odin);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
@@ -613,6 +690,8 @@ main (int   argc,
                    test_carries_a_nested_rust_comment);
   g_test_add_func ("/syntax/carries-a-nested-v-comment",
                    test_carries_a_nested_v_comment);
+  g_test_add_func ("/syntax/carries-odin-state",
+                   test_carries_odin_state);
   g_test_add_func ("/syntax/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/syntax/survives-unterminated-text",

@@ -394,6 +394,24 @@ test_colours_v (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">int</span>"));
 }
 
+static void
+test_colours_odin (void)
+{
+  static const char *patch =
+    "diff --git a/src/main.odin b/src/main.odin\n"
+    "@@ -1 +1 @@\n"
+    "-answer :: proc() -> int { return 41 }\n"
+    "+answer :: proc() -> int { return 42 }\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#99c1f1\">answer</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">proc</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">int</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -489,6 +507,7 @@ main (int   argc,
   g_test_add_func ("/unified-diff/colours-yaml", test_colours_yaml);
   g_test_add_func ("/unified-diff/colours-toml", test_colours_toml);
   g_test_add_func ("/unified-diff/colours-v", test_colours_v);
+  g_test_add_func ("/unified-diff/colours-odin", test_colours_odin);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",

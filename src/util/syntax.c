@@ -146,6 +146,32 @@ static const char *const V_CONSTANTS[] = {
   "false", "none", "true", NULL,
 };
 
+static const char *const ODIN_KEYWORDS[] = {
+  "asm", "auto_cast", "bit_field", "bit_set", "break", "case", "cast",
+  "context", "continue", "defer", "distinct", "do", "dynamic", "else", "enum",
+  "fallthrough", "for", "foreign", "if", "import", "in", "inline", "map",
+  "matrix", "no_inline", "not_in", "or_break", "or_continue", "or_else",
+  "or_return", "package", "proc", "return", "struct", "switch", "transmute",
+  "typeid", "union", "using", "when", "where",
+  NULL,
+};
+
+static const char *const ODIN_TYPES[] = {
+  "any", "bool", "byte",
+  "b8", "b16", "b32", "b64",
+  "int", "i8", "i16", "i32", "i64", "i128",
+  "uint", "u8", "u16", "u32", "u64", "u128", "uintptr",
+  "f16", "f32", "f64",
+  "complex32", "complex64", "complex128",
+  "quaternion64", "quaternion128", "quaternion256",
+  "rune", "string", "cstring", "rawptr",
+  NULL,
+};
+
+static const char *const ODIN_CONSTANTS[] = {
+  "false", "nil", "true", NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -171,6 +197,7 @@ typedef struct
   gboolean bang_functions;       /* Rust's macro_name! */
   gboolean generic_functions;    /* Rust's function_name<T>(...) */
   gboolean square_generic_functions; /* V's function_name[T](...) */
+  gboolean odin_procedures;      /* Odin's name :: proc(...) */
   gboolean rust_lifetimes;       /* Rust's 'name */
   gboolean rust_strings;         /* Rust's r#"..."# strings */
   gboolean nested_block_comments; /* languages with nested block comments */
@@ -182,7 +209,10 @@ typedef struct
   gboolean prefixed_raw_strings; /* V's r'...' and r"..." strings */
   gboolean backtick_literals;    /* V's rune literals */
   gboolean at_attributes;        /* V's @[attribute] */
-  gboolean dollar_directives;    /* V's $if and compile-time calls */
+  gboolean paren_attributes;     /* Odin's @(attribute) */
+  gboolean dollar_directives;    /* V compile-time and Odin polymorphic names */
+  gboolean hash_word_directives; /* Odin's #directive */
+  gboolean undefined_constant;   /* Odin's --- value */
   gboolean shebangs;             /* executable scripts' #! line */
   char key_delimiter;            /* ':' for mappings, '=' for assignments */
 } Language;
@@ -298,6 +328,23 @@ static const Language V_LANGUAGE = {
   .shebangs = TRUE,
 };
 
+static const Language ODIN_LANGUAGE = {
+  .keywords = ODIN_KEYWORDS,
+  .types = ODIN_TYPES,
+  .constants = ODIN_CONSTANTS,
+  .raw_strings = TRUE,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
+  .capitalized_types = TRUE,
+  .composite_literals = TRUE,
+  .odin_procedures = TRUE,
+  .nested_block_comments = TRUE,
+  .paren_attributes = TRUE,
+  .dollar_directives = TRUE,
+  .hash_word_directives = TRUE,
+  .undefined_constant = TRUE,
+};
+
 static const Language *
 language_table (XdSyntaxLanguage language)
 {
@@ -321,6 +368,8 @@ language_table (XdSyntaxLanguage language)
     return &TOML_LANGUAGE;
   if (language == XD_SYNTAX_V)
     return &V_LANGUAGE;
+  if (language == XD_SYNTAX_ODIN)
+    return &ODIN_LANGUAGE;
 
   return NULL;
 }
@@ -374,6 +423,8 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_TOML;
   if (g_strcmp0 (dot, ".v") == 0 || g_strcmp0 (dot, ".vsh") == 0)
     return XD_SYNTAX_V;
+  if (g_strcmp0 (dot, ".odin") == 0)
+    return XD_SYNTAX_ODIN;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -674,6 +725,28 @@ followed_by_square_generic_call (const char *at)
   return depth == 0 && *at == '(';
 }
 
+static gboolean
+followed_by_odin_procedure (const char *at)
+{
+  if (at[0] != ':' || at[1] != ':')
+    return FALSE;
+
+  at += 2;
+  while (*at == ' ' || *at == '\t')
+    at++;
+
+  while (*at == '#')
+    {
+      at++;
+      while (is_word_byte (*at))
+        at++;
+      while (*at == ' ' || *at == '\t')
+        at++;
+    }
+
+  return strncmp (at, "proc", 4) == 0 && !is_word_byte (at[4]);
+}
+
 static const char *
 scan_word (Emitter        *emitter,
            const Language *language,
@@ -716,7 +789,9 @@ scan_word (Emitter        *emitter,
            (language->bang_functions && *after == '!') ||
            (language->generic_functions && followed_by_generic_call (after)) ||
            (language->square_generic_functions &&
-            followed_by_square_generic_call (after)))
+            followed_by_square_generic_call (after)) ||
+           (language->odin_procedures &&
+            followed_by_odin_procedure (after)))
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else
     append_plain (emitter, at, length);
@@ -839,6 +914,8 @@ scan_at_attribute (Emitter    *emitter,
                    const char *at)
 {
   const char *scan = at + 2;
+  char open = at[1];
+  char close = open == '[' ? ']' : ')';
   guint depth = 1;
 
   while (*scan != '\0' && depth > 0)
@@ -852,12 +929,12 @@ scan_at_attribute (Emitter    *emitter,
           if (*scan == quote)
             scan++;
         }
-      else if (*scan == '[')
+      else if (*scan == open)
         {
           depth++;
           scan++;
         }
-      else if (*scan == ']')
+      else if (*scan == close)
         {
           depth--;
           scan++;
@@ -867,6 +944,26 @@ scan_at_attribute (Emitter    *emitter,
           scan++;
         }
     }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static const char *
+scan_hash_word_directive (Emitter    *emitter,
+                          const char *at)
+{
+  const char *scan = at + 1;
+
+  if (*scan == '+')
+    scan++;
+
+  while (is_word_byte (*scan) || *scan == '-')
+    scan++;
+
+  if (scan == at + 1)
+    return NULL;
 
   append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
                 (gsize) (scan - at));
@@ -1235,7 +1332,9 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
         {
           at = scan_table_header (&emitter, at);
         }
-      else if (table->at_attributes && at[0] == '@' && at[1] == '[')
+      else if (at[0] == '@' &&
+               ((table->at_attributes && at[1] == '[') ||
+                (table->paren_attributes && at[1] == '(')))
         {
           at = scan_at_attribute (&emitter, at);
         }
@@ -1328,6 +1427,20 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
         {
           at = scan_directive (&emitter, at);
         }
+      else if (table->hash_word_directives && *at == '#')
+        {
+          const char *after = scan_hash_word_directive (&emitter, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
       else if (table->dollar_directives && *at == '$')
         {
           const char *after = scan_dollar_directive (&emitter, at);
@@ -1361,6 +1474,11 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
         {
           append_token (&emitter, XD_SYNTAX_TOKEN_NUMBER, at, 1);
           at++;
+        }
+      else if (table->undefined_constant && strncmp (at, "---", 3) == 0)
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_NUMBER, at, 3);
+          at += 3;
         }
       else if (table->bare_keys &&
                (g_ascii_isalnum (*at) || strchr ("_-.", *at) != NULL))
