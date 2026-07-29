@@ -1,10 +1,13 @@
 require "digest/sha256"
 require "random/secure"
+require "../agent/manager"
 require "../agent/secrets"
 require "../protocol/message"
 require "../storage/workflow_state"
+require "../version"
 require "../workspace/service"
 require "./connection"
+require "./event_bus"
 
 module Xd
   module Daemon
@@ -19,8 +22,11 @@ module Xd
     # this boundary. Every state-changing command is serialized here so local
     # and remote clients cannot diverge or race separate implementations.
     class Engine
+      getter events : EventBus
+
       @pairing : Pairing?
-      @mutex = Mutex.new
+      @command_mutex = Mutex.new
+      @event_mutex = Mutex.new
       @next_event_id = 0_i64
 
       def initialize(
@@ -28,15 +34,25 @@ module Xd
         workspaces : Workspace::Service? = nil,
         @clock : Proc(Time::Instant) = -> { Time.instant },
         @token_generator : Proc(String) = -> { Random::Secure.base64(32) },
+        launcher : Agent::Launcher? = nil,
       )
         @workspaces = workspaces || Workspace::Service.new(
           File.join(Path[@store.path].dirname, "Workspaces"),
           @store
         )
+        @events = EventBus.new
+        @agents = Agent::Manager.new(
+          @store,
+          @workspaces,
+          launcher || Agent::ProcessLauncher.new(VERSION),
+          ->(name : String, fields : Hash(String, JSON::Any)) {
+            publish_agent_event(name, fields)
+          }
+        )
       end
 
       def arm_pairing(ttl : Time::Span) : String
-        @mutex.synchronize do
+        @command_mutex.synchronize do
           code = String.build do |io|
             8.times do |index|
               io << '-' if index == 4
@@ -55,7 +71,7 @@ module Xd
       def process(connection : Connection, line : String) : Protocol::Outcome
         request = Protocol::Request.parse(line)
 
-        @mutex.synchronize do
+        @command_mutex.synchronize do
           if request.operation.authentication_required? && !connection.authenticated
             return Protocol::Outcome.new(
               Protocol::Response.error(
@@ -66,8 +82,7 @@ module Xd
           end
 
           response = dispatch_request(connection, request)
-          events = response.success? ? events_for(request) :
-                                       [] of Protocol::Event
+          events = response.success? ? events_for(request) : [] of Protocol::Event
           Protocol::Outcome.new(response, events)
         end
       rescue error : Protocol::Error
@@ -78,6 +93,12 @@ module Xd
         failed_outcome(error.message || "Workspace error")
       rescue error : Agent::Secrets::Error
         failed_outcome(error.message || "Agent secrets error")
+      rescue error : Agent::Manager::Error
+        failed_outcome(error.message || "Agent error")
+      end
+
+      def close : Nil
+        @agents.close
       end
 
       private def dispatch_request(
@@ -119,6 +140,8 @@ module Xd
           chat(request)
         when Protocol::Operation::SetOption
           set_option(request)
+        when Protocol::Operation::Send
+          send_message(request)
         when Protocol::Operation::Queue
           queue(request)
         when Protocol::Operation::DropQueue
@@ -127,6 +150,8 @@ module Xd
           edit_queue(request)
         when Protocol::Operation::SteerQueue
           steer_queue(request)
+        when Protocol::Operation::Cancel
+          cancel(request)
         when Protocol::Operation::Ping
           Protocol::Response.ok
         else
@@ -413,7 +438,7 @@ module Xd
         end
 
         Protocol::Response.ok({
-          "total_messages" => JSON::Any.new(total),
+          "total_messages"  => JSON::Any.new(total),
           "last_message_id" => JSON::Any.new(
             @store.last_message_id(chat_id)
           ),
@@ -458,7 +483,7 @@ module Xd
 
         fields["title"] = json_any(stored.title)
         fields["backend"] = JSON::Any.new(stored.backend)
-        fields["commands"] = json_any([] of String)
+        fields["commands"] = json_any(@agents.commands(chat_id))
         fields["plan"] = JSON::Any.new(stored.plan)
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?
         fields["queue"] = json_any(stored.queue)
@@ -546,6 +571,35 @@ module Xd
         Protocol::Response.ok
       end
 
+      private def send_message(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string(
+          "chat",
+          "A message needs a chat and something to say."
+        )
+        text = request.string(
+          "text",
+          "A message needs a chat and something to say."
+        )
+        if text.empty?
+          raise Protocol::Error.new(
+            "A message needs a chat and something to say."
+          )
+        end
+
+        result = @agents.send(chat_id, text)
+        Protocol::Response.ok({
+          "queued" => JSON::Any.new(result.queued?),
+        })
+      end
+
+      private def cancel(request : Protocol::Request) : Protocol::Response
+        chat_id = request.string("chat", "cancel needs a chat id")
+        @agents.cancel(chat_id)
+        Protocol::Response.ok
+      end
+
       private def drop_queue(
         request : Protocol::Request,
       ) : Protocol::Response
@@ -592,6 +646,7 @@ module Xd
         end
 
         @store.queue_promote(chat_id, index)
+        @agents.cancel(chat_id, publish_queue_event: false)
         Protocol::Response.ok
       end
 
@@ -657,8 +712,17 @@ module Xd
         name : String,
         fields = {} of String => JSON::Any,
       ) : Protocol::Event
-        @next_event_id += 1
-        Protocol::Event.new(name, @next_event_id, fields)
+        @event_mutex.synchronize do
+          @next_event_id += 1
+          Protocol::Event.new(name, @next_event_id, fields)
+        end
+      end
+
+      private def publish_agent_event(
+        name : String,
+        fields : Hash(String, JSON::Any),
+      ) : Nil
+        @events.publish(protocol_event(name, fields))
       end
 
       private def failed_outcome(message : String) : Protocol::Outcome

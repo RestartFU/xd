@@ -133,6 +133,7 @@ module Xd
         0
       ensure
         server.close
+        engine.close
         store.close
       end
     end

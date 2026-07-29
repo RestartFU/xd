@@ -17,6 +17,7 @@ private def with_session_engine(
   begin
     yield engine, store
   ensure
+    engine.close
     store.close
     FileUtils.rm_r(Path[path].dirname)
   end

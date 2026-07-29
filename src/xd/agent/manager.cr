@@ -170,7 +170,10 @@ module Xd
         fail_start(chat_id, error)
       end
 
-      def cancel(chat_id : String) : Nil
+      def cancel(
+        chat_id : String,
+        publish_queue_event : Bool = true,
+      ) : Nil
         handle : SessionHandle? = nil
         queued : String? = nil
 
@@ -190,7 +193,7 @@ module Xd
         end
 
         if text = queued
-          publish_queue(chat_id)
+          publish_queue(chat_id) if publish_queue_event
           start_turn(chat_id, text)
         else
           handle.try(&.cancel)

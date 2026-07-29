@@ -16,7 +16,7 @@ module Xd
       @closed = false
 
       def initialize(@engine : Engine)
-        @events = EventBus.new
+        @events = @engine.events
         @session = Session.new(@engine, @events)
       end
 

@@ -7,9 +7,37 @@ private def parse_response(response : Xd::Protocol::Response) : JSON::Any
   JSON.parse(response.to_json)
 end
 
+private class EngineSessionHandle < Xd::Agent::SessionHandle
+  getter canceled = false
+
+  def cancel : Nil
+    @canceled = true
+  end
+end
+
+private class EngineLauncher < Xd::Agent::Launcher
+  getter specs = [] of Xd::Agent::RunSpec
+  getter handles = [] of EngineSessionHandle
+
+  def start(
+    backend : Xd::Agent::Backend,
+    spec : Xd::Agent::RunSpec,
+    environment : Hash(String, String),
+    secret_names : Array(String),
+    on_event : Proc(Xd::Agent::Event, Nil),
+    on_finished : Proc(Bool, String?, Nil),
+  ) : Xd::Agent::SessionHandle
+    handle = EngineSessionHandle.new
+    @specs << spec
+    @handles << handle
+    handle
+  end
+end
+
 private def with_daemon_engine(
   clock : Proc(Time::Instant) = -> { Time.instant },
   token_generator : Proc(String) = -> { Random::Secure.base64(32) },
+  launcher : Xd::Agent::Launcher? = nil,
   & : Xd::Storage::Store, Xd::Daemon::Engine ->
 ) : Nil
   path = File.join(
@@ -21,12 +49,14 @@ private def with_daemon_engine(
   engine = Xd::Daemon::Engine.new(
     store,
     clock: clock,
-    token_generator: token_generator
+    token_generator: token_generator,
+    launcher: launcher
   )
 
   begin
     yield store, engine
   ensure
+    engine.close
     store.close
     FileUtils.rm_r(Path[path].dirname)
   end
@@ -199,7 +229,7 @@ describe Xd::Daemon::Engine do
       with_daemon_engine do |_store, engine|
         local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
         saved = engine.dispatch(local, {
-          "op" => "set-agent-secrets",
+          "op"      => "set-agent-secrets",
           "entries" => [
             {"name" => "API_TOKEN", "value" => "never-over-wire"},
           ],
@@ -226,6 +256,59 @@ describe Xd::Daemon::Engine do
         ENV.delete("XD_AGENT_SECRETS_FILE")
       end
       FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "routes send and cancel through the daemon-owned agent manager" do
+    launcher = EngineLauncher.new
+    old_path = ENV["XD_AGENT_SECRETS_FILE"]?
+
+    begin
+      with_daemon_engine(launcher: launcher) do |_store, engine|
+        ENV["XD_AGENT_SECRETS_FILE"] = File.join(
+          Dir.tempdir,
+          "xd-engine-agent-#{Random::Secure.hex(12)}.json"
+        )
+        local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+        seen = [] of Xd::Protocol::Event
+        subscription = engine.events.subscribe { |event| seen << event }
+
+        folder = engine.dispatch(local, {
+          "op"   => "new-folder",
+          "name" => "Agent",
+        }.to_json)["id"].as_s
+        chat = engine.dispatch(local, {
+          "op"     => "new-chat",
+          "folder" => folder,
+        }.to_json)["id"].as_s
+
+        sent = engine.dispatch(local, {
+          "op"   => "send",
+          "chat" => chat,
+          "text" => "inspect",
+        }.to_json)
+        sent.success?.should be_true
+        sent["queued"].as_bool.should be_false
+        launcher.specs.first.prompt.should eq("inspect")
+        seen.map { |event| event["event"].as_s }
+          .should contain("turn-started")
+
+        engine.dispatch(local, {
+          "op"   => "cancel",
+          "chat" => chat,
+        }.to_json).success?.should be_true
+        launcher.handles.first.canceled.should be_true
+        engine.events.unsubscribe(subscription)
+      end
+    ensure
+      if path = ENV["XD_AGENT_SECRETS_FILE"]?
+        File.delete?(path)
+      end
+      if old_path
+        ENV["XD_AGENT_SECRETS_FILE"] = old_path
+      else
+        ENV.delete("XD_AGENT_SECRETS_FILE")
+      end
     end
   end
 end
