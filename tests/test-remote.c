@@ -3224,6 +3224,63 @@ test_slow_git_snapshot_does_not_stall_other_chats (void)
 }
 
 /*
+ * Opening a chat is a passive snapshot. A queue left by a stopped daemon
+ * must stay pending until the user explicitly sends or steers it.
+ */
+static void
+test_opening_an_idle_chat_keeps_its_queue (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autoptr (GError) error = NULL;
+  RemoteReply reply = { 0 };
+
+  daemon_start (&daemon);
+  g_assert_true (xd_storage_queue_append (
+    daemon.storage, daemon.chat_id, "wait for me", &error));
+  g_assert_no_error (error);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    JsonArray *queue;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "chat");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &reply);
+    queue = json_object_get_array_member (reply.reply, "queue");
+
+    g_assert_false (json_object_get_boolean_member_with_default (
+      reply.reply, "working", FALSE));
+    g_assert_cmpuint (json_array_get_length (queue), ==, 1);
+    g_assert_cmpstr (json_array_get_string_element (queue, 0), ==,
+                     "wait for me");
+  }
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+
+    g_assert_no_error (error);
+    g_assert_nonnull (stored);
+    g_assert_cmpuint (stored->queue->len, ==, 1);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "wait for me");
+  }
+
+  json_object_unref (reply.reply);
+  g_free (reply.wait.failure);
+  daemon_stop (&daemon);
+}
+
+/*
  * The client may know about a queued instruction before it knows a remote turn
  * stopped. Clicking steer must still do work: cancel is sent regardless of the
  * client's stale state. Selecting a later row must promote that exact message
@@ -4001,6 +4058,7 @@ main (int argc, char *argv[])
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/send-during-turn-queues", test_send_during_turn_queues);
   ADD ("/remote/slow-git-snapshot-does-not-stall-other-chats", test_slow_git_snapshot_does_not_stall_other_chats);
+  ADD ("/remote/opening-an-idle-chat-keeps-its-queue", test_opening_an_idle_chat_keeps_its_queue);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
   ADD ("/remote/a-live-turn-is-already-durable", test_a_live_turn_is_already_durable);

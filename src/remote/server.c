@@ -3104,21 +3104,6 @@ handle_chat (Connection *connection,
       return;
     }
 
-  /* A daemon restart ends the old process, not the user's next instruction.
-   * Opening the chat is enough to resume its persisted queue. */
-  if (chat->queue->len > 0 &&
-      !g_hash_table_contains (self->turns, chat_id) &&
-      start_queued (self, chat_id))
-    {
-      g_clear_pointer (&chat, xd_chat_free);
-      chat = xd_storage_get_chat (self->storage, chat_id, &error);
-      if (chat == NULL)
-        {
-          send_error (connection, error != NULL ? error->message : "No such chat.");
-          return;
-        }
-    }
-
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "ok");
   json_builder_add_boolean_value (builder, TRUE);
