@@ -48,6 +48,8 @@ xd_diff_text_snapshot (GtkWidget   *widget,
     {
       PangoLayout *layout = gtk_label_get_layout (GTK_LABEL (self->label));
       PangoLayoutIter *iter = pango_layout_get_iter (layout);
+      gboolean chunk =
+        gtk_widget_has_css_class (self->label, "xd-diff-chunk");
       const graphene_point_t label_point = GRAPHENE_POINT_INIT (0, 0);
       graphene_point_t label_origin;
       const char *block_colour = NULL;
@@ -89,7 +91,10 @@ xd_diff_text_snapshot (GtkWidget   *widget,
           bottom = label_origin.y + origin_y +
                    (float) bottom_units / PANGO_SCALE;
 
-          if (colour != block_colour || top != block_bottom)
+          if (chunk && row == 0 && colour != NULL)
+            top = 0;
+
+          if (colour != block_colour)
             {
               append_row_block (
                 snapshot, block_colour, block_top, block_bottom, width);
@@ -101,6 +106,16 @@ xd_diff_text_snapshot (GtkWidget   *widget,
           row++;
         }
       while (pango_layout_iter_next_line (iter));
+
+      /*
+       * Pango's last line can end fractionally before GTK's rounded widget
+       * allocation. Adjacent virtual chunks then expose that remainder as a
+       * random one-pixel black seam. Chunk labels have no vertical padding,
+       * so extending a coloured edge to the allocation boundary is exact.
+       */
+      if (chunk && block_colour != NULL)
+        block_bottom = MAX (
+          block_bottom, (float) gtk_widget_get_height (widget));
 
       append_row_block (
         snapshot, block_colour, block_top, block_bottom, width);
