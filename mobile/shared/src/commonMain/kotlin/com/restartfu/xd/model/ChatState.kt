@@ -31,6 +31,8 @@ public data class ChatState(
     val liveSegment: String = "",
     val pendingUser: TranscriptItem? = null,
     val loading: Boolean = false,
+    val loadingOlder: Boolean = false,
+    val hasOlderMessages: Boolean = false,
     val error: String? = null,
 ) {
     public val visibleItems: List<TranscriptItem>

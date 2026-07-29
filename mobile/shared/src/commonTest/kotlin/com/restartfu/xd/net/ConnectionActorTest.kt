@@ -72,6 +72,28 @@ class ConnectionActorTest {
     }
 
     @Test
+    fun backgroundingCompletesAndClearsPairingAttempt() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
+        val result = async {
+            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+        }
+        runCurrent()
+
+        actor.goBackground()
+        runCurrent()
+
+        val failure = assertIs<PairResult.Failure>(result.await())
+        assertTrue(failure.message.contains("background"))
+        assertEquals(Link.Idle, actor.link.value)
+        assertTrue(factory.latest.closed)
+
+        actor.poke()
+        runCurrent()
+        assertEquals(1, factory.sockets.size)
+    }
+
+    @Test
     fun eventBetweenCallAndReplyDoesNotConsumeReply() = runTest {
         val factory = FakeSocketFactory()
         val actor = connectedActor(factory)

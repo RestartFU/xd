@@ -22,6 +22,8 @@ public sealed interface TranscriptInput {
         val nowMillis: Long,
     ) : TranscriptInput
 
+    public data class MessagesLoaded(val messages: MessagesReply) : TranscriptInput
+
     public data class TurnStarted(
         val label: String?,
         val nowMillis: Long,
@@ -53,6 +55,12 @@ public object TranscriptMachine {
         input: TranscriptInput,
     ): TranscriptTransition = when (input) {
         is TranscriptInput.Loaded -> loaded(state, input)
+        is TranscriptInput.MessagesLoaded -> TranscriptTransition(
+            state.withMessages(input.messages).copy(
+                loadingOlder = false,
+                error = null,
+            ),
+        )
         is TranscriptInput.TurnStarted -> TranscriptTransition(
             state.copy(
                 working = true,
@@ -144,15 +152,6 @@ public object TranscriptMachine {
         input: TranscriptInput.Loaded,
     ): TranscriptTransition {
         val chat = input.chat
-        val messages = input.messages.messages.mapIndexed { index, message ->
-            TranscriptItem(
-                id = "persisted-${message.at}-$index",
-                kind = message.role.toKind(),
-                text = message.content,
-                atMillis = message.at * 1000,
-                label = message.label,
-            )
-        }
         val liveItems = if (chat.working) {
             chat.items.mapIndexed { index, item ->
                 TranscriptItem(
@@ -175,15 +174,28 @@ public object TranscriptMachine {
                 working = chat.working,
                 label = chat.label,
                 startedAtMillis = chat.workingFor?.let { input.nowMillis - it * 1000 },
-                messages = messages,
                 liveItems = liveItems,
                 liveSegment = if (chat.working) chat.segment.orEmpty() else "",
                 pendingUser = null,
                 loading = false,
+                loadingOlder = false,
                 error = null,
-            ),
+            ).withMessages(input.messages),
         )
     }
+
+    private fun ChatState.withMessages(reply: MessagesReply): ChatState = copy(
+        messages = reply.messages.mapIndexed { index, message ->
+            TranscriptItem(
+                id = "persisted-${message.at}-${reply.messages.size - index}",
+                kind = message.role.toKind(),
+                text = message.content,
+                atMillis = message.at * 1000,
+                label = message.label,
+            )
+        },
+        hasOlderMessages = reply.messages.size < reply.totalMessages,
+    )
 
     private fun String.toKind(): TranscriptKind = when (this) {
         "user" -> TranscriptKind.USER

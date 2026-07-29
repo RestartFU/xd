@@ -42,6 +42,11 @@ the debug APK to `dist/mobile/xd-mobile-debug.apk`.
 The APK build also runs that suite, signs the debug APK, and verifies its
 alignment and signature before exporting it.
 
+Docker keeps the generated debug signing key in the
+`xd-mobile-debug-signing` BuildKit cache. Rebuilding can update an installed
+debug APK without losing pairing credentials. Deleting that cache rotates the
+key; Android then requires uninstalling the old debug app.
+
 ## Nightly signing
 
 The rolling nightly release builds a non-debuggable

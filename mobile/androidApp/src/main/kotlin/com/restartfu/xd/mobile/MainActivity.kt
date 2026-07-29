@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -262,10 +263,12 @@ private fun TreeScreen(
     openChat: (String) -> Unit,
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    val operationError by model.error.collectAsStateWithLifecycle()
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
     val roots = tree.folders.filter { it.parentId == null }
     val children = tree.folders.groupBy(Folder::parentId)
     val chats = tree.chats.groupBy(ChatSummary::folderId)
+    val foldersById = tree.folders.associateBy(Folder::id)
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
@@ -283,7 +286,7 @@ private fun TreeScreen(
                     CircularProgressIndicator()
                 }
             } else {
-                tree.error?.let {
+                (tree.error ?: operationError)?.let {
                     Text(
                         it,
                         modifier = Modifier.padding(16.dp),
@@ -313,7 +316,7 @@ private fun TreeScreen(
                     }
                     tree.folders.forEach { folder ->
                         Text(
-                            folder.name,
+                            folderPath(folder, foldersById),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
@@ -330,6 +333,20 @@ private fun TreeScreen(
             },
         )
     }
+}
+
+private fun folderPath(
+    folder: Folder,
+    foldersById: Map<String, Folder>,
+): String {
+    val names = mutableListOf<String>()
+    val visited = mutableSetOf<String>()
+    var current: Folder? = folder
+    while (current != null && visited.add(current.id)) {
+        names += current.name
+        current = current.parentId?.let(foldersById::get)
+    }
+    return names.asReversed().joinToString(" / ")
 }
 
 private fun androidx.compose.foundation.lazy.LazyListScope.folderRows(
@@ -417,16 +434,19 @@ private fun ChatScreen(
     var composer by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val items = state.visibleItems
-    val atBottom by remember(items.size) {
+    val leadingItemCount =
+        (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
+    val lastTranscriptIndex = leadingItemCount + items.lastIndex
+    val atBottom by remember(items.size, leadingItemCount) {
         derivedStateOf {
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            last >= items.lastIndex - 1
+            last >= lastTranscriptIndex - 1
         }
     }
 
-    LaunchedEffect(items.size, items.lastOrNull()?.text) {
+    LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount) {
         if (items.isNotEmpty() && (atBottom || listState.layoutInfo.totalItemsCount == 0)) {
-            listState.animateScrollToItem(items.lastIndex)
+            listState.animateScrollToItem(lastTranscriptIndex)
         }
     }
 
@@ -445,8 +465,11 @@ private fun ChatScreen(
                     .padding(12.dp),
             ) {
                 if (state.queue.isNotEmpty()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        state.queue.take(3).forEachIndexed { index, queued ->
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        state.queue.forEachIndexed { index, queued ->
                             AssistChip(
                                 onClick = { model.dropQueued(index) },
                                 label = { Text(queued, maxLines = 1) },
@@ -497,6 +520,21 @@ private fun ChatScreen(
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (state.hasOlderMessages) {
+                item(key = "load-older") {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        TextButton(
+                            onClick = model::loadOlder,
+                            enabled = !state.loadingOlder,
+                        ) {
+                            Text(if (state.loadingOlder) "Loading…" else "Load older")
+                        }
+                    }
+                }
+            }
             if (state.loading && items.isEmpty()) {
                 item { CircularProgressIndicator() }
             }

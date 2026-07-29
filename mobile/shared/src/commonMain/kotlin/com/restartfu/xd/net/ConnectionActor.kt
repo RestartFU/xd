@@ -189,6 +189,10 @@ internal class ConnectionActor(
         wanted = false
         retryJob?.cancel()
         retryJob = null
+        pairing?.result?.complete(
+            PairResult.Failure("Pairing cancelled when the app moved to background"),
+        )
+        pairing = null
         closeCurrent(DisconnectedException("App moved to background"))
         _link.value = Link.Idle
     }

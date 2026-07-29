@@ -57,6 +57,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         folderId: String,
         onCreated: (String) -> Unit,
     ) {
+        _error.value = null
         viewModelScope.launch {
             runCatching { client.createChat(folderId = folderId, title = null) }
                 .onSuccess(onCreated)
@@ -100,6 +101,10 @@ class ChatViewModel(
 
     fun dropQueued(index: Int) {
         viewModelScope.launch { runCatching { session.dropQueued(index) } }
+    }
+
+    fun loadOlder() {
+        viewModelScope.launch { session.loadOlder() }
     }
 
     override fun onCleared() {

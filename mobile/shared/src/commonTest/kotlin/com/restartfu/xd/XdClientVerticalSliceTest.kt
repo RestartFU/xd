@@ -7,6 +7,7 @@ import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,10 +53,26 @@ class XdClientVerticalSliceTest {
         socket.receive(messagesReply("""{"role":"user","content":"Earlier","at":1}"""))
         runCurrent()
         assertEquals("Earlier", session.state.value.messages.single().text)
+        assertTrue(session.state.value.hasOlderMessages)
+
+        val loadingOlder = async { session.loadOlder() }
+        runCurrent()
+        assertEquals("messages", socket.opAt(4))
+        assertTrue(socket.writes[4].decodeToString().contains(""""limit":300"""))
+        socket.receive(
+            messagesReply(
+                """{"role":"user","content":"Oldest","at":0},""" +
+                    """{"role":"user","content":"Earlier","at":1}""",
+            ),
+        )
+        runCurrent()
+        loadingOlder.await()
+        assertEquals(listOf("Oldest", "Earlier"), session.state.value.messages.map { it.text })
+        assertFalse(session.state.value.hasOlderMessages)
 
         val sending = async { session.send("Next") }
         runCurrent()
-        assertEquals("send", socket.opAt(4))
+        assertEquals("send", socket.opAt(5))
         assertEquals("Next", session.state.value.pendingUser?.text)
         socket.receive("""{"ok":true}""")
         runCurrent()
@@ -64,11 +81,11 @@ class XdClientVerticalSliceTest {
         socket.receive("""{"event":"turn-started","chat":"chat","label":"Codex"}""")
         runCurrent()
         assertTrue(session.state.value.working)
-        assertEquals("chat", socket.opAt(5))
+        assertEquals("chat", socket.opAt(6))
         socket.receive("""{"event":"text","chat":"chat","text":"Hel"}""")
         socket.receive(chatReply(working = true, segment = "Hel"))
         runCurrent()
-        assertEquals("messages", socket.opAt(6))
+        assertEquals("messages", socket.opAt(7))
         socket.receive("""{"event":"text","chat":"chat","text":"lo"}""")
         socket.receive(messagesReply("""{"role":"user","content":"Next","at":2}"""))
         runCurrent()
@@ -76,10 +93,10 @@ class XdClientVerticalSliceTest {
 
         socket.receive("""{"event":"turn-finished","chat":"chat","ok":true,"waiting":false}""")
         runCurrent()
-        assertEquals("chat", socket.opAt(7))
+        assertEquals("chat", socket.opAt(8))
         socket.receive(chatReply(working = false))
         runCurrent()
-        assertEquals("messages", socket.opAt(8))
+        assertEquals("messages", socket.opAt(9))
         socket.receive(
             messagesReply(
                 """{"role":"user","content":"Next","at":2},""" +

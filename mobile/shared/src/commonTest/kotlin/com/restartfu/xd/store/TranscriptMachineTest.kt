@@ -136,6 +136,37 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun messagesExposeAndClearOlderPageAvailability() {
+        val partial = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat = chat(),
+                messages = messagesWithTotal(
+                    2,
+                    MessageReply("assistant", "newest", 13),
+                ),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertTrue(partial.hasOlderMessages)
+
+        val complete = reduce(
+            partial.copy(loadingOlder = true),
+            TranscriptInput.MessagesLoaded(
+                messages(
+                    MessageReply("user", "oldest", 12),
+                    MessageReply("assistant", "newest", 13),
+                ),
+            ),
+        ).state
+
+        assertEquals(listOf("oldest", "newest"), complete.messages.map { it.text })
+        assertEquals(false, complete.hasOlderMessages)
+        assertEquals(false, complete.loadingOlder)
+    }
+
+    @Test
     fun pendingTimeoutRequestsChatAndMessagesOnlyForCurrentPendingRow() {
         val pending = reduce(
             ChatState("chat"),
@@ -181,6 +212,16 @@ class TranscriptMachineTest {
         ok = true,
         totalMessages = rows.size,
         lastMessageId = rows.size.toLong(),
+        messages = rows.toList(),
+    )
+
+    private fun messagesWithTotal(
+        total: Int,
+        vararg rows: MessageReply,
+    ): MessagesReply = MessagesReply(
+        ok = true,
+        totalMessages = total,
+        lastMessageId = total.toLong(),
         messages = rows.toList(),
     )
 }

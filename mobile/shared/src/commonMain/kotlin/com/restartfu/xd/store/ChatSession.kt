@@ -42,6 +42,8 @@ public class ChatSession internal constructor(
     public suspend fun dropQueued(index: Int? = null): Unit =
         core.call(Ops.dropQueue(core.chatId, index))
 
+    public suspend fun loadOlder(): Unit = core.loadOlder()
+
     public suspend fun setOption(option: ChatOption, value: String): Unit =
         core.call(Ops.setOption(core.chatId, option, value))
 
@@ -63,6 +65,7 @@ internal class ChatSessionCore(
     private val _state = MutableStateFlow(ChatState(chatId = chatId))
     private var pendingSequence = 0L
     private var pendingTimer: Job? = null
+    private var messageLimit = MESSAGE_PAGE_SIZE
     private var reloadInProgress = false
     private val inputsDuringReload = mutableListOf<BufferedInput>()
 
@@ -78,7 +81,8 @@ internal class ChatSessionCore(
             try {
                 val chatReply = actor.callSequenced(Ops.chat(chatId))
                 val chat = chatReply.value.decodeReply<ChatReply>()
-                val messages = actor.call(Ops.messages(chatId)).decodeReply<MessagesReply>()
+                val messages = actor.call(Ops.messages(chatId, messageLimit))
+                    .decodeReply<MessagesReply>()
                 val replayEffects = stateMutex.withLock {
                     var transition = TranscriptMachine.reduce(
                         _state.value,
@@ -107,6 +111,46 @@ internal class ChatSessionCore(
                     _state.value = _state.value.copy(
                         loading = false,
                         error = error.message ?: "Could not load the chat",
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun loadOlder() {
+        reloadMutex.withLock {
+            val shouldLoad = stateMutex.withLock {
+                if (!_state.value.hasOlderMessages || _state.value.loadingOlder) {
+                    false
+                } else {
+                    _state.value = _state.value.copy(
+                        loadingOlder = true,
+                        error = null,
+                    )
+                    true
+                }
+            }
+            if (!shouldLoad) return@withLock
+
+            val nextLimit = minOf(
+                messageLimit.toLong() + MESSAGE_PAGE_SIZE,
+                Int.MAX_VALUE.toLong(),
+            ).toInt()
+            try {
+                val messages = actor.call(Ops.messages(chatId, nextLimit))
+                    .decodeReply<MessagesReply>()
+                stateMutex.withLock {
+                    _state.value = TranscriptMachine.reduce(
+                        _state.value,
+                        TranscriptInput.MessagesLoaded(messages),
+                    ).state
+                    messageLimit = nextLimit
+                }
+            } catch (error: Throwable) {
+                stateMutex.withLock {
+                    _state.value = _state.value.copy(
+                        loadingOlder = false,
+                        error = error.message ?: "Could not load older messages",
                     )
                 }
             }
@@ -201,6 +245,7 @@ internal class ChatSessionCore(
     }
 
     private companion object {
+        const val MESSAGE_PAGE_SIZE = 150
         const val PENDING_TIMEOUT_MILLIS = 10_000L
     }
 
