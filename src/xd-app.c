@@ -102,7 +102,7 @@ static const char *XD_STYLE =
   " --sidebar-backdrop-color: #060607;"
   " --secondary-sidebar-bg-color: #060607;"
   " --popover-bg-color: #141416;"
-  " --dialog-bg-color: #101013;"
+  " --dialog-bg-color: #16161b;"
   " --card-bg-color: #101013;"
   "}\n"
 
@@ -122,8 +122,17 @@ static const char *XD_STYLE =
    * surface sits a little above the one behind it, with a hairline edge
    * where they meet -- which is what reads as glass.
    */
+  /*
+   * The "background" class is not on the list.
+   *
+   * GTK and libadwaita put it on things that are not this window: every
+   * popover, and the panel a dialog floats in the middle of the screen. Both
+   * then had to be undone by name, and the dialog's panel is a widget whose
+   * name has already changed once between libadwaita versions. The window
+   * node is the window; the rest of this list is xd's own classes.
+   */
   ".xd-surface, .xd-surface > *, .xd-sidebar, .xd-sidebar > *,"
-  " window, .background, headerbar, .toolbar"
+  " window, headerbar, .toolbar"
   " { background-color: #0a0a0c; }\n"
 
   /*
@@ -327,19 +336,27 @@ static const char *XD_STYLE =
    * as the menus, same radius, buttons that read as the composer's do.
    */
   /*
-   * The fill belongs to the sheet, not to the dialog.
+   * The panel is painted where libadwaita paints it.
    *
-   * A dialog's own node covers the whole window -- the dimming it puts over
-   * what is behind is inside it. Filling that node painted an opaque slab
-   * across the window instead, so opening one made the conversation vanish
-   * rather than recede. Only the panel in the middle is a panel.
+   * A dialog's own node covers the whole window: the dimming that puts what
+   * is behind into the background is a child of it, and the panel is another.
+   * Filling that node painted an opaque slab across the window instead, so
+   * opening one made the conversation vanish rather than recede -- and
+   * reaching past it to the panel by name found a widget that libadwaita has
+   * already renamed once, which leaves a dialog with no panel at all where
+   * the name does not match.
+   *
+   * So nothing here paints the panel. --dialog-bg-color is what libadwaita
+   * reads for it, wherever it has moved that widget to, and the rules under
+   * this one are the shape and the colours inside it. The tone is the menus'
+   * again, which is where a dialog belongs.
    */
-  /* The sheet carries the "background" class the surfaces rule names, and one
-   * class outranks two element names -- so the panel is reached by saying
-   * both, or every dialog quietly takes the window's own black instead. */
-  "dialog { background: none; background-color: transparent; }\n"
-  "dialog sheet.background, .dialog-content, alertdialog > *"
-  " { background-color: #16161b; }\n"
+  /* Said again for the versions that read the variable and the ones that do
+   * not: where the panel is still the widget called a sheet, this names it.
+   * Neither of these can reach the node that covers the window, which is the
+   * property that matters. */
+  "dialog sheet, dialog sheet.background, dialog .sheet,"
+  " .dialog-content, alertdialog > * { background-color: #16161b; }\n"
   ".dialog-content, alertdialog { border-radius: 14px;"
   " border: 1px solid alpha(#ffffff, 0.10); }\n"
   "alertdialog .title { font-size: 1.05em; font-weight: 700; }\n"
