@@ -112,6 +112,19 @@ static const char *const RUST_CONSTANTS[] = {
   "false", "None", "true", NULL,
 };
 
+static const char *const JSON_CONSTANTS[] = {
+  "false", "null", "true", NULL,
+};
+
+static const char *const YAML_CONSTANTS[] = {
+  "false", "no", "null", "off", "on", "true", "yes",
+  NULL,
+};
+
+static const char *const TOML_CONSTANTS[] = {
+  "false", "true", NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -122,12 +135,14 @@ typedef struct
   const char *const *types;
   const char *const *constants;
   gboolean raw_strings;         /* Go's backtick string, which spans lines */
-  gboolean triple_strings;      /* Kotlin's triple-quoted string */
+  gboolean triple_strings;      /* multiline triple-quoted strings */
+  gboolean single_triple_strings; /* triple apostrophes too */
   gboolean directives;          /* C's # lines */
   gboolean slash_comments;       /* C-like // comments */
   gboolean block_comments;       /* C-like block comments */
   gboolean hash_comments;        /* Dockerfile's leading # comments */
   gboolean inline_hash_comments; /* Make's unescaped # comments */
+  gboolean spaced_hash_comments; /* YAML's whitespace-separated # comments */
   gboolean make_variables;       /* Make's $(...), ${...} and $x */
   gboolean case_insensitive;     /* Dockerfile instructions */
   gboolean capitalized_types;    /* user-defined types */
@@ -137,6 +152,12 @@ typedef struct
   gboolean rust_lifetimes;       /* Rust's 'name */
   gboolean rust_strings;         /* Rust's r#"..."# strings */
   gboolean nested_block_comments; /* Rust's nested block comments */
+  gboolean bare_keys;            /* YAML and TOML unquoted keys */
+  gboolean quoted_keys;          /* JSON, YAML and TOML quoted keys */
+  gboolean table_headers;        /* TOML's [table] and [[array]] */
+  gboolean yaml_references;      /* YAML anchors, aliases and tags */
+  gboolean tilde_constant;       /* YAML's null shorthand */
+  char key_delimiter;            /* ':' for mappings, '=' for assignments */
 } Language;
 
 static const Language C_LANGUAGE = {
@@ -198,6 +219,40 @@ static const Language RUST_LANGUAGE = {
   .nested_block_comments = TRUE,
 };
 
+static const Language JSON_LANGUAGE = {
+  .keywords = NO_WORDS,
+  .types = NO_WORDS,
+  .constants = JSON_CONSTANTS,
+  .quoted_keys = TRUE,
+  .key_delimiter = ':',
+};
+
+static const Language YAML_LANGUAGE = {
+  .keywords = NO_WORDS,
+  .types = NO_WORDS,
+  .constants = YAML_CONSTANTS,
+  .spaced_hash_comments = TRUE,
+  .case_insensitive = TRUE,
+  .bare_keys = TRUE,
+  .quoted_keys = TRUE,
+  .yaml_references = TRUE,
+  .tilde_constant = TRUE,
+  .key_delimiter = ':',
+};
+
+static const Language TOML_LANGUAGE = {
+  .keywords = NO_WORDS,
+  .types = NO_WORDS,
+  .constants = TOML_CONSTANTS,
+  .triple_strings = TRUE,
+  .single_triple_strings = TRUE,
+  .inline_hash_comments = TRUE,
+  .bare_keys = TRUE,
+  .quoted_keys = TRUE,
+  .table_headers = TRUE,
+  .key_delimiter = '=',
+};
+
 static const Language *
 language_table (XdSyntaxLanguage language)
 {
@@ -213,6 +268,12 @@ language_table (XdSyntaxLanguage language)
     return &MAKEFILE_LANGUAGE;
   if (language == XD_SYNTAX_RUST)
     return &RUST_LANGUAGE;
+  if (language == XD_SYNTAX_JSON)
+    return &JSON_LANGUAGE;
+  if (language == XD_SYNTAX_YAML)
+    return &YAML_LANGUAGE;
+  if (language == XD_SYNTAX_TOML)
+    return &TOML_LANGUAGE;
 
   return NULL;
 }
@@ -258,6 +319,12 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_MAKEFILE;
   if (g_strcmp0 (dot, ".rs") == 0)
     return XD_SYNTAX_RUST;
+  if (g_strcmp0 (dot, ".json") == 0)
+    return XD_SYNTAX_JSON;
+  if (g_strcmp0 (dot, ".yaml") == 0 || g_strcmp0 (dot, ".yml") == 0)
+    return XD_SYNTAX_YAML;
+  if (g_strcmp0 (dot, ".toml") == 0)
+    return XD_SYNTAX_TOML;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -374,6 +441,42 @@ scan_quoted (Emitter    *emitter,
     scan++;
 
   append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, (gsize) (scan - at));
+  return scan;
+}
+
+static gboolean
+quoted_key (const char *at,
+            char        quote,
+            char        delimiter)
+{
+  const char *scan = at + 1;
+
+  while (*scan != '\0' && *scan != quote)
+    scan += (*scan == '\\' && scan[1] != '\0') ? 2 : 1;
+
+  if (*scan != quote)
+    return FALSE;
+
+  for (scan++; *scan == ' ' || *scan == '\t'; scan++)
+    ;
+
+  return *scan == delimiter;
+}
+
+static const char *
+scan_quoted_key (Emitter    *emitter,
+                 const char *at,
+                 char        quote)
+{
+  const char *scan = at + 1;
+
+  while (*scan != '\0' && *scan != quote)
+    scan += (*scan == '\\' && scan[1] != '\0') ? 2 : 1;
+
+  if (*scan == quote)
+    scan++;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, (gsize) (scan - at));
   return scan;
 }
 
@@ -539,6 +642,104 @@ starts_the_line (const char *line,
       return FALSE;
 
   return TRUE;
+}
+
+static gboolean
+starts_a_bare_key (const char *line,
+                   const char *at,
+                   char        delimiter)
+{
+  const char *scan = line;
+
+  while (*scan == ' ' || *scan == '\t')
+    scan++;
+
+  if (delimiter == ':' && *scan == '-' &&
+      (scan[1] == ' ' || scan[1] == '\t'))
+    {
+      scan++;
+      while (*scan == ' ' || *scan == '\t')
+        scan++;
+    }
+
+  return scan == at;
+}
+
+static const char *
+scan_bare_key (Emitter    *emitter,
+               const char *line,
+               const char *at,
+               char        delimiter)
+{
+  const char *scan = at;
+  const char *end;
+
+  if (!starts_a_bare_key (line, at, delimiter))
+    return NULL;
+
+  while (*scan != '\0' && *scan != delimiter && *scan != '#')
+    scan++;
+
+  if (*scan != delimiter)
+    return NULL;
+
+  /* A colon within an unquoted scalar, such as https://, is not a YAML key. */
+  if (delimiter == ':' && scan[1] != '\0' &&
+      scan[1] != ' ' && scan[1] != '\t' &&
+      scan[1] != '[' && scan[1] != '{')
+    return NULL;
+
+  end = scan;
+  while (end > at && (end[-1] == ' ' || end[-1] == '\t'))
+    end--;
+
+  if (end == at)
+    return NULL;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, (gsize) (end - at));
+  append_plain (emitter, end, (gsize) (scan - end));
+  return scan;
+}
+
+static const char *
+scan_table_header (Emitter    *emitter,
+                   const char *at)
+{
+  const char *close = strchr (at + 1, ']');
+
+  if (close == NULL)
+    close = at + strlen (at);
+  else
+    {
+      close++;
+      if (*close == ']')
+        close++;
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (close - at));
+  return close;
+}
+
+static const char *
+scan_yaml_reference (Emitter    *emitter,
+                     const char *at)
+{
+  const char *scan = at + 1;
+
+  if (*scan == '!')
+    scan++;
+
+  while (is_word_byte (*scan) || *scan == '-' || *scan == '.' ||
+         *scan == '/' || *scan == ':')
+    scan++;
+
+  if (scan == at + 1)
+    return NULL;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
 }
 
 static gboolean
@@ -799,7 +1000,13 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
     }
   else if (state->in_triple_string)
     {
-      const char *close = strstr (at, "\"\"\"");
+      char marker[4] = {
+        (char) state->triple_quote,
+        (char) state->triple_quote,
+        (char) state->triple_quote,
+        '\0',
+      };
+      const char *close = strstr (at, marker);
 
       if (close == NULL)
         {
@@ -811,6 +1018,7 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
                     (gsize) (close + 3 - at));
       at = close + 3;
       state->in_triple_string = FALSE;
+      state->triple_quote = 0;
     }
   else if (state->in_rust_raw_string)
     {
@@ -862,14 +1070,30 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;
         }
-      else if (table->triple_strings && strncmp (at, "\"\"\"", 3) == 0)
+      else if (table->spaced_hash_comments && *at == '#' &&
+               (at == line || at[-1] == ' ' || at[-1] == '\t'))
         {
-          const char *close = strstr (at + 3, "\"\"\"");
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
+          return;
+        }
+      else if (table->table_headers && *at == '[' &&
+               starts_the_line (line, at))
+        {
+          at = scan_table_header (&emitter, at);
+        }
+      else if (table->triple_strings &&
+               (strncmp (at, "\"\"\"", 3) == 0 ||
+                (table->single_triple_strings &&
+                 strncmp (at, "'''", 3) == 0)))
+        {
+          char marker[4] = { *at, *at, *at, '\0' };
+          const char *close = strstr (at + 3, marker);
 
           if (close == NULL)
             {
               append_token (&emitter, XD_SYNTAX_TOKEN_STRING, at, strlen (at));
               state->in_triple_string = TRUE;
+              state->triple_quote = (guint8) *at;
               return;
             }
 
@@ -905,6 +1129,11 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           else
             at = after;
         }
+      else if (table->quoted_keys && (*at == '"' || *at == '\'') &&
+               quoted_key (at, *at, table->key_delimiter))
+        {
+          at = scan_quoted_key (&emitter, at, *at);
+        }
       else if (*at == '"' || *at == '\'')
         {
           at = scan_quoted (&emitter, at, *at);
@@ -931,6 +1160,50 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       else if (table->directives && *at == '#' && starts_the_line (line, at))
         {
           at = scan_directive (&emitter, at);
+        }
+      else if (table->yaml_references &&
+               (*at == '&' || *at == '*' || *at == '!'))
+        {
+          const char *after = scan_yaml_reference (&emitter, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
+      else if (table->tilde_constant && *at == '~')
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_NUMBER, at, 1);
+          at++;
+        }
+      else if (table->bare_keys &&
+               (g_ascii_isalnum (*at) || strchr ("_-.", *at) != NULL))
+        {
+          const char *after = scan_bare_key (
+            &emitter, line, at, table->key_delimiter);
+
+          if (after == NULL)
+            {
+              if (g_ascii_isdigit (*at) ||
+                  (*at == '.' && g_ascii_isdigit (at[1])))
+                at = scan_number (&emitter, at);
+              else if (g_ascii_isalpha (*at) || *at == '_')
+                at = scan_word (&emitter, table, at);
+              else
+                {
+                  append_plain (&emitter, at, 1);
+                  at++;
+                }
+            }
+          else
+            {
+              at = after;
+            }
         }
       else if (g_ascii_isdigit (*at) ||
                (*at == '.' && g_ascii_isdigit (at[1])))

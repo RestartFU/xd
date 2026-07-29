@@ -323,6 +323,59 @@ test_colours_rust (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">i32</span>"));
 }
 
+static void
+test_colours_json (void)
+{
+  static const char *patch =
+    "diff --git a/package.json b/package.json\n"
+    "@@ -1 +1 @@\n"
+    "-{\"enabled\": false}\n"
+    "+{\"enabled\": true}\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (
+    strstr (markup, "foreground=\"#78aeed\">&quot;enabled&quot;</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">true</span>"));
+}
+
+static void
+test_colours_yaml (void)
+{
+  static const char *patch =
+    "diff --git a/compose.yaml b/compose.yaml\n"
+    "@@ -1 +1 @@\n"
+    "-enabled: false\n"
+    "+enabled: true\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">enabled</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">true</span>"));
+}
+
+static void
+test_colours_toml (void)
+{
+  static const char *patch =
+    "diff --git a/Cargo.toml b/Cargo.toml\n"
+    "@@ -1 +1 @@\n"
+    "-edition = \"2021\"\n"
+    "+edition = \"2024\"\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">edition</span>"));
+  g_assert_nonnull (
+    strstr (markup, "foreground=\"#f8e45c\">&quot;2024&quot;</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -414,6 +467,9 @@ main (int   argc,
   g_test_add_func ("/unified-diff/colours-makefile",
                    test_colours_makefile);
   g_test_add_func ("/unified-diff/colours-rust", test_colours_rust);
+  g_test_add_func ("/unified-diff/colours-json", test_colours_json);
+  g_test_add_func ("/unified-diff/colours-yaml", test_colours_yaml);
+  g_test_add_func ("/unified-diff/colours-toml", test_colours_toml);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",

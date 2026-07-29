@@ -84,6 +84,14 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_MAKEFILE);
   g_assert_cmpint (xd_syntax_language_for_path ("src/main.rs"),
                    ==, XD_SYNTAX_RUST);
+  g_assert_cmpint (xd_syntax_language_for_path ("package.json"),
+                   ==, XD_SYNTAX_JSON);
+  g_assert_cmpint (xd_syntax_language_for_path ("compose.yaml"),
+                   ==, XD_SYNTAX_YAML);
+  g_assert_cmpint (xd_syntax_language_for_path ("workflow.yml"),
+                   ==, XD_SYNTAX_YAML);
+  g_assert_cmpint (xd_syntax_language_for_path ("Cargo.toml"),
+                   ==, XD_SYNTAX_TOML);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -236,6 +244,62 @@ test_classifies_rust (void)
   g_assert_nonnull (strstr (body, "string:'x'\n"));
 }
 
+static void
+test_classifies_json (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *record = scan (
+    XD_SYNTAX_JSON,
+    "{\"name\": \"xd\", \"enabled\": true, \"retries\": 3, \"empty\": null}",
+    &state, NULL);
+
+  g_assert_nonnull (strstr (record, "type:\"name\"\n"));
+  g_assert_nonnull (strstr (record, "string:\"xd\"\n"));
+  g_assert_nonnull (strstr (record, "number:true\n"));
+  g_assert_nonnull (strstr (record, "number:3\n"));
+  g_assert_nonnull (strstr (record, "number:null\n"));
+}
+
+static void
+test_classifies_yaml (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *setting = scan (
+    XD_SYNTAX_YAML, "service-name: true # enabled", &state, NULL);
+  g_autofree char *url = scan (
+    XD_SYNTAX_YAML, "- endpoint: https://example.test/a#fragment",
+    &state, NULL);
+  g_autofree char *anchor = scan (
+    XD_SYNTAX_YAML, "defaults: &base", &state, NULL);
+
+  g_assert_nonnull (strstr (setting, "type:service-name\n"));
+  g_assert_nonnull (strstr (setting, "number:true\n"));
+  g_assert_nonnull (strstr (setting, "comment:# enabled\n"));
+  g_assert_nonnull (strstr (url, "type:endpoint\n"));
+  g_assert_null (strstr (url, "comment:#fragment\n"));
+  g_assert_nonnull (strstr (anchor, "preproc:&base\n"));
+}
+
+static void
+test_classifies_toml (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *table = scan (
+    XD_SYNTAX_TOML, "[server.database]", &state, NULL);
+  g_autofree char *setting = scan (
+    XD_SYNTAX_TOML,
+    "listen-address = \"127.0.0.1\" # local", &state, NULL);
+  g_autofree char *enabled = scan (
+    XD_SYNTAX_TOML, "\"feature flag\" = true", &state, NULL);
+
+  g_assert_nonnull (strstr (table, "preproc:[server.database]\n"));
+  g_assert_nonnull (strstr (setting, "type:listen-address\n"));
+  g_assert_nonnull (strstr (setting, "string:\"127.0.0.1\"\n"));
+  g_assert_nonnull (strstr (setting, "comment:# local\n"));
+  g_assert_nonnull (strstr (enabled, "type:\"feature flag\"\n"));
+  g_assert_nonnull (strstr (enabled, "number:true\n"));
+}
+
 /*
  * The type of a composite literal is a type, and the space is what says so:
  * gofmt writes "Vec3{40}" tight and "if ok {" loose.
@@ -357,6 +421,28 @@ test_carries_a_kotlin_triple_string (void)
 }
 
 static void
+test_carries_a_toml_multiline_string (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *opened = scan (
+    XD_SYNTAX_TOML, "description = '''first", &state, NULL);
+  g_autofree char *inside = NULL;
+  g_autofree char *closed = NULL;
+
+  g_assert_true (state.in_triple_string);
+  g_assert_cmpuint (state.triple_quote, ==, '\'');
+
+  inside = scan (XD_SYNTAX_TOML, "# still string", &state, NULL);
+  g_assert_true (state.in_triple_string);
+  g_assert_null (strstr (inside, "comment:# still string\n"));
+
+  closed = scan (XD_SYNTAX_TOML, "last''' # comment", &state, NULL);
+  g_assert_false (state.in_triple_string);
+  g_assert_nonnull (strstr (closed, "string:last'''\n"));
+  g_assert_nonnull (strstr (closed, "comment:# comment\n"));
+}
+
+static void
 test_carries_a_rust_raw_string (void)
 {
   XdSyntaxState state = { 0 };
@@ -444,6 +530,9 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-kotlin", test_classifies_kotlin);
   g_test_add_func ("/syntax/classifies-makefile", test_classifies_makefile);
   g_test_add_func ("/syntax/classifies-rust", test_classifies_rust);
+  g_test_add_func ("/syntax/classifies-json", test_classifies_json);
+  g_test_add_func ("/syntax/classifies-yaml", test_classifies_yaml);
+  g_test_add_func ("/syntax/classifies-toml", test_classifies_toml);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
@@ -458,6 +547,8 @@ main (int   argc,
                    test_carries_a_go_raw_string);
   g_test_add_func ("/syntax/carries-a-kotlin-triple-string",
                    test_carries_a_kotlin_triple_string);
+  g_test_add_func ("/syntax/carries-a-toml-multiline-string",
+                   test_carries_a_toml_multiline_string);
   g_test_add_func ("/syntax/carries-a-rust-raw-string",
                    test_carries_a_rust_raw_string);
   g_test_add_func ("/syntax/carries-a-nested-rust-comment",
