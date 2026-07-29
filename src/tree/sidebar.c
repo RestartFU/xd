@@ -1198,24 +1198,64 @@ on_row_right_clicked (GtkGestureClick *gesture,
   gtk_popover_popup (popover);
 }
 
-static void
-on_row_menu_closed (GtkPopover *popover,
-                    gpointer    user_data)
+typedef struct
 {
-  XdSidebar *self = user_data;
-  gboolean begin = self->pending_menu == popover;
+  XdSidebar *sidebar;
+  GtkPopover *popover;
+} ClosingMenu;
+
+static gboolean
+finish_row_menu_close (gpointer user_data)
+{
+  ClosingMenu *closing = user_data;
+  XdSidebar *self = closing->sidebar;
+  GtkPopover *popover = closing->popover;
+  gboolean begin;
+
+  /*
+   * GtkModelButton closes its popover before activating its action. Detaching
+   * here synchronously therefore removes the button from the sidebar's action
+   * group before GTK can invoke create or rename. One idle leaves the widget
+   * hierarchy intact through activation, then gets the recycled row safety
+   * that detaching was meant to provide.
+   *
+   * A menu reopened before this idle belongs to a new interaction and stays
+   * attached until its own ::closed emission.
+   */
+  if (gtk_widget_get_visible (GTK_WIDGET (popover)))
+    goto out;
+
+  begin = self->pending_menu == popover;
 
   if (gtk_widget_get_parent (GTK_WIDGET (popover)) != NULL)
     gtk_widget_unparent (GTK_WIDGET (popover));
 
-  if (!begin)
-    return;
+  if (begin)
+    {
+      self->pending_menu = NULL;
+      if (self->pending_edit_id == 0)
+        self->pending_edit_id = g_idle_add_full (
+          G_PRIORITY_DEFAULT_IDLE, begin_pending_edit, g_object_ref (self),
+          g_object_unref);
+    }
 
-  self->pending_menu = NULL;
-  if (self->pending_edit_id == 0)
-    self->pending_edit_id = g_idle_add_full (
-      G_PRIORITY_DEFAULT_IDLE, begin_pending_edit, g_object_ref (self),
-      g_object_unref);
+out:
+  g_object_unref (closing->popover);
+  g_object_unref (closing->sidebar);
+  g_free (closing);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_row_menu_closed (GtkPopover *popover,
+                    gpointer    user_data)
+{
+  ClosingMenu *closing = g_new0 (ClosingMenu, 1);
+
+  closing->sidebar = g_object_ref (user_data);
+  closing->popover = g_object_ref (popover);
+  g_idle_add (finish_row_menu_close, closing);
 }
 
 /*
