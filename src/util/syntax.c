@@ -172,6 +172,28 @@ static const char *const ODIN_CONSTANTS[] = {
   "false", "nil", "true", NULL,
 };
 
+static const char *const RUBY_KEYWORDS[] = {
+  "BEGIN", "END", "__ENCODING__", "__FILE__", "__LINE__", "alias", "and",
+  "begin", "break", "case", "class", "def", "defined", "do", "else",
+  "elsif", "end", "ensure", "for", "if", "in", "module", "next", "not",
+  "or", "redo", "rescue", "retry", "return", "self", "super", "then",
+  "undef", "unless", "until", "when", "while", "yield",
+  NULL,
+};
+
+static const char *const RUBY_CONSTANTS[] = {
+  "false", "nil", "true", NULL,
+};
+
+static const char *const RUBY_FUNCTIONS[] = {
+  "abort", "at_exit", "autoload", "binding", "block_given", "caller",
+  "catch", "eval", "exec", "exit", "fail", "fork", "format", "gets",
+  "lambda", "load", "loop", "open", "p", "print", "printf", "proc",
+  "putc", "puts", "raise", "readline", "require", "require_relative",
+  "select", "sleep", "sprintf", "system", "throw", "trap", "warn",
+  NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -181,6 +203,7 @@ typedef struct
   const char *const *keywords;
   const char *const *types;
   const char *const *constants;
+  const char *const *functions; /* calls commonly written without parentheses */
   gboolean raw_strings;         /* Go's backtick string, which spans lines */
   gboolean triple_strings;      /* multiline triple-quoted strings */
   gboolean single_triple_strings; /* triple apostrophes too */
@@ -214,6 +237,13 @@ typedef struct
   gboolean hash_word_directives; /* Odin's #directive */
   gboolean undefined_constant;   /* Odin's --- value */
   gboolean shebangs;             /* executable scripts' #! line */
+  gboolean ruby_block_comments;  /* Ruby's column-one =begin blocks */
+  gboolean ruby_symbols;         /* :name and :"quoted name" */
+  gboolean ruby_percent_literals; /* %q(), %w[], %r{} and friends */
+  gboolean ruby_regexes;         /* /pattern/ literals */
+  gboolean ruby_variables;       /* @instance, @@class and $global */
+  gboolean ruby_heredocs;        /* <<ID, <<-ID and <<~ID strings */
+  gboolean ruby_definitions;     /* def name, including receiver.name */
   char key_delimiter;            /* ':' for mappings, '=' for assignments */
 } Language;
 
@@ -345,6 +375,23 @@ static const Language ODIN_LANGUAGE = {
   .undefined_constant = TRUE,
 };
 
+static const Language RUBY_LANGUAGE = {
+  .keywords = RUBY_KEYWORDS,
+  .types = NO_WORDS,
+  .constants = RUBY_CONSTANTS,
+  .functions = RUBY_FUNCTIONS,
+  .inline_hash_comments = TRUE,
+  .capitalized_types = TRUE,
+  .shebangs = TRUE,
+  .ruby_block_comments = TRUE,
+  .ruby_symbols = TRUE,
+  .ruby_percent_literals = TRUE,
+  .ruby_regexes = TRUE,
+  .ruby_variables = TRUE,
+  .ruby_heredocs = TRUE,
+  .ruby_definitions = TRUE,
+};
+
 static const Language *
 language_table (XdSyntaxLanguage language)
 {
@@ -370,6 +417,8 @@ language_table (XdSyntaxLanguage language)
     return &V_LANGUAGE;
   if (language == XD_SYNTAX_ODIN)
     return &ODIN_LANGUAGE;
+  if (language == XD_SYNTAX_RUBY)
+    return &RUBY_LANGUAGE;
 
   return NULL;
 }
@@ -400,6 +449,11 @@ xd_syntax_language_for_path (const char *path)
       g_ascii_strcasecmp (path, "BSDmakefile") == 0)
     return XD_SYNTAX_MAKEFILE;
 
+  if (g_strcmp0 (path, "Gemfile") == 0 ||
+      g_strcmp0 (path, "Rakefile") == 0 ||
+      g_strcmp0 (path, "Vagrantfile") == 0)
+    return XD_SYNTAX_RUBY;
+
   dot = strrchr (path, '.');
   if (dot == NULL)
     return XD_SYNTAX_NONE;
@@ -425,6 +479,9 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_V;
   if (g_strcmp0 (dot, ".odin") == 0)
     return XD_SYNTAX_ODIN;
+  if (g_strcmp0 (dot, ".rb") == 0 || g_strcmp0 (dot, ".rake") == 0 ||
+      g_strcmp0 (dot, ".gemspec") == 0)
+    return XD_SYNTAX_RUBY;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -747,9 +804,40 @@ followed_by_odin_procedure (const char *at)
   return strncmp (at, "proc", 4) == 0 && !is_word_byte (at[4]);
 }
 
+static gboolean
+is_ruby_definition (const char *line,
+                    const char *at)
+{
+  const char *scan = at;
+  const char *end;
+
+  while (scan > line && (scan[-1] == ' ' || scan[-1] == '\t'))
+    scan--;
+
+  /* A singleton method may put its receiver between def and the method. */
+  if (scan > line && scan[-1] == '.')
+    {
+      scan--;
+      while (scan > line && (scan[-1] == ' ' || scan[-1] == '\t'))
+        scan--;
+      while (scan > line && is_word_byte (scan[-1]))
+        scan--;
+      while (scan > line && (scan[-1] == ' ' || scan[-1] == '\t'))
+        scan--;
+    }
+
+  end = scan;
+  while (scan > line && is_word_byte (scan[-1]))
+    scan--;
+
+  return end - scan == 3 && strncmp (scan, "def", 3) == 0 &&
+         (scan == line || !is_word_byte (scan[-1]));
+}
+
 static const char *
 scan_word (Emitter        *emitter,
            const Language *language,
+           const char     *line,
            const char     *at)
 {
   const char *scan = at;
@@ -775,6 +863,11 @@ scan_word (Emitter        *emitter,
   else if (word_listed (language->constants, at, length,
                         language->case_insensitive))
     append_token (emitter, XD_SYNTAX_TOKEN_NUMBER, at, length);
+  else if (language->functions != NULL &&
+           word_listed (language->functions, at, length, FALSE))
+    append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
+  else if (language->ruby_definitions && is_ruby_definition (line, at))
+    append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else if (language->capitalized_types && g_ascii_isupper (*at))
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
   /*
@@ -1180,6 +1273,296 @@ scan_rust_lifetime (Emitter    *emitter,
   return scan;
 }
 
+static gboolean
+ruby_marker_line (const char *line,
+                  const char *marker)
+{
+  gsize length = strlen (marker);
+
+  return strncmp (line, marker, length) == 0 &&
+         (line[length] == '\0' || line[length] == ' ' ||
+          line[length] == '\t');
+}
+
+static const char *
+scan_ruby_symbol (Emitter    *emitter,
+                  const char *at)
+{
+  const char *scan = at + 1;
+
+  if (*scan == '\'' || *scan == '"')
+    {
+      char quote = *scan++;
+
+      while (*scan != '\0' && *scan != quote)
+        scan += (*scan == '\\' && scan[1] != '\0') ? 2 : 1;
+      if (*scan == quote)
+        scan++;
+    }
+  else
+    {
+      if (!g_ascii_isalpha (*scan) && *scan != '_')
+        return NULL;
+
+      while (is_word_byte (*scan))
+        scan++;
+      if (*scan == '?' || *scan == '!' || *scan == '=')
+        scan++;
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static const char *
+scan_ruby_percent_literal (Emitter    *emitter,
+                           const char *at)
+{
+  const char *delimiter = at + 1;
+  const char *scan;
+  char kind = '\0';
+  char open;
+  char close;
+  guint depth = 1;
+
+  if (*delimiter != '\0' && strchr ("qQwWiIrsx", *delimiter) != NULL)
+    kind = *delimiter++;
+
+  if (*delimiter == '\0' || g_ascii_isalnum (*delimiter) ||
+      g_ascii_isspace (*delimiter))
+    return NULL;
+
+  open = *delimiter;
+  if (kind == '\0' && open == '=')
+    return NULL;
+  if (open == '(')
+    close = ')';
+  else if (open == '[')
+    close = ']';
+  else if (open == '{')
+    close = '}';
+  else if (open == '<')
+    close = '>';
+  else
+    close = open;
+
+  scan = delimiter + 1;
+  while (*scan != '\0')
+    {
+      if (*scan == '\\' && scan[1] != '\0')
+        {
+          scan += 2;
+        }
+      else if (open != close && *scan == open)
+        {
+          depth++;
+          scan++;
+        }
+      else if (*scan == close)
+        {
+          depth--;
+          scan++;
+          if (depth == 0)
+            break;
+        }
+      else
+        {
+          scan++;
+        }
+    }
+
+  /* Do not mistake %= and modulo expressions for an unterminated literal. */
+  if (depth != 0)
+    return NULL;
+
+  if (kind == 'r')
+    while (g_ascii_isalpha (*scan))
+      scan++;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static gboolean
+ruby_regex_can_start (const char *line,
+                      const char *at)
+{
+  static const char *const PREFIX_WORDS[] = {
+    "and", "if", "not", "or", "return", "unless", "when", "yield", NULL,
+  };
+  const char *scan = at;
+  const char *end;
+
+  while (scan > line && (scan[-1] == ' ' || scan[-1] == '\t'))
+    scan--;
+
+  if (scan == line || strchr ("=([{,:;!&|?~", scan[-1]) != NULL)
+    return TRUE;
+
+  end = scan;
+  while (scan > line && is_word_byte (scan[-1]))
+    scan--;
+
+  return end > scan &&
+         word_listed (PREFIX_WORDS, scan, (gsize) (end - scan), FALSE);
+}
+
+static const char *
+scan_ruby_regex (Emitter    *emitter,
+                 const char *line,
+                 const char *at)
+{
+  const char *scan = at + 1;
+  gboolean in_class = FALSE;
+
+  if (!ruby_regex_can_start (line, at) || *scan == '/' || *scan == '=')
+    return NULL;
+
+  while (*scan != '\0')
+    {
+      if (*scan == '\\' && scan[1] != '\0')
+        {
+          scan += 2;
+        }
+      else if (*scan == '[')
+        {
+          in_class = TRUE;
+          scan++;
+        }
+      else if (*scan == ']' && in_class)
+        {
+          in_class = FALSE;
+          scan++;
+        }
+      else if (*scan == '/' && !in_class)
+        {
+          scan++;
+          while (g_ascii_isalpha (*scan))
+            scan++;
+          append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                        (gsize) (scan - at));
+          return scan;
+        }
+      else
+        {
+          scan++;
+        }
+    }
+
+  return NULL;
+}
+
+static const char *
+scan_ruby_variable (Emitter    *emitter,
+                    const char *at)
+{
+  static const char *special_globals = "!\"$&'()*+,-./:;<=>?@\\`~";
+  const char *scan = at + 1;
+
+  if (*at == '@')
+    {
+      if (*scan == '@')
+        scan++;
+      if (!g_ascii_isalpha (*scan) && *scan != '_')
+        return NULL;
+      while (is_word_byte (*scan))
+        scan++;
+    }
+  else
+    {
+      if (g_ascii_isdigit (*scan))
+        while (g_ascii_isdigit (*scan))
+          scan++;
+      else if (g_ascii_isalpha (*scan) || *scan == '_')
+        while (is_word_byte (*scan))
+          scan++;
+      else if (*scan != '\0' && strchr (special_globals, *scan) != NULL)
+        scan++;
+      else
+        return NULL;
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_PREPROC, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static const char *
+scan_ruby_heredoc (Emitter       *emitter,
+                   const char    *at,
+                   XdSyntaxState *state)
+{
+  const char *scan = at + 2;
+  const char *name;
+  gsize length;
+  char quote = '\0';
+
+  if (*scan == '-' || *scan == '~')
+    {
+      state->heredoc_indent = TRUE;
+      scan++;
+    }
+  else
+    {
+      state->heredoc_indent = FALSE;
+    }
+
+  if (*scan == '\'' || *scan == '"' || *scan == '`')
+    {
+      quote = *scan++;
+      name = scan;
+      while (*scan != '\0' && *scan != quote)
+        scan++;
+      if (*scan != quote)
+        return NULL;
+      length = (gsize) (scan - name);
+      scan++;
+    }
+  else
+    {
+      if (!g_ascii_isalpha (*scan) && *scan != '_')
+        return NULL;
+      name = scan;
+      while (is_word_byte (*scan))
+        scan++;
+      length = (gsize) (scan - name);
+    }
+
+  if (length == 0 || length >= sizeof state->heredoc_delimiter)
+    return NULL;
+
+  memcpy (state->heredoc_delimiter, name, length);
+  state->heredoc_delimiter[length] = '\0';
+  state->in_heredoc = TRUE;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                (gsize) (scan - at));
+  return scan;
+}
+
+static gboolean
+ruby_heredoc_terminator (const char    *line,
+                         XdSyntaxState *state)
+{
+  const char *scan = line;
+  gsize length = strlen (state->heredoc_delimiter);
+
+  if (state->heredoc_indent)
+    while (*scan == ' ' || *scan == '\t')
+      scan++;
+
+  if (strncmp (scan, state->heredoc_delimiter, length) != 0)
+    return FALSE;
+
+  scan += length;
+  while (*scan == ' ' || *scan == '\t')
+    scan++;
+
+  return *scan == '\0';
+}
+
 void
 xd_syntax_scan_line (XdSyntaxLanguage   language,
                      const char        *line,
@@ -1205,7 +1588,17 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
 
   if (state->in_comment)
     {
-      if (table->nested_block_comments)
+      if (table->ruby_block_comments)
+        {
+          gboolean closes = ruby_marker_line (line, "=end");
+
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, line,
+                        strlen (line));
+          if (closes)
+            state->in_comment = FALSE;
+          return;
+        }
+      else if (table->nested_block_comments)
         {
           at = scan_nested_comment (&emitter, at, &state->in_comment, FALSE);
           if (state->in_comment)
@@ -1271,10 +1664,30 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       if (state->in_rust_raw_string)
         return;
     }
+  else if (state->in_heredoc)
+    {
+      gboolean closes = ruby_heredoc_terminator (line, state);
+
+      append_token (&emitter, XD_SYNTAX_TOKEN_STRING, line, strlen (line));
+      if (closes)
+        {
+          state->in_heredoc = FALSE;
+          state->heredoc_indent = FALSE;
+          state->heredoc_delimiter[0] = '\0';
+        }
+      return;
+    }
 
   while (*at != '\0')
     {
-      if (table->block_comments && at[0] == '/' && at[1] == '*')
+      if (table->ruby_block_comments && at == line &&
+          ruby_marker_line (line, "=begin"))
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
+          state->in_comment = TRUE;
+          return;
+        }
+      else if (table->block_comments && at[0] == '/' && at[1] == '*')
         {
           if (table->nested_block_comments)
             {
@@ -1327,6 +1740,76 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;
         }
+      else if (table->ruby_heredocs && at[0] == '<' && at[1] == '<')
+        {
+          const char *after = scan_ruby_heredoc (&emitter, at, state);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
+      else if (table->ruby_symbols && *at == ':' && at[1] != ':')
+        {
+          const char *after = scan_ruby_symbol (&emitter, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
+      else if (table->ruby_percent_literals && *at == '%')
+        {
+          const char *after = scan_ruby_percent_literal (&emitter, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
+      else if (table->ruby_regexes && *at == '/')
+        {
+          const char *after = scan_ruby_regex (&emitter, line, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
+      else if (table->ruby_variables && (*at == '@' || *at == '$'))
+        {
+          const char *after = scan_ruby_variable (&emitter, at);
+
+          if (after == NULL)
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
+          else
+            {
+              at = after;
+            }
+        }
       else if (table->table_headers && *at == '[' &&
                starts_the_line (line, at))
         {
@@ -1367,7 +1850,7 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
 
           if (after == NULL)
             {
-              at = scan_word (&emitter, table, at);
+              at = scan_word (&emitter, table, line, at);
             }
           else
             {
@@ -1492,7 +1975,7 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
                   (*at == '.' && g_ascii_isdigit (at[1])))
                 at = scan_number (&emitter, at);
               else if (g_ascii_isalpha (*at) || *at == '_')
-                at = scan_word (&emitter, table, at);
+                at = scan_word (&emitter, table, line, at);
               else
                 {
                   append_plain (&emitter, at, 1);
@@ -1511,7 +1994,7 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
         }
       else if (g_ascii_isalpha (*at) || *at == '_')
         {
-          at = scan_word (&emitter, table, at);
+          at = scan_word (&emitter, table, line, at);
         }
       else
         {

@@ -36,6 +36,7 @@ typedef enum
   XD_SYNTAX_TOML,
   XD_SYNTAX_V,
   XD_SYNTAX_ODIN,
+  XD_SYNTAX_RUBY,
 } XdSyntaxLanguage;
 
 typedef enum
@@ -67,6 +68,9 @@ typedef struct
   guint8 triple_quote;       /* delimiter used by that string */
   guint8 in_rust_raw_string; /* inside Rust's raw string */
   guint8 rust_raw_hashes;    /* delimiter width of that raw string */
+  guint8 in_heredoc;         /* inside a Ruby heredoc */
+  guint8 heredoc_indent;     /* its terminator may be indented */
+  char heredoc_delimiter[32];
 } XdSyntaxState;
 
 /* XD_SYNTAX_NONE for a path in a language this does not know. */

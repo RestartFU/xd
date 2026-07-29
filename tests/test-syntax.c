@@ -98,6 +98,18 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_V);
   g_assert_cmpint (xd_syntax_language_for_path ("game/main.odin"),
                    ==, XD_SYNTAX_ODIN);
+  g_assert_cmpint (xd_syntax_language_for_path ("lib/report.rb"),
+                   ==, XD_SYNTAX_RUBY);
+  g_assert_cmpint (xd_syntax_language_for_path ("tasks/release.rake"),
+                   ==, XD_SYNTAX_RUBY);
+  g_assert_cmpint (xd_syntax_language_for_path ("xd.gemspec"),
+                   ==, XD_SYNTAX_RUBY);
+  g_assert_cmpint (xd_syntax_language_for_path ("Gemfile"),
+                   ==, XD_SYNTAX_RUBY);
+  g_assert_cmpint (xd_syntax_language_for_path ("Rakefile"),
+                   ==, XD_SYNTAX_RUBY);
+  g_assert_cmpint (xd_syntax_language_for_path ("Vagrantfile"),
+                   ==, XD_SYNTAX_RUBY);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -376,6 +388,75 @@ test_classifies_odin (void)
   g_assert_nonnull (strstr (body, "number:42\n"));
   g_assert_nonnull (strstr (file_tag, "preproc:#+test\n"));
   g_assert_nonnull (strstr (undefined, "number:---\n"));
+}
+
+static void
+test_classifies_ruby (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_RUBY, "class Greeter; def self.greet name", &state, NULL);
+  g_autofree char *body = scan (
+    XD_SYNTAX_RUBY,
+    "puts %Q(Hello #{name}) if @enabled && name != :world # welcome",
+    &state, NULL);
+  g_autofree char *pattern = scan (
+    XD_SYNTAX_RUBY, "pattern = /foo\\/[a-z]+/im; ratio = total / count",
+    &state, NULL);
+  g_autofree char *modulo = scan (
+    XD_SYNTAX_RUBY, "value %= 2", &state, NULL);
+
+  g_assert_nonnull (strstr (declaration, "keyword:class\n"));
+  g_assert_nonnull (strstr (declaration, "type:Greeter\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:def\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:self\n"));
+  g_assert_nonnull (strstr (declaration, "function:greet\n"));
+  g_assert_nonnull (strstr (body, "function:puts\n"));
+  g_assert_nonnull (strstr (body, "string:%Q(Hello #{name})\n"));
+  g_assert_nonnull (strstr (body, "keyword:if\n"));
+  g_assert_nonnull (strstr (body, "preproc:@enabled\n"));
+  g_assert_nonnull (strstr (body, "string::world\n"));
+  g_assert_nonnull (strstr (body, "comment:# welcome\n"));
+  g_assert_nonnull (strstr (pattern, "string:/foo\\/[a-z]+/im\n"));
+  g_assert_null (strstr (pattern, "string:/ count\n"));
+  g_assert_null (strstr (modulo, "string:%="));
+}
+
+static void
+test_carries_ruby_state (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *heredoc_open = scan (
+    XD_SYNTAX_RUBY, "message = <<~TEXT", &state, NULL);
+  g_autofree char *heredoc_body = NULL;
+  g_autofree char *heredoc_close = NULL;
+  g_autofree char *comment_open = NULL;
+  g_autofree char *comment_body = NULL;
+  g_autofree char *comment_close = NULL;
+
+  g_assert_true (state.in_heredoc);
+  g_assert_nonnull (strstr (heredoc_open, "string:<<~TEXT\n"));
+
+  heredoc_body = scan (
+    XD_SYNTAX_RUBY, "  #{name} # still a string", &state, NULL);
+  g_assert_true (state.in_heredoc);
+  g_assert_nonnull (
+    strstr (heredoc_body, "string:  #{name} # still a string\n"));
+
+  heredoc_close = scan (XD_SYNTAX_RUBY, "  TEXT", &state, NULL);
+  g_assert_false (state.in_heredoc);
+  g_assert_nonnull (strstr (heredoc_close, "string:  TEXT\n"));
+
+  comment_open = scan (XD_SYNTAX_RUBY, "=begin docs", &state, NULL);
+  g_assert_true (state.in_comment);
+  g_assert_nonnull (strstr (comment_open, "comment:=begin docs\n"));
+
+  comment_body = scan (XD_SYNTAX_RUBY, "def not_code", &state, NULL);
+  g_assert_nonnull (strstr (comment_body, "comment:def not_code\n"));
+
+  comment_close = scan (XD_SYNTAX_RUBY, "=end", &state, NULL);
+  g_assert_false (state.in_comment);
+  g_assert_nonnull (strstr (comment_close, "comment:=end\n"));
 }
 
 /*
@@ -668,6 +749,8 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-toml", test_classifies_toml);
   g_test_add_func ("/syntax/classifies-v", test_classifies_v);
   g_test_add_func ("/syntax/classifies-odin", test_classifies_odin);
+  g_test_add_func ("/syntax/classifies-ruby", test_classifies_ruby);
+  g_test_add_func ("/syntax/carries-ruby-state", test_carries_ruby_state);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
