@@ -1,6 +1,7 @@
 require "base64"
 require "gtk4"
 require "../agent/ask"
+require "../agent/git_diff_tracker"
 require "../agent/workspace_block"
 require "../daemon/client"
 require "./chat_controls"
@@ -223,6 +224,12 @@ module Xd
           return
         end
 
+        if role == "tool"
+          if patch = Agent::GitDiffTracker.patch(content)
+            return add_diff_message(patch)
+          end
+        end
+
         workspace = role == "assistant" ? Agent::WorkspaceBlock.parse(content) : nil
         assistant_text = workspace.try(&.remainder) || content
         parsed = role == "assistant" ? Agent::Ask.parse(assistant_text) : nil
@@ -249,6 +256,17 @@ module Xd
         row.add_css_class("xd-message-#{role}")
         @transcript.append(row)
         append_ask(parsed.ask) if parsed && answerable
+        row
+      end
+
+      private def add_diff_message(patch : String) : Gtk::Label
+        row = Gtk::Label.new("Files changed\n#{patch}")
+        row.xalign = 0_f32
+        row.wrap = false
+        row.selectable = true
+        row.add_css_class("xd-message")
+        row.add_css_class("xd-message-diff")
+        @transcript.append(row)
         row
       end
 

@@ -9,6 +9,7 @@ require "./conversation"
 require "./environment"
 require "./exec_session"
 require "./executable"
+require "./git_diff_tracker"
 require "./ask"
 require "./secrets"
 require "./workspace_block"
@@ -115,6 +116,7 @@ module Xd
         property segment = ""
         property segment_message_id = 0_i64
         property visible_segment_bytes = 0
+        property diff_tracker : GitDiffTracker?
         property context_used = 0_u64
         property context_window = 0_u64
 
@@ -128,6 +130,7 @@ module Xd
           @transcript_message_id,
           @started_at = Time.instant,
         )
+          @diff_tracker = GitDiffTracker.open(@workdir)
         end
       end
 
@@ -462,6 +465,7 @@ module Xd
           when EventType::ToolUse
             close_segment(turn)
             text = event.text || "Used a tool"
+            text = turn.diff_tracker.try(&.capture(text)) || text
             @store.append_message(turn.chat_id, "tool", text)
             event_name = "tool"
             fields = {
@@ -567,6 +571,7 @@ module Xd
                 turn.workdir
               )
               turn.workdir = selected
+              turn.diff_tracker = GitDiffTracker.open(selected)
             end
             turn.segment = reported.remainder
             if turn.segment_message_id != 0

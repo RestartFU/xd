@@ -36,6 +36,12 @@ module Xd
         background: alpha(#3584e4, 0.10);
         color: #b8d9ff;
       }
+      .xd-message-diff {
+        background: alpha(#33d17a, 0.07);
+        color: #d7f8e5;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.9em;
+      }
       .xd-message-error {
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;
