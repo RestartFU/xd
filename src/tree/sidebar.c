@@ -2056,6 +2056,7 @@ xd_sidebar_init (XdSidebar *self)
   {
     GMenu *menu = g_menu_new ();
     g_autoptr (GMenuItem) secrets = NULL;
+    GtkPopover *popover;
 
     g_menu_append (menu, "New Workspace", "sidebar.new-workspace");
     g_menu_append (menu, "Connect to a Machine\u2026", "win.pair-remote");
@@ -2067,6 +2068,10 @@ xd_sidebar_init (XdSidebar *self)
     gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (new_button),
                                     G_MENU_MODEL (menu));
     g_object_unref (menu);
+
+    popover = gtk_menu_button_get_popover (GTK_MENU_BUTTON (new_button));
+    if (popover != NULL)
+      gtk_widget_add_css_class (GTK_WIDGET (popover), "xd-menu-popover");
   }
   gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (new_button), "list-add-symbolic");
   gtk_widget_set_tooltip_text (new_button, "Add a workspace or a machine");
