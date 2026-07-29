@@ -708,6 +708,13 @@ add_remote_session (XdTerminalPanel *self,
 
       terminal = VTE_TERMINAL (vte_terminal_new ());
       configure_terminal (terminal);
+      /*
+       * A remote VTE has no local pty from which AUTO can learn VERASE, so
+       * Backspace otherwise commits 0x08 and the daemon shell prints ^H.
+       * Its pty uses the conventional DEL byte. Keep this remote-only so a
+       * local terminal can still follow its own pty settings.
+       */
+      vte_terminal_set_backspace_binding (terminal, VTE_ERASE_ASCII_DELETE);
       gtk_widget_set_hexpand (GTK_WIDGET (terminal), FALSE);
       gtk_widget_set_vexpand (GTK_WIDGET (terminal), FALSE);
       gtk_widget_set_halign (GTK_WIDGET (terminal), GTK_ALIGN_START);
