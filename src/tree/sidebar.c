@@ -36,6 +36,8 @@ struct _XdSidebar
   XdNode *pending_parent;
   gboolean pending_creating;
   XdNodeKind pending_kind;
+  GtkPopover *pending_menu;
+  guint pending_edit_id;
 
   /* What the selection is on, as a node rather than a position. */
   XdNode *selected;
@@ -258,23 +260,23 @@ end_editing (XdSidebar *self,
 static void begin_renaming (XdSidebar *self, XdNode *node);
 static void begin_creating (XdSidebar *self, XdNode *parent, XdNodeKind kind);
 
-static void
-on_menu_closed (GtkPopover *menu,
-                gpointer    user_data)
+static gboolean
+begin_pending_edit (gpointer user_data)
 {
   XdSidebar *self = user_data;
   g_autoptr (XdNode) node = g_steal_pointer (&self->pending_edit);
   g_autoptr (XdNode) parent = g_steal_pointer (&self->pending_parent);
   gboolean creating = self->pending_creating;
 
-  g_signal_handlers_disconnect_by_func (menu, on_menu_closed, self);
-
+  self->pending_edit_id = 0;
   self->pending_creating = FALSE;
 
   if (creating && parent != NULL)
     begin_creating (self, parent, self->pending_kind);
   else if (node != NULL)
     begin_renaming (self, node);
+
+  return G_SOURCE_REMOVE;
 }
 
 /*
@@ -296,7 +298,12 @@ waiting_for_menu (XdSidebar  *self,
   GtkWidget *box = row_box_for_node (self, row_node);
   GtkWidget *menu = box != NULL ? g_object_get_data (G_OBJECT (box), "menu") : NULL;
 
-  if (menu == NULL || !gtk_widget_get_visible (menu))
+  /*
+   * Visibility becomes false as closing starts, before ::closed. Parenting
+   * lasts until our permanent close handler runs, so it is the reliable test
+   * for whether focus restoration is still unfinished.
+   */
+  if (menu == NULL || gtk_widget_get_parent (menu) == NULL)
     return FALSE;
 
   /* All of it before the menu is told to go: closing can finish inside that
@@ -305,8 +312,8 @@ waiting_for_menu (XdSidebar  *self,
   g_set_object (&self->pending_parent, parent);
   self->pending_creating = creating;
   self->pending_kind = kind;
+  self->pending_menu = GTK_POPOVER (menu);
 
-  g_signal_connect (menu, "closed", G_CALLBACK (on_menu_closed), self);
   gtk_popover_popdown (GTK_POPOVER (menu));
 
   return TRUE;
@@ -1180,8 +1187,20 @@ static void
 on_row_menu_closed (GtkPopover *popover,
                     gpointer    user_data)
 {
+  XdSidebar *self = user_data;
+  gboolean begin = self->pending_menu == popover;
+
   if (gtk_widget_get_parent (GTK_WIDGET (popover)) != NULL)
     gtk_widget_unparent (GTK_WIDGET (popover));
+
+  if (!begin)
+    return;
+
+  self->pending_menu = NULL;
+  if (self->pending_edit_id == 0)
+    self->pending_edit_id = g_idle_add_full (
+      G_PRIORITY_DEFAULT_IDLE, begin_pending_edit, g_object_ref (self),
+      g_object_unref);
 }
 
 /*
@@ -1418,7 +1437,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
   g_object_set_data_full (G_OBJECT (box), "menu",
                           g_object_ref_sink (popover), g_object_unref);
   g_signal_connect (popover, "closed",
-                    G_CALLBACK (on_row_menu_closed), NULL);
+                    G_CALLBACK (on_row_menu_closed), user_data);
 
   gesture = gtk_gesture_click_new ();
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (gesture), GDK_BUTTON_SECONDARY);
@@ -1917,6 +1936,8 @@ xd_sidebar_dispose (GObject *object)
   XdSidebar *self = XD_SIDEBAR (object);
 
   g_clear_handle_id (&self->restore_expanded_id, g_source_remove);
+  g_clear_handle_id (&self->pending_edit_id, g_source_remove);
+  self->pending_menu = NULL;
 
   if (self->save_expanded_id != 0)
     {
