@@ -2290,6 +2290,71 @@ handle_cancel (Connection *connection,
   send_done (connection, NULL);
 }
 
+/*
+ * Makes one specific queued message the next turn, then interrupts whatever
+ * is running. Reordering and cancellation happen on the daemon's main loop:
+ * another device cannot change which instruction this click means between
+ * those two operations.
+ */
+static void
+handle_steer_queue (Connection *connection,
+                    JsonObject *request)
+{
+  XdRemoteServer *self = connection->server;
+  const char *chat_id = member_string (request, "chat");
+  const char *text = member_string (request, "text");
+  gint64 index;
+  XdDaemonTurn *turn;
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (GError) error = NULL;
+
+  if (chat_id == NULL || text == NULL ||
+      !json_object_has_member (request, "index"))
+    {
+      send_error (
+        connection, "steer-queue needs a chat id, queue index, and text.");
+      return;
+    }
+
+  index = json_object_get_int_member (request, "index");
+  if (index < 0 || index > G_MAXUINT)
+    {
+      send_error (connection, "That queue index is invalid.");
+      return;
+    }
+
+  chat = xd_storage_get_chat (self->storage, chat_id, &error);
+  if (chat == NULL)
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  if ((guint) index >= chat->queue->len ||
+      g_strcmp0 (g_ptr_array_index (chat->queue, (guint) index), text) != 0)
+    {
+      send_error (connection, "That queued message changed; try again.");
+      return;
+    }
+
+  if (!xd_storage_queue_promote (self->storage, chat_id,
+                                 (guint) index, &error))
+    {
+      send_error (connection, error->message);
+      return;
+    }
+
+  broadcast_stored_queue (self, chat_id);
+
+  turn = g_hash_table_lookup (self->turns, chat_id);
+  if (turn != NULL)
+    xd_daemon_turn_cancel (turn);
+  else
+    start_queued (self, chat_id);
+
+  send_done (connection, NULL);
+}
+
 static void
 handle_queue (Connection *connection,
               JsonObject *request,
@@ -3432,6 +3497,8 @@ dispatch (Connection *connection,
     handle_queue (connection, request, FALSE);
   else if (g_strcmp0 (op, "drop-queue") == 0)
     handle_queue (connection, request, TRUE);
+  else if (g_strcmp0 (op, "steer-queue") == 0)
+    handle_steer_queue (connection, request);
   else if (g_strcmp0 (op, "cancel") == 0)
     handle_cancel (connection, request);
   else if (g_strcmp0 (op, "diff-read") == 0)

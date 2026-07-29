@@ -278,7 +278,7 @@ static void on_remote_sent (GObject *source, GAsyncResult *result, gpointer data
 static void show_queued (XdChatView *self);
 static void set_queue (XdChatView *self, GPtrArray *messages);
 static void clear_queue (XdChatView *self);
-static void on_steer_clicked (GtkButton *button, gpointer user_data);
+static void steer_queued_at (XdChatView *self, guint position);
 static Turn *current_turn (XdChatView *self);
 static gboolean send_remote_message (XdChatView *self, const char *text);
 static void cancel_remote_turn (XdChatView *self);
@@ -3329,12 +3329,22 @@ on_queued_row_dropped (GtkButton *button,
   drop_queued_at (self, position);
 }
 
+static void
+on_queued_row_steered (GtkButton *button,
+                       gpointer   user_data)
+{
+  XdChatView *self = user_data;
+  guint position =
+    GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "position")) - 1;
+
+  steer_queued_at (self, position);
+}
+
 /*
  * A row per waiting message, in the order they will be answered.
  *
  * More than one can wait, so the bar is a list rather than a line: each row
- * says what it will send and can be dropped on its own, and only the first
- * carries the button that interrupts the agent to send it now.
+ * says what it will send, can be steered now, and can be dropped on its own.
  */
 static void
 show_queued (XdChatView *self)
@@ -3351,6 +3361,8 @@ show_queued (XdChatView *self)
       GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
       GtkWidget *icon = gtk_image_new_from_icon_name ("document-send-symbolic");
       GtkWidget *label = gtk_label_new (g_ptr_array_index (self->queue, i));
+      GtkWidget *steer =
+        gtk_button_new_from_icon_name ("media-skip-forward-symbolic");
       GtkWidget *drop = gtk_button_new_from_icon_name ("window-close-symbolic");
 
       gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
@@ -3364,31 +3376,15 @@ show_queued (XdChatView *self)
       g_signal_connect (drop, "clicked",
                         G_CALLBACK (on_queued_row_dropped), self);
 
+      gtk_widget_add_css_class (steer, "flat");
+      gtk_widget_set_tooltip_text (steer, "Send this now, interrupting the agent");
+      g_object_set_data (G_OBJECT (steer), "position", GUINT_TO_POINTER (i + 1));
+      g_signal_connect (steer, "clicked",
+                        G_CALLBACK (on_queued_row_steered), self);
+
       gtk_box_append (GTK_BOX (row), icon);
       gtk_box_append (GTK_BOX (row), label);
-
-      if (i == 0)
-        {
-          GtkWidget *steer =
-            gtk_button_new_from_icon_name ("media-skip-forward-symbolic");
-
-          gtk_widget_add_css_class (steer, "flat");
-          gtk_widget_set_tooltip_text (
-            steer, "Send now, interrupting the agent");
-          g_signal_connect (steer, "clicked",
-                            G_CALLBACK (on_steer_clicked), self);
-          gtk_box_append (GTK_BOX (row), steer);
-        }
-      else
-        {
-          g_autofree char *ordinal = g_strdup_printf ("%u", i + 1);
-          GtkWidget *place = gtk_label_new (ordinal);
-
-          gtk_widget_add_css_class (place, "dim-label");
-          gtk_widget_add_css_class (place, "caption");
-          gtk_box_append (GTK_BOX (row), place);
-        }
-
+      gtk_box_append (GTK_BOX (row), steer);
       gtk_box_append (GTK_BOX (row), drop);
       gtk_box_append (GTK_BOX (self->queued_bar), row);
     }
@@ -3463,6 +3459,30 @@ send_remote_queue_op (XdChatView *self,
       json_builder_set_member_name (builder, "index");
       json_builder_add_int_value (builder, position);
     }
+  json_builder_end_object (builder);
+
+  request = json_builder_get_root (builder);
+  xd_remote_client_call_async (self->remote, request, NULL,
+                               on_remote_queue_set, g_object_ref (self));
+}
+
+static void
+send_remote_steer (XdChatView *self,
+                   guint       position,
+                   const char *text)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "steer-queue");
+  json_builder_set_member_name (builder, "chat");
+  json_builder_add_string_value (builder, xd_node_get_chat_id (self->chat));
+  json_builder_set_member_name (builder, "index");
+  json_builder_add_int_value (builder, position);
+  json_builder_set_member_name (builder, "text");
+  json_builder_add_string_value (builder, text);
   json_builder_end_object (builder);
 
   request = json_builder_get_root (builder);
@@ -3571,19 +3591,41 @@ send_queued (XdChatView *self)
  * agent knows what it had got to before being redirected.
  */
 static void
-on_steer_clicked (GtkButton *button,
-                  gpointer   user_data)
+steer_queued_at (XdChatView *self,
+                 guint       position)
 {
-  XdChatView *self = user_data;
   Turn *turn = current_turn (self);
+  const char *text;
+  char *selected;
+
+  if (position >= self->queue->len)
+    return;
+
+  text = g_ptr_array_index (self->queue, position);
+
+  if (position > 0)
+    {
+      selected = g_ptr_array_steal_index (self->queue, position);
+      g_ptr_array_insert (self->queue, 0, selected);
+
+      if (self->remote == NULL && !store_local_queue (self))
+        {
+          selected = g_ptr_array_steal_index (self->queue, 0);
+          g_ptr_array_insert (self->queue, position, selected);
+          show_queued (self);
+          return;
+        }
+
+      show_queued (self);
+    }
 
   /*
-   * Always ask the daemon for a remote chat. Its working event may be late or
-   * may have been missed, while the queued instruction is already persisted
-   * there. Cancel is idempotent, and the daemon also promotes an idle queue.
+   * Always ask the daemon to select and steer atomically. Its working event
+   * may be late or may have been missed, and another device may edit the queue
+   * between this click and the request reaching it.
    */
   if (self->remote != NULL)
-    cancel_remote_turn (self);
+    send_remote_steer (self, position, text);
   else if (turn != NULL)
     xd_chat_session_cancel (turn->session);
   else
@@ -3765,7 +3807,7 @@ send_current_message (XdChatView *self)
    * when there is one. This is the keyboard equivalent of the steer button. */
   if (text == NULL && self->attachments->len == 0 && self->queue->len > 0)
     {
-      on_steer_clicked (NULL, self);
+      steer_queued_at (self, 0);
       return;
     }
 

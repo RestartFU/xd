@@ -2815,7 +2815,7 @@ queue_changed (gpointer user_data)
 typedef struct
 {
   const char *chat_id;
-  gboolean queue_cleared;
+  gboolean queue_changed;
   gboolean turn_started;
 } SteerEvents;
 
@@ -2833,9 +2833,8 @@ on_steer_event (XdRemoteClient *client,
   if (g_strcmp0 (chat_id, seen->chat_id) != 0)
     return;
 
-  if (g_strcmp0 (name, "queued") == 0 &&
-      !json_object_has_member (event, "text"))
-    seen->queue_cleared = TRUE;
+  if (g_strcmp0 (name, "queued") == 0)
+    seen->queue_changed = TRUE;
   else if (g_strcmp0 (name, "turn-started") == 0)
     seen->turn_started = TRUE;
 }
@@ -2845,7 +2844,7 @@ steer_started_queued_turn (gpointer user_data)
 {
   SteerEvents *seen = user_data;
 
-  return seen->queue_cleared && seen->turn_started;
+  return seen->queue_changed && seen->turn_started;
 }
 
 /*
@@ -3162,7 +3161,8 @@ test_slow_git_snapshot_does_not_stall_other_chats (void)
 /*
  * The client may know about a queued instruction before it knows a remote turn
  * stopped. Clicking steer must still do work: cancel is sent regardless of the
- * client's stale state, and an idle daemon promotes the persisted queue.
+ * client's stale state. Selecting a later row must promote that exact message
+ * before an idle daemon starts it.
  */
 static void
 test_steer_starts_an_idle_remote_queue (void)
@@ -3175,6 +3175,7 @@ test_steer_starts_an_idle_remote_queue (void)
   g_autofree char *old_path = NULL;
   g_autofree char *test_path = NULL;
   RemoteReply queued = { 0 };
+  RemoteReply later = { 0 };
   RemoteReply steered = { 0 };
   SteerEvents seen = { 0 };
 
@@ -3212,18 +3213,10 @@ test_steer_starts_an_idle_remote_queue (void)
     json_builder_set_member_name (builder, "chat");
     json_builder_add_string_value (builder, daemon.chat_id);
     json_builder_set_member_name (builder, "text");
-    json_builder_add_string_value (builder, "follow up now");
+    json_builder_add_string_value (builder, "first later");
     json_builder_end_object (builder);
 
     call_remote_request (client, builder, &queued);
-  }
-
-  {
-    g_autoptr (XdChat) stored =
-      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
-
-    g_assert_cmpuint (stored->queue->len, ==, 1);
-    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "follow up now");
   }
 
   {
@@ -3231,9 +3224,40 @@ test_steer_starts_an_idle_remote_queue (void)
 
     json_builder_begin_object (builder);
     json_builder_set_member_name (builder, "op");
-    json_builder_add_string_value (builder, "cancel");
+    json_builder_add_string_value (builder, "queue");
     json_builder_set_member_name (builder, "chat");
     json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "follow up now");
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &later);
+  }
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_cmpuint (stored->queue->len, ==, 2);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "first later");
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 1), ==, "follow up now");
+  }
+
+  seen.queue_changed = FALSE;
+  seen.turn_started = FALSE;
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "steer-queue");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_set_member_name (builder, "index");
+    json_builder_add_int_value (builder, 1);
+    json_builder_set_member_name (builder, "text");
+    json_builder_add_string_value (builder, "follow up now");
     json_builder_end_object (builder);
 
     call_remote_request (client, builder, &steered);
@@ -3244,8 +3268,30 @@ test_steer_starts_an_idle_remote_queue (void)
   {
     g_autoptr (XdChat) stored =
       xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+    g_autoptr (GPtrArray) messages =
+      xd_storage_list_messages (daemon.storage, daemon.chat_id, NULL);
+    gboolean found_selected = FALSE;
+    gboolean found_unselected = FALSE;
 
-    g_assert_cmpuint (stored->queue->len, ==, 0);
+    g_assert_cmpuint (stored->queue->len, ==, 1);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "first later");
+    g_assert_nonnull (messages);
+
+    for (guint i = 0; i < messages->len; i++)
+      {
+        XdMessage *message = g_ptr_array_index (messages, i);
+
+        if (g_strcmp0 (message->role, "user") != 0)
+          continue;
+
+        if (g_strcmp0 (message->content, "follow up now") == 0)
+          found_selected = TRUE;
+        if (g_strcmp0 (message->content, "first later") == 0)
+          found_unselected = TRUE;
+      }
+
+    g_assert_true (found_selected);
+    g_assert_false (found_unselected);
   }
 
   if (old_path != NULL)
@@ -3255,8 +3301,10 @@ test_steer_starts_an_idle_remote_queue (void)
 
   g_signal_handlers_disconnect_by_data (client, &seen);
   json_object_unref (queued.reply);
+  json_object_unref (later.reply);
   json_object_unref (steered.reply);
   g_free (queued.wait.failure);
+  g_free (later.wait.failure);
   g_free (steered.wait.failure);
   daemon_stop (&daemon);
 }

@@ -693,16 +693,26 @@ test_queue_keeps_every_message (Fixture       *fixture,
   g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "first thing");
   g_assert_cmpstr (g_ptr_array_index (chat->queue, 2), ==, "third thing");
 
-  /* Dropping one leaves the rest in order. */
-  g_assert_true (xd_storage_queue_remove (fixture->storage, chat_id, 1, &error));
+  /* Steering one makes it next without disturbing the others. */
+  g_assert_true (xd_storage_queue_promote (
+    fixture->storage, chat_id, 2, &error));
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 0), ==, "third thing");
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 1), ==, "first thing");
+  g_assert_cmpstr (g_ptr_array_index (chat->queue, 2), ==, "second thing");
+
+  /* Dropping one leaves the rest in their promoted order. */
+  g_assert_true (xd_storage_queue_remove (fixture->storage, chat_id, 2, &error));
 
   /* Oldest first, and consumed as it is taken. */
   g_assert_true (xd_storage_queue_take_first (
     fixture->storage, chat_id, &first, &error));
-  g_assert_cmpstr (first, ==, "first thing");
+  g_assert_cmpstr (first, ==, "third thing");
   g_assert_true (xd_storage_queue_take_first (
     fixture->storage, chat_id, &second, &error));
-  g_assert_cmpstr (second, ==, "third thing");
+  g_assert_cmpstr (second, ==, "first thing");
 
   g_clear_pointer (&chat, xd_chat_free);
   chat = xd_storage_get_chat (fixture->storage, chat_id, &error);

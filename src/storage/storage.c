@@ -1055,6 +1055,37 @@ xd_storage_queue_remove (XdStorage   *self,
 }
 
 gboolean
+xd_storage_queue_promote (XdStorage   *self,
+                          const char  *chat_id,
+                          guint        position,
+                          GError     **error)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  char *selected;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  messages = load_queue (self, chat_id, error);
+  if (messages == NULL)
+    return FALSE;
+
+  if (position >= messages->len)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                           "That queued message no longer exists.");
+      return FALSE;
+    }
+
+  if (position == 0)
+    return TRUE;
+
+  selected = g_ptr_array_steal_index (messages, position);
+  g_ptr_array_insert (messages, 0, selected);
+
+  return xd_storage_set_queue (self, chat_id, messages, error);
+}
+
+gboolean
 xd_storage_queue_take_first (XdStorage   *self,
                              const char  *chat_id,
                              char       **text,

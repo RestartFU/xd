@@ -163,6 +163,12 @@ gboolean    xd_storage_queue_remove    (XdStorage   *self,
                                         guint        position,
                                         GError     **error);
 
+/* Moves one waiting message to the front, preserving every other position. */
+gboolean    xd_storage_queue_promote   (XdStorage   *self,
+                                        const char  *chat_id,
+                                        guint        position,
+                                        GError     **error);
+
 /*
  * Consumes the oldest waiting message, if any.
  *
