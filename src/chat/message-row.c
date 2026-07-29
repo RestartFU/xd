@@ -598,6 +598,17 @@ xd_message_row_make_workflow (XdMessageRow *self,
   self->workflow_repository = repository_from_workflow_url (url, run_id);
   self->workflow_run_id = g_strdup (run_id);
 
+  /*
+   * Assistant rows begin an asynchronous Markdown render when constructed.
+   * This row becomes a live card immediately afterwards, so invalidate that
+   * render before replacing its body. Otherwise its completion can clear the
+   * card, destroy these status widgets, then leave the workflow callback
+   * writing through their stale pointers.
+   */
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
+  g_clear_object (&self->render_cancellable);
+  self->render_generation++;
   clear_body (self);
   make_info_card (self, "xd-status");
 
