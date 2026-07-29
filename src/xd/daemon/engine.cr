@@ -8,6 +8,7 @@ require "../version"
 require "../workspace/service"
 require "./connection"
 require "./event_bus"
+require "./filesystem"
 
 module Xd
   module Daemon
@@ -41,6 +42,7 @@ module Xd
           @store
         )
         @events = EventBus.new
+        @filesystem = Filesystem.new(@store, @workspaces)
         @agents = Agent::Manager.new(
           @store,
           @workspaces,
@@ -95,6 +97,8 @@ module Xd
         failed_outcome(error.message || "Agent secrets error")
       rescue error : Agent::Manager::Error
         failed_outcome(error.message || "Agent error")
+      rescue error : Filesystem::Error
+        failed_outcome(error.message || "Filesystem error")
       end
 
       def close : Nil
@@ -132,6 +136,10 @@ module Xd
           new_chat(request)
         when Protocol::Operation::Messages
           messages(request)
+        when Protocol::Operation::ListDir
+          list_dir(request)
+        when Protocol::Operation::FileBrowse
+          file_browse(request)
         when Protocol::Operation::RenameChat
           rename_chat(request)
         when Protocol::Operation::DeleteChat
@@ -444,6 +452,28 @@ module Xd
           ),
           "messages" => messages_json(rows),
         })
+      end
+
+      private def list_dir(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        Protocol::Response.ok(
+          @filesystem.list_directory(request.string?("path"))
+        )
+      end
+
+      private def file_browse(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        message = "file-browse needs a chat and action."
+        chat_id = request.string("chat", message)
+        action = request.string("action", message)
+        Protocol::Response.ok(@filesystem.browse(
+          chat_id,
+          action,
+          request.string?("path"),
+          request.string?("content")
+        ))
       end
 
       private def rename_chat(
