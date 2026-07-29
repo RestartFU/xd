@@ -1,6 +1,6 @@
 require "./xd/protocol/operation"
 require "./xd/storage/workflow_state"
-require "./xd/daemon/engine"
+require "./xd/daemon/server"
 
 module Xd
   VERSION = "0.1.0"
