@@ -194,6 +194,47 @@ static const char *const RUBY_FUNCTIONS[] = {
   NULL,
 };
 
+static const char *const RUBY_DEFINITION_KEYWORDS[] = {
+  "def", NULL,
+};
+
+static const char *const CRYSTAL_KEYWORDS[] = {
+  "__DIR__", "__END_LINE__", "__FILE__", "__LINE__", "abstract", "alias",
+  "alignof", "annotation", "as", "asm", "begin", "break", "case", "class",
+  "def", "do", "else", "elsif", "end", "ensure", "enum", "extend", "for",
+  "fun", "if", "in", "include", "instance_alignof", "instance_sizeof",
+  "is_a", "lib", "macro", "module", "next", "of", "offsetof", "out",
+  "pointerof", "previous_def", "private", "protected", "require", "rescue",
+  "responds_to", "return", "select", "self", "sizeof", "struct", "super",
+  "then", "type", "typeof", "union", "uninitialized", "unless", "until",
+  "verbatim", "when", "while", "with", "yield",
+  NULL,
+};
+
+static const char *const CRYSTAL_TYPES[] = {
+  "Array", "Bool", "Bytes", "Char", "Class", "Enum", "Exception", "Fiber",
+  "Float32", "Float64", "Hash", "IO", "Int8", "Int16", "Int32", "Int64",
+  "Int128", "Iterator", "NamedTuple", "Nil", "Number", "Object", "Pointer",
+  "Proc", "Range", "Reference", "Regex", "Set", "Slice", "String", "Struct",
+  "Symbol", "Tuple", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+  "Value",
+  NULL,
+};
+
+static const char *const CRYSTAL_CONSTANTS[] = {
+  "false", "nil", "true", NULL,
+};
+
+static const char *const CRYSTAL_FUNCTIONS[] = {
+  "abort", "at_exit", "delegate", "exit", "getter", "p", "pp", "print",
+  "printf", "property", "puts", "raise", "record", "setter", "sleep", "spawn",
+  NULL,
+};
+
+static const char *const CRYSTAL_DEFINITION_KEYWORDS[] = {
+  "def", "fun", "macro", NULL,
+};
+
 static const char *const NO_WORDS[] = {
   NULL,
 };
@@ -238,12 +279,14 @@ typedef struct
   gboolean undefined_constant;   /* Odin's --- value */
   gboolean shebangs;             /* executable scripts' #! line */
   gboolean ruby_block_comments;  /* Ruby's column-one =begin blocks */
-  gboolean ruby_symbols;         /* :name and :"quoted name" */
-  gboolean ruby_percent_literals; /* %q(), %w[], %r{} and friends */
-  gboolean ruby_regexes;         /* /pattern/ literals */
-  gboolean ruby_variables;       /* @instance, @@class and $global */
+  gboolean colon_symbols;        /* :name and :"quoted name" */
+  const char *percent_literal_kinds; /* letters accepted after % */
+  gboolean slash_regexes;        /* /pattern/ literals */
+  gboolean sigil_variables;      /* @instance, @@class and $global */
   gboolean ruby_heredocs;        /* <<ID, <<-ID and <<~ID strings */
-  gboolean ruby_definitions;     /* def name, including receiver.name */
+  gboolean crystal_heredocs;     /* Crystal's mandatory <<-ID strings */
+  const char *const *definition_keywords; /* def/fun/macro names */
+  gboolean crystal_macros;       /* {{...}} and {%...%} delimiters */
   char key_delimiter;            /* ':' for mappings, '=' for assignments */
 } Language;
 
@@ -384,12 +427,31 @@ static const Language RUBY_LANGUAGE = {
   .capitalized_types = TRUE,
   .shebangs = TRUE,
   .ruby_block_comments = TRUE,
-  .ruby_symbols = TRUE,
-  .ruby_percent_literals = TRUE,
-  .ruby_regexes = TRUE,
-  .ruby_variables = TRUE,
+  .colon_symbols = TRUE,
+  .percent_literal_kinds = "qQwWiIrsx",
+  .slash_regexes = TRUE,
+  .sigil_variables = TRUE,
   .ruby_heredocs = TRUE,
-  .ruby_definitions = TRUE,
+  .definition_keywords = RUBY_DEFINITION_KEYWORDS,
+};
+
+static const Language CRYSTAL_LANGUAGE = {
+  .keywords = CRYSTAL_KEYWORDS,
+  .types = CRYSTAL_TYPES,
+  .constants = CRYSTAL_CONSTANTS,
+  .functions = CRYSTAL_FUNCTIONS,
+  .inline_hash_comments = TRUE,
+  .capitalized_types = TRUE,
+  .backtick_literals = TRUE,
+  .at_attributes = TRUE,
+  .shebangs = TRUE,
+  .colon_symbols = TRUE,
+  .percent_literal_kinds = "qQwWirx",
+  .slash_regexes = TRUE,
+  .sigil_variables = TRUE,
+  .crystal_heredocs = TRUE,
+  .definition_keywords = CRYSTAL_DEFINITION_KEYWORDS,
+  .crystal_macros = TRUE,
 };
 
 static const Language *
@@ -419,6 +481,8 @@ language_table (XdSyntaxLanguage language)
     return &ODIN_LANGUAGE;
   if (language == XD_SYNTAX_RUBY)
     return &RUBY_LANGUAGE;
+  if (language == XD_SYNTAX_CRYSTAL)
+    return &CRYSTAL_LANGUAGE;
 
   return NULL;
 }
@@ -482,6 +546,8 @@ xd_syntax_language_for_path (const char *path)
   if (g_strcmp0 (dot, ".rb") == 0 || g_strcmp0 (dot, ".rake") == 0 ||
       g_strcmp0 (dot, ".gemspec") == 0)
     return XD_SYNTAX_RUBY;
+  if (g_strcmp0 (dot, ".cr") == 0)
+    return XD_SYNTAX_CRYSTAL;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -805,8 +871,9 @@ followed_by_odin_procedure (const char *at)
 }
 
 static gboolean
-is_ruby_definition (const char *line,
-                    const char *at)
+is_definition (const char        *line,
+               const char        *at,
+               const char *const *keywords)
 {
   const char *scan = at;
   const char *end;
@@ -830,7 +897,7 @@ is_ruby_definition (const char *line,
   while (scan > line && is_word_byte (scan[-1]))
     scan--;
 
-  return end - scan == 3 && strncmp (scan, "def", 3) == 0 &&
+  return word_listed (keywords, scan, (gsize) (end - scan), FALSE) &&
          (scan == line || !is_word_byte (scan[-1]));
 }
 
@@ -866,7 +933,8 @@ scan_word (Emitter        *emitter,
   else if (language->functions != NULL &&
            word_listed (language->functions, at, length, FALSE))
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
-  else if (language->ruby_definitions && is_ruby_definition (line, at))
+  else if (language->definition_keywords != NULL &&
+           is_definition (line, at, language->definition_keywords))
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else if (language->capitalized_types && g_ascii_isupper (*at))
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
@@ -1285,8 +1353,8 @@ ruby_marker_line (const char *line,
 }
 
 static const char *
-scan_ruby_symbol (Emitter    *emitter,
-                  const char *at)
+scan_colon_symbol (Emitter    *emitter,
+                   const char *at)
 {
   const char *scan = at + 1;
 
@@ -1301,13 +1369,24 @@ scan_ruby_symbol (Emitter    *emitter,
     }
   else
     {
-      if (!g_ascii_isalpha (*scan) && *scan != '_')
-        return NULL;
-
-      while (is_word_byte (*scan))
-        scan++;
-      if (*scan == '?' || *scan == '!' || *scan == '=')
-        scan++;
+      if (g_ascii_isalpha (*scan) || *scan == '_')
+        {
+          while (is_word_byte (*scan))
+            scan++;
+          if (*scan == '?' || *scan == '!' || *scan == '=')
+            scan++;
+        }
+      else if (*scan != '\0' &&
+               strchr ("+-*/%&|^<>=!~[]", *scan) != NULL)
+        {
+          while (*scan != '\0' &&
+                 strchr ("+-*/%&|^<>=!~[]?", *scan) != NULL)
+            scan++;
+        }
+      else
+        {
+          return NULL;
+        }
     }
 
   append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
@@ -1316,8 +1395,9 @@ scan_ruby_symbol (Emitter    *emitter,
 }
 
 static const char *
-scan_ruby_percent_literal (Emitter    *emitter,
-                           const char *at)
+scan_percent_literal (Emitter    *emitter,
+                      const char *at,
+                      const char *kinds)
 {
   const char *delimiter = at + 1;
   const char *scan;
@@ -1326,7 +1406,7 @@ scan_ruby_percent_literal (Emitter    *emitter,
   char close;
   guint depth = 1;
 
-  if (*delimiter != '\0' && strchr ("qQwWiIrsx", *delimiter) != NULL)
+  if (*delimiter != '\0' && strchr (kinds, *delimiter) != NULL)
     kind = *delimiter++;
 
   if (*delimiter == '\0' || g_ascii_isalnum (*delimiter) ||
@@ -1386,8 +1466,8 @@ scan_ruby_percent_literal (Emitter    *emitter,
 }
 
 static gboolean
-ruby_regex_can_start (const char *line,
-                      const char *at)
+slash_regex_can_start (const char *line,
+                       const char *at)
 {
   static const char *const PREFIX_WORDS[] = {
     "and", "if", "not", "or", "return", "unless", "when", "yield", NULL,
@@ -1410,14 +1490,14 @@ ruby_regex_can_start (const char *line,
 }
 
 static const char *
-scan_ruby_regex (Emitter    *emitter,
-                 const char *line,
-                 const char *at)
+scan_slash_regex (Emitter    *emitter,
+                  const char *line,
+                  const char *at)
 {
   const char *scan = at + 1;
   gboolean in_class = FALSE;
 
-  if (!ruby_regex_can_start (line, at) || *scan == '/' || *scan == '=')
+  if (!slash_regex_can_start (line, at) || *scan == '/' || *scan == '=')
     return NULL;
 
   while (*scan != '\0')
@@ -1455,8 +1535,8 @@ scan_ruby_regex (Emitter    *emitter,
 }
 
 static const char *
-scan_ruby_variable (Emitter    *emitter,
-                    const char *at)
+scan_sigil_variable (Emitter    *emitter,
+                     const char *at)
 {
   static const char *special_globals = "!\"$&'()*+,-./:;<=>?@\\`~";
   const char *scan = at + 1;
@@ -1473,8 +1553,12 @@ scan_ruby_variable (Emitter    *emitter,
   else
     {
       if (g_ascii_isdigit (*scan))
-        while (g_ascii_isdigit (*scan))
-          scan++;
+        {
+          while (g_ascii_isdigit (*scan))
+            scan++;
+          if (*scan == '?')
+            scan++;
+        }
       else if (g_ascii_isalpha (*scan) || *scan == '_')
         while (is_word_byte (*scan))
           scan++;
@@ -1490,16 +1574,20 @@ scan_ruby_variable (Emitter    *emitter,
 }
 
 static const char *
-scan_ruby_heredoc (Emitter       *emitter,
-                   const char    *at,
-                   XdSyntaxState *state)
+scan_heredoc (Emitter       *emitter,
+              const char    *at,
+              XdSyntaxState *state,
+              gboolean       crystal)
 {
   const char *scan = at + 2;
   const char *name;
   gsize length;
   char quote = '\0';
 
-  if (*scan == '-' || *scan == '~')
+  if (crystal && *scan != '-')
+    return NULL;
+
+  if (*scan == '-' || (!crystal && *scan == '~'))
     {
       state->heredoc_indent = TRUE;
       scan++;
@@ -1512,6 +1600,8 @@ scan_ruby_heredoc (Emitter       *emitter,
   if (*scan == '\'' || *scan == '"' || *scan == '`')
     {
       quote = *scan++;
+      if (crystal && quote != '\'')
+        return NULL;
       name = scan;
       while (*scan != '\0' && *scan != quote)
         scan++;
@@ -1543,8 +1633,8 @@ scan_ruby_heredoc (Emitter       *emitter,
 }
 
 static gboolean
-ruby_heredoc_terminator (const char    *line,
-                         XdSyntaxState *state)
+heredoc_terminator (const char    *line,
+                    XdSyntaxState *state)
 {
   const char *scan = line;
   gsize length = strlen (state->heredoc_delimiter);
@@ -1666,7 +1756,7 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
     }
   else if (state->in_heredoc)
     {
-      gboolean closes = ruby_heredoc_terminator (line, state);
+      gboolean closes = heredoc_terminator (line, state);
 
       append_token (&emitter, XD_SYNTAX_TOKEN_STRING, line, strlen (line));
       if (closes)
@@ -1740,9 +1830,28 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;
         }
-      else if (table->ruby_heredocs && at[0] == '<' && at[1] == '<')
+      else if (table->crystal_macros && at[0] == '{' &&
+               (at[1] == '{' || at[1] == '%'))
         {
-          const char *after = scan_ruby_heredoc (&emitter, at, state);
+          append_token (&emitter, XD_SYNTAX_TOKEN_PREPROC, at, 2);
+          state->crystal_macro_close = (guint8) at[1];
+          at += 2;
+        }
+      else if (table->crystal_macros &&
+               ((state->crystal_macro_close == '}' &&
+                 at[0] == '}' && at[1] == '}') ||
+                (state->crystal_macro_close == '%' &&
+                 at[0] == '%' && at[1] == '}')))
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_PREPROC, at, 2);
+          state->crystal_macro_close = 0;
+          at += 2;
+        }
+      else if ((table->ruby_heredocs || table->crystal_heredocs) &&
+               at[0] == '<' && at[1] == '<')
+        {
+          const char *after = scan_heredoc (
+            &emitter, at, state, table->crystal_heredocs);
 
           if (after == NULL)
             {
@@ -1754,9 +1863,9 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
               at = after;
             }
         }
-      else if (table->ruby_symbols && *at == ':' && at[1] != ':')
+      else if (table->colon_symbols && *at == ':' && at[1] != ':')
         {
-          const char *after = scan_ruby_symbol (&emitter, at);
+          const char *after = scan_colon_symbol (&emitter, at);
 
           if (after == NULL)
             {
@@ -1768,9 +1877,10 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
               at = after;
             }
         }
-      else if (table->ruby_percent_literals && *at == '%')
+      else if (table->percent_literal_kinds != NULL && *at == '%')
         {
-          const char *after = scan_ruby_percent_literal (&emitter, at);
+          const char *after = scan_percent_literal (
+            &emitter, at, table->percent_literal_kinds);
 
           if (after == NULL)
             {
@@ -1782,9 +1892,9 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
               at = after;
             }
         }
-      else if (table->ruby_regexes && *at == '/')
+      else if (table->slash_regexes && *at == '/')
         {
-          const char *after = scan_ruby_regex (&emitter, line, at);
+          const char *after = scan_slash_regex (&emitter, line, at);
 
           if (after == NULL)
             {
@@ -1796,9 +1906,10 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
               at = after;
             }
         }
-      else if (table->ruby_variables && (*at == '@' || *at == '$'))
+      else if (table->sigil_variables && (*at == '@' || *at == '$') &&
+               !(table->at_attributes && at[0] == '@' && at[1] == '['))
         {
-          const char *after = scan_ruby_variable (&emitter, at);
+          const char *after = scan_sigil_variable (&emitter, at);
 
           if (after == NULL)
             {

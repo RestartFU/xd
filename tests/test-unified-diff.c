@@ -430,6 +430,25 @@ test_colours_ruby (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">42</span>"));
 }
 
+static void
+test_colours_crystal (void)
+{
+  static const char *patch =
+    "diff --git a/src/answer.cr b/src/answer.cr\n"
+    "@@ -1 +1 @@\n"
+    "-def answer : Int32 = 41\n"
+    "+def answer : Int32 = 42\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">def</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#99c1f1\">answer</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">Int32</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">42</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -527,6 +546,8 @@ main (int   argc,
   g_test_add_func ("/unified-diff/colours-v", test_colours_v);
   g_test_add_func ("/unified-diff/colours-odin", test_colours_odin);
   g_test_add_func ("/unified-diff/colours-ruby", test_colours_ruby);
+  g_test_add_func ("/unified-diff/colours-crystal",
+                   test_colours_crystal);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",

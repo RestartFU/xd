@@ -110,6 +110,8 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_RUBY);
   g_assert_cmpint (xd_syntax_language_for_path ("Vagrantfile"),
                    ==, XD_SYNTAX_RUBY);
+  g_assert_cmpint (xd_syntax_language_for_path ("src/server.cr"),
+                   ==, XD_SYNTAX_CRYSTAL);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -459,6 +461,69 @@ test_carries_ruby_state (void)
   g_assert_nonnull (strstr (comment_close, "comment:=end\n"));
 }
 
+static void
+test_classifies_crystal (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *annotation = scan (
+    XD_SYNTAX_CRYSTAL, "@[JSON::Field(key: \"name\")]", &state, NULL);
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_CRYSTAL,
+    "class Greeter; def greet name : String", &state, NULL);
+  g_autofree char *body = scan (
+    XD_SYNTAX_CRYSTAL,
+    "puts %Q(Hello #{name}) if @enabled # welcome", &state, NULL);
+  g_autofree char *macro = scan (
+    XD_SYNTAX_CRYSTAL, "{% if flag?(:linux) %}", &state, NULL);
+  g_autofree char *literals = scan (
+    XD_SYNTAX_CRYSTAL,
+    "pattern = /foo\\/[a-z]+/im; command = `uname -a`; getter = :[]?",
+    &state, NULL);
+
+  g_assert_nonnull (
+    strstr (annotation, "preproc:@[JSON::Field(key: \"name\")]\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:class\n"));
+  g_assert_nonnull (strstr (declaration, "type:Greeter\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:def\n"));
+  g_assert_nonnull (strstr (declaration, "function:greet\n"));
+  g_assert_nonnull (strstr (declaration, "type:String\n"));
+  g_assert_nonnull (strstr (body, "function:puts\n"));
+  g_assert_nonnull (strstr (body, "string:%Q(Hello #{name})\n"));
+  g_assert_nonnull (strstr (body, "keyword:if\n"));
+  g_assert_nonnull (strstr (body, "preproc:@enabled\n"));
+  g_assert_nonnull (strstr (body, "comment:# welcome\n"));
+  g_assert_nonnull (strstr (macro, "preproc:{%\n"));
+  g_assert_nonnull (strstr (macro, "keyword:if\n"));
+  g_assert_nonnull (strstr (macro, "string::linux\n"));
+  g_assert_nonnull (strstr (macro, "preproc:%}\n"));
+  g_assert_cmpuint (state.crystal_macro_close, ==, 0);
+  g_assert_nonnull (strstr (literals, "string:/foo\\/[a-z]+/im\n"));
+  g_assert_nonnull (strstr (literals, "string:`uname -a`\n"));
+  g_assert_nonnull (strstr (literals, "string::[]?\n"));
+}
+
+static void
+test_carries_a_crystal_heredoc (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *opened = scan (
+    XD_SYNTAX_CRYSTAL, "message = <<-TEXT.upcase", &state, NULL);
+  g_autofree char *body = NULL;
+  g_autofree char *closed = NULL;
+
+  g_assert_true (state.in_heredoc);
+  g_assert_nonnull (strstr (opened, "string:<<-TEXT\n"));
+
+  body = scan (
+    XD_SYNTAX_CRYSTAL, "  #{name} # still a string", &state, NULL);
+  g_assert_true (state.in_heredoc);
+  g_assert_nonnull (strstr (body, "string:  #{name} # still a string\n"));
+
+  closed = scan (XD_SYNTAX_CRYSTAL, "  TEXT", &state, NULL);
+  g_assert_false (state.in_heredoc);
+  g_assert_nonnull (strstr (closed, "string:  TEXT\n"));
+}
+
 /*
  * The type of a composite literal is a type, and the space is what says so:
  * gofmt writes "Vec3{40}" tight and "if ok {" loose.
@@ -751,6 +816,9 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-odin", test_classifies_odin);
   g_test_add_func ("/syntax/classifies-ruby", test_classifies_ruby);
   g_test_add_func ("/syntax/carries-ruby-state", test_carries_ruby_state);
+  g_test_add_func ("/syntax/classifies-crystal", test_classifies_crystal);
+  g_test_add_func ("/syntax/carries-a-crystal-heredoc",
+                   test_carries_a_crystal_heredoc);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
