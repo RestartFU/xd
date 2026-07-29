@@ -27,7 +27,10 @@ module Xd
     )
     end
 
-    def run(arguments : Array(String)) : Int32
+    def run(
+      arguments : Array(String),
+      desktop : Proc(Int32)? = nil,
+    ) : Int32
       if arguments == ["--version"] || arguments == ["-v"]
         @output.puts "xd #{VERSION}"
         return 0
@@ -37,7 +40,11 @@ module Xd
         return serve(parse_serve(arguments.skip(1)))
       end
 
-      @error.puts "xd desktop client is not wired yet"
+      if desktop
+        return desktop.call
+      end
+
+      @error.puts "xd desktop client is unavailable in this build"
       1
     rescue error : UsageError
       @error.puts error.message

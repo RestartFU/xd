@@ -26,6 +26,7 @@ FROM crystal-toolchain AS crystal
 WORKDIR /src
 COPY shard.yml shard.lock ./
 RUN shards install --production --frozen
+RUN ./bin/gi-crystal
 
 COPY src/xd.cr ./src/xd.cr
 COPY src/xd ./src/xd
