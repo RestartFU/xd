@@ -143,6 +143,19 @@ static void
 daemon_stop (Daemon *daemon)
 {
   g_clear_object (&daemon->server);
+
+  /*
+   * Letting go of the server cancels its reads; it does not finish them.
+   * Cancellation completes on a later iteration, and until it does, the
+   * sources for those descriptors are still in the main context -- so the
+   * next test polls a descriptor this one has already closed.
+   *
+   * Linux reports that as POLLNVAL on the entry and carries on, which is why
+   * a suite full of daemons never noticed. BSD fails the whole poll with
+   * EBADF, and GLib makes that fatal.
+   */
+  while (g_main_context_iteration (NULL, FALSE))
+    ;
   g_clear_object (&daemon->certificate);
   g_clear_object (&daemon->storage);
   g_clear_pointer (&daemon->chat_id, g_free);
