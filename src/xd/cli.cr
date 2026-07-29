@@ -32,7 +32,7 @@ module Xd
       desktop : Proc(Int32)? = nil,
     ) : Int32
       if arguments == ["--version"] || arguments == ["-v"]
-        @output.puts "xd #{VERSION}"
+        @output.puts "xd #{Xd.version_string}"
         return 0
       end
 
@@ -122,7 +122,7 @@ module Xd
         )
 
         @output.puts(
-          "xd serve: #{VERSION}, listening on #{port}, " \
+          "xd serve: #{Xd.version_string}, listening on #{port}, " \
           "workspaces at #{options.root}"
         )
         if options.pair

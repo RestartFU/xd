@@ -4,8 +4,8 @@
 #
 # Everything the app needs is loaded out of this directory. The bundled loader
 # is invoked with --library-path rather than exporting LD_LIBRARY_PATH on
-# purpose: xd spawns the host's `claude` and `codex` binaries, and those must
-# keep using the host's own libraries.
+# purpose: host tools spawned by terminal sessions must keep using host
+# libraries. Bundled Claude and OpenSSL use their own small loader wrappers.
 
 set -e
 
@@ -49,13 +49,8 @@ export XD_HOST_GTK_THEME="${GTK_THEME-}"
 unset GIO_EXTRA_MODULES GTK_PATH GTK_MODULES GTK_IM_MODULE_FILE
 unset GTK_EXE_PREFIX GTK_DATA_PREFIX LOCALE_ARCHIVE
 
-# GTK_THEME is a desktop saying which theme its applications wear, and xd is
-# not wearing one: libadwaita stands down when that variable is set, taking
-# with it the stylesheet everything here is written against -- black surfaces
-# become grey, a dialog's panel is painted by nobody, and the app arrives
-# looking like a different program. The value is handed back to anything xd
-# launches for the user; see src/util/host-launch.c. The same is done in the
-# program itself, for the builds that start without this launcher.
+# xd owns its GTK styling. Preserve host theme for child tools, but do not let
+# it override the app stylesheet.
 unset GTK_THEME
 export GIO_MODULE_DIR="$HERE/lib/gio/modules"
 export GTK_IM_MODULE=gtk-im-context-simple
@@ -88,6 +83,9 @@ export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/i
 # The keyfile backend keeps settings in $XDG_CONFIG_HOME/glib-2.0/settings and
 # is built into GIO, so the bundle needs no dconf module or D-Bus round trip.
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
+export SSL_CERT_FILE="$HERE/etc/ssl/certs/ca-certificates.crt"
+export OPENSSL_CONF="$HERE/etc/ssl/openssl.cnf"
+export OPENSSL_MODULES="$HERE/lib/ossl-modules"
 
 # GL is the host's own stack end to end: the bundle carries no Mesa, so
 # libepoxy dlopens the host's libGL -- the same one the desktop runs on.

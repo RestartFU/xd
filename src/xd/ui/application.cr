@@ -1,4 +1,5 @@
 require "gtk4"
+require "../version"
 require "./runtime"
 require "./window"
 
@@ -43,7 +44,7 @@ module Xd
 
     def run : Int32
       application = Gtk::Application.new(
-        "com.restartfu.xd",
+        APP_ID,
         Gio::ApplicationFlags::None
       )
       runtime : Runtime? = nil

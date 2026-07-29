@@ -1,9 +1,11 @@
+require "./version"
+
 module Xd
   module AppPaths
     extend self
 
     def data_name : String
-      ENV["XD_DATA_NAME"]? || "xd"
+      ENV["XD_DATA_NAME"]? || DATA_NAME
     end
 
     def data_dir : String
