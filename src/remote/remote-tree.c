@@ -25,6 +25,7 @@ struct _XdRemoteTree
 
   GHashTable *folders;      /* folder id -> XdNode*, owning a reference */
   GHashTable *chats;        /* chat id   -> XdNode*, owning a reference */
+  gboolean loaded;          /* at least one complete tree snapshot arrived */
 
   /* A chat just made on the daemon, to be handed over once the tree it lives
    * in has been read back and there is a node to hand over. */
@@ -383,6 +384,7 @@ apply_tree (XdRemoteTree *self,
   g_hash_table_unref (reload.children);
   g_ptr_array_unref (reload.removed);
 
+  self->loaded = TRUE;
   set_root_state (self, XD_NODE_IDLE);
 
   /* The chat that was just made now has a row, which is the first moment it
@@ -457,9 +459,12 @@ xd_remote_tree_refresh (XdRemoteTree *self)
       return;
     }
 
-  /* The remote's own row says it is working, which is the one thing the tree
-   * can show while there is nothing under it yet. */
-  set_root_state (self, XD_NODE_WORKING);
+  /* The remote's own row says it is working only before its first snapshot.
+   * Later refreshes are background reconciliation: swapping the stable server
+   * icon for animated dots on every tree event makes the connection row flash.
+   * After a disconnect it also stays offline until a reply confirms recovery. */
+  if (!self->loaded)
+    set_root_state (self, XD_NODE_WORKING);
 
   xd_remote_client_call_op_async (self->client, "tree", NULL, NULL,
                                   self->cancellable, on_tree_received,
@@ -785,14 +790,30 @@ xd_remote_tree_set_folder_context_finish (XdRemoteTree *self,
 
 void
 xd_remote_tree_get_agent_secrets_async (XdRemoteTree        *self,
+                                        XdNode              *folder,
                                         GCancellable        *cancellable,
                                         GAsyncReadyCallback  callback,
                                         gpointer             user_data)
 {
-  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) request = NULL;
 
-  xd_remote_client_call_op_async (self->client, "agent-secrets", NULL, NULL,
-                                  cancellable, callback, user_data);
+  g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (folder == NULL || XD_IS_NODE (folder));
+
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "op");
+  json_builder_add_string_value (builder, "agent-secrets");
+  if (folder != NULL)
+    {
+      json_builder_set_member_name (builder, "folder");
+      json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    }
+  json_builder_end_object (builder);
+  request = json_builder_get_root (builder);
+
+  xd_remote_client_call_async (self->client, request, cancellable,
+                               callback, user_data);
 }
 
 GStrv
@@ -845,6 +866,7 @@ xd_remote_tree_get_agent_secrets_finish (XdRemoteTree  *self,
 void
 xd_remote_tree_set_agent_secrets_async (
                                        XdRemoteTree              *self,
+                                       XdNode                    *folder,
                                        const XdAgentSecretUpdate *entries,
                                        gsize                      n_entries,
                                        GCancellable              *cancellable,
@@ -855,11 +877,17 @@ xd_remote_tree_set_agent_secrets_async (
   g_autoptr (JsonNode) request = NULL;
 
   g_return_if_fail (XD_IS_REMOTE_TREE (self));
+  g_return_if_fail (folder == NULL || XD_IS_NODE (folder));
   g_return_if_fail (entries != NULL || n_entries == 0);
 
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "op");
   json_builder_add_string_value (builder, "set-agent-secrets");
+  if (folder != NULL)
+    {
+      json_builder_set_member_name (builder, "folder");
+      json_builder_add_string_value (builder, xd_node_get_folder_id (folder));
+    }
   json_builder_set_member_name (builder, "entries");
   json_builder_begin_array (builder);
   for (gsize i = 0; i < n_entries; i++)

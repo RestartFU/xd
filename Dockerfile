@@ -12,6 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
+      cmake \
       meson \
       ninja-build \
       pkg-config \
@@ -23,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libjson-glib-dev \
       libsqlite3-dev \
       libcmark-dev \
+      libpulse-dev \
+      libsoup-3.0-dev \
       libvte-2.91-gtk4-dev \
       libegl1 \
       libgl1-mesa-dri \
@@ -44,8 +47,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       patchelf \
     && rm -rf /var/lib/apt/lists/*
 
-# --- stage 2: compile -------------------------------------------------------
+# --- stage 2: local speech runtime ------------------------------------------
+FROM deps AS whisper
+
+RUN git clone --quiet --depth 1 --branch v1.9.1 \
+      https://github.com/ggml-org/whisper.cpp.git /whisper \
+ && test "$(git -C /whisper rev-parse HEAD)" = \
+      f049fff95a089aa9969deb009cdd4892b3e74916 \
+ && cmake -S /whisper -B /whisper/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_BINDIR=lib \
+      -DGGML_NATIVE=OFF \
+      -DGGML_BACKEND_DL=ON \
+      -DGGML_CPU_ALL_VARIANTS=ON \
+      -DWHISPER_BUILD_EXAMPLES=OFF \
+      -DWHISPER_BUILD_SERVER=OFF \
+      -DWHISPER_BUILD_TESTS=OFF \
+ && cmake --build /whisper/build --parallel \
+ && cmake --install /whisper/build
+
+# --- stage 3: compile -------------------------------------------------------
 FROM deps AS build
+
+COPY --from=whisper /usr/local/ /usr/local/
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
 # Which build this is: "nightly" gives the app its own id, settings, data
 # directory and workspaces, so it installs beside a release rather than over
@@ -66,12 +92,12 @@ RUN meson setup /build --prefix=/usr --buildtype=release \
       -Dprofile="$PROFILE" -Dcommit="$COMMIT" \
  && meson compile -C /build
 
-# --- stage 3: headless tests (CI gate: docker build --target test .) --------
+# --- stage 4: headless tests (CI gate: docker build --target test .) --------
 FROM build AS test
 
 RUN meson test -C /build --print-errorlogs
 
-# --- stage 4: assemble the redistributable bundle ---------------------------
+# --- stage 5: assemble the redistributable bundle ---------------------------
 FROM build AS staging
 
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
@@ -80,7 +106,7 @@ COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 RUN DESTDIR=/stage meson install -C /build --no-rebuild --quiet \
  && bash /usr/local/bin/bundle.sh /stage /out /usr/local/share/xd-launcher.sh
 
-# --- stage 5: export --------------------------------------------------------
+# --- stage 6: export --------------------------------------------------------
 FROM scratch AS bundle
 
 COPY --from=staging /out /

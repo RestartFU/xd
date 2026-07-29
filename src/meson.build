@@ -6,6 +6,8 @@ xd_core_sources = files(
   'settings/pane-state.c',
   'settings/settings-resolver.c',
   'util/markdown.c',
+  'util/text-reveal.c',
+  'util/voice-data.c',
   'util/ask-block.c',
   'util/git-diff.c',
   'util/git-head-watch.c',
@@ -23,11 +25,13 @@ xd_core_sources = files(
   'integrations/discord-presence.c',
   'remote/client.c',
   'remote/remote-tree.c',
+  'tree/fs-tree.c',
   'tree/xd-node.c',
   'storage/storage.c',
   'backend/backend.c',
   'backend/claude-backend.c',
   'backend/codex-backend.c',
+  'backend/codex-app-server.c',
   'backend/cerebras-backend.c',
   # No GTK here either, so the subprocess plumbing can be tested headlessly.
   'chat/chat-session.c',
@@ -74,7 +78,6 @@ xd_sources = files(
   'main.c',
   'xd-app.c',
   'xd-window.c',
-  'tree/fs-tree.c',
   'tree/sidebar.c',
   'ui/dots.c',
   'ui/dir-browser.c',
@@ -106,6 +109,10 @@ endif
 xd_app_deps = [glib_dep, gio_dep, gtk_dep, adw_dep, json_dep, sqlite_dep]
 if not is_windows
   xd_app_deps += [gio_unix_dep, vte_dep]
+endif
+if has_voice
+  xd_sources += files('chat/voice-input.c')
+  xd_app_deps += [pulse_simple_dep, soup_dep, whisper_dep]
 endif
 
 executable('xd',

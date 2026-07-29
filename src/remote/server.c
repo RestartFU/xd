@@ -1418,14 +1418,27 @@ handle_file_browse (Connection *connection,
  * credentials.
  */
 static void
-handle_agent_secrets (Connection *connection)
+handle_agent_secrets (Connection *connection,
+                      JsonObject *request)
 {
   g_autoptr (XdAgentSecrets) secrets = NULL;
   g_autoptr (JsonBuilder) builder = json_builder_new ();
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) names = NULL;
+  g_autofree char *folder_path = NULL;
+  const char *folder_id = member_string (request, "folder");
 
-  secrets = xd_agent_secrets_load (NULL, &error);
+  if (folder_id != NULL)
+    {
+      folder_path = folder_argument (
+        connection, request, "folder", FALSE);
+      if (folder_path == NULL)
+        return;
+    }
+
+  secrets = folder_id != NULL
+    ? xd_agent_secrets_load_for_folder (folder_id, &error)
+    : xd_agent_secrets_load (NULL, &error);
   if (secrets == NULL)
     {
       send_error (connection, error->message);
@@ -1455,6 +1468,8 @@ handle_set_agent_secrets (Connection *connection,
   g_auto (GStrv) old_names = NULL;
   JsonNode *entries_node;
   JsonArray *entries;
+  g_autofree char *folder_path = NULL;
+  const char *folder_id = member_string (request, "folder");
 
   entries_node = json_object_get_member (request, "entries");
   if (entries_node == NULL || !JSON_NODE_HOLDS_ARRAY (entries_node))
@@ -1463,7 +1478,17 @@ handle_set_agent_secrets (Connection *connection,
       return;
     }
 
-  secrets = xd_agent_secrets_load (NULL, &error);
+  if (folder_id != NULL)
+    {
+      folder_path = folder_argument (
+        connection, request, "folder", FALSE);
+      if (folder_path == NULL)
+        return;
+    }
+
+  secrets = folder_id != NULL
+    ? xd_agent_secrets_load_for_folder (folder_id, &error)
+    : xd_agent_secrets_load (NULL, &error);
   if (secrets == NULL)
     {
       send_error (connection, error->message);
@@ -1893,14 +1918,15 @@ on_turn_finished (XdDaemonTurn *turn,
 /*
  * Starts one daemon-owned turn.
  *
- * Used by a direct send and by the persistent queue. Keeping both on this path
- * makes naming, storage and broadcasts identical whichever device supplied
- * the message.
+ * Used by direct sends, the persistent queue and daemon recovery. Keeping all
+ * three on this path makes turn setup and broadcasts identical while
+ * @user_submitted decides whether the prompt belongs in the transcript.
  */
 static gboolean
 start_daemon_turn (XdRemoteServer  *self,
                    const char      *chat_id,
                    const char      *text,
+                   gboolean         user_submitted,
                    GError         **error)
 {
   XdDaemonTurn *turn;
@@ -1935,7 +1961,7 @@ start_daemon_turn (XdRemoteServer  *self,
 
         if (worktree == NULL ||
             !xd_storage_use_worktree (
-              self->storage, chat_id, worktree, error))
+              self->storage, chat_id, worktree, source, error))
           return FALSE;
       }
   }
@@ -1974,13 +2000,24 @@ start_daemon_turn (XdRemoteServer  *self,
   g_signal_connect (turn, "tool", G_CALLBACK (on_turn_tool), running);
   g_signal_connect (turn, "finished", G_CALLBACK (on_turn_finished), running);
 
-  if (!xd_daemon_turn_start (turn, chat_id, text, error))
+  if (!xd_daemon_turn_start (
+        turn, chat_id, text, user_submitted, error))
     {
       running_free (running);
       g_object_unref (turn);
 
-      /* The message and the failure are both in the transcript now. */
+      /* Real user input and every failure are in the transcript now. */
       broadcast_event (self, "changed", chat_id, NULL, NULL);
+      return FALSE;
+    }
+
+  if (!xd_storage_set_daemon_working (
+        self->storage, chat_id, TRUE, error))
+    {
+      g_signal_handlers_disconnect_by_data (turn, running);
+      xd_daemon_turn_cancel (turn);
+      running_free (running);
+      g_object_unref (turn);
       return FALSE;
     }
 
@@ -2084,7 +2121,7 @@ start_queued (XdRemoteServer *self,
 
   broadcast_stored_queue (self, chat_id);
 
-  if (!start_daemon_turn (self, chat_id, text, &error))
+  if (!start_daemon_turn (self, chat_id, text, TRUE, &error))
     {
       g_warning ("cannot start the queued message: %s", error->message);
       return FALSE;
@@ -2209,12 +2246,21 @@ static gboolean
 forget_turn (gpointer user_data)
 {
   Running *running = user_data;
+  gboolean still_working = FALSE;
 
   g_hash_table_remove (running->server->turns, running->chat_id);
   if (running->server->quiescing)
     complete_quiesce (running->server);
   else
-    start_queued (running->server, running->chat_id);
+    still_working = start_queued (running->server, running->chat_id);
+
+  /* Keep ownership continuous while a queued turn replaces this one. A brief
+   * false value would let the local window race the daemon for that queue. */
+  if (!still_working &&
+      !xd_storage_set_daemon_working (
+        running->server->storage, running->chat_id, FALSE, NULL))
+    g_warning ("cannot clear the daemon turn state");
+
   running_free (running);
 
   return G_SOURCE_REMOVE;
@@ -2263,7 +2309,7 @@ handle_send (Connection *connection,
       return;
     }
 
-  if (!start_daemon_turn (self, chat_id, message, &error))
+  if (!start_daemon_turn (self, chat_id, message, TRUE, &error))
     {
       send_error (connection, error->message);
       return;
@@ -3115,21 +3161,6 @@ handle_chat (Connection *connection,
       return;
     }
 
-  /* A daemon restart ends the old process, not the user's next instruction.
-   * Opening the chat is enough to resume its persisted queue. */
-  if (chat->queue->len > 0 &&
-      !g_hash_table_contains (self->turns, chat_id) &&
-      start_queued (self, chat_id))
-    {
-      g_clear_pointer (&chat, xd_chat_free);
-      chat = xd_storage_get_chat (self->storage, chat_id, &error);
-      if (chat == NULL)
-        {
-          send_error (connection, error != NULL ? error->message : "No such chat.");
-          return;
-        }
-    }
-
   json_builder_begin_object (builder);
   json_builder_set_member_name (builder, "ok");
   json_builder_add_boolean_value (builder, TRUE);
@@ -3297,7 +3328,7 @@ use_existing_worktree (XdRemoteServer  *self,
 
       if (xd_worktree_path_equal (item->path, requested))
         return xd_storage_use_existing_worktree (
-          self->storage, chat_id, item->path, error);
+          self->storage, chat_id, item->path, workdir, error);
     }
 
   g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
@@ -3387,9 +3418,10 @@ on_local_change_settled (gpointer user_data)
 static void
 queue_local_change (XdRemoteServer *self)
 {
-  g_clear_handle_id (&self->local_change_id, g_source_remove);
-  self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
-                                         on_local_change_settled, self);
+  /* Continuous streamed writes must not postpone the notification forever. */
+  if (self->local_change_id == 0)
+    self->local_change_id = g_timeout_add (LOCAL_CHANGE_DEBOUNCE_MS,
+                                           on_local_change_settled, self);
 }
 
 static void
@@ -3515,7 +3547,7 @@ dispatch (Connection *connection,
   else if (g_strcmp0 (op, "file-browse") == 0)
     handle_file_browse (connection, request);
   else if (g_strcmp0 (op, "agent-secrets") == 0)
-    handle_agent_secrets (connection);
+    handle_agent_secrets (connection, request);
   else if (g_strcmp0 (op, "set-agent-secrets") == 0)
     handle_set_agent_secrets (connection, request);
   /* The daemon is the only writer: a client sends what it wants done and this
@@ -3698,6 +3730,11 @@ xd_remote_server_new (XdStorage        *storage,
         return NULL;
     }
 
+  /* A hard process stop cannot clear its flags. Once this server owns the
+   * listening socket, no old daemon can still own any of these turns. */
+  if (!xd_storage_clear_daemon_working (storage, error))
+    return NULL;
+
   g_signal_connect (self->service, "incoming", G_CALLBACK (on_incoming), self);
   g_socket_service_start (self->service);
 
@@ -3796,6 +3833,7 @@ xd_remote_server_resume_interrupted (XdRemoteServer *self,
       if (!start_daemon_turn (
             self, chat_id,
             "Resume the work interrupted by the daemon update.",
+            FALSE,
             &start_error))
         {
           g_warning ("cannot resume chat %s after update: %s",
@@ -3871,7 +3909,11 @@ xd_remote_server_dispose (GObject *object)
   g_clear_handle_id (&self->local_change_id, g_source_remove);
   g_clear_object (&self->tree_watch);
   if (self->storage != NULL)
-    g_signal_handlers_disconnect_by_data (self->storage, self);
+    {
+      g_signal_handlers_disconnect_by_data (self->storage, self);
+      if (!xd_storage_clear_daemon_working (self->storage, NULL))
+        g_warning ("cannot clear daemon turn state while stopping");
+    }
   g_clear_pointer (&self->turns, g_hash_table_unref);
   g_clear_pointer (&self->command_sets, g_hash_table_unref);
   if (self->terminals != NULL)

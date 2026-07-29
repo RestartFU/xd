@@ -21,9 +21,14 @@
 #include "util/git-head-watch.h"
 #include "util/git-info.h"
 #include "util/subagent-tool.h"
+#include "util/text-reveal.h"
 #include "util/workflow-run.h"
 #include "util/workspace-block.h"
 #include "util/worktree.h"
+
+#if XD_HAS_VOICE
+#include "voice-input.h"
+#endif
 
 /*
  * A turn in flight.
@@ -64,6 +69,9 @@ typedef struct
   GString *text;            /* everything the turn has said, for the ask block */
   GString *segment;         /* what belongs in the row being written now */
   GPtrArray *items;         /* finished speech and tools, in timeline order */
+  XdMessageRow *live_row;   /* weak: progressively revealed text on screen */
+  guint live_render;
+  XdTextReveal reveal;
   gboolean resumed;
   gboolean is_retry;
   gboolean had_tool;
@@ -130,10 +138,10 @@ struct _XdChatView
   /*
    * A turn running on the daemon, as far as this window can see it.
    *
-   * The text arrives in pieces like a local one's, and is held the same way --
-   * shown when the message is what it is going to be rather than reflowing on
-   * every token. What is not held here is the truth: the daemon has written it
-   * down by the time the turn ends, and the transcript is read again then.
+   * The text arrives in pieces like a local one's. A short buffer feeds its
+   * live row at frame intervals without rebuilding rich markup for each token.
+   * What is not held here is the truth: the daemon has written it down by the
+   * time the turn ends, and the transcript is read again then.
    */
   /*
    * The dots at the foot of the transcript while a turn is running.
@@ -145,12 +153,23 @@ struct _XdChatView
    */
   GtkWidget *working_row;
   GtkLabel *working_label;
+  XdDots *working_dots;
   guint working_timer;
 
   gboolean remote_working;
   gint64 remote_started_at;       /* monotonic usec on this device */
   GString *remote_said;
+  XdMessageRow *remote_live_row;   /* weak */
+  guint remote_live_render;
+  XdTextReveal remote_reveal;
   char *remote_label;
+
+  /* Same machine, different process: `xd serve` owns this local chat's turn.
+   * Its live transcript arrives through SQLite rather than remote events. */
+  gboolean daemon_working;
+  gint64 daemon_started_at;
+  gint64 daemon_live_message_id;
+  XdMessageRow *daemon_live_row; /* weak */
 
   /* The last message the transcript on screen was drawn from, so a write made
    * by something else can be told from one this window just made. */
@@ -179,6 +198,20 @@ struct _XdChatView
   double history_bottom_distance;
   GtkTextView *composer;
   GtkButton *send_button;
+#if XD_HAS_VOICE
+  GtkButton *voice_button;
+  XdVoiceRecorder *voice_recorder;
+  XdVoiceModel *voice_model;
+  GCancellable *voice_cancellable;
+  char *voice_model_path;
+  guint voice_generation;
+  guint voice_timer;
+  gint64 voice_started_at;
+  gboolean voice_confirming;
+  gboolean voice_downloading;
+  gboolean voice_recording;
+  gboolean voice_transcribing;
+#endif
   gboolean send_state_set;
   gboolean send_running;
   GtkWidget *composer_area;
@@ -291,7 +324,7 @@ static gboolean send_message (XdChatView *self,
                               const char *text);
 static void update_send_button (XdChatView *self);
 static void update_context_bar (XdChatView *self,
-                                const XdChat *chat);
+                                XdChat     *chat);
 static void update_context_meter (XdChatView *self,
                                   guint64     used,
                                   guint64     window);
@@ -328,8 +361,14 @@ static void on_plan_toggled (GtkToggleButton *toggle,
 static XdMessageRow *append_row (XdChatView    *self,
                                  XdMessageKind  kind,
                                  const char    *text);
+static void set_working_animation (XdChatView *self,
+                                   gboolean    animated);
 static const char *workdir_for (const XdChat              *chat,
                                 const XdEffectiveSettings *resolved);
+static gboolean restore_original_workdir (XdChatView                *self,
+                                          XdChat                    *chat,
+                                          const XdEffectiveSettings *resolved,
+                                          GError                   **error);
 
 /* A chat with nothing stored runs at whatever the CLI is configured to use. */
 static AiEffort
@@ -491,6 +530,7 @@ begin_bottom_jump (XdChatView *self)
 {
   self->follow_bottom = TRUE;
   self->history_bottom_distance = -1;
+  set_working_animation (self, TRUE);
   self->bottom_jump_upper = -1;
   self->bottom_jump_page_size = -1;
   self->bottom_jump_stable_frames = 0;
@@ -524,6 +564,7 @@ on_scroll_adjustment_changed (GtkAdjustment *adjustment,
     {
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
+      set_working_animation (self, TRUE);
     }
   else if (self->history_bottom_distance >= 0)
     {
@@ -561,6 +602,7 @@ on_transcript_scrolled (GtkEventControllerScroll *controller,
     {
       self->follow_bottom = FALSE;
       self->history_bottom_distance = -1;
+      set_working_animation (self, FALSE);
     }
   return GDK_EVENT_PROPAGATE;
 }
@@ -644,6 +686,8 @@ on_tool_group_expanded (GtkExpander *expander,
 {
   if (gtk_expander_get_expanded (expander))
     render_tool_group (expander);
+  else
+    gtk_expander_set_child (expander, NULL);
 }
 
 /*
@@ -991,7 +1035,7 @@ append_choices (XdChatView  *self,
  * question was answered when it was asked, and reopening the chat must not
  * offer it again.
  */
-static void
+static XdMessageRow *
 append_reply (XdChatView *self,
               const char *text,
               const char *source,
@@ -1024,6 +1068,166 @@ append_reply (XdChatView *self,
 
   if (ask != NULL)
     append_choices (self, ask, answerable);
+
+  return row;
+}
+
+static void
+release_live_row (XdMessageRow **slot)
+{
+  if (*slot == NULL)
+    return;
+
+  g_object_remove_weak_pointer (G_OBJECT (*slot), (gpointer *) slot);
+  *slot = NULL;
+}
+
+static void
+discard_live_row (XdMessageRow **slot)
+{
+  GtkWidget *row;
+  GtkWidget *parent;
+
+  if (*slot == NULL)
+    return;
+
+  row = GTK_WIDGET (*slot);
+  parent = gtk_widget_get_parent (row);
+  release_live_row (slot);
+
+  if (GTK_IS_BOX (parent))
+    gtk_box_remove (GTK_BOX (parent), row);
+}
+
+/*
+ * Hides control blocks even while their closing tag has not arrived yet.
+ *
+ * Completed workspace blocks can be parsed out normally. A partial block at
+ * the end must be held like a partial <ask>, or streaming would briefly expose
+ * an implementation detail as ordinary prose.
+ */
+static gsize
+workspace_visible_length (const char *text)
+{
+  static const char marker[] = "<workspace>";
+  const char *at;
+
+  if (text == NULL)
+    return 0;
+
+  for (at = strchr (text, '<'); at != NULL; at = strchr (at + 1, '<'))
+    {
+      gsize remaining;
+      gsize compared;
+
+      if (at != text && at[-1] != '\n')
+        continue;
+
+      remaining = strlen (at);
+      compared = MIN (remaining, sizeof marker - 1);
+      if (strncmp (at, marker, compared) == 0)
+        return at - text;
+    }
+
+  return strlen (text);
+}
+
+static char *
+visible_stream_text (const char *text)
+{
+  g_autofree char *workspace = NULL;
+  g_autofree char *without_workspace = NULL;
+  const char *shown = text;
+  gsize visible;
+  char *prose;
+
+  workspace = xd_workspace_block_parse (text, &without_workspace);
+  if (workspace != NULL)
+    shown = without_workspace;
+
+  visible = MIN (xd_ask_visible_length (shown),
+                 workspace_visible_length (shown));
+  prose = g_strndup (shown, visible);
+  g_strchomp (prose);
+
+  return prose;
+}
+
+static void
+show_live_text (XdChatView    *self,
+                XdMessageRow **slot,
+                const char    *text,
+                const char    *source)
+{
+  g_autofree char *prose = visible_stream_text (text);
+
+  if (*prose == '\0')
+    return;
+
+  if (*slot == NULL)
+    {
+      *slot = append_row (self, XD_MESSAGE_ASSISTANT, prose);
+      g_object_add_weak_pointer (G_OBJECT (*slot), (gpointer *) slot);
+      xd_message_row_set_source (*slot, source);
+    }
+  else
+    {
+      xd_message_row_set_text (*slot, prose);
+    }
+
+  queue_scroll_to_bottom (self);
+}
+
+/*
+ * Reveals a buffered prefix without rebuilding Markdown on every frame.
+ *
+ * Rich rendering returns when the buffered text catches up or the segment
+ * closes. Until then one plain GtkLabel changes in place, making a stream
+ * cheap enough to animate rather than arriving as periodic blocks.
+ */
+static gboolean
+show_progressive_text (XdChatView    *self,
+                       XdMessageRow **slot,
+                       XdTextReveal  *reveal,
+                       const char    *text,
+                       const char    *source)
+{
+  g_autofree char *prose = visible_stream_text (text);
+  g_autofree char *shown = NULL;
+  gboolean settled = FALSE;
+  guint characters;
+
+  characters = xd_text_reveal_advance (
+    reveal, prose, g_get_monotonic_time (), &settled);
+
+  if (characters > 0)
+    {
+      shown = xd_text_reveal_prefix (prose, characters);
+
+      if (*slot == NULL)
+        {
+          *slot = append_row (self, XD_MESSAGE_ASSISTANT, "");
+          g_object_add_weak_pointer (G_OBJECT (*slot), (gpointer *) slot);
+          xd_message_row_set_source (*slot, source);
+        }
+
+      xd_message_row_set_stream_text (*slot, shown);
+      queue_scroll_to_bottom (self);
+    }
+
+  if (settled && *prose != '\0')
+    show_live_text (self, slot, prose, source);
+
+  return settled;
+}
+
+static void
+sync_reveal_to_text (XdTextReveal *reveal,
+                     const char   *text)
+{
+  g_autofree char *prose = visible_stream_text (text);
+
+  reveal->shown = (guint) g_utf8_strlen (prose, -1);
 }
 
 /* Duration is turn metadata, not a later answer to a question. */
@@ -1230,6 +1434,8 @@ clear_transcript (XdChatView *self)
   GtkWidget *child;
 
   /* It is about to be taken out with everything else. Stop its timer too. */
+  release_live_row (&self->daemon_live_row);
+  self->daemon_live_message_id = 0;
   set_working (self, FALSE);
   retire_open_questions (self);
 
@@ -1257,8 +1463,11 @@ static gint64
 working_seconds (XdChatView *self)
 {
   Turn *turn = current_turn (self);
-  gint64 started_at = turn != NULL ? turn->started_at
-                                   : self->remote_started_at;
+  gint64 started_at = turn != NULL
+                        ? turn->started_at
+                        : self->remote != NULL
+                            ? self->remote_started_at
+                            : self->daemon_started_at;
 
   if (started_at <= 0)
     return 0;
@@ -1281,6 +1490,29 @@ update_working_label (gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+static void
+set_working_animation (XdChatView *self,
+                       gboolean    animated)
+{
+  if (self->working_label == NULL)
+    return;
+
+  if (animated)
+    {
+      update_working_label (self);
+      if (self->working_timer == 0)
+        self->working_timer =
+          g_timeout_add_seconds (1, update_working_label, self);
+    }
+  else
+    {
+      g_clear_handle_id (&self->working_timer, g_source_remove);
+    }
+
+  if (self->working_dots != NULL)
+    xd_dots_set_animated (self->working_dots, animated);
+}
+
 /*
  * Shows that the turn is still going, for as long as it is.
  *
@@ -1296,6 +1528,7 @@ set_working (XdChatView *self,
     {
       g_clear_handle_id (&self->working_timer, g_source_remove);
       self->working_label = NULL;
+      self->working_dots = NULL;
 
       if (self->working_row != NULL)
         gtk_box_remove (self->transcript, self->working_row);
@@ -1305,23 +1538,25 @@ set_working (XdChatView *self,
 
   if (self->working_row != NULL)
     {
-      update_working_label (self);
+      if (self->follow_bottom)
+        update_working_label (self);
       return;
     }
 
   {
-    GtkWidget *dots = GTK_WIDGET (xd_dots_new ());
+    self->working_dots = xd_dots_new ();
 
     self->working_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
     self->working_label = GTK_LABEL (gtk_label_new ("Working for 0s"));
     gtk_label_set_xalign (self->working_label, 0.0f);
     gtk_widget_add_css_class (GTK_WIDGET (self->working_label), "caption");
     gtk_widget_add_css_class (GTK_WIDGET (self->working_label), "dim-label");
-    gtk_widget_add_css_class (dots, "caption");
-    gtk_widget_add_css_class (dots, "dim-label");
+    gtk_widget_add_css_class (GTK_WIDGET (self->working_dots), "caption");
+    gtk_widget_add_css_class (GTK_WIDGET (self->working_dots), "dim-label");
     gtk_box_append (GTK_BOX (self->working_row),
                     GTK_WIDGET (self->working_label));
-    gtk_box_append (GTK_BOX (self->working_row), dots);
+    gtk_box_append (GTK_BOX (self->working_row),
+                    GTK_WIDGET (self->working_dots));
   }
 
   gtk_widget_set_halign (self->working_row, GTK_ALIGN_START);
@@ -1329,8 +1564,7 @@ set_working (XdChatView *self,
   gtk_widget_set_margin_top (self->working_row, 6);
 
   gtk_box_append (self->transcript, self->working_row);
-  update_working_label (self);
-  self->working_timer = g_timeout_add_seconds (1, update_working_label, self);
+  set_working_animation (self, self->follow_bottom);
 }
 
 static void
@@ -1462,8 +1696,17 @@ render_transcript (XdChatView *self,
       if (g_strcmp0 (message->role, "duration") == 0)
         continue;
       else if (g_strcmp0 (message->role, "assistant") == 0)
-        append_reply (self, message->content, message->label,
-                      reply_is_answerable (messages, i));
+        {
+          if (self->daemon_working && i + 1 == messages->len)
+            {
+              show_live_text (self, &self->daemon_live_row,
+                              message->content, message->label);
+              self->daemon_live_message_id = message->id;
+            }
+          else
+            append_reply (self, message->content, message->label,
+                          reply_is_answerable (messages, i));
+        }
       else if (g_strcmp0 (message->role, "tool") == 0)
         show_tool_use (self, message->content);
       else
@@ -1501,6 +1744,79 @@ load_transcript (XdChatView *self)
     }
 
   render_transcript (self, messages, total);
+}
+
+/*
+ * Mirrors a daemon-owned local turn without rebuilding the transcript.
+ *
+ * New durable rows append once. The current assistant row keeps its database
+ * id while its content grows, so that one widget is updated in place. A full
+ * render at turn finish restores rich Markdown, duration placement and any
+ * completed question controls.
+ */
+static gboolean
+sync_daemon_transcript (XdChatView *self,
+                        GError    **error)
+{
+  g_autoptr (GPtrArray) messages = NULL;
+  gint64 after_id = self->rendered_message_id;
+
+  if (self->daemon_live_row != NULL && self->daemon_live_message_id > 0)
+    after_id = self->daemon_live_message_id - 1;
+
+  messages = xd_storage_list_messages_since (
+    self->storage, xd_node_get_chat_id (self->chat), after_id, error);
+  if (messages == NULL)
+    return FALSE;
+
+  for (guint i = 0; i < messages->len; i++)
+    {
+      XdMessage *message = g_ptr_array_index (messages, i);
+
+      if (message->id == self->daemon_live_message_id &&
+          self->daemon_live_row != NULL)
+        {
+          show_live_text (self, &self->daemon_live_row,
+                          message->content, message->label);
+          self->rendered_message_id =
+            MAX (self->rendered_message_id, message->id);
+          continue;
+        }
+
+      release_live_row (&self->daemon_live_row);
+      self->daemon_live_message_id = 0;
+
+      if (g_strcmp0 (message->role, "duration") == 0)
+        {
+          self->rendered_message_id =
+            MAX (self->rendered_message_id, message->id);
+          continue;
+        }
+      else if (g_strcmp0 (message->role, "assistant") == 0)
+        {
+          show_live_text (self, &self->daemon_live_row,
+                          message->content, message->label);
+          self->daemon_live_message_id = message->id;
+        }
+      else if (g_strcmp0 (message->role, "tool") == 0)
+        {
+          show_tool_use (self, message->content);
+        }
+      else
+        {
+          append_row (self, xd_message_kind_from_role (message->role),
+                      message->content);
+        }
+
+      self->rendered_message_id =
+        MAX (self->rendered_message_id, message->id);
+    }
+
+  keep_working_last (self);
+  if (self->follow_bottom)
+    queue_scroll_to_bottom (self);
+
+  return TRUE;
 }
 
 /* --- transcripts from a daemon -------------------------------------------- */
@@ -1585,12 +1901,45 @@ on_remote_messages (GObject      *source,
 
 /* --- a turn running on the daemon ------------------------------------------ */
 
+static gboolean
+render_remote_live_text (gpointer user_data)
+{
+  XdChatView *self = user_data;
+  gboolean settled;
+
+  if (!self->remote_working ||
+      self->remote_said == NULL ||
+      self->remote_said->len == 0)
+    {
+      self->remote_live_render = 0;
+      return G_SOURCE_REMOVE;
+    }
+
+  settled = show_progressive_text (
+    self, &self->remote_live_row, &self->remote_reveal,
+    self->remote_said->str, self->remote_label);
+  if (settled)
+    self->remote_live_render = 0;
+
+  return settled ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+}
+
+static void
+schedule_remote_live_text (XdChatView *self)
+{
+  xd_text_reveal_note_append (&self->remote_reveal, g_get_monotonic_time ());
+
+  if (self->remote_live_render == 0)
+    self->remote_live_render =
+      g_timeout_add (XD_TEXT_REVEAL_FRAME_MSEC,
+                     render_remote_live_text, self);
+}
+
 /*
  * Ends the message being streamed, if there is one.
  *
- * The same rule as a local turn: text is shown when the message is finished
- * rather than as it arrives, because Markdown read character by character
- * renders as its own source until the syntax closes.
+ * Quiet text may already own a live row. Finalize that row rather than adding
+ * the same speech again when a tool starts.
  */
 static void
 close_remote_segment (XdChatView *self)
@@ -1599,6 +1948,7 @@ close_remote_segment (XdChatView *self)
   g_autofree char *without_workspace = NULL;
   const char *text;
 
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
   if (self->remote_said == NULL || self->remote_said->len == 0)
     return;
 
@@ -1615,24 +1965,28 @@ close_remote_segment (XdChatView *self)
     g_strchomp (prose);
     if (*prose != '\0')
       {
-        XdMessageRow *row = append_row (self, XD_MESSAGE_ASSISTANT, prose);
-
-        xd_message_row_set_source (row, self->remote_label);
+        show_live_text (self, &self->remote_live_row,
+                        prose, self->remote_label);
       }
   }
 
+  release_live_row (&self->remote_live_row);
   g_string_truncate (self->remote_said, 0);
+  xd_text_reveal_reset (&self->remote_reveal);
 }
 
 static void
 end_remote_turn (XdChatView *self)
 {
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
+  release_live_row (&self->remote_live_row);
   self->remote_working = FALSE;
   self->remote_started_at = 0;
   g_clear_pointer (&self->remote_label, g_free);
 
   if (self->remote_said != NULL)
     g_string_truncate (self->remote_said, 0);
+  xd_text_reveal_reset (&self->remote_reveal);
 }
 
 /*
@@ -1785,6 +2139,7 @@ on_remote_event (XdRemoteClient *client,
         self->remote_said = g_string_new (NULL);
 
       g_string_append (self->remote_said, text);
+      schedule_remote_live_text (self);
       return;
     }
 
@@ -2073,6 +2428,7 @@ on_remote_options_received (GObject      *source,
             self->remote_said = g_string_new (NULL);
 
           g_string_assign (self->remote_said, segment);
+          schedule_remote_live_text (self);
         }
 
       queue_scroll_to_bottom (self);
@@ -2253,12 +2609,22 @@ on_storage_changed (XdStorage *storage,
   XdChatView *self = user_data;
   g_autoptr (XdChat) chat = NULL;
   const char *chat_id;
+  gboolean was_daemon_working;
+  g_autoptr (GError) error = NULL;
 
   if (self->chat == NULL || self->remote != NULL)
     return;
 
   chat_id = xd_node_get_chat_id (self->chat);
   chat = xd_storage_get_chat (self->storage, chat_id, NULL);
+  was_daemon_working = self->daemon_working;
+  self->daemon_working = chat != NULL && chat->daemon_working;
+
+  if (self->daemon_working && !was_daemon_working)
+    self->daemon_started_at = g_get_monotonic_time ();
+  else if (!self->daemon_working)
+    self->daemon_started_at = 0;
+
   if (chat != NULL)
     set_queue (self, chat->queue);
 
@@ -2268,19 +2634,39 @@ on_storage_changed (XdStorage *storage,
   if (chat != NULL)
     update_context_bar (self, chat);
 
+  if (self->daemon_working)
+    xd_node_set_state (self->chat, XD_NODE_WORKING);
+  else if (was_daemon_working)
+    xd_node_set_state (self->chat, xd_node_is_active (self->chat)
+                                     ? XD_NODE_IDLE : XD_NODE_DONE);
+
   /* Another window may have queued this while this one owned the turn. Once
    * that turn is gone, the persisted instruction still runs. */
-  if (self->queue->len > 0)
+  if (!self->daemon_working && self->queue->len > 0)
     {
       send_queued (self);
       return;
     }
 
-  if (xd_storage_last_message_id (self->storage, chat_id) ==
-      self->rendered_message_id)
+  if (!self->daemon_working && !was_daemon_working &&
+      xd_storage_last_message_id (self->storage, chat_id) ==
+        self->rendered_message_id)
     return;
 
-  load_transcript (self);
+  if (self->daemon_working)
+    {
+      if (!sync_daemon_transcript (self, &error))
+        {
+          g_warning ("cannot mirror the daemon turn: %s", error->message);
+          return;
+        }
+    }
+  else
+    {
+      /* Final render restores rich content and the measured duration. */
+      load_transcript (self);
+    }
+  set_working (self, self->daemon_working);
   queue_scroll_to_bottom (self);
 }
 
@@ -2319,6 +2705,8 @@ turn_free (gpointer data)
 {
   Turn *turn = data;
 
+  g_clear_handle_id (&turn->live_render, g_source_remove);
+  release_live_row (&turn->live_row);
   g_clear_object (&turn->session);
   g_clear_pointer (&turn->chat_id, g_free);
   g_clear_pointer (&turn->backend_id, g_free);
@@ -2415,6 +2803,27 @@ on_commands (XdChatSession    *session,
   store_commands (turn->view, scope, commands);
 }
 
+static gboolean
+render_live_text (gpointer user_data)
+{
+  Turn *turn = user_data;
+  gboolean settled;
+
+  if (!turn_is_visible (turn) || turn->segment->len == 0)
+    {
+      turn->live_render = 0;
+      return G_SOURCE_REMOVE;
+    }
+
+  settled = show_progressive_text (
+    turn->view, &turn->live_row, &turn->reveal,
+    turn->segment->str, turn->label);
+  if (settled)
+    turn->live_render = 0;
+
+  return settled ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+}
+
 static void
 on_text_delta (XdChatSession *session,
                const char    *delta,
@@ -2424,15 +2833,11 @@ on_text_delta (XdChatSession *session,
 
   g_string_append (turn->text, delta);
   g_string_append (turn->segment, delta);
+  xd_text_reveal_note_append (&turn->reveal, g_get_monotonic_time ());
 
-  /*
-   * The text is not shown, or allocated a row, as it arrives.
-   *
-   * A message half-written reflows on every token, and Markdown read
-   * character by character renders as its own source until the syntax closes.
-   * The turn-level working marker already shows progress; a blank message row
-   * would only reserve unexplained space until this segment is complete.
-   */
+  if (turn_is_visible (turn) && turn->live_render == 0)
+    turn->live_render =
+      g_timeout_add (XD_TEXT_REVEAL_FRAME_MSEC, render_live_text, turn);
 }
 
 /*
@@ -2459,8 +2864,8 @@ switch_turn_workspace (Turn       *turn,
   if (xd_worktree_path_equal (turn->workdir, workdir))
     return TRUE;
 
-  if (!xd_storage_set_workdir (
-        self->storage, turn->chat_id, workdir, &error))
+  if (!xd_storage_switch_workdir (
+        self->storage, turn->chat_id, workdir, turn->workdir, &error))
     {
       g_warning ("cannot switch to the agent's workspace: %s", error->message);
       return FALSE;
@@ -2502,6 +2907,7 @@ close_segment (Turn     *turn,
   g_autofree char *without_workspace = NULL;
   const char *text;
 
+  g_clear_handle_id (&turn->live_render, g_source_remove);
   if (turn->segment->len == 0)
     return;
 
@@ -2513,7 +2919,12 @@ close_segment (Turn     *turn,
 
   if (*text == '\0')
     {
+      if (turn_is_visible (turn))
+        discard_live_row (&turn->live_row);
+      else
+        release_live_row (&turn->live_row);
       g_string_truncate (turn->segment, 0);
+      xd_text_reveal_reset (&turn->reveal);
       return;
     }
 
@@ -2528,6 +2939,7 @@ close_segment (Turn     *turn,
 
       if (ask != NULL)
         {
+          discard_live_row (&turn->live_row);
           append_reply (turn->view, text, turn->label, TRUE);
         }
       else
@@ -2540,15 +2952,15 @@ close_segment (Turn     *turn,
           g_strchomp (prose);
           if (*prose != '\0')
             {
-              XdMessageRow *row =
-                append_row (turn->view, XD_MESSAGE_ASSISTANT, prose);
-
-              xd_message_row_set_source (row, turn->label);
+              show_live_text (turn->view, &turn->live_row,
+                              prose, turn->label);
             }
         }
     }
 
+  release_live_row (&turn->live_row);
   g_string_truncate (turn->segment, 0);
+  xd_text_reveal_reset (&turn->reveal);
 }
 
 /* Writes everything the turn produced, in the order it happened. */
@@ -2892,6 +3304,38 @@ workdir_for (const XdChat              *chat,
   return resolved->workdir;
 }
 
+/*
+ * Linked checkouts are disposable. Preserve the checkout a chat moved from;
+ * older database rows without one fall back to their folder's resolved path.
+ * Persist the recovery before another CLI process is launched.
+ */
+static gboolean
+restore_original_workdir (XdChatView                *self,
+                          XdChat                    *chat,
+                          const XdEffectiveSettings *resolved,
+                          GError                   **error)
+{
+  const char *original =
+    chat->original_workdir != NULL &&
+    g_file_test (chat->original_workdir, G_FILE_TEST_IS_DIR)
+      ? chat->original_workdir : resolved->workdir;
+
+  if (chat->workdir == NULL || *chat->workdir == '\0' ||
+      g_file_test (chat->workdir, G_FILE_TEST_IS_DIR) ||
+      original == NULL || *original == '\0' ||
+      !g_file_test (original, G_FILE_TEST_IS_DIR))
+    return TRUE;
+
+  if (!xd_storage_restore_workdir (
+        self->storage, chat->id, original, error))
+    return FALSE;
+
+  g_free (chat->workdir);
+  chat->workdir = g_strdup (original);
+  g_clear_pointer (&chat->original_workdir, g_free);
+  return TRUE;
+}
+
 static void
 start_turn (XdChatView *self,
             const char *prompt)
@@ -2903,6 +3347,7 @@ start_turn (XdChatView *self,
   g_autofree char *handover = NULL;
   g_autofree char *full_prompt = NULL;
   g_autofree char *system_prompt = NULL;
+  g_auto (GStrv) folder_ids = NULL;
   const AiBackend *backend;
   AiRunSpec spec = { 0 };
   Turn *turn;
@@ -2983,9 +3428,19 @@ start_turn (XdChatView *self,
    * instructions or model takes effect on the next message instead of only on
    * chats made afterwards. */
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  if (!restore_original_workdir (self, chat, resolved, &error))
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      g_hash_table_remove (self->turns, chat->id);
+      set_working (self, FALSE);
+      update_send_button (self);
+      return;
+    }
 
   spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
+  folder_ids = xd_node_folder_ids (xd_node_get_parent (self->chat));
+  spec.folder_ids = (const char *const *) folder_ids;
   turn->workdir = g_strdup (spec.workdir);
   turn->diff_tracker = xd_git_diff_tracker_new (turn->workdir);
   /* The chat's own pick wins; the folder chain is the fallback. */
@@ -3070,19 +3525,21 @@ prepare_new_worktree (XdChatView *self,
   g_autoptr (XdEffectiveSettings) resolved = NULL;
   g_autofree char *worktree = NULL;
   g_autofree char *name = NULL;
+  const char *original;
 
   if (!chat->new_worktree)
     return TRUE;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  original = workdir_for (chat, resolved);
   name = xd_chat_title_from_prompt (prompt);
   worktree = xd_worktree_create (
-    workdir_for (chat, resolved), chat->id, name, error);
+    original, chat->id, name, error);
   if (worktree == NULL)
     return FALSE;
 
   if (!xd_storage_use_worktree (
-        self->storage, chat->id, worktree, error))
+        self->storage, chat->id, worktree, original, error))
     return FALSE;
 
   g_free (chat->workdir);
@@ -3099,6 +3556,7 @@ send_message (XdChatView *self,
 {
   g_autoptr (XdChat) chat = NULL;
   g_autoptr (GError) error = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   if (self->chat == NULL || text == NULL || *text == '\0')
     return FALSE;
@@ -3109,6 +3567,15 @@ send_message (XdChatView *self,
 
   chat = xd_storage_get_chat (
     self->storage, xd_node_get_chat_id (self->chat), &error);
+  if (chat != NULL)
+    {
+      resolved =
+        xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+      if (!restore_original_workdir (self, chat, resolved, &error))
+        g_clear_pointer (&chat, xd_chat_free);
+      else
+        update_context_bar (self, chat);
+    }
   if (chat == NULL || !prepare_new_worktree (self, chat, text, &error))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
@@ -3839,6 +4306,12 @@ steer_queued_at (XdChatView *self,
     send_remote_steer (self, position, text);
   else if (turn != NULL)
     xd_chat_session_cancel (turn->session);
+  else if (self->daemon_working)
+    {
+      /* This process cannot signal a turn owned by `xd serve`. Keep the
+       * selected order durable; the daemon will consume it when it finishes. */
+      return;
+    }
   else
     send_queued (self);
   /* The queued text goes out when the turn reports that it has stopped. */
@@ -4051,7 +4524,7 @@ send_current_message (XdChatView *self)
         return;
 
       /* One turn at a time, so anything typed meanwhile waits for it. */
-      if (current_turn (self) != NULL)
+      if (current_turn (self) != NULL || self->daemon_working)
         queue_message (self, text);
       else if (!send_message (self, text))
         gtk_text_buffer_set_text (
@@ -4080,7 +4553,7 @@ send_current_message (XdChatView *self)
 
   forget_attachments (self);
 
-  if (current_turn (self) != NULL)
+  if (current_turn (self) != NULL || self->daemon_working)
     queue_message (self, message->str);
   else if (!send_message (self, message->str))
     gtk_text_buffer_set_text (
@@ -4115,6 +4588,385 @@ update_send_button (XdChatView *self)
       gtk_widget_add_css_class (GTK_WIDGET (self->send_button), "suggested-action");
     }
 }
+
+#if XD_HAS_VOICE
+typedef struct
+{
+  XdChatView *view;
+  guint generation;
+} VoiceOperation;
+
+static VoiceOperation *
+voice_operation_new (XdChatView *self)
+{
+  VoiceOperation *operation = g_new0 (VoiceOperation, 1);
+
+  operation->view = g_object_ref (self);
+  operation->generation = self->voice_generation;
+
+  return operation;
+}
+
+static void
+voice_operation_free (VoiceOperation *operation)
+{
+  g_object_unref (operation->view);
+  g_free (operation);
+}
+
+static void
+show_voice_error (XdChatView *self,
+                  const char *message)
+{
+  AdwAlertDialog *dialog =
+    ADW_ALERT_DIALOG (adw_alert_dialog_new ("Voice Input Failed", message));
+
+  adw_alert_dialog_add_response (dialog, "close", "Close");
+  adw_alert_dialog_set_default_response (dialog, "close");
+  adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
+}
+
+static void
+update_voice_button (XdChatView *self)
+{
+  GtkWidget *button = GTK_WIDGET (self->voice_button);
+
+  g_clear_handle_id (&self->voice_timer, g_source_remove);
+  gtk_widget_remove_css_class (button, "destructive-action");
+
+  if (self->voice_confirming)
+    {
+      GtkWidget *spinner = gtk_spinner_new ();
+
+      gtk_spinner_start (GTK_SPINNER (spinner));
+      gtk_button_set_child (self->voice_button, spinner);
+      gtk_widget_set_sensitive (button, FALSE);
+      gtk_widget_set_tooltip_text (button, "Preparing local voice input…");
+    }
+  else if (self->voice_downloading)
+    {
+      gtk_button_set_icon_name (
+        self->voice_button, "media-playback-stop-symbolic");
+      gtk_widget_add_css_class (button, "destructive-action");
+      gtk_widget_set_sensitive (button, TRUE);
+      gtk_widget_set_tooltip_text (
+        button, "Downloading local speech model… 0% — click to cancel");
+    }
+  else if (self->voice_recording)
+    {
+      gtk_button_set_icon_name (
+        self->voice_button, "media-playback-stop-symbolic");
+      gtk_widget_add_css_class (button, "destructive-action");
+      gtk_widget_set_sensitive (button, TRUE);
+      gtk_widget_set_tooltip_text (
+        button, "Recording voice… click to transcribe");
+    }
+  else if (self->voice_transcribing)
+    {
+      GtkWidget *spinner = gtk_spinner_new ();
+
+      gtk_spinner_start (GTK_SPINNER (spinner));
+      gtk_button_set_child (self->voice_button, spinner);
+      gtk_widget_set_sensitive (button, FALSE);
+      gtk_widget_set_tooltip_text (button, "Transcribing voice…");
+    }
+  else
+    {
+      gtk_button_set_icon_name (
+        self->voice_button, "audio-input-microphone-symbolic");
+      gtk_widget_set_sensitive (button, self->chat != NULL);
+      gtk_widget_set_tooltip_text (
+        button, "Record voice prompt locally");
+    }
+}
+
+static gboolean
+update_voice_status (gpointer user_data)
+{
+  XdChatView *self = user_data;
+  g_autofree char *tooltip = NULL;
+  gint64 seconds;
+
+  if (self->voice_downloading && self->voice_model != NULL)
+    {
+      tooltip = g_strdup_printf (
+        "Downloading local speech model… %u%% — click to cancel",
+        xd_voice_model_get_progress (self->voice_model));
+      gtk_widget_set_tooltip_text (
+        GTK_WIDGET (self->voice_button), tooltip);
+      return G_SOURCE_CONTINUE;
+    }
+
+  if (!self->voice_recording)
+    {
+      self->voice_timer = 0;
+      return G_SOURCE_REMOVE;
+    }
+
+  seconds = (g_get_monotonic_time () - self->voice_started_at) /
+            G_TIME_SPAN_SECOND;
+  tooltip = g_strdup_printf (
+    "Recording voice… %02" G_GINT64_FORMAT ":%02" G_GINT64_FORMAT
+    " — click to transcribe",
+    seconds / 60, seconds % 60);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->voice_button), tooltip);
+
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+reset_voice (XdChatView *self)
+{
+  self->voice_confirming = FALSE;
+  self->voice_downloading = FALSE;
+  self->voice_recording = FALSE;
+  self->voice_transcribing = FALSE;
+  g_clear_handle_id (&self->voice_timer, g_source_remove);
+  g_clear_object (&self->voice_recorder);
+  g_clear_object (&self->voice_model);
+  g_clear_object (&self->voice_cancellable);
+  g_clear_pointer (&self->voice_model_path, g_free);
+  update_voice_button (self);
+}
+
+static void
+cancel_voice (XdChatView *self)
+{
+  if (self->voice_recorder != NULL)
+    xd_voice_recorder_stop (self->voice_recorder);
+  if (self->voice_cancellable != NULL)
+    g_cancellable_cancel (self->voice_cancellable);
+  self->voice_generation++;
+  reset_voice (self);
+}
+
+static void
+insert_voice_transcript (XdChatView *self,
+                         const char *transcript)
+{
+  GtkTextBuffer *buffer = gtk_text_view_get_buffer (self->composer);
+  GtkTextIter start;
+  GtkTextIter end;
+  GtkTextIter previous;
+  g_autofree char *existing = NULL;
+  g_autofree char *inserted = NULL;
+  gboolean needs_space = FALSE;
+
+  gtk_text_buffer_get_bounds (buffer, &start, &end);
+  existing = gtk_text_buffer_get_text (buffer, &start, &end, FALSE);
+  previous = end;
+  if (*existing != '\0' && gtk_text_iter_backward_char (&previous))
+    needs_space = !g_unichar_isspace (gtk_text_iter_get_char (&previous));
+  inserted = needs_space ? g_strconcat (" ", transcript, NULL)
+                         : g_strdup (transcript);
+  gtk_text_buffer_insert (buffer, &end, inserted, -1);
+  gtk_widget_grab_focus (GTK_WIDGET (self->composer));
+}
+
+static void
+on_voice_transcribed (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  VoiceOperation *operation = user_data;
+  XdChatView *self = operation->view;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *transcript =
+    xd_voice_transcribe_finish (result, &error);
+
+  if (operation->generation == self->voice_generation)
+    {
+      reset_voice (self);
+      if (transcript != NULL)
+        insert_voice_transcript (self, transcript);
+      else if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        show_voice_error (self, error->message);
+    }
+
+  voice_operation_free (operation);
+}
+
+static void
+on_voice_recorded (GObject      *source,
+                   GAsyncResult *result,
+                   gpointer      user_data)
+{
+  VoiceOperation *operation = user_data;
+  XdChatView *self = operation->view;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) wav =
+    xd_voice_recorder_record_finish (
+      XD_VOICE_RECORDER (source), result, &error);
+
+  if (operation->generation != self->voice_generation)
+    {
+      voice_operation_free (operation);
+      return;
+    }
+
+  g_clear_object (&self->voice_recorder);
+  self->voice_recording = FALSE;
+  self->voice_transcribing = wav != NULL;
+  update_voice_button (self);
+
+  if (wav == NULL)
+    {
+      reset_voice (self);
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        show_voice_error (self, error->message);
+      voice_operation_free (operation);
+      return;
+    }
+
+  xd_voice_transcribe_async (
+    wav, self->voice_model_path, self->voice_cancellable,
+    on_voice_transcribed, operation);
+}
+
+static void
+start_voice_recording (XdChatView *self,
+                       char       *model_path)
+{
+  self->voice_confirming = FALSE;
+  self->voice_downloading = FALSE;
+  g_clear_object (&self->voice_model);
+  self->voice_model_path = model_path;
+  self->voice_recorder = xd_voice_recorder_new ();
+  self->voice_recording = TRUE;
+  self->voice_started_at = g_get_monotonic_time ();
+  update_voice_button (self);
+  self->voice_timer =
+    g_timeout_add_seconds (1, update_voice_status, self);
+  xd_voice_recorder_record_async (
+    self->voice_recorder, self->voice_cancellable,
+    on_voice_recorded, voice_operation_new (self));
+}
+
+static void
+on_voice_model_ready (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  VoiceOperation *operation = user_data;
+  XdChatView *self = operation->view;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *model_path =
+    xd_voice_model_ensure_finish (
+      XD_VOICE_MODEL (source), result, &error);
+
+  if (operation->generation != self->voice_generation)
+    {
+      voice_operation_free (operation);
+      return;
+    }
+
+  g_clear_handle_id (&self->voice_timer, g_source_remove);
+  if (model_path == NULL)
+    {
+      reset_voice (self);
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        show_voice_error (self, error->message);
+    }
+  else
+    {
+      start_voice_recording (self, g_steal_pointer (&model_path));
+    }
+
+  voice_operation_free (operation);
+}
+
+static void
+on_voice_model_confirmed (GObject      *source,
+                          GAsyncResult *result,
+                          gpointer      user_data)
+{
+  VoiceOperation *operation = user_data;
+  XdChatView *self = operation->view;
+  AdwAlertDialog *dialog = ADW_ALERT_DIALOG (source);
+  const char *response = adw_alert_dialog_choose_finish (dialog, result);
+
+  if (operation->generation != self->voice_generation)
+    {
+      voice_operation_free (operation);
+      return;
+    }
+
+  self->voice_confirming = FALSE;
+  if (g_strcmp0 (response, "download") != 0)
+    {
+      reset_voice (self);
+      voice_operation_free (operation);
+      return;
+    }
+
+  self->voice_downloading = TRUE;
+  self->voice_model = xd_voice_model_new ();
+  update_voice_button (self);
+  self->voice_timer =
+    g_timeout_add (250, update_voice_status, self);
+  xd_voice_model_ensure_async (
+    self->voice_model, self->voice_cancellable,
+    on_voice_model_ready, operation);
+}
+
+static void
+confirm_voice_model_download (XdChatView *self)
+{
+  AdwAlertDialog *dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new (
+    "Download Local Speech Model?",
+    "Voice input runs entirely on this device. xd needs to download the "
+    "548 MiB Whisper large-v3-turbo model once."));
+
+  adw_alert_dialog_add_responses (
+    dialog, "cancel", "Cancel", "download", "Download", NULL);
+  adw_alert_dialog_set_response_appearance (
+    dialog, "download", ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response (dialog, "download");
+  adw_alert_dialog_set_close_response (dialog, "cancel");
+  adw_alert_dialog_choose (
+    dialog, GTK_WIDGET (self), self->voice_cancellable,
+    on_voice_model_confirmed, voice_operation_new (self));
+}
+
+static void
+on_voice_clicked (GtkButton *button,
+                  gpointer   user_data)
+{
+  XdChatView *self = user_data;
+  g_autofree char *model_path = NULL;
+
+  if (self->voice_recording)
+    {
+      self->voice_recording = FALSE;
+      self->voice_transcribing = TRUE;
+      xd_voice_recorder_stop (self->voice_recorder);
+      update_voice_button (self);
+      return;
+    }
+
+  if (self->voice_downloading)
+    {
+      cancel_voice (self);
+      return;
+    }
+
+  if (self->voice_confirming || self->voice_transcribing ||
+      self->chat == NULL)
+    return;
+
+  self->voice_generation++;
+  self->voice_cancellable = g_cancellable_new ();
+  model_path = xd_voice_model_find ();
+  if (model_path != NULL)
+    start_voice_recording (self, g_steal_pointer (&model_path));
+  else
+    {
+      self->voice_confirming = TRUE;
+      update_voice_button (self);
+      confirm_voice_model_download (self);
+    }
+}
+#endif
 
 /* --- the context bar ------------------------------------------------------ */
 
@@ -4629,9 +5481,10 @@ update_context_meter (XdChatView *self,
 
 static void
 update_context_bar (XdChatView   *self,
-                    const XdChat *chat)
+                    XdChat       *chat)
 {
   g_autoptr (XdEffectiveSettings) resolved = NULL;
+  g_autoptr (GError) error = NULL;
   g_autoptr (XdGitInfo) git = NULL;
   g_autoptr (GPtrArray) worktrees = NULL;
   g_autofree char *base_description = NULL;
@@ -4642,6 +5495,8 @@ update_context_bar (XdChatView   *self,
   guint64 window = 0;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  if (!restore_original_workdir (self, chat, resolved, &error))
+    g_warning ("cannot restore the original checkout: %s", error->message);
   workdir = workdir_for (chat, resolved);
   xd_git_head_watch_set_workdir (self->git_head_watch, workdir);
   model = chat->model != NULL ? chat->model : resolved->model;
@@ -4739,7 +5594,9 @@ on_workspace_selected (XdOptionPicker *chooser,
   XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
   g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
   const char *worktree = NULL;
+  const char *original = NULL;
   guint selected;
   gboolean new_worktree;
 
@@ -4761,17 +5618,29 @@ on_workspace_selected (XdOptionPicker *chooser,
       return;
     }
 
-  if (worktree != NULL
+  chat = xd_storage_get_chat (
+    self->storage, xd_node_get_chat_id (self->chat), &error);
+  if (chat != NULL)
+    {
+      resolved =
+        xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+      original = workdir_for (chat, resolved);
+    }
+
+  if (chat == NULL ||
+      (worktree != NULL
         ? !xd_storage_use_existing_worktree (
-            self->storage, xd_node_get_chat_id (self->chat), worktree, &error)
+            self->storage, xd_node_get_chat_id (self->chat), worktree,
+            original, &error)
         : !xd_storage_set_new_worktree (
             self->storage, xd_node_get_chat_id (self->chat),
-            new_worktree, &error))
+            new_worktree, &error)))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
+  g_clear_pointer (&chat, xd_chat_free);
   chat = xd_storage_get_chat (
     self->storage, xd_node_get_chat_id (self->chat), NULL);
   if (chat != NULL)
@@ -5027,6 +5896,9 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
    * as it is left, so the next successful snapshot rebuilds it exactly once. */
   if (changed)
     {
+#if XD_HAS_VOICE
+      cancel_voice (self);
+#endif
       keep_previous = current_transcript_is_cacheable (self);
       self->follow_bottom = TRUE;
       self->history_bottom_distance = -1;
@@ -5038,6 +5910,10 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
       retire_open_questions (self);
       leave_current_transcript (self, keep_previous);
       end_remote_turn (self);
+      release_live_row (&self->daemon_live_row);
+      self->daemon_live_message_id = 0;
+      self->daemon_working = FALSE;
+      self->daemon_started_at = 0;
       use_command_scope (self, NULL);
     }
 
@@ -5078,6 +5954,9 @@ xd_chat_view_show_remote_chat (XdChatView     *self,
 
   load_remote_transcript (self);
   update_send_button (self);
+#if XD_HAS_VOICE
+  update_voice_button (self);
+#endif
   gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 }
 
@@ -5097,6 +5976,9 @@ xd_chat_view_set_chat (XdChatView *self,
   changed = self->chat != chat || self->remote != NULL;
   if (changed)
     {
+#if XD_HAS_VOICE
+      cancel_voice (self);
+#endif
       keep_previous =
         chat != NULL && current_transcript_is_cacheable (self);
       self->follow_bottom = TRUE;
@@ -5112,6 +5994,10 @@ xd_chat_view_set_chat (XdChatView *self,
       retire_open_questions (self);
       leave_current_transcript (self, keep_previous);
       end_remote_turn (self);
+      release_live_row (&self->daemon_live_row);
+      self->daemon_live_message_id = 0;
+      self->daemon_working = FALSE;
+      self->daemon_started_at = 0;
     }
 
   set_remote (self, NULL);
@@ -5134,6 +6020,9 @@ xd_chat_view_set_chat (XdChatView *self,
       gtk_widget_set_visible (self->composer_area, FALSE);
       adw_window_title_set_title (self->title, "xd");
       adw_window_title_set_subtitle (self->title, NULL);
+#if XD_HAS_VOICE
+      update_voice_button (self);
+#endif
       return;
     }
 
@@ -5156,6 +6045,11 @@ xd_chat_view_set_chat (XdChatView *self,
 
     if (record != NULL)
       {
+        self->daemon_working = record->daemon_working;
+        if (self->daemon_working && self->daemon_started_at == 0)
+          self->daemon_started_at = g_get_monotonic_time ();
+        if (self->daemon_working)
+          cached = FALSE;
         use_command_scope (self, record->backend);
         update_context_bar (self, record);
         if (changed)
@@ -5191,6 +6085,9 @@ xd_chat_view_set_chat (XdChatView *self,
   turn = current_turn (self);
   if (turn != NULL && rebuilt)
     {
+      /* Any weak row belonged to the transcript that was just replaced. */
+      release_live_row (&turn->live_row);
+
       /* The finished parts of this turn live only in memory until it ends,
        * so the rebuilt transcript has to replay them or they vanish until
        * the chat is next reopened. */
@@ -5211,11 +6108,31 @@ xd_chat_view_set_chat (XdChatView *self,
             }
         }
 
+      /* The current stretch has not joined @items yet. It still belongs on
+       * screen when returning to a chat whose turn never stopped. */
+      if (turn->segment->len > 0)
+        {
+          sync_reveal_to_text (&turn->reveal, turn->segment->str);
+          show_live_text (self, &turn->live_row,
+                          turn->segment->str, turn->label);
+        }
+
       /* The transcript was rebuilt, and the marker went with it. */
       set_working (self, TRUE);
     }
   else if (turn != NULL)
     {
+      if (turn->segment->len > 0)
+        {
+          sync_reveal_to_text (&turn->reveal, turn->segment->str);
+          show_live_text (self, &turn->live_row,
+                          turn->segment->str, turn->label);
+        }
+      set_working (self, TRUE);
+    }
+  else if (self->daemon_working)
+    {
+      xd_node_set_state (self->chat, XD_NODE_WORKING);
       set_working (self, TRUE);
     }
   else if (self->queue->len > 0)
@@ -5225,6 +6142,9 @@ xd_chat_view_set_chat (XdChatView *self,
     }
 
   update_send_button (self);
+#if XD_HAS_VOICE
+  update_voice_button (self);
+#endif
   gtk_widget_grab_focus (GTK_WIDGET (self->composer));
 }
 
@@ -5256,9 +6176,6 @@ xd_chat_view_new (XdStorage *storage,
   /* Here rather than in init: the tree does not exist yet at init time. */
   g_signal_connect_swapped (self->tree, "chat-removed",
                             G_CALLBACK (forget_chat_sessions), self);
-
-  g_signal_connect (self->storage, "changed",
-                    G_CALLBACK (on_storage_changed), self);
 
   xd_chat_view_set_chat (self, NULL);
 
@@ -5398,6 +6315,17 @@ build_composer (XdChatView *self)
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->send_button), "Send (Enter)");
   g_signal_connect (self->send_button, "clicked", G_CALLBACK (on_send_clicked), self);
 
+#if XD_HAS_VOICE
+  self->voice_button = GTK_BUTTON (
+    gtk_button_new_from_icon_name ("audio-input-microphone-symbolic"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->voice_button), "circular");
+  gtk_widget_set_tooltip_text (
+    GTK_WIDGET (self->voice_button),
+    "Record voice prompt locally");
+  g_signal_connect (
+    self->voice_button, "clicked", G_CALLBACK (on_voice_clicked), self);
+#endif
+
   {
     const char *efforts[G_N_ELEMENTS (effort_choices) + 1] = { NULL };
     const char *accesses[G_N_ELEMENTS (access_choices) + 1] = { NULL };
@@ -5503,6 +6431,9 @@ build_composer (XdChatView *self)
     gtk_box_append (GTK_BOX (run), filler);
   }
 
+#if XD_HAS_VOICE
+  gtk_box_append (GTK_BOX (run), GTK_WIDGET (self->voice_button));
+#endif
   gtk_box_append (GTK_BOX (run), GTK_WIDGET (self->send_button));
   gtk_box_append (GTK_BOX (toolbar), identity);
   gtk_box_append (GTK_BOX (toolbar), run);
@@ -5576,7 +6507,14 @@ xd_chat_view_dispose (GObject *object)
     }
 
   g_clear_handle_id (&self->working_timer, g_source_remove);
+  g_clear_handle_id (&self->remote_live_render, g_source_remove);
+  release_live_row (&self->remote_live_row);
+  release_live_row (&self->daemon_live_row);
   self->working_label = NULL;
+  self->working_dots = NULL;
+#if XD_HAS_VOICE
+  cancel_voice (self);
+#endif
   g_cancellable_cancel (self->fetching);
   g_clear_object (&self->fetching);
   g_clear_pointer (&self->pending_remote_messages, g_ptr_array_unref);

@@ -1,0 +1,3 @@
+{"type":"error","message":"Reconnecting to the response stream"}
+{"type":"item.completed","item":{"type":"agent_message","text":"still working"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}

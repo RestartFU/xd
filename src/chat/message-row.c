@@ -19,9 +19,13 @@ struct _XdMessageRow
   XdRemoteClient *remote;
   GCancellable *image_cancellable;
   GCancellable *workflow_cancellable;
+  GCancellable *render_cancellable;
+  guint render_generation;
 
   GtkWidget *card;
   GtkWidget *body;          /* a column of prose labels and code cards */
+  GtkLabel *stream_label;   /* unowned; present only while text is arriving */
+  gboolean streaming;
   GtkWidget *workflow_status;
   GtkWidget *workflow_spinner;
   GtkWidget *workflow_log;
@@ -34,6 +38,95 @@ G_DEFINE_FINAL_TYPE (XdMessageRow, xd_message_row, ADW_TYPE_BIN)
 
 static void render_body (XdMessageRow *self);
 static void clear_body (XdMessageRow *self);
+static GtkWidget *make_text_label (XdMessageRow *self);
+
+typedef struct
+{
+  char *text;
+  guint generation;
+} MarkdownRender;
+
+static void
+markdown_render_free (MarkdownRender *render)
+{
+  g_free (render->text);
+  g_free (render);
+}
+
+static void
+render_markdown_thread (GTask        *task,
+                        gpointer      source_object,
+                        gpointer      task_data,
+                        GCancellable *cancellable)
+{
+  MarkdownRender *render = task_data;
+  char *markup;
+
+  if (g_task_return_error_if_cancelled (task))
+    return;
+
+  markup = xd_markdown_to_pango (render->text);
+  if (g_task_return_error_if_cancelled (task))
+    {
+      g_free (markup);
+      return;
+    }
+
+  g_task_return_pointer (task, markup, g_free);
+}
+
+static void
+on_markdown_rendered (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  XdMessageRow *self = XD_MESSAGE_ROW (source);
+  GTask *task = G_TASK (result);
+  MarkdownRender *render = g_task_get_task_data (task);
+  g_autoptr (GError) error = NULL;
+  g_autofree char *markup = g_task_propagate_pointer (task, &error);
+  GtkWidget *label;
+
+  if (markup == NULL ||
+      render->generation != self->render_generation ||
+      self->streaming)
+    return;
+
+  clear_body (self);
+  label = make_text_label (self);
+  gtk_label_set_markup (GTK_LABEL (label), markup);
+  gtk_box_append (GTK_BOX (self->body), label);
+}
+
+static void
+start_markdown_render (XdMessageRow *self)
+{
+  g_autoptr (GTask) task = NULL;
+  MarkdownRender *render;
+  GtkWidget *label;
+
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
+  g_clear_object (&self->render_cancellable);
+  self->render_cancellable = g_cancellable_new ();
+  self->render_generation++;
+
+  /* Paint readable text immediately. CommonMark conversion happens away from
+   * GTK's event loop, then replaces this label with equivalent rich markup. */
+  label = make_text_label (self);
+  gtk_label_set_text (GTK_LABEL (label), self->text->str);
+  gtk_box_append (GTK_BOX (self->body), label);
+
+  render = g_new0 (MarkdownRender, 1);
+  render->text = g_strdup (self->text->str);
+  render->generation = self->render_generation;
+
+  task = g_task_new (self, self->render_cancellable,
+                     on_markdown_rendered, NULL);
+  g_task_set_task_data (
+    task, render, (GDestroyNotify) markdown_render_free);
+  g_task_run_in_thread (task, render_markdown_thread);
+}
 
 XdMessageKind
 xd_message_kind_from_role (const char *role)
@@ -184,6 +277,50 @@ xd_message_row_new_remote (XdMessageKind   kind,
   g_return_val_if_fail (XD_IS_REMOTE_CLIENT (remote), NULL);
 
   return message_row_new (kind, text, remote);
+}
+
+/*
+ * Finalizes one assistant row.
+ *
+ * Streaming uses a plain label below. Rich Markdown is built only when a
+ * segment pauses or ends, so token delivery never repeatedly destroys and
+ * recreates the row's widget tree.
+ */
+void
+xd_message_row_set_text (XdMessageRow *self,
+                         const char   *text)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+
+  if (!self->streaming && g_strcmp0 (self->text->str, text) == 0)
+    return;
+
+  g_string_assign (self->text, text != NULL ? text : "");
+  self->streaming = FALSE;
+  render_body (self);
+}
+
+void
+xd_message_row_set_stream_text (XdMessageRow *self,
+                                const char   *text)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+
+  g_string_assign (self->text, text != NULL ? text : "");
+
+  if (!self->streaming)
+    {
+      if (self->render_cancellable != NULL)
+        g_cancellable_cancel (self->render_cancellable);
+      g_clear_object (&self->render_cancellable);
+      self->render_generation++;
+      clear_body (self);
+      self->stream_label = GTK_LABEL (make_text_label (self));
+      gtk_box_append (GTK_BOX (self->body), GTK_WIDGET (self->stream_label));
+      self->streaming = TRUE;
+    }
+
+  gtk_label_set_text (self->stream_label, self->text->str);
 }
 
 static void
@@ -503,11 +640,31 @@ xd_message_row_make_workflow (XdMessageRow *self,
       g_timeout_add_seconds (10, poll_workflow_status, self);
 }
 
+static void
+on_subagent_toggled (GtkToggleButton *toggle,
+                     gpointer         user_data)
+{
+  GtkImage *indicator = GTK_IMAGE (user_data);
+
+  gtk_image_set_from_icon_name (
+    indicator,
+    gtk_toggle_button_get_active (toggle)
+      ? "pan-down-symbolic"
+      : "pan-end-symbolic");
+  gtk_widget_set_tooltip_text (
+    GTK_WIDGET (toggle),
+    gtk_toggle_button_get_active (toggle)
+      ? "Hide subagent activity"
+      : "Show subagent activity");
+}
+
 void
 xd_message_row_make_subagent (XdMessageRow *self,
                               GtkWidget    *activity)
 {
-  GtkWidget *expander;
+  GtkWidget *toggle;
+  GtkWidget *header;
+  GtkWidget *indicator;
 
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
@@ -524,24 +681,45 @@ xd_message_row_make_subagent (XdMessageRow *self,
   g_object_ref (activity);
   gtk_box_remove (GTK_BOX (gtk_widget_get_parent (activity)), activity);
 
-  expander = gtk_expander_new (NULL);
-  gtk_expander_set_expanded (GTK_EXPANDER (expander), FALSE);
-  gtk_widget_set_hexpand (expander, TRUE);
+  toggle = gtk_toggle_button_new ();
+  header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  indicator = gtk_image_new_from_icon_name ("pan-end-symbolic");
+  gtk_widget_add_css_class (toggle, "xd-subagent-toggle");
+  gtk_widget_set_tooltip_text (toggle, "Show subagent activity");
+  gtk_widget_set_hexpand (toggle, TRUE);
+  gtk_widget_set_hexpand (header, TRUE);
+  gtk_widget_set_valign (indicator, GTK_ALIGN_START);
+  gtk_widget_set_margin_top (indicator, 3);
+  gtk_widget_set_margin_top (header, 12);
+  gtk_widget_set_margin_bottom (header, 12);
+  gtk_widget_set_margin_start (header, 14);
+  gtk_widget_set_margin_end (header, 14);
 
   g_object_ref (self->body);
   gtk_box_remove (GTK_BOX (self->card), self->body);
-  gtk_expander_set_label_widget (GTK_EXPANDER (expander), self->body);
+  gtk_widget_set_margin_top (self->body, 0);
+  gtk_widget_set_margin_bottom (self->body, 0);
+  gtk_widget_set_margin_start (self->body, 0);
+  gtk_widget_set_margin_end (self->body, 0);
+  gtk_box_append (GTK_BOX (header), indicator);
+  gtk_box_append (GTK_BOX (header), self->body);
   g_object_unref (self->body);
+  gtk_button_set_child (GTK_BUTTON (toggle), header);
 
   gtk_widget_set_margin_start (activity, 12);
   gtk_widget_set_margin_end (activity, 0);
-  gtk_expander_set_child (GTK_EXPANDER (expander), activity);
-  g_object_bind_property (expander, "expanded",
+  g_object_bind_property (toggle, "active",
                           activity, "expanded",
                           G_BINDING_SYNC_CREATE);
-  g_object_unref (activity);
+  g_object_bind_property (toggle, "active",
+                          activity, "visible",
+                          G_BINDING_SYNC_CREATE);
+  g_signal_connect (toggle, "toggled",
+                    G_CALLBACK (on_subagent_toggled), indicator);
 
-  gtk_box_append (GTK_BOX (self->card), expander);
+  gtk_box_append (GTK_BOX (self->card), toggle);
+  gtk_box_append (GTK_BOX (self->card), activity);
+  g_object_unref (activity);
 }
 
 /* One prose label, configured the way every piece of message text is. */
@@ -1324,6 +1502,7 @@ clear_body (XdMessageRow *self)
 {
   GtkWidget *child;
 
+  self->stream_label = NULL;
   while ((child = gtk_widget_get_first_child (self->body)) != NULL)
     gtk_box_remove (GTK_BOX (self->body), child);
 }
@@ -1422,6 +1601,10 @@ append_markdown_chunk (XdMessageRow *self,
 static void
 render_body (XdMessageRow *self)
 {
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
+  g_clear_object (&self->render_cancellable);
+  self->render_generation++;
   clear_body (self);
 
   if (self->kind != XD_MESSAGE_ASSISTANT)
@@ -1468,6 +1651,21 @@ render_body (XdMessageRow *self)
           gtk_box_append (GTK_BOX (self->body), label);
         }
 
+      return;
+    }
+
+  /*
+   * Ordinary prose is most assistant output and CommonMark parsing is its
+   * expensive part. Fences and possible tables need custom GTK cards, so keep
+   * their structural pass here; plain prose can be prepared by GLib's worker
+   * pool without touching GTK.
+   */
+  if (*self->text->str != '\0' &&
+      strstr (self->text->str, "```") == NULL &&
+      !(strchr (self->text->str, '|') != NULL &&
+        strchr (self->text->str, '\n') != NULL))
+    {
+      start_markdown_render (self);
       return;
     }
 
@@ -1567,9 +1765,12 @@ xd_message_row_dispose (GObject *object)
     }
 
   g_cancellable_cancel (self->image_cancellable);
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
   if (self->workflow_cancellable != NULL)
     g_cancellable_cancel (self->workflow_cancellable);
   g_clear_object (&self->image_cancellable);
+  g_clear_object (&self->render_cancellable);
   g_clear_object (&self->workflow_cancellable);
   g_clear_object (&self->remote);
 

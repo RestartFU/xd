@@ -11,6 +11,7 @@ typedef struct
   char *title;
   char *backend;
   char *workdir;      /* NULL: inherit the folder's */
+  char *original_workdir; /* checkout to restore if workdir disappears */
   char *model;        /* NULL: the backend's default */
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
@@ -19,6 +20,7 @@ typedef struct
   gboolean plan;      /* think it through, change nothing */
   gboolean terminal_open;  /* the panes this chat was left with */
   gboolean diff_open;
+  gboolean daemon_working; /* a turn owned by the local daemon */
   guint64 context_used;    /* transient when sent to a remote client */
   guint64 context_window;
   gint64 created_at;
@@ -69,11 +71,13 @@ const char *xd_storage_get_path        (XdStorage   *self);
  * mention those, and without it a window shows a conversation that stopped
  * being true while it was on screen.
  *
- * Coalesced, since one statement is several writes.
+ * Throttled, since one statement is several writes and a live stream may
+ * never become completely quiet.
  */
 
 /*
- * Watches the database for writes, and emits ::changed when it settles.
+ * Watches the database for writes, emitting ::changed at a bounded rate while
+ * writes continue.
  *
  * More than one process works on this file: a window and the daemon serving
  * the same chats to other devices, at least. SQLite tells a connection nothing
@@ -99,7 +103,15 @@ char       *xd_storage_create_chat     (XdStorage   *self,
                                         const char  *workdir,
                                         GError     **error);
 
-gboolean    xd_storage_set_workdir     (XdStorage   *self,
+/* Moves a running chat while preserving its first checkout for recovery. */
+gboolean    xd_storage_switch_workdir  (XdStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *workdir,
+                                        const char  *original_workdir,
+                                        GError     **error);
+
+/* Returns a chat to its preserved checkout and clears the recovery marker. */
+gboolean    xd_storage_restore_workdir (XdStorage   *self,
                                         const char  *chat_id,
                                         const char  *workdir,
                                         GError     **error);
@@ -117,12 +129,14 @@ gboolean    xd_storage_set_new_worktree (XdStorage  *self,
 gboolean    xd_storage_use_existing_worktree (XdStorage  *self,
                                               const char *chat_id,
                                               const char *workdir,
+                                              const char *original_workdir,
                                               GError    **error);
 
 /* Atomically consumes the pending choice and points the chat at its checkout. */
 gboolean    xd_storage_use_worktree     (XdStorage   *self,
                                          const char  *chat_id,
                                          const char  *workdir,
+                                         const char  *original_workdir,
                                          GError     **error);
 
 gboolean    xd_storage_set_model       (XdStorage   *self,
@@ -210,6 +224,21 @@ gboolean    xd_storage_set_plan        (XdStorage   *self,
                                         const char  *chat_id,
                                         gboolean     plan,
                                         GError     **error);
+
+/*
+ * Cross-process turn ownership.
+ *
+ * A window and `xd serve` use separate processes but share this database.
+ * This bit lets the window distinguish a live daemon stream from an ordinary
+ * metadata write, keep the chat marked working, and leave queued messages for
+ * the daemon rather than accidentally starting a second local turn.
+ */
+gboolean    xd_storage_set_daemon_working (XdStorage *self,
+                                           const char *chat_id,
+                                           gboolean    working,
+                                           GError    **error);
+gboolean    xd_storage_clear_daemon_working (XdStorage *self,
+                                             GError    **error);
 
 XdChat     *xd_storage_get_chat        (XdStorage   *self,
                                         const char  *chat_id,

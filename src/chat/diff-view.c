@@ -13,6 +13,55 @@ typedef struct
   GHashTable *collapsed;
 } VirtualDiff;
 
+typedef struct
+{
+  GtkAdjustment *adjustment;
+  double value;
+} ScrollPosition;
+
+static gboolean
+restore_scroll_position (GtkWidget     *widget,
+                         GdkFrameClock *frame_clock,
+                         gpointer       user_data)
+{
+  ScrollPosition *position = user_data;
+
+  /*
+   * GtkListView changes its adjustment while reallocating a row whose height
+   * shrank. Restore after that allocation, so collapsing content below the
+   * clicked header does not move the whole visible diff.
+   */
+  gtk_adjustment_set_value (position->adjustment, position->value);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+scroll_position_free (ScrollPosition *position)
+{
+  g_clear_object (&position->adjustment);
+  g_free (position);
+}
+
+static void
+keep_scroll_position (GtkExpander *expander)
+{
+  GtkWidget *scroller = gtk_widget_get_ancestor (
+    GTK_WIDGET (expander), GTK_TYPE_SCROLLED_WINDOW);
+  ScrollPosition *position;
+
+  if (scroller == NULL)
+    return;
+
+  position = g_new0 (ScrollPosition, 1);
+  position->adjustment = g_object_ref (
+    gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller)));
+  position->value = gtk_adjustment_get_value (position->adjustment);
+
+  gtk_widget_add_tick_callback (
+    scroller, restore_scroll_position, position,
+    (GDestroyNotify) scroll_position_free);
+}
+
 static void
 virtual_diff_free (VirtualDiff *diff)
 {
@@ -214,6 +263,7 @@ on_virtual_file_expanded (GtkExpander *expander,
     }
   else
     {
+      keep_scroll_position (expander);
       g_hash_table_add (diff->collapsed, g_strdup (path));
       clear_box (body);
     }

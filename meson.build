@@ -53,6 +53,7 @@ is_macos = host_machine.system() == 'darwin'
 #
 has_server = true
 has_daemon_terminal = not is_windows
+has_voice = not is_windows and not is_macos
 
 glib_dep      = dependency('glib-2.0', version: '>= 2.72')
 gio_dep       = dependency('gio-2.0')
@@ -62,6 +63,12 @@ json_dep      = dependency('json-glib-1.0')
 pango_dep     = dependency('pango')
 sqlite_dep    = dependency('sqlite3')
 cmark_dep     = dependency('libcmark', version: '>= 0.30')
+
+if has_voice
+  pulse_simple_dep = dependency('libpulse-simple')
+  soup_dep         = dependency('libsoup-3.0')
+  whisper_dep      = dependency('whisper', version: '>= 1.9.1')
+endif
 
 if is_windows
   gio_unix_dep = declare_dependency()
@@ -107,6 +114,7 @@ add_project_arguments([
   '-DXD_VERSION="' + meson.project_version() + '"',
   '-DXD_HAS_TERMINAL=' + (is_windows ? '0' : '1'),
   '-DXD_HAS_SERVER=' + (has_server ? '1' : '0'),
+  '-DXD_HAS_VOICE=' + (has_voice ? '1' : '0'),
   '-D_GNU_SOURCE',
 ], language: 'c')
 

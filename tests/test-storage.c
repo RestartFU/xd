@@ -78,6 +78,84 @@ test_create_and_list (Fixture       *fixture,
 }
 
 static void
+test_chats_follow_latest_user_message (Fixture       *fixture,
+                                       gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) chats = NULL;
+  g_autofree char *first = NULL;
+  g_autofree char *second = NULL;
+
+  first = xd_storage_create_chat (fixture->storage, "folder", "First",
+                                  "claude", NULL, NULL, NULL, &error);
+  g_usleep (1000);
+  second = xd_storage_create_chat (fixture->storage, "folder", "Second",
+                                   "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, second);
+
+  g_usleep (1000);
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, first, "user", "work here", NULL, NULL, &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
+
+  /* Agent output and metadata writes must not steal user-selected recency. */
+  g_usleep (1000);
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, second, "assistant", "finished", NULL, NULL, &error));
+  g_assert_true (xd_storage_set_chat_title (
+    fixture->storage, second, "Renamed", &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
+
+  g_usleep (1000);
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, second, "user", "work here now", NULL, NULL, &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, second);
+  g_assert_no_error (error);
+}
+
+static void
+test_daemon_turn_state_is_shared (Fixture       *fixture,
+                                  gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (XdChat) chat = NULL;
+
+  chat_id = xd_storage_create_chat (fixture->storage, "folder", "Chat",
+                                    "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_false (chat->daemon_working);
+
+  g_assert_true (xd_storage_set_daemon_working (
+    fixture->storage, chat_id, TRUE, &error));
+  g_assert_no_error (error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_true (chat->daemon_working);
+
+  g_assert_true (xd_storage_clear_daemon_working (
+    fixture->storage, &error));
+  g_assert_no_error (error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_false (chat->daemon_working);
+}
+
+static void
 test_new_chats_inherit_last_changed_agent (Fixture       *fixture,
                                            gconstpointer  user_data)
 {
@@ -483,20 +561,56 @@ test_workspace_locks_after_first_message (Fixture       *fixture,
   g_assert_true (chat->new_worktree);
 
   g_assert_true (xd_storage_use_existing_worktree (
-    fixture->storage, chat_id, "/tmp/existing-worktree", &error));
+    fixture->storage, chat_id, "/tmp/existing-worktree",
+    "/tmp/original-checkout", &error));
   g_assert_no_error (error);
   g_clear_pointer (&chat, xd_chat_free);
   chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
   g_assert_false (chat->new_worktree);
   g_assert_cmpstr (chat->workdir, ==, "/tmp/existing-worktree");
+  g_assert_cmpstr (chat->original_workdir, ==, "/tmp/original-checkout");
 
   g_assert_true (xd_storage_append_message (
     fixture->storage, chat_id, "user", "start", NULL, NULL, &error));
   g_assert_no_error (error);
 
   g_assert_false (xd_storage_use_existing_worktree (
-    fixture->storage, chat_id, "/tmp/another-worktree", &error));
+    fixture->storage, chat_id, "/tmp/another-worktree",
+    "/tmp/original-checkout", &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
+}
+
+static void
+test_workspace_restores_its_first_checkout (Fixture       *fixture,
+                                            gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *chat_id = NULL;
+  g_autoptr (XdChat) chat = NULL;
+
+  chat_id = xd_storage_create_chat (
+    fixture->storage, "folder", "Chat", "claude",
+    NULL, NULL, "/tmp/original-checkout", &error);
+  g_assert_true (xd_storage_switch_workdir (
+    fixture->storage, chat_id, "/tmp/first-worktree",
+    "/tmp/original-checkout", &error));
+  g_assert_true (xd_storage_switch_workdir (
+    fixture->storage, chat_id, "/tmp/second-worktree",
+    "/tmp/first-worktree", &error));
+  g_assert_no_error (error);
+
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (chat->workdir, ==, "/tmp/second-worktree");
+  g_assert_cmpstr (chat->original_workdir, ==, "/tmp/original-checkout");
+
+  g_assert_true (xd_storage_restore_workdir (
+    fixture->storage, chat_id, chat->original_workdir, &error));
+  g_assert_no_error (error);
+  g_clear_pointer (&chat, xd_chat_free);
+  chat = xd_storage_get_chat (fixture->storage, chat_id, &error);
+  g_assert_cmpstr (chat->workdir, ==, "/tmp/original-checkout");
+  g_assert_null (chat->original_workdir);
 }
 
 /* Re-reporting overwrites rather than accumulating: the CLI hands back an id
@@ -790,6 +904,10 @@ main (int   argc,
   g_test_add (path, Fixture, NULL, fixture_set_up, func, fixture_tear_down)
 
   ADD ("/storage/create-and-list", test_create_and_list);
+  ADD ("/storage/chats-follow-latest-user-message",
+       test_chats_follow_latest_user_message);
+  ADD ("/storage/daemon-turn-state-is-shared",
+       test_daemon_turn_state_is_shared);
   ADD ("/storage/new-chats-inherit-agent", test_new_chats_inherit_last_changed_agent);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
@@ -803,6 +921,7 @@ main (int   argc,
   ADD ("/storage/context-usage", test_context_usage_follows_session);
   ADD ("/storage/plan-keeps-access", test_plan_preserves_the_access_level);
   ADD ("/storage/workspace-locks", test_workspace_locks_after_first_message);
+  ADD ("/storage/workspace-restores-first-checkout", test_workspace_restores_its_first_checkout);
   ADD ("/storage/delete-cascades", test_deleting_a_chat_takes_its_messages);
   ADD ("/storage/search", test_search_finds_messages);
   ADD ("/storage/reopen", test_reopening_keeps_data);

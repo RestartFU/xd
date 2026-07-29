@@ -36,6 +36,8 @@ struct _XdSidebar
   XdNode *pending_parent;
   gboolean pending_creating;
   XdNodeKind pending_kind;
+  GtkPopover *pending_menu;
+  guint pending_edit_id;
 
   /* What the selection is on, as a node rather than a position. */
   XdNode *selected;
@@ -258,23 +260,23 @@ end_editing (XdSidebar *self,
 static void begin_renaming (XdSidebar *self, XdNode *node);
 static void begin_creating (XdSidebar *self, XdNode *parent, XdNodeKind kind);
 
-static void
-on_menu_closed (GtkPopover *menu,
-                gpointer    user_data)
+static gboolean
+begin_pending_edit (gpointer user_data)
 {
   XdSidebar *self = user_data;
   g_autoptr (XdNode) node = g_steal_pointer (&self->pending_edit);
   g_autoptr (XdNode) parent = g_steal_pointer (&self->pending_parent);
   gboolean creating = self->pending_creating;
 
-  g_signal_handlers_disconnect_by_func (menu, on_menu_closed, self);
-
+  self->pending_edit_id = 0;
   self->pending_creating = FALSE;
 
   if (creating && parent != NULL)
     begin_creating (self, parent, self->pending_kind);
   else if (node != NULL)
     begin_renaming (self, node);
+
+  return G_SOURCE_REMOVE;
 }
 
 /*
@@ -296,7 +298,12 @@ waiting_for_menu (XdSidebar  *self,
   GtkWidget *box = row_box_for_node (self, row_node);
   GtkWidget *menu = box != NULL ? g_object_get_data (G_OBJECT (box), "menu") : NULL;
 
-  if (menu == NULL || !gtk_widget_get_visible (menu))
+  /*
+   * Visibility becomes false as closing starts, before ::closed. Parenting
+   * lasts until our permanent close handler runs, so it is the reliable test
+   * for whether focus restoration is still unfinished.
+   */
+  if (menu == NULL || gtk_widget_get_parent (menu) == NULL)
     return FALSE;
 
   /* All of it before the menu is told to go: closing can finish inside that
@@ -305,8 +312,8 @@ waiting_for_menu (XdSidebar  *self,
   g_set_object (&self->pending_parent, parent);
   self->pending_creating = creating;
   self->pending_kind = kind;
+  self->pending_menu = GTK_POPOVER (menu);
 
-  g_signal_connect (menu, "closed", G_CALLBACK (on_menu_closed), self);
   gtk_popover_popdown (GTK_POPOVER (menu));
 
   return TRUE;
@@ -837,7 +844,22 @@ on_agent_secrets (GtkWidget  *widget,
     return;
 
   xd_agent_secrets_dialog_present (
-    GTK_WIDGET (self), remote ? self->remote : NULL);
+    GTK_WIDGET (self), remote ? self->remote : NULL, NULL);
+}
+
+static void
+on_folder_secrets (GtkWidget  *widget,
+                   const char *action_name,
+                   GVariant   *target)
+{
+  XdSidebar *self = XD_SIDEBAR (widget);
+  XdNode *folder = node_from_target (self, target);
+
+  if (folder == NULL)
+    return;
+
+  xd_agent_secrets_dialog_present (
+    GTK_WIDGET (self), is_remote_row (folder) ? self->remote : NULL, folder);
 }
 
 typedef struct
@@ -1176,12 +1198,64 @@ on_row_right_clicked (GtkGestureClick *gesture,
   gtk_popover_popup (popover);
 }
 
+typedef struct
+{
+  XdSidebar *sidebar;
+  GtkPopover *popover;
+} ClosingMenu;
+
+static gboolean
+finish_row_menu_close (gpointer user_data)
+{
+  ClosingMenu *closing = user_data;
+  XdSidebar *self = closing->sidebar;
+  GtkPopover *popover = closing->popover;
+  gboolean begin;
+
+  /*
+   * GtkModelButton closes its popover before activating its action. Detaching
+   * here synchronously therefore removes the button from the sidebar's action
+   * group before GTK can invoke create or rename. One idle leaves the widget
+   * hierarchy intact through activation, then gets the recycled row safety
+   * that detaching was meant to provide.
+   *
+   * A menu reopened before this idle belongs to a new interaction and stays
+   * attached until its own ::closed emission.
+   */
+  if (gtk_widget_get_visible (GTK_WIDGET (popover)))
+    goto out;
+
+  begin = self->pending_menu == popover;
+
+  if (gtk_widget_get_parent (GTK_WIDGET (popover)) != NULL)
+    gtk_widget_unparent (GTK_WIDGET (popover));
+
+  if (begin)
+    {
+      self->pending_menu = NULL;
+      if (self->pending_edit_id == 0)
+        self->pending_edit_id = g_idle_add_full (
+          G_PRIORITY_DEFAULT_IDLE, begin_pending_edit, g_object_ref (self),
+          g_object_unref);
+    }
+
+out:
+  g_object_unref (closing->popover);
+  g_object_unref (closing->sidebar);
+  g_free (closing);
+
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_row_menu_closed (GtkPopover *popover,
                     gpointer    user_data)
 {
-  if (gtk_widget_get_parent (GTK_WIDGET (popover)) != NULL)
-    gtk_widget_unparent (GTK_WIDGET (popover));
+  ClosingMenu *closing = g_new0 (ClosingMenu, 1);
+
+  closing->sidebar = g_object_ref (user_data);
+  closing->popover = g_object_ref (popover);
+  g_idle_add (finish_row_menu_close, closing);
 }
 
 /*
@@ -1418,7 +1492,7 @@ on_item_setup (GtkSignalListItemFactory *factory,
   g_object_set_data_full (G_OBJECT (box), "menu",
                           g_object_ref_sink (popover), g_object_unref);
   g_signal_connect (popover, "closed",
-                    G_CALLBACK (on_row_menu_closed), NULL);
+                    G_CALLBACK (on_row_menu_closed), user_data);
 
   gesture = gtk_gesture_click_new ();
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (gesture), GDK_BUTTON_SECONDARY);
@@ -1452,6 +1526,7 @@ build_row_menu (XdNode *node)
   g_autoptr (GMenuItem) new_folder = NULL;
   g_autoptr (GMenuItem) rename = NULL;
   g_autoptr (GMenuItem) context = NULL;
+  g_autoptr (GMenuItem) secrets = NULL;
   g_autoptr (GMenuItem) settings = NULL;
   g_autoptr (GMenuItem) trash = NULL;
 
@@ -1481,8 +1556,12 @@ build_row_menu (XdNode *node)
     context, "sidebar.folder-context", target);
   g_menu_append_item (menu, context);
 
-  /* The rest of the settings still edit a local dotfile directly. Agent
-   * context has its own daemon operation and is available on both sides. */
+  secrets = g_menu_item_new ("Agent Secrets…", NULL);
+  g_menu_item_set_action_and_target_value (
+    secrets, "sidebar.folder-secrets", target);
+  g_menu_append_item (menu, secrets);
+
+  /* The rest of the settings still edit a local dotfile directly. */
   if (!remote)
     {
       settings = g_menu_item_new ("Folder Settings…", NULL);
@@ -1917,6 +1996,8 @@ xd_sidebar_dispose (GObject *object)
   XdSidebar *self = XD_SIDEBAR (object);
 
   g_clear_handle_id (&self->restore_expanded_id, g_source_remove);
+  g_clear_handle_id (&self->pending_edit_id, g_source_remove);
+  self->pending_menu = NULL;
 
   if (self->save_expanded_id != 0)
     {
@@ -1981,6 +2062,8 @@ xd_sidebar_class_init (XdSidebarClass *klass)
                                    on_folder_context);
   gtk_widget_class_install_action (widget_class, "sidebar.agent-secrets", "s",
                                    on_agent_secrets);
+  gtk_widget_class_install_action (widget_class, "sidebar.folder-secrets", "s",
+                                   on_folder_secrets);
   gtk_widget_class_install_action (widget_class, "sidebar.refresh-remote", "s",
                                    on_refresh_remote);
 }
@@ -2013,6 +2096,7 @@ xd_sidebar_init (XdSidebar *self)
   {
     GMenu *menu = g_menu_new ();
     g_autoptr (GMenuItem) secrets = NULL;
+    GtkPopover *popover;
 
     g_menu_append (menu, "New Workspace", "sidebar.new-workspace");
     g_menu_append (menu, "Connect to a Machine\u2026", "win.pair-remote");
@@ -2024,6 +2108,10 @@ xd_sidebar_init (XdSidebar *self)
     gtk_menu_button_set_menu_model (GTK_MENU_BUTTON (new_button),
                                     G_MENU_MODEL (menu));
     g_object_unref (menu);
+
+    popover = gtk_menu_button_get_popover (GTK_MENU_BUTTON (new_button));
+    if (popover != NULL)
+      gtk_widget_add_css_class (GTK_WIDGET (popover), "xd-menu-popover");
   }
   gtk_menu_button_set_icon_name (GTK_MENU_BUTTON (new_button), "list-add-symbolic");
   gtk_widget_set_tooltip_text (new_button, "Add a workspace or a machine");

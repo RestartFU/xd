@@ -225,7 +225,7 @@ const char *
 xd_diff_line_background (XdDiffLineKind kind)
 {
   if (kind == XD_DIFF_LINE_FILE)
-    return "#000000";
+    return "#2a2a2d";
   if (kind == XD_DIFF_LINE_ADDED)
     return "#183522";
   if (kind == XD_DIFF_LINE_REMOVED)

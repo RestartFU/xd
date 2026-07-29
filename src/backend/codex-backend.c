@@ -1,24 +1,11 @@
-#include "backend.h"
+#include "codex-backend.h"
 
 /*
- * Codex, driven non-interactively.
+ * Codex's rich-client transport is app-server.
  *
- *   codex exec --json [-m MODEL] [-C DIR] -s read-only <prompt>
- *   codex exec resume [OPTIONS] <THREAD> <prompt>
- *
- * Those two do not take the same options. "exec resume" has neither -s nor -C:
- * the sandbox goes through the config override it does take, and the directory
- * is the one the process is started in -- which the session sets anyway, so
- * -C was only ever saying it twice.
- *
- * Output is one JSON object per line: "thread.started" carries the id used to
- * resume, command "item.started" events make long-running work visible,
- * "item.completed" delivers finished items -- the agent's reply among them --
- * and "turn.completed" ends the turn.
- *
- * Unlike claude, this mode reports no token-level deltas, so a reply arrives
- * in one piece. The event names are also less settled than claude's, which is
- * why everything unrecognised is skipped rather than treated as an error.
+ * One persistent process multiplexes threads and turns over JSON-RPC. The
+ * legacy exec parser remains below so old captured transcripts still exercise
+ * the shared event vocabulary and upgrades can tolerate stored fixtures.
  */
 
 /*
@@ -56,16 +43,16 @@ static const char *CODEX_COMMIT_INSTRUCTIONS =
   "Co-authored-by: Codex <codex@openai.com>\n"
   "</commit_attribution>";
 
-static const char *
-codex_sandbox (AiAccess access)
+const char *
+xd_codex_sandbox_policy_type (AiAccess access)
 {
   switch (access)
     {
-    case AI_ACCESS_EDIT: return "workspace-write";
-    case AI_ACCESS_FULL: return "danger-full-access";
+    case AI_ACCESS_EDIT: return "workspaceWrite";
+    case AI_ACCESS_FULL: return "dangerFullAccess";
     case AI_ACCESS_PLAN:
     case AI_ACCESS_READ_ONLY:
-    default:             return "read-only";
+    default:             return "readOnly";
     }
 }
 
@@ -75,75 +62,31 @@ codex_build_argv (const AiBackend *self,
 {
   GPtrArray *argv = g_ptr_array_new_with_free_func (g_free);
 
-  gboolean resuming = spec->resume_session_id != NULL;
-
   g_ptr_array_add (argv, g_strdup (self->program));
-  g_ptr_array_add (argv, g_strdup ("exec"));
-
-  if (resuming)
-    g_ptr_array_add (argv, g_strdup ("resume"));
-
-  g_ptr_array_add (argv, g_strdup ("--json"));
-
-  /* The sandbox: a flag when starting, the same thing as a config override
-   * when resuming, which is the option resume actually has. */
-  if (resuming)
-    {
-      g_ptr_array_add (argv, g_strdup ("-c"));
-      g_ptr_array_add (argv, g_strdup_printf ("sandbox_mode=\"%s\"",
-                                              codex_sandbox (spec->access)));
-    }
-  else
-    {
-      g_ptr_array_add (argv, g_strdup ("-s"));
-      g_ptr_array_add (argv, g_strdup (codex_sandbox (spec->access)));
-    }
-
-  /* Codex takes effort as a config override rather than a flag. */
-  g_ptr_array_add (argv, g_strdup ("-c"));
-  g_ptr_array_add (argv, g_strdup_printf ("model_reasoning_effort=\"%s\"",
-                                          ai_effort_to_string (spec->effort)));
-
-  if (spec->model != NULL)
-    {
-      g_ptr_array_add (argv, g_strdup ("-m"));
-      g_ptr_array_add (argv, g_strdup (spec->model));
-    }
-
-  /* Only when starting: resume has no -C, and does not need one -- the turn
-   * runs in the directory the session was started in. */
-  if (spec->workdir != NULL && !resuming)
-    {
-      g_ptr_array_add (argv, g_strdup ("-C"));
-      g_ptr_array_add (argv, g_strdup (spec->workdir));
-    }
-
-  /* After the options, where the usage says it goes. */
-  if (resuming)
-    g_ptr_array_add (argv, g_strdup (spec->resume_session_id));
-
-  /*
-   * Codex has no --append-system-prompt, so built-in and folder instructions
-   * ride in front of the prompt itself.
-   */
-  {
-    g_autoptr (GString) prompt = g_string_new (NULL);
-
-    if (spec->access == AI_ACCESS_PLAN)
-      g_string_append_printf (prompt, "%s\n\n", CODEX_PLAN_INSTRUCTIONS);
-
-    g_string_append_printf (prompt, "%s\n\n", CODEX_COMMIT_INSTRUCTIONS);
-
-    if (spec->system_prompt != NULL)
-      g_string_append_printf (prompt, "%s\n\n", spec->system_prompt);
-
-    g_string_append (prompt, spec->prompt);
-    g_ptr_array_add (argv, g_string_free (g_steal_pointer (&prompt), FALSE));
-  }
-
+  g_ptr_array_add (argv, g_strdup ("app-server"));
+  g_ptr_array_add (argv, g_strdup ("--listen"));
+  g_ptr_array_add (argv, g_strdup ("stdio://"));
   g_ptr_array_add (argv, NULL);
 
   return argv;
+}
+
+char *
+xd_codex_developer_instructions (const AiRunSpec *spec)
+{
+  g_autoptr (GString) text = g_string_new (NULL);
+
+  g_return_val_if_fail (spec != NULL, NULL);
+
+  if (spec->access == AI_ACCESS_PLAN)
+    g_string_append_printf (text, "%s\n\n", CODEX_PLAN_INSTRUCTIONS);
+
+  g_string_append (text, CODEX_COMMIT_INSTRUCTIONS);
+
+  if (spec->system_prompt != NULL && *spec->system_prompt != '\0')
+    g_string_append_printf (text, "\n\n%s", spec->system_prompt);
+
+  return g_string_free (g_steal_pointer (&text), FALSE);
 }
 
 static void
@@ -421,7 +364,10 @@ codex_parse_object (AiParser    *parser,
   if (g_strcmp0 (type, "turn.failed") == 0 || g_strcmp0 (type, "error") == 0)
     {
       JsonObject *error = ai_json_get_object (root, "error");
-      const char *message = ai_json_get_string (error, "message");
+      const char *message = ai_json_get_string (root, "message");
+
+      if (message == NULL)
+        message = ai_json_get_string (error, "message");
 
       emit (callback, user_data, AI_EVENT_ERROR,
             message != NULL ? message : "The turn failed", NULL);
@@ -449,6 +395,7 @@ const AiBackend xd_codex_backend = {
   .display_name = "Codex",
   .program = "codex",
   .icon_name = "xd-backend-codex-symbolic",
+  .transport = AI_TRANSPORT_CODEX_APP_SERVER,
   .default_model = "gpt-5.6-sol",
   .models = codex_models,
   .n_models = G_N_ELEMENTS (codex_models),

@@ -11,6 +11,8 @@ xd_tests = {
   'settings': 'test-settings.c',
   'agent-secrets': 'test-agent-secrets.c',
   'markdown': 'test-markdown.c',
+  'text-reveal': 'test-text-reveal.c',
+  'voice-data': 'test-voice-data.c',
   'ask': 'test-ask.c',
   'git-diff': 'test-git-diff.c',
   'git-head-watch': 'test-git-head-watch.c',
@@ -25,6 +27,7 @@ xd_tests = {
   'worktree': 'test-worktree.c',
   'discord-presence': 'test-discord-presence.c',
   'node': 'test-node.c',
+  'fs-tree': 'test-fs-tree.c',
   'handover': 'test-handover.c',
 }
 

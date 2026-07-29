@@ -1,5 +1,6 @@
 #include "xd-app.h"
 
+#include "backend/codex-app-server.h"
 #include <glib/gstdio.h>
 #include "xd-window.h"
 
@@ -326,7 +327,8 @@ static const char *XD_STYLE =
   ".xd-menu { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 6px; }\n"
-  ".xd-menu-popover > contents { background-color: #141416;"
+  ".xd-menu-popover > contents, popover.menu > contents"
+  " { background-color: #141416;"
   " border: 1px solid alpha(#ffffff, 0.10); border-radius: 12px;"
   " padding: 5px; }\n"
   "popover menuitem { border-radius: 8px; padding: 6px 10px; }\n"
@@ -494,6 +496,10 @@ static const char *XD_STYLE =
   ".xd-subagent { background-color: alpha(#a56de2, 0.07);"
   " border: 1px solid alpha(#a56de2, 0.22);"
   " border-left: 3px solid alpha(#a56de2, 0.72); border-radius: 10px; }\n"
+  "button.xd-subagent-toggle, button.xd-subagent-toggle:hover,"
+  " button.xd-subagent-toggle:checked"
+  " { background: none; border: none; border-radius: 10px;"
+  " padding: 0; }\n"
   ".xd-code label { font-family: \"JetBrains Mono\", monospace;"
   " font-size: 1em; }\n"
   ".xd-code textview.xd-diff, .xd-code textview.xd-diff text"
@@ -518,7 +524,7 @@ static const char *XD_STYLE =
   " border-radius: 0; }\n"
   "listview.xd-diff-list > row:hover"
   " { background: none; }\n"
-  ".xd-diff-expander > title { padding: 9px 12px;"
+  ".xd-diff-expander > box > title { padding: 9px 12px;"
   " background-color: #2a2a2d; }\n"
 
   /* Repository browser: the list and preview share the same quiet side pane
@@ -693,6 +699,7 @@ xd_application_dispose (GObject *object)
 {
   XdApplication *self = XD_APPLICATION (object);
 
+  xd_codex_app_server_shutdown_all ();
   g_clear_object (&self->settings);
 
   G_OBJECT_CLASS (xd_application_parent_class)->dispose (object);

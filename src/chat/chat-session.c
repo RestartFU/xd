@@ -1,5 +1,6 @@
 #include "chat-session.h"
 
+#include "backend/codex-app-server.h"
 #include "settings/agent-secrets.h"
 #include "util/host-launch.h"
 
@@ -19,6 +20,7 @@ struct _XdChatSession
 
   const AiBackend *backend;
   AiParser *parser;
+  XdCodexTurn *codex_turn;
 
   GSubprocess *process;
   GDataInputStream *stdout_stream;
@@ -29,6 +31,7 @@ struct _XdChatSession
   guint kill_timeout_id;
   gboolean stopping;
   gboolean finished;
+  char *backend_error;
 };
 
 enum
@@ -84,7 +87,7 @@ on_process_waited (GObject      *source,
 
   if (g_subprocess_wait_check_finish (G_SUBPROCESS (source), result, &error))
     {
-      finish (self, TRUE, NULL);
+      finish (self, self->backend_error == NULL, self->backend_error);
       return;
     }
 
@@ -98,7 +101,10 @@ on_process_waited (GObject      *source,
   {
     const char *tail = stderr_tail (self);
 
-    finish (self, FALSE, tail != NULL ? tail : error->message);
+    finish (self, FALSE,
+            tail != NULL ? tail
+                         : self->backend_error != NULL ? self->backend_error
+                                                       : error->message);
   }
 }
 
@@ -147,18 +153,38 @@ on_event (const AiEvent *event,
       /* The backend reported the id only at the end; keep it either way. */
       if (event->session_id != NULL)
         g_signal_emit (self, signals[SIGNAL_SESSION_STARTED], 0, event->session_id);
+      g_clear_pointer (&self->backend_error, g_free);
       break;
 
     case AI_EVENT_ERROR:
       /* Interrupting a CLI makes it report the turn as failed, which is true
        * from its side and misleading from ours: the user stopped it, and
        * being told the backend died is both wrong and alarming. */
-      finish (self, self->stopping, self->stopping ? NULL : event->text);
+      /*
+       * A streamed error is not necessarily terminal. Codex emits one while
+       * reconnecting, then carries on with the same turn. Wait for process
+       * exit; a later result clears it, while a real failed exit reports it.
+       * This also keeps the turn registered, preventing a second process from
+       * resuming the same backend session concurrently.
+       */
+      if (!self->stopping)
+        {
+          g_free (self->backend_error);
+          self->backend_error = g_strdup (event->text);
+        }
       break;
 
     default:
       break;
     }
+}
+
+static void
+on_codex_finished (gboolean    success,
+                   const char *message,
+                   gpointer    user_data)
+{
+  finish (XD_CHAT_SESSION (user_data), success, message);
 }
 
 static void
@@ -250,15 +276,16 @@ xd_chat_session_start (XdChatSession    *self,
   g_autoptr (GError) local_error = NULL;
   g_autoptr (XdAgentSecrets) secrets = NULL;
   g_auto (GStrv) environment = NULL;
+  g_auto (GStrv) secret_names = NULL;
   g_autofree char *secret_prompt = NULL;
   g_autofree char *system_prompt = NULL;
   AiRunSpec effective;
 
   g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
   g_return_val_if_fail (spec != NULL, FALSE);
-  g_return_val_if_fail (self->process == NULL, FALSE);
+  g_return_val_if_fail (self->process == NULL && self->codex_turn == NULL, FALSE);
 
-  secrets = xd_agent_secrets_load (NULL, &local_error);
+  secrets = xd_agent_secrets_load_effective (spec->folder_ids, &local_error);
   if (secrets == NULL)
     {
       g_prefix_error (&local_error, "Cannot load agent secrets: ");
@@ -282,13 +309,33 @@ xd_chat_session_start (XdChatSession    *self,
     }
 
   ai_parser_set_model (self->parser, effective.model);
-  argv = self->backend->build_argv (self->backend, &effective);
+  environment = xd_host_environ ();
+  environment = xd_agent_secrets_apply_environment (secrets, environment);
+  secret_names = xd_agent_secrets_names (secrets);
 
+  if (self->backend->transport == AI_TRANSPORT_CODEX_APP_SERVER)
+    {
+      self->codex_turn = xd_codex_app_server_start (
+        self->backend, &effective, environment, secret_names, on_event,
+        on_codex_finished, self, &local_error);
+      if (self->codex_turn == NULL)
+        {
+          if (g_error_matches (local_error, G_SPAWN_ERROR,
+                               G_SPAWN_ERROR_NOENT))
+            g_set_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_NOENT,
+                         "%s is not in PATH. xd runs the CLI you already have "
+                         "installed and signed in.", self->backend->program);
+          else
+            g_propagate_error (error, g_steal_pointer (&local_error));
+          return FALSE;
+        }
+      return TRUE;
+    }
+
+  argv = self->backend->build_argv (self->backend, &effective);
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDIN_PIPE |
                                         G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                         G_SUBPROCESS_FLAGS_STDERR_PIPE);
-  environment = xd_host_environ ();
-  environment = xd_agent_secrets_apply_environment (secrets, environment);
   g_subprocess_launcher_set_environ (launcher, environment);
 
   /* The working directory is how a folder's project context reaches the CLI:
@@ -311,8 +358,8 @@ xd_chat_session_start (XdChatSession    *self,
       return FALSE;
     }
 
-  /* codex reads stdin when it is a pipe and appends it to the prompt, so it
-   * has to see end-of-file straight away. */
+  /* These are non-interactive children; leaving stdin open can make a CLI
+   * wait for more input after the prompt it received in argv. */
   g_output_stream_close (g_subprocess_get_stdin_pipe (self->process), NULL, NULL);
 
   self->stdout_stream =
@@ -356,10 +403,17 @@ xd_chat_session_cancel (XdChatSession *self)
 {
   g_return_if_fail (XD_IS_CHAT_SESSION (self));
 
-  if (self->process == NULL || self->finished || self->stopping)
+  if ((self->process == NULL && self->codex_turn == NULL) ||
+      self->finished || self->stopping)
     return;
 
   self->stopping = TRUE;
+
+  if (self->codex_turn != NULL)
+    {
+      xd_codex_turn_cancel (self->codex_turn);
+      return;
+    }
 
 #ifdef G_OS_WIN32
   /* GSubprocess has no signal delivery on Windows. Force-exit is the only
@@ -380,7 +434,7 @@ xd_chat_session_is_running (XdChatSession *self)
 {
   g_return_val_if_fail (XD_IS_CHAT_SESSION (self), FALSE);
 
-  return self->process != NULL && !self->finished;
+  return (self->process != NULL || self->codex_turn != NULL) && !self->finished;
 }
 
 static void
@@ -392,6 +446,15 @@ xd_chat_session_dispose (GObject *object)
 
   if (self->process != NULL && !self->finished)
     g_subprocess_force_exit (self->process);
+
+  if (self->codex_turn != NULL)
+    {
+      if (!self->finished)
+        xd_codex_turn_cancel (self->codex_turn);
+      xd_codex_turn_detach (self->codex_turn);
+      xd_codex_turn_free (self->codex_turn);
+      self->codex_turn = NULL;
+    }
 
   g_cancellable_cancel (self->cancellable);
 
@@ -409,6 +472,7 @@ xd_chat_session_finalize (GObject *object)
   XdChatSession *self = XD_CHAT_SESSION (object);
 
   g_clear_pointer (&self->parser, ai_parser_free);
+  g_clear_pointer (&self->backend_error, g_free);
   g_string_free (self->stderr_text, TRUE);
 
   G_OBJECT_CLASS (xd_chat_session_parent_class)->finalize (object);

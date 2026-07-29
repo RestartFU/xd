@@ -764,6 +764,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
   g_autoptr (XdAgentSecrets) stored = NULL;
   g_autoptr (GError) error = NULL;
   g_auto (GStrv) environment = NULL;
+  XdNode *folder;
 
   daemon_start (&daemon);
   path = g_build_filename (daemon.dir, "agent-secrets.json", NULL);
@@ -771,12 +772,13 @@ test_agent_secrets_are_managed_without_reading_values (void)
 
   client = xd_remote_client_new ("127.0.0.1", daemon.port);
   tree = paired_tree (&daemon, client);
+  folder = child_at (xd_remote_tree_get_root (tree), 0);
 
   {
     AgentSecretsWait read = { .tree = tree };
 
     xd_remote_tree_get_agent_secrets_async (
-      tree, NULL, on_agent_secrets_read, &read);
+      tree, NULL, NULL, on_agent_secrets_read, &read);
     wait_for (&read.wait);
     g_assert_true (read.wait.ok);
     g_assert_null (read.names[0]);
@@ -791,7 +793,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait saved = { .tree = tree };
 
     xd_remote_tree_set_agent_secrets_async (
-      tree, entries, G_N_ELEMENTS (entries), NULL,
+      tree, NULL, entries, G_N_ELEMENTS (entries), NULL,
       on_agent_secrets_saved, &saved);
     wait_for (&saved.wait);
     g_assert_true (saved.wait.ok);
@@ -802,7 +804,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait read = { .tree = tree };
 
     xd_remote_tree_get_agent_secrets_async (
-      tree, NULL, on_agent_secrets_read, &read);
+      tree, NULL, NULL, on_agent_secrets_read, &read);
     wait_for (&read.wait);
     g_assert_true (read.wait.ok);
     g_assert_cmpstr (read.names[0], ==, "CLOUDFLARE_API_TOKEN");
@@ -820,7 +822,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait saved = { .tree = tree };
 
     xd_remote_tree_set_agent_secrets_async (
-      tree, entries, G_N_ELEMENTS (entries), NULL,
+      tree, NULL, entries, G_N_ELEMENTS (entries), NULL,
       on_agent_secrets_saved, &saved);
     wait_for (&saved.wait);
     g_assert_true (saved.wait.ok);
@@ -840,7 +842,7 @@ test_agent_secrets_are_managed_without_reading_values (void)
     AgentSecretsWait saved = { .tree = tree };
 
     xd_remote_tree_set_agent_secrets_async (
-      tree, NULL, 0, NULL, on_agent_secrets_saved, &saved);
+      tree, NULL, NULL, 0, NULL, on_agent_secrets_saved, &saved);
     wait_for (&saved.wait);
     g_assert_true (saved.wait.ok);
     g_free (saved.wait.failure);
@@ -854,6 +856,44 @@ test_agent_secrets_are_managed_without_reading_values (void)
 
     g_assert_null (names[0]);
   }
+
+  /* A folder store is separate from global and still never returns values. */
+  {
+    const XdAgentSecretUpdate entries[] = {
+      { "FOLDER_TOKEN", "folder-secret-value" },
+    };
+    AgentSecretsWait saved = { .tree = tree };
+
+    xd_remote_tree_set_agent_secrets_async (
+      tree, folder, entries, G_N_ELEMENTS (entries), NULL,
+      on_agent_secrets_saved, &saved);
+    wait_for (&saved.wait);
+    g_assert_true (saved.wait.ok);
+    g_free (saved.wait.failure);
+  }
+
+  {
+    AgentSecretsWait read = { .tree = tree };
+
+    xd_remote_tree_get_agent_secrets_async (
+      tree, folder, NULL, on_agent_secrets_read, &read);
+    wait_for (&read.wait);
+    g_assert_true (read.wait.ok);
+    g_assert_cmpstr (read.names[0], ==, "FOLDER_TOKEN");
+    g_assert_null (read.names[1]);
+    g_assert_cmpstr (read.names[0], !=, "folder-secret-value");
+    g_strfreev (read.names);
+    g_free (read.wait.failure);
+  }
+
+  g_clear_pointer (&stored, xd_agent_secrets_free);
+  stored = xd_agent_secrets_load_for_folder ("folder-1", &error);
+  g_assert_no_error (error);
+  g_clear_pointer (&environment, g_strfreev);
+  environment = g_new0 (char *, 1);
+  environment = xd_agent_secrets_apply_environment (stored, environment);
+  g_assert_cmpstr (g_environ_getenv (environment, "FOLDER_TOKEN"),
+                   ==, "folder-secret-value");
 
   if (old_override != NULL)
     g_setenv ("XD_AGENT_SECRETS_FILE", old_override, TRUE);
@@ -1116,6 +1156,43 @@ test_tree_refresh_keeps_client_placeholders (void)
 
   g_assert_true (child_at (root, 0) == folder_placeholder);
   g_assert_true (child_at (folder, 0) == chat_placeholder);
+
+  daemon_stop (&daemon);
+}
+
+/*
+ * A tree event is ordinary background synchronization, not visible work.
+ *
+ * The remote root used to swap its server icon for animated dots until every
+ * refresh reply arrived. Daemon changes can be frequent, so that made the
+ * connection row flash even though it remained usable throughout.
+ */
+static void
+test_background_tree_refresh_stays_visually_idle (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  XdNode *root;
+  Wait loading = { 0 };
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  root = xd_remote_tree_get_root (tree);
+
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
+
+  g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &loading);
+  xd_remote_tree_refresh (tree);
+
+  /* The request is in flight, but an already loaded tree remains stable. */
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
+
+  wait_for (&loading);
+  g_signal_handlers_disconnect_by_data (tree, &loading);
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
 
   daemon_stop (&daemon);
 }
@@ -1644,6 +1721,14 @@ test_images_are_uploaded_to_the_daemon (void)
    * this test tears the server down. */
   while (g_main_context_pending (NULL))
     g_main_context_iteration (NULL, FALSE);
+
+  {
+    g_autoptr (XdChat) stored_chat =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_nonnull (stored_chat);
+    g_assert_false (stored_chat->daemon_working);
+  }
 
   /* Command metadata survives the turn on the daemon, so a device opening
    * this chat later gets the same installed command list. */
@@ -2249,6 +2334,7 @@ test_remote_workspace_choice_is_persisted (void)
   g_assert_no_error (error);
   g_assert_false (stored->new_worktree);
   g_assert_cmpstr (stored->workdir, ==, listed_existing);
+  g_assert_cmpstr (stored->original_workdir, ==, daemon.root);
 
   json_object_unref (changed.reply);
   json_object_unref (selected.reply);
@@ -2256,6 +2342,42 @@ test_remote_workspace_choice_is_persisted (void)
   g_free (changed.wait.failure);
   g_free (selected.wait.failure);
   g_free (options.wait.failure);
+  daemon_stop (&daemon);
+}
+
+static void
+test_deleted_worktree_falls_back_to_original_checkout (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdChat) stored = NULL;
+  g_autoptr (XdDaemonTurn) resolver = NULL;
+  g_autofree char *original = NULL;
+  g_autofree char *deleted = NULL;
+  g_autofree char *resolved = NULL;
+  g_autoptr (GError) error = NULL;
+
+  daemon_start (&daemon);
+  original = g_build_filename (daemon.dir, "original-checkout", NULL);
+  deleted = g_build_filename (daemon.dir, "deleted-worktree", NULL);
+  g_assert_cmpint (g_mkdir (original, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (deleted, 0700), ==, 0);
+  g_assert_true (xd_storage_switch_workdir (
+    daemon.storage, daemon.chat_id, deleted, original, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_rmdir (deleted), ==, 0);
+
+  chat = xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  resolver = xd_daemon_turn_new (daemon.storage, daemon.root);
+  resolved = xd_daemon_turn_resolve_workdir (resolver, chat);
+
+  g_assert_cmpstr (resolved, ==, original);
+  stored = xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (stored->workdir, ==, original);
+  g_assert_null (stored->original_workdir);
+
   daemon_stop (&daemon);
 }
 
@@ -3219,6 +3341,63 @@ test_slow_git_snapshot_does_not_stall_other_chats (void)
 }
 
 /*
+ * Opening a chat is a passive snapshot. A queue left by a stopped daemon
+ * must stay pending until the user explicitly sends or steers it.
+ */
+static void
+test_opening_an_idle_chat_keeps_its_queue (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  g_autoptr (GError) error = NULL;
+  RemoteReply reply = { 0 };
+
+  daemon_start (&daemon);
+  g_assert_true (xd_storage_queue_append (
+    daemon.storage, daemon.chat_id, "wait for me", &error));
+  g_assert_no_error (error);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+
+  {
+    g_autoptr (JsonBuilder) builder = json_builder_new ();
+    JsonArray *queue;
+
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "op");
+    json_builder_add_string_value (builder, "chat");
+    json_builder_set_member_name (builder, "chat");
+    json_builder_add_string_value (builder, daemon.chat_id);
+    json_builder_end_object (builder);
+
+    call_remote_request (client, builder, &reply);
+    queue = json_object_get_array_member (reply.reply, "queue");
+
+    g_assert_false (json_object_get_boolean_member_with_default (
+      reply.reply, "working", FALSE));
+    g_assert_cmpuint (json_array_get_length (queue), ==, 1);
+    g_assert_cmpstr (json_array_get_string_element (queue, 0), ==,
+                     "wait for me");
+  }
+
+  {
+    g_autoptr (XdChat) stored =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+
+    g_assert_no_error (error);
+    g_assert_nonnull (stored);
+    g_assert_cmpuint (stored->queue->len, ==, 1);
+    g_assert_cmpstr (g_ptr_array_index (stored->queue, 0), ==, "wait for me");
+  }
+
+  json_object_unref (reply.reply);
+  g_free (reply.wait.failure);
+  daemon_stop (&daemon);
+}
+
+/*
  * The client may know about a queued instruction before it knows a remote turn
  * stopped. Clicking steer must still do work: cancel is sent regardless of the
  * client's stale state. Selecting a later row must promote that exact message
@@ -3438,6 +3617,14 @@ test_a_joining_device_sees_an_active_turn (void)
   stored_turn.chat_id = daemon.chat_id;
   wait_until (live_turn_was_stored, &stored_turn);
 
+  {
+    g_autoptr (XdChat) stored_chat =
+      xd_storage_get_chat (daemon.storage, daemon.chat_id, NULL);
+
+    g_assert_nonnull (stored_chat);
+    g_assert_true (stored_chat->daemon_working);
+  }
+
   if (old_path != NULL)
     g_setenv ("PATH", old_path, TRUE);
   else
@@ -3621,7 +3808,7 @@ test_a_live_turn_is_already_durable (void)
   turn = xd_daemon_turn_new (daemon.storage, daemon.root);
   g_signal_connect (turn, "text", G_CALLBACK (on_live_turn_text), &text);
   g_assert_true (xd_daemon_turn_start (turn, daemon.chat_id,
-                                       "keep this", &error));
+                                       "keep this", TRUE, &error));
   g_assert_no_error (error);
 
   if (old_path != NULL)
@@ -3667,7 +3854,8 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
   RemoteReply started = { 0 };
   StoredTurn stored;
   Wait quiesced = { 0 };
-  gboolean found_resume = FALSE;
+  gboolean found_resume_message = FALSE;
+  gboolean found_original_prompt = FALSE;
 
   daemon_start (&daemon);
 
@@ -3755,12 +3943,18 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
     {
       XdMessage *message = g_ptr_array_index (messages, i);
 
-      if (g_strcmp0 (message->role, "user") == 0 &&
-          g_strcmp0 (message->content,
-                     "Resume the work interrupted by the daemon update.") == 0)
-        found_resume = TRUE;
+      if (g_strcmp0 (message->role, "user") == 0)
+        {
+          if (g_strcmp0 (message->content, "do long work") == 0)
+            found_original_prompt = TRUE;
+          if (g_strcmp0 (
+                message->content,
+                "Resume the work interrupted by the daemon update.") == 0)
+            found_resume_message = TRUE;
+        }
     }
-  g_assert_true (found_resume);
+  g_assert_true (found_original_prompt);
+  g_assert_false (found_resume_message);
 
   json_object_unref (started.reply);
   g_free (started.wait.failure);
@@ -3865,7 +4059,7 @@ test_an_interrupted_turn_keeps_its_timeline (void)
                     G_CALLBACK (on_interrupted_turn_finished), &seen);
 
   g_assert_true (xd_daemon_turn_start (turn, daemon.chat_id,
-                                       "inspect it", &error));
+                                       "inspect it", TRUE, &error));
   g_assert_no_error (error);
 
   if (old_path != NULL)
@@ -3988,6 +4182,7 @@ main (int argc, char *argv[])
   ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
   ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
   ADD ("/remote/tree-refresh-keeps-client-placeholders", test_tree_refresh_keeps_client_placeholders);
+  ADD ("/remote/background-tree-refresh-stays-visually-idle", test_background_tree_refresh_stays_visually_idle);
   ADD ("/remote/new-chat-inherits-last-changed-agent", test_remote_new_chat_inherits_last_changed_agent);
   ADD ("/remote/folder-context-is-managed-from-the-client", test_folder_context_is_managed_from_the_client);
   ADD ("/remote/agent-secrets-are-managed-without-reading-values", test_agent_secrets_are_managed_without_reading_values);
@@ -4000,10 +4195,12 @@ main (int argc, char *argv[])
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/files-are-browsed-read-and-written", test_remote_files_are_browsed_read_and_written);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
+  ADD ("/remote/deleted-worktree-falls-back-to-original-checkout", test_deleted_worktree_falls_back_to_original_checkout);
   ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/send-during-turn-queues", test_send_during_turn_queues);
   ADD ("/remote/slow-git-snapshot-does-not-stall-other-chats", test_slow_git_snapshot_does_not_stall_other_chats);
+  ADD ("/remote/opening-an-idle-chat-keeps-its-queue", test_opening_an_idle_chat_keeps_its_queue);
   ADD ("/remote/steer-starts-an-idle-remote-queue", test_steer_starts_an_idle_remote_queue);
   ADD ("/remote/a-joining-device-sees-an-active-turn", test_a_joining_device_sees_an_active_turn);
   ADD ("/remote/a-live-turn-is-already-durable", test_a_live_turn_is_already_durable);

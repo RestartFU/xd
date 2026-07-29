@@ -1,4 +1,5 @@
 #include "backend/backend.h"
+#include "backend/codex-backend.h"
 #include "util/subagent-tool.h"
 
 #include <glib/gstdio.h>
@@ -286,47 +287,21 @@ test_codex_argv (void)
   const AiBackend *backend = ai_backend_lookup ("codex");
   AiRunSpec spec = { .prompt = "hello" };
   g_autofree char *plain = NULL;
-  g_autofree char *resumed = NULL;
+  g_autofree char *instructions = NULL;
 
   plain = argv_to_string (backend, &spec);
-  g_assert_nonnull (strstr (plain, "exec --json"));
-  g_assert_nonnull (strstr (plain, "-s read-only"));
+  g_assert_nonnull (strstr (plain, "app-server --listen stdio://"));
+  g_assert_null (strstr (plain, "exec"));
 
-  /*
-   * Resuming is a different command with different options.
-   *
-   * "codex exec resume" takes neither -s nor -C, and refuses the whole run if
-   * it is given one -- so the sandbox travels as the config override it does
-   * take, and the session id goes after the options, where its usage puts it.
-   * Every message after the first goes through here.
-   */
-  spec.resume_session_id = "thread-1";
-  spec.workdir = "/tmp/somewhere";
-  resumed = argv_to_string (backend, &spec);
-
-  g_assert_nonnull (strstr (resumed, "exec resume --json"));
-  g_assert_nonnull (strstr (resumed, "sandbox_mode=\"read-only\""));
-  g_assert_nonnull (strstr (resumed, "thread-1"));
-  g_assert_null (strstr (resumed, "-s read-only"));
-  g_assert_null (strstr (resumed, "-C "));
-
-  /* The id goes after the options, which is the order its usage gives. */
-  g_assert_true (strstr (resumed, "thread-1") >
-                 strstr (resumed, "sandbox_mode="));
-
-  spec.workdir = NULL;
-
-  /* Codex has no --append-system-prompt, so instructions must reach it by
-   * riding in front of the prompt. */
-  spec.resume_session_id = NULL;
+  /* Instructions now travel as developerInstructions, separate from user
+   * input, on thread/start and thread/resume. */
   spec.system_prompt = "be brief";
-  g_free (plain);
-  plain = argv_to_string (backend, &spec);
-  g_assert_nonnull (strstr (plain, "be brief\n\nhello"));
+  instructions = xd_codex_developer_instructions (&spec);
+  g_assert_nonnull (strstr (instructions, "be brief"));
   g_assert_nonnull (
-    strstr (plain, "Co-authored-by: Codex <codex@openai.com>"));
+    strstr (instructions, "Co-authored-by: Codex <codex@openai.com>"));
   g_assert_nonnull (
-    strstr (plain, "unless the user specifically asks you not to"));
+    strstr (instructions, "unless the user specifically asks you not to"));
 }
 
 static void
@@ -367,30 +342,28 @@ static void
 test_access_maps_to_each_cli (void)
 {
   const AiBackend *claude = ai_backend_lookup ("claude");
-  const AiBackend *codex = ai_backend_lookup ("codex");
   const AiBackend *cerebras = ai_backend_lookup ("cerebras");
   AiRunSpec spec = { .prompt = "hello" };
 
-  struct { AiAccess access; const char *claude_flag; const char *codex_flag; } cases[] = {
-    { AI_ACCESS_PLAN,      "--permission-mode plan",              "-s read-only" },
-    { AI_ACCESS_READ_ONLY, "--permission-mode manual",            "-s read-only" },
-    { AI_ACCESS_EDIT,      "--permission-mode acceptEdits",       "-s workspace-write" },
-    { AI_ACCESS_FULL,      "--permission-mode bypassPermissions", "-s danger-full-access" },
+  struct { AiAccess access; const char *claude_flag; const char *codex_policy; } cases[] = {
+    { AI_ACCESS_PLAN,      "--permission-mode plan",              "readOnly" },
+    { AI_ACCESS_READ_ONLY, "--permission-mode manual",            "readOnly" },
+    { AI_ACCESS_EDIT,      "--permission-mode acceptEdits",       "workspaceWrite" },
+    { AI_ACCESS_FULL,      "--permission-mode bypassPermissions", "dangerFullAccess" },
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (cases); i++)
     {
       g_autofree char *claude_argv = NULL;
-      g_autofree char *codex_argv = NULL;
       g_autofree char *cerebras_argv = NULL;
 
       spec.access = cases[i].access;
       claude_argv = argv_to_string (claude, &spec);
-      codex_argv = argv_to_string (codex, &spec);
       cerebras_argv = argv_to_string (cerebras, &spec);
 
       g_assert_nonnull (strstr (claude_argv, cases[i].claude_flag));
-      g_assert_nonnull (strstr (codex_argv, cases[i].codex_flag));
+      g_assert_cmpstr (xd_codex_sandbox_policy_type (cases[i].access), ==,
+                       cases[i].codex_policy);
 
       if (cases[i].access <= AI_ACCESS_READ_ONLY)
         {
@@ -407,9 +380,10 @@ test_access_maps_to_each_cli (void)
   /* Codex has no plan mode, so planning has to be asked for in words. */
   spec.access = AI_ACCESS_PLAN;
   {
-    g_autofree char *codex_argv = argv_to_string (codex, &spec);
+    g_autofree char *instructions =
+      xd_codex_developer_instructions (&spec);
 
-    g_assert_nonnull (strstr (codex_argv, "<plan_mode>"));
+    g_assert_nonnull (strstr (instructions, "<plan_mode>"));
   }
 
   g_assert_cmpint (ai_access_from_string ("something-new"), ==, AI_ACCESS_READ_ONLY);
@@ -420,16 +394,13 @@ static void
 test_effort_maps_to_each_cli (void)
 {
   const AiBackend *claude = ai_backend_lookup ("claude");
-  const AiBackend *codex = ai_backend_lookup ("codex");
   const AiBackend *cerebras = ai_backend_lookup ("cerebras");
   AiRunSpec spec = { .prompt = "hello", .effort = AI_EFFORT_XHIGH };
   g_autofree char *claude_argv = argv_to_string (claude, &spec);
-  g_autofree char *codex_argv = argv_to_string (codex, &spec);
   g_autofree char *cerebras_argv = NULL;
   g_autofree char *unset = NULL;
 
   g_assert_nonnull (strstr (claude_argv, "--effort xhigh"));
-  g_assert_nonnull (strstr (codex_argv, "model_reasoning_effort=\"xhigh\""));
 
   spec.model = "cerebras/gpt-oss-120b";
   cerebras_argv = argv_to_string (cerebras, &spec);
@@ -710,18 +681,12 @@ static void
 test_model_reaches_argv (void)
 {
   const AiBackend *claude = ai_backend_lookup ("claude");
-  const AiBackend *codex = ai_backend_lookup ("codex");
   const AiBackend *cerebras = ai_backend_lookup ("cerebras");
   AiRunSpec spec = { .prompt = "hello", .model = "claude-opus-5" };
   g_autofree char *claude_argv = argv_to_string (claude, &spec);
-  g_autofree char *codex_argv = NULL;
   g_autofree char *cerebras_argv = NULL;
 
   g_assert_nonnull (strstr (claude_argv, "--model claude-opus-5"));
-
-  spec.model = "gpt-5.6-sol";
-  codex_argv = argv_to_string (codex, &spec);
-  g_assert_nonnull (strstr (codex_argv, "-m gpt-5.6-sol"));
 
   spec.model = "cerebras/zai-glm-4.7";
   cerebras_argv = argv_to_string (cerebras, &spec);

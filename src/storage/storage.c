@@ -4,7 +4,7 @@
 #include <json-glib/json-glib.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 15
+#define XD_STORAGE_SCHEMA_VERSION 18
 
 struct _XdStorage
 {
@@ -27,8 +27,10 @@ enum
 
 static guint signals[N_SIGNALS];
 
-/* SQLite writes several times per statement; one event out the far side is
- * enough, and a moment late costs nothing. */
+/* SQLite writes several times per statement. Cap notifications rather than
+ * waiting for complete silence: a streamed reply can write continuously for
+ * minutes, and a resettable debounce made every other process look frozen
+ * until the turn stopped. */
 #define SETTLE_MS 400
 
 G_DEFINE_FINAL_TYPE (XdStorage, xd_storage, G_TYPE_OBJECT)
@@ -54,8 +56,8 @@ on_file_changed (GFileMonitor      *monitor,
 {
   XdStorage *self = user_data;
 
-  g_clear_handle_id (&self->settled_id, g_source_remove);
-  self->settled_id = g_timeout_add (SETTLE_MS, on_settled, self);
+  if (self->settled_id == 0)
+    self->settled_id = g_timeout_add (SETTLE_MS, on_settled, self);
 }
 
 void
@@ -97,6 +99,7 @@ xd_chat_free (XdChat *self)
   g_free (self->title);
   g_free (self->backend);
   g_free (self->workdir);
+  g_free (self->original_workdir);
   g_free (self->model);
   g_free (self->effort);
   g_free (self->access);
@@ -403,6 +406,47 @@ migrate (XdStorage  *self,
                  error))
     return FALSE;
 
+  /* A linked checkout can be removed after a turn. Remember where the chat
+   * came from so its next message can return there instead of dying in chdir. */
+  if (version < 16 &&
+      !exec_sql (self,
+                 "ALTER TABLE chats ADD COLUMN original_workdir TEXT;",
+                 error))
+    return FALSE;
+
+  /*
+   * Sidebar recency follows user instructions, not arbitrary database writes.
+   * Backfill old chats from their latest user row; untouched chats retain
+   * creation order.
+   */
+  if (version < 17 &&
+      !exec_sql (
+        self,
+        "ALTER TABLE chats ADD COLUMN"
+        " last_user_message_at INTEGER NOT NULL DEFAULT 0;"
+        "UPDATE chats"
+        " SET last_user_message_at = COALESCE("
+        "   (SELECT MAX(messages.created_at) * 1000000"
+        "      FROM messages"
+        "     WHERE messages.chat_id = chats.id AND messages.role = 'user'),"
+        "   chats.created_at * 1000000"
+        " );"
+        "CREATE INDEX chats_folder_user_message"
+        " ON chats (folder_id, last_user_message_at DESC);",
+        error))
+    return FALSE;
+
+  /* A daemon and a local window are separate processes. Persist only whether
+   * the daemon owns a turn; the streamed transcript itself is already stored
+   * in messages as it arrives. */
+  if (version < 18 &&
+      !exec_sql (
+        self,
+        "ALTER TABLE chats ADD COLUMN"
+        " daemon_working INTEGER NOT NULL DEFAULT 0;",
+        error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          XD_STORAGE_SCHEMA_VERSION);
@@ -481,7 +525,7 @@ xd_storage_create_chat (XdStorage   *self,
   g_return_val_if_fail (backend != NULL, NULL);
 
   id = g_uuid_string_random ();
-  now = g_get_real_time () / G_USEC_PER_SEC;
+  now = g_get_real_time ();
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT backend, model, effort, access, plan"
@@ -518,8 +562,9 @@ xd_storage_create_chat (XdStorage   *self,
   if (sqlite3_prepare_v2 (self->db,
                           "INSERT INTO chats (id, folder_id, title, backend,"
                           "                   model, effort, access, plan, workdir,"
-                          "                   created_at, updated_at)"
-                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                          "                   created_at, updated_at,"
+                          "                   last_user_message_at)"
+                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot create the chat");
@@ -535,8 +580,9 @@ xd_storage_create_chat (XdStorage   *self,
   bind_text (stmt, 7, actual_access);
   sqlite3_bind_int (stmt, 8, actual_plan ? 1 : 0);
   bind_text (stmt, 9, workdir);
-  sqlite3_bind_int64 (stmt, 10, now);
-  sqlite3_bind_int64 (stmt, 11, now);
+  sqlite3_bind_int64 (stmt, 10, now / G_USEC_PER_SEC);
+  sqlite3_bind_int64 (stmt, 11, now / G_USEC_PER_SEC);
+  sqlite3_bind_int64 (stmt, 12, now);
 
   if (sqlite3_step (stmt) != SQLITE_DONE)
     {
@@ -634,13 +680,16 @@ chat_from_row (sqlite3_stmt *stmt)
     chat->queue = queue_from_column (stored);
   }
   chat->new_worktree  = sqlite3_column_int (stmt, 14) != 0;
+  chat->original_workdir = column_text (stmt, 15);
+  chat->daemon_working = sqlite3_column_int (stmt, 16) != 0;
 
   return chat;
 }
 
 #define CHAT_COLUMNS \
   "id, folder_id, title, backend, workdir, model, effort, access, plan,"\
-  " created_at, updated_at, terminal_open, diff_open, queued, new_worktree"
+  " created_at, updated_at, terminal_open, diff_open, queued, new_worktree,"\
+  " original_workdir, daemon_working"
 
 XdChat *
 xd_storage_get_chat (XdStorage   *self,
@@ -684,7 +733,8 @@ xd_storage_list_chats (XdStorage   *self,
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT " CHAT_COLUMNS " FROM chats"
-                          " WHERE folder_id = ? ORDER BY updated_at DESC;",
+                          " WHERE folder_id = ?"
+                          " ORDER BY last_user_message_at DESC, created_at DESC;",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot list chats");
@@ -702,7 +752,8 @@ xd_storage_list_chats (XdStorage   *self,
   return chats;
 }
 
-/* Every chat mutation also bumps updated_at, which is what orders the list. */
+/* Metadata mutations still bump updated_at for general change tracking.
+ * Sidebar order has its own user-message timestamp. */
 static gboolean
 update_chat_column (XdStorage   *self,
                     const char  *sql,
@@ -744,6 +795,56 @@ xd_storage_set_chat_title (XdStorage   *self,
   return update_chat_column (self,
                              "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?;",
                              title, chat_id, "Cannot rename the chat", error);
+}
+
+gboolean
+xd_storage_set_daemon_working (XdStorage   *self,
+                               const char  *chat_id,
+                               gboolean     working,
+                               GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats SET daemon_working = ? WHERE id = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot update the daemon turn");
+      return FALSE;
+    }
+
+  sqlite3_bind_int (stmt, 1, working);
+  bind_text (stmt, 2, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
+  if (!ok)
+    {
+      if (sqlite3_errcode (self->db) != SQLITE_OK)
+        set_sqlite_error (error, self->db, "Cannot update the daemon turn");
+      else
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                     "No chat %s", chat_id);
+    }
+
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+gboolean
+xd_storage_clear_daemon_working (XdStorage  *self,
+                                 GError    **error)
+{
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+
+  return exec_sql (self,
+                   "UPDATE chats SET daemon_working = 0"
+                   " WHERE daemon_working != 0;",
+                   error);
 }
 
 char *
@@ -845,17 +946,81 @@ xd_storage_set_backend (XdStorage   *self,
 }
 
 gboolean
-xd_storage_set_workdir (XdStorage   *self,
-                        const char  *chat_id,
-                        const char  *workdir,
-                        GError     **error)
+xd_storage_switch_workdir (XdStorage   *self,
+                           const char  *chat_id,
+                           const char  *workdir,
+                           const char  *original_workdir,
+                           GError     **error)
 {
-  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
 
-  return update_chat_column (self,
-                             "UPDATE chats SET workdir = ?, updated_at = ? WHERE id = ?;",
-                             workdir, chat_id, "Cannot change the working directory",
-                             error);
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+  g_return_val_if_fail (workdir != NULL && *workdir != '\0', FALSE);
+  g_return_val_if_fail (
+    original_workdir != NULL && *original_workdir != '\0', FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats"
+        "   SET workdir = ?,"
+        "       original_workdir = COALESCE(original_workdir, ?),"
+        "       updated_at = ?"
+        " WHERE id = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot change the working directory");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, workdir);
+  bind_text (stmt, 2, original_workdir);
+  sqlite3_bind_int64 (stmt, 3, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 4, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot change the working directory");
+
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+gboolean
+xd_storage_restore_workdir (XdStorage   *self,
+                            const char  *chat_id,
+                            const char  *workdir,
+                            GError     **error)
+{
+  sqlite3_stmt *stmt = NULL;
+  gboolean ok;
+
+  g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
+  g_return_val_if_fail (chat_id != NULL, FALSE);
+  g_return_val_if_fail (workdir != NULL && *workdir != '\0', FALSE);
+
+  if (sqlite3_prepare_v2 (
+        self->db,
+        "UPDATE chats"
+        "   SET workdir = ?, original_workdir = NULL, updated_at = ?"
+        " WHERE id = ?;",
+        -1, &stmt, NULL) != SQLITE_OK)
+    {
+      set_sqlite_error (error, self->db, "Cannot restore the working directory");
+      return FALSE;
+    }
+
+  bind_text (stmt, 1, workdir);
+  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
+  bind_text (stmt, 3, chat_id);
+
+  ok = sqlite3_step (stmt) == SQLITE_DONE;
+  if (!ok)
+    set_sqlite_error (error, self->db, "Cannot restore the working directory");
+
+  sqlite3_finalize (stmt);
+  return ok;
 }
 
 gboolean
@@ -900,6 +1065,7 @@ gboolean
 xd_storage_use_existing_worktree (XdStorage   *self,
                                   const char  *chat_id,
                                   const char  *workdir,
+                                  const char  *original_workdir,
                                   GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
@@ -908,10 +1074,15 @@ xd_storage_use_existing_worktree (XdStorage   *self,
   g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
   g_return_val_if_fail (chat_id != NULL, FALSE);
   g_return_val_if_fail (workdir != NULL && *workdir != '\0', FALSE);
+  g_return_val_if_fail (
+    original_workdir != NULL && *original_workdir != '\0', FALSE);
 
   if (sqlite3_prepare_v2 (
         self->db,
-        "UPDATE chats SET workdir = ?, new_worktree = 0, updated_at = ?"
+        "UPDATE chats"
+        "   SET workdir = ?,"
+        "       original_workdir = COALESCE(original_workdir, ?),"
+        "       new_worktree = 0, updated_at = ?"
         " WHERE id = ? AND NOT EXISTS"
         "   (SELECT 1 FROM messages WHERE chat_id = ?);",
         -1, &stmt, NULL) != SQLITE_OK)
@@ -921,9 +1092,10 @@ xd_storage_use_existing_worktree (XdStorage   *self,
     }
 
   bind_text (stmt, 1, workdir);
-  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
-  bind_text (stmt, 3, chat_id);
+  bind_text (stmt, 2, original_workdir);
+  sqlite3_bind_int64 (stmt, 3, g_get_real_time () / G_USEC_PER_SEC);
   bind_text (stmt, 4, chat_id);
+  bind_text (stmt, 5, chat_id);
 
   ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
   if (!ok)
@@ -939,6 +1111,7 @@ gboolean
 xd_storage_use_worktree (XdStorage   *self,
                          const char  *chat_id,
                          const char  *workdir,
+                         const char  *original_workdir,
                          GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
@@ -947,11 +1120,15 @@ xd_storage_use_worktree (XdStorage   *self,
   g_return_val_if_fail (XD_IS_STORAGE (self), FALSE);
   g_return_val_if_fail (chat_id != NULL, FALSE);
   g_return_val_if_fail (workdir != NULL, FALSE);
+  g_return_val_if_fail (
+    original_workdir != NULL && *original_workdir != '\0', FALSE);
 
   if (sqlite3_prepare_v2 (
         self->db,
         "UPDATE chats"
-        "   SET workdir = ?, new_worktree = 0, updated_at = ?"
+        "   SET workdir = ?,"
+        "       original_workdir = COALESCE(original_workdir, ?),"
+        "       new_worktree = 0, updated_at = ?"
         " WHERE id = ? AND new_worktree = 1 AND NOT EXISTS"
         "   (SELECT 1 FROM messages WHERE chat_id = ?);",
         -1, &stmt, NULL) != SQLITE_OK)
@@ -961,9 +1138,10 @@ xd_storage_use_worktree (XdStorage   *self,
     }
 
   bind_text (stmt, 1, workdir);
-  sqlite3_bind_int64 (stmt, 2, g_get_real_time () / G_USEC_PER_SEC);
-  bind_text (stmt, 3, chat_id);
+  bind_text (stmt, 2, original_workdir);
+  sqlite3_bind_int64 (stmt, 3, g_get_real_time () / G_USEC_PER_SEC);
   bind_text (stmt, 4, chat_id);
+  bind_text (stmt, 5, chat_id);
 
   ok = sqlite3_step (stmt) == SQLITE_DONE && sqlite3_changes (self->db) == 1;
   if (!ok)
@@ -1574,29 +1752,42 @@ xd_storage_delete_chat (XdStorage   *self,
 
 static void
 touch_chat (XdStorage  *self,
-            const char *chat_id)
+            const char *chat_id,
+            gboolean    user_message)
 {
   sqlite3_stmt *stmt = NULL;
+  gint64 now = g_get_real_time ();
+  const char *sql = user_message
+    ? "UPDATE chats"
+      " SET updated_at = ?, last_user_message_at = ? WHERE id = ?;"
+    : "UPDATE chats SET updated_at = ? WHERE id = ?;";
 
-  if (sqlite3_prepare_v2 (self->db, "UPDATE chats SET updated_at = ? WHERE id = ?;",
-                          -1, &stmt, NULL) != SQLITE_OK)
+  if (sqlite3_prepare_v2 (self->db, sql, -1, &stmt, NULL) != SQLITE_OK)
     return;
 
-  sqlite3_bind_int64 (stmt, 1, g_get_real_time () / G_USEC_PER_SEC);
-  bind_text (stmt, 2, chat_id);
+  sqlite3_bind_int64 (stmt, 1, now / G_USEC_PER_SEC);
+  if (user_message)
+    {
+      sqlite3_bind_int64 (stmt, 2, now);
+      bind_text (stmt, 3, chat_id);
+    }
+  else
+    bind_text (stmt, 2, chat_id);
+
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 }
 
-gboolean
-xd_storage_append_message_with_id (XdStorage   *self,
-                                   const char  *chat_id,
-                                   const char  *role,
-                                   const char  *content,
-                                   const char  *raw_json,
-                                   const char  *label,
-                                   gint64      *message_id,
-                                   GError     **error)
+static gboolean
+append_message (XdStorage   *self,
+                const char  *chat_id,
+                const char  *role,
+                const char  *content,
+                const char  *raw_json,
+                const char  *label,
+                gboolean     user_activity,
+                gint64      *message_id,
+                GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
@@ -1627,15 +1818,31 @@ xd_storage_append_message_with_id (XdStorage   *self,
 
   sqlite3_finalize (stmt);
 
-  /* A new message makes the chat the most recent one in its folder. */
+  /* Only a user send advances sidebar recency. Agent output still updates the
+   * general mutation timestamp without moving the chat. */
   if (ok)
     {
       if (message_id != NULL)
         *message_id = sqlite3_last_insert_rowid (self->db);
-      touch_chat (self, chat_id);
+      touch_chat (self, chat_id, user_activity);
     }
 
   return ok;
+}
+
+gboolean
+xd_storage_append_message_with_id (XdStorage   *self,
+                                   const char  *chat_id,
+                                   const char  *role,
+                                   const char  *content,
+                                   const char  *raw_json,
+                                   const char  *label,
+                                   gint64      *message_id,
+                                   GError     **error)
+{
+  return append_message (
+    self, chat_id, role, content, raw_json, label,
+    g_strcmp0 (role, "user") == 0, message_id, error);
 }
 
 gboolean
@@ -1647,8 +1854,9 @@ xd_storage_append_message (XdStorage   *self,
                            const char  *label,
                            GError     **error)
 {
-  return xd_storage_append_message_with_id (
-    self, chat_id, role, content, raw_json, label, NULL, error);
+  return append_message (
+    self, chat_id, role, content, raw_json, label,
+    g_strcmp0 (role, "user") == 0, NULL, error);
 }
 
 gboolean

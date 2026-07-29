@@ -130,19 +130,22 @@ current_terminal (XdTerminalPanel *self)
 /*
  * A single session leaves the tab bar hidden, and with it the only place the
  * session was named. The label takes over there, showing the selected page's
- * title until a second tab brings the bar back.
+ * title until a second tab brings the bar back. Switch the two directly:
+ * AdwTabBar's autohide animation visibly drags terminal text when a new
+ * session is created.
  */
 static void
 update_title (XdTerminalPanel *self)
 {
   AdwTabView *view = current_view (self);
   AdwTabPage *page = view != NULL ? adw_tab_view_get_selected_page (view) : NULL;
+  gboolean show_tabs = view != NULL && adw_tab_view_get_n_pages (view) > 1;
   const char *title = page != NULL ? adw_tab_page_get_title (page) : NULL;
 
   gtk_label_set_label (self->title, title != NULL ? title : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->bar), show_tabs);
   gtk_widget_set_visible (GTK_WIDGET (self->title),
-                          title != NULL &&
-                          !adw_tab_bar_get_tabs_revealed (self->bar));
+                          title != NULL && !show_tabs);
 }
 
 static void
@@ -705,6 +708,13 @@ add_remote_session (XdTerminalPanel *self,
 
       terminal = VTE_TERMINAL (vte_terminal_new ());
       configure_terminal (terminal);
+      /*
+       * A remote VTE has no local pty from which AUTO can learn VERASE, so
+       * Backspace otherwise commits 0x08 and the daemon shell prints ^H.
+       * Its pty uses the conventional DEL byte. Keep this remote-only so a
+       * local terminal can still follow its own pty settings.
+       */
+      vte_terminal_set_backspace_binding (terminal, VTE_ERASE_ASCII_DELETE);
       gtk_widget_set_hexpand (GTK_WIDGET (terminal), FALSE);
       gtk_widget_set_vexpand (GTK_WIDGET (terminal), FALSE);
       gtk_widget_set_halign (GTK_WIDGET (terminal), GTK_ALIGN_START);
@@ -1398,10 +1408,9 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_widget_set_can_target (GTK_WIDGET (self->title), FALSE);
 
   self->bar = ADW_TAB_BAR (adw_tab_bar_new ());
-  adw_tab_bar_set_autohide (self->bar, TRUE);
+  adw_tab_bar_set_autohide (self->bar, FALSE);
   gtk_widget_add_css_class (GTK_WIDGET (self->bar), "inline");
-  g_signal_connect (self->bar, "notify::tabs-revealed",
-                    G_CALLBACK (on_title_source_changed), self);
+  gtk_widget_set_visible (GTK_WIDGET (self->bar), FALSE);
 
   self->stack = GTK_STACK (gtk_stack_new ());
   gtk_widget_set_vexpand (GTK_WIDGET (self->stack), TRUE);
@@ -1419,6 +1428,7 @@ xd_terminal_panel_init (XdTerminalPanel *self)
   gtk_box_append (GTK_BOX (controls), kill_button);
   gtk_widget_set_valign (controls, GTK_ALIGN_CENTER);
   gtk_widget_set_margin_top (controls, 4);
+  gtk_widget_set_margin_bottom (controls, 4);
   gtk_widget_set_margin_start (controls, 4);
   gtk_widget_set_margin_end (controls, 8);
 

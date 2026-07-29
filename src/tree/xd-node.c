@@ -301,3 +301,23 @@ xd_node_set_parent (XdNode *self,
   if (parent != NULL)
     g_object_add_weak_pointer (G_OBJECT (parent), (gpointer *) &self->parent);
 }
+
+GStrv
+xd_node_folder_ids (XdNode *self)
+{
+  g_autoptr (GPtrArray) ids = g_ptr_array_new_with_free_func (g_free);
+
+  g_return_val_if_fail (self == NULL || XD_IS_NODE (self), NULL);
+
+  for (XdNode *node = self; node != NULL; node = xd_node_get_parent (node))
+    {
+      const char *id = xd_node_get_folder_id (node);
+
+      if (xd_node_get_kind (node) == XD_NODE_FOLDER &&
+          id != NULL && *id != '\0')
+        g_ptr_array_insert (ids, 0, g_strdup (id));
+    }
+
+  g_ptr_array_add (ids, NULL);
+  return (GStrv) g_ptr_array_free (g_steal_pointer (&ids), FALSE);
+}

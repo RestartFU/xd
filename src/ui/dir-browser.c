@@ -476,7 +476,10 @@ xd_dir_browser_present (GtkWidget       *parent,
 
   self->selection = gtk_single_selection_new (g_object_ref (G_LIST_MODEL (self->entries)));
   self->list_view = GTK_LIST_VIEW (gtk_list_view_new (
-    GTK_SELECTION_MODEL (self->selection), factory));
+    /* GtkListView takes ownership of its model. Browser also needs one
+     * reference so its asynchronous lifetime can release the model safely
+     * after the window and list view have gone away. */
+    g_object_ref (GTK_SELECTION_MODEL (self->selection)), factory));
   gtk_list_view_set_single_click_activate (self->list_view, FALSE);
   gtk_widget_add_css_class (GTK_WIDGET (self->list_view), "navigation-sidebar");
   g_signal_connect (self->list_view, "activate", G_CALLBACK (on_row_activated), self);
