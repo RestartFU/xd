@@ -57,6 +57,12 @@ class XdClientVerticalSliceTest {
         assertEquals("Earlier", session.state.value.messages.single().text)
         assertTrue(session.state.value.hasOlderMessages)
 
+        socket.receive(
+            """{"event":"commands","chat":"chat","backend":"codex","commands":["review","test"]}""",
+        )
+        runCurrent()
+        assertEquals(listOf("review", "test"), session.state.value.commands)
+
         val cancelledOlder = async { session.loadOlder() }
         runCurrent()
         assertEquals("messages", socket.opAt(4))
@@ -243,6 +249,40 @@ class XdClientVerticalSliceTest {
         runCurrent()
         runCurrent()
 
+        assertEquals(
+            com.restartfu.xd.net.FatalReason.PROTOCOL,
+            assertIs<Link.Fatal>(client.link.value).reason,
+        )
+        assertTrue(socket.closed)
+    }
+
+    @Test
+    fun missingNewChatIdMakesProtocolFatal() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+        socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
+        runCurrent()
+
+        val creating = async {
+            runCatching { client.createChat("folder", null) }
+        }
+        runCurrent()
+        socket.receive("""{"ok":true}""")
+        runCurrent()
+        runCurrent()
+
+        assertTrue(creating.await().isFailure)
         assertEquals(
             com.restartfu.xd.net.FatalReason.PROTOCOL,
             assertIs<Link.Fatal>(client.link.value).reason,

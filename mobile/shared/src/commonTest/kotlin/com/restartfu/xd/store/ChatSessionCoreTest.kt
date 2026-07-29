@@ -72,4 +72,62 @@ class ChatSessionCoreTest {
 
         assertEquals("Hel", core.state.value.liveSegment)
     }
+
+    @Test
+    fun reloadRequestsAreConflatedWhileReloadRuns() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(
+            factory,
+            MemoryCredentialStore(
+                StoredCredentials(
+                    host = "daemon",
+                    port = 4001,
+                    token = "token",
+                    certificateDer = byteArrayOf(1, 2, 3),
+                ),
+            ),
+            backgroundScope,
+        )
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        runCurrent()
+        runCurrent()
+
+        val core = ChatSessionCore("chat", actor, backgroundScope) { 10_000L }
+        core.requestReload()
+        runCurrent()
+        core.requestReload()
+        core.requestReload()
+        core.requestReload()
+        runCurrent()
+        assertEquals(
+            1,
+            factory.latest.countOps("chat"),
+            factory.latest.decodedWrites(),
+        )
+
+        factory.latest.receive(chatReply())
+        runCurrent()
+        factory.latest.receive(messagesReply())
+        runCurrent()
+        assertEquals(
+            2,
+            factory.latest.countOps("chat"),
+            factory.latest.decodedWrites(),
+        )
+    }
+
+    private fun com.restartfu.xd.net.FakeSocket.countOps(op: String): Int =
+        writes.count { it.decodeToString().contains(""""op":"$op"""") }
+
+    private fun com.restartfu.xd.net.FakeSocket.decodedWrites(): String =
+        writes.joinToString(separator = " | ") { it.decodeToString().trim() }
+
+    private fun chatReply(): String =
+        """{"ok":true,"title":"Hello","backend":"codex","commands":[],"plan":false,"queue":[],"working":false,"items":[],"new_worktree":false,"has_messages":true}"""
+
+    private fun messagesReply(): String =
+        """{"ok":true,"total_messages":0,"last_message_id":0,"messages":[]}"""
 }

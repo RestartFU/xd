@@ -14,7 +14,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -25,6 +24,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
@@ -158,9 +158,10 @@ internal class ConnectionActor(
     suspend fun callSequenced(request: JsonObject): SequencedReply {
         val response = CompletableDeferred<SequencedReply>()
         mailbox.send(Message.Call(request, response))
-        val reply = try {
-            withTimeout(CALL_TIMEOUT_MILLIS) { response.await() }
-        } catch (error: TimeoutCancellationException) {
+        val reply = withTimeoutOrNull(CALL_TIMEOUT_MILLIS) {
+            response.await()
+        }
+        if (reply == null) {
             mailbox.send(Message.CallTimedOut(response))
             throw DisconnectedException("Daemon did not answer the request in time")
         }

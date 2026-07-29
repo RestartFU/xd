@@ -8,6 +8,7 @@ import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.net.PlatformSocketFactory
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.Ops
+import com.restartfu.xd.protocol.RemoteProtocolException
 import com.restartfu.xd.protocol.decodeReply
 import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.store.ChatSessionCore
@@ -41,7 +42,7 @@ public class XdClient(
                 if (value is Link.Up) {
                     launch { treeStore.refresh() }
                     sessions.value.values.forEach { entry ->
-                        launch { entry.core.reload() }
+                        entry.core.requestReload()
                     }
                 }
             }
@@ -108,7 +109,7 @@ public class XdClient(
             if (sessions.compareAndSet(before, after)) break
         }
         if (chosen.state.value.title.isEmpty() && actor.link.value is Link.Up) {
-            scope.launch { chosen.reload() }
+            chosen.requestReload()
         }
         return ChatSession(chosen) { releaseChat(chatId, chosen) }
     }
@@ -118,8 +119,11 @@ public class XdClient(
         title: String?,
     ): String {
         val value = actor.call(Ops.newChat(folderId, title))
-        val reply = actor.decodeReply(value) { it.decodeReply<DoneReply>() }
-        return reply.id ?: error("The daemon did not return the new chat id")
+        return actor.decodeReply(value) {
+            val reply = it.decodeReply<DoneReply>()
+            reply.id?.takeIf(String::isNotBlank)
+                ?: throw RemoteProtocolException("New chat reply has no id")
+        }
     }
 
     private fun takeSessions(): Map<String, SessionEntry> {

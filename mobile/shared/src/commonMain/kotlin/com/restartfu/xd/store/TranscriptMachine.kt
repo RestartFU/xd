@@ -28,6 +28,7 @@ public sealed interface TranscriptInput {
     public data class Tool(val name: String) : TranscriptInput
     public data object TurnFinished : TranscriptInput
     public data object Changed : TranscriptInput
+    public data class Commands(val commands: List<String>) : TranscriptInput
     public data class Queued(val messages: List<String>) : TranscriptInput
 
     public data class OptimisticSend(
@@ -118,6 +119,9 @@ public object TranscriptMachine {
             } else {
                 listOf(TranscriptEffect.Refetch)
             },
+        )
+        is TranscriptInput.Commands -> TranscriptTransition(
+            state.copy(commands = input.commands),
         )
         is TranscriptInput.Queued -> TranscriptTransition(
             state.copy(queue = input.messages, pendingUser = null),

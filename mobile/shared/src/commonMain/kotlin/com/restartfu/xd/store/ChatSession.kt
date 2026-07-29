@@ -14,6 +14,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -75,6 +76,10 @@ internal class ChatSessionCore(
     private var snapshotSequence = 0L
     private var invalidated = false
     private val inputsDuringReload = mutableListOf<BufferedInput>()
+    private val reloadRequests = Channel<Unit>(Channel.CONFLATED)
+    private val reloadWorker = scope.launch {
+        for (ignored in reloadRequests) reload()
+    }
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
@@ -119,7 +124,7 @@ internal class ChatSessionCore(
                     inputsDuringReload.clear()
                     effects
                 }
-                if (replayEffects.isNotEmpty()) scope.launch { reload() }
+                if (replayEffects.isNotEmpty()) requestReload()
             } catch (error: CancellationException) {
                 clearReloadAfterCancellation()
                 throw error
@@ -280,6 +285,12 @@ internal class ChatSessionCore(
             }
             "turn-finished" -> apply(TranscriptInput.TurnFinished, event.sequence)
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
+            "commands" -> {
+                val commands = (value["commands"] as? JsonArray)
+                    ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                    .orEmpty()
+                apply(TranscriptInput.Commands(commands), event.sequence)
+            }
             "queued" -> {
                 val queue = (value["queue"] as? JsonArray)
                     ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
@@ -290,6 +301,8 @@ internal class ChatSessionCore(
     }
 
     fun shutdown() {
+        reloadRequests.close()
+        reloadWorker.cancel()
         scope.launch {
             val timer = stateMutex.withLock {
                 pendingTimer.also { pendingTimer = null }
@@ -299,6 +312,8 @@ internal class ChatSessionCore(
     }
 
     suspend fun invalidate() {
+        reloadRequests.close()
+        reloadWorker.cancel()
         val timer = stateMutex.withLock {
             invalidated = true
             reloadInProgress = false
@@ -310,6 +325,10 @@ internal class ChatSessionCore(
             pendingTimer.also { pendingTimer = null }
         }
         timer?.cancel()
+    }
+
+    fun requestReload() {
+        reloadRequests.trySend(Unit)
     }
 
     private suspend fun apply(
@@ -342,7 +361,7 @@ internal class ChatSessionCore(
         }
         timerToCancel?.cancel()
         if (effects.isNotEmpty()) {
-            scope.launch { reload() }
+            requestReload()
         }
     }
 

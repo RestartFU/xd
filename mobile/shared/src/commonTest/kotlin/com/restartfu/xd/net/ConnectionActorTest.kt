@@ -5,6 +5,7 @@ import com.restartfu.xd.credentials.StoredCredentials
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -185,6 +186,36 @@ class ConnectionActorTest {
         assertTrue(call.await().isFailure)
         assertTrue(factory.latest.closed)
         assertIs<Link.Down>(actor.link.value)
+    }
+
+    @Test
+    fun callerCancellationDoesNotCloseSharedConnection() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = connectedActor(factory)
+        val abandoned = async {
+            actor.call(com.restartfu.xd.protocol.Ops.ping())
+        }
+        val survivor = async {
+            actor.call(com.restartfu.xd.protocol.Ops.ping())
+        }
+        runCurrent()
+
+        abandoned.cancel()
+        runCurrent()
+        assertFalse(factory.latest.closed)
+        assertIs<Link.Up>(actor.link.value)
+
+        factory.latest.receive(
+            """{"ok":true,"answer":"ignored"}""",
+            """{"ok":true,"answer":"pong"}""",
+        )
+        runCurrent()
+
+        assertEquals(
+            "pong",
+            survivor.await().getValue("answer").jsonPrimitive.content,
+        )
+        assertFalse(factory.latest.closed)
     }
 
     @Test
