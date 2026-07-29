@@ -15,13 +15,26 @@ import javax.net.ssl.SSLSocket
 
 public class AndroidSocketFactory(
     private val connectTimeoutMillis: Int = 10_000,
+    private val handshakeTimeoutMillis: Int = 10_000,
 ) : PlatformSocketFactory {
-    override fun create(): PlatformSocket = AndroidSocket(connectTimeoutMillis)
+    init {
+        require(connectTimeoutMillis > 0) { "Connect timeout must be positive" }
+        require(handshakeTimeoutMillis > 0) { "Handshake timeout must be positive" }
+    }
+
+    override fun create(): PlatformSocket =
+        AndroidSocket(connectTimeoutMillis, handshakeTimeoutMillis)
 }
 
 internal class AndroidSocket(
     private val connectTimeoutMillis: Int,
+    private val handshakeTimeoutMillis: Int = connectTimeoutMillis,
 ) : PlatformSocket {
+    init {
+        require(connectTimeoutMillis > 0) { "Connect timeout must be positive" }
+        require(handshakeTimeoutMillis > 0) { "Handshake timeout must be positive" }
+    }
+
     private val closed = AtomicBoolean(false)
     private val callbackFinished = AtomicBoolean(false)
     private val writeLock = Any()
@@ -92,7 +105,9 @@ internal class AndroidSocket(
                 endpointIdentificationAlgorithm = null
             }
             active.connect(InetSocketAddress(host, port), connectTimeoutMillis)
+            active.soTimeout = handshakeTimeoutMillis
             active.startHandshake()
+            active.soTimeout = 0
 
             if (closed.get()) throw EOFException("Socket was closed")
             val certificate = active.session.peerCertificates.firstOrNull()?.encoded

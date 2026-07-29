@@ -85,7 +85,7 @@ class ConnectionActorTest {
         )
         runCurrent()
 
-        assertEquals("changed", event.await().getValue("event").jsonPrimitive.content)
+        assertEquals("changed", event.await().value.getValue("event").jsonPrimitive.content)
         assertEquals("pong", call.await().getValue("answer").jsonPrimitive.content)
     }
 

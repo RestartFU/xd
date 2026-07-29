@@ -1,6 +1,7 @@
 package com.restartfu.xd.net
 
 import java.io.ByteArrayOutputStream
+import java.net.ServerSocket
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.concurrent.CountDownLatch
@@ -107,6 +108,46 @@ class AndroidSocketTest {
         assertTrue(done.await(5, TimeUnit.SECONDS))
         assertEquals(SocketFailureKind.PIN_MISMATCH, assertNotNull(failure.get()).kind)
         server.close()
+    }
+
+    @Test
+    fun tlsHandshakeTimesOutWhenPeerDoesNotRespond() {
+        val server = ServerSocket(0)
+        val accepted = CountDownLatch(1)
+        val releaseServer = CountDownLatch(1)
+        val serverThread = thread(name = "xd-test-stalled-tls-server", isDaemon = true) {
+            server.accept().use {
+                accepted.countDown()
+                releaseServer.await(5, TimeUnit.SECONDS)
+            }
+        }
+        val done = CountDownLatch(1)
+        val failure = AtomicReference<SocketFailure?>()
+
+        try {
+            AndroidSocket(
+                connectTimeoutMillis = 2_000,
+                handshakeTimeoutMillis = 100,
+            ).connect(
+                "127.0.0.1",
+                server.localPort,
+                null,
+                listener(
+                    closed = {
+                        failure.set(it)
+                        done.countDown()
+                    },
+                ),
+            )
+
+            assertTrue(accepted.await(5, TimeUnit.SECONDS))
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            assertEquals(SocketFailureKind.UNREACHABLE, assertNotNull(failure.get()).kind)
+        } finally {
+            releaseServer.countDown()
+            server.close()
+            serverThread.join(5_000)
+        }
     }
 
     private fun listener(

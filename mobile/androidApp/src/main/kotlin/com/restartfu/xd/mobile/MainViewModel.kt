@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.store.ChatSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -70,9 +71,27 @@ class ChatViewModel(
 ) : ViewModel() {
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
+    private val _sending = MutableStateFlow(false)
+    val sending: StateFlow<Boolean> = _sending.asStateFlow()
 
-    fun send(text: String) {
-        viewModelScope.launch { runCatching { session.send(text) } }
+    fun send(
+        text: String,
+        onSent: () -> Unit,
+    ) {
+        if (_sending.value) return
+        _sending.value = true
+        viewModelScope.launch {
+            try {
+                session.send(text)
+                onSent()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // ChatSession exposes the failure through its state.
+            } finally {
+                _sending.value = false
+            }
+        }
     }
 
     fun cancel() {

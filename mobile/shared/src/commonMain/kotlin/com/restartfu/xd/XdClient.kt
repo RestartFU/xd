@@ -47,7 +47,7 @@ public class XdClient(
         }
         scope.launch {
             actor.events.collect { event ->
-                if ((event["event"] as? JsonPrimitive)?.contentOrNull == "tree") {
+                if ((event.value["event"] as? JsonPrimitive)?.contentOrNull == "tree") {
                     launch { treeStore.refresh() }
                 }
                 sessions.value.values.forEach { entry ->

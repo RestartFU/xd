@@ -59,6 +59,16 @@ private class DisconnectedException(
     message: String,
 ) : Exception(message)
 
+internal data class SequencedReply(
+    val sequence: Long,
+    val value: JsonObject,
+)
+
+internal data class SequencedEvent(
+    val sequence: Long,
+    val value: JsonObject,
+)
+
 /**
  * Owns connection state and is the only coroutine touching protocol queues.
  *
@@ -75,11 +85,12 @@ internal class ConnectionActor(
     private val assembler = LineAssembler()
     private val _link = MutableStateFlow<Link>(Link.Idle)
     private val _hasCredentials = MutableStateFlow(false)
-    private val _events = MutableSharedFlow<JsonObject>(extraBufferCapacity = 1024)
+    private val _events = MutableSharedFlow<SequencedEvent>(extraBufferCapacity = 1024)
     private var credentials: StoredCredentials? = credentialStore.load()
     private var socket: PlatformSocket? = null
     private var leafCertificateDer: ByteArray? = null
     private var generation: Long = 0
+    private var inboundSequence: Long = 0
     private var wanted: Boolean = true
     private var retryJob: Job? = null
     private var pairing: PairAttempt? = null
@@ -91,7 +102,7 @@ internal class ConnectionActor(
 
     val link: StateFlow<Link> = _link.asStateFlow()
     val hasCredentials: StateFlow<Boolean> = _hasCredentials.asStateFlow()
-    val events: SharedFlow<JsonObject> = _events.asSharedFlow()
+    val events: SharedFlow<SequencedEvent> = _events.asSharedFlow()
 
     init {
         _hasCredentials.value = credentials != null
@@ -138,9 +149,13 @@ internal class ConnectionActor(
     }
 
     suspend fun call(request: JsonObject): JsonObject {
-        val response = CompletableDeferred<JsonObject>()
+        return callSequenced(request).value
+    }
+
+    suspend fun callSequenced(request: JsonObject): SequencedReply {
+        val response = CompletableDeferred<SequencedReply>()
         mailbox.send(Message.Call(request, response))
-        return response.await().requireSuccess()
+        return response.await().also { it.value.requireSuccess() }
     }
 
     private suspend fun run() {
@@ -236,7 +251,7 @@ internal class ConnectionActor(
         if (message.generation != generation || socket == null) return
         leafCertificateDer = message.certificateDer.copyOf()
         val attempt = pairing
-        val reply = CompletableDeferred<JsonObject>()
+        val reply = CompletableDeferred<SequencedReply>()
         val request = if (attempt != null) {
             Ops.pair(attempt.code, attempt.deviceName)
         } else {
@@ -268,11 +283,12 @@ internal class ConnectionActor(
         if (message.generation != generation || socket == null) return
         try {
             for (line in assembler.append(message.bytes)) {
+                val sequence = ++inboundSequence
                 val objectValue = WireJson.parseToJsonElement(line).jsonObject
                 if ("event" in objectValue) {
-                    _events.emit(objectValue)
+                    _events.emit(SequencedEvent(sequence, objectValue))
                 } else {
-                    calls.acceptReply(objectValue)
+                    calls.acceptReply(SequencedReply(sequence, objectValue))
                 }
             }
         } catch (error: Throwable) {
@@ -291,11 +307,12 @@ internal class ConnectionActor(
             )
         }
 
+        val value = raw.value
         try {
-            raw.requireSuccess()
+            value.requireSuccess()
             val attempt = pairing
             if (attempt != null) {
-                val reply = raw.decodeReply<PairReply>()
+                val reply = value.decodeReply<PairReply>()
                 require(reply.token.isNotBlank()) { "Pair reply has an empty token" }
                 val certificate = leafCertificateDer
                     ?: throw RemoteProtocolException("Pairing returned no certificate")
@@ -313,7 +330,7 @@ internal class ConnectionActor(
                 _link.value = Link.Up(attempt.deviceName)
                 attempt.result.complete(PairResult.Success(attempt.deviceName))
             } else {
-                val reply = raw.decodeReply<HelloReply>()
+                val reply = value.decodeReply<HelloReply>()
                 if (reply.version != PROTOCOL_VERSION) {
                     return protocolFatal(
                         "Unsupported daemon protocol version ${reply.version}",
@@ -494,7 +511,7 @@ internal class ConnectionActor(
 
         data class Call(
             val request: JsonObject,
-            val response: CompletableDeferred<JsonObject>,
+            val response: CompletableDeferred<SequencedReply>,
         ) : Message
 
         data class SocketConnected(
@@ -514,7 +531,7 @@ internal class ConnectionActor(
 
         data class GreetingFinished(
             val generation: Long,
-            val result: Result<JsonObject>,
+            val result: Result<SequencedReply>,
         ) : Message
     }
 

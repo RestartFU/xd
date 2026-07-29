@@ -65,6 +65,7 @@ class XdClientVerticalSliceTest {
         runCurrent()
         assertTrue(session.state.value.working)
         assertEquals("chat", socket.opAt(5))
+        socket.receive("""{"event":"text","chat":"chat","text":"Hel"}""")
         socket.receive(chatReply(working = true, segment = "Hel"))
         runCurrent()
         assertEquals("messages", socket.opAt(6))

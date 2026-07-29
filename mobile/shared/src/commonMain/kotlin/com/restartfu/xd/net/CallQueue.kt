@@ -17,15 +17,15 @@ internal class CallQueue(
     private val write: (ByteArray) -> Unit,
     private val onUnanswerableReply: (JsonObject) -> Unit = {},
 ) {
-    private val pending = ArrayDeque<CompletableDeferred<JsonObject>>()
+    private val pending = ArrayDeque<CompletableDeferred<SequencedReply>>()
 
     val size: Int
         get() = pending.size
 
     fun enqueue(
         request: JsonObject,
-        response: CompletableDeferred<JsonObject> = CompletableDeferred(),
-    ): Deferred<JsonObject> {
+        response: CompletableDeferred<SequencedReply> = CompletableDeferred(),
+    ): Deferred<SequencedReply> {
         pending.addLast(response)
         try {
             write("${request}\n".encodeToByteArray())
@@ -37,12 +37,12 @@ internal class CallQueue(
         return response
     }
 
-    suspend fun call(request: JsonObject): JsonObject = enqueue(request).await()
+    suspend fun call(request: JsonObject): SequencedReply = enqueue(request).await()
 
-    fun acceptReply(reply: JsonObject) {
+    fun acceptReply(reply: SequencedReply) {
         val response = pending.removeFirstOrNull()
         if (response == null) {
-            onUnanswerableReply(reply)
+            onUnanswerableReply(reply.value)
             return
         }
         response.complete(reply)

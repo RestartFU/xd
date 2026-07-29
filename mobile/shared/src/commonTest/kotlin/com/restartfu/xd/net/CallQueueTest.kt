@@ -19,12 +19,12 @@ class CallQueueTest {
         val second = async { queue.call(request("second")) }
         testScheduler.runCurrent()
 
-        queue.acceptReply(reply("one"))
-        queue.acceptReply(reply("two"))
+        queue.acceptReply(SequencedReply(1, reply("one")))
+        queue.acceptReply(SequencedReply(2, reply("two")))
 
         assertEquals(listOf("{\"op\":\"first\"}\n", "{\"op\":\"second\"}\n"), writes)
-        assertEquals("one", first.await()["value"].toString().trim('"'))
-        assertEquals("two", second.await()["value"].toString().trim('"'))
+        assertEquals("one", first.await().value["value"].toString().trim('"'))
+        assertEquals("two", second.await().value["value"].toString().trim('"'))
     }
 
     @Test
@@ -38,11 +38,11 @@ class CallQueueTest {
         assertTrue(cancelled.isCancelled)
         assertEquals(2, queue.size)
 
-        queue.acceptReply(reply("discard me"))
+        queue.acceptReply(SequencedReply(1, reply("discard me")))
         assertFalse(live.isCompleted)
-        queue.acceptReply(reply("belongs to live"))
+        queue.acceptReply(SequencedReply(2, reply("belongs to live")))
 
-        assertEquals("belongs to live", live.await()["value"].toString().trim('"'))
+        assertEquals("belongs to live", live.await().value["value"].toString().trim('"'))
         assertEquals(0, queue.size)
     }
 
@@ -51,7 +51,7 @@ class CallQueueTest {
         var dropped = false
         val queue = CallQueue(write = {}, onUnanswerableReply = { dropped = true })
 
-        queue.acceptReply(reply("orphan"))
+        queue.acceptReply(SequencedReply(1, reply("orphan")))
 
         assertTrue(dropped)
     }

@@ -413,6 +413,7 @@ private fun ChatScreen(
     goBack: () -> Unit,
 ) {
     val state by model.state.collectAsStateWithLifecycle()
+    val sending by model.sending.collectAsStateWithLifecycle()
     var composer by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val items = state.visibleItems
@@ -469,13 +470,20 @@ private fun ChatScreen(
                                 model.cancel()
                             } else {
                                 val text = composer
-                                composer = ""
-                                model.send(text)
+                                model.send(text) {
+                                    if (composer == text) composer = ""
+                                }
                             }
                         },
-                        enabled = state.working || composer.isNotBlank(),
+                        enabled = state.working || (!sending && composer.isNotBlank()),
                     ) {
-                        Text(if (state.working) "Cancel" else "Send")
+                        Text(
+                            when {
+                                state.working -> "Cancel"
+                                sending -> "Sending…"
+                                else -> "Send"
+                            },
+                        )
                     }
                 }
             }

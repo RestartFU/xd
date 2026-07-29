@@ -2,6 +2,7 @@ package com.restartfu.xd.store
 
 import com.restartfu.xd.model.ChatState
 import com.restartfu.xd.net.ConnectionActor
+import com.restartfu.xd.net.SequencedEvent
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.MessagesReply
@@ -63,7 +64,7 @@ internal class ChatSessionCore(
     private var pendingSequence = 0L
     private var pendingTimer: Job? = null
     private var reloadInProgress = false
-    private val eventsDuringReload = mutableListOf<TranscriptInput>()
+    private val inputsDuringReload = mutableListOf<BufferedInput>()
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
@@ -71,11 +72,12 @@ internal class ChatSessionCore(
         reloadMutex.withLock {
             stateMutex.withLock {
                 reloadInProgress = true
-                eventsDuringReload.clear()
+                inputsDuringReload.clear()
                 _state.value = _state.value.copy(loading = true, error = null)
             }
             try {
-                val chat = actor.call(Ops.chat(chatId)).decodeReply<ChatReply>()
+                val chatReply = actor.callSequenced(Ops.chat(chatId))
+                val chat = chatReply.value.decodeReply<ChatReply>()
                 val messages = actor.call(Ops.messages(chatId)).decodeReply<MessagesReply>()
                 val replayEffects = stateMutex.withLock {
                     var transition = TranscriptMachine.reduce(
@@ -83,20 +85,25 @@ internal class ChatSessionCore(
                         TranscriptInput.Loaded(chat, messages, nowMillis()),
                     )
                     val effects = mutableListOf<TranscriptEffect>()
-                    for (event in eventsDuringReload) {
-                        transition = TranscriptMachine.reduce(transition.state, event)
+                    for (buffered in inputsDuringReload) {
+                        if (buffered.sequence != null &&
+                            buffered.sequence <= chatReply.sequence
+                        ) {
+                            continue
+                        }
+                        transition = TranscriptMachine.reduce(transition.state, buffered.input)
                         effects += transition.effects
                     }
                     _state.value = transition.state
                     reloadInProgress = false
-                    eventsDuringReload.clear()
+                    inputsDuringReload.clear()
                     effects
                 }
                 if (replayEffects.isNotEmpty()) scope.launch { reload() }
             } catch (error: Throwable) {
                 stateMutex.withLock {
                     reloadInProgress = false
-                    eventsDuringReload.clear()
+                    inputsDuringReload.clear()
                     _state.value = _state.value.copy(
                         loading = false,
                         error = error.message ?: "Could not load the chat",
@@ -137,30 +144,32 @@ internal class ChatSessionCore(
         actor.call(request)
     }
 
-    suspend fun onEvent(event: JsonObject) {
-        val eventChat = (event["chat"] as? JsonPrimitive)?.contentOrNull
+    suspend fun onEvent(event: SequencedEvent) {
+        val value = event.value
+        val eventChat = (value["chat"] as? JsonPrimitive)?.contentOrNull
         if (eventChat != null && eventChat != chatId) return
 
-        when ((event["event"] as? JsonPrimitive)?.contentOrNull) {
+        when ((value["event"] as? JsonPrimitive)?.contentOrNull) {
             "turn-started" -> apply(
                 TranscriptInput.TurnStarted(
-                    label = (event["label"] as? JsonPrimitive)?.contentOrNull,
+                    label = (value["label"] as? JsonPrimitive)?.contentOrNull,
                     nowMillis = nowMillis(),
                 ),
+                event.sequence,
             )
-            "text" -> (event["text"] as? JsonPrimitive)?.contentOrNull?.let {
-                apply(TranscriptInput.Text(it))
+            "text" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let {
+                apply(TranscriptInput.Text(it), event.sequence)
             }
-            "tool" -> (event["text"] as? JsonPrimitive)?.contentOrNull?.let {
-                apply(TranscriptInput.Tool(it))
+            "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let {
+                apply(TranscriptInput.Tool(it), event.sequence)
             }
-            "turn-finished" -> apply(TranscriptInput.TurnFinished)
-            "changed" -> apply(TranscriptInput.Changed)
+            "turn-finished" -> apply(TranscriptInput.TurnFinished, event.sequence)
+            "changed" -> apply(TranscriptInput.Changed, event.sequence)
             "queued" -> {
-                val queue = (event["queue"] as? JsonArray)
+                val queue = (value["queue"] as? JsonArray)
                     ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                     .orEmpty()
-                apply(TranscriptInput.Queued(queue))
+                apply(TranscriptInput.Queued(queue), event.sequence)
             }
         }
     }
@@ -170,12 +179,15 @@ internal class ChatSessionCore(
         pendingTimer = null
     }
 
-    private suspend fun apply(input: TranscriptInput) {
+    private suspend fun apply(
+        input: TranscriptInput,
+        sequence: Long? = null,
+    ) {
         val effects = stateMutex.withLock {
             val transition = TranscriptMachine.reduce(_state.value, input)
             _state.value = transition.state
             if (reloadInProgress && input !is TranscriptInput.Loaded) {
-                eventsDuringReload += input
+                inputsDuringReload += BufferedInput(sequence, input)
             }
             transition.effects
         }
@@ -191,4 +203,9 @@ internal class ChatSessionCore(
     private companion object {
         const val PENDING_TIMEOUT_MILLIS = 10_000L
     }
+
+    private data class BufferedInput(
+        val sequence: Long?,
+        val input: TranscriptInput,
+    )
 }
