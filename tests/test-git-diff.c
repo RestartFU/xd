@@ -168,6 +168,53 @@ test_ignores_other_tools (void)
   g_assert_null (xd_git_diff_from_tool (message));
 }
 
+static void
+test_scopes_snapshot_to_workdir (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *root = g_dir_make_tmp ("xd-git-scope-XXXXXX", &error);
+  g_autofree char *scope = NULL;
+  g_autofree char *inside = NULL;
+  g_autofree char *outside = NULL;
+  g_autofree char *message = NULL;
+  g_autoptr (XdGitDiffTracker) tracker = NULL;
+  const char *patch;
+  const char *init[] = { "git", "init", "-q", NULL };
+  const char *add[] = { "git", "add", "scope/inside.txt", NULL };
+  const char *commit[] = {
+    "git", "-c", "user.name=xd tests", "-c", "user.email=xd@example.com",
+    "commit", "-q", "-m", "initial", NULL
+  };
+
+  g_assert_no_error (error);
+  scope = g_build_filename (root, "scope", NULL);
+  inside = g_build_filename (scope, "inside.txt", NULL);
+  outside = g_build_filename (root, "outside.txt", NULL);
+  g_assert_cmpint (g_mkdir (scope, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (inside, "before\n", -1, &error));
+  g_assert_no_error (error);
+
+  run (root, init);
+  run (root, add);
+  run (root, commit);
+
+  tracker = xd_git_diff_tracker_new (scope);
+  g_assert_nonnull (tracker);
+
+  g_assert_true (g_file_set_contents (inside, "after\n", -1, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_file_set_contents (outside, "not this chat\n", -1, &error));
+  g_assert_no_error (error);
+
+  message = xd_git_diff_tracker_capture (tracker, "file_change");
+  patch = xd_git_diff_from_tool (message);
+  g_assert_nonnull (patch);
+  g_assert_nonnull (strstr (patch, "scope/inside.txt"));
+  g_assert_null (strstr (patch, "outside.txt"));
+
+  remove_tree (root);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -179,6 +226,8 @@ main (int   argc,
                    test_capture_only_change_since_previous_event);
   g_test_add_func ("/git-diff/ignores-other-tools",
                    test_ignores_other_tools);
+  g_test_add_func ("/git-diff/scopes-snapshot-to-workdir",
+                   test_scopes_snapshot_to_workdir);
 
   return g_test_run ();
 }

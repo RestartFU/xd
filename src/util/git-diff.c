@@ -11,6 +11,7 @@
 struct _XdGitDiffTracker
 {
   char *root;
+  char *pathspec;
   char *previous_tree;
 };
 
@@ -53,6 +54,7 @@ run_git (const char        *workdir,
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                         G_SUBPROCESS_FLAGS_STDERR_PIPE);
   g_subprocess_launcher_set_cwd (launcher, workdir);
+  g_subprocess_launcher_setenv (launcher, "GIT_LITERAL_PATHSPECS", "1", TRUE);
   if (index_path != NULL)
     {
       g_autofree char *git_index_path = g_strdup (index_path);
@@ -168,10 +170,11 @@ seed_from_user_index (const char *index_path,
  */
 static char *
 snapshot_tree (const char   *root,
+               const char   *pathspec,
                GCancellable *cancellable)
 {
   const char *read_argv[] = { "git", "read-tree", "HEAD", NULL };
-  const char *add_argv[] = { "git", "add", "-A", "--", ".", NULL };
+  const char *add_argv[] = { "git", "add", "-A", "--", pathspec, NULL };
   const char *write_argv[] = { "git", "write-tree", NULL };
   g_autofree char *user_index = NULL;
   g_autofree char *index_dir = NULL;
@@ -274,10 +277,22 @@ xd_git_diff_tracker_new_cancellable (const char   *workdir,
                                      GCancellable *cancellable)
 {
   XdGitDiffTracker *self = g_new0 (XdGitDiffTracker, 1);
+  g_autoptr (GFile) root_file = NULL;
+  g_autoptr (GFile) workdir_file = NULL;
 
   self->root = repository_root (workdir, cancellable);
   if (self->root != NULL)
-    self->previous_tree = snapshot_tree (self->root, cancellable);
+    {
+      root_file = g_file_new_for_path (self->root);
+      workdir_file = g_file_new_for_path (workdir);
+      self->pathspec = g_file_equal (root_file, workdir_file)
+        ? g_strdup (".")
+        : g_file_get_relative_path (root_file, workdir_file);
+
+      if (self->pathspec != NULL)
+        self->previous_tree =
+          snapshot_tree (self->root, self->pathspec, cancellable);
+    }
 
   if (self->previous_tree == NULL)
     {
@@ -295,6 +310,7 @@ xd_git_diff_tracker_free (XdGitDiffTracker *self)
     return;
 
   g_free (self->root);
+  g_free (self->pathspec);
   g_free (self->previous_tree);
   g_free (self);
 }
@@ -307,7 +323,7 @@ xd_git_diff_tracker_capture (XdGitDiffTracker *self,
   g_autofree char *patch = NULL;
   const char *argv[] = {
     "git", "--no-pager", "diff", "--no-ext-diff", "--no-color",
-    NULL, NULL, "--", NULL
+    NULL, NULL, "--", NULL, NULL
   };
 
   if (!xd_tool_is_file_change (message) ||
@@ -315,12 +331,13 @@ xd_git_diff_tracker_capture (XdGitDiffTracker *self,
       self == NULL)
     return g_strdup (message);
 
-  current_tree = snapshot_tree (self->root, NULL);
+  current_tree = snapshot_tree (self->root, self->pathspec, NULL);
   if (current_tree == NULL)
     return g_strdup (message);
 
   argv[5] = self->previous_tree;
   argv[6] = current_tree;
+  argv[8] = self->pathspec;
   patch = run_git (self->root, NULL, argv, FALSE, NULL);
 
   g_free (self->previous_tree);
