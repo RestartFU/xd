@@ -6,6 +6,7 @@
 # the download link never changes:
 #
 #   https://github.com/<owner>/<repo>/releases/download/nightly/xd-nightly-linux-x86_64.tar.gz
+#   https://github.com/<owner>/<repo>/releases/download/nightly/xd-nightly-android.apk
 #
 # The installer is published beside it, from the same commit, so the script and
 # the bundle it installs can never be from different builds. (Not /latest/: that
@@ -190,8 +191,57 @@ jobs:
             xd-nightly-macos-arm64.zip.sha256
             scripts/install-macos.sh
 
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Decode the Android signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_NIGHTLY_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
+            > "$RUNNER_TEMP/xd-nightly.p12"
+
+      - name: Test and build the signed Android app
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_NIGHTLY_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_NIGHTLY_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_NIGHTLY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          docker buildx build \
+            --target nightly-apk \
+            --output type=local,dest=dist/mobile \
+            --file mobile/Dockerfile \
+            --build-arg ANDROID_VERSION_CODE="$GITHUB_RUN_NUMBER" \
+            --secret id=android_keystore,src="$RUNNER_TEMP/xd-nightly.p12" \
+            --secret id=android_keystore_password,env=ANDROID_KEYSTORE_PASSWORD \
+            --secret id=android_key_alias,env=ANDROID_KEY_ALIAS \
+            --secret id=android_key_password,env=ANDROID_KEY_PASSWORD \
+            mobile
+
+      - name: Checksum the APK
+        run: |
+          set -euo pipefail
+          mv dist/mobile/xd-nightly-android.apk xd-nightly-android.apk
+          sha256sum xd-nightly-android.apk > xd-nightly-android.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            xd-nightly-android.apk
+            xd-nightly-android.apk.sha256
+
   publish:
-    needs: [linux, windows, macos]
+    needs: [linux, windows, macos, android]
     runs-on: ubuntu-latest
 
     steps:
@@ -244,6 +294,13 @@ jobs:
           The macOS app is a separate native Mach-O build. It includes the
           embedded terminal; daemon hosting is not available there yet.
 
+          Android 8.0+:
+
+          Download \`xd-nightly-android.apk\` and install it after allowing
+          APK installs from your browser or file manager. The Android app is a
+          remote client; pair it with a reachable Linux daemon using
+          \`xd serve --pair\`.
+
           All downloads are self-contained. Installs beside a release rather
           than over it -- its own settings, chats and workspaces. On Linux,
           the daemon is the same binary —
@@ -267,6 +324,8 @@ jobs:
             xd-nightly-windows-x86_64.msi.sha256 \
             xd-nightly-macos-arm64.zip \
             xd-nightly-macos-arm64.zip.sha256 \
+            xd-nightly-android.apk \
+            xd-nightly-android.apk.sha256 \
             scripts/install.sh \
             scripts/install.ps1 \
             scripts/install-macos.sh
