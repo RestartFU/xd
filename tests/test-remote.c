@@ -1128,6 +1128,43 @@ test_tree_refresh_keeps_client_placeholders (void)
   daemon_stop (&daemon);
 }
 
+/*
+ * A tree event is ordinary background synchronization, not visible work.
+ *
+ * The remote root used to swap its server icon for animated dots until every
+ * refresh reply arrived. Daemon changes can be frequent, so that made the
+ * connection row flash even though it remained usable throughout.
+ */
+static void
+test_background_tree_refresh_stays_visually_idle (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdRemoteClient) client = NULL;
+  g_autoptr (XdRemoteTree) tree = NULL;
+  XdNode *root;
+  Wait loading = { 0 };
+
+  daemon_start (&daemon);
+
+  client = xd_remote_client_new ("127.0.0.1", daemon.port);
+  tree = paired_tree (&daemon, client);
+  root = xd_remote_tree_get_root (tree);
+
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
+
+  g_signal_connect_swapped (tree, "loaded", G_CALLBACK (on_done), &loading);
+  xd_remote_tree_refresh (tree);
+
+  /* The request is in flight, but an already loaded tree remains stable. */
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
+
+  wait_for (&loading);
+  g_signal_handlers_disconnect_by_data (tree, &loading);
+  g_assert_cmpint (xd_node_get_state (root), ==, XD_NODE_IDLE);
+
+  daemon_stop (&daemon);
+}
+
 static void
 set_remote_agent_option (XdRemoteClient *client,
                          const char     *chat_id,
@@ -4088,6 +4125,7 @@ main (int argc, char *argv[])
   ADD ("/remote/token-reconnects-and-strangers-are-turned-away", test_token_reconnects_and_strangers_are_turned_away);
   ADD ("/remote/folders-and-chats-are-managed-from-the-client", test_folders_and_chats_are_managed_from_the_client);
   ADD ("/remote/tree-refresh-keeps-client-placeholders", test_tree_refresh_keeps_client_placeholders);
+  ADD ("/remote/background-tree-refresh-stays-visually-idle", test_background_tree_refresh_stays_visually_idle);
   ADD ("/remote/new-chat-inherits-last-changed-agent", test_remote_new_chat_inherits_last_changed_agent);
   ADD ("/remote/folder-context-is-managed-from-the-client", test_folder_context_is_managed_from_the_client);
   ADD ("/remote/agent-secrets-are-managed-without-reading-values", test_agent_secrets_are_managed_without_reading_values);

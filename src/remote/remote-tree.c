@@ -25,6 +25,7 @@ struct _XdRemoteTree
 
   GHashTable *folders;      /* folder id -> XdNode*, owning a reference */
   GHashTable *chats;        /* chat id   -> XdNode*, owning a reference */
+  gboolean loaded;          /* at least one complete tree snapshot arrived */
 
   /* A chat just made on the daemon, to be handed over once the tree it lives
    * in has been read back and there is a node to hand over. */
@@ -383,6 +384,7 @@ apply_tree (XdRemoteTree *self,
   g_hash_table_unref (reload.children);
   g_ptr_array_unref (reload.removed);
 
+  self->loaded = TRUE;
   set_root_state (self, XD_NODE_IDLE);
 
   /* The chat that was just made now has a row, which is the first moment it
@@ -457,9 +459,12 @@ xd_remote_tree_refresh (XdRemoteTree *self)
       return;
     }
 
-  /* The remote's own row says it is working, which is the one thing the tree
-   * can show while there is nothing under it yet. */
-  set_root_state (self, XD_NODE_WORKING);
+  /* The remote's own row says it is working only before its first snapshot.
+   * Later refreshes are background reconciliation: swapping the stable server
+   * icon for animated dots on every tree event makes the connection row flash.
+   * After a disconnect it also stays offline until a reply confirms recovery. */
+  if (!self->loaded)
+    set_root_state (self, XD_NODE_WORKING);
 
   xd_remote_client_call_op_async (self->client, "tree", NULL, NULL,
                                   self->cancellable, on_tree_received,
