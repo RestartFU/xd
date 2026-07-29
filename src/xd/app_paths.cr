@@ -39,11 +39,25 @@ module Xd
         File.join(data_dir, "agent-secrets.json")
     end
 
+    def remote_pastes : String
+      path = File.join(cache_home, data_name, "remote-pasted")
+      Dir.mkdir_p(path, 0o700)
+      path
+    end
+
     private def data_home : String
       {% if flag?(:win32) %}
         ENV["LOCALAPPDATA"]? || File.join(Path.home, "AppData", "Local")
       {% else %}
         ENV["XDG_DATA_HOME"]? || File.join(Path.home, ".local", "share")
+      {% end %}
+    end
+
+    private def cache_home : String
+      {% if flag?(:win32) %}
+        ENV["LOCALAPPDATA"]? || File.join(Path.home, "AppData", "Local")
+      {% else %}
+        ENV["XDG_CACHE_HOME"]? || File.join(Path.home, ".cache")
       {% end %}
     end
   end

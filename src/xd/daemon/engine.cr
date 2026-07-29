@@ -9,6 +9,7 @@ require "../workspace/service"
 require "./connection"
 require "./event_bus"
 require "./filesystem"
+require "./images"
 
 module Xd
   module Daemon
@@ -43,6 +44,7 @@ module Xd
         )
         @events = EventBus.new
         @filesystem = Filesystem.new(@store, @workspaces)
+        @images = Images.new
         @agents = Agent::Manager.new(
           @store,
           @workspaces,
@@ -99,6 +101,8 @@ module Xd
         failed_outcome(error.message || "Agent error")
       rescue error : Filesystem::Error
         failed_outcome(error.message || "Filesystem error")
+      rescue error : Images::Error
+        failed_outcome(error.message || "Image error")
       end
 
       def close : Nil
@@ -136,6 +140,8 @@ module Xd
           new_chat(request)
         when Protocol::Operation::Messages
           messages(request)
+        when Protocol::Operation::ImageRead
+          image_read(request)
         when Protocol::Operation::ListDir
           list_dir(request)
         when Protocol::Operation::FileBrowse
@@ -462,6 +468,12 @@ module Xd
         )
       end
 
+      private def image_read(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        Protocol::Response.ok(@images.read(request.string?("path")))
+      end
+
       private def file_browse(
         request : Protocol::Request,
       ) : Protocol::Response
@@ -608,17 +620,15 @@ module Xd
           "chat",
           "A message needs a chat and something to say."
         )
-        text = request.string(
-          "text",
-          "A message needs a chat and something to say."
-        )
-        if text.empty?
+        text = request.string?("text") || ""
+        if text.empty? && !request.member?("attachments")
           raise Protocol::Error.new(
             "A message needs a chat and something to say."
           )
         end
 
-        result = @agents.send(chat_id, text)
+        message = @images.materialize(request.body, text)
+        result = @agents.send(chat_id, message)
         Protocol::Response.ok({
           "queued" => JSON::Any.new(result.queued?),
         })
