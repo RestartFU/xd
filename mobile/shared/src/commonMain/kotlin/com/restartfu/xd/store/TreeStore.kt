@@ -21,6 +21,7 @@ internal class TreeStore(
     private val stateMutex = Mutex()
     private val _state = MutableStateFlow(TreeSnapshot())
     private var lifecycleVersion = 0L
+    private var clearVersion = 0L
     private val workingEvents = mutableMapOf<String, WorkingEvent>()
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
@@ -28,6 +29,7 @@ internal class TreeStore(
     suspend fun clear() {
         stateMutex.withLock {
             lifecycleVersion += 1
+            clearVersion = lifecycleVersion
             workingEvents.clear()
             _state.value = TreeSnapshot()
         }
@@ -57,6 +59,7 @@ internal class TreeStore(
             try {
                 val reply = actor.call(Ops.tree()).decodeReply<TreeReply>()
                 stateMutex.withLock {
+                    if (clearVersion > versionBefore) return@withLock
                     _state.value = TreeSnapshot(
                         folders = reply.folders.map {
                             Folder(id = it.id, name = it.name, parentId = it.parent)

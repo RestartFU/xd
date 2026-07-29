@@ -495,7 +495,7 @@ private fun ChatScreen(
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
-    var composer by rememberSaveable { mutableStateOf("") }
+    val composer by model.draft.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val items = state.visibleItems
     val leadingItemCount =
@@ -544,7 +544,7 @@ private fun ChatScreen(
                 Row(verticalAlignment = Alignment.Bottom) {
                     OutlinedTextField(
                         value = composer,
-                        onValueChange = { composer = it },
+                        onValueChange = model::updateDraft,
                         modifier = Modifier.weight(1f),
                         label = { Text("Message") },
                         minLines = 1,
@@ -553,12 +553,7 @@ private fun ChatScreen(
                     Spacer(Modifier.width(8.dp))
                     if (state.working) {
                         Button(
-                            onClick = {
-                                val text = composer
-                                model.enqueue(text) {
-                                    if (composer == text) composer = ""
-                                }
-                            },
+                            onClick = model::enqueue,
                             enabled = !sending && composer.isNotBlank(),
                         ) {
                             Text(if (sending) "Queueing…" else "Queue")
@@ -566,12 +561,7 @@ private fun ChatScreen(
                         TextButton(onClick = model::cancel) { Text("Cancel") }
                     } else {
                         Button(
-                            onClick = {
-                                val text = composer
-                                model.send(text) {
-                                    if (composer == text) composer = ""
-                                }
-                            },
+                            onClick = model::send,
                             enabled = !sending && composer.isNotBlank(),
                         ) {
                             Text(if (sending) "Sending…" else "Send")

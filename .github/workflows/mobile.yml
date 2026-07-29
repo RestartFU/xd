@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'mobile/**'
+      - 'src/remote/**'
+      - 'docs/protocol.md'
       - 'scripts/mobile-*.sh'
       - 'Makefile'
       - '.github/workflows/mobile.yml'

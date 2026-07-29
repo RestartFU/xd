@@ -97,15 +97,19 @@ class ChatViewModel(
     val state = session.state
     private val _sending = MutableStateFlow(false)
     private val _droppingQueued = MutableStateFlow(false)
+    private val _draft = MutableStateFlow("")
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
+    val draft: StateFlow<String> = _draft.asStateFlow()
 
-    fun send(
-        text: String,
-        onSent: () -> Unit,
-    ) {
+    fun updateDraft(value: String) {
+        _draft.value = value
+    }
+
+    fun send() {
+        val text = _draft.value
         launchGuarded(_sending) {
-                session.send(text)
-                onSent()
+            session.send(text)
+            if (_draft.value == text) _draft.value = ""
         }
     }
 
@@ -113,13 +117,11 @@ class ChatViewModel(
         launchGuarded { session.cancel() }
     }
 
-    fun enqueue(
-        text: String,
-        onQueued: () -> Unit,
-    ) {
+    fun enqueue() {
+        val text = _draft.value
         launchGuarded(_sending) {
-                session.enqueue(text)
-                onQueued()
+            session.enqueue(text)
+            if (_draft.value == text) _draft.value = ""
         }
     }
 

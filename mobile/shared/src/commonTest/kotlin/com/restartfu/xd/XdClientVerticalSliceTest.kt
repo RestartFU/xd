@@ -205,6 +205,14 @@ class XdClientVerticalSliceTest {
         socket.receive(treeReply(working = false))
         runCurrent()
         assertTrue(client.tree.value.chats.single().working)
+
+        socket.receive("""{"event":"tree"}""")
+        runCurrent()
+        socket.receive(treeReply(working = true))
+        val forgetting = async { client.forget() }
+        runCurrent()
+        forgetting.await()
+        assertTrue(client.tree.value.chats.isEmpty())
     }
 
     private fun FakeSocket.opAt(index: Int): String {
