@@ -19,9 +19,13 @@ struct _XdMessageRow
   XdRemoteClient *remote;
   GCancellable *image_cancellable;
   GCancellable *workflow_cancellable;
+  GCancellable *render_cancellable;
+  guint render_generation;
 
   GtkWidget *card;
   GtkWidget *body;          /* a column of prose labels and code cards */
+  GtkLabel *stream_label;   /* unowned; present only while text is arriving */
+  gboolean streaming;
   GtkWidget *workflow_status;
   GtkWidget *workflow_spinner;
   GtkWidget *workflow_log;
@@ -34,6 +38,95 @@ G_DEFINE_FINAL_TYPE (XdMessageRow, xd_message_row, ADW_TYPE_BIN)
 
 static void render_body (XdMessageRow *self);
 static void clear_body (XdMessageRow *self);
+static GtkWidget *make_text_label (XdMessageRow *self);
+
+typedef struct
+{
+  char *text;
+  guint generation;
+} MarkdownRender;
+
+static void
+markdown_render_free (MarkdownRender *render)
+{
+  g_free (render->text);
+  g_free (render);
+}
+
+static void
+render_markdown_thread (GTask        *task,
+                        gpointer      source_object,
+                        gpointer      task_data,
+                        GCancellable *cancellable)
+{
+  MarkdownRender *render = task_data;
+  char *markup;
+
+  if (g_task_return_error_if_cancelled (task))
+    return;
+
+  markup = xd_markdown_to_pango (render->text);
+  if (g_task_return_error_if_cancelled (task))
+    {
+      g_free (markup);
+      return;
+    }
+
+  g_task_return_pointer (task, markup, g_free);
+}
+
+static void
+on_markdown_rendered (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  XdMessageRow *self = XD_MESSAGE_ROW (source);
+  GTask *task = G_TASK (result);
+  MarkdownRender *render = g_task_get_task_data (task);
+  g_autoptr (GError) error = NULL;
+  g_autofree char *markup = g_task_propagate_pointer (task, &error);
+  GtkWidget *label;
+
+  if (markup == NULL ||
+      render->generation != self->render_generation ||
+      self->streaming)
+    return;
+
+  clear_body (self);
+  label = make_text_label (self);
+  gtk_label_set_markup (GTK_LABEL (label), markup);
+  gtk_box_append (GTK_BOX (self->body), label);
+}
+
+static void
+start_markdown_render (XdMessageRow *self)
+{
+  g_autoptr (GTask) task = NULL;
+  MarkdownRender *render;
+  GtkWidget *label;
+
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
+  g_clear_object (&self->render_cancellable);
+  self->render_cancellable = g_cancellable_new ();
+  self->render_generation++;
+
+  /* Paint readable text immediately. CommonMark conversion happens away from
+   * GTK's event loop, then replaces this label with equivalent rich markup. */
+  label = make_text_label (self);
+  gtk_label_set_text (GTK_LABEL (label), self->text->str);
+  gtk_box_append (GTK_BOX (self->body), label);
+
+  render = g_new0 (MarkdownRender, 1);
+  render->text = g_strdup (self->text->str);
+  render->generation = self->render_generation;
+
+  task = g_task_new (self, self->render_cancellable,
+                     on_markdown_rendered, NULL);
+  g_task_set_task_data (
+    task, render, (GDestroyNotify) markdown_render_free);
+  g_task_run_in_thread (task, render_markdown_thread);
+}
 
 XdMessageKind
 xd_message_kind_from_role (const char *role)
@@ -187,10 +280,11 @@ xd_message_row_new_remote (XdMessageKind   kind,
 }
 
 /*
- * Redraws one assistant row after streaming has been quiet for a moment.
+ * Finalizes one assistant row.
  *
- * The caller deliberately throttles this: rebuilding Markdown for every token
- * is expensive and makes partially written syntax flash between forms.
+ * Streaming uses a plain label below. Rich Markdown is built only when a
+ * segment pauses or ends, so token delivery never repeatedly destroys and
+ * recreates the row's widget tree.
  */
 void
 xd_message_row_set_text (XdMessageRow *self,
@@ -198,11 +292,35 @@ xd_message_row_set_text (XdMessageRow *self,
 {
   g_return_if_fail (XD_IS_MESSAGE_ROW (self));
 
-  if (g_strcmp0 (self->text->str, text) == 0)
+  if (!self->streaming && g_strcmp0 (self->text->str, text) == 0)
     return;
 
   g_string_assign (self->text, text != NULL ? text : "");
+  self->streaming = FALSE;
   render_body (self);
+}
+
+void
+xd_message_row_set_stream_text (XdMessageRow *self,
+                                const char   *text)
+{
+  g_return_if_fail (XD_IS_MESSAGE_ROW (self));
+
+  g_string_assign (self->text, text != NULL ? text : "");
+
+  if (!self->streaming)
+    {
+      if (self->render_cancellable != NULL)
+        g_cancellable_cancel (self->render_cancellable);
+      g_clear_object (&self->render_cancellable);
+      self->render_generation++;
+      clear_body (self);
+      self->stream_label = GTK_LABEL (make_text_label (self));
+      gtk_box_append (GTK_BOX (self->body), GTK_WIDGET (self->stream_label));
+      self->streaming = TRUE;
+    }
+
+  gtk_label_set_text (self->stream_label, self->text->str);
 }
 
 static void
@@ -1384,6 +1502,7 @@ clear_body (XdMessageRow *self)
 {
   GtkWidget *child;
 
+  self->stream_label = NULL;
   while ((child = gtk_widget_get_first_child (self->body)) != NULL)
     gtk_box_remove (GTK_BOX (self->body), child);
 }
@@ -1482,6 +1601,10 @@ append_markdown_chunk (XdMessageRow *self,
 static void
 render_body (XdMessageRow *self)
 {
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
+  g_clear_object (&self->render_cancellable);
+  self->render_generation++;
   clear_body (self);
 
   if (self->kind != XD_MESSAGE_ASSISTANT)
@@ -1528,6 +1651,21 @@ render_body (XdMessageRow *self)
           gtk_box_append (GTK_BOX (self->body), label);
         }
 
+      return;
+    }
+
+  /*
+   * Ordinary prose is most assistant output and CommonMark parsing is its
+   * expensive part. Fences and possible tables need custom GTK cards, so keep
+   * their structural pass here; plain prose can be prepared by GLib's worker
+   * pool without touching GTK.
+   */
+  if (*self->text->str != '\0' &&
+      strstr (self->text->str, "```") == NULL &&
+      !(strchr (self->text->str, '|') != NULL &&
+        strchr (self->text->str, '\n') != NULL))
+    {
+      start_markdown_render (self);
       return;
     }
 
@@ -1627,9 +1765,12 @@ xd_message_row_dispose (GObject *object)
     }
 
   g_cancellable_cancel (self->image_cancellable);
+  if (self->render_cancellable != NULL)
+    g_cancellable_cancel (self->render_cancellable);
   if (self->workflow_cancellable != NULL)
     g_cancellable_cancel (self->workflow_cancellable);
   g_clear_object (&self->image_cancellable);
+  g_clear_object (&self->render_cancellable);
   g_clear_object (&self->workflow_cancellable);
   g_clear_object (&self->remote);
 

@@ -6,6 +6,7 @@ xd_core_sources = files(
   'settings/pane-state.c',
   'settings/settings-resolver.c',
   'util/markdown.c',
+  'util/text-reveal.c',
   'util/ask-block.c',
   'util/git-diff.c',
   'util/git-head-watch.c',

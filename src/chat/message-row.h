@@ -31,6 +31,8 @@ XdMessageRow *xd_message_row_new_remote  (XdMessageKind   kind,
                                           XdRemoteClient *remote);
 void          xd_message_row_set_text    (XdMessageRow   *self,
                                           const char     *text);
+void          xd_message_row_set_stream_text (XdMessageRow *self,
+                                               const char   *text);
 void          xd_message_row_make_workflow (XdMessageRow *self,
                                              const char   *run_id,
                                              const char   *url);
