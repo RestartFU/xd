@@ -1,4 +1,5 @@
 #include "xd-app.h"
+#include "backend/codex-app-server.h"
 #include "util/app-paths.h"
 #include "util/host-launch.h"
 
@@ -615,6 +616,7 @@ run_serve (int argc, char *argv[])
     }
 
   g_main_loop_run (loop);
+  xd_codex_app_server_shutdown_all ();
 
   if (updater.restart_ready)
     {

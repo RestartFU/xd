@@ -28,6 +28,7 @@ xd_core_sources = files(
   'backend/backend.c',
   'backend/claude-backend.c',
   'backend/codex-backend.c',
+  'backend/codex-app-server.c',
   'backend/cerebras-backend.c',
   # No GTK here either, so the subprocess plumbing can be tested headlessly.
   'chat/chat-session.c',

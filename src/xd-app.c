@@ -1,5 +1,6 @@
 #include "xd-app.h"
 
+#include "backend/codex-app-server.h"
 #include <glib/gstdio.h>
 #include "xd-window.h"
 
@@ -698,6 +699,7 @@ xd_application_dispose (GObject *object)
 {
   XdApplication *self = XD_APPLICATION (object);
 
+  xd_codex_app_server_shutdown_all ();
   g_clear_object (&self->settings);
 
   G_OBJECT_CLASS (xd_application_parent_class)->dispose (object);

@@ -7,12 +7,11 @@ G_BEGIN_DECLS
 
 /*
  * xd never speaks to an AI API. It drives the CLIs already installed and
- * authenticated on the machine -- claude, codex and opencode -- and reads the
- * JSONL they write to stdout.
+ * authenticated on the machine -- claude, codex and opencode. Most runs read
+ * JSONL from one child process; Codex uses its persistent app-server protocol.
  *
- * A backend contributes two things: how to build the command line, and how to
- * turn one line of its output into events. Spawning, reading and cancelling
- * are the same for every backend and live in XdChatSession.
+ * A backend says which transport it uses, how to start it and how legacy JSONL
+ * objects map into xd's shared event vocabulary.
  */
 
 typedef enum
@@ -88,6 +87,12 @@ typedef struct
 typedef struct _AiParser AiParser;
 typedef struct _AiBackend AiBackend;
 
+typedef enum
+{
+  AI_TRANSPORT_EXEC,
+  AI_TRANSPORT_CODEX_APP_SERVER,
+} AiTransport;
+
 /* One selectable model. Every chat names one; there is no "let the CLI
  * decide", because a chat that does not say which model answers it cannot show
  * the user which model answered it. */
@@ -104,6 +109,7 @@ struct _AiBackend
   const char *display_name;
   const char *program;          /* looked up in PATH */
   const char *icon_name;
+  AiTransport transport;
 
   const AiModel *models;
   gsize n_models;
