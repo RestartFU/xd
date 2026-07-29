@@ -45,42 +45,46 @@ test_wav_header (void)
 }
 
 static void
-test_transcript (void)
+test_wav_to_f32 (void)
 {
-  static const char json[] = "{\"text\":\"  Fix café parsing.  \"}";
+  static const guint8 pcm[] = { 0x00, 0x80, 0x00, 0x00, 0xff, 0x7f };
+  g_autoptr (GBytes) wav =
+    xd_voice_wav_from_s16 (pcm, sizeof pcm, 16000, 1);
   g_autoptr (GError) error = NULL;
-  g_autofree char *text =
-    xd_voice_transcript_parse ((const guint8 *) json, strlen (json), &error);
+  g_autoptr (GBytes) converted = xd_voice_wav_to_f32 (wav, &error);
+  gsize length = 0;
+  const float *samples = g_bytes_get_data (converted, &length);
 
   g_assert_no_error (error);
-  g_assert_cmpstr (text, ==, "Fix café parsing.");
+  g_assert_cmpuint (length, ==, 3 * sizeof *samples);
+  g_assert_cmpfloat (samples[0], ==, -1.0f);
+  g_assert_cmpfloat (samples[1], ==, 0.0f);
+  g_assert_cmpfloat_with_epsilon (samples[2], 32767.0f / 32768.0f, 0.00001f);
 }
 
 static void
-test_service_error (void)
+test_invalid_wav (void)
 {
-  static const char json[] =
-    "{\"error\":{\"message\":\"API key is invalid.\"}}";
+  g_autoptr (GBytes) wav = g_bytes_new_static ("not a wav", 9);
   g_autoptr (GError) error = NULL;
-  g_autofree char *text =
-    xd_voice_transcript_parse ((const guint8 *) json, strlen (json), &error);
+  g_autoptr (GBytes) converted = xd_voice_wav_to_f32 (wav, &error);
 
-  g_assert_null (text);
+  g_assert_null (converted);
   g_assert_error (error, XD_VOICE_DATA_ERROR, 1);
-  g_assert_cmpstr (error->message, ==, "API key is invalid.");
 }
 
 static void
-test_empty_transcript (void)
+test_model_metadata (void)
 {
-  static const char json[] = "{\"text\":\"  \"}";
-  g_autoptr (GError) error = NULL;
-  g_autofree char *text =
-    xd_voice_transcript_parse ((const guint8 *) json, strlen (json), &error);
-
-  g_assert_null (text);
-  g_assert_error (error, XD_VOICE_DATA_ERROR, 1);
-  g_assert_cmpstr (error->message, ==, "No speech was detected.");
+  g_assert_true (xd_voice_model_metadata_valid (
+    G_GUINT64_CONSTANT (574041195),
+    "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"));
+  g_assert_false (xd_voice_model_metadata_valid (
+    G_GUINT64_CONSTANT (574041194),
+    "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"));
+  g_assert_false (xd_voice_model_metadata_valid (
+    G_GUINT64_CONSTANT (574041195),
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 }
 
 int
@@ -90,9 +94,9 @@ main (int   argc,
   g_test_init (&argc, &argv, NULL);
 
   g_test_add_func ("/voice-data/wav-header", test_wav_header);
-  g_test_add_func ("/voice-data/transcript", test_transcript);
-  g_test_add_func ("/voice-data/service-error", test_service_error);
-  g_test_add_func ("/voice-data/empty", test_empty_transcript);
+  g_test_add_func ("/voice-data/wav-to-f32", test_wav_to_f32);
+  g_test_add_func ("/voice-data/invalid-wav", test_invalid_wav);
+  g_test_add_func ("/voice-data/model-metadata", test_model_metadata);
 
   return g_test_run ();
 }

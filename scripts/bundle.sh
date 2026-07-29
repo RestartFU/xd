@@ -27,6 +27,14 @@ mkdir -p "$OUT/lib/gio/modules"
 
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
 
+# Whisper installs outside Debian's dynamic linker cache, and ggml discovers
+# its best CPU backend at runtime. Carry both the linked core and every backend
+# variant; the loader picks one matching the machine's AVX level.
+cp -a /usr/local/lib/libwhisper.so* "$OUT/lib/"
+cp -a /usr/local/lib/libggml.so* "$OUT/lib/"
+cp -a /usr/local/lib/libggml-base.so* "$OUT/lib/"
+cp -a /usr/local/lib/libggml-cpu*.so* "$OUT/lib/"
+
 # --- gdk-pixbuf loaders (dlopened, so they are extra closure roots) ---------
 mkdir -p "$OUT/lib/gdk-pixbuf-2.0/loaders"
 cp -a "$PIXBUF_LOADERS"/*.so "$OUT/lib/gdk-pixbuf-2.0/loaders/"
@@ -44,13 +52,18 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 # enough. NSS modules are added by hand: they are opened by name, never linked.
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
+  "$OUT/lib"/libwhisper.so* \
+  "$OUT/lib"/libggml.so* \
+  "$OUT/lib"/libggml-base.so* \
+  "$OUT/lib"/libggml-cpu*.so* \
   "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \
   "$ARCH_DIR"/libnss_dns.so.2)
 
 for root in "${roots[@]}"; do
   [ -e "$root" ] || continue
-  ldd "$root" 2>/dev/null | awk '/=> \//{print $3}'
+  LD_LIBRARY_PATH="$OUT/lib:/usr/local/lib" \
+    ldd "$root" 2>/dev/null | awk '/=> \//{print $3}'
 done | sort -u | while read -r lib; do
   cp -Ln "$lib" "$OUT/lib/" 2>/dev/null || true
 done

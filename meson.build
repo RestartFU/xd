@@ -55,6 +55,7 @@ cmark_dep     = dependency('libcmark', version: '>= 0.30')
 if has_voice
   pulse_simple_dep = dependency('libpulse-simple')
   soup_dep         = dependency('libsoup-3.0')
+  whisper_dep      = dependency('whisper', version: '>= 1.9.1')
 endif
 
 if is_windows

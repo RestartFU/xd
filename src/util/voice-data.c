@@ -1,6 +1,10 @@
 #include "voice-data.h"
 
-#include <json-glib/json-glib.h>
+#include <string.h>
+
+#define VOICE_MODEL_SIZE   G_GUINT64_CONSTANT (574041195)
+#define VOICE_MODEL_SHA256 \
+  "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
 
 G_DEFINE_QUARK (xd-voice-data-error, xd_voice_data_error)
 
@@ -62,59 +66,78 @@ xd_voice_wav_from_s16 (const guint8 *pcm,
   return g_byte_array_free_to_bytes (g_steal_pointer (&bytes));
 }
 
-char *
-xd_voice_transcript_parse (const guint8 *json,
-                           gsize         length,
-                           GError      **error)
+static guint16
+read_u16_le (const guint8 *bytes)
 {
-  g_autoptr (JsonParser) parser = json_parser_new ();
-  JsonObject *root;
-  const char *text;
-  char *result;
+  guint16 value;
 
-  g_return_val_if_fail (json != NULL || length == 0, NULL);
+  memcpy (&value, bytes, sizeof value);
+  return GUINT16_FROM_LE (value);
+}
 
-  if (!json_parser_load_from_data (
-        parser, (const char *) json, (gssize) length, error))
-    return NULL;
+static guint32
+read_u32_le (const guint8 *bytes)
+{
+  guint32 value;
 
-  if (!JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser)))
+  memcpy (&value, bytes, sizeof value);
+  return GUINT32_FROM_LE (value);
+}
+
+GBytes *
+xd_voice_wav_to_f32 (GBytes  *wav,
+                     GError **error)
+{
+  gsize length = 0;
+  const guint8 *bytes;
+  guint32 data_length;
+  gsize sample_count;
+  float *samples;
+
+  g_return_val_if_fail (wav != NULL, NULL);
+
+  bytes = g_bytes_get_data (wav, &length);
+  if (length < 44 ||
+      memcmp (bytes, "RIFF", 4) != 0 ||
+      memcmp (bytes + 8, "WAVEfmt ", 8) != 0 ||
+      read_u32_le (bytes + 16) != 16 ||
+      read_u16_le (bytes + 20) != 1 ||
+      read_u16_le (bytes + 22) != 1 ||
+      read_u32_le (bytes + 24) != 16000 ||
+      read_u16_le (bytes + 34) != 16 ||
+      memcmp (bytes + 36, "data", 4) != 0)
     {
       g_set_error_literal (error, XD_VOICE_DATA_ERROR, 1,
-                           "Transcription service returned invalid JSON.");
+                           "Recorded audio has an invalid WAV header.");
       return NULL;
     }
 
-  root = json_node_get_object (json_parser_get_root (parser));
-  if (json_object_has_member (root, "error") &&
-      JSON_NODE_HOLDS_OBJECT (json_object_get_member (root, "error")))
-    {
-      JsonObject *service_error = json_object_get_object_member (root, "error");
-      const char *message =
-        json_object_get_string_member_with_default (
-          service_error, "message", "Transcription failed.");
-
-      g_set_error_literal (error, XD_VOICE_DATA_ERROR, 1, message);
-      return NULL;
-    }
-
-  text = json_object_get_string_member_with_default (root, "text", NULL);
-  if (text == NULL)
+  data_length = read_u32_le (bytes + 40);
+  if ((data_length & 1) != 0 || data_length > length - 44)
     {
       g_set_error_literal (error, XD_VOICE_DATA_ERROR, 1,
-                           "Transcription response contained no text.");
+                           "Recorded audio data is truncated.");
       return NULL;
     }
 
-  result = g_strdup (text);
-  g_strstrip (result);
-  if (*result == '\0')
+  sample_count = data_length / 2;
+  samples = g_new (float, sample_count);
+  for (gsize i = 0; i < sample_count; i++)
     {
-      g_free (result);
-      g_set_error_literal (error, XD_VOICE_DATA_ERROR, 1,
-                           "No speech was detected.");
-      return NULL;
+      gint16 sample;
+
+      memcpy (&sample, bytes + 44 + i * 2, sizeof sample);
+      sample = GINT16_FROM_LE (sample);
+      samples[i] = sample / 32768.0f;
     }
 
-  return result;
+  return g_bytes_new_take (samples, sample_count * sizeof *samples);
+}
+
+gboolean
+xd_voice_model_metadata_valid (guint64     length,
+                               const char *sha256)
+{
+  return length == VOICE_MODEL_SIZE &&
+         g_strcmp0 (sha256, VOICE_MODEL_SHA256) == 0;
 }

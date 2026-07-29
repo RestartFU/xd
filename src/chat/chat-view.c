@@ -28,7 +28,6 @@
 
 #if XD_HAS_VOICE
 #include "voice-input.h"
-#include "settings/agent-secrets.h"
 #endif
 
 /*
@@ -195,11 +194,14 @@ struct _XdChatView
 #if XD_HAS_VOICE
   GtkButton *voice_button;
   XdVoiceRecorder *voice_recorder;
+  XdVoiceModel *voice_model;
   GCancellable *voice_cancellable;
-  char *voice_api_key;
+  char *voice_model_path;
   guint voice_generation;
   guint voice_timer;
   gint64 voice_started_at;
+  gboolean voice_confirming;
+  gboolean voice_downloading;
   gboolean voice_recording;
   gboolean voice_transcribing;
 #endif
@@ -4492,39 +4494,6 @@ show_voice_error (XdChatView *self,
   adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
 }
 
-static char *
-voice_api_key (XdChatView  *self,
-               GError     **error)
-{
-  const char *inherited = g_getenv ("OPENAI_API_KEY");
-  g_autoptr (XdAgentSecrets) secrets = NULL;
-  g_auto (GStrv) folder_ids = NULL;
-  g_auto (GStrv) environment = NULL;
-  const char *stored;
-
-  if (inherited != NULL && *inherited != '\0')
-    return g_strdup (inherited);
-
-  folder_ids = xd_node_folder_ids (
-    self->chat != NULL ? xd_node_get_parent (self->chat) : NULL);
-  secrets = xd_agent_secrets_load_effective (
-    (const char *const *) folder_ids, error);
-  if (secrets == NULL)
-    return NULL;
-
-  environment = xd_agent_secrets_apply_environment (
-    secrets, g_get_environ ());
-  stored = g_environ_getenv (environment, "OPENAI_API_KEY");
-  if (stored != NULL && *stored != '\0')
-    return g_strdup (stored);
-
-  g_set_error_literal (
-    error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-    "Voice transcription needs OPENAI_API_KEY. Add it under local "
-    "“Agent Secrets…” or export it before starting xd.");
-  return NULL;
-}
-
 static void
 update_voice_button (XdChatView *self)
 {
@@ -4533,7 +4502,25 @@ update_voice_button (XdChatView *self)
   g_clear_handle_id (&self->voice_timer, g_source_remove);
   gtk_widget_remove_css_class (button, "destructive-action");
 
-  if (self->voice_recording)
+  if (self->voice_confirming)
+    {
+      GtkWidget *spinner = gtk_spinner_new ();
+
+      gtk_spinner_start (GTK_SPINNER (spinner));
+      gtk_button_set_child (self->voice_button, spinner);
+      gtk_widget_set_sensitive (button, FALSE);
+      gtk_widget_set_tooltip_text (button, "Preparing local voice input…");
+    }
+  else if (self->voice_downloading)
+    {
+      gtk_button_set_icon_name (
+        self->voice_button, "media-playback-stop-symbolic");
+      gtk_widget_add_css_class (button, "destructive-action");
+      gtk_widget_set_sensitive (button, TRUE);
+      gtk_widget_set_tooltip_text (
+        button, "Downloading local speech model… 0% — click to cancel");
+    }
+  else if (self->voice_recording)
     {
       gtk_button_set_icon_name (
         self->voice_button, "media-playback-stop-symbolic");
@@ -4557,16 +4544,26 @@ update_voice_button (XdChatView *self)
         self->voice_button, "audio-input-microphone-symbolic");
       gtk_widget_set_sensitive (button, self->chat != NULL);
       gtk_widget_set_tooltip_text (
-        button, "Record voice prompt for OpenAI transcription");
+        button, "Record voice prompt locally");
     }
 }
 
 static gboolean
-update_voice_duration (gpointer user_data)
+update_voice_status (gpointer user_data)
 {
   XdChatView *self = user_data;
   g_autofree char *tooltip = NULL;
   gint64 seconds;
+
+  if (self->voice_downloading && self->voice_model != NULL)
+    {
+      tooltip = g_strdup_printf (
+        "Downloading local speech model… %u%% — click to cancel",
+        xd_voice_model_get_progress (self->voice_model));
+      gtk_widget_set_tooltip_text (
+        GTK_WIDGET (self->voice_button), tooltip);
+      return G_SOURCE_CONTINUE;
+    }
 
   if (!self->voice_recording)
     {
@@ -4588,12 +4585,15 @@ update_voice_duration (gpointer user_data)
 static void
 reset_voice (XdChatView *self)
 {
+  self->voice_confirming = FALSE;
+  self->voice_downloading = FALSE;
   self->voice_recording = FALSE;
   self->voice_transcribing = FALSE;
   g_clear_handle_id (&self->voice_timer, g_source_remove);
   g_clear_object (&self->voice_recorder);
+  g_clear_object (&self->voice_model);
   g_clear_object (&self->voice_cancellable);
-  g_clear_pointer (&self->voice_api_key, g_free);
+  g_clear_pointer (&self->voice_model_path, g_free);
   update_voice_button (self);
 }
 
@@ -4687,8 +4687,113 @@ on_voice_recorded (GObject      *source,
     }
 
   xd_voice_transcribe_async (
-    wav, self->voice_api_key, self->voice_cancellable,
+    wav, self->voice_model_path, self->voice_cancellable,
     on_voice_transcribed, operation);
+}
+
+static void
+start_voice_recording (XdChatView *self,
+                       char       *model_path)
+{
+  self->voice_confirming = FALSE;
+  self->voice_downloading = FALSE;
+  g_clear_object (&self->voice_model);
+  self->voice_model_path = model_path;
+  self->voice_recorder = xd_voice_recorder_new ();
+  self->voice_recording = TRUE;
+  self->voice_started_at = g_get_monotonic_time ();
+  update_voice_button (self);
+  self->voice_timer =
+    g_timeout_add_seconds (1, update_voice_status, self);
+  xd_voice_recorder_record_async (
+    self->voice_recorder, self->voice_cancellable,
+    on_voice_recorded, voice_operation_new (self));
+}
+
+static void
+on_voice_model_ready (GObject      *source,
+                      GAsyncResult *result,
+                      gpointer      user_data)
+{
+  VoiceOperation *operation = user_data;
+  XdChatView *self = operation->view;
+  g_autoptr (GError) error = NULL;
+  g_autofree char *model_path =
+    xd_voice_model_ensure_finish (
+      XD_VOICE_MODEL (source), result, &error);
+
+  if (operation->generation != self->voice_generation)
+    {
+      voice_operation_free (operation);
+      return;
+    }
+
+  g_clear_handle_id (&self->voice_timer, g_source_remove);
+  if (model_path == NULL)
+    {
+      reset_voice (self);
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        show_voice_error (self, error->message);
+    }
+  else
+    {
+      start_voice_recording (self, g_steal_pointer (&model_path));
+    }
+
+  voice_operation_free (operation);
+}
+
+static void
+on_voice_model_confirmed (GObject      *source,
+                          GAsyncResult *result,
+                          gpointer      user_data)
+{
+  VoiceOperation *operation = user_data;
+  XdChatView *self = operation->view;
+  AdwAlertDialog *dialog = ADW_ALERT_DIALOG (source);
+  const char *response = adw_alert_dialog_choose_finish (dialog, result);
+
+  if (operation->generation != self->voice_generation)
+    {
+      voice_operation_free (operation);
+      return;
+    }
+
+  self->voice_confirming = FALSE;
+  if (g_strcmp0 (response, "download") != 0)
+    {
+      reset_voice (self);
+      voice_operation_free (operation);
+      return;
+    }
+
+  self->voice_downloading = TRUE;
+  self->voice_model = xd_voice_model_new ();
+  update_voice_button (self);
+  self->voice_timer =
+    g_timeout_add (250, update_voice_status, self);
+  xd_voice_model_ensure_async (
+    self->voice_model, self->voice_cancellable,
+    on_voice_model_ready, operation);
+}
+
+static void
+confirm_voice_model_download (XdChatView *self)
+{
+  AdwAlertDialog *dialog = ADW_ALERT_DIALOG (adw_alert_dialog_new (
+    "Download Local Speech Model?",
+    "Voice input runs entirely on this device. xd needs to download the "
+    "548 MiB Whisper large-v3-turbo model once."));
+
+  adw_alert_dialog_add_responses (
+    dialog, "cancel", "Cancel", "download", "Download", NULL);
+  adw_alert_dialog_set_response_appearance (
+    dialog, "download", ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response (dialog, "download");
+  adw_alert_dialog_set_close_response (dialog, "cancel");
+  adw_alert_dialog_choose (
+    dialog, GTK_WIDGET (self), self->voice_cancellable,
+    on_voice_model_confirmed, voice_operation_new (self));
 }
 
 static void
@@ -4696,7 +4801,7 @@ on_voice_clicked (GtkButton *button,
                   gpointer   user_data)
 {
   XdChatView *self = user_data;
-  g_autoptr (GError) error = NULL;
+  g_autofree char *model_path = NULL;
 
   if (self->voice_recording)
     {
@@ -4707,27 +4812,27 @@ on_voice_clicked (GtkButton *button,
       return;
     }
 
-  if (self->voice_transcribing || self->chat == NULL)
-    return;
-
-  self->voice_api_key = voice_api_key (self, &error);
-  if (self->voice_api_key == NULL)
+  if (self->voice_downloading)
     {
-      show_voice_error (self, error->message);
+      cancel_voice (self);
       return;
     }
 
+  if (self->voice_confirming || self->voice_transcribing ||
+      self->chat == NULL)
+    return;
+
   self->voice_generation++;
-  self->voice_recorder = xd_voice_recorder_new ();
   self->voice_cancellable = g_cancellable_new ();
-  self->voice_recording = TRUE;
-  self->voice_started_at = g_get_monotonic_time ();
-  update_voice_button (self);
-  self->voice_timer =
-    g_timeout_add_seconds (1, update_voice_duration, self);
-  xd_voice_recorder_record_async (
-    self->voice_recorder, self->voice_cancellable,
-    on_voice_recorded, voice_operation_new (self));
+  model_path = xd_voice_model_find ();
+  if (model_path != NULL)
+    start_voice_recording (self, g_steal_pointer (&model_path));
+  else
+    {
+      self->voice_confirming = TRUE;
+      update_voice_button (self);
+      confirm_voice_model_download (self);
+    }
 }
 #endif
 
@@ -6066,7 +6171,7 @@ build_composer (XdChatView *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->voice_button), "circular");
   gtk_widget_set_tooltip_text (
     GTK_WIDGET (self->voice_button),
-    "Record voice prompt for OpenAI transcription");
+    "Record voice prompt locally");
   g_signal_connect (
     self->voice_button, "clicked", G_CALLBACK (on_voice_clicked), self);
 #endif

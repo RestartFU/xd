@@ -18,8 +18,23 @@ GBytes          *xd_voice_recorder_record_finish (XdVoiceRecorder    *self,
                                                    GError            **error);
 void             xd_voice_recorder_stop          (XdVoiceRecorder    *self);
 
+#define XD_TYPE_VOICE_MODEL (xd_voice_model_get_type ())
+G_DECLARE_FINAL_TYPE (XdVoiceModel, xd_voice_model,
+                      XD, VOICE_MODEL, GObject)
+
+XdVoiceModel *xd_voice_model_new             (void);
+char         *xd_voice_model_find            (void);
+guint         xd_voice_model_get_progress    (XdVoiceModel       *self);
+void          xd_voice_model_ensure_async    (XdVoiceModel       *self,
+                                               GCancellable       *cancellable,
+                                               GAsyncReadyCallback callback,
+                                               gpointer            user_data);
+char         *xd_voice_model_ensure_finish   (XdVoiceModel       *self,
+                                               GAsyncResult       *result,
+                                               GError            **error);
+
 void  xd_voice_transcribe_async  (GBytes             *wav,
-                                  const char         *api_key,
+                                  const char         *model_path,
                                   GCancellable       *cancellable,
                                   GAsyncReadyCallback callback,
                                   gpointer            user_data);

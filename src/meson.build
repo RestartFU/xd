@@ -105,7 +105,7 @@ if not is_windows
 endif
 if has_voice
   xd_sources += files('chat/voice-input.c')
-  xd_app_deps += [pulse_simple_dep, soup_dep]
+  xd_app_deps += [pulse_simple_dep, soup_dep, whisper_dep]
 endif
 
 executable('xd',
