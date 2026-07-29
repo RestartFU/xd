@@ -52,15 +52,34 @@ make_certificate (const char *dir,
 {
   g_autofree char *cert_path = g_strdup_printf ("%s/%s-cert.pem", dir, name);
   g_autofree char *key_path = g_strdup_printf ("%s/%s-key.pem", dir, name);
-  g_autofree char *command = NULL;
+  g_autofree char *subject = g_strdup_printf ("/CN=%s", name);
   g_autoptr (GError) error = NULL;
   GTlsCertificate *certificate;
+  int status = 0;
 
-  command = g_strdup_printf ("openssl req -x509 -newkey ec "
-                             "-pkeyopt ec_paramgen_curve:prime256v1 -keyout %s "
-                             "-out %s -days 1 -nodes -subj /CN=%s",
-                             key_path, cert_path, name);
-  g_assert_true (g_spawn_command_line_sync (command, NULL, NULL, NULL, NULL));
+  /*
+   * An argv rather than a command line: g_spawn_command_line_sync puts the
+   * string through g_shell_parse_argv first, where a backslash escapes the
+   * character after it. A Windows temporary directory is full of them, so the
+   * paths openssl was given were not the paths meant, and it wrote a key
+   * nowhere anyone went looking for.
+   */
+  {
+    const char *argv[] = {
+      "openssl", "req", "-x509", "-newkey", "ec",
+      "-pkeyopt", "ec_paramgen_curve:prime256v1",
+      "-keyout", key_path, "-out", cert_path,
+      "-days", "1", "-nodes", "-subj", subject,
+      NULL,
+    };
+
+    g_assert_true (g_spawn_sync (NULL, (char **) argv, NULL,
+                                 G_SPAWN_SEARCH_PATH, NULL, NULL,
+                                 NULL, NULL, &status, &error));
+    g_assert_no_error (error);
+    g_assert_true (g_spawn_check_wait_status (status, &error));
+    g_assert_no_error (error);
+  }
 
   certificate = g_tls_certificate_new_from_files (cert_path, key_path, &error);
   g_assert_no_error (error);

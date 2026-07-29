@@ -3713,8 +3713,19 @@ xd_remote_server_dispose (GObject *object)
 {
   XdRemoteServer *self = XD_REMOTE_SERVER (object);
 
+  /*
+   * Stopping only stops accepting; the listening sockets stay open, and their
+   * sources stay in the main context until the service is finalized. Closing
+   * here takes the descriptors and the sources down together, so nothing is
+   * left polling one that has gone. Linux reports such a descriptor as
+   * POLLNVAL on its own entry and carries on; BSD fails the whole poll with
+   * EBADF, which GLib treats as fatal, so this only ever showed on macOS.
+   */
   if (self->service != NULL)
-    g_socket_service_stop (self->service);
+    {
+      g_socket_service_stop (self->service);
+      g_socket_listener_close (G_SOCKET_LISTENER (self->service));
+    }
 
   if (self->quiesce_task != NULL)
     {
