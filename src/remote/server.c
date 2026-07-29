@@ -3913,6 +3913,17 @@ xd_remote_server_dispose (GObject *object)
     }
 
   g_clear_handle_id (&self->local_change_id, g_source_remove);
+  /*
+   * Cancelled before it is dropped, which is the only way to stop a monitor.
+   *
+   * Letting go of the reference alone leaves the backend to come apart on its
+   * own schedule. Linux watches a whole tree through one inotify descriptor
+   * and never noticed; macOS gives each watch a kqueue descriptor of its own,
+   * closes it as the monitor goes, and leaves the source watching it -- which
+   * is an EBADF out of the next poll, and fatal to GLib.
+   */
+  if (self->tree_watch != NULL)
+    g_file_monitor_cancel (self->tree_watch);
   g_clear_object (&self->tree_watch);
   if (self->storage != NULL)
     {
