@@ -1,6 +1,7 @@
 require "base64"
 require "gtk4"
 require "../daemon/client"
+require "./chat_controls"
 
 module Xd
   module UI
@@ -10,6 +11,7 @@ module Xd
       @active_chat : String?
       @stream_label : Gtk::Label?
       @folders = [] of String
+      @working = false
 
       def initialize(
         application : Gtk::Application,
@@ -67,6 +69,15 @@ module Xd
         chat_header.margin_end = 18
         chat_header.append(@chat_title)
 
+        @controls = ChatControls.new(
+          ->(option : String, value : String?) {
+            set_option(option, value)
+          }
+        )
+        @controls.widget.margin_start = 12
+        @controls.widget.margin_end = 12
+        @controls.widget.margin_bottom = 6
+
         @transcript = Gtk::Box.new(:vertical, 10)
         @transcript.margin_top = 18
         @transcript.margin_bottom = 18
@@ -87,7 +98,15 @@ module Xd
         @send = Gtk::Button.new_with_label("Send")
         @send.sensitive = false
         @send.add_css_class("suggested-action")
-        @send.clicked_signal.connect { send_message }
+        @send.clicked_signal.connect do
+          @working ? cancel_turn : send_message
+        end
+
+        @queue_box = Gtk::Box.new(:vertical, 4)
+        @queue_box.margin_start = 18
+        @queue_box.margin_end = 18
+        @queue_box.add_css_class("xd-queue")
+        @queue_box.visible = false
 
         composer = Gtk::Box.new(:horizontal, 8)
         composer.margin_top = 10
@@ -108,8 +127,10 @@ module Xd
         chat.hexpand = true
         chat.add_css_class("xd-chat")
         chat.append(chat_header)
+        chat.append(@controls.widget)
         chat.append(Gtk::Separator.new(:horizontal))
         chat.append(@transcript_scroll)
+        chat.append(@queue_box)
         chat.append(@status)
         chat.append(composer)
 
@@ -209,6 +230,8 @@ module Xd
         @chat_title.text = title
         @entry.sensitive = true
         @send.sensitive = true
+        @controls.sensitive = true
+        load_chat_state
         load_messages
         @entry.grab_focus
       end
@@ -276,7 +299,112 @@ module Xd
           "chat" => JSON::Any.new(chat_id),
           "text" => JSON::Any.new(text),
         })
-        load_messages if response
+        if response
+          if response["queued"]?.try(&.as_bool?) == true
+            @status.text = "Message queued"
+          end
+          load_messages
+          load_chat_state
+        end
+      end
+
+      private def cancel_turn : Nil
+        chat_id = @active_chat
+        return unless chat_id
+
+        call({
+          "op"   => JSON::Any.new("cancel"),
+          "chat" => JSON::Any.new(chat_id),
+        })
+      end
+
+      private def set_option(option : String, value : String?) : Nil
+        chat_id = @active_chat
+        return unless chat_id
+
+        request = {
+          "op"     => JSON::Any.new("set-option"),
+          "chat"   => JSON::Any.new(chat_id),
+          "option" => JSON::Any.new(option),
+        }
+        request["value"] = JSON::Any.new(value) if value
+        load_chat_state if call(request)
+      end
+
+      private def load_chat_state : Nil
+        chat_id = @active_chat
+        return unless chat_id
+
+        state = call({
+          "op"   => JSON::Any.new("chat"),
+          "chat" => JSON::Any.new(chat_id),
+        })
+        return unless state
+
+        @controls.update(state)
+        @working = state["working"]?.try(&.as_bool?) || false
+        @send.label = @working ? "Stop" : "Send"
+        if @working
+          @send.remove_css_class("suggested-action")
+          @send.add_css_class("destructive-action")
+        else
+          @send.remove_css_class("destructive-action")
+          @send.add_css_class("suggested-action")
+        end
+        queue = state["queue"]?.try(&.as_a?) || [] of JSON::Any
+        render_queue(queue)
+      end
+
+      private def render_queue(queue : Array(JSON::Any)) : Nil
+        clear(@queue_box)
+        @queue_box.visible = !queue.empty?
+
+        queue.each_with_index do |node, index|
+          text = node.as_s
+          label = Gtk::Label.new(text)
+          label.xalign = 0_f32
+          label.hexpand = true
+          label.ellipsize = :end
+
+          steer = Gtk::Button.new_with_label("Run next")
+          steer.add_css_class("flat")
+          steer.clicked_signal.connect do
+            steer_queue(index, text)
+          end
+
+          remove = Gtk::Button.new_with_label("×")
+          remove.add_css_class("flat")
+          remove.tooltip_text = "Remove queued message"
+          remove.clicked_signal.connect { drop_queue(index) }
+
+          row = Gtk::Box.new(:horizontal, 6)
+          row.add_css_class("xd-queue-row")
+          row.append(label)
+          row.append(steer)
+          row.append(remove)
+          @queue_box.append(row)
+        end
+      end
+
+      private def steer_queue(index : Int, text : String) : Nil
+        chat_id = @active_chat
+        return unless chat_id
+        call({
+          "op"    => JSON::Any.new("steer-queue"),
+          "chat"  => JSON::Any.new(chat_id),
+          "index" => JSON::Any.new(index.to_i64),
+          "text"  => JSON::Any.new(text),
+        })
+      end
+
+      private def drop_queue(index : Int) : Nil
+        chat_id = @active_chat
+        return unless chat_id
+        call({
+          "op"    => JSON::Any.new("drop-queue"),
+          "chat"  => JSON::Any.new(chat_id),
+          "index" => JSON::Any.new(index.to_i64),
+        })
       end
 
       private def handle_event(event : Hash(String, JSON::Any)) : Nil
@@ -307,12 +435,17 @@ module Xd
           return unless active_event?(event)
           @status.text = "Working…"
           @stream_label = nil
+          load_chat_state
         when "turn-finished", "changed"
-          load_messages if active_event?(event)
+          if active_event?(event)
+            load_messages
+            load_chat_state
+          end
         when "queued"
           return unless active_event?(event)
           queue = event["queue"]?.try(&.as_a?)
           @status.text = queue && !queue.empty? ? "Message queued" : ""
+          load_chat_state
         end
       end
 

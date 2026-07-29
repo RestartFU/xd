@@ -34,6 +34,22 @@ module Xd
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;
       }
+      .xd-controls button {
+        min-height: 26px;
+        padding: 3px 8px;
+      }
+      .xd-controls button.flat:hover {
+        background: alpha(#ffffff, 0.07);
+      }
+      .xd-queue {
+        background: alpha(#f6d32d, 0.06);
+        border-radius: 10px;
+        padding: 6px 8px;
+      }
+      .xd-queue-row button {
+        min-height: 24px;
+        padding: 2px 7px;
+      }
       .xd-composer entry {
         border-radius: 12px;
         padding: 10px 12px;
