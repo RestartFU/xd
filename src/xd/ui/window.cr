@@ -2,6 +2,7 @@ require "base64"
 require "gtk4"
 require "../daemon/client"
 require "./chat_controls"
+require "./sidebar"
 
 module Xd
   module UI
@@ -10,7 +11,6 @@ module Xd
 
       @active_chat : String?
       @stream_label : Gtk::Label?
-      @folders = [] of String
       @working = false
 
       def initialize(
@@ -23,39 +23,12 @@ module Xd
         @widget.title = "xd"
         @widget.set_default_size(1180, 760)
 
-        @tree_box = Gtk::Box.new(:vertical, 2)
-        @tree_box.margin_top = 6
-        @tree_box.margin_bottom = 6
-        @tree_box.margin_start = 6
-        @tree_box.margin_end = 6
-
-        tree_scroll = Gtk::ScrolledWindow.new
-        tree_scroll.vexpand = true
-        tree_scroll.child = @tree_box
-
-        tree_title = Gtk::Label.new("Workspaces")
-        tree_title.xalign = 0_f32
-        tree_title.hexpand = true
-        tree_title.add_css_class("title")
-        new_chat = Gtk::Button.new_with_label("+")
-        new_chat.tooltip_text = "New chat"
-        new_chat.add_css_class("flat")
-        new_chat.clicked_signal.connect { create_chat }
-
-        tree_header = Gtk::Box.new(:horizontal, 8)
-        tree_header.margin_top = 8
-        tree_header.margin_bottom = 8
-        tree_header.margin_start = 12
-        tree_header.margin_end = 8
-        tree_header.append(tree_title)
-        tree_header.append(new_chat)
-
-        sidebar = Gtk::Box.new(:vertical, 0)
-        sidebar.width_request = 280
-        sidebar.add_css_class("xd-sidebar")
-        sidebar.append(tree_header)
-        sidebar.append(Gtk::Separator.new(:horizontal))
-        sidebar.append(tree_scroll)
+        @sidebar = Sidebar.new(
+          @widget,
+          ->(request : Hash(String, JSON::Any)) { call(request) },
+          ->(id : String, title : String) { open_chat(id, title) },
+          ->(id : String) { chat_deleted(id) }
+        )
 
         @chat_title = Gtk::Label.new("Select a chat")
         @chat_title.xalign = 0_f32
@@ -135,7 +108,7 @@ module Xd
         chat.append(composer)
 
         root = Gtk::Box.new(:horizontal, 0)
-        root.append(sidebar)
+        root.append(@sidebar.widget)
         root.append(Gtk::Separator.new(:vertical))
         root.append(chat)
         @widget.child = root
@@ -147,7 +120,7 @@ module Xd
           end
         end
 
-        reload_tree
+        @sidebar.reload
       end
 
       def present : Nil
@@ -162,68 +135,6 @@ module Xd
         nil
       end
 
-      private def reload_tree : Nil
-        response = call({"op" => JSON::Any.new("tree")})
-        return unless response
-
-        clear(@tree_box)
-        folders = response["folders"].as_a
-        chats = response["chats"].as_a
-        @folders = folders.map { |folder| folder["id"].as_s }
-        names = {} of String => String
-        folders.each do |folder|
-          names[folder["id"].as_s] = folder["name"].as_s
-        end
-
-        @folders.each do |folder_id|
-          heading = Gtk::Label.new(names[folder_id]? || "Workspace")
-          heading.xalign = 0_f32
-          heading.margin_top = 8
-          heading.margin_start = 8
-          heading.add_css_class("dim-label")
-          @tree_box.append(heading)
-
-          chats.each do |chat|
-            next unless chat["folder"].as_s == folder_id
-            add_chat_button(chat)
-          end
-        end
-      end
-
-      private def add_chat_button(chat : JSON::Any) : Nil
-        id = chat["id"].as_s
-        title = chat["title"].as_s? || "New Chat"
-        title = "New Chat" if title.empty?
-        button = Gtk::Button.new_with_label(title)
-        button.hexpand = true
-        button.halign = :fill
-        button.add_css_class("flat")
-        button.add_css_class("xd-chat-row")
-        button.clicked_signal.connect { open_chat(id, title) }
-        @tree_box.append(button)
-      end
-
-      private def create_chat : Nil
-        folder_id = @folders.first?
-        unless folder_id
-          created = call({
-            "op"   => JSON::Any.new("new-folder"),
-            "name" => JSON::Any.new("Workspace"),
-          })
-          return unless created
-          folder_id = created["id"].as_s
-        end
-
-        created = call({
-          "op"     => JSON::Any.new("new-chat"),
-          "folder" => JSON::Any.new(folder_id),
-        })
-        return unless created
-
-        reload_tree
-        open_chat(created["id"].as_s, "New Chat")
-      end
-
       private def open_chat(id : String, title : String) : Nil
         @active_chat = id
         @stream_label = nil
@@ -234,6 +145,26 @@ module Xd
         load_chat_state
         load_messages
         @entry.grab_focus
+      end
+
+      private def chat_deleted(id : String) : Nil
+        return unless @active_chat == id
+
+        @active_chat = nil
+        @stream_label = nil
+        @working = false
+        @chat_title.text = "Select a chat"
+        @entry.text = ""
+        @entry.sensitive = false
+        @send.label = "Send"
+        @send.sensitive = false
+        @send.remove_css_class("destructive-action")
+        @send.add_css_class("suggested-action")
+        @controls.sensitive = false
+        clear(@transcript)
+        clear(@queue_box)
+        @queue_box.visible = false
+        @status.text = ""
       end
 
       private def load_messages : Nil
@@ -411,7 +342,7 @@ module Xd
         name = event["event"]?.try(&.as_s?) || return
         case name
         when "tree"
-          reload_tree
+          @sidebar.reload
         when "text"
           return unless active_event?(event)
           text = event["text"]?.try(&.as_s?) || return
