@@ -1775,7 +1775,7 @@ test_the_daemon_lists_its_directories (void)
   client = xd_remote_client_new ("127.0.0.1", daemon.port);
   tree = paired_tree (&daemon, client);
 
-  xd_remote_tree_list_dir (tree, daemon.root, on_dir_listed, &listed);
+  xd_remote_tree_list_dir (tree, daemon.root, NULL, on_dir_listed, &listed);
   wait_for (&listed.wait);
 
   if (listed.failure != NULL)

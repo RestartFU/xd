@@ -158,6 +158,7 @@ typedef void (*XdRemoteDirFunc) (const char         *path,
 
 void            xd_remote_tree_list_dir      (XdRemoteTree    *self,
                                               const char      *path,
+                                              GCancellable    *cancellable,
                                               XdRemoteDirFunc  callback,
                                               gpointer         user_data);
 void            xd_remote_tree_rename_chat   (XdRemoteTree *self,
