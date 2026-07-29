@@ -21,9 +21,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairing = MutableStateFlow(false)
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
+    private val _createdChat = MutableStateFlow<String?>(null)
     private val _error = MutableStateFlow<String?>(null)
 
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
+    val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
 
     fun pair(
@@ -68,16 +70,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createChat(
-        folderId: String,
-        onCreated: (String) -> Unit,
-    ) {
+    fun createChat(folderId: String) {
         if (_creatingChat.value) return
         _creatingChat.value = true
         _error.value = null
         viewModelScope.launch {
             try {
-                onCreated(client.createChat(folderId = folderId, title = null))
+                _createdChat.value = client.createChat(folderId = folderId, title = null)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -86,6 +85,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _creatingChat.value = false
             }
         }
+    }
+
+    fun consumeCreatedChat(chatId: String) {
+        _createdChat.compareAndSet(chatId, null)
     }
 }
 

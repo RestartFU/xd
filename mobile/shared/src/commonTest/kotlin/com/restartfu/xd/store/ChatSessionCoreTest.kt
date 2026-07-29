@@ -9,6 +9,7 @@ import com.restartfu.xd.net.SequencedEvent
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
@@ -51,10 +52,12 @@ class ChatSessionCoreTest {
         )
         runCurrent()
         factory.latest.receive(
-            """{"ok":true,"total_messages":0,"last_message_id":null,"messages":[]}""",
+            """{"ok":true,"total_messages":0,"last_message_id":0,"messages":[]}""",
         )
         runCurrent()
         reload.await()
+        assertNull(core.state.value.error)
+        assertEquals("Hel", core.state.value.liveSegment)
 
         core.onEvent(
             SequencedEvent(

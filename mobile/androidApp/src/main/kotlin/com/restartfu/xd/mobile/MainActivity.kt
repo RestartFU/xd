@@ -289,6 +289,7 @@ private fun TreeScreen(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
+    val createdChat by model.createdChat.collectAsStateWithLifecycle()
     var expandedIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     val roots = tree.folders.filter { it.parentId == null }
     val children = tree.folders.groupBy(Folder::parentId)
@@ -296,6 +297,13 @@ private fun TreeScreen(
     val foldersById = tree.folders.associateBy(Folder::id)
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
     var confirmingForget by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(createdChat) {
+        createdChat?.let { chatId ->
+            openChat(chatId)
+            model.consumeCreatedChat(chatId)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -370,7 +378,7 @@ private fun TreeScreen(
                                 .fillMaxWidth()
                                 .clickable {
                                     choosingFolder = false
-                                    model.createChat(folder.id, openChat)
+                                    model.createChat(folder.id)
                                 }
                                 .padding(vertical = 12.dp),
                         )
