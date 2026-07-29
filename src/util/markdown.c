@@ -333,7 +333,8 @@ append_padding (GString *out,
 
 static gboolean
 render_table (GString    *out,
-              cmark_node *paragraph)
+              cmark_node *paragraph,
+              gboolean    markup)
 {
   g_autoptr (GString) plain = g_string_new (NULL);
   g_auto (GStrv) lines = NULL;
@@ -391,14 +392,15 @@ render_table (GString    *out,
           (guint) g_utf8_strlen (g_ptr_array_index (cells, column), -1));
     }
 
-  g_string_append (out, "<tt>");
+  if (markup)
+    g_string_append (out, "<tt>");
   for (guint row = 0; row < rows->len; row++)
     {
       GPtrArray *cells = g_ptr_array_index (rows, row);
 
       if (row > 0)
         g_string_append_c (out, '\n');
-      if (row == 0)
+      if (row == 0 && markup)
         g_string_append (out, "<b>");
 
       for (guint column = 0; column < columns; column++)
@@ -408,13 +410,18 @@ render_table (GString    *out,
 
           if (column > 0)
             g_string_append (out, " \xe2\x94\x82 ");
-          append_escaped (out, cell, -1);
+          if (markup)
+            append_escaped (out, cell, -1);
+          else
+            g_string_append (out, cell);
           append_padding (out, widths[column] - width);
         }
 
       if (row == 0)
         {
-          g_string_append (out, "</b>\n");
+          if (markup)
+            g_string_append (out, "</b>");
+          g_string_append_c (out, '\n');
           for (guint column = 0; column < columns; column++)
             {
               if (column > 0)
@@ -424,7 +431,8 @@ render_table (GString    *out,
             }
         }
     }
-  g_string_append (out, "</tt>");
+  if (markup)
+    g_string_append (out, "</tt>");
 
   return TRUE;
 }
@@ -524,7 +532,7 @@ render_block (GString    *out,
       break;
 
     case CMARK_NODE_PARAGRAPH:
-      if (!render_table (out, node))
+      if (!render_table (out, node, TRUE))
         render_inline_children (out, node, TRUE);
       break;
 
@@ -643,6 +651,35 @@ xd_markdown_to_pango (const char *text)
       return g_markup_escape_text (text, -1);
     }
 
+  return g_string_free (g_steal_pointer (&out), FALSE);
+}
+
+char *
+xd_markdown_table_to_text (const char *text)
+{
+  cmark_node *document;
+  cmark_node *paragraph;
+  g_autoptr (GString) out = g_string_new (NULL);
+
+  if (text == NULL || *text == '\0')
+    return NULL;
+
+  document = cmark_parse_document (
+    text, strlen (text), CMARK_OPT_VALIDATE_UTF8);
+  if (document == NULL)
+    return NULL;
+
+  paragraph = cmark_node_first_child (document);
+  if (paragraph == NULL ||
+      cmark_node_next (paragraph) != NULL ||
+      cmark_node_get_type (paragraph) != CMARK_NODE_PARAGRAPH ||
+      !render_table (out, paragraph, FALSE))
+    {
+      cmark_node_free (document);
+      return NULL;
+    }
+
+  cmark_node_free (document);
   return g_string_free (g_steal_pointer (&out), FALSE);
 }
 

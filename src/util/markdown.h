@@ -15,6 +15,12 @@ G_BEGIN_DECLS
  */
 char *xd_markdown_to_pango (const char *text);
 
+/*
+ * Formats one complete GitHub-style table paragraph as a plain-text grid.
+ * Returns NULL when @text is not exactly one table.
+ */
+char *xd_markdown_table_to_text (const char *text);
+
 /* Escapes plain text and turns bare HTTP(S) URLs into GtkLabel links. */
 char *xd_urls_to_pango     (const char *text);
 
