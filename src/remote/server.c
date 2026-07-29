@@ -1907,9 +1907,9 @@ on_turn_finished (XdDaemonTurn *turn,
 /*
  * Starts one daemon-owned turn.
  *
- * Used by a direct send and by the persistent queue. Keeping both on this path
- * makes naming, storage and broadcasts identical whichever device supplied
- * the message.
+ * Used by direct sends, the persistent queue and daemon recovery. Keeping all
+ * three on this path makes turn setup and broadcasts identical while
+ * @user_submitted decides whether the prompt belongs in the transcript.
  */
 static gboolean
 start_daemon_turn (XdRemoteServer  *self,
@@ -1995,7 +1995,7 @@ start_daemon_turn (XdRemoteServer  *self,
       running_free (running);
       g_object_unref (turn);
 
-      /* The message and the failure are both in the transcript now. */
+      /* Real user input and every failure are in the transcript now. */
       broadcast_event (self, "changed", chat_id, NULL, NULL);
       return FALSE;
     }

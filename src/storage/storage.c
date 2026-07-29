@@ -1796,19 +1796,6 @@ xd_storage_append_message (XdStorage   *self,
 }
 
 gboolean
-xd_storage_append_message_without_recency (XdStorage   *self,
-                                           const char  *chat_id,
-                                           const char  *role,
-                                           const char  *content,
-                                           const char  *raw_json,
-                                           const char  *label,
-                                           GError     **error)
-{
-  return append_message (
-    self, chat_id, role, content, raw_json, label, FALSE, NULL, error);
-}
-
-gboolean
 xd_storage_update_message (XdStorage   *self,
                            gint64       message_id,
                            const char  *content,

@@ -3769,7 +3769,8 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
   RemoteReply started = { 0 };
   StoredTurn stored;
   Wait quiesced = { 0 };
-  gboolean found_resume = FALSE;
+  gboolean found_resume_message = FALSE;
+  gboolean found_original_prompt = FALSE;
 
   daemon_start (&daemon);
 
@@ -3857,12 +3858,18 @@ test_a_restarted_daemon_resumes_interrupted_work (void)
     {
       XdMessage *message = g_ptr_array_index (messages, i);
 
-      if (g_strcmp0 (message->role, "user") == 0 &&
-          g_strcmp0 (message->content,
-                     "Resume the work interrupted by the daemon update.") == 0)
-        found_resume = TRUE;
+      if (g_strcmp0 (message->role, "user") == 0)
+        {
+          if (g_strcmp0 (message->content, "do long work") == 0)
+            found_original_prompt = TRUE;
+          if (g_strcmp0 (
+                message->content,
+                "Resume the work interrupted by the daemon update.") == 0)
+            found_resume_message = TRUE;
+        }
     }
-  g_assert_true (found_resume);
+  g_assert_true (found_original_prompt);
+  g_assert_false (found_resume_message);
 
   json_object_unref (started.reply);
   g_free (started.wait.failure);

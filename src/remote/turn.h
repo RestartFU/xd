@@ -38,7 +38,8 @@ XdDaemonTurn *xd_daemon_turn_new       (XdStorage    *storage,
  *
  * The user's message is stored first, so it is in the transcript whatever
  * happens next -- including this failing. @user_submitted is false only for
- * daemon-generated recovery work, which must not change sidebar recency.
+ * daemon-generated recovery work; its prompt reaches the backend without
+ * appearing in the transcript or changing sidebar recency.
  */
 gboolean      xd_daemon_turn_start     (XdDaemonTurn  *self,
                                         const char    *chat_id,

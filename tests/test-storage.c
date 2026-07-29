@@ -113,15 +113,6 @@ test_chats_follow_latest_user_message (Fixture       *fixture,
   chats = xd_storage_list_chats (fixture->storage, "folder", &error);
   g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
 
-  /* Restart recovery looks like a user row in the transcript, but was not
-   * sent by the user and therefore cannot reorder chats either. */
-  g_assert_true (xd_storage_append_message_without_recency (
-    fixture->storage, second, "user", "Resume interrupted work.",
-    NULL, NULL, &error));
-  g_clear_pointer (&chats, g_ptr_array_unref);
-  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
-  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
-
   g_usleep (1000);
   g_assert_true (xd_storage_append_message (
     fixture->storage, second, "user", "work here now", NULL, NULL, &error));

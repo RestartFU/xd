@@ -619,13 +619,15 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
       return FALSE;
     }
 
-  /* Stored before anything can go wrong, so the message is in the transcript
-   * even if the CLI never starts. */
-  if (!(user_submitted
-        ? xd_storage_append_message (
-            self->storage, chat_id, "user", prompt, NULL, NULL, error)
-        : xd_storage_append_message_without_recency (
-            self->storage, chat_id, "user", prompt, NULL, NULL, error)))
+  /*
+   * Store real user input before anything can go wrong, so it remains in the
+   * transcript even if the CLI never starts. Daemon recovery prompts are
+   * instructions to the backend, not things the user said: sending one must
+   * neither change recency nor leave a synthetic user bubble behind.
+   */
+  if (user_submitted &&
+      !xd_storage_append_message (
+        self->storage, chat_id, "user", prompt, NULL, NULL, error))
     return FALSE;
 
   self->transcript_message_id =
