@@ -21,6 +21,19 @@ internal class TreeStore(
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
 
+    suspend fun setChatWorking(
+        chatId: String,
+        working: Boolean,
+    ) {
+        refreshMutex.withLock {
+            _state.value = _state.value.copy(
+                chats = _state.value.chats.map { chat ->
+                    if (chat.id == chatId) chat.copy(working = working) else chat
+                },
+            )
+        }
+    }
+
     suspend fun refresh() {
         refreshMutex.withLock {
             _state.value = _state.value.copy(loading = true, error = null)

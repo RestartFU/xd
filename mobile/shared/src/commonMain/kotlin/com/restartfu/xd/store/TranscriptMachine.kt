@@ -42,6 +42,11 @@ public sealed interface TranscriptInput {
     ) : TranscriptInput
 
     public data class PendingTimedOut(val id: String) : TranscriptInput
+
+    public data class SendFailed(
+        val id: String,
+        val message: String,
+    ) : TranscriptInput
 }
 
 public data class TranscriptTransition(
@@ -145,6 +150,16 @@ public object TranscriptMachine {
                 )
             }
         }
+        is TranscriptInput.SendFailed -> TranscriptTransition(
+            state.copy(
+                pendingUser = if (state.pendingUser?.id == input.id) {
+                    null
+                } else {
+                    state.pendingUser
+                },
+                error = input.message,
+            ),
+        )
     }
 
     private fun loaded(
@@ -184,18 +199,21 @@ public object TranscriptMachine {
         )
     }
 
-    private fun ChatState.withMessages(reply: MessagesReply): ChatState = copy(
-        messages = reply.messages.mapIndexed { index, message ->
-            TranscriptItem(
-                id = "persisted-${message.at}-${reply.messages.size - index}",
-                kind = message.role.toKind(),
-                text = message.content,
-                atMillis = message.at * 1000,
-                label = message.label,
-            )
-        },
-        hasOlderMessages = reply.messages.size < reply.totalMessages,
-    )
+    private fun ChatState.withMessages(reply: MessagesReply): ChatState {
+        val visible = reply.messages.filterNot { it.role == "duration" }
+        return copy(
+            messages = visible.mapIndexed { index, message ->
+                TranscriptItem(
+                    id = "persisted-${message.at}-${visible.size - index}",
+                    kind = message.role.toKind(),
+                    text = message.content,
+                    atMillis = message.at * 1000,
+                    label = message.label,
+                )
+            },
+            hasOlderMessages = reply.messages.size < reply.totalMessages,
+        )
+    }
 
     private fun String.toKind(): TranscriptKind = when (this) {
         "user" -> TranscriptKind.USER

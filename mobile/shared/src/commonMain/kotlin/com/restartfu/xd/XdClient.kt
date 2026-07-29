@@ -47,8 +47,14 @@ public class XdClient(
         }
         scope.launch {
             actor.events.collect { event ->
-                if ((event.value["event"] as? JsonPrimitive)?.contentOrNull == "tree") {
+                val eventName =
+                    (event.value["event"] as? JsonPrimitive)?.contentOrNull
+                if (eventName == "tree") {
                     launch { treeStore.refresh() }
+                }
+                val chatId = (event.value["chat"] as? JsonPrimitive)?.contentOrNull
+                if (chatId != null && eventName in TURN_LIFECYCLE_EVENTS) {
+                    treeStore.setChatWorking(chatId, eventName == "turn-started")
                 }
                 sessions.value.values.forEach { entry ->
                     // Preserve wire order: text/tool transitions are not
@@ -133,6 +139,10 @@ public class XdClient(
     }
 
     private fun nowMillis(): Long = currentEpochMillis()
+
+    private companion object {
+        val TURN_LIFECYCLE_EVENTS = setOf("turn-started", "turn-finished")
+    }
 
     private data class SessionEntry(
         val core: ChatSessionCore,

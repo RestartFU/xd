@@ -136,6 +136,25 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun durationRowsRemainTranscriptMetadata() {
+        val result = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat = chat(),
+                messages = messages(
+                    MessageReply("user", "ask", 12),
+                    MessageReply("assistant", "answer", 13),
+                    MessageReply("duration", "7", 14),
+                ),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertEquals(listOf("ask", "answer"), result.messages.map { it.text })
+        assertEquals(false, result.hasOlderMessages)
+    }
+
+    @Test
     fun messagesExposeAndClearOlderPageAvailability() {
         val partial = reduce(
             ChatState("chat"),

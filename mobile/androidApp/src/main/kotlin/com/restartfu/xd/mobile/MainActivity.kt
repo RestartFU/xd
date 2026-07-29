@@ -270,9 +270,19 @@ private fun TreeScreen(
     val chats = tree.chats.groupBy(ChatSummary::folderId)
     val foldersById = tree.folders.associateBy(Folder::id)
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
+    var confirmingForget by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("xd") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("xd") },
+                actions = {
+                    TextButton(onClick = { confirmingForget = true }) {
+                        Text("Forget")
+                    }
+                },
+            )
+        },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = { choosingFolder = true },
@@ -330,6 +340,26 @@ private fun TreeScreen(
             },
             confirmButton = {
                 TextButton(onClick = { choosingFolder = false }) { Text("Cancel") }
+            },
+        )
+    }
+    if (confirmingForget) {
+        AlertDialog(
+            onDismissRequest = { confirmingForget = false },
+            title = { Text("Forget this remote?") },
+            text = {
+                Text("Pairing credentials will be erased. You will need a new code to reconnect.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingForget = false
+                        model.forget()
+                    },
+                ) { Text("Forget") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingForget = false }) { Text("Cancel") }
             },
         )
     }

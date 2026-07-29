@@ -174,12 +174,12 @@ internal class ChatSessionCore(
         } catch (error: Throwable) {
             pendingTimer?.cancel()
             pendingTimer = null
-            stateMutex.withLock {
-                _state.value = _state.value.copy(
-                    pendingUser = null,
-                    error = error.message ?: "Could not send the message",
-                )
-            }
+            apply(
+                TranscriptInput.SendFailed(
+                    pendingId,
+                    error.message ?: "Could not send the message",
+                ),
+            )
             throw error
         }
     }
