@@ -5,7 +5,7 @@
 /* Overridden by the launcher, and recorded there as XD_HOST_<name>. */
 static const char *rewritten[] = {
   "XDG_DATA_DIRS", "LANG", "LC_ALL", "LOCPATH", "LOCALE_ARCHIVE",
-  "GIO_EXTRA_MODULES", "GTK_IM_MODULE", "GTK_PATH",
+  "GIO_EXTRA_MODULES", "GTK_IM_MODULE", "GTK_PATH", "GTK_THEME",
 };
 
 /* Set by the launcher with no host value to go back to. */

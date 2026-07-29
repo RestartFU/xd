@@ -563,6 +563,15 @@ static const char *XD_STYLE =
    * than to a form, so naming something does not make the tree jump. */
   ".xd-inline-entry { min-height: 0; padding: 0 4px; }\n";
 
+/*
+ * Above everything, including the user's own gtk.css.
+ *
+ * The application priority is where an app puts styling a desktop is welcome
+ * to override, and none of this is that: xd is one designed surface, and a
+ * theme reaching into the middle of it does not produce a themed xd, it
+ * produces a broken one. What is above this is xd's own panel styles, which
+ * is the only thing that should be.
+ */
 static void
 load_style (void)
 {
@@ -571,7 +580,7 @@ load_style (void)
   gtk_css_provider_load_from_string (provider, XD_STYLE);
   gtk_style_context_add_provider_for_display (gdk_display_get_default (),
                                               GTK_STYLE_PROVIDER (provider),
-                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+                                              GTK_STYLE_PROVIDER_PRIORITY_USER + 1);
 }
 
 static gboolean

@@ -35,9 +35,11 @@ xd_panel_style_ensure (void)
       g_autoptr (GtkCssProvider) provider = gtk_css_provider_new ();
 
       gtk_css_provider_load_from_string (provider, PANEL_STYLE);
+      /* One above the window's own sheet, which is itself above everything a
+       * desktop or a user stylesheet could say; see load_style in xd-app.c. */
       gtk_style_context_add_provider_for_display (
         gdk_display_get_default (), GTK_STYLE_PROVIDER (provider),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+        GTK_STYLE_PROVIDER_PRIORITY_USER + 2);
 
       g_once_init_leave (&once, 1);
     }

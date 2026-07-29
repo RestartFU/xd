@@ -665,6 +665,30 @@ main (int argc, char *argv[])
   if (argc > 1 && g_strcmp0 (argv[1], "serve") == 0)
     return run_serve (argc, argv);
 
+  /*
+   * A theme forced from outside is not a theme xd has.
+   *
+   * GTK_THEME names a theme for GTK to load, and libadwaita answers it by not
+   * loading its stylesheet at all -- which takes with it the dimming under a
+   * dialog, every colour the palette here is written as an override of, and
+   * the widget styling this app's own sheet is a refinement of. Sessions
+   * export it globally so GTK3 applications follow the desktop; xd carries
+   * its whole look, down to the base its surfaces are shades of, so following
+   * anything else leaves it half painted rather than themed.
+   */
+  /* Recorded the way the bundle's launcher records what it overrides, so a
+   * terminal or an editor started from xd is still the desktop's; see
+   * util/host-launch.c. Skipped where the launcher has already noted it,
+   * which is where GTK_THEME is gone from here to read. */
+  if (g_getenv ("XD_HOST_GTK_THEME") == NULL)
+    {
+      const char *theme = g_getenv ("GTK_THEME");
+
+      g_setenv ("XD_HOST_GTK_THEME", theme != NULL ? theme : "", TRUE);
+    }
+
+  g_unsetenv ("GTK_THEME");
+
   {
     g_autoptr (XdApplication) app = xd_application_new ();
 
