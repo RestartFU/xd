@@ -12,6 +12,7 @@ module Xd
       property thread_id : String?
       property turn_id : String?
       property backend_error : String?
+      property cancel_callback : Proc(Nil)? = nil
       property stopping = false
       property finished = false
       getter streamed_messages = Set(String).new
@@ -44,6 +45,10 @@ module Xd
         return if @finished
         @finished = true
         @on_finished.call(success, message)
+      end
+
+      def cancel : Nil
+        @cancel_callback.try(&.call)
       end
     end
 
