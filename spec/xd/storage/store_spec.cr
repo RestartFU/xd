@@ -19,7 +19,7 @@ end
 describe Xd::Storage::Store do
   it "creates the current schema and persists paired devices" do
     path = database_path
-    now = 100_i64
+    now = 100_000_000_i64
     clock = -> { now }
 
     begin
@@ -28,7 +28,7 @@ describe Xd::Storage::Store do
       store.add_device("token-hash", "workstation")
       store.close
 
-      now = 200_i64
+      now = 200_000_000_i64
       reopened = Xd::Storage::Store.new(path, clock)
       reopened.device_name("token-hash").should eq("workstation")
       reopened.device_name("missing").should be_nil

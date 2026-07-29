@@ -6,6 +6,12 @@ require "./schema"
 
 module Xd
   module Storage
+    class Error < Daemon::DeviceStoreError
+    end
+
+    class NotFoundError < Error
+    end
+
     class Store < Daemon::DeviceStore
       getter path : String
 
@@ -13,7 +19,7 @@ module Xd
 
       def initialize(
         @path : String,
-        @clock : Proc(Int64) = -> { Time.utc.to_unix },
+        @clock : Proc(Int64) = -> { Time.utc.to_unix_ms * 1_000 },
       )
         directory = Path[@path].dirname
         Dir.mkdir_p(directory, 0o700) unless directory.to_s == "."
@@ -39,7 +45,7 @@ module Xd
       end
 
       def add_device(token_hash : String, name : String) : Nil
-        now = @clock.call
+        now = now_seconds
         @database.exec(
           <<-SQL,
             INSERT INTO devices (token_hash, name, created_at, last_seen)
@@ -64,12 +70,12 @@ module Xd
              WHERE token_hash = ?
             RETURNING name
             SQL
-          @clock.call,
+          now_seconds,
           token_hash,
           as: String
         )
       rescue error : DB::Error
-        raise Daemon::DeviceStoreError.new(
+        raise Error.new(
           "Cannot authenticate the device: #{error.message}"
         )
       end
@@ -233,7 +239,7 @@ module Xd
           )
         end
       rescue error : DB::Error
-        raise Daemon::DeviceStoreError.new(
+        raise Error.new(
           "Cannot migrate the chat database: #{error.message}"
         )
       end
@@ -243,9 +249,23 @@ module Xd
               "?journal_mode=wal&synchronous=normal&foreign_keys=on"
         DB.open(uri)
       rescue error : DB::Error
-        raise Daemon::DeviceStoreError.new(
+        raise Error.new(
           "Cannot open the chat database: #{error.message}"
         )
+      end
+
+      private def now_microseconds : Int64
+        @clock.call
+      end
+
+      private def now_seconds : Int64
+        now_microseconds // 1_000_000
+      end
+
+      private def database_error(context : String, & : -> T) : T forall T
+        yield
+      rescue error : DB::Error
+        raise Error.new("#{context}: #{error.message}")
       end
     end
   end
