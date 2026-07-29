@@ -59,28 +59,30 @@ static const AiBackend stub_backend = {
  * --input-format stream-json: it answers each line and waits for the next
  * rather than exiting, which is the whole point of keeping it.
  *
- * Every launch appends to a file, so the test can tell one process answering
- * twice from two processes answering once -- which is the only thing that
- * distinguishes this feature from what came before it.
+ * Launches are counted here rather than by the stub writing a file: the count
+ * is what tells one process answering twice from two processes answering once,
+ * and doing it in the test's own memory keeps a Windows path from having to
+ * survive being quoted into a shell script.
  */
-static char *stream_launch_log;
+static guint stream_launches;
 
 static GPtrArray *
 stream_build_argv (const AiBackend *self,
                    const AiRunSpec *spec)
 {
   GPtrArray *argv = g_ptr_array_new_with_free_func (g_free);
-  g_autofree char *script = g_strdup_printf (
-    "printf 'x' >> %s\n"
-    "while IFS= read -r line; do "
-    "  printf '%%s\\n' '{\"type\":\"result\",\"subtype\":\"success\","
-    "\"session_id\":\"kept\",\"is_error\":false,\"result\":\"ok\"}'; "
-    "done\n",
-    stream_launch_log);
+
+  /* Called once per spawn and never for a continued turn, so this counts
+   * processes without a file, a path, or a shell to quote one through. */
+  stream_launches++;
 
   g_ptr_array_add (argv, g_strdup (self->program));
   g_ptr_array_add (argv, g_strdup ("-c"));
-  g_ptr_array_add (argv, g_steal_pointer (&script));
+  g_ptr_array_add (argv, g_strdup (
+    "while IFS= read -r line; do "
+    "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\","
+    "\"session_id\":\"kept\",\"is_error\":false,\"result\":\"ok\"}'; "
+    "done"));
   g_ptr_array_add (argv, NULL);
 
   return argv;
@@ -358,20 +360,23 @@ test_reuses_the_process_for_a_second_turn (void)
 {
   g_autoptr (XdChatSession) session = xd_chat_session_new (&stream_backend);
   g_autoptr (GError) error = NULL;
-  g_autofree char *dir = g_dir_make_tmp ("xd-stream-XXXXXX", NULL);
-  g_autofree char *launches = NULL;
   AiRunSpec spec = { 0 };
   Run first = { 0 };
   Run second = { 0 };
 
-  stream_launch_log = g_build_filename (dir, "launches", NULL);
+  guint watchdog;
+
+  /* Each watchdog is taken down with its loop: one left armed fires into a
+   * Run that has already been cleared. */
+  stream_launches = 0;
   spec.prompt = "one";
 
   run_init (&first, session);
   g_assert_true (xd_chat_session_start (session, &spec, &error));
   g_assert_no_error (error);
-  g_timeout_add_seconds (10, on_timeout, &first);
+  watchdog = g_timeout_add_seconds (10, on_timeout, &first);
   g_main_loop_run (first.loop);
+  g_clear_handle_id (&watchdog, g_source_remove);
   g_assert_true (first.finished);
   g_assert_true (first.success);
 
@@ -388,16 +393,17 @@ test_reuses_the_process_for_a_second_turn (void)
   spec.prompt = "two";
   g_assert_true (xd_chat_session_continue (session, &spec, &error));
   g_assert_no_error (error);
-  g_timeout_add_seconds (10, on_timeout, &second);
+  watchdog = g_timeout_add_seconds (10, on_timeout, &second);
   g_main_loop_run (second.loop);
+  g_clear_handle_id (&watchdog, g_source_remove);
   g_assert_true (second.finished);
   g_assert_true (second.success);
 
-  g_assert_true (g_file_get_contents (stream_launch_log, &launches, NULL, NULL));
-  g_assert_cmpstr (launches, ==, "x");
+  /* Two turns, one process. Two would mean it quietly restarted, which is
+   * indistinguishable from working if you only watch what it reports. */
+  g_assert_cmpuint (stream_launches, ==, 1);
 
   run_clear (&second);
-  g_clear_pointer (&stream_launch_log, g_free);
 }
 
 int
