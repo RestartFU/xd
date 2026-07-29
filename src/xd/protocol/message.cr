@@ -30,6 +30,18 @@ module Xd
       def string?(name : String) : String?
         @body[name]?.try(&.as_s?)
       end
+
+      def int?(name : String) : Int64?
+        @body[name]?.try(&.as_i64?)
+      end
+
+      def member?(name : String) : Bool
+        @body.has_key?(name)
+      end
+
+      def string(name : String, message : String) : String
+        string?(name) || raise Error.new(message)
+      end
     end
 
     class Response
