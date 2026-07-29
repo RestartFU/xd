@@ -1890,6 +1890,7 @@ static gboolean
 start_daemon_turn (XdRemoteServer  *self,
                    const char      *chat_id,
                    const char      *text,
+                   gboolean         user_submitted,
                    GError         **error)
 {
   XdDaemonTurn *turn;
@@ -1963,7 +1964,8 @@ start_daemon_turn (XdRemoteServer  *self,
   g_signal_connect (turn, "tool", G_CALLBACK (on_turn_tool), running);
   g_signal_connect (turn, "finished", G_CALLBACK (on_turn_finished), running);
 
-  if (!xd_daemon_turn_start (turn, chat_id, text, error))
+  if (!xd_daemon_turn_start (
+        turn, chat_id, text, user_submitted, error))
     {
       running_free (running);
       g_object_unref (turn);
@@ -2073,7 +2075,7 @@ start_queued (XdRemoteServer *self,
 
   broadcast_stored_queue (self, chat_id);
 
-  if (!start_daemon_turn (self, chat_id, text, &error))
+  if (!start_daemon_turn (self, chat_id, text, TRUE, &error))
     {
       g_warning ("cannot start the queued message: %s", error->message);
       return FALSE;
@@ -2252,7 +2254,7 @@ handle_send (Connection *connection,
       return;
     }
 
-  if (!start_daemon_turn (self, chat_id, message, &error))
+  if (!start_daemon_turn (self, chat_id, message, TRUE, &error))
     {
       send_error (connection, error->message);
       return;
@@ -3763,6 +3765,7 @@ xd_remote_server_resume_interrupted (XdRemoteServer *self,
       if (!start_daemon_turn (
             self, chat_id,
             "Resume the work interrupted by the daemon update.",
+            FALSE,
             &start_error))
         {
           g_warning ("cannot resume chat %s after update: %s",

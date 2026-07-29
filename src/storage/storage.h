@@ -318,6 +318,17 @@ gboolean    xd_storage_append_message  (XdStorage   *self,
                                         const char  *label,
                                         GError     **error);
 
+/* Stores transcript text generated without a new user send, such as daemon
+ * restart recovery, without changing sidebar recency. */
+gboolean    xd_storage_append_message_without_recency
+                                       (XdStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *role,
+                                        const char  *content,
+                                        const char  *raw_json,
+                                        const char  *label,
+                                        GError     **error);
+
 /* Like append_message(), and returns the inserted row id through @message_id.
  * Used for live assistant output whose content is extended while it streams. */
 gboolean    xd_storage_append_message_with_id (XdStorage   *self,

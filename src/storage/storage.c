@@ -4,7 +4,7 @@
 #include <json-glib/json-glib.h>
 #include <sqlite3.h>
 
-#define XD_STORAGE_SCHEMA_VERSION 16
+#define XD_STORAGE_SCHEMA_VERSION 17
 
 struct _XdStorage
 {
@@ -412,6 +412,28 @@ migrate (XdStorage  *self,
                  error))
     return FALSE;
 
+  /*
+   * Sidebar recency follows user instructions, not arbitrary database writes.
+   * Backfill old chats from their latest user row; untouched chats retain
+   * creation order.
+   */
+  if (version < 17 &&
+      !exec_sql (
+        self,
+        "ALTER TABLE chats ADD COLUMN"
+        " last_user_message_at INTEGER NOT NULL DEFAULT 0;"
+        "UPDATE chats"
+        " SET last_user_message_at = COALESCE("
+        "   (SELECT MAX(messages.created_at) * 1000000"
+        "      FROM messages"
+        "     WHERE messages.chat_id = chats.id AND messages.role = 'user'),"
+        "   chats.created_at * 1000000"
+        " );"
+        "CREATE INDEX chats_folder_user_message"
+        " ON chats (folder_id, last_user_message_at DESC);",
+        error))
+    return FALSE;
+
   sql = g_strdup_printf ("INSERT INTO meta (key, value) VALUES ('schema_version', '%d')"
                          "  ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
                          XD_STORAGE_SCHEMA_VERSION);
@@ -490,7 +512,7 @@ xd_storage_create_chat (XdStorage   *self,
   g_return_val_if_fail (backend != NULL, NULL);
 
   id = g_uuid_string_random ();
-  now = g_get_real_time () / G_USEC_PER_SEC;
+  now = g_get_real_time ();
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT backend, model, effort, access, plan"
@@ -527,8 +549,9 @@ xd_storage_create_chat (XdStorage   *self,
   if (sqlite3_prepare_v2 (self->db,
                           "INSERT INTO chats (id, folder_id, title, backend,"
                           "                   model, effort, access, plan, workdir,"
-                          "                   created_at, updated_at)"
-                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                          "                   created_at, updated_at,"
+                          "                   last_user_message_at)"
+                          " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot create the chat");
@@ -544,8 +567,9 @@ xd_storage_create_chat (XdStorage   *self,
   bind_text (stmt, 7, actual_access);
   sqlite3_bind_int (stmt, 8, actual_plan ? 1 : 0);
   bind_text (stmt, 9, workdir);
-  sqlite3_bind_int64 (stmt, 10, now);
-  sqlite3_bind_int64 (stmt, 11, now);
+  sqlite3_bind_int64 (stmt, 10, now / G_USEC_PER_SEC);
+  sqlite3_bind_int64 (stmt, 11, now / G_USEC_PER_SEC);
+  sqlite3_bind_int64 (stmt, 12, now);
 
   if (sqlite3_step (stmt) != SQLITE_DONE)
     {
@@ -695,7 +719,8 @@ xd_storage_list_chats (XdStorage   *self,
 
   if (sqlite3_prepare_v2 (self->db,
                           "SELECT " CHAT_COLUMNS " FROM chats"
-                          " WHERE folder_id = ? ORDER BY updated_at DESC;",
+                          " WHERE folder_id = ?"
+                          " ORDER BY last_user_message_at DESC, created_at DESC;",
                           -1, &stmt, NULL) != SQLITE_OK)
     {
       set_sqlite_error (error, self->db, "Cannot list chats");
@@ -713,7 +738,8 @@ xd_storage_list_chats (XdStorage   *self,
   return chats;
 }
 
-/* Every chat mutation also bumps updated_at, which is what orders the list. */
+/* Metadata mutations still bump updated_at for general change tracking.
+ * Sidebar order has its own user-message timestamp. */
 static gboolean
 update_chat_column (XdStorage   *self,
                     const char  *sql,
@@ -1662,29 +1688,42 @@ xd_storage_delete_chat (XdStorage   *self,
 
 static void
 touch_chat (XdStorage  *self,
-            const char *chat_id)
+            const char *chat_id,
+            gboolean    user_message)
 {
   sqlite3_stmt *stmt = NULL;
+  gint64 now = g_get_real_time ();
+  const char *sql = user_message
+    ? "UPDATE chats"
+      " SET updated_at = ?, last_user_message_at = ? WHERE id = ?;"
+    : "UPDATE chats SET updated_at = ? WHERE id = ?;";
 
-  if (sqlite3_prepare_v2 (self->db, "UPDATE chats SET updated_at = ? WHERE id = ?;",
-                          -1, &stmt, NULL) != SQLITE_OK)
+  if (sqlite3_prepare_v2 (self->db, sql, -1, &stmt, NULL) != SQLITE_OK)
     return;
 
-  sqlite3_bind_int64 (stmt, 1, g_get_real_time () / G_USEC_PER_SEC);
-  bind_text (stmt, 2, chat_id);
+  sqlite3_bind_int64 (stmt, 1, now / G_USEC_PER_SEC);
+  if (user_message)
+    {
+      sqlite3_bind_int64 (stmt, 2, now);
+      bind_text (stmt, 3, chat_id);
+    }
+  else
+    bind_text (stmt, 2, chat_id);
+
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
 }
 
-gboolean
-xd_storage_append_message_with_id (XdStorage   *self,
-                                   const char  *chat_id,
-                                   const char  *role,
-                                   const char  *content,
-                                   const char  *raw_json,
-                                   const char  *label,
-                                   gint64      *message_id,
-                                   GError     **error)
+static gboolean
+append_message (XdStorage   *self,
+                const char  *chat_id,
+                const char  *role,
+                const char  *content,
+                const char  *raw_json,
+                const char  *label,
+                gboolean     user_activity,
+                gint64      *message_id,
+                GError     **error)
 {
   sqlite3_stmt *stmt = NULL;
   gboolean ok;
@@ -1715,15 +1754,31 @@ xd_storage_append_message_with_id (XdStorage   *self,
 
   sqlite3_finalize (stmt);
 
-  /* A new message makes the chat the most recent one in its folder. */
+  /* Only a user send advances sidebar recency. Agent output still updates the
+   * general mutation timestamp without moving the chat. */
   if (ok)
     {
       if (message_id != NULL)
         *message_id = sqlite3_last_insert_rowid (self->db);
-      touch_chat (self, chat_id);
+      touch_chat (self, chat_id, user_activity);
     }
 
   return ok;
+}
+
+gboolean
+xd_storage_append_message_with_id (XdStorage   *self,
+                                   const char  *chat_id,
+                                   const char  *role,
+                                   const char  *content,
+                                   const char  *raw_json,
+                                   const char  *label,
+                                   gint64      *message_id,
+                                   GError     **error)
+{
+  return append_message (
+    self, chat_id, role, content, raw_json, label,
+    g_strcmp0 (role, "user") == 0, message_id, error);
 }
 
 gboolean
@@ -1735,8 +1790,22 @@ xd_storage_append_message (XdStorage   *self,
                            const char  *label,
                            GError     **error)
 {
-  return xd_storage_append_message_with_id (
-    self, chat_id, role, content, raw_json, label, NULL, error);
+  return append_message (
+    self, chat_id, role, content, raw_json, label,
+    g_strcmp0 (role, "user") == 0, NULL, error);
+}
+
+gboolean
+xd_storage_append_message_without_recency (XdStorage   *self,
+                                           const char  *chat_id,
+                                           const char  *role,
+                                           const char  *content,
+                                           const char  *raw_json,
+                                           const char  *label,
+                                           GError     **error)
+{
+  return append_message (
+    self, chat_id, role, content, raw_json, label, FALSE, NULL, error);
 }
 
 gboolean

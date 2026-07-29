@@ -37,11 +37,13 @@ XdDaemonTurn *xd_daemon_turn_new       (XdStorage    *storage,
  * Starts @prompt as a turn in @chat_id.
  *
  * The user's message is stored first, so it is in the transcript whatever
- * happens next -- including this failing.
+ * happens next -- including this failing. @user_submitted is false only for
+ * daemon-generated recovery work, which must not change sidebar recency.
  */
 gboolean      xd_daemon_turn_start     (XdDaemonTurn  *self,
                                         const char    *chat_id,
                                         const char    *prompt,
+                                        gboolean       user_submitted,
                                         GError       **error);
 
 void          xd_daemon_turn_cancel    (XdDaemonTurn *self);

@@ -3683,7 +3683,7 @@ test_a_live_turn_is_already_durable (void)
   turn = xd_daemon_turn_new (daemon.storage, daemon.root);
   g_signal_connect (turn, "text", G_CALLBACK (on_live_turn_text), &text);
   g_assert_true (xd_daemon_turn_start (turn, daemon.chat_id,
-                                       "keep this", &error));
+                                       "keep this", TRUE, &error));
   g_assert_no_error (error);
 
   if (old_path != NULL)
@@ -3927,7 +3927,7 @@ test_an_interrupted_turn_keeps_its_timeline (void)
                     G_CALLBACK (on_interrupted_turn_finished), &seen);
 
   g_assert_true (xd_daemon_turn_start (turn, daemon.chat_id,
-                                       "inspect it", &error));
+                                       "inspect it", TRUE, &error));
   g_assert_no_error (error);
 
   if (old_path != NULL)

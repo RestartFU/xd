@@ -584,6 +584,7 @@ gboolean
 xd_daemon_turn_start (XdDaemonTurn  *self,
                       const char    *chat_id,
                       const char    *prompt,
+                      gboolean       user_submitted,
                       GError       **error)
 {
   g_autoptr (XdChat) chat = NULL;
@@ -618,8 +619,11 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
 
   /* Stored before anything can go wrong, so the message is in the transcript
    * even if the CLI never starts. */
-  if (!xd_storage_append_message (self->storage, chat_id, "user", prompt,
-                                  NULL, NULL, error))
+  if (!(user_submitted
+        ? xd_storage_append_message (
+            self->storage, chat_id, "user", prompt, NULL, NULL, error)
+        : xd_storage_append_message_without_recency (
+            self->storage, chat_id, "user", prompt, NULL, NULL, error)))
     return FALSE;
 
   self->transcript_message_id =

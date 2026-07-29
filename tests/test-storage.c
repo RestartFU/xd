@@ -78,6 +78,60 @@ test_create_and_list (Fixture       *fixture,
 }
 
 static void
+test_chats_follow_latest_user_message (Fixture       *fixture,
+                                       gconstpointer  user_data)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GPtrArray) chats = NULL;
+  g_autofree char *first = NULL;
+  g_autofree char *second = NULL;
+
+  first = xd_storage_create_chat (fixture->storage, "folder", "First",
+                                  "claude", NULL, NULL, NULL, &error);
+  g_usleep (1000);
+  second = xd_storage_create_chat (fixture->storage, "folder", "Second",
+                                   "claude", NULL, NULL, NULL, &error);
+  g_assert_no_error (error);
+
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, second);
+
+  g_usleep (1000);
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, first, "user", "work here", NULL, NULL, &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
+
+  /* Agent output and metadata writes must not steal user-selected recency. */
+  g_usleep (1000);
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, second, "assistant", "finished", NULL, NULL, &error));
+  g_assert_true (xd_storage_set_chat_title (
+    fixture->storage, second, "Renamed", &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
+
+  /* Restart recovery looks like a user row in the transcript, but was not
+   * sent by the user and therefore cannot reorder chats either. */
+  g_assert_true (xd_storage_append_message_without_recency (
+    fixture->storage, second, "user", "Resume interrupted work.",
+    NULL, NULL, &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, first);
+
+  g_usleep (1000);
+  g_assert_true (xd_storage_append_message (
+    fixture->storage, second, "user", "work here now", NULL, NULL, &error));
+  g_clear_pointer (&chats, g_ptr_array_unref);
+  chats = xd_storage_list_chats (fixture->storage, "folder", &error);
+  g_assert_cmpstr (((XdChat *) g_ptr_array_index (chats, 0))->id, ==, second);
+  g_assert_no_error (error);
+}
+
+static void
 test_new_chats_inherit_last_changed_agent (Fixture       *fixture,
                                            gconstpointer  user_data)
 {
@@ -826,6 +880,8 @@ main (int   argc,
   g_test_add (path, Fixture, NULL, fixture_set_up, func, fixture_tear_down)
 
   ADD ("/storage/create-and-list", test_create_and_list);
+  ADD ("/storage/chats-follow-latest-user-message",
+       test_chats_follow_latest_user_message);
   ADD ("/storage/new-chats-inherit-agent", test_new_chats_inherit_last_changed_agent);
   ADD ("/storage/chats-follow-folder-id", test_chats_follow_folder_id);
   ADD ("/storage/messages-round-trip", test_messages_round_trip);
