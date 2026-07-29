@@ -1,6 +1,7 @@
 require "base64"
 require "gtk4"
 require "../agent/ask"
+require "../agent/workspace_block"
 require "../daemon/client"
 require "./chat_controls"
 require "./sidebar"
@@ -222,12 +223,14 @@ module Xd
           return
         end
 
-        parsed = role == "assistant" ? Agent::Ask.parse(content) : nil
+        workspace = role == "assistant" ? Agent::WorkspaceBlock.parse(content) : nil
+        assistant_text = workspace.try(&.remainder) || content
+        parsed = role == "assistant" ? Agent::Ask.parse(assistant_text) : nil
         shown = if parsed
                   [parsed.remainder, parsed.ask.question]
                     .reject(&.empty?).join("\n\n")
                 else
-                  content
+                  assistant_text
                 end
         heading = case role
                   when "user"      then "You"

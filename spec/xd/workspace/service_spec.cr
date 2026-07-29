@@ -118,6 +118,13 @@ describe Xd::Workspace::Service do
         "Always answer in French.\n\nThis is a Go codebase."
       )
       service.folder_ids(child_id).should eq([parent_id, child_id])
+      service.describe_place(child_id, "/code/proxy").should eq(
+        "[This conversation belongs to the folder “Lunar / Proxy” in the " \
+        "user’s xd workspace tree, and you are running in /code/proxy. If " \
+        "that directory holds nothing but a dotfile, it is the folder " \
+        "itself rather than a checkout: say so and ask which repository is " \
+        "meant, instead of searching the machine for one.]"
+      )
     end
   end
 

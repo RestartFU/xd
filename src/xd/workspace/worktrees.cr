@@ -91,6 +91,20 @@ module Xd
         raise Error.new(error.message || "Cannot change the workspace.")
       end
 
+      # Resolves only a checkout already registered with the same repository.
+      # Agent-reported paths may move future turns, but never widen their
+      # sandbox to an unrelated directory.
+      def registered_path(workdir : String, requested : String) : String?
+        return nil unless Path[requested].absolute?
+        return nil unless File.directory?(requested)
+
+        list(workdir).find do |item|
+          same_path?(item.path, requested)
+        end.try(&.path)
+      rescue Error
+        nil
+      end
+
       def list(workdir : String) : Array(Worktree)
         root = repository_root(workdir)
         output, status, error = git(
@@ -170,7 +184,7 @@ module Xd
 
         if existing = worktrees.find do |item|
              !item.detached &&
-               (item.branch == branch || item.branch == legacy_branch)
+             (item.branch == branch || item.branch == legacy_branch)
            end
           return existing.path
         end

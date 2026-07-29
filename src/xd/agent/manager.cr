@@ -11,6 +11,7 @@ require "./exec_session"
 require "./executable"
 require "./ask"
 require "./secrets"
+require "./workspace_block"
 
 module Xd
   module Agent
@@ -104,7 +105,7 @@ module Xd
         getter model : String
         getter effort : Effort
         getter label : String
-        getter workdir : String
+        property workdir : String
         getter transcript_message_id : Int64
         getter started_at : Time::Instant
         property handle : SessionHandle?
@@ -293,6 +294,7 @@ module Xd
           access = chat.plan ? Access::Plan : Access.from_wire(chat.access)
           secrets = Secrets.effective(folder_ids)
           system_prompt = [
+            @workspaces.describe_place(chat.folder_id, workdir),
             settings.instructions,
             Ask::INSTRUCTIONS,
             secrets.prompt,
@@ -424,7 +426,10 @@ module Xd
             return if text.empty?
 
             turn.segment += text
-            visible_bytes = Ask.visible_bytes(turn.segment)
+            visible_bytes = Math.min(
+              Ask.visible_bytes(turn.segment),
+              WorkspaceBlock.visible_bytes(turn.segment)
+            )
             visible_text = if visible_bytes > turn.visible_segment_bytes
                              turn.segment.byte_slice(
                                turn.visible_segment_bytes,
@@ -549,9 +554,43 @@ module Xd
 
       private def close_segment(turn : ActiveTurn) : Nil
         return if turn.segment.empty?
+
+        if reported = WorkspaceBlock.parse(turn.segment)
+          if selected = @worktree_service.registered_path(
+               turn.workdir,
+               reported.path
+             )
+            unless same_path?(turn.workdir, selected)
+              @store.switch_workdir(
+                turn.chat_id,
+                selected,
+                turn.workdir
+              )
+              turn.workdir = selected
+            end
+            turn.segment = reported.remainder
+            if turn.segment_message_id != 0
+              if turn.segment.empty?
+                @store.delete_message(turn.segment_message_id)
+              else
+                @store.update_message(
+                  turn.segment_message_id,
+                  turn.segment
+                )
+              end
+            end
+          end
+        end
+
         turn.segment = ""
         turn.segment_message_id = 0_i64
         turn.visible_segment_bytes = 0
+      end
+
+      private def same_path?(left : String, right : String) : Bool
+        File.realpath(left) == File.realpath(right)
+      rescue File::Error
+        File.expand_path(left) == File.expand_path(right)
       end
 
       private def publish_queue(chat_id : String) : Nil

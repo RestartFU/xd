@@ -51,6 +51,17 @@ private class FakeLauncher < Xd::Agent::Launcher
   end
 end
 
+private def manager_git(workdir : String, *arguments : String) : Nil
+  status = Process.run(
+    "git",
+    arguments,
+    chdir: workdir,
+    output: Process::Redirect::Close,
+    error: Process::Redirect::Close
+  )
+  status.success?.should be_true
+end
+
 private def with_agent_manager(
   & : Xd::Agent::Manager, Xd::Storage::Store, Xd::Workspace::Service, String, FakeLauncher, Array(Tuple(String, Hash(String, JSON::Any))) ->
 ) : Nil
@@ -202,6 +213,36 @@ describe Xd::Agent::Manager do
       )
       finished = events.reverse.find(&.[0].==("turn-finished")).not_nil!
       finished[1]["waiting"].as_bool.should be_true
+    end
+  end
+
+  it "accepts only a registered workspace report" do
+    with_agent_manager do |manager, store, workspaces, folder_id, launcher, events|
+      repository = workspaces.find_folder(folder_id)
+      worktree = File.join(File.dirname(workspaces.root), "linked")
+      manager_git(repository, "init", "-q", "-b", "main")
+      manager_git(repository, "config", "user.email", "test@example.com")
+      manager_git(repository, "config", "user.name", "Test")
+      File.write(File.join(repository, "tracked.txt"), "initial\n")
+      manager_git(repository, "add", "tracked.txt")
+      manager_git(repository, "commit", "-q", "-m", "initial")
+      manager_git(repository, "worktree", "add", "-q", "-b", "linked", worktree)
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+
+      manager.send(chat_id, "move")
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "Moved.\n<workspace>#{worktree}</workspace>"
+      ))
+      launcher.finish(0, true)
+
+      store.get_chat(chat_id).workdir.should eq(File.realpath(worktree))
+      assistant = store.list_messages(chat_id)
+        .find(&.role.==("assistant")).not_nil!
+      assistant.content.should eq("Moved.")
+      events.select(&.[0].==("text"))
+        .map { |event| event[1]["text"].as_s }
+        .should eq(["Moved.\n"])
     end
   end
 

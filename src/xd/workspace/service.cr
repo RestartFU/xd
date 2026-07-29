@@ -191,6 +191,25 @@ module Xd
         chat_workdir || resolve(folder_id).workdir
       end
 
+      def describe_place(folder_id : String, workdir : String?) : String
+        folder = find_folder(folder_id)
+        chain = ancestor_paths(folder)
+          .reject(&.==(@root))
+          .map { |path| File.basename(path) }
+          .join(" / ")
+
+        unless workdir && !workdir.empty?
+          return "[This conversation belongs to the folder “#{chain}” " \
+                 "in the user’s xd workspace tree.]"
+        end
+
+        "[This conversation belongs to the folder “#{chain}” in the user’s " \
+        "xd workspace tree, and you are running in #{workdir}. If that " \
+        "directory holds nothing but a dotfile, it is the folder itself " \
+        "rather than a checkout: say so and ask which repository is meant, " \
+        "instead of searching the machine for one.]"
+      end
+
       private def scan_folder(
         path : String,
         settings : Settings,

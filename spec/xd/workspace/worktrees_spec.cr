@@ -61,6 +61,8 @@ describe Xd::Workspace::Worktrees do
       selected = service.select(store.get_chat(second_id), created)
       selected.should eq(created)
       store.get_chat(second_id).workdir.should eq(created)
+      service.registered_path(repository, created).should eq(created)
+      service.registered_path(repository, directory).should be_nil
 
       worktree_git(repository, "worktree", "remove", "--force", created)
       service.resolve(store.get_chat(first_id)).should eq(repository)
