@@ -38,6 +38,7 @@ typedef enum
   XD_SYNTAX_ODIN,
   XD_SYNTAX_RUBY,
   XD_SYNTAX_CRYSTAL,
+  XD_SYNTAX_CSHARP,
 } XdSyntaxLanguage;
 
 typedef enum
@@ -72,6 +73,8 @@ typedef struct
   guint8 in_heredoc;         /* inside a Ruby or Crystal heredoc */
   guint8 heredoc_indent;     /* its terminator may be indented */
   guint8 crystal_macro_close; /* '%' or '}' while inside macro delimiters */
+  guint8 in_csharp_verbatim_string; /* inside C#'s multiline @"" string */
+  guint8 csharp_raw_quotes;  /* delimiter width of C#'s raw string */
   char heredoc_delimiter[32];
 } XdSyntaxState;
 

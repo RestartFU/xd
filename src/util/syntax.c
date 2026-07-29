@@ -24,6 +24,38 @@ static const char *const C_CONSTANTS[] = {
   "NULL", "true", "false", NULL,
 };
 
+static const char *const CSHARP_KEYWORDS[] = {
+  "abstract", "add", "alias", "and", "as", "ascending", "async", "await",
+  "base", "break", "by", "case", "catch", "checked", "class", "const",
+  "continue", "default", "delegate", "descending", "do", "else", "enum",
+  "equals", "event", "explicit", "extern", "file", "finally", "fixed", "for",
+  "foreach", "from", "get", "global", "goto", "group", "if", "implicit", "in",
+  "init", "interface", "internal", "into", "is", "join", "let", "lock",
+  "managed", "nameof", "namespace", "new", "not", "notnull", "on", "operator",
+  "or", "orderby", "out", "override", "params", "partial", "private",
+  "protected", "public", "readonly", "record", "ref", "remove", "required",
+  "return", "scoped", "sealed", "select", "set", "sizeof", "stackalloc",
+  "static", "struct", "switch", "this", "throw", "try", "typeof", "unchecked",
+  "unmanaged", "unsafe", "using", "value", "var", "virtual", "volatile",
+  "when", "where", "while", "with", "yield",
+  NULL,
+};
+
+static const char *const CSHARP_TYPES[] = {
+  "bool", "byte", "char", "decimal", "double", "dynamic", "float", "int",
+  "long", "nint", "nuint", "object", "sbyte", "short", "string", "uint",
+  "ulong", "ushort", "void",
+  NULL,
+};
+
+static const char *const CSHARP_CONSTANTS[] = {
+  "false", "null", "true", NULL,
+};
+
+static const char *const CSHARP_TYPE_CONTEXTS[] = {
+  "class", "enum", "interface", "new", "record", "struct", NULL,
+};
+
 static const char *const GO_KEYWORDS[] = {
   "break", "case", "chan", "const", "continue", "default", "defer", "else",
   "fallthrough", "for", "func", "go", "goto", "if", "import", "interface",
@@ -257,6 +289,7 @@ typedef struct
   gboolean make_variables;       /* Make's $(...), ${...} and $x */
   gboolean case_insensitive;     /* Dockerfile instructions */
   gboolean capitalized_types;    /* user-defined types */
+  gboolean pascal_functions;     /* C# methods conventionally start uppercase */
   gboolean composite_literals;  /* Go's Type{...} */
   gboolean bang_functions;       /* Rust's macro_name! */
   gboolean generic_functions;    /* Rust's function_name<T>(...) */
@@ -286,7 +319,10 @@ typedef struct
   gboolean ruby_heredocs;        /* <<ID, <<-ID and <<~ID strings */
   gboolean crystal_heredocs;     /* Crystal's mandatory <<-ID strings */
   const char *const *definition_keywords; /* def/fun/macro names */
+  const char *const *type_context_keywords; /* class/record/new type names */
   gboolean crystal_macros;       /* {{...}} and {%...%} delimiters */
+  gboolean csharp_strings;       /* interpolated and verbatim string prefixes */
+  gboolean verbatim_identifiers; /* C#'s @keyword escaped identifiers */
   char key_delimiter;            /* ':' for mappings, '=' for assignments */
 } Language;
 
@@ -297,6 +333,21 @@ static const Language C_LANGUAGE = {
   .directives = TRUE,
   .slash_comments = TRUE,
   .block_comments = TRUE,
+};
+
+static const Language CSHARP_LANGUAGE = {
+  .keywords = CSHARP_KEYWORDS,
+  .types = CSHARP_TYPES,
+  .constants = CSHARP_CONSTANTS,
+  .directives = TRUE,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
+  .capitalized_types = TRUE,
+  .pascal_functions = TRUE,
+  .generic_functions = TRUE,
+  .csharp_strings = TRUE,
+  .verbatim_identifiers = TRUE,
+  .type_context_keywords = CSHARP_TYPE_CONTEXTS,
 };
 
 static const Language GO_LANGUAGE = {
@@ -483,6 +534,8 @@ language_table (XdSyntaxLanguage language)
     return &RUBY_LANGUAGE;
   if (language == XD_SYNTAX_CRYSTAL)
     return &CRYSTAL_LANGUAGE;
+  if (language == XD_SYNTAX_CSHARP)
+    return &CSHARP_LANGUAGE;
 
   return NULL;
 }
@@ -548,6 +601,8 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_RUBY;
   if (g_strcmp0 (dot, ".cr") == 0)
     return XD_SYNTAX_CRYSTAL;
+  if (g_strcmp0 (dot, ".cs") == 0 || g_strcmp0 (dot, ".csx") == 0)
+    return XD_SYNTAX_CSHARP;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -665,6 +720,143 @@ scan_quoted (Emitter    *emitter,
 
   append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, (gsize) (scan - at));
   return scan;
+}
+
+static const char *
+scan_csharp_interpolated_string (Emitter    *emitter,
+                                 const char *at)
+{
+  const char *scan = at + 2;
+
+  while (*scan != '\0' && *scan != '"')
+    scan += (*scan == '\\' && scan[1] != '\0') ? 2 : 1;
+
+  if (*scan == '"')
+    scan++;
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, (gsize) (scan - at));
+  return scan;
+}
+
+static const char *
+scan_csharp_verbatim_string (Emitter       *emitter,
+                             const char    *at,
+                             XdSyntaxState *state,
+                             gboolean       opening)
+{
+  const char *scan = at;
+
+  if (opening)
+    {
+      if (at[0] == '@' && at[1] == '"')
+        scan += 2;
+      else if (((at[0] == '$' && at[1] == '@') ||
+                (at[0] == '@' && at[1] == '$')) &&
+               at[2] == '"')
+        scan += 3;
+      else
+        return NULL;
+    }
+
+  while (*scan != '\0')
+    {
+      if (scan[0] == '"' && scan[1] == '"')
+        scan += 2;
+      else if (*scan == '"')
+        {
+          scan++;
+          state->in_csharp_verbatim_string = FALSE;
+          append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                        (gsize) (scan - at));
+          return scan;
+        }
+      else
+        {
+          scan++;
+        }
+    }
+
+  state->in_csharp_verbatim_string = TRUE;
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, strlen (at));
+  return at + strlen (at);
+}
+
+static gboolean
+csharp_raw_string_opening (const char  *at,
+                           const char **contents,
+                           guint8      *quotes)
+{
+  const char *scan = at;
+  guint count = 0;
+
+  while (*scan == '$')
+    scan++;
+  while (*scan == '"' && count < G_MAXUINT8)
+    {
+      count++;
+      scan++;
+    }
+
+  if (count < 3)
+    return FALSE;
+
+  *contents = scan;
+  *quotes = (guint8) count;
+  return TRUE;
+}
+
+static const char *
+csharp_raw_string_close (const char *at,
+                         guint8      quotes)
+{
+  const char *scan = at;
+
+  while (*scan != '\0')
+    {
+      guint count = 0;
+
+      if (*scan != '"')
+        {
+          scan++;
+          continue;
+        }
+
+      while (scan[count] == '"')
+        count++;
+      if (count >= quotes)
+        return scan + quotes;
+      scan += count;
+    }
+
+  return NULL;
+}
+
+static const char *
+scan_csharp_raw_string (Emitter       *emitter,
+                        const char    *at,
+                        XdSyntaxState *state,
+                        gboolean       opening)
+{
+  const char *contents = at;
+  const char *close;
+  guint8 quotes = state->csharp_raw_quotes;
+
+  if (opening &&
+      !csharp_raw_string_opening (at, &contents, &quotes))
+    return NULL;
+
+  close = csharp_raw_string_close (contents, quotes);
+  if (close == NULL)
+    {
+      append_token (emitter, XD_SYNTAX_TOKEN_STRING, at, strlen (at));
+      state->csharp_raw_quotes = quotes;
+      return at + strlen (at);
+    }
+
+  append_token (emitter, XD_SYNTAX_TOKEN_STRING, at,
+                (gsize) (close - at));
+  state->csharp_raw_quotes = 0;
+  return close;
 }
 
 static gboolean
@@ -824,6 +1016,30 @@ followed_by_generic_call (const char *at)
   return depth == 0 && *at == '(';
 }
 
+static const char *
+scan_csharp_verbatim_identifier (Emitter    *emitter,
+                                 const char *at)
+{
+  const char *scan = at + 1;
+  const char *after;
+
+  if (!g_ascii_isalpha (*scan) && *scan != '_')
+    return NULL;
+
+  while (is_word_byte (*scan))
+    scan++;
+  for (after = scan; *after == ' ' || *after == '\t'; after++)
+    ;
+
+  if (*after == '(' || followed_by_generic_call (after))
+    append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at,
+                  (gsize) (scan - at));
+  else
+    append_plain (emitter, at, (gsize) (scan - at));
+
+  return scan;
+}
+
 static gboolean
 followed_by_square_generic_call (const char *at)
 {
@@ -910,6 +1126,7 @@ scan_word (Emitter        *emitter,
   const char *scan = at;
   const char *after;
   gsize length;
+  gboolean called;
 
   while (is_word_byte (*scan))
     scan++;
@@ -920,6 +1137,14 @@ scan_word (Emitter        *emitter,
    * before deciding whether an unlisted word is being called. */
   for (after = scan; *after == ' ' || *after == '\t'; after++)
     ;
+
+  called = *after == '(' ||
+           (language->bang_functions && *after == '!') ||
+           (language->generic_functions && followed_by_generic_call (after)) ||
+           (language->square_generic_functions &&
+            followed_by_square_generic_call (after)) ||
+           (language->odin_procedures &&
+            followed_by_odin_procedure (after));
 
   if (word_listed (language->keywords, at, length,
                    language->case_insensitive))
@@ -936,7 +1161,11 @@ scan_word (Emitter        *emitter,
   else if (language->definition_keywords != NULL &&
            is_definition (line, at, language->definition_keywords))
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
-  else if (language->capitalized_types && g_ascii_isupper (*at))
+  else if (language->type_context_keywords != NULL &&
+           is_definition (line, at, language->type_context_keywords))
+    append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
+  else if (language->capitalized_types && g_ascii_isupper (*at) &&
+           !(language->pascal_functions && called))
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
   /*
    * A composite literal names a type: Vec3{40, 70, 40}. The space is what
@@ -946,13 +1175,7 @@ scan_word (Emitter        *emitter,
    */
   else if (language->composite_literals && *scan == '{')
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
-  else if (*after == '(' ||
-           (language->bang_functions && *after == '!') ||
-           (language->generic_functions && followed_by_generic_call (after)) ||
-           (language->square_generic_functions &&
-            followed_by_square_generic_call (after)) ||
-           (language->odin_procedures &&
-            followed_by_odin_procedure (after)))
+  else if (called)
     append_token (emitter, XD_SYNTAX_TOKEN_FUNCTION, at, length);
   else
     append_plain (emitter, at, length);
@@ -1754,6 +1977,18 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       if (state->in_rust_raw_string)
         return;
     }
+  else if (state->in_csharp_verbatim_string)
+    {
+      at = scan_csharp_verbatim_string (&emitter, at, state, FALSE);
+      if (state->in_csharp_verbatim_string)
+        return;
+    }
+  else if (state->csharp_raw_quotes > 0)
+    {
+      at = scan_csharp_raw_string (&emitter, at, state, FALSE);
+      if (state->csharp_raw_quotes > 0)
+        return;
+    }
   else if (state->in_heredoc)
     {
       gboolean closes = heredoc_terminator (line, state);
@@ -1931,6 +2166,63 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
                 (table->paren_attributes && at[1] == '(')))
         {
           at = scan_at_attribute (&emitter, at);
+        }
+      else if (table->csharp_strings &&
+               (*at == '"' || *at == '$'))
+        {
+          const char *after = scan_csharp_raw_string (
+            &emitter, at, state, TRUE);
+
+          if (after != NULL)
+            {
+              at = after;
+              if (state->csharp_raw_quotes > 0)
+                return;
+            }
+          else
+            {
+              after = scan_csharp_verbatim_string (
+                &emitter, at, state, TRUE);
+              if (after != NULL)
+                {
+                  at = after;
+                  if (state->in_csharp_verbatim_string)
+                    return;
+                }
+              else if (at[0] == '$' && at[1] == '"')
+                {
+                  at = scan_csharp_interpolated_string (&emitter, at);
+                }
+              else if (*at == '"')
+                {
+                  at = scan_quoted (&emitter, at, *at);
+                }
+              else
+                {
+                  append_plain (&emitter, at, 1);
+                  at++;
+                }
+            }
+        }
+      else if (table->csharp_strings && *at == '@')
+        {
+          const char *after = scan_csharp_verbatim_string (
+            &emitter, at, state, TRUE);
+
+          if (after == NULL && table->verbatim_identifiers)
+            after = scan_csharp_verbatim_identifier (&emitter, at);
+
+          if (after != NULL)
+            {
+              at = after;
+              if (state->in_csharp_verbatim_string)
+                return;
+            }
+          else
+            {
+              append_plain (&emitter, at, 1);
+              at++;
+            }
         }
       else if (table->triple_strings &&
                (strncmp (at, "\"\"\"", 3) == 0 ||

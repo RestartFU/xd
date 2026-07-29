@@ -112,6 +112,10 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_RUBY);
   g_assert_cmpint (xd_syntax_language_for_path ("src/server.cr"),
                    ==, XD_SYNTAX_CRYSTAL);
+  g_assert_cmpint (xd_syntax_language_for_path ("src/Program.cs"),
+                   ==, XD_SYNTAX_CSHARP);
+  g_assert_cmpint (xd_syntax_language_for_path ("scripts/setup.csx"),
+                   ==, XD_SYNTAX_CSHARP);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path (NULL), ==, XD_SYNTAX_NONE);
@@ -524,6 +528,91 @@ test_carries_a_crystal_heredoc (void)
   g_assert_nonnull (strstr (closed, "string:  TEXT\n"));
 }
 
+static void
+test_classifies_csharp (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_CSHARP,
+    "public sealed record User(string Name, int Age = 42);", &state, NULL);
+  g_autofree char *method = scan (
+    XD_SYNTAX_CSHARP,
+    "public static async Task<string> LoadAsync<T>(T value) => "
+    "new User(value.ToString(), 42);",
+    &state, NULL);
+  g_autofree char *strings = scan (
+    XD_SYNTAX_CSHARP,
+    "var path = $@\"C:\\\\{folder}\\\\file\"; var said = @\"say \"\"hi\"\"\";",
+    &state, NULL);
+  g_autofree char *escaped = scan (
+    XD_SYNTAX_CSHARP,
+    "@class = true; @await(); // legal identifiers", &state, NULL);
+  g_autofree char *directive = scan (
+    XD_SYNTAX_CSHARP, "#nullable enable", &state, NULL);
+
+  g_assert_nonnull (strstr (declaration, "keyword:public\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:sealed\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:record\n"));
+  g_assert_nonnull (strstr (declaration, "type:User\n"));
+  g_assert_nonnull (strstr (declaration, "type:string\n"));
+  g_assert_nonnull (strstr (declaration, "type:int\n"));
+  g_assert_nonnull (strstr (declaration, "number:42\n"));
+  g_assert_nonnull (strstr (method, "type:Task\n"));
+  g_assert_nonnull (strstr (method, "function:LoadAsync\n"));
+  g_assert_nonnull (strstr (method, "type:T\n"));
+  g_assert_nonnull (strstr (method, "type:User\n"));
+  g_assert_nonnull (strstr (method, "function:ToString\n"));
+  g_assert_nonnull (
+    strstr (strings, "string:$@\"C:\\\\{folder}\\\\file\"\n"));
+  g_assert_nonnull (strstr (strings, "string:@\"say \"\"hi\"\"\"\n"));
+  g_assert_null (strstr (escaped, "keyword:class\n"));
+  g_assert_null (strstr (escaped, "keyword:await\n"));
+  g_assert_nonnull (strstr (escaped, "function:@await\n"));
+  g_assert_nonnull (strstr (escaped, "number:true\n"));
+  g_assert_nonnull (strstr (escaped, "comment:// legal identifiers\n"));
+  g_assert_nonnull (strstr (directive, "preproc:#nullable\n"));
+}
+
+static void
+test_carries_csharp_strings (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *verbatim_open = scan (
+    XD_SYNTAX_CSHARP, "var text = @\"first", &state, NULL);
+  g_autofree char *verbatim_close = NULL;
+  g_autofree char *raw_open = NULL;
+  g_autofree char *raw_body = NULL;
+  g_autofree char *raw_close = NULL;
+
+  g_assert_true (state.in_csharp_verbatim_string);
+  g_assert_nonnull (strstr (verbatim_open, "string:@\"first\n"));
+
+  verbatim_close = scan (
+    XD_SYNTAX_CSHARP, "second \"\"quoted\"\"\"; return text;", &state, NULL);
+  g_assert_false (state.in_csharp_verbatim_string);
+  g_assert_nonnull (
+    strstr (verbatim_close, "string:second \"\"quoted\"\"\"\n"));
+  g_assert_nonnull (strstr (verbatim_close, "keyword:return\n"));
+
+  raw_open = scan (
+    XD_SYNTAX_CSHARP, "var json = $$\"\"\"\"", &state, NULL);
+  g_assert_cmpuint (state.csharp_raw_quotes, ==, 4);
+  g_assert_nonnull (strstr (raw_open, "string:$$\"\"\"\"\n"));
+
+  raw_body = scan (
+    XD_SYNTAX_CSHARP, "{\"value\": {{value}}}", &state, NULL);
+  g_assert_cmpuint (state.csharp_raw_quotes, ==, 4);
+  g_assert_nonnull (
+    strstr (raw_body, "string:{\"value\": {{value}}}\n"));
+
+  raw_close = scan (
+    XD_SYNTAX_CSHARP, "\"\"\"\"; Console.WriteLine(json);", &state, NULL);
+  g_assert_cmpuint (state.csharp_raw_quotes, ==, 0);
+  g_assert_nonnull (strstr (raw_close, "string:\"\"\"\"\n"));
+  g_assert_nonnull (strstr (raw_close, "type:Console\n"));
+  g_assert_nonnull (strstr (raw_close, "function:WriteLine\n"));
+}
+
 /*
  * The type of a composite literal is a type, and the space is what says so:
  * gofmt writes "Vec3{40}" tight and "if ok {" loose.
@@ -819,6 +908,9 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-crystal", test_classifies_crystal);
   g_test_add_func ("/syntax/carries-a-crystal-heredoc",
                    test_carries_a_crystal_heredoc);
+  g_test_add_func ("/syntax/classifies-csharp", test_classifies_csharp);
+  g_test_add_func ("/syntax/carries-csharp-strings",
+                   test_carries_csharp_strings);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
