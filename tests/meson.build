@@ -27,6 +27,7 @@ xd_tests = {
   'worktree': 'test-worktree.c',
   'discord-presence': 'test-discord-presence.c',
   'node': 'test-node.c',
+  'fs-tree': 'test-fs-tree.c',
   'handover': 'test-handover.c',
 }
 

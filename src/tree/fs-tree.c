@@ -467,6 +467,34 @@ request_next_files (ScanOp *op)
                                       op->self->cancellable, on_next_files, op);
 }
 
+/*
+ * Only the directories xd owns are part of its tree.
+ *
+ * Every directory directly under Workspaces is a workspace, including one
+ * copied there before xd has seen it. Below that, a folder must already carry
+ * xd metadata: folders made through the sidebar get it when they are created.
+ * Treating every source/build directory as an xd folder both filled the
+ * sidebar with repository internals and wrote .xd.json throughout the repo.
+ */
+static gboolean
+is_managed_child (ScanOp     *op,
+                  const char *name)
+{
+  g_autofree char *path = NULL;
+  g_autofree char *current = NULL;
+  g_autofree char *legacy = NULL;
+
+  if (op->node == op->self->root)
+    return TRUE;
+
+  path = g_build_filename (xd_node_get_path (op->node), name, NULL);
+  current = g_build_filename (path, XD_FOLDER_SETTINGS_FILE, NULL);
+  legacy = g_build_filename (path, ".hy.json", NULL);
+
+  return g_file_test (current, G_FILE_TEST_IS_REGULAR) ||
+         g_file_test (legacy, G_FILE_TEST_IS_REGULAR);
+}
+
 static void
 on_next_files (GObject      *source,
                GAsyncResult *result,
@@ -501,6 +529,8 @@ on_next_files (GObject      *source,
       if (g_file_info_get_file_type (info) != G_FILE_TYPE_DIRECTORY)
         continue;
       if (g_file_info_get_is_hidden (info))
+        continue;
+      if (!is_managed_child (op, g_file_info_get_name (info)))
         continue;
 
       g_ptr_array_add (op->names, g_strdup (g_file_info_get_name (info)));
@@ -543,12 +573,29 @@ scan_node (XdFsTree *self,
            XdNode   *node)
 {
   g_autoptr (GFile) file = NULL;
+  g_autofree char *git = NULL;
   ScanOp *op;
 
   op = g_new0 (ScanOp, 1);
   op->self = g_object_ref (self);
   op->node = g_object_ref (node);
   op->names = g_ptr_array_new_with_free_func (g_free);
+
+  /*
+   * A checkout is a working directory, not an organizational subtree.
+   * Besides hiding source and build directories, this guard also hides
+   * metadata an older build may already have sprayed through a repository.
+   * Both normal clones (.git directory) and linked worktrees (.git file)
+   * count.
+   */
+  git = g_build_filename (xd_node_get_path (node), ".git", NULL);
+  if (node != self->root && g_file_test (git, G_FILE_TEST_EXISTS))
+    {
+      reconcile (self, node, op->names);
+      watch_node (self, node);
+      scan_op_free (op);
+      return;
+    }
 
   file = g_file_new_for_path (xd_node_get_path (node));
   g_file_enumerate_children_async (file, ENUMERATE_ATTRS,
