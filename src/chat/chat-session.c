@@ -40,7 +40,8 @@ struct _XdChatSession
   gboolean streaming;
   char *session_id;               /* last one the backend reported */
   char *launched_model;
-  char *launched_system_prompt;
+  char *launched_system_prompt;   /* as given, before secrets were appended */
+  char *launched_secrets;         /* what the environment was built from */
   char *launched_workdir;
   AiEffort launched_effort;
   AiAccess launched_access;
@@ -67,6 +68,13 @@ static guint signals[N_SIGNALS];
 G_DEFINE_FINAL_TYPE (XdChatSession, xd_chat_session, G_TYPE_OBJECT)
 
 static void read_next_line (XdChatSession *self);
+
+static int
+compare_strings (const void *a,
+                 const void *b)
+{
+  return g_strcmp0 (*(const char *const *) a, *(const char *const *) b);
+}
 
 /* --- finishing ------------------------------------------------------------ */
 
@@ -112,6 +120,21 @@ on_process_waited (GObject      *source,
 
   if (g_subprocess_wait_check_finish (G_SUBPROCESS (source), result, &error))
     {
+      /*
+       * A streaming process exits only after its turn, never during one, so a
+       * clean exit with the turn still open means the CLI went away mid-answer.
+       * Calling that a success stores whatever partial text arrived as if it
+       * were the whole reply.
+       */
+      if (self->streaming && !self->finished && !self->stopping)
+        {
+          const char *tail = stderr_tail (self);
+
+          finish (self, FALSE,
+                  tail != NULL ? tail : "The agent stopped before answering.");
+          return;
+        }
+
       finish (self, TRUE, NULL);
       return;
     }
@@ -282,6 +305,36 @@ on_stderr_line (GObject      *source,
 /* --- lifecycle ------------------------------------------------------------ */
 
 /*
+ * What the secrets would put in an environment, as one comparable string.
+ *
+ * Names alone are not enough: a rotated value leaves the names identical while
+ * making the running process's environment wrong, and a process launched with
+ * the old value would keep using it for as long as the chat stayed open. The
+ * secrets are applied to an empty environment and hashed, so a changed value
+ * shows up the same way a changed name does. Sorted first, because the order
+ * they come out in is not part of what they are.
+ */
+static char *
+secrets_fingerprint (XdAgentSecrets *secrets)
+{
+  g_auto (GStrv) applied = NULL;
+  g_autoptr (GChecksum) sum = g_checksum_new (G_CHECKSUM_SHA256);
+
+  if (secrets == NULL)
+    return g_strdup ("");
+
+  applied = xd_agent_secrets_apply_environment (secrets, g_new0 (char *, 1));
+  if (applied == NULL)
+    return g_strdup ("");
+
+  qsort (applied, g_strv_length (applied), sizeof (char *), compare_strings);
+  for (gsize i = 0; applied[i] != NULL; i++)
+    g_checksum_update (sum, (const guchar *) applied[i], -1);
+
+  return g_strdup (g_checksum_get_string (sum));
+}
+
+/*
  * Hands one turn to a process that reads them from stdin.
  *
  * Written synchronously: it is a single short line into a pipe with a whole
@@ -404,7 +457,10 @@ xd_chat_session_start (XdChatSession    *self,
       self->stdin_stream = g_subprocess_get_stdin_pipe (self->process);
 
       self->launched_model = g_strdup (effective.model);
-      self->launched_system_prompt = g_strdup (effective.system_prompt);
+      /* The one that was asked for, not the one the secrets were appended to:
+       * it is what a later turn can be compared against. */
+      self->launched_system_prompt = g_strdup (spec->system_prompt);
+      self->launched_secrets = secrets_fingerprint (secrets);
       self->launched_workdir = g_strdup (effective.workdir);
       self->launched_effort = effective.effort;
       self->launched_access = effective.access;
@@ -456,16 +512,25 @@ xd_chat_session_start (XdChatSession    *self,
 /*
  * Whether a turn can be handed to the process that is already running.
  *
- * Everything compared here is argv, decided when the process started and not
- * changeable afterwards. Someone who switches model mid-chat gets a new
- * process, which is what they would have got before any of this.
+ * Everything compared here is fixed when the process starts and cannot be
+ * changed afterwards -- argv for most of it, the environment for the secrets.
+ * Someone who switches model mid-chat gets a new process, which is what they
+ * would have got before any of this.
+ *
+ * Instructions and secrets are in the list because they are the two that look
+ * like they took effect and did not: editing a folder's instructions or
+ * rotating a key would leave the running process on the old ones, silently,
+ * for as long as the chat stayed open.
  */
 static gboolean
 matches_launch (XdChatSession   *self,
-                const AiRunSpec *spec)
+                const AiRunSpec *spec,
+                const char      *secrets)
 {
   return g_strcmp0 (self->launched_model, spec->model) == 0 &&
          g_strcmp0 (self->launched_workdir, spec->workdir) == 0 &&
+         g_strcmp0 (self->launched_system_prompt, spec->system_prompt) == 0 &&
+         g_strcmp0 (self->launched_secrets, secrets) == 0 &&
          self->launched_effort == spec->effort &&
          self->launched_access == spec->access;
 }
@@ -483,9 +548,16 @@ xd_chat_session_can_continue (XdChatSession   *self,
   if (backend != self->backend)
     return FALSE;
 
-  return self->streaming && self->process != NULL &&
-         self->stdin_stream != NULL && !self->stopping &&
-         self->finished && matches_launch (self, spec);
+  if (!self->streaming || self->process == NULL ||
+      self->stdin_stream == NULL || self->stopping || !self->finished)
+    return FALSE;
+
+  {
+    g_autoptr (XdAgentSecrets) secrets = xd_agent_secrets_load (NULL, NULL);
+    g_autofree char *fingerprint = secrets_fingerprint (secrets);
+
+    return matches_launch (self, spec, fingerprint);
+  }
 }
 
 gboolean
@@ -617,6 +689,7 @@ xd_chat_session_finalize (GObject *object)
   g_clear_pointer (&self->session_id, g_free);
   g_clear_pointer (&self->launched_model, g_free);
   g_clear_pointer (&self->launched_system_prompt, g_free);
+  g_clear_pointer (&self->launched_secrets, g_free);
   g_clear_pointer (&self->launched_workdir, g_free);
   g_string_free (self->stderr_text, TRUE);
 
