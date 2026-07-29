@@ -23,6 +23,7 @@ RUN shards install --production --frozen
 COPY src/xd.cr ./src/xd.cr
 COPY src/xd ./src/xd
 COPY spec ./spec
+COPY tests/fixtures ./tests/fixtures
 
 RUN crystal spec --error-trace \
  && mkdir -p /crystal-build \
