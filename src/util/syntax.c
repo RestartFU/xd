@@ -51,6 +51,17 @@ static const char *const GO_CONSTANTS[] = {
   NULL,
 };
 
+static const char *const DOCKERFILE_KEYWORDS[] = {
+  "ADD", "ARG", "AS", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM",
+  "HEALTHCHECK", "LABEL", "MAINTAINER", "ONBUILD", "RUN", "SHELL",
+  "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+  NULL,
+};
+
+static const char *const NO_WORDS[] = {
+  NULL,
+};
+
 typedef struct
 {
   const char *const *keywords;
@@ -58,6 +69,10 @@ typedef struct
   const char *const *constants;
   gboolean raw_strings;         /* Go's backtick string, which spans lines */
   gboolean directives;          /* C's # lines */
+  gboolean slash_comments;       /* C and Go's // comments */
+  gboolean block_comments;       /* C and Go's block comments */
+  gboolean hash_comments;        /* Dockerfile's leading # comments */
+  gboolean case_insensitive;     /* Dockerfile instructions */
   gboolean composite_literals;  /* Go's Type{...} */
 } Language;
 
@@ -66,6 +81,8 @@ static const Language C_LANGUAGE = {
   .types = C_TYPES,
   .constants = C_CONSTANTS,
   .directives = TRUE,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
 };
 
 static const Language GO_LANGUAGE = {
@@ -73,7 +90,17 @@ static const Language GO_LANGUAGE = {
   .types = GO_TYPES,
   .constants = GO_CONSTANTS,
   .raw_strings = TRUE,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
   .composite_literals = TRUE,
+};
+
+static const Language DOCKERFILE_LANGUAGE = {
+  .keywords = DOCKERFILE_KEYWORDS,
+  .types = NO_WORDS,
+  .constants = NO_WORDS,
+  .hash_comments = TRUE,
+  .case_insensitive = TRUE,
 };
 
 static const Language *
@@ -83,6 +110,8 @@ language_table (XdSyntaxLanguage language)
     return &C_LANGUAGE;
   if (language == XD_SYNTAX_GO)
     return &GO_LANGUAGE;
+  if (language == XD_SYNTAX_DOCKERFILE)
+    return &DOCKERFILE_LANGUAGE;
 
   return NULL;
 }
@@ -101,6 +130,12 @@ xd_syntax_language_for_path (const char *path)
     if (*at == '/' || *at == '\\')
       path = at + 1;
 
+  if (g_ascii_strcasecmp (path, "Dockerfile") == 0 ||
+      g_ascii_strncasecmp (path, "Dockerfile.", 11) == 0 ||
+      g_ascii_strcasecmp (path, "Containerfile") == 0 ||
+      g_ascii_strncasecmp (path, "Containerfile.", 14) == 0)
+    return XD_SYNTAX_DOCKERFILE;
+
   dot = strrchr (path, '.');
   if (dot == NULL)
     return XD_SYNTAX_NONE;
@@ -109,6 +144,8 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_GO;
   if (g_strcmp0 (dot, ".c") == 0 || g_strcmp0 (dot, ".h") == 0)
     return XD_SYNTAX_C;
+  if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
+    return XD_SYNTAX_DOCKERFILE;
 
   return XD_SYNTAX_NONE;
 }
@@ -186,11 +223,18 @@ append_token (Emitter      *emitter,
 static gboolean
 word_listed (const char *const *list,
              const char        *word,
-             gsize              length)
+             gsize              length,
+             gboolean           case_insensitive)
 {
   for (gsize i = 0; list[i] != NULL; i++)
-    if (strncmp (list[i], word, length) == 0 && list[i][length] == '\0')
-      return TRUE;
+    {
+      int compared = case_insensitive
+        ? g_ascii_strncasecmp (list[i], word, length)
+        : strncmp (list[i], word, length);
+
+      if (compared == 0 && list[i][length] == '\0')
+        return TRUE;
+    }
 
   return FALSE;
 }
@@ -273,11 +317,14 @@ scan_word (Emitter        *emitter,
   for (after = scan; *after == ' ' || *after == '\t'; after++)
     ;
 
-  if (word_listed (language->keywords, at, length))
+  if (word_listed (language->keywords, at, length,
+                   language->case_insensitive))
     append_token (emitter, XD_SYNTAX_TOKEN_KEYWORD, at, length);
-  else if (word_listed (language->types, at, length))
+  else if (word_listed (language->types, at, length,
+                        language->case_insensitive))
     append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
-  else if (word_listed (language->constants, at, length))
+  else if (word_listed (language->constants, at, length,
+                        language->case_insensitive))
     append_token (emitter, XD_SYNTAX_TOKEN_NUMBER, at, length);
   /*
    * A composite literal names a type: Vec3{40, 70, 40}. The space is what
@@ -401,7 +448,7 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
 
   while (*at != '\0')
     {
-      if (at[0] == '/' && at[1] == '*')
+      if (table->block_comments && at[0] == '/' && at[1] == '*')
         {
           const char *close = strstr (at + 2, "*/");
 
@@ -416,7 +463,13 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
                         (gsize) (close + 2 - at));
           at = close + 2;
         }
-      else if (at[0] == '/' && at[1] == '/')
+      else if (table->slash_comments && at[0] == '/' && at[1] == '/')
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
+          return;
+        }
+      else if (table->hash_comments && *at == '#' &&
+               starts_the_line (line, at))
         {
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;

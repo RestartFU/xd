@@ -62,6 +62,14 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_C);
   g_assert_cmpint (xd_syntax_language_for_path ("a/b.h"), ==, XD_SYNTAX_C);
   g_assert_cmpint (xd_syntax_language_for_path ("main.go"), ==, XD_SYNTAX_GO);
+  g_assert_cmpint (xd_syntax_language_for_path ("Dockerfile"),
+                   ==, XD_SYNTAX_DOCKERFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("images/Dockerfile.release"),
+                   ==, XD_SYNTAX_DOCKERFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("Containerfile"),
+                   ==, XD_SYNTAX_DOCKERFILE);
+  g_assert_cmpint (xd_syntax_language_for_path ("image.dockerfile"),
+                   ==, XD_SYNTAX_DOCKERFILE);
   g_assert_cmpint (xd_syntax_language_for_path ("README.md"),
                    ==, XD_SYNTAX_NONE);
   g_assert_cmpint (xd_syntax_language_for_path ("Makefile"),
@@ -114,6 +122,31 @@ test_classifies_go (void)
   g_assert_nonnull (strstr (record, "type:byte\n"));
   g_assert_nonnull (strstr (record, "type:error\n"));
   g_assert_nonnull (strstr (record, "number:nil\n"));
+}
+
+static void
+test_classifies_dockerfile (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *instruction = scan (
+    XD_SYNTAX_DOCKERFILE,
+    "from \"debian:bookworm\" AS build", &state, NULL);
+  g_autofree char *port = scan (
+    XD_SYNTAX_DOCKERFILE, "EXPOSE 8080", &state, NULL);
+  g_autofree char *comment = scan (
+    XD_SYNTAX_DOCKERFILE, "  # syntax=docker/dockerfile:1", &state, NULL);
+  g_autofree char *url = scan (
+    XD_SYNTAX_DOCKERFILE,
+    "RUN curl https://example.test/archive", &state, NULL);
+
+  g_assert_nonnull (strstr (instruction, "keyword:from\n"));
+  g_assert_nonnull (strstr (instruction, "string:\"debian:bookworm\"\n"));
+  g_assert_nonnull (strstr (instruction, "keyword:AS\n"));
+  g_assert_nonnull (strstr (port, "keyword:EXPOSE\n"));
+  g_assert_nonnull (strstr (port, "number:8080\n"));
+  g_assert_nonnull (
+    strstr (comment, "comment:# syntax=docker/dockerfile:1\n"));
+  g_assert_null (strstr (url, "comment://example.test/archive\n"));
 }
 
 /*
@@ -254,6 +287,8 @@ main (int   argc,
                    test_hands_back_every_byte);
   g_test_add_func ("/syntax/classifies-c", test_classifies_c);
   g_test_add_func ("/syntax/classifies-go", test_classifies_go);
+  g_test_add_func ("/syntax/classifies-dockerfile",
+                   test_classifies_dockerfile);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",

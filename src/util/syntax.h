@@ -14,8 +14,8 @@ G_BEGIN_DECLS
  * is the one part neither consumer can use: the diff draws its own row
  * backgrounds behind a single shared layout, and would have to be rewritten
  * around a foreign text view to gain nothing. What is left is a token scanner,
- * and a token scanner for two languages is small enough to keep here, where it
- * also costs the bundled builds nothing.
+ * and a token scanner for this small language set is compact enough to keep
+ * here, where it also costs the bundled builds nothing.
  *
  * Scanning is per line and stateful, because that is what a diff can offer:
  * hunks are fragments, and the old and new sides of one hunk are two different
@@ -27,6 +27,7 @@ typedef enum
   XD_SYNTAX_NONE = 0,
   XD_SYNTAX_C,
   XD_SYNTAX_GO,
+  XD_SYNTAX_DOCKERFILE,
 } XdSyntaxLanguage;
 
 typedef enum

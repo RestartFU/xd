@@ -257,6 +257,22 @@ test_colours_code_by_language (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#ffbe6f\">2</span>"));
 }
 
+static void
+test_colours_dockerfile (void)
+{
+  static const char *patch =
+    "diff --git a/Dockerfile b/Dockerfile\n"
+    "@@ -1 +1 @@\n"
+    "-FROM debian:bookworm\n"
+    "+FROM debian:trixie\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">FROM</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -342,6 +358,8 @@ main (int   argc,
                    test_formats_independent_slices);
   g_test_add_func ("/unified-diff/colours-code-by-language",
                    test_colours_code_by_language);
+  g_test_add_func ("/unified-diff/colours-dockerfile",
+                   test_colours_dockerfile);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",
