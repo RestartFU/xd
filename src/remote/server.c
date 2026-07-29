@@ -1010,6 +1010,18 @@ handle_new_chat (Connection *connection,
     }
 
   send_done (connection, chat_id);
+
+  /*
+   * Said here rather than waited for.
+   *
+   * Every other change to the tree announces itself this way; this one left it
+   * to the watch on the database directory, which sees the write the chat
+   * became and broadcasts from there. That works where the watch reports a
+   * write promptly, which is to say on inotify -- the kqueue and Windows
+   * backends do not, and the device that asked for the chat waited for a tree
+   * that never came.
+   */
+  broadcast_tree (self);
 }
 
 static void
