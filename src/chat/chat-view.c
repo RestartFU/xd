@@ -291,7 +291,7 @@ static gboolean send_message (XdChatView *self,
                               const char *text);
 static void update_send_button (XdChatView *self);
 static void update_context_bar (XdChatView *self,
-                                const XdChat *chat);
+                                XdChat     *chat);
 static void update_context_meter (XdChatView *self,
                                   guint64     used,
                                   guint64     window);
@@ -330,6 +330,10 @@ static XdMessageRow *append_row (XdChatView    *self,
                                  const char    *text);
 static const char *workdir_for (const XdChat              *chat,
                                 const XdEffectiveSettings *resolved);
+static gboolean restore_original_workdir (XdChatView                *self,
+                                          XdChat                    *chat,
+                                          const XdEffectiveSettings *resolved,
+                                          GError                   **error);
 
 /* A chat with nothing stored runs at whatever the CLI is configured to use. */
 static AiEffort
@@ -2459,8 +2463,8 @@ switch_turn_workspace (Turn       *turn,
   if (xd_worktree_path_equal (turn->workdir, workdir))
     return TRUE;
 
-  if (!xd_storage_set_workdir (
-        self->storage, turn->chat_id, workdir, &error))
+  if (!xd_storage_switch_workdir (
+        self->storage, turn->chat_id, workdir, turn->workdir, &error))
     {
       g_warning ("cannot switch to the agent's workspace: %s", error->message);
       return FALSE;
@@ -2892,6 +2896,38 @@ workdir_for (const XdChat              *chat,
   return resolved->workdir;
 }
 
+/*
+ * Linked checkouts are disposable. Preserve the checkout a chat moved from;
+ * older database rows without one fall back to their folder's resolved path.
+ * Persist the recovery before another CLI process is launched.
+ */
+static gboolean
+restore_original_workdir (XdChatView                *self,
+                          XdChat                    *chat,
+                          const XdEffectiveSettings *resolved,
+                          GError                   **error)
+{
+  const char *original =
+    chat->original_workdir != NULL &&
+    g_file_test (chat->original_workdir, G_FILE_TEST_IS_DIR)
+      ? chat->original_workdir : resolved->workdir;
+
+  if (chat->workdir == NULL || *chat->workdir == '\0' ||
+      g_file_test (chat->workdir, G_FILE_TEST_IS_DIR) ||
+      original == NULL || *original == '\0' ||
+      !g_file_test (original, G_FILE_TEST_IS_DIR))
+    return TRUE;
+
+  if (!xd_storage_restore_workdir (
+        self->storage, chat->id, original, error))
+    return FALSE;
+
+  g_free (chat->workdir);
+  chat->workdir = g_strdup (original);
+  g_clear_pointer (&chat->original_workdir, g_free);
+  return TRUE;
+}
+
 static void
 start_turn (XdChatView *self,
             const char *prompt)
@@ -2983,6 +3019,14 @@ start_turn (XdChatView *self,
    * instructions or model takes effect on the next message instead of only on
    * chats made afterwards. */
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  if (!restore_original_workdir (self, chat, resolved, &error))
+    {
+      append_row (self, XD_MESSAGE_ERROR, error->message);
+      g_hash_table_remove (self->turns, chat->id);
+      set_working (self, FALSE);
+      update_send_button (self);
+      return;
+    }
 
   spec.prompt = full_prompt;
   spec.workdir = workdir_for (chat, resolved);
@@ -3070,19 +3114,21 @@ prepare_new_worktree (XdChatView *self,
   g_autoptr (XdEffectiveSettings) resolved = NULL;
   g_autofree char *worktree = NULL;
   g_autofree char *name = NULL;
+  const char *original;
 
   if (!chat->new_worktree)
     return TRUE;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  original = workdir_for (chat, resolved);
   name = xd_chat_title_from_prompt (prompt);
   worktree = xd_worktree_create (
-    workdir_for (chat, resolved), chat->id, name, error);
+    original, chat->id, name, error);
   if (worktree == NULL)
     return FALSE;
 
   if (!xd_storage_use_worktree (
-        self->storage, chat->id, worktree, error))
+        self->storage, chat->id, worktree, original, error))
     return FALSE;
 
   g_free (chat->workdir);
@@ -3099,6 +3145,7 @@ send_message (XdChatView *self,
 {
   g_autoptr (XdChat) chat = NULL;
   g_autoptr (GError) error = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
 
   if (self->chat == NULL || text == NULL || *text == '\0')
     return FALSE;
@@ -3109,6 +3156,15 @@ send_message (XdChatView *self,
 
   chat = xd_storage_get_chat (
     self->storage, xd_node_get_chat_id (self->chat), &error);
+  if (chat != NULL)
+    {
+      resolved =
+        xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+      if (!restore_original_workdir (self, chat, resolved, &error))
+        g_clear_pointer (&chat, xd_chat_free);
+      else
+        update_context_bar (self, chat);
+    }
   if (chat == NULL || !prepare_new_worktree (self, chat, text, &error))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
@@ -4629,9 +4685,10 @@ update_context_meter (XdChatView *self,
 
 static void
 update_context_bar (XdChatView   *self,
-                    const XdChat *chat)
+                    XdChat       *chat)
 {
   g_autoptr (XdEffectiveSettings) resolved = NULL;
+  g_autoptr (GError) error = NULL;
   g_autoptr (XdGitInfo) git = NULL;
   g_autoptr (GPtrArray) worktrees = NULL;
   g_autofree char *base_description = NULL;
@@ -4642,6 +4699,8 @@ update_context_bar (XdChatView   *self,
   guint64 window = 0;
 
   resolved = xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+  if (!restore_original_workdir (self, chat, resolved, &error))
+    g_warning ("cannot restore the original checkout: %s", error->message);
   workdir = workdir_for (chat, resolved);
   xd_git_head_watch_set_workdir (self->git_head_watch, workdir);
   model = chat->model != NULL ? chat->model : resolved->model;
@@ -4739,7 +4798,9 @@ on_workspace_selected (XdOptionPicker *chooser,
   XdChatView *self = user_data;
   g_autoptr (GError) error = NULL;
   g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdEffectiveSettings) resolved = NULL;
   const char *worktree = NULL;
+  const char *original = NULL;
   guint selected;
   gboolean new_worktree;
 
@@ -4761,17 +4822,29 @@ on_workspace_selected (XdOptionPicker *chooser,
       return;
     }
 
-  if (worktree != NULL
+  chat = xd_storage_get_chat (
+    self->storage, xd_node_get_chat_id (self->chat), &error);
+  if (chat != NULL)
+    {
+      resolved =
+        xd_settings_resolve (xd_node_get_parent (self->chat), chat->backend);
+      original = workdir_for (chat, resolved);
+    }
+
+  if (chat == NULL ||
+      (worktree != NULL
         ? !xd_storage_use_existing_worktree (
-            self->storage, xd_node_get_chat_id (self->chat), worktree, &error)
+            self->storage, xd_node_get_chat_id (self->chat), worktree,
+            original, &error)
         : !xd_storage_set_new_worktree (
             self->storage, xd_node_get_chat_id (self->chat),
-            new_worktree, &error))
+            new_worktree, &error)))
     {
       append_row (self, XD_MESSAGE_ERROR, error->message);
       return;
     }
 
+  g_clear_pointer (&chat, xd_chat_free);
   chat = xd_storage_get_chat (
     self->storage, xd_node_get_chat_id (self->chat), NULL);
   if (chat != NULL)

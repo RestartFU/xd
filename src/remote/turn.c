@@ -208,6 +208,38 @@ find_folder_path (const char *path,
 }
 
 /*
+ * A chat may point at a linked checkout which was removed after its last turn.
+ * Restore the checkout it moved from; old rows without that history fall back
+ * to folder settings. Persist before launch so later turns and every client
+ * see the same recovered workspace.
+ */
+static char *
+resolve_workdir (XdDaemonTurn              *self,
+                 const XdChat              *chat,
+                 const XdEffectiveSettings *resolved)
+{
+  const char *inherited = resolved != NULL ? resolved->workdir : NULL;
+  const char *original =
+    chat->original_workdir != NULL &&
+    g_file_test (chat->original_workdir, G_FILE_TEST_IS_DIR)
+      ? chat->original_workdir : inherited;
+
+  if (chat->workdir == NULL || *chat->workdir == '\0')
+    return g_strdup (original);
+
+  if (g_file_test (chat->workdir, G_FILE_TEST_IS_DIR) ||
+      original == NULL || *original == '\0' ||
+      !g_file_test (original, G_FILE_TEST_IS_DIR))
+    return g_strdup (chat->workdir);
+
+  if (!xd_storage_restore_workdir (
+        self->storage, chat->id, original, NULL))
+    return g_strdup (chat->workdir);
+
+  return g_strdup (original);
+}
+
+/*
  * The folder chain as nodes, so the resolver the window uses can be used here.
  *
  * The settings it reads are files on this machine, and the rules for which one
@@ -374,8 +406,8 @@ switch_workspace (XdDaemonTurn *self,
   if (xd_worktree_path_equal (self->workdir, workdir))
     return TRUE;
 
-  if (!xd_storage_set_workdir (
-        self->storage, self->chat_id, workdir, &error))
+  if (!xd_storage_switch_workdir (
+        self->storage, self->chat_id, workdir, self->workdir, &error))
     {
       g_warning ("cannot switch to the agent's workspace: %s", error->message);
       return FALSE;
@@ -534,7 +566,7 @@ reply_label (const XdChat    *chat,
 
 char *
 xd_daemon_turn_resolve_workdir (XdDaemonTurn *self,
-                                const XdChat *chat)
+                                const XdChat  *chat)
 {
   g_autoptr (GPtrArray) chain = g_ptr_array_new_with_free_func (g_object_unref);
   g_autoptr (XdEffectiveSettings) resolved = NULL;
@@ -542,13 +574,10 @@ xd_daemon_turn_resolve_workdir (XdDaemonTurn *self,
   g_return_val_if_fail (XD_IS_DAEMON_TURN (self), NULL);
   g_return_val_if_fail (chat != NULL, NULL);
 
-  if (chat->workdir != NULL && *chat->workdir != '\0')
-    return g_strdup (chat->workdir);
-
   resolved = xd_settings_resolve (folder_chain (self, chat->folder_id, chain),
                                   chat->backend);
 
-  return g_strdup (resolved->workdir);
+  return resolve_workdir (self, chat, resolved);
 }
 
 gboolean
@@ -565,7 +594,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   g_autofree char *full_prompt = NULL;
   g_autofree char *instructions = NULL;
   const AiBackend *backend;
-  const char *workdir;
+  g_autofree char *workdir = NULL;
   const char *model;
   AiRunSpec spec = { 0 };
 
@@ -608,8 +637,7 @@ xd_daemon_turn_start (XdDaemonTurn  *self,
   resolved = xd_settings_resolve (folder_chain (self, chat->folder_id, chain),
                                   chat->backend);
 
-  workdir = (chat->workdir != NULL && *chat->workdir != '\0') ? chat->workdir
-                                                              : resolved->workdir;
+  workdir = resolve_workdir (self, chat, resolved);
   model = chat->model != NULL ? chat->model : resolved->model;
 
   instructions = resolved->instructions != NULL

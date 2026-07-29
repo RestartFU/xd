@@ -11,6 +11,7 @@ typedef struct
   char *title;
   char *backend;
   char *workdir;      /* NULL: inherit the folder's */
+  char *original_workdir; /* checkout to restore if workdir disappears */
   char *model;        /* NULL: the backend's default */
   char *effort;       /* NULL: the CLI's own setting */
   char *access;       /* NULL: read-only */
@@ -99,7 +100,15 @@ char       *xd_storage_create_chat     (XdStorage   *self,
                                         const char  *workdir,
                                         GError     **error);
 
-gboolean    xd_storage_set_workdir     (XdStorage   *self,
+/* Moves a running chat while preserving its first checkout for recovery. */
+gboolean    xd_storage_switch_workdir  (XdStorage   *self,
+                                        const char  *chat_id,
+                                        const char  *workdir,
+                                        const char  *original_workdir,
+                                        GError     **error);
+
+/* Returns a chat to its preserved checkout and clears the recovery marker. */
+gboolean    xd_storage_restore_workdir (XdStorage   *self,
                                         const char  *chat_id,
                                         const char  *workdir,
                                         GError     **error);
@@ -117,12 +126,14 @@ gboolean    xd_storage_set_new_worktree (XdStorage  *self,
 gboolean    xd_storage_use_existing_worktree (XdStorage  *self,
                                               const char *chat_id,
                                               const char *workdir,
+                                              const char *original_workdir,
                                               GError    **error);
 
 /* Atomically consumes the pending choice and points the chat at its checkout. */
 gboolean    xd_storage_use_worktree     (XdStorage   *self,
                                          const char  *chat_id,
                                          const char  *workdir,
+                                         const char  *original_workdir,
                                          GError     **error);
 
 gboolean    xd_storage_set_model       (XdStorage   *self,

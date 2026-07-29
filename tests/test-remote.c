@@ -2217,6 +2217,7 @@ test_remote_workspace_choice_is_persisted (void)
   g_assert_no_error (error);
   g_assert_false (stored->new_worktree);
   g_assert_cmpstr (stored->workdir, ==, listed_existing);
+  g_assert_cmpstr (stored->original_workdir, ==, daemon.root);
 
   json_object_unref (changed.reply);
   json_object_unref (selected.reply);
@@ -2224,6 +2225,42 @@ test_remote_workspace_choice_is_persisted (void)
   g_free (changed.wait.failure);
   g_free (selected.wait.failure);
   g_free (options.wait.failure);
+  daemon_stop (&daemon);
+}
+
+static void
+test_deleted_worktree_falls_back_to_original_checkout (void)
+{
+  Daemon daemon = { 0 };
+  g_autoptr (XdChat) chat = NULL;
+  g_autoptr (XdChat) stored = NULL;
+  g_autoptr (XdDaemonTurn) resolver = NULL;
+  g_autofree char *original = NULL;
+  g_autofree char *deleted = NULL;
+  g_autofree char *resolved = NULL;
+  g_autoptr (GError) error = NULL;
+
+  daemon_start (&daemon);
+  original = g_build_filename (daemon.dir, "original-checkout", NULL);
+  deleted = g_build_filename (daemon.dir, "deleted-worktree", NULL);
+  g_assert_cmpint (g_mkdir (original, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (deleted, 0700), ==, 0);
+  g_assert_true (xd_storage_switch_workdir (
+    daemon.storage, daemon.chat_id, deleted, original, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_rmdir (deleted), ==, 0);
+
+  chat = xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  resolver = xd_daemon_turn_new (daemon.storage, daemon.root);
+  resolved = xd_daemon_turn_resolve_workdir (resolver, chat);
+
+  g_assert_cmpstr (resolved, ==, original);
+  stored = xd_storage_get_chat (daemon.storage, daemon.chat_id, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (stored->workdir, ==, original);
+  g_assert_null (stored->original_workdir);
+
   daemon_stop (&daemon);
 }
 
@@ -3959,6 +3996,7 @@ main (int argc, char *argv[])
   ADD ("/remote/the-daemon-lists-its-directories", test_the_daemon_lists_its_directories);
   ADD ("/remote/files-are-browsed-read-and-written", test_remote_files_are_browsed_read_and_written);
   ADD ("/remote/workspace-choice-is-persisted", test_remote_workspace_choice_is_persisted);
+  ADD ("/remote/deleted-worktree-falls-back-to-original-checkout", test_deleted_worktree_falls_back_to_original_checkout);
   ADD ("/remote/diff-reads-the-daemon-repository", test_remote_diff_reads_the_daemon_repository);
   ADD ("/remote/terminal-is-shared-and-replayable", test_remote_terminal_is_shared_and_replayable);
   ADD ("/remote/send-during-turn-queues", test_send_during_turn_queues);

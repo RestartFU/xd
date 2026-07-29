@@ -1924,7 +1924,7 @@ start_daemon_turn (XdRemoteServer  *self,
 
         if (worktree == NULL ||
             !xd_storage_use_worktree (
-              self->storage, chat_id, worktree, error))
+              self->storage, chat_id, worktree, source, error))
           return FALSE;
       }
   }
@@ -3286,7 +3286,7 @@ use_existing_worktree (XdRemoteServer  *self,
 
       if (xd_worktree_path_equal (item->path, requested))
         return xd_storage_use_existing_worktree (
-          self->storage, chat_id, item->path, error);
+          self->storage, chat_id, item->path, workdir, error);
     }
 
   g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
