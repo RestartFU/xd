@@ -92,6 +92,13 @@ module Xd
         source.try(&.close)
       end
 
+      def kill_chat(chat_id : String) : Nil
+        sources = @lock.synchronize do
+          @terminals.values.select(&.chat_id.==(chat_id))
+        end
+        sources.each(&.close)
+      end
+
       def close : Nil
         sources = @lock.synchronize { @terminals.values.dup }
         sources.each(&.close)

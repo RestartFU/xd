@@ -129,6 +129,7 @@ module Xd
 
       @turns = {} of String => ActiveTurn
       @starting = Set(String).new
+      @command_sets = {} of String => Array(String)
       @mutex = Mutex.new
       @closed = false
 
@@ -211,9 +212,24 @@ module Xd
       end
 
       def commands(chat_id : String) : Array(String)
+        backend = @store.get_chat(chat_id).backend
         @mutex.synchronize do
-          @turns[chat_id]?.try(&.commands.dup) || [] of String
+          @command_sets[backend]?.try(&.dup) || [] of String
         end
+      end
+
+      # Detach a chat before its database row is deleted. Agent completion may
+      # arrive later; removing ownership first makes that callback a no-op.
+      def forget(chat_id : String) : Nil
+        handle = @mutex.synchronize do
+          @starting.delete(chat_id)
+          turn = @turns.delete(chat_id)
+          if turn
+            turn.finished = true
+            turn.handle
+          end
+        end
+        handle.try(&.cancel)
       end
 
       def close : Nil
@@ -388,6 +404,7 @@ module Xd
           when EventType::Commands
             commands = event.commands || [] of String
             turn.commands = commands.dup
+            @command_sets[turn.backend.id] = commands.dup
             event_name = "commands"
             fields = {
               "chat"     => JSON::Any.new(turn.chat_id),

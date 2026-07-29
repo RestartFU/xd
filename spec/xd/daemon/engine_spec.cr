@@ -19,6 +19,7 @@ end
 private class EngineLauncher < Xd::Agent::Launcher
   getter specs = [] of Xd::Agent::RunSpec
   getter handles = [] of EngineSessionHandle
+  getter finish_callbacks = [] of Proc(Bool, String?, Nil)
 
   def start(
     backend : Xd::Agent::Backend,
@@ -31,6 +32,7 @@ private class EngineLauncher < Xd::Agent::Launcher
     handle = EngineSessionHandle.new
     @specs << spec
     @handles << handle
+    @finish_callbacks << on_finished
     handle
   end
 end
@@ -299,6 +301,17 @@ describe Xd::Daemon::Engine do
           "chat" => chat,
         }.to_json).success?.should be_true
         launcher.handles.first.canceled.should be_true
+
+        deleted = engine.dispatch(local, {
+          "op"   => "delete-chat",
+          "chat" => chat,
+        }.to_json)
+        deleted.success?.should be_true
+        launcher.finish_callbacks.first.call(true, nil)
+        engine.dispatch(local, {
+          "op"   => "chat",
+          "chat" => chat,
+        }.to_json).success?.should be_false
         engine.events.unsubscribe(subscription)
       end
     ensure

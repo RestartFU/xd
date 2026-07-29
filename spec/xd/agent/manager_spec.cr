@@ -149,6 +149,7 @@ describe Xd::Agent::Manager do
       events.map(&.[0]).should contain("text")
       events.map(&.[0]).should contain("tool")
       events.map(&.[0]).should contain("turn-finished")
+      manager.commands(chat_id).should eq(["review"])
     end
   end
 

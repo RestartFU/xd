@@ -551,6 +551,8 @@ module Xd
           "chat",
           "delete-chat needs a chat id"
         )
+        @agents.forget(chat_id)
+        @terminals.kill_chat(chat_id)
         @store.delete_chat(chat_id)
         Protocol::Response.ok
       end
