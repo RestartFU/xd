@@ -309,7 +309,7 @@ bind_virtual_file (GtkSignalListItemFactory *factory,
     g_autofree char *escaped = g_markup_escape_text (valid, -1);
 
     path_markup = g_strdup_printf (
-      "<span foreground=\"#9a9996\" weight=\"bold\">%s</span>", escaped);
+      "<span foreground=\"#ffbe6f\" weight=\"bold\">%s</span>", escaped);
   }
   counts_markup = g_strdup_printf (
     "<span foreground=\"#57e389\">+%u</span>"

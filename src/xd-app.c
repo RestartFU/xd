@@ -518,7 +518,8 @@ static const char *XD_STYLE =
   " border-radius: 0; }\n"
   "listview.xd-diff-list > row:hover"
   " { background: none; }\n"
-  ".xd-diff-expander > title { padding: 9px 12px; }\n"
+  ".xd-diff-expander > title { padding: 9px 12px;"
+  " background-color: #2a2a2d; }\n"
 
   /* Repository browser: the list and preview share the same quiet side pane
    * as changes, so files read like navigation rather than message cards. */
