@@ -1,0 +1,12 @@
+name: xd
+version: 0.1.0
+
+authors:
+  - RestartFU
+
+targets:
+  xd:
+    main: src/xd.cr
+
+crystal: 1.21.0
+license: MIT

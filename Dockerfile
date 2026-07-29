@@ -5,6 +5,24 @@
 # GTK support data + launcher) so the result runs on any glibc-based x86_64
 # host, including NixOS where there is no /lib64 loader and no system GTK.
 
+# --- Crystal migration toolchain -------------------------------------------
+#
+# Pin the multi-platform manifest, not only the tag. Developers need Docker,
+# never a host Crystal compiler. This stage remains separate while the
+# behavior-parity suite is moved module by module from C.
+FROM crystallang/crystal:1.21.0@sha256:32b7b908a8c3625ebd629053daf48b6f469deaf74aeb71ad101895096b1665fa AS crystal
+
+WORKDIR /src
+COPY shard.yml ./
+COPY src/xd.cr ./src/xd.cr
+COPY src/xd ./src/xd
+COPY spec ./spec
+
+RUN crystal spec --error-trace \
+ && mkdir -p /crystal-build \
+ && crystal build src/xd.cr --release --no-debug -o /crystal-build/xd \
+ && /crystal-build/xd --version
+
 # --- stage 1: build + runtime dependencies ----------------------------------
 FROM debian:trixie-slim AS deps
 
