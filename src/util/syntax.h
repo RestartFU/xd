@@ -28,6 +28,7 @@ typedef enum
   XD_SYNTAX_C,
   XD_SYNTAX_GO,
   XD_SYNTAX_DOCKERFILE,
+  XD_SYNTAX_KOTLIN,
 } XdSyntaxLanguage;
 
 typedef enum
@@ -55,6 +56,7 @@ typedef struct
 {
   guint8 in_comment;      /* inside a block comment */
   guint8 in_raw_string;   /* inside Go's backtick string */
+  guint8 in_triple_string; /* inside Kotlin's triple-quoted string */
 } XdSyntaxState;
 
 /* XD_SYNTAX_NONE for a path in a language this does not know. */

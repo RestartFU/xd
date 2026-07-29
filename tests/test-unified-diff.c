@@ -273,6 +273,23 @@ test_colours_dockerfile (void)
   g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">FROM</span>"));
 }
 
+static void
+test_colours_kotlin (void)
+{
+  static const char *patch =
+    "diff --git a/src/Main.kt b/src/Main.kt\n"
+    "@@ -1 +1 @@\n"
+    "-val answer: Int = 41\n"
+    "+val answer: Int = 42\n";
+  g_autoptr (GPtrArray) lines =
+    xd_unified_diff_parse (patch, NULL, NULL);
+  g_autofree char *markup =
+    xd_unified_diff_markup (lines, TRUE, 0, NULL);
+
+  g_assert_nonnull (strstr (markup, "foreground=\"#dc8add\">val</span>"));
+  g_assert_nonnull (strstr (markup, "foreground=\"#78aeed\">Int</span>"));
+}
+
 /* A file whose language is unknown keeps the plain green-and-red reading. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -360,6 +377,7 @@ main (int   argc,
                    test_colours_code_by_language);
   g_test_add_func ("/unified-diff/colours-dockerfile",
                    test_colours_dockerfile);
+  g_test_add_func ("/unified-diff/colours-kotlin", test_colours_kotlin);
   g_test_add_func ("/unified-diff/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/unified-diff/keeps-the-hunk-sides-apart",

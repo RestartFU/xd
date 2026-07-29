@@ -62,6 +62,10 @@ test_reads_the_path (void)
                    ==, XD_SYNTAX_C);
   g_assert_cmpint (xd_syntax_language_for_path ("a/b.h"), ==, XD_SYNTAX_C);
   g_assert_cmpint (xd_syntax_language_for_path ("main.go"), ==, XD_SYNTAX_GO);
+  g_assert_cmpint (xd_syntax_language_for_path ("Main.kt"),
+                   ==, XD_SYNTAX_KOTLIN);
+  g_assert_cmpint (xd_syntax_language_for_path ("build.gradle.kts"),
+                   ==, XD_SYNTAX_KOTLIN);
   g_assert_cmpint (xd_syntax_language_for_path ("Dockerfile"),
                    ==, XD_SYNTAX_DOCKERFILE);
   g_assert_cmpint (xd_syntax_language_for_path ("images/Dockerfile.release"),
@@ -147,6 +151,30 @@ test_classifies_dockerfile (void)
   g_assert_nonnull (
     strstr (comment, "comment:# syntax=docker/dockerfile:1\n"));
   g_assert_null (strstr (url, "comment://example.test/archive\n"));
+}
+
+static void
+test_classifies_kotlin (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *declaration = scan (
+    XD_SYNTAX_KOTLIN,
+    "data class User(val name: String, val age: Int = 42)", &state, NULL);
+  g_autofree char *function = scan (
+    XD_SYNTAX_KOTLIN,
+    "fun greet(name: String) = \"Hello, $name\" // welcome", &state, NULL);
+
+  g_assert_nonnull (strstr (declaration, "keyword:data\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:class\n"));
+  g_assert_nonnull (strstr (declaration, "type:User\n"));
+  g_assert_nonnull (strstr (declaration, "keyword:val\n"));
+  g_assert_nonnull (strstr (declaration, "type:String\n"));
+  g_assert_nonnull (strstr (declaration, "type:Int\n"));
+  g_assert_nonnull (strstr (declaration, "number:42\n"));
+  g_assert_nonnull (strstr (function, "keyword:fun\n"));
+  g_assert_nonnull (strstr (function, "function:greet\n"));
+  g_assert_nonnull (strstr (function, "string:\"Hello, $name\"\n"));
+  g_assert_nonnull (strstr (function, "comment:// welcome\n"));
 }
 
 /*
@@ -246,6 +274,29 @@ test_carries_a_go_raw_string (void)
   g_assert_nonnull (strstr (closed, "string:from t`\n"));
 }
 
+static void
+test_carries_a_kotlin_triple_string (void)
+{
+  XdSyntaxState state = { 0 };
+  g_autofree char *opened = scan (
+    XD_SYNTAX_KOTLIN, "val query = \"\"\"select fun", &state, NULL);
+  g_autofree char *inside = NULL;
+  g_autofree char *closed = NULL;
+
+  g_assert_true (state.in_triple_string);
+  g_assert_null (strstr (opened, "keyword:fun\n"));
+
+  inside = scan (XD_SYNTAX_KOTLIN, "from users // literal", &state, NULL);
+  g_assert_true (state.in_triple_string);
+  g_assert_null (strstr (inside, "comment:// literal\n"));
+
+  closed = scan (XD_SYNTAX_KOTLIN, "where active\"\"\".trimIndent ()",
+                 &state, NULL);
+  g_assert_false (state.in_triple_string);
+  g_assert_nonnull (strstr (closed, "string:where active\"\"\"\n"));
+  g_assert_nonnull (strstr (closed, "function:trimIndent\n"));
+}
+
 /* A language this cannot read is handed straight back, uncoloured. */
 static void
 test_leaves_unknown_languages_alone (void)
@@ -289,6 +340,7 @@ main (int   argc,
   g_test_add_func ("/syntax/classifies-go", test_classifies_go);
   g_test_add_func ("/syntax/classifies-dockerfile",
                    test_classifies_dockerfile);
+  g_test_add_func ("/syntax/classifies-kotlin", test_classifies_kotlin);
   g_test_add_func ("/syntax/names-a-composite-literal-type",
                    test_names_a_composite_literal_type);
   g_test_add_func ("/syntax/leaves-c-braces-alone",
@@ -301,6 +353,8 @@ main (int   argc,
                    test_carries_a_block_comment);
   g_test_add_func ("/syntax/carries-a-go-raw-string",
                    test_carries_a_go_raw_string);
+  g_test_add_func ("/syntax/carries-a-kotlin-triple-string",
+                   test_carries_a_kotlin_triple_string);
   g_test_add_func ("/syntax/leaves-unknown-languages-alone",
                    test_leaves_unknown_languages_alone);
   g_test_add_func ("/syntax/survives-unterminated-text",

@@ -51,6 +51,30 @@ static const char *const GO_CONSTANTS[] = {
   NULL,
 };
 
+static const char *const KOTLIN_KEYWORDS[] = {
+  "abstract", "actual", "annotation", "as", "break", "by", "catch", "class",
+  "companion", "const", "constructor", "context", "continue", "crossinline",
+  "data", "delegate", "do", "dynamic", "else", "enum", "expect", "external",
+  "field", "file", "final", "finally", "for", "fun", "get", "if", "import",
+  "in", "infix", "init", "inline", "inner", "interface", "internal", "is",
+  "lateinit", "noinline", "object", "open", "operator", "out", "override",
+  "package", "param", "private", "property", "protected", "public",
+  "receiver", "reified", "return", "sealed", "set", "setparam", "super",
+  "suspend", "tailrec", "this", "throw", "try", "typealias", "typeof", "val",
+  "value", "var", "vararg", "when", "where", "while",
+  NULL,
+};
+
+static const char *const KOTLIN_TYPES[] = {
+  "Any", "Array", "Boolean", "Byte", "Char", "Double", "Float", "Int", "Long",
+  "Nothing", "Short", "String", "UByte", "UInt", "ULong", "UShort", "Unit",
+  NULL,
+};
+
+static const char *const KOTLIN_CONSTANTS[] = {
+  "false", "null", "true", NULL,
+};
+
 static const char *const DOCKERFILE_KEYWORDS[] = {
   "ADD", "ARG", "AS", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM",
   "HEALTHCHECK", "LABEL", "MAINTAINER", "ONBUILD", "RUN", "SHELL",
@@ -68,11 +92,13 @@ typedef struct
   const char *const *types;
   const char *const *constants;
   gboolean raw_strings;         /* Go's backtick string, which spans lines */
+  gboolean triple_strings;      /* Kotlin's triple-quoted string */
   gboolean directives;          /* C's # lines */
-  gboolean slash_comments;       /* C and Go's // comments */
-  gboolean block_comments;       /* C and Go's block comments */
+  gboolean slash_comments;       /* C, Go and Kotlin's // comments */
+  gboolean block_comments;       /* C, Go and Kotlin's block comments */
   gboolean hash_comments;        /* Dockerfile's leading # comments */
   gboolean case_insensitive;     /* Dockerfile instructions */
+  gboolean capitalized_types;    /* Kotlin's user-defined types */
   gboolean composite_literals;  /* Go's Type{...} */
 } Language;
 
@@ -95,6 +121,16 @@ static const Language GO_LANGUAGE = {
   .composite_literals = TRUE,
 };
 
+static const Language KOTLIN_LANGUAGE = {
+  .keywords = KOTLIN_KEYWORDS,
+  .types = KOTLIN_TYPES,
+  .constants = KOTLIN_CONSTANTS,
+  .triple_strings = TRUE,
+  .slash_comments = TRUE,
+  .block_comments = TRUE,
+  .capitalized_types = TRUE,
+};
+
 static const Language DOCKERFILE_LANGUAGE = {
   .keywords = DOCKERFILE_KEYWORDS,
   .types = NO_WORDS,
@@ -112,6 +148,8 @@ language_table (XdSyntaxLanguage language)
     return &GO_LANGUAGE;
   if (language == XD_SYNTAX_DOCKERFILE)
     return &DOCKERFILE_LANGUAGE;
+  if (language == XD_SYNTAX_KOTLIN)
+    return &KOTLIN_LANGUAGE;
 
   return NULL;
 }
@@ -144,6 +182,8 @@ xd_syntax_language_for_path (const char *path)
     return XD_SYNTAX_GO;
   if (g_strcmp0 (dot, ".c") == 0 || g_strcmp0 (dot, ".h") == 0)
     return XD_SYNTAX_C;
+  if (g_strcmp0 (dot, ".kt") == 0 || g_strcmp0 (dot, ".kts") == 0)
+    return XD_SYNTAX_KOTLIN;
   if (g_ascii_strcasecmp (dot, ".dockerfile") == 0)
     return XD_SYNTAX_DOCKERFILE;
 
@@ -326,6 +366,8 @@ scan_word (Emitter        *emitter,
   else if (word_listed (language->constants, at, length,
                         language->case_insensitive))
     append_token (emitter, XD_SYNTAX_TOKEN_NUMBER, at, length);
+  else if (language->capitalized_types && g_ascii_isupper (*at))
+    append_token (emitter, XD_SYNTAX_TOKEN_TYPE, at, length);
   /*
    * A composite literal names a type: Vec3{40, 70, 40}. The space is what
    * tells it apart from a block -- gofmt writes the literal tight and "if ok
@@ -445,6 +487,21 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
       at = close + 1;
       state->in_raw_string = FALSE;
     }
+  else if (state->in_triple_string)
+    {
+      const char *close = strstr (at, "\"\"\"");
+
+      if (close == NULL)
+        {
+          append_token (&emitter, XD_SYNTAX_TOKEN_STRING, at, strlen (at));
+          return;
+        }
+
+      append_token (&emitter, XD_SYNTAX_TOKEN_STRING, at,
+                    (gsize) (close + 3 - at));
+      at = close + 3;
+      state->in_triple_string = FALSE;
+    }
 
   while (*at != '\0')
     {
@@ -473,6 +530,21 @@ xd_syntax_scan_line (XdSyntaxLanguage   language,
         {
           append_token (&emitter, XD_SYNTAX_TOKEN_COMMENT, at, strlen (at));
           return;
+        }
+      else if (table->triple_strings && strncmp (at, "\"\"\"", 3) == 0)
+        {
+          const char *close = strstr (at + 3, "\"\"\"");
+
+          if (close == NULL)
+            {
+              append_token (&emitter, XD_SYNTAX_TOKEN_STRING, at, strlen (at));
+              state->in_triple_string = TRUE;
+              return;
+            }
+
+          append_token (&emitter, XD_SYNTAX_TOKEN_STRING, at,
+                        (gsize) (close + 3 - at));
+          at = close + 3;
         }
       else if (*at == '"' || *at == '\'')
         {
