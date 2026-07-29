@@ -2639,6 +2639,16 @@ test_remote_diff_reads_the_daemon_repository (void)
 static void
 test_remote_terminal_is_shared_and_replayable (void)
 {
+  /*
+   * The Windows daemon serves every op except a shell, on purpose: there is no
+   * forkpty, and remote/terminal-stub.c refuses with a reason rather than
+   * pretending. A test that needs one is testing the thing that is absent.
+   */
+#ifdef G_OS_WIN32
+  g_test_skip ("this machine does not host terminals");
+  return;
+#endif
+
   Daemon daemon = { 0 };
   g_autoptr (XdRemoteClient) client = NULL;
   g_autoptr (XdRemoteTree) tree = NULL;
