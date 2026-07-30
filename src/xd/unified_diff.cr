@@ -35,6 +35,13 @@ module Xd
     markup : String,
     row_kinds : Array(DiffLineKind)
 
+  record DiffFileSection,
+    path : String,
+    start : Int32,
+    finish : Int32,
+    additions : UInt32,
+    deletions : UInt32
+
   module UnifiedDiff
     extend self
 
@@ -116,6 +123,37 @@ module Xd
     ) : Int32
       return lines.size if show_file_headers
       lines.count { |line| !line.kind.file? }
+    end
+
+    def file_sections(
+      lines : Array(DiffLine),
+    ) : Array(DiffFileSection)
+      return [] of DiffFileSection if lines.empty?
+
+      starts = [] of Int32
+      lines.each_with_index do |line, index|
+        starts << index if line.kind.file?
+      end
+      starts << 0 if starts.empty?
+
+      starts.map_with_index do |start, index|
+        finish = starts[index + 1]? || lines.size
+        first = lines[start]
+        additions = 0_u32
+        deletions = 0_u32
+        (start...finish).each do |position|
+          kind = lines[position].kind
+          additions &+= 1 if kind.added?
+          deletions &+= 1 if kind.removed?
+        end
+        DiffFileSection.new(
+          first.kind.file? ? first.text : "Changes",
+          start,
+          finish,
+          additions,
+          deletions
+        )
+      end
     end
 
     def markup(

@@ -83,6 +83,39 @@ describe Xd::UnifiedDiff do
     Xd::DiffLineKind::Context.background.should be_nil
   end
 
+  it "splits a complete patch into counted virtual file sections" do
+    patch = <<-DIFF
+      diff --git a/src/a.c b/src/a.c
+      @@ -1 +1,2 @@
+      -old
+      +new
+      +extra
+      diff --git a/src/b.c b/src/b.c
+      @@ -4 +4 @@
+      -before
+      +after
+      DIFF
+    sections = Xd::UnifiedDiff.file_sections(
+      Xd::UnifiedDiff.parse(patch).lines
+    )
+
+    sections.should eq([
+      Xd::DiffFileSection.new("src/a.c", 0, 5, 2, 1),
+      Xd::DiffFileSection.new("src/b.c", 5, 9, 1, 1),
+    ])
+  end
+
+  it "keeps metadata-only patches in one Changes section" do
+    lines = [
+      Xd::DiffLine.new(Xd::DiffLineKind::Meta, "mode changed"),
+    ]
+
+    Xd::UnifiedDiff.file_sections(lines).should eq([
+      Xd::DiffFileSection.new("Changes", 0, 1, 0, 0),
+    ])
+    Xd::UnifiedDiff.file_sections([] of Xd::DiffLine).should be_empty
+  end
+
   it "formats one safe layout with totals, gutters, and a limit footer" do
     patch = <<-DIFF
       diff --git a/src/a.c b/src/a.c
