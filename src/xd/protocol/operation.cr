@@ -37,6 +37,8 @@ module Xd
       SteerQueue
       Cancel
       DiffRead
+      GitState
+      GitAction
       TerminalList
       TerminalOpen
       TerminalInput
@@ -76,6 +78,8 @@ module Xd
         when SteerQueue        then "steer-queue"
         when Cancel            then "cancel"
         when DiffRead          then "diff-read"
+        when GitState          then "git-state"
+        when GitAction         then "git-action"
         when TerminalList      then "terminal-list"
         when TerminalOpen      then "terminal-open"
         when TerminalInput     then "terminal-input"
@@ -118,6 +122,8 @@ module Xd
         when "steer-queue"         then SteerQueue
         when "cancel"              then Cancel
         when "diff-read"           then DiffRead
+        when "git-state"           then GitState
+        when "git-action"          then GitAction
         when "terminal-list"       then TerminalList
         when "terminal-open"       then TerminalOpen
         when "terminal-input"      then TerminalInput

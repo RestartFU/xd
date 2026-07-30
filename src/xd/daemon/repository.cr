@@ -1,3 +1,4 @@
+require "../agent/environment"
 require "../storage/workflow_state"
 require "../workspace/service"
 require "./filesystem"
@@ -7,15 +8,92 @@ module Xd
     class Repository
       MAX_OUTPUT_BYTES = 8 * 1024 * 1024
       BASE_PATTERN     = /\A[A-Za-z0-9_\.\/-]{1,256}\z/
+      URL_PATTERN      = /https:\/\/[^\s]+/
+      STATE_SCRIPT     =
+        "printf '%s\\n' \"$(git status --porcelain 2>/dev/null | head -n 1)\"; " \
+        "git rev-parse --abbrev-ref HEAD 2>/dev/null || echo; " \
+        "git rev-parse --abbrev-ref --symbolic-full-name '@{u}' " \
+        "2>/dev/null || echo; " \
+        "git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0; " \
+        "for ref in " \
+        "\"$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD)\" " \
+        "origin/main origin/master main master; do " \
+        "  [ -n \"$ref\" ] || continue; " \
+        "  git rev-parse --verify --quiet \"$ref\" >/dev/null && " \
+        "    { echo \"${ref##*/}\"; break; }; " \
+        "done; " \
+        "gh pr view --json url --jq .url 2>/dev/null || true"
 
       class Error < Exception
       end
+
+      record State,
+        visible : Bool,
+        action : String,
+        label : String,
+        enabled : Bool,
+        url : String? = nil
+
+      record ActionResult, state : State, url : String? = nil
 
       def initialize(
         @store : Storage::Store,
         @workspaces : Workspace::Service,
         @filesystem : Filesystem,
       )
+        @action_mutex = Mutex.new
+      end
+
+      def state(chat_id : String) : State
+        state_at(@filesystem.workdir(chat_id))
+      end
+
+      def perform(
+        chat_id : String,
+        action : String,
+        message : String?,
+      ) : ActionResult
+        @action_mutex.synchronize do
+          workdir = @filesystem.workdir(chat_id)
+          current = state_at(workdir)
+          unless current.visible && current.enabled && current.action == action
+            raise Error.new("Repository state changed. Try again.")
+          end
+
+          url = case action
+                when "commit"
+                  text = message.try(&.strip) || ""
+                  if text.empty?
+                    raise Error.new("Write a commit message first.")
+                  end
+                  checked(workdir, "git", ["add", "-A"])
+                  checked(workdir, "git", ["commit", "-m", text])
+                  nil
+                when "push"
+                  checked(workdir, "git", ["push", "-u", "origin", "HEAD"])
+                  nil
+                when "create-pr"
+                  environment = Agent::Environment.host
+                  environment["GH_BROWSER"] = "echo"
+                  output = checked(
+                    workdir,
+                    "gh",
+                    ["pr", "create", "--web"],
+                    environment
+                  )
+                  web_url(output) || raise Error.new(
+                    "GitHub CLI did not return a pull request URL."
+                  )
+                when "view-pr"
+                  current.url || raise Error.new(
+                    "GitHub CLI did not return a pull request URL."
+                  )
+                else
+                  raise Error.new("No such Git action.")
+                end
+
+          ActionResult.new(state_at(workdir), url)
+        end
       end
 
       def read(
@@ -106,6 +184,87 @@ module Xd
         ""
       end
 
+      private def state_at(workdir : String) : State
+        output, _status, _error = command(
+          workdir,
+          "sh",
+          ["-c", STATE_SCRIPT]
+        )
+        lines = output.split('\n')
+        return hidden_state if lines.size < 5
+
+        dirty = lines[0]
+        branch = lines[1]
+        upstream = lines[2]
+        ahead = lines[3].to_i?
+        base = lines[4]
+        url = lines[5]?.try do |value|
+          stripped = value.strip
+          stripped unless stripped.empty?
+        end
+        return hidden_state if branch.empty?
+
+        action = if !dirty.empty?
+                   "commit"
+                 elsif (ahead || 0) > 0 || upstream.empty?
+                   "push"
+                 elsif branch != base
+                   url ? "view-pr" : "create-pr"
+                 else
+                   "none"
+                 end
+        State.new(
+          true,
+          action,
+          action_label(action),
+          action != "none",
+          url
+        )
+      rescue File::Error | IO::Error
+        hidden_state
+      end
+
+      private def hidden_state : State
+        State.new(false, "none", "Up to date", false)
+      end
+
+      private def action_label(action : String) : String
+        case action
+        when "commit"    then "Commit"
+        when "push"      then "Push"
+        when "create-pr" then "Create PR"
+        when "view-pr"   then "View PR"
+        else                  "Up to date"
+        end
+      end
+
+      private def checked(
+        workdir : String,
+        executable : String,
+        arguments : Array(String),
+        environment : Hash(String, String) = Agent::Environment.host,
+      ) : String
+        output, status, error_text = command(
+          workdir,
+          executable,
+          arguments,
+          environment
+        )
+        unless status.success?
+          detail = error_text.strip
+          detail = output.strip if detail.empty?
+          detail = "#{executable} refused the request." if detail.empty?
+          raise Error.new(detail)
+        end
+        output
+      rescue error : File::Error | IO::Error
+        raise Error.new("Cannot run #{executable}: #{error.message}")
+      end
+
+      private def web_url(output : String) : String?
+        output.match(URL_PATTERN).try(&.[0].rstrip(".,);"))
+      end
+
       private def working_all(workdir : String, root : String) : String
         output = capture(workdir, ["--no-pager", "diff", "HEAD"])
         untracked = capture(
@@ -194,18 +353,29 @@ module Xd
         workdir : String,
         arguments : Array(String),
       ) : Tuple(String, Process::Status, String)
+        command(workdir, "git", arguments)
+      rescue error : File::Error | IO::Error
+        raise Error.new("Cannot run Git: #{error.message}")
+      end
+
+      private def command(
+        workdir : String,
+        executable : String,
+        arguments : Array(String),
+        environment : Hash(String, String) = Agent::Environment.host,
+      ) : Tuple(String, Process::Status, String)
         output = IO::Memory.new
         error = IO::Memory.new
         status = Process.run(
-          "git",
+          executable,
           arguments,
           chdir: workdir,
+          env: environment,
+          clear_env: true,
           output: output,
           error: error
         )
         {output.to_s, status, error.to_s}
-      rescue error : File::Error | IO::Error
-        raise Error.new("Cannot run Git: #{error.message}")
       end
     end
   end

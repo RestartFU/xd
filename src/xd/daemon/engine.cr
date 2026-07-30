@@ -207,6 +207,10 @@ module Xd
           cancel(request)
         when Protocol::Operation::DiffRead
           diff_read(request)
+        when Protocol::Operation::GitState
+          git_state(request)
+        when Protocol::Operation::GitAction
+          git_action(request)
         when Protocol::Operation::TerminalList
           terminal_list(request)
         when Protocol::Operation::TerminalOpen
@@ -831,6 +835,93 @@ module Xd
           request.string?("base")
         )
         Protocol::Response.ok({"output" => JSON::Any.new(output)})
+      end
+
+      private def git_state(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string("chat", "git-state needs a chat id.")
+        refresh_id = request.int?("request")
+        @store.get_chat(chat_id)
+        @after_write = -> {
+          spawn do
+            fields = repository_state_fields(
+              chat_id,
+              @repository.state(chat_id)
+            )
+            if id = refresh_id
+              fields["request"] = JSON::Any.new(id)
+            end
+            publish_async_event("git-state", fields)
+          end
+          nil
+        }
+        Protocol::Response.ok
+      end
+
+      private def git_action(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        message = "git-action needs a chat id and action."
+        chat_id = request.string("chat", message)
+        action = request.string("action", message)
+        unless {"commit", "push", "create-pr", "view-pr"}.includes?(action)
+          raise Protocol::Error.new("No such Git action.")
+        end
+        commit_message = request.string?("message")
+        if action == "commit" && commit_message.try(&.strip).to_s.empty?
+          raise Protocol::Error.new("Write a commit message first.")
+        end
+        @store.get_chat(chat_id)
+
+        @after_write = -> {
+          spawn do
+            fields = {
+              "chat"    => JSON::Any.new(chat_id),
+              "action"  => JSON::Any.new(action),
+              "success" => JSON::Any.new(false),
+            }
+            begin
+              result = @repository.perform(
+                chat_id,
+                action,
+                commit_message
+              )
+              repository_state_fields(
+                chat_id,
+                result.state
+              ).each { |name, value| fields[name] = value }
+              fields["success"] = JSON::Any.new(true)
+              if url = result.url
+                fields["url"] = JSON::Any.new(url)
+              end
+            rescue error : Repository::Error
+              fields["error"] = JSON::Any.new(
+                error.message || "Git refused the request."
+              )
+            end
+            publish_async_event("git-action-finished", fields)
+          end
+          nil
+        }
+        Protocol::Response.ok
+      end
+
+      private def repository_state_fields(
+        chat_id : String,
+        state : Repository::State,
+      ) : Hash(String, JSON::Any)
+        fields = {
+          "chat"    => JSON::Any.new(chat_id),
+          "visible" => JSON::Any.new(state.visible),
+          "action"  => JSON::Any.new(state.action),
+          "label"   => JSON::Any.new(state.label),
+          "enabled" => JSON::Any.new(state.enabled),
+        }
+        if url = state.url
+          fields["url"] = JSON::Any.new(url)
+        end
+        fields
       end
 
       private def terminal_list(

@@ -90,4 +90,51 @@ describe Xd::Daemon::Repository do
       end
     end
   end
+
+  it "chooses and performs the next repository action" do
+    with_repository do |repository, folder, chat_id|
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+
+      dirty = repository.state(chat_id)
+      dirty.visible.should be_true
+      dirty.action.should eq("commit")
+      dirty.label.should eq("Commit")
+      dirty.enabled.should be_true
+
+      committed = repository.perform(
+        chat_id,
+        "commit",
+        "Update tracked text"
+      )
+      committed.url.should be_nil
+      committed.state.action.should eq("push")
+      committed.state.label.should eq("Push")
+      output = IO::Memory.new
+      status = Process.run(
+        "git",
+        ["log", "-1", "--format=%s"],
+        chdir: folder,
+        output: output,
+        error: Process::Redirect::Close
+      )
+      status.success?.should be_true
+      output.to_s.should eq("Update tracked text\n")
+    end
+  end
+
+  it "hides actions outside a repository" do
+    with_repository do |repository, folder, chat_id|
+      git_dir = File.join(folder, ".git")
+      hidden = File.join(folder, ".git-hidden")
+      File.rename(git_dir, hidden)
+      begin
+        state = repository.state(chat_id)
+        state.visible.should be_false
+        state.enabled.should be_false
+        state.label.should eq("Up to date")
+      ensure
+        File.rename(hidden, git_dir)
+      end
+    end
+  end
 end
