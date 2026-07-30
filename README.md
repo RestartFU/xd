@@ -89,9 +89,9 @@ system GTK such as NixOS.
 
 The app itself is deliberately *not* run inside Docker. Its daemon starts the
 bundled Codex, Claude, and Git CLIs and uses credentials stored on the daemon
-host. For a paired chat, authentication, CLI updates, repository operations,
-and speech-model downloads all happen on that remote host. The launcher invokes
-the bundled loader with `--library-path` rather than exporting
+host. For a paired chat, authentication, CLI version checks, repository
+operations, and speech-model downloads all happen on that remote host. The
+launcher invokes the bundled loader with `--library-path` rather than exporting
 `LD_LIBRARY_PATH`, so ordinary child processes still use host libraries.
 
 ### Known wart

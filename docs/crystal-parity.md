@@ -400,14 +400,12 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   roots ship in the Linux bundle; a no-host-Git smoke test covers repository
   creation, commits, diffs, worktrees, and HTTPS helper loading.
 - `[x]` Agent execution resolves bundled binaries before host binaries.
-- `[~]` Daemon-owned CLI updater runs the official `codex update` and
-  `claude update` commands asynchronously, checks structured before/after
-  versions, blocks replacement while turns run, blocks new turns during
-  replacement, and reloads the pooled Codex app-server after success. Local/TLS
-  protocol operations drive a clean account-panel version row and Update CLIs
-  button against the selected daemon. An actual paired TLS client checks and
-  updates both fixture binaries on the remote machine. Real official-release
-  replacement remains.
+- `[x]` Bundled assistants are release-owned and never invoke `codex update`,
+  `claude update`, npm, Homebrew, or another host package manager. The daemon
+  reads versions asynchronously with `DISABLE_AUTOUPDATER=1`; local and paired
+  clients show those versions without exposing a self-update button or
+  protocol operation. Updating xd atomically replaces its pinned assistant
+  binaries with the rest of the signed bundle.
 - `[~]` Codex app-server and Claude stream-json turns work through the shared
   manager.
 - `[~]` Codex status, device login, browser link, cancellation, logout, and
@@ -472,7 +470,8 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (303 examples).
+- `[x]` Crystal specs pass in Docker (305 default, 2 PortAudio, and 5
+  authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
