@@ -23,10 +23,15 @@ module Xd
         messages = store.list_messages_since(chat_id, last_seen)
         return nil if messages.size < 2
 
-        first = messages.size - 1
+        previous = messages[0...(messages.size - 1)].select do |message|
+          message.role == "user" || message.role == "assistant"
+        end
+        return nil if previous.empty?
+
+        first = previous.size
         budget = 0
         while first > 0
-          message = messages[first - 1]
+          message = previous[first - 1]
           budget += message.content.bytesize + 16
           break if budget > HANDOVER_LIMIT_BYTES
           first -= 1
@@ -34,12 +39,8 @@ module Xd
 
         transcript = String.build do |text|
           text << HANDOVER_OPEN << "\n\n"
-          messages[first...(messages.size - 1)].each do |message|
-            who = case message.role
-                  when "user"      then "User"
-                  when "assistant" then "Assistant"
-                  else                  next
-                  end
+          previous[first...].each do |message|
+            who = message.role == "user" ? "User" : "Assistant"
             text << who << ": " << message.content << "\n\n"
           end
           text << HANDOVER_CLOSE

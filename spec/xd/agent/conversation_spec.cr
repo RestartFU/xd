@@ -37,6 +37,31 @@ describe Xd::Agent::Conversation do
     end
   end
 
+  it "does not create an empty handover from events or tools" do
+    with_conversation_store do |store, chat_id|
+      store.append_message(chat_id, "event", "Switched to GPT-5.6 Terra")
+      store.append_message(chat_id, "user", "current")
+
+      Xd::Agent::Conversation.handover(store, chat_id, 0_i64)
+        .should be_nil
+    end
+  end
+
+  it "does not spend the handover budget on hidden tool rows" do
+    with_conversation_store do |store, chat_id|
+      store.append_message(chat_id, "user", "first")
+      store.append_message(chat_id, "assistant", "first answer")
+      store.append_message(chat_id, "tool", "x" * 20_000)
+      store.append_message(chat_id, "user", "current")
+
+      handover = Xd::Agent::Conversation.handover(store, chat_id, 0_i64)
+      handover.should_not be_nil
+      handover.not_nil!.should contain("User: first")
+      handover.not_nil!.should contain("Assistant: first answer")
+      handover.not_nil!.should_not contain("x" * 100)
+    end
+  end
+
   it "keeps slash commands first when joining a handover" do
     joined = Xd::Agent::Conversation.join("earlier", "/review now")
     joined.should eq("/review now\n\nearlier")
