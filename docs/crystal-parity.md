@@ -361,7 +361,9 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   also has a bounded 256-event outbound queue; a non-reading client is
   disconnected instead of applying socket backpressure to every daemon turn.
   Unexpected handler exceptions are logged and converted into matched error
-  responses instead of silently killing the per-request fiber.
+  responses instead of silently killing the per-request fiber. Client calls
+  have a 30-second default deadline (five minutes for Git actions); timed-out
+  request ids are retired so late replies cannot poison later calls.
 - `[x]` Remote pairing uses a short-lived code, token, and pinned certificate.
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
@@ -463,7 +465,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (300 examples).
+- `[x]` Crystal specs pass in Docker (301 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

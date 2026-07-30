@@ -173,6 +173,58 @@ describe Xd::Daemon::Client do
     FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
   end
 
+  it "times out one request and ignores its late reply" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-timeout-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    server = UNIXServer.new(path)
+    release = Channel(Nil).new(1)
+    spawn do
+      socket = server.accept
+      first = JSON.parse(socket.gets.not_nil!).as_h
+      release.receive
+      socket << {
+        Xd::Protocol::REQUEST_ID => first[Xd::Protocol::REQUEST_ID],
+        "ok"                     => true,
+        "value"                  => "late",
+      }.to_json << '\n'
+      socket.flush
+
+      second = JSON.parse(socket.gets.not_nil!).as_h
+      socket << {
+        Xd::Protocol::REQUEST_ID => second[Xd::Protocol::REQUEST_ID],
+        "ok"                     => true,
+        "value"                  => "current",
+      }.to_json << '\n'
+      socket.flush
+    ensure
+      socket.try(&.close)
+    end
+
+    client = Xd::Daemon::Client.local(
+      path,
+      request_timeout: 20.milliseconds
+    )
+    expect_raises(
+      Xd::Daemon::Client::Error,
+      "Daemon request timed out."
+    ) do
+      client.call({"op" => JSON::Any.new("ping")})
+    end
+
+    release.send(nil)
+    response = client.call({"op" => JSON::Any.new("ping")})
+    response["value"].as_s.should eq("current")
+    client.closed?.should be_false
+  ensure
+    client.try(&.close)
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
   it "delivers daemon events after another observer fails" do
     with_client_server do |server, engine, _store, directory|
       engine.events.subscribe { |_event| raise "observer failed" }

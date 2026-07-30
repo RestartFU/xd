@@ -1,5 +1,6 @@
 require "json"
 require "openssl"
+require "set"
 require "socket"
 require "../protocol/message"
 require "./endpoint"
@@ -22,11 +23,16 @@ module Xd
     # cannot hold a cancel, terminal input, or model-status call behind it.
     # The FIFO remains as a compatibility path for older daemons.
     class Client < Endpoint
+      REQUEST_TIMEOUT        = 30.seconds
+      LONG_REQUEST_TIMEOUT   = 5.minutes
+      MAX_ABANDONED_REQUESTS = 256
+
       class Error < Exception
       end
 
       @pending = {} of Int64 => Channel(ClientAnswer)
       @pending_order = Deque(Int64).new
+      @abandoned = Set(Int64).new
       @subscribers = {} of Int64 => Proc(Hash(String, JSON::Any), Nil)
       @disconnect_subscribers = {} of Int64 => Proc(String, Nil)
       @next_subscriber = 0_i64
@@ -37,15 +43,22 @@ module Xd
 
       getter fingerprint : String?
 
-      private def initialize(@io : IO, @fingerprint : String? = nil)
+      private def initialize(
+        @io : IO,
+        @fingerprint : String? = nil,
+        @request_timeout : Time::Span = REQUEST_TIMEOUT,
+      )
         spawn read_loop
       end
 
-      def self.local(path : String) : self
+      def self.local(
+        path : String,
+        request_timeout : Time::Span = REQUEST_TIMEOUT,
+      ) : self
         {% if flag?(:win32) || flag?(:xd_loopback_local) %}
-          new(LocalIPC.connect(path))
+          new(LocalIPC.connect(path), request_timeout: request_timeout)
         {% else %}
-          new(UNIXSocket.new(path))
+          new(UNIXSocket.new(path), request_timeout: request_timeout)
         {% end %}
       rescue error : IO::Error
         raise Error.new("Cannot connect to local daemon: #{error.message}")
@@ -56,9 +69,10 @@ module Xd
         port : Int,
         token : String,
         fingerprint : String,
+        request_timeout : Time::Span = REQUEST_TIMEOUT,
       ) : self
         io, actual = remote_socket(host, port, fingerprint)
-        client = new(io, actual)
+        client = new(io, actual, request_timeout)
         begin
           client.call({
             "op"    => JSON::Any.new("hello"),
@@ -76,9 +90,10 @@ module Xd
         port : Int,
         code : String,
         name : String = System.hostname,
+        request_timeout : Time::Span = REQUEST_TIMEOUT,
       ) : RemotePairing
         io, fingerprint = remote_socket(host, port, nil)
-        client = new(io, fingerprint)
+        client = new(io, fingerprint, request_timeout)
         begin
           response = client.call({
             "op"   => JSON::Any.new("pair"),
@@ -98,6 +113,7 @@ module Xd
         request : Hash(String, JSON::Any),
       ) : Hash(String, JSON::Any)
         answer = Channel(ClientAnswer).new(1)
+        request_id = 0_i64
 
         begin
           @lock.synchronize do
@@ -116,7 +132,22 @@ module Xd
           disconnect("Daemon connection failed: #{error.message}")
         end
 
-        result = answer.receive
+        wait = request["op"]?.try(&.as_s?) == "git-action" ? LONG_REQUEST_TIMEOUT : @request_timeout
+        result = select
+        when response = answer.receive
+          response
+        when timeout(wait)
+          timed_out, overflow = abandon(request_id)
+          if timed_out
+            if overflow
+              disconnect(
+                "Too many daemon requests timed out."
+              )
+            end
+            raise Error.new("Daemon request timed out.")
+          end
+          answer.receive
+        end
         if message = result.error
           raise Error.new(message)
         end
@@ -216,14 +247,19 @@ module Xd
           if root.has_key?("event")
             publish(root)
           else
-            answer = @lock.synchronize do
+            answer, abandoned = @lock.synchronize do
               if request_id = root[Protocol::REQUEST_ID]?.try(&.as_i64?)
                 @pending_order.delete(request_id)
-                @pending.delete(request_id)
+                ignored = @abandoned.delete(request_id)
+                {@pending.delete(request_id), ignored}
               elsif oldest = @pending_order.shift?
-                @pending.delete(oldest)
+                ignored = @abandoned.delete(oldest)
+                {@pending.delete(oldest), ignored}
+              else
+                {nil, false}
               end
             end
+            next if abandoned
             unless answer
               return disconnect("Daemon sent an unanswerable response.")
             end
@@ -260,6 +296,17 @@ module Xd
         end
       end
 
+      private def abandon(request_id : Int64) : {Bool, Bool}
+        @lock.synchronize do
+          unless @pending.delete(request_id)
+            next {false, false}
+          end
+
+          @abandoned << request_id
+          {true, @abandoned.size > MAX_ABANDONED_REQUESTS}
+        end
+      end
+
       private def disconnect(message : String) : Nil
         pending = [] of Channel(ClientAnswer)
         subscribers = [] of Proc(String, Nil)
@@ -270,6 +317,7 @@ module Xd
             pending = @pending.values
             @pending.clear
             @pending_order.clear
+            @abandoned.clear
             subscribers = @disconnect_subscribers.values.dup
             true
           else
