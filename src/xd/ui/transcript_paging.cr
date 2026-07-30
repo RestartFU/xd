@@ -1,5 +1,41 @@
 module Xd
   module UI
+    class TranscriptBatch(T)
+      DEFAULT_SIZE = 4
+
+      getter position : Int32
+
+      def initialize(
+        @items : Array(T),
+        start : Int = 0,
+        @batch_size : Int32 = DEFAULT_SIZE,
+      )
+        raise ArgumentError.new("batch size must be positive") unless @batch_size > 0
+
+        @position = Math.min(
+          Math.max(start, 0),
+          @items.size
+        ).to_i32
+      end
+
+      def next_batch : Array({Int32, T})
+        batch = [] of {Int32, T}
+        finish = Math.min(
+          @position.to_i64 + @batch_size,
+          @items.size.to_i64
+        ).to_i32
+        while @position < finish
+          batch << {@position, @items[@position]}
+          @position += 1
+        end
+        batch
+      end
+
+      def done? : Bool
+        @position >= @items.size
+      end
+    end
+
     class TranscriptPaging
       PAGE_SIZE = 100
 

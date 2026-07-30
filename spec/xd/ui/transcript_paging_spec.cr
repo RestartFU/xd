@@ -31,6 +31,39 @@ describe Xd::UI::TranscriptPaging do
   end
 end
 
+describe Xd::UI::TranscriptBatch do
+  it "keeps GTK work bounded while preserving source positions" do
+    batch = Xd::UI::TranscriptBatch(Int32).new(
+      (0...11).to_a,
+      start: 2,
+      batch_size: 4
+    )
+
+    first = batch.next_batch
+    first.map(&.[0]).should eq([2, 3, 4, 5])
+    first.map(&.[1]).should eq([2, 3, 4, 5])
+    batch.done?.should be_false
+
+    batch.next_batch.map(&.[0]).should eq([6, 7, 8, 9])
+    batch.next_batch.map(&.[0]).should eq([10])
+    batch.done?.should be_true
+    batch.next_batch.should be_empty
+  end
+
+  it "validates bounds and clamps its starting position" do
+    expect_raises(ArgumentError, "batch size must be positive") do
+      Xd::UI::TranscriptBatch(Int32).new([1], batch_size: 0)
+    end
+
+    before = Xd::UI::TranscriptBatch(Int32).new([1, 2], start: -5)
+    before.next_batch.map(&.[0]).should eq([0, 1])
+
+    after = Xd::UI::TranscriptBatch(Int32).new([1, 2], start: 50)
+    after.done?.should be_true
+    after.next_batch.should be_empty
+  end
+end
+
 describe Xd::UI::TranscriptLru do
   it "keeps the four most recently touched chats" do
     lru = Xd::UI::TranscriptLru.new

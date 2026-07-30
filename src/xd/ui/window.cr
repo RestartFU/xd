@@ -1020,7 +1020,7 @@ module Xd
             @status.text = error
             next
           end
-          apply_messages(response.not_nil!, page, force)
+          apply_messages(response.not_nil!, page, force, request)
         end
       end
 
@@ -1028,6 +1028,7 @@ module Xd
         response : Hash(String, JSON::Any),
         page : TranscriptPage,
         force : Bool,
+        request : Int64,
       ) : Nil
         revision = response["last_message_id"]?.try(&.as_i64?) || 0_i64
         return if !force && page.revision == revision
@@ -1046,24 +1047,46 @@ module Xd
                 messages.size.to_i64
         append_history_button(page, total, messages.size)
         start = page.paging.start(messages.size)
-        (start...messages.size).each do |index|
-          message = messages[index]
-          if seconds = turn_duration(messages, index)
-            append_worked_for(seconds)
-          end
-          next if message["role"].as_s == "duration"
+        batch = TranscriptBatch(JSON::Any).new(messages, start)
+        GLib.idle_add do
+          active = !@closed &&
+                   request == @messages_request &&
+                   @transcript_page.same?(page) &&
+                   @client.same?(page.endpoint) &&
+                   @active_chat == page.chat_id
+          if active
+            batch.next_batch.each do |entry|
+              index, message = entry
+              if seconds = turn_duration(messages, index)
+                append_worked_for(seconds)
+              end
+              next if message["role"].as_s == "duration"
 
-          add_message(
-            message["role"].as_s,
-            message["content"].as_s,
-            message["label"]?.try(&.as_s?),
-            reply_answerable?(messages, index)
-          )
+              add_message(
+                message["role"].as_s,
+                message["content"].as_s,
+                message["label"]?.try(&.as_s?),
+                reply_answerable?(messages, index)
+              )
+            end
+
+            if batch.done?
+              page.revision = revision
+              @stream_row = nil
+              set_working(@working)
+              scroll_to_bottom
+              if force && !@follow_bottom &&
+                 @history_bottom_distance >= 0
+                queue_history_restore
+              end
+              false
+            else
+              true
+            end
+          else
+            false
+          end
         end
-        page.revision = revision
-        @stream_row = nil
-        set_working(@working)
-        scroll_to_bottom
       end
 
       private def turn_duration(
@@ -1142,7 +1165,6 @@ module Xd
         @transcript_scroll.opacity = 0.0
         page.paging.load_earlier
         load_messages(force: true)
-        queue_history_restore
       end
 
       private def add_message(
