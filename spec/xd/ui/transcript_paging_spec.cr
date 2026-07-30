@@ -1,0 +1,48 @@
+require "../../spec_helper"
+require "../../../src/xd/ui/transcript_paging"
+
+describe Xd::UI::TranscriptPaging do
+  it "requests one boundary row and displays fixed pages" do
+    paging = Xd::UI::TranscriptPaging.new
+
+    paging.query_limit.should eq(101)
+    paging.start(101).should eq(1)
+    paging.displayed(101).should eq(100)
+    paging.hidden(245, 101).should eq(145)
+    paging.earlier_label(245, 101).should eq(
+      "Load 100 earlier messages"
+    )
+
+    paging.load_earlier.should eq(200)
+    paging.query_limit.should eq(201)
+    paging.start(201).should eq(1)
+    paging.hidden(245, 201).should eq(45)
+    paging.earlier_label(245, 201).should eq(
+      "Load 45 earlier messages"
+    )
+  end
+
+  it "uses singular copy and saturates its protocol limit" do
+    paging = Xd::UI::TranscriptPaging.new(Int32::MAX - 50)
+
+    paging.earlier_label(2, 1).should eq("Load 1 earlier message")
+    paging.load_earlier.should eq(Int32::MAX)
+    paging.query_limit.should eq(Int32::MAX)
+  end
+end
+
+describe Xd::UI::TranscriptLru do
+  it "keeps the four most recently touched chats" do
+    lru = Xd::UI::TranscriptLru.new
+
+    %w(one two three four).each do |key|
+      lru.touch(key).should be_nil
+    end
+    lru.touch("one").should be_nil
+    lru.touch("five").should eq("two")
+    lru.keys.should eq(%w(three four one five))
+
+    lru.delete("four")
+    lru.keys.should eq(%w(three one five))
+  end
+end
