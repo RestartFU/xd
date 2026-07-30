@@ -34,6 +34,8 @@ module Xd
           when SigningIn  then "signing-in"
           when SigningOut then "signing-out"
           when Failed     then "failed"
+          else
+            "unknown"
           end
         end
       end
@@ -200,6 +202,8 @@ module Xd
                         when .check?  then State::Checking
                         when .login?  then State::SigningIn
                         when .logout? then State::SigningOut
+                        else
+                          raise Error.new("Unknown authentication command.")
                         end
           snapshot = entry.snapshot
           entry.serial
@@ -293,8 +297,6 @@ module Xd
           entry.process = process
           if command.login?
             entry.input = process.input
-          else
-            process.input.close
           end
           entry.cancel_requested
         end
