@@ -48,16 +48,19 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   gesture-tested for Enter, Escape, and click-away with fatal GTK criticals
   enabled. Folder drag/drop into a row and back to empty top-level space is
   filesystem- and screenshot-verified under the same fatal-critical check.
-- `[~]` Local, remote-root, folder, and chat menus use the C `GMenu`/
+- `[x]` Local, remote-root, folder, and chat menus use the C `GMenu`/
   `GtkPopoverMenu` sections, labels, and action order. Folder/chat mutation
   failures use the same operation-specific `AdwAlertDialog` headings. The
   exact `09dc473` bundle is screenshot-verified with fatal GTK warnings:
   header create, folder create/rename, chat create/delete, trash confirmation,
-  and duplicate-name error all survive menu close ordering. Paired remote-root
-  menu/state and new remote-connection error dialogs remain.
+  and duplicate-name error all survive menu close ordering. The exact
+  `d01d497` bundle verifies the remote-root menu, TLS workspace creation,
+  offline mutation error, and remove confirmation.
 - `[~]` Chat working/waiting/done and remote-root offline transitions match C
-  state rules, including animated dots and tooltips; screenshot/event matrix
-  remains.
+  state rules, including animated dots and tooltips. A paired `d01d497`
+  client keeps its cached child when the daemon stops, draws the root offline,
+  then reconnects without pairing again and returns the root to idle. Chat
+  state screenshot/event matrix remains.
 - `[~]` Updater row, release-channel checks/install/restart, and branch-build
   entry point are ported. Nightly installed-path row and branch panel are
   screenshot-verified with fatal GTK criticals; real update/install remains.
