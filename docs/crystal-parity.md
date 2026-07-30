@@ -126,8 +126,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   TLS clients send the same byte payload through the daemon. An installed
   nightly bundle verifies mixed prose/image ordering, image-only rows,
   thumbnail sizing, the transparent Adwaita viewer, and dialog close with
-  fatal GTK criticals enabled. Composer chooser/chip re-verification follows
-  the generic `GListModel` wrapper fix.
+  fatal GTK criticals enabled. The rebuilt bundle also verifies chooser
+  selection, the card/caption/remove-overlay geometry, and removal lifecycle
+  after the generic `GListModel` wrapper fix.
 - `[~]` Ask questions stay bold in the transcript while answer controls use the
   exact C composer slot, flow layout, input row, and retirement lifecycle;
   installed GTK verification remains.
