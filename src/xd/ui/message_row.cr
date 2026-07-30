@@ -193,7 +193,7 @@ module Xd
           scroller = Gtk::ScrolledWindow.new
           scroller.set_policy(:automatic, :never)
           scroller.propagate_natural_height = true
-          scroller.child = DiffView.build(code, true)
+          scroller.child = DiffView.build_async(code, true)
           content = scroller
         else
           label = Gtk::Label.new(code)
