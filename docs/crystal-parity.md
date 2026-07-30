@@ -176,7 +176,8 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[ ]` Add Claude login/logout/status UI and verify bundled authentication.
 - `[ ]` Match all existing model, effort, access, plan/build, resume, and
   cancellation behavior.
-- `[ ]` Remove Cerebras/OpenCode code, settings, icons, docs, and tests.
+- `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
+  removed; Claude Code and Codex are the only backends.
 
 C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 

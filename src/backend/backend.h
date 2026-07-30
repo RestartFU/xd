@@ -7,7 +7,7 @@ G_BEGIN_DECLS
 
 /*
  * xd never speaks to an AI API. It drives the CLIs already installed and
- * authenticated on the machine -- claude, codex and opencode. Most runs read
+ * authenticated on the machine -- Claude Code and Codex. Most runs read
  * JSONL from one child process; Codex uses its persistent app-server protocol.
  *
  * A backend says which transport it uses, how to start it and how legacy JSONL

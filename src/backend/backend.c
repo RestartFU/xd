@@ -4,12 +4,10 @@
 
 extern const AiBackend xd_claude_backend;
 extern const AiBackend xd_codex_backend;
-extern const AiBackend xd_cerebras_backend;
 
 static const AiBackend *const backends[] = {
   &xd_claude_backend,
   &xd_codex_backend,
-  &xd_cerebras_backend,
 };
 
 const AiBackend *

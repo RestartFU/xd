@@ -1,4 +1,0 @@
-{"type":"step_start","timestamp":1785110400000,"sessionID":"ses_cerebras_123","part":{"id":"prt_1","sessionID":"ses_cerebras_123","messageID":"msg_1","type":"step-start"}}
-{"type":"tool_use","timestamp":1785110400100,"sessionID":"ses_cerebras_123","part":{"id":"prt_2","sessionID":"ses_cerebras_123","messageID":"msg_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"src/main.c"},"output":"..."}}}
-{"type":"text","timestamp":1785110400200,"sessionID":"ses_cerebras_123","part":{"id":"prt_3","sessionID":"ses_cerebras_123","messageID":"msg_1","type":"text","text":"hello from Cerebras","time":{"start":1785110400100,"end":1785110400200}}}
-{"type":"step_finish","timestamp":1785110400300,"sessionID":"ses_cerebras_123","part":{"id":"prt_4","sessionID":"ses_cerebras_123","messageID":"msg_1","type":"step-finish","tokens":{"input":8000,"output":25,"reasoning":0,"cache":{"read":4000,"write":0}}}}
