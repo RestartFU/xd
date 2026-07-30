@@ -175,6 +175,13 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   geometry and restart are verified; paired persistence remains.
 - `[x]` Header controls are toggle buttons whose active states match pane
   visibility.
+- `[x]` Header Git action uses the C one-button state machine (`Commit`,
+  `Push`, `Create PR`, `View PR`) and exact Adwaita commit/error dialogs.
+  State and actions run only in the shared daemon; request tokens keep
+  asynchronous results scoped to their initiating client. The exact
+  `64f6423` bundle is verified under `G_DEBUG=fatal-warnings`: a working patch
+  becomes `Nothing Changed` after commit, the button advances to `Push`, and a
+  refused push opens `Git Refused` without leaking into the chat footer.
 - `[~]` Terminal RPC, PTY output, input, resize, replay, and kill operations use
   the shared daemon. An installed local client verifies each operation across
   UI disconnect/reconnect; paired TLS proof remains.
@@ -209,7 +216,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
   paired restart matrices remain.
-- `[ ]` Refresh repository panes after agent turns and terminal activity.
+- `[~]` Agent turns and completed Git actions refresh repository state and the
+  visible diff. A daemon-owned Git HEAD watcher for terminal/external changes
+  remains.
 
 C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 `src/chat/diff-pane.c`, `src/chat/diff-view.c`,
@@ -287,7 +296,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (219 examples).
+- `[x]` Crystal specs pass in Docker (222 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

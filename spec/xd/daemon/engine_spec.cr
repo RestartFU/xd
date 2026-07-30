@@ -622,6 +622,95 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "runs Git actions through the shared asynchronous daemon path" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      remote.authenticated = true
+      folder_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Git Actions",
+      }.to_json)["id"].as_s
+      folder = File.join(
+        Path[store.path].dirname,
+        "Workspaces",
+        "Git Actions"
+      )
+      engine_git(folder, "init", "-q", "-b", "main")
+      engine_git(folder, "config", "user.email", "test@example.com")
+      engine_git(folder, "config", "user.name", "Test")
+      File.write(File.join(folder, "tracked.txt"), "before\n")
+      engine_git(folder, "add", "tracked.txt")
+      engine_git(folder, "commit", "-q", "-m", "initial")
+      chat_id = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder_id,
+      }.to_json)["id"].as_s
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+
+      seen = [] of Xd::Protocol::Event
+      subscription = engine.events.subscribe { |event| seen << event }
+      state = engine.process(local, {
+        "op"      => "git-state",
+        "chat"    => chat_id,
+        "request" => "local-state",
+      }.to_json)
+      state.response.success?.should be_true
+      state.after_write.not_nil!.call
+
+      deadline = Time.instant + 3.seconds
+      until seen.any? { |event|
+              event["event"].as_s == "git-state" &&
+              event["request"].as_s == "local-state"
+            }
+        fail "Git state event did not arrive" if Time.instant >= deadline
+        sleep 10.milliseconds
+      end
+      state_event = seen.find { |event|
+        event["event"].as_s == "git-state" &&
+          event["request"].as_s == "local-state"
+      }.not_nil!
+      state_event["action"].as_s.should eq("commit")
+
+      action = engine.process(remote, {
+        "op"      => "git-action",
+        "chat"    => chat_id,
+        "action"  => "commit",
+        "message" => "Commit over TLS",
+        "request" => "remote-action",
+      }.to_json)
+      action.response.success?.should be_true
+      action.after_write.not_nil!.call
+
+      deadline = Time.instant + 3.seconds
+      until seen.any? { |event|
+              event["event"].as_s == "git-action-finished" &&
+              event["request"].as_s == "remote-action"
+            }
+        fail "Git action event did not arrive" if Time.instant >= deadline
+        sleep 10.milliseconds
+      end
+      action_event = seen.find { |event|
+        event["event"].as_s == "git-action-finished" &&
+          event["request"].as_s == "remote-action"
+      }.not_nil!
+      action_event["success"].as_bool.should be_true
+      action_event["action"].as_s.should eq("push")
+      engine.events.unsubscribe(subscription)
+
+      output = IO::Memory.new
+      status = Process.run(
+        "git",
+        ["log", "-1", "--format=%s"],
+        chdir: folder,
+        output: output,
+        error: Process::Redirect::Close
+      )
+      status.success?.should be_true
+      output.to_s.should eq("Commit over TLS\n")
+    end
+  end
+
   it "routes terminal sessions through the shared daemon engine" do
     with_daemon_engine do |_store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
