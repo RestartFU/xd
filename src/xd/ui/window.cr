@@ -1201,8 +1201,9 @@ module Xd
             return
           end
           if subagent = Agent::SubagentTool.parse(content)
+            activity = @transcript_page.try(&.tool_group).try(&.widget)
             end_tool_group
-            add_subagent_message(subagent[0], subagent[1])
+            add_subagent_message(subagent[0], subagent[1], activity)
             return
           end
           content = "Files changed" if Agent::GitDiffTracker.file_change?(content)
@@ -1309,6 +1310,7 @@ module Xd
       private def add_subagent_message(
         identity : String,
         task : String,
+        activity : Gtk::Expander?,
       ) : Gtk::Label
         title = Gtk::Label.new("Subagent · #{identity}")
         title.xalign = 0_f32
@@ -1323,8 +1325,59 @@ module Xd
 
         card = Gtk::Box.new(:vertical, 6)
         card.add_css_class("xd-subagent")
-        card.append(title)
-        card.append(detail)
+        if activity && (parent = activity.parent.as?(Gtk::Box))
+          parent.remove(activity)
+
+          indicator = Gtk::Image.new_from_icon_name("pan-end-symbolic")
+          indicator.valign = :start
+          indicator.margin_top = 3
+
+          body = Gtk::Box.new(:vertical, 6)
+          body.append(title)
+          body.append(detail)
+
+          header = Gtk::Box.new(:horizontal, 8)
+          header.hexpand = true
+          header.margin_top = 12
+          header.margin_bottom = 12
+          header.margin_start = 14
+          header.margin_end = 14
+          header.append(indicator)
+          header.append(body)
+
+          toggle = Gtk::ToggleButton.new
+          toggle.child = header
+          toggle.hexpand = true
+          toggle.tooltip_text = "Show subagent activity"
+          toggle.add_css_class("xd-subagent-toggle")
+          toggle.bind_property(
+            "active",
+            activity,
+            "expanded",
+            GObject::BindingFlags::SyncCreate
+          )
+          toggle.bind_property(
+            "active",
+            activity,
+            "visible",
+            GObject::BindingFlags::SyncCreate
+          )
+          toggle.toggled_signal.connect do
+            expanded = toggle.active?
+            indicator.icon_name =
+              expanded ? "pan-down-symbolic" : "pan-end-symbolic"
+            toggle.tooltip_text =
+              expanded ? "Hide subagent activity" : "Show subagent activity"
+          end
+
+          activity.margin_start = 12
+          activity.margin_end = 0
+          card.append(toggle)
+          card.append(activity)
+        else
+          card.append(title)
+          card.append(detail)
+        end
         @transcript.append(card)
         title
       end

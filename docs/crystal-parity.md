@@ -17,6 +17,9 @@ checked against the C application where visual behavior is involved.
 ## Window and application shell
 
 - `[x]` Crystal GTK4/libadwaita application starts from the relocatable bundle.
+  Clean and restored non-Git profiles stay alive under fatal GTK warnings;
+  scheduler-backed background workers cover restored Markdown rendering
+  without raw-thread startup crashes.
 - `[x]` Default window geometry is 1100x720.
 - `[x]` Dark style, DM Sans, icons, MIME data, and minimal-host launch work.
 - `[~]` Root horizontal `GtkPaned` has the C sidebar/chat child order and
@@ -77,8 +80,15 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   leave GTK callbacks immediately and finish through main-loop idles. Request
   generations discard stale remote replies after chat or endpoint switches,
   and one pending Send cannot duplicate a turn while network latency is high.
+  Request ids multiplex replies, and daemon control operations bypass slow
+  repository commands, so Stop is not queued behind a diff or file read.
 - `[~]` Stored messages, streamed text, tool rows, images, ask blocks,
-  subagent/workflow/workspace cards, and inline diffs render.
+  subagent/workflow/workspace cards, and inline diffs render. Contiguous tool
+  activity immediately before a completed subagent now moves behind the same
+  collapsed arrow toggle as C instead of remaining as a detached transcript
+  row. A restored non-Git bundle profile containing generic tools, an inline
+  diff, and a subagent card survives fatal GTK warnings; the broader paired
+  card matrix remains.
 - `[~]` Port the exact `XdMessageRow` hierarchy, typography, selectable text,
   Markdown, syntax highlighting, code blocks, and copy controls. CommonMark,
   safe links, streaming fragments, lists, tables, and Pango validation now
@@ -154,7 +164,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   thumbnail sizing, the transparent Adwaita viewer, and dialog close with
   fatal GTK criticals enabled. The rebuilt bundle also verifies chooser
   selection, the card/caption/remove-overlay geometry, and removal lifecycle
-  after the generic `GListModel` wrapper fix.
+  after the generic `GListModel` wrapper fix. File decoding, scaling, and PNG
+  encoding run on the bounded scheduler-backed worker pool, keeping chooser
+  completion off GTK and avoiding unsafe raw-thread callbacks.
 - `[~]` Ask questions stay bold in the transcript while answer controls use the
   exact C composer slot, flow layout, input row, and retirement lifecycle;
   installed GTK verification remains.
@@ -186,7 +198,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   touching microphone hardware. Installed-bundle GTK proof verifies the idle
   microphone control; the current inline first-use prompt, progress bar, and
   responsive Cancel path pass fatal-warning GTK smoke. Actual paired TLS specs
-  verify remote execution and event isolation.
+  verify remote execution and event isolation. Model download and recorder
+  callbacks run in scheduler-backed execution contexts, so progress and
+  completion can return to GTK without freezing or crashing.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
   tooltip, and geometry. The daemon computes it once for local and TLS clients;
   installed GTK geometry is verified; live branch-change verification remains.
@@ -250,7 +264,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   position. Diff state/base/patch requests are asynchronous and
   generation-scoped; pure patch parsing and file-section calculation run on a
   worker thread before GTK receives the virtual model. Explicit cancellation,
-  paired-TLS latency, and live Git-head refresh proof remain.
+  paired-TLS latency, and live Git-head refresh proof remain. Agent-native edit,
+  write, and file-change payloads also produce inline unified diffs without a
+  Git repository or Git executable.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
   paired restart matrices remain.
@@ -434,7 +450,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (277 examples).
+- `[x]` Crystal specs pass in Docker (288 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
