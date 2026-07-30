@@ -449,7 +449,6 @@ module Xd
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;
       }
-      .xd-ask { margin: 0 14px 8px 14px; }
       .xd-attachment, .xd-image-preview {
         background: alpha(#ffffff, 0.05);
         border: 1px solid alpha(#ffffff, 0.10);

@@ -102,7 +102,9 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   Installed local-daemon proof switches away and back during a turn, restores
   the initiating user row and live output, then appends a later delta once and
   in order. Paired TLS UI recovery verification remains.
-- `[ ]` Match context-window meter and token formatting.
+- `[~]` Context-window meter uses the C 108-pixel progress bar, compact token
+  formatting, raw-count tooltip, and 75/90-percent warning states; installed
+  GTK verification remains.
 - `[ ]` Match handover, retry, cancellation, and queued-turn timeline behavior.
 
 C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
@@ -115,11 +117,15 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
 - `[~]` Multiline entry, Enter-to-send, Shift+Enter, cancel button state,
   attachment button, model, effort, access, build, and plan controls exist.
 - `[~]` Image paste/chooser limits and previews exist.
-- `[~]` Ask answers and queued messages exist.
+- `[~]` Ask questions stay bold in the transcript while answer controls use the
+  exact C composer slot, flow layout, input row, and retirement lifecycle;
+  installed GTK verification remains.
 - `[ ]` Match exact control order, labels, tooltips, picker popovers, spacing,
   sensitivity, and active states.
-- `[ ]` Port queued-message drop/edit/steer controls.
-- `[ ]` Port slash-command discovery and command bar.
+- `[~]` Queued-message drop/edit/steer controls and multiline editor match C;
+  installed GTK verification remains.
+- `[~]` Slash-command discovery, filtering, layout, and insertion match C;
+  installed GTK verification remains.
 - `[ ]` Port worktree chooser and new-worktree behavior exactly.
 - `[ ]` Port optional voice recording/download/transcription behavior.
 - `[ ]` Match context/branch/worktree line below composer.
@@ -226,7 +232,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (204 examples).
+- `[x]` Crystal specs pass in Docker (211 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

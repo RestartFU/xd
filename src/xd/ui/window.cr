@@ -115,6 +115,7 @@ module Xd
       @commands = [] of String
       @commands_bar : Gtk::ScrolledWindow
       @commands_flow : Gtk::FlowBox
+      @choices_bar : Gtk::Box
 
       def initialize(
         application : Gtk::Application,
@@ -289,9 +290,15 @@ module Xd
         @queue_box.margin_end = 6
         @queue_box.visible = false
 
+        @choices_bar = Gtk::Box.new(:vertical, 6)
+        @choices_bar.margin_top = 6
+        @choices_bar.margin_start = 10
+        @choices_bar.margin_end = 10
+        @choices_bar.visible = false
+
         @attachments_bar = Gtk::Box.new(:horizontal, 6)
-        @attachments_bar.margin_start = 18
-        @attachments_bar.margin_end = 18
+        @attachments_bar.margin_start = 10
+        @attachments_bar.margin_end = 10
         @attachments_bar.margin_top = 8
         @attachments_bar.add_css_class("xd-attachments")
         @attachments_bar.visible = false
@@ -310,6 +317,7 @@ module Xd
 
         composer_column = Gtk::Box.new(:vertical, 0)
         composer_column.append(@queue_box)
+        composer_column.append(@choices_bar)
         composer_column.append(@attachments_bar)
         composer_column.append(@commands_bar)
         composer_column.append(entry_scroll)
@@ -810,7 +818,9 @@ module Xd
       ) : Nil
         changed = @active_chat != id || !@client.same?(endpoint)
         if changed
-          leave_current_transcript(current_transcript_cacheable?)
+          keep_previous = current_transcript_cacheable?
+          retire_open_questions
+          leave_current_transcript(keep_previous)
           @follow_bottom = true
           @history_bottom_distance = -1.0
         end
@@ -860,6 +870,7 @@ module Xd
       private def clear_active_chat : Nil
         remember_panes
         hide_panes_for_switch
+        retire_open_questions
         leave_current_transcript(false)
         @active_chat = nil
         @sidebar.clear_active_chat
@@ -920,7 +931,7 @@ module Xd
         if @follow_bottom
           begin_bottom_jump
         end
-        page.choices_visible = false
+        retire_open_questions
         @live_turn_key = nil
         reset_stream_segment
         remove_working_row(reset_started_at: false)
@@ -1063,7 +1074,7 @@ module Xd
         assistant_text = workspace.try(&.remainder) || content
         parsed = role == "assistant" ? Agent::Ask.parse(assistant_text) : nil
         shown = if parsed
-                  [parsed.remainder, parsed.ask.question]
+                  [parsed.remainder, "**#{parsed.ask.question}**"]
                     .reject(&.empty?).join("\n\n")
                 else
                   assistant_text
@@ -1154,20 +1165,30 @@ module Xd
       end
 
       private def append_ask(ask : Agent::Ask) : Nil
+        retire_open_questions
         if page = @transcript_page
           page.choices_visible = true
         end
-        choices = Gtk::Box.new(:vertical, 5)
-        choices.add_css_class("xd-ask")
 
-        ask.options.each do |option|
-          answer = option
-          button = Gtk::Button.new_with_label(answer)
-          button.hexpand = true
-          button.halign = :fill
-          button.add_css_class("xd-choice")
-          button.clicked_signal.connect { answer_ask(answer) }
-          choices.append(button)
+        unless ask.options.empty?
+          choices = Gtk::FlowBox.new
+          choices.selection_mode = :none
+          choices.row_spacing = 4_u32
+          choices.max_children_per_line = 1_u32
+          choices.homogeneous = true
+
+          ask.options.each do |option|
+            answer = option
+            button = Gtk::Button.new_with_label(answer)
+            button.add_css_class("xd-choice")
+            if label = button.child.as?(Gtk::Label)
+              label.wrap = true
+            end
+            button.clicked_signal.connect { answer_ask(answer) }
+            choices.append(button)
+          end
+
+          @choices_bar.append(choices)
         end
 
         if ask.accepts_input
@@ -1183,25 +1204,32 @@ module Xd
           row = Gtk::Box.new(:horizontal, 6)
           row.append(input)
           row.append(send)
-          choices.append(row)
+          @choices_bar.append(row)
         end
 
-        @transcript.append(choices)
+        @choices_bar.visible = true
       end
 
       private def answer_ask(answer : String) : Nil
         text = answer.strip
         return if text.empty?
 
-        @entry.buffer.text = text
-        send_message
+        @entry.grab_focus
+        send_message(text)
       end
 
-      private def send_message : Nil
+      private def retire_open_questions : Nil
+        clear(@choices_bar)
+        @choices_bar.visible = false
+        @transcript_page.try(&.choices_visible=(false))
+      end
+
+      private def send_message(explicit_text : String? = nil) : Nil
         chat_id = @active_chat
         return unless chat_id
-        text = @entry.buffer.text.strip
-        return if text.empty? && @attachments.empty?
+        text = (explicit_text || @entry.buffer.text).strip
+        attachments = explicit_text ? [] of Attachment : @attachments
+        return if text.empty? && attachments.empty?
         @sidebar.answer_chat(@client, chat_id)
 
         request = {
@@ -1209,22 +1237,25 @@ module Xd
           "chat" => JSON::Any.new(chat_id),
           "text" => JSON::Any.new(text),
         }
-        unless @attachments.empty?
-          attachments = @attachments.map do |attachment|
+        unless attachments.empty?
+          encoded = attachments.map do |attachment|
             JSON::Any.new({
               "name" => JSON::Any.new(attachment.name),
               "mime" => JSON::Any.new("image/png"),
               "data" => JSON::Any.new(attachment.data),
             })
           end
-          request["attachments"] = JSON::Any.new(attachments)
+          request["attachments"] = JSON::Any.new(encoded)
         end
 
         begin_bottom_jump
         response = call(request)
         if response
-          @entry.buffer.text = ""
-          clear_attachments
+          retire_open_questions
+          unless explicit_text
+            @entry.buffer.text = ""
+            clear_attachments
+          end
           if response["queued"]?.try(&.as_bool?) == true
             @status.text = "Message queued"
           end
