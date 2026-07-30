@@ -123,19 +123,21 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
 - `[~]` Control order, labels, tooltips, spacing, sensitivity, and active
   states match C. The combined assistant/model picker includes its icon,
   provider rail, persisted favorites, search, empty state, row shortcuts, and
-  atomic daemon selection; installed GTK verification remains.
+  atomic daemon selection. An installed nightly bundle verifies all four
+  popovers, favorite persistence, provider switching, Ctrl+2 selection, and
+  Plan disabling access with fatal GTK criticals enabled.
 - `[~]` Queued-message drop/edit/steer controls and multiline editor match C;
   installed GTK verification remains.
 - `[~]` Slash-command discovery, filtering, layout, and insertion match C;
   installed GTK verification remains.
 - `[~]` Worktree chooser uses the C descriptive popover, current/new/existing
   checkout rows, detached labels, locking rule, and daemon-owned selection.
-  Effort and access use the same picker widget; installed GTK verification
-  remains.
+  Effort and access use the same picker widget; the current/new checkout,
+  effort, and access popovers are installed-bundle screenshot-verified.
 - `[ ]` Port optional voice recording/download/transcription behavior.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
   tooltip, and geometry. The daemon computes it once for Unix and TLS clients;
-  installed GTK and live branch-change verification remain.
+  installed GTK geometry is verified; live branch-change verification remains.
 
 C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 `src/chat/option-picker.c`, `src/chat/voice-input.c`.
