@@ -340,10 +340,24 @@ module Xd
       elsif state.in_rust_raw_string
         at = scan_rust_raw_string(pieces, line, 0, state, false) || 0
         return pieces if state.in_rust_raw_string
+      elsif state.in_heredoc
+        closes = heredoc_terminator?(line, state)
+        emit(pieces, SyntaxToken::String, line, 0, line.bytesize)
+        if closes
+          state.in_heredoc = false
+          state.heredoc_indent = false
+          state.heredoc_delimiter = ""
+        end
+        return pieces
       end
 
       while at < line.bytesize
-        if block_comments?(language) && bytes_at?(line, at, "/*")
+        if ruby_block_comments?(language) && at == 0 &&
+           ruby_marker_line?(line, "=begin")
+          emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+          state.in_comment = 1
+          return pieces
+        elsif block_comments?(language) && bytes_at?(line, at, "/*")
           at = scan_block_comment(pieces, language, line, at, state)
           return pieces if state.in_comment > 0
         elsif slash_comments?(language) && bytes_at?(line, at, "//")
@@ -368,6 +382,74 @@ module Xd
               byte(line, at - 1) == byte_of('\t'))
           emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
           return pieces
+        elsif crystal_macros?(language) &&
+              byte(line, at) == byte_of('{') &&
+              (byte(line, at + 1) == byte_of('{') ||
+              byte(line, at + 1) == byte_of('%'))
+          emit(pieces, SyntaxToken::Preprocessor, line, at, at + 2)
+          state.crystal_macro_close =
+            byte(line, at + 1) == byte_of('{') ? '}' : '%'
+          at += 2
+        elsif crystal_macros?(language) &&
+              ((state.crystal_macro_close == '}' &&
+              bytes_at?(line, at, "}}")) ||
+              (state.crystal_macro_close == '%' &&
+              bytes_at?(line, at, "%}")))
+          emit(pieces, SyntaxToken::Preprocessor, line, at, at + 2)
+          state.crystal_macro_close = '\0'
+          at += 2
+        elsif heredocs?(language) && bytes_at?(line, at, "<<")
+          after = scan_heredoc(pieces, language, line, at, state)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif colon_symbols?(language) &&
+              byte(line, at) == byte_of(':') &&
+              byte(line, at + 1) != byte_of(':')
+          after = scan_colon_symbol(pieces, line, at)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif percent_literal_kinds(language) &&
+              byte(line, at) == byte_of('%')
+          after = scan_percent_literal(
+            pieces,
+            line,
+            at,
+            percent_literal_kinds(language).not_nil!
+          )
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif slash_regexes?(language) && byte(line, at) == byte_of('/')
+          after = scan_slash_regex(pieces, line, at)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif sigil_variables?(language) &&
+              (byte(line, at) == byte_of('@') ||
+              byte(line, at) == byte_of('$')) &&
+              !(at_attributes?(language) &&
+              bytes_at?(line, at, "@["))
+          after = scan_sigil_variable(pieces, line, at)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
         elsif table_headers?(language) &&
               byte(line, at) == byte_of('[') &&
               starts_line?(line, at)
@@ -531,6 +613,13 @@ module Xd
       line : String,
       state : SyntaxState,
     ) : Int32
+      if ruby_block_comments?(language)
+        closes = ruby_marker_line?(line, "=end")
+        emit(pieces, SyntaxToken::Comment, line, 0, line.bytesize)
+        state.in_comment = 0 if closes
+        return line.bytesize
+      end
+
       if nested_block_comments?(language)
         return scan_nested_comment(pieces, line, 0, state, false)
       end
@@ -598,6 +687,260 @@ module Xd
 
       emit(pieces, SyntaxToken::Comment, line, at, scan)
       scan
+    end
+
+    private def scan_colon_symbol(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      current = byte(line, scan)
+      if current == byte_of('\'') || current == byte_of('"')
+        quote = current
+        scan += 1
+        while scan < line.bytesize && byte(line, scan) != quote
+          scan += byte(line, scan) == byte_of('\\') &&
+                  scan + 1 < line.bytesize ? 2 : 1
+        end
+        scan += 1 if scan < line.bytesize
+      elsif ascii_alpha?(current) || current == byte_of('_')
+        while word_byte?(byte(line, scan))
+          scan += 1
+        end
+        if byte(line, scan) == byte_of('?') ||
+           byte(line, scan) == byte_of('!') ||
+           byte(line, scan) == byte_of('=')
+          scan += 1
+        end
+      elsif operator_byte?(current)
+        while operator_byte?(byte(line, scan)) ||
+              byte(line, scan) == byte_of('?')
+          scan += 1
+        end
+      else
+        return nil
+      end
+
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def scan_percent_literal(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      kinds : String,
+    ) : Int32?
+      delimiter = at + 1
+      kind = '\0'
+      if kinds.includes?(byte(line, delimiter).chr)
+        kind = byte(line, delimiter).chr
+        delimiter += 1
+      end
+
+      open = byte(line, delimiter)
+      return nil if open == 0_u8 ||
+                    word_byte?(open) ||
+                    open == byte_of(' ') ||
+                    open == byte_of('\t')
+      return nil if kind == '\0' && open == byte_of('=')
+
+      close =
+        case open
+        when byte_of('(') then byte_of(')')
+        when byte_of('[') then byte_of(']')
+        when byte_of('{') then byte_of('}')
+        when byte_of('<') then byte_of('>')
+        else                   open
+        end
+      scan = delimiter + 1
+      depth = 1
+      while scan < line.bytesize
+        current = byte(line, scan)
+        if current == byte_of('\\') && scan + 1 < line.bytesize
+          scan += 2
+        elsif open != close && current == open
+          depth += 1
+          scan += 1
+        elsif current == close
+          depth -= 1
+          scan += 1
+          break if depth == 0
+        else
+          scan += 1
+        end
+      end
+      return nil unless depth == 0
+
+      if kind == 'r'
+        while ascii_alpha?(byte(line, scan))
+          scan += 1
+        end
+      end
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def scan_slash_regex(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      return nil unless slash_regex_can_start?(line, at)
+      return nil if byte(line, scan) == byte_of('/') ||
+                    byte(line, scan) == byte_of('=')
+
+      in_class = false
+      while scan < line.bytesize
+        current = byte(line, scan)
+        if current == byte_of('\\') && scan + 1 < line.bytesize
+          scan += 2
+        elsif current == byte_of('[')
+          in_class = true
+          scan += 1
+        elsif current == byte_of(']') && in_class
+          in_class = false
+          scan += 1
+        elsif current == byte_of('/') && !in_class
+          scan += 1
+          while ascii_alpha?(byte(line, scan))
+            scan += 1
+          end
+          emit(pieces, SyntaxToken::String, line, at, scan)
+          return scan
+        else
+          scan += 1
+        end
+      end
+      nil
+    end
+
+    private def slash_regex_can_start?(line : String, at : Int32) : Bool
+      scan = at
+      while scan > 0 &&
+            (byte(line, scan - 1) == byte_of(' ') ||
+            byte(line, scan - 1) == byte_of('\t'))
+        scan -= 1
+      end
+      return true if scan == 0 ||
+                     "=([{,:;!&|?~".includes?(byte(line, scan - 1).chr)
+
+      finish = scan
+      while scan > 0 && word_byte?(byte(line, scan - 1))
+        scan -= 1
+      end
+      return false if finish == scan
+
+      Set{"and", "if", "not", "or", "return", "unless", "when", "yield"}
+        .includes?(byte_slice(line, scan, finish))
+    end
+
+    private def scan_sigil_variable(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      if byte(line, at) == byte_of('@')
+        scan += 1 if byte(line, scan) == byte_of('@')
+        return nil unless ascii_alpha?(byte(line, scan)) ||
+                          byte(line, scan) == byte_of('_')
+        while word_byte?(byte(line, scan))
+          scan += 1
+        end
+      elsif ascii_digit?(byte(line, scan))
+        while ascii_digit?(byte(line, scan))
+          scan += 1
+        end
+        scan += 1 if byte(line, scan) == byte_of('?')
+      elsif ascii_alpha?(byte(line, scan)) ||
+            byte(line, scan) == byte_of('_')
+        while word_byte?(byte(line, scan))
+          scan += 1
+        end
+      elsif "$!\"&'()*+,-./:;<=>?@\\`~".includes?(byte(line, scan).chr)
+        scan += 1
+      else
+        return nil
+      end
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_heredoc(
+      pieces : Array(SyntaxPiece),
+      language : SyntaxLanguage,
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+    ) : Int32?
+      crystal = language.crystal?
+      scan = at + 2
+      return nil if crystal && byte(line, scan) != byte_of('-')
+
+      if byte(line, scan) == byte_of('-') ||
+         (!crystal && byte(line, scan) == byte_of('~'))
+        state.heredoc_indent = true
+        scan += 1
+      else
+        state.heredoc_indent = false
+      end
+
+      name_start = scan
+      quote = byte(line, scan)
+      if quote == byte_of('\'') ||
+         quote == byte_of('"') ||
+         quote == byte_of('`')
+        return nil if crystal && quote != byte_of('\'')
+        scan += 1
+        name_start = scan
+        while scan < line.bytesize && byte(line, scan) != quote
+          scan += 1
+        end
+        return nil if scan >= line.bytesize
+        name_finish = scan
+        scan += 1
+      else
+        return nil unless ascii_alpha?(byte(line, scan)) ||
+                          byte(line, scan) == byte_of('_')
+        while word_byte?(byte(line, scan))
+          scan += 1
+        end
+        name_finish = scan
+      end
+
+      delimiter = byte_slice(line, name_start, name_finish)
+      return nil if delimiter.empty? || delimiter.bytesize >= 32
+
+      state.heredoc_delimiter = delimiter
+      state.in_heredoc = true
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def heredoc_terminator?(
+      line : String,
+      state : SyntaxState,
+    ) : Bool
+      scan = state.heredoc_indent ? skip_space(line, 0) : 0
+      delimiter = state.heredoc_delimiter
+      return false unless bytes_at?(line, scan, delimiter)
+
+      scan = skip_space(line, scan + delimiter.bytesize)
+      scan == line.bytesize
+    end
+
+    private def ruby_marker_line?(line : String, marker : String) : Bool
+      return false unless line.starts_with?(marker)
+      after = byte(line, marker.bytesize)
+      after == 0_u8 || after == byte_of(' ') || after == byte_of('\t')
+    end
+
+    private def operator_byte?(byte : UInt8) : Bool
+      "+-*/%&|^<>=!~[]".includes?(byte.chr)
     end
 
     private def scan_at_attribute(
@@ -915,6 +1258,12 @@ module Xd
           SyntaxToken::Type
         elsif listed?(constants(language), word, case_insensitive?(language))
           SyntaxToken::Number
+        elsif listed?(functions(language), word, false)
+          SyntaxToken::Function
+        elsif definition_keywords(language).try do |definitions|
+                is_definition?(line, at, definitions)
+              end
+          SyntaxToken::Function
         elsif capitalized_types?(language) &&
               ascii_upper?(byte(line, at))
           SyntaxToken::Type
@@ -929,6 +1278,43 @@ module Xd
 
       emit(pieces, token, line, at, scan)
       scan
+    end
+
+    private def is_definition?(
+      line : String,
+      at : Int32,
+      definitions : Set(String),
+    ) : Bool
+      scan = at
+      while scan > 0 &&
+            (byte(line, scan - 1) == byte_of(' ') ||
+            byte(line, scan - 1) == byte_of('\t'))
+        scan -= 1
+      end
+
+      if scan > 0 && byte(line, scan - 1) == byte_of('.')
+        scan -= 1
+        while scan > 0 &&
+              (byte(line, scan - 1) == byte_of(' ') ||
+              byte(line, scan - 1) == byte_of('\t'))
+          scan -= 1
+        end
+        while scan > 0 && word_byte?(byte(line, scan - 1))
+          scan -= 1
+        end
+        while scan > 0 &&
+              (byte(line, scan - 1) == byte_of(' ') ||
+              byte(line, scan - 1) == byte_of('\t'))
+          scan -= 1
+        end
+      end
+
+      finish = scan
+      while scan > 0 && word_byte?(byte(line, scan - 1))
+        scan -= 1
+      end
+      definitions.includes?(byte_slice(line, scan, finish)) &&
+        (scan == 0 || !word_byte?(byte(line, scan - 1)))
     end
 
     private def scan_directive(
@@ -1159,6 +1545,24 @@ module Xd
       end
     end
 
+    private def functions(language : SyntaxLanguage) : Set(String)
+      case language
+      when .ruby?    then RUBY_FUNCTIONS
+      when .crystal? then CRYSTAL_FUNCTIONS
+      else                NO_WORDS
+      end
+    end
+
+    private def definition_keywords(
+      language : SyntaxLanguage,
+    ) : Set(String)?
+      case language
+      when .ruby?    then RUBY_DEFINITION_KEYWORDS
+      when .crystal? then CRYSTAL_DEFINITION_KEYWORDS
+      else                nil
+      end
+    end
+
     private def listed?(
       words : Set(String),
       word : String,
@@ -1314,6 +1718,38 @@ module Xd
 
     private def undefined_constant?(language : SyntaxLanguage) : Bool
       language.odin?
+    end
+
+    private def ruby_block_comments?(language : SyntaxLanguage) : Bool
+      language.ruby?
+    end
+
+    private def heredocs?(language : SyntaxLanguage) : Bool
+      language.ruby? || language.crystal?
+    end
+
+    private def colon_symbols?(language : SyntaxLanguage) : Bool
+      language.ruby? || language.crystal?
+    end
+
+    private def percent_literal_kinds(
+      language : SyntaxLanguage,
+    ) : String?
+      return "qQwWiIrsx" if language.ruby?
+      return "qQwWirx" if language.crystal?
+      nil
+    end
+
+    private def slash_regexes?(language : SyntaxLanguage) : Bool
+      language.ruby? || language.crystal?
+    end
+
+    private def sigil_variables?(language : SyntaxLanguage) : Bool
+      language.ruby? || language.crystal?
+    end
+
+    private def crystal_macros?(language : SyntaxLanguage) : Bool
+      language.crystal?
     end
 
     private def triple_strings?(language : SyntaxLanguage) : Bool

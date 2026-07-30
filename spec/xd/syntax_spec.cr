@@ -560,4 +560,153 @@ describe Xd::Syntax do
     state.in_comment.should eq(0)
     syntax_has?(close, Xd::SyntaxToken::Function, "main").should be_true
   end
+
+  it "classifies Ruby definitions, literals, sigils, and comments" do
+    declaration = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "class Greeter; def self.greet name",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(declaration, Xd::SyntaxToken::Keyword, "class")
+      .should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "Greeter").should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Function, "greet")
+      .should be_true
+
+    body = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "puts %Q(Hello \#{name}) if @enabled && name != :world # welcome",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(body, Xd::SyntaxToken::Function, "puts").should be_true
+    syntax_has?(body, Xd::SyntaxToken::String, "%Q(Hello \#{name})")
+      .should be_true
+    syntax_has?(body, Xd::SyntaxToken::Preprocessor, "@enabled")
+      .should be_true
+    syntax_has?(body, Xd::SyntaxToken::String, ":world").should be_true
+    syntax_has?(body, Xd::SyntaxToken::Comment, "# welcome").should be_true
+
+    pattern = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "pattern = /foo\\/[a-z]+/im; ratio = total / count; value %= 2",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(
+      pattern,
+      Xd::SyntaxToken::String,
+      "/foo\\/[a-z]+/im"
+    ).should be_true
+    syntax_has?(pattern, Xd::SyntaxToken::String, "/ count")
+      .should be_false
+    syntax_has?(pattern, Xd::SyntaxToken::String, "%=").should be_false
+  end
+
+  it "carries Ruby heredocs and block comments" do
+    state = Xd::SyntaxState.new
+    opened = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "message = <<~TEXT",
+      state
+    )
+    state.in_heredoc.should be_true
+    syntax_has?(opened, Xd::SyntaxToken::String, "<<~TEXT").should be_true
+    body = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "  \#{name} # still a string",
+      state
+    )
+    body.should eq([
+      Xd::SyntaxPiece.new(
+        Xd::SyntaxToken::String,
+        "  \#{name} # still a string"
+      ),
+    ])
+    Xd::Syntax.scan_line(Xd::SyntaxLanguage::Ruby, "  TEXT", state)
+    state.in_heredoc.should be_false
+
+    opened_comment = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "=begin docs",
+      state
+    )
+    state.in_comment.should eq(1)
+    syntax_has?(
+      opened_comment,
+      Xd::SyntaxToken::Comment,
+      "=begin docs"
+    ).should be_true
+    body_comment = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Ruby,
+      "def not_code",
+      state
+    )
+    body_comment.first.token.should eq(Xd::SyntaxToken::Comment)
+    Xd::Syntax.scan_line(Xd::SyntaxLanguage::Ruby, "=end", state)
+    state.in_comment.should eq(0)
+  end
+
+  it "classifies Crystal annotations, macros, and heredocs" do
+    annotation_pieces = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Crystal,
+      "@[JSON::Field(key: \"name\")]",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(
+      annotation_pieces,
+      Xd::SyntaxToken::Preprocessor,
+      "@[JSON::Field(key: \"name\")]"
+    ).should be_true
+
+    declaration = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Crystal,
+      "class Greeter; def greet name : String",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(declaration, Xd::SyntaxToken::Function, "greet")
+      .should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "String").should be_true
+
+    state = Xd::SyntaxState.new
+    macro_pieces = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Crystal,
+      "{% if flag?(:linux) %}",
+      state
+    )
+    syntax_has?(macro_pieces, Xd::SyntaxToken::Preprocessor, "{%")
+      .should be_true
+    syntax_has?(macro_pieces, Xd::SyntaxToken::String, ":linux")
+      .should be_true
+    syntax_has?(macro_pieces, Xd::SyntaxToken::Preprocessor, "%}")
+      .should be_true
+    state.crystal_macro_close.should eq('\0')
+
+    literals = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Crystal,
+      "pattern = /foo\\/[a-z]+/im; command = `uname -a`; getter = :[]?",
+      state
+    )
+    syntax_has?(
+      literals,
+      Xd::SyntaxToken::String,
+      "/foo\\/[a-z]+/im"
+    ).should be_true
+    syntax_has?(literals, Xd::SyntaxToken::String, "`uname -a`")
+      .should be_true
+    syntax_has?(literals, Xd::SyntaxToken::String, ":[]?").should be_true
+
+    opened = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Crystal,
+      "message = <<-TEXT.upcase",
+      state
+    )
+    state.in_heredoc.should be_true
+    syntax_has?(opened, Xd::SyntaxToken::String, "<<-TEXT").should be_true
+    Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Crystal,
+      "  \#{name} # still a string",
+      state
+    )
+    Xd::Syntax.scan_line(Xd::SyntaxLanguage::Crystal, "  TEXT", state)
+    state.in_heredoc.should be_false
+  end
 end
