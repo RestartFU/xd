@@ -736,11 +736,9 @@ module Xd
       private def panel_call(
         fields : Hash(String, JSON::Any),
       ) : PanelCallResult
-        @status.text = ""
         PanelCallResult.new(@client.call(fields), nil)
       rescue error : Daemon::Client::Error
         message = error.message || "Daemon request failed."
-        @status.text = message
         PanelCallResult.new(nil, message)
       end
 
