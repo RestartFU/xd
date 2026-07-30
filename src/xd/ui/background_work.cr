@@ -11,6 +11,7 @@ module Xd
       @@queue = Channel(Proc(Nil)).new(QUEUE_SIZE)
       @@mutex = Mutex.new
       @@started = false
+      @@context : Fiber::ExecutionContext::Parallel?
 
       def submit(&work : -> Nil) : Bool
         start
@@ -27,8 +28,13 @@ module Xd
           return if @@started
 
           @@started = true
-          WORKERS.times do
-            Thread.new do
+          context = Fiber::ExecutionContext::Parallel.new(
+            "xd background UI",
+            WORKERS
+          )
+          @@context = context
+          WORKERS.times do |index|
+            context.spawn(name: "xd background UI #{index + 1}") do
               loop do
                 begin
                   @@queue.receive.call

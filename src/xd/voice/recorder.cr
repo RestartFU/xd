@@ -107,7 +107,7 @@ module Xd
 
         @stop_requested.set(false)
         @cancelled.set(false)
-        Thread.new do
+        Fiber::ExecutionContext::Isolated.new("xd voice recorder") do
           result = record_blocking
           @running.set(false)
           finished.call(result)
