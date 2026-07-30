@@ -87,7 +87,11 @@ module Xd
         return unless event["chat"]?.try(&.as_s?) == @chat_id
 
         @terminal_panel.handle_event(event)
-        if event["event"]?.try(&.as_s?) == "turn-finished"
+        name = event["event"]?.try(&.as_s?)
+        repository_changed = name == "turn-finished" ||
+                             (name == "git-action-finished" &&
+                              event["success"]?.try(&.as_bool?) == true)
+        if repository_changed
           @diff_pane.refresh if @repository_widget.visible? &&
                                 @repository_page == "diff"
         end
