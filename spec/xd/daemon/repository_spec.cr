@@ -94,6 +94,82 @@ describe Xd::Daemon::Repository do
     end
   end
 
+  it "uses one private-index diff for every untracked file" do
+    with_repository do |repository, folder, chat_id|
+      40.times do |index|
+        File.write(
+          File.join(folder, "generated-#{index}.txt"),
+          "generated #{index}\n"
+        )
+      end
+
+      actual_git = Process.find_executable("git").not_nil!
+      wrapper = File.join(folder, "git-wrapper")
+      calls = File.join(folder, "git-calls")
+      File.write(
+        wrapper,
+        "#!/bin/sh\n" \
+        "printf '%s\\n' \"$*\" >> #{Process.quote_posix(calls)}\n" \
+        "exec #{Process.quote_posix(actual_git)} \"$@\"\n"
+      )
+      File.chmod(wrapper, 0o755)
+      previous_path = ENV["PATH"]?
+      ENV["PATH"] = "#{folder}:#{previous_path || ""}"
+      File.rename(wrapper, File.join(folder, "git"))
+
+      begin
+        all = repository.read(chat_id, "working-all", nil, nil)
+        all.should contain("generated-0.txt")
+        all.should contain("generated-39.txt")
+      ensure
+        if previous_path
+          ENV["PATH"] = previous_path
+        else
+          ENV.delete("PATH")
+        end
+      end
+
+      commands = File.read(calls).lines
+      commands.count(&.starts_with?("--no-pager diff ")).should eq(1)
+      commands.any?(&.includes?("--no-index")).should be_false
+    end
+  end
+
+  it "leaves staged state and the real index unchanged" do
+    with_repository do |repository, folder, chat_id|
+      tracked = File.join(folder, "tracked.txt")
+      File.write(tracked, "staged\n")
+      git(folder, "add", "tracked.txt")
+      File.write(tracked, "worktree\n")
+      File.write(File.join(folder, "new.txt"), "new\n")
+      index = File.join(folder, ".git", "index")
+      before = File.read(index)
+
+      all = repository.read(chat_id, "working-all", nil, nil)
+
+      all.should contain("+worktree")
+      all.should contain("+new")
+      File.read(index).should eq(before)
+      Dir.glob(File.join(folder, ".git", "xd-pane-index*")).should be_empty
+    end
+  end
+
+  it "stops an oversized generated-file diff at the transport limit" do
+    with_repository do |repository, folder, chat_id|
+      File.write(
+        File.join(folder, "generated.txt"),
+        ("generated output\n" * 600_000)
+      )
+
+      expect_raises(
+        Xd::Daemon::Repository::Error,
+        "That diff is too large to send over the remote connection."
+      ) do
+        repository.read(chat_id, "working-all", nil, nil)
+      end
+    end
+  end
+
   it "rejects unsafe base names and paths" do
     with_repository do |repository, _folder, chat_id|
       expect_raises(Xd::Daemon::Repository::Error, /valid base/) do

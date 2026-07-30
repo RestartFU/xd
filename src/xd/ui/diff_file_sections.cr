@@ -7,11 +7,16 @@ require "./diff_text"
 module Xd
   module UI
     class DiffFileSections
-      CHUNK_ROWS = 80
+      CHUNK_ROWS        =    80
+      MAX_RENDERED_ROWS = 4_000
 
       record Prepared,
         parsed : ParsedDiff,
         sections : Array(DiffFileSection)
+
+      record RenderPlan,
+        finish : Int32,
+        omitted : Int32
 
       record RowWidgets,
         expander : Gtk::Expander,
@@ -31,6 +36,8 @@ module Xd
       @row_widgets = {} of UInt64 => RowWidgets
       @bound_sections = {} of UInt64 => DiffFileSection
       @binding = Set(UInt64).new
+      @render_jobs = {} of UInt64 => Int64
+      @render_sequence = 0_i64
 
       def initialize
         factory = Gtk::SignalListItemFactory.new
@@ -57,6 +64,7 @@ module Xd
       end
 
       def fill(prepared : Prepared) : ParsedDiff
+        @render_jobs.clear
         @widget.model = nil
         @parsed = prepared.parsed
         @sections = prepared.sections
@@ -66,6 +74,14 @@ module Xd
         )
         @widget.model = Gtk::NoSelection.new(descriptors)
         @parsed
+      end
+
+      def self.render_plan(start : Int32, finish : Int32) : RenderPlan
+        visible_finish = Math.min(finish, start + MAX_RENDERED_ROWS)
+        RenderPlan.new(
+          visible_finish,
+          Math.max(finish - visible_finish, 0)
+        )
       end
 
       private def setup_item(object : GObject::Object) : Nil
@@ -124,8 +140,9 @@ module Xd
         widgets.expander.expanded = expanded
         @binding.delete(key)
         if expanded
-          fill_body(widgets.body, section)
+          fill_body(key, widgets.body, section)
         else
+          cancel_body(key)
           clear(widgets.body)
         end
       end
@@ -133,6 +150,7 @@ module Xd
       private def unbind_item(object : GObject::Object) : Nil
         item = list_item(object)
         key = pointer_key(item)
+        cancel_body(key)
         @bound_sections.delete(key)
         if widgets = @row_widgets[key]?
           clear(widgets.body)
@@ -144,6 +162,7 @@ module Xd
       private def teardown_item(object : GObject::Object) : Nil
         item = list_item(object)
         key = pointer_key(item)
+        cancel_body(key)
         @binding.delete(key)
         @bound_sections.delete(key)
         @row_widgets.delete(key)
@@ -156,31 +175,57 @@ module Xd
 
         if widgets.expander.expanded?
           @collapsed.delete(section.path)
-          fill_body(widgets.body, section)
+          fill_body(key, widgets.body, section)
         else
           keep_scroll_position(widgets.expander)
           @collapsed << section.path
+          cancel_body(key)
           clear(widgets.body)
         end
       end
 
       private def fill_body(
+        key : UInt64,
         body : Gtk::Box,
         section : DiffFileSection,
       ) : Nil
+        cancel_body(key)
         clear(body)
         start = section.start
         if @parsed.lines[start]?.try(&.kind.file?)
           start += 1
         end
 
-        at = start
-        while at < section.finish
-          finish = Math.min(at + CHUNK_ROWS, section.finish)
+        plan = self.class.render_plan(start, section.finish)
+        @render_sequence += 1
+        token = @render_sequence
+        @render_jobs[key] = token
+        append_body_chunk(
+          key,
+          body,
+          section,
+          start,
+          plan,
+          token
+        )
+      end
+
+      private def append_body_chunk(
+        key : UInt64,
+        body : Gtk::Box,
+        section : DiffFileSection,
+        start : Int32,
+        plan : RenderPlan,
+        token : Int64,
+      ) : Nil
+        return unless body_job_active?(key, body, section, token)
+
+        if start < plan.finish
+          finish = Math.min(start + CHUNK_ROWS, plan.finish)
           rendered = UnifiedDiff.markup_slice(
             @parsed.lines,
             false,
-            at,
+            start,
             finish
           )
           text = DiffText.new(
@@ -190,8 +235,58 @@ module Xd
           )
           text.widget.hexpand = true
           body.append(text.widget)
-          at = finish
+
+          if finish < plan.finish
+            GLib.idle_add do
+              append_body_chunk(
+                key,
+                body,
+                section,
+                finish,
+                plan,
+                token
+              )
+              false
+            end
+            return
+          end
         end
+
+        append_omitted_notice(body, plan.omitted) if plan.omitted > 0
+        @render_jobs.delete(key) if @render_jobs[key]? == token
+      end
+
+      private def body_job_active?(
+        key : UInt64,
+        body : Gtk::Box,
+        section : DiffFileSection,
+        token : Int64,
+      ) : Bool
+        return false unless @render_jobs[key]? == token
+        return false unless @bound_sections[key]? == section
+
+        widgets = @row_widgets[key]?
+        !!widgets && widgets.body.to_unsafe == body.to_unsafe
+      end
+
+      private def append_omitted_notice(
+        body : Gtk::Box,
+        omitted : Int32,
+      ) : Nil
+        noun = omitted == 1 ? "row" : "rows"
+        notice = Gtk::Label.new(
+          "#{omitted} more diff #{noun} not shown"
+        )
+        notice.xalign = 0_f32
+        notice.margin_top = 8
+        notice.margin_bottom = 8
+        notice.margin_start = 12
+        notice.add_css_class("dim-label")
+        body.append(notice)
+      end
+
+      private def cancel_body(key : UInt64) : Nil
+        @render_jobs.delete(key)
       end
 
       private def keep_scroll_position(

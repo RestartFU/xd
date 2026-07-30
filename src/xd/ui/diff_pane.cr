@@ -15,6 +15,7 @@ module Xd
       @sequence = 0_i64
       @summary : Gtk::Label
       @stack : Gtk::Stack
+      @status : Adw::StatusPage
       @sections : DiffFileSections
 
       def initialize(@request : PanelCall)
@@ -64,12 +65,12 @@ module Xd
         changes.vexpand = true
         changes.child = @sections.widget
 
-        empty = Adw::StatusPage.new(
+        @status = Adw::StatusPage.new(
           icon_name: "object-select-symbolic",
           title: "Nothing Changed"
         )
         @stack = Gtk::Stack.new
-        @stack.add_named(empty, "empty")
+        @stack.add_named(@status, "empty")
         @stack.add_named(changes, "changes")
         @stack.vexpand = true
 
@@ -195,8 +196,8 @@ module Xd
                 @stack.visible_child_name = "changes"
               else
                 show_empty(
-                  "Could not read changes",
-                  message
+                  "Could Not Read Changes",
+                  message || "The diff could not be parsed."
                 )
               end
             end
@@ -206,9 +207,13 @@ module Xd
       end
 
       private def show_call_error(result : PanelCallResult) : Nil
+        detail = result.error || "The diff could not be read."
+        title = detail.includes?("too large") ?
+                  "Diff Too Large" :
+                  "Could Not Read Changes"
         show_empty(
-          "Could not read changes",
-          result.error
+          title,
+          detail
         )
       end
 
@@ -243,6 +248,8 @@ module Xd
       ) : Nil
         @summary.text = summary
         @summary.tooltip_text = tooltip
+        @status.title = summary
+        @status.description = tooltip || ""
         @stack.visible_child_name = "empty"
       end
     end

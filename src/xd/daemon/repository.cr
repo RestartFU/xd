@@ -1,3 +1,4 @@
+require "file_utils"
 require "../agent/environment"
 require "../storage/workflow_state"
 require "../workspace/service"
@@ -6,10 +7,12 @@ require "./filesystem"
 module Xd
   module Daemon
     class Repository
-      MAX_OUTPUT_BYTES = 8 * 1024 * 1024
-      BASE_PATTERN     = /\A[A-Za-z0-9_\.\/-]{1,256}\z/
-      URL_PATTERN      = /https:\/\/[^\s]+/
-      STATE_SCRIPT     =
+      MAX_OUTPUT_BYTES  = 8 * 1024 * 1024
+      MAX_ERROR_BYTES   = 64 * 1024
+      READ_BUFFER_BYTES = 16 * 1024
+      BASE_PATTERN      = /\A[A-Za-z0-9_\.\/-]{1,256}\z/
+      URL_PATTERN       = /https:\/\/[^\s]+/
+      STATE_SCRIPT      =
         "printf '%s\\n' \"$(git status --porcelain 2>/dev/null | head -n 1)\"; " \
         "git rev-parse --abbrev-ref HEAD 2>/dev/null || echo; " \
         "git rev-parse --abbrev-ref --symbolic-full-name '@{u}' " \
@@ -35,6 +38,9 @@ module Xd
         url : String? = nil
 
       record ActionResult, state : State, url : String? = nil
+      private record StreamCapture,
+        text : String,
+        overflowed : Bool
 
       def initialize(
         @store : Storage::Store,
@@ -139,7 +145,7 @@ module Xd
                      ["--no-pager", "diff", "--name-status", range(base)]
                    )
                  when "working-all"
-                   working_all(workdir, root)
+                   working_all(workdir)
                  when "branch-all"
                    capture(
                      workdir,
@@ -285,32 +291,60 @@ module Xd
         output.match(URL_PATTERN).try(&.[0].rstrip(".,);"))
       end
 
-      private def working_all(workdir : String, root : String) : String
-        output = capture(
+      private def working_all(workdir : String) : String
+        baseline = working_treeish(workdir)
+        reported = capture(
           workdir,
-          ["--no-pager", "diff", working_treeish(workdir)]
+          ["rev-parse", "--git-path", "index"]
+        ).strip
+        if reported.empty?
+          raise Error.new("Git could not locate the repository index.")
+        end
+
+        user_index = Path[reported].absolute? ? reported : File.expand_path(reported, workdir)
+        temporary = File.tempfile(
+          "xd-pane-index",
+          dir: File.dirname(user_index)
         )
-        untracked = capture(
-          workdir,
-          ["ls-files", "--others", "--exclude-standard", "-z"]
-        )
-        untracked.split('\0').each do |path|
-          next if path.empty?
-          selected = safe_path(workdir, root, path)
-          output += capture(
-            workdir,
-            [
-              "--no-pager", "diff", "--no-index", "--",
-              "/dev/null", selected,
-            ]
-          )
-          if output.bytesize > MAX_OUTPUT_BYTES
-            raise Error.new(
-              "That diff is too large to send over the remote connection."
+        index_path = temporary.path
+        temporary.close
+        environment = Agent::Environment.host
+        environment["GIT_INDEX_FILE"] = index_path
+
+        begin
+          if File.file?(user_index)
+            FileUtils.cp(user_index, index_path)
+          else
+            File.delete?(index_path)
+            checked(
+              workdir,
+              "git",
+              ["read-tree", "--empty"],
+              environment
             )
           end
+
+          # Intent-to-add makes every untracked file visible to one regular
+          # tree-to-worktree diff. The private index preserves staged changes
+          # while avoiding one `git diff --no-index` process per new file.
+          checked(
+            workdir,
+            "git",
+            ["add", "--intent-to-add", "--all"],
+            environment
+          )
+          capture(
+            workdir,
+            [
+              "--no-pager", "diff", "--no-ext-diff", "--no-color",
+              baseline,
+            ],
+            environment: environment
+          )
+        ensure
+          File.delete?(index_path)
+          File.delete?("#{index_path}.lock")
         end
-        output
       end
 
       private def working_treeish(workdir : String) : String
@@ -371,9 +405,15 @@ module Xd
         workdir : String,
         arguments : Array(String),
         errors : Bool = true,
+        environment : Hash(String, String) = Agent::Environment.host,
       ) : String
-        output, status, error_text = run(workdir, arguments)
-        if output.bytesize > MAX_OUTPUT_BYTES
+        output, status, error_text, overflowed = limited_command(
+          workdir,
+          "git",
+          arguments,
+          environment
+        )
+        if overflowed
           raise Error.new(
             "That diff is too large to send over the remote connection."
           )
@@ -387,6 +427,8 @@ module Xd
           raise Error.new(message) unless message.empty?
         end
         output
+      rescue error : File::Error | IO::Error
+        raise Error.new("Cannot run Git: #{error.message}")
       end
 
       private def run(
@@ -416,6 +458,81 @@ module Xd
           error: error
         )
         {output.to_s, status, error.to_s}
+      end
+
+      private def limited_command(
+        workdir : String,
+        executable : String,
+        arguments : Array(String),
+        environment : Hash(String, String),
+      ) : Tuple(String, Process::Status, String, Bool)
+        process = Process.new(
+          executable,
+          arguments,
+          chdir: workdir,
+          env: environment,
+          clear_env: true,
+          input: Process::Redirect::Close,
+          output: Process::Redirect::Pipe,
+          error: Process::Redirect::Pipe
+        )
+        output_done = Channel(StreamCapture).new(1)
+        error_done = Channel(StreamCapture).new(1)
+        spawn capture_stream(
+          process.output,
+          MAX_OUTPUT_BYTES,
+          output_done
+        )
+        spawn capture_stream(
+          process.error,
+          MAX_ERROR_BYTES,
+          error_done
+        )
+
+        status = process.wait
+        output = output_done.receive
+        error = error_done.receive
+        error_text = error.text.scrub
+        if error.overflowed
+          error_text += "\n… Git error output truncated …"
+        end
+        {
+          output.text,
+          status,
+          error_text,
+          output.overflowed,
+        }
+      end
+
+      private def capture_stream(
+        stream : IO,
+        limit : Int32,
+        done : Channel(StreamCapture),
+      ) : Nil
+        output = IO::Memory.new
+        overflowed = false
+        buffer = Bytes.new(READ_BUFFER_BYTES)
+
+        begin
+          loop do
+            count = stream.read(buffer)
+            break if count == 0
+
+            remaining = Math.max(limit - output.size, 0)
+            kept = Math.min(count, remaining)
+            output.write(buffer[0, kept]) if kept > 0
+            if count > remaining
+              overflowed = true
+              stream.close
+              break
+            end
+            Fiber.yield
+          end
+        rescue IO::Error
+        ensure
+          stream.close unless stream.closed?
+          done.send(StreamCapture.new(output.to_s, overflowed))
+        end
       end
     end
   end
