@@ -166,19 +166,25 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 ## Terminal, files, and diff panes
 
 - `[~]` Terminal is the end child of a vertical `GtkPaned` below the
-  conversation/composer, with 260-pixel default and persisted height; per-chat
-  visibility remains.
+  conversation/composer, with 260-pixel default and persisted height. The
+  exact-commit `2485a89` bundle verifies bottom placement, divider, restored
+  height, and restored session/output at 1100x720. Multi-chat and paired
+  visibility matrices remain.
 - `[~]` Files and diff share one stack at the right of the conversation plus
-  terminal, with 420-pixel default and persisted width; exact pane content
-  remains.
+  terminal, with 420-pixel default and persisted width. Local installed-bundle
+  geometry and restart are verified; paired persistence remains.
 - `[x]` Header controls are toggle buttons whose active states match pane
   visibility.
 - `[~]` Terminal RPC, PTY output, input, resize, replay, and kill operations use
-  the shared daemon.
+  the shared daemon. An installed local client verifies each operation across
+  UI disconnect/reconnect; paired TLS proof remains.
 - `[~]` Daemon-backed multi-session tabs, centered single-session title,
   add/kill controls, close request, focus, replay, resize, and per-chat view
   retention work. C palette/font, copy/paste, URL handling, and daemon-terminal
-  Backspace behavior are ported. Offline status, reconnect reconciliation, and
+  Backspace behavior are ported. The `2485a89` bundle survives one-tab,
+  two-tab, detach, and replay transitions under `G_DEBUG=fatal-warnings`;
+  compensating minimum widths keep the C negative-margin tab fill without
+  negative GTK measurements. Offline status, reconnect reconciliation, and
   pending-kill retry are implemented; paired reconnect UI verification remains.
 - `[~]` File list/read/write uses the C `AdwBin`/toast overlay, exact
   header/list/preview/status stack, directory-first UTF-8 collation, hidden
@@ -201,7 +207,8 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   position. Cancellable nonblocking reads, paired-TLS latency/cancellation,
   and live Git-head refresh proof remain.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
-  `a{su}` device map; restart/UI verification remains.
+  `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
+  paired restart matrices remain.
 - `[ ]` Refresh repository panes after agent turns and terminal activity.
 
 C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
@@ -280,7 +287,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (217 examples).
+- `[x]` Crystal specs pass in Docker (219 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
