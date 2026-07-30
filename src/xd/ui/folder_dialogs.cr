@@ -18,12 +18,25 @@ module Xd
       end
 
       def settings(folder_id : String, folder_name : String) : Nil
-        state = call({
+        request_async({
           "op"     => JSON::Any.new("folder-settings"),
           "folder" => JSON::Any.new(folder_id),
-        })
-        return unless state
+        }) do |result|
+          if error = result.error
+            @on_error.call(error)
+          elsif state = result.body
+            present_settings(folder_id, folder_name, state)
+          else
+            @on_error.call("Daemon returned no folder settings.")
+          end
+        end
+      end
 
+      private def present_settings(
+        folder_id : String,
+        folder_name : String,
+        state : Hash(String, JSON::Any),
+      ) : Nil
         inherited_backend =
           state["inherited_backend"]?.try(&.as_s?) ||
             state["effective_backend"].as_s
@@ -199,15 +212,17 @@ module Xd
         end
       end
 
-      private def call(
+      private def request_async(
         request : Hash(String, JSON::Any),
-      ) : Hash(String, JSON::Any)?
-        result = @request.call(request)
-        if error = result.error
-          @on_error.call(error)
-          return nil
+        &complete : PanelCallResult -> Nil
+      ) : Nil
+        spawn do
+          result = @request.call(request)
+          GLib.idle_add do
+            complete.call(result)
+            false
+          end
         end
-        result.body
       end
 
       def context(folder_id : String, folder_name : String) : Nil
