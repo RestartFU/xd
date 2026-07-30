@@ -113,6 +113,7 @@ module Xd
       @live_turn_key : String?
       @clock_origin : Time::Instant
       @commands = [] of String
+      @queue = [] of String
       @commands_bar : Gtk::ScrolledWindow
       @commands_flow : Gtk::FlowBox
       @choices_bar : Gtk::Box
@@ -831,6 +832,7 @@ module Xd
           keep_previous = current_transcript_cacheable?
           retire_open_questions
           leave_current_transcript(keep_previous)
+          clear_queue
           @follow_bottom = true
           @history_bottom_distance = -1.0
         end
@@ -893,7 +895,7 @@ module Xd
         @entry.buffer.text = ""
         @entry.sensitive = false
         @attach.sensitive = false
-        @send.label = "Send"
+        update_send_button
         @send.sensitive = false
         @send.remove_css_class("destructive-action")
         @send.add_css_class("suggested-action")
@@ -902,8 +904,7 @@ module Xd
         @file_button.sensitive = false
         @diff_button.sensitive = false
         @tool_panel.select_chat(nil, nil)
-        clear(@queue_box)
-        @queue_box.visible = false
+        clear_queue
         @commands.clear
         refresh_command_suggestions
         clear_attachments
@@ -1241,6 +1242,10 @@ module Xd
         return unless chat_id
         text = (explicit_text || @entry.buffer.text).strip
         attachments = explicit_text ? [] of Attachment : @attachments
+        if !explicit_text && text.empty? && attachments.empty? && !@queue.empty?
+          steer_queue(0, @queue.first)
+          return
+        end
         return if text.empty? && attachments.empty?
         @sidebar.answer_chat(@client, chat_id)
 
@@ -1697,6 +1702,7 @@ module Xd
 
       private def set_working(working : Bool) : Nil
         @working = working
+        update_send_button
         unless working
           remove_working_row
           return
@@ -1744,6 +1750,7 @@ module Xd
         finish_stream_segment
         remove_working_row
         @working = false
+        update_send_button
         @stream_source = nil
         @live_turn_key = nil
       end
@@ -1815,16 +1822,23 @@ module Xd
           @live_turn_key = nil
           set_working(false)
         end
-        @send.label = @working ? "Stop" : "Send"
+        update_send_button
+        queue = state["queue"]?.try(&.as_a?) || [] of JSON::Any
+        render_queue(queue)
+      end
+
+      private def update_send_button : Nil
         if @working
+          @send.icon_name = "media-playback-stop-symbolic"
+          @send.tooltip_text = "Stop"
           @send.remove_css_class("suggested-action")
           @send.add_css_class("destructive-action")
         else
+          @send.icon_name = "go-up-symbolic"
+          @send.tooltip_text = "Send (Enter)"
           @send.remove_css_class("destructive-action")
           @send.add_css_class("suggested-action")
         end
-        queue = state["queue"]?.try(&.as_a?) || [] of JSON::Any
-        render_queue(queue)
       end
 
       private def refresh_command_suggestions : Nil
@@ -1853,6 +1867,7 @@ module Xd
       end
 
       private def render_queue(queue : Array(JSON::Any)) : Nil
+        @queue = queue.map(&.as_s)
         clear(@queue_box)
         @queue_box.visible = !queue.empty?
 
@@ -1898,6 +1913,12 @@ module Xd
           row.append(remove)
           @queue_box.append(row)
         end
+      end
+
+      private def clear_queue : Nil
+        @queue.clear
+        clear(@queue_box)
+        @queue_box.visible = false
       end
 
       private def show_queue_editor(

@@ -116,6 +116,8 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
 - `[x]` Composer and transcript share a 1040-pixel `AdwClamp`.
 - `[~]` Multiline entry, Enter-to-send, Shift+Enter, cancel button state,
   attachment button, model, effort, access, build, and plan controls exist.
+  Send/Stop stays icon-only and circular with the C icons, tooltips, colours,
+  and empty-Enter queue steering behavior.
 - `[~]` Image paste/chooser limits and previews exist.
 - `[~]` Ask questions stay bold in the transcript while answer controls use the
   exact C composer slot, flow layout, input row, and retirement lifecycle;
