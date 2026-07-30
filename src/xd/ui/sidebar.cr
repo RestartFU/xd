@@ -6,6 +6,7 @@ require "../daemon/endpoint"
 require "../remote/connection"
 require "../version"
 require "./adw"
+require "./auth_dialog"
 require "./dialogs"
 require "./directory_browser"
 require "./dots"
@@ -303,6 +304,17 @@ module Xd
           "secrets"
         ) do
           dialogs(@local_source).secrets
+        end
+        added = Gio::Menu.new
+        menu_model.append_section(nil, added)
+        add_header_action(
+          added,
+          menu_actions,
+          menu,
+          "Assistant Accounts…",
+          "accounts"
+        ) do
+          auth(@local_source)
         end
         menu.closed_signal.connect do
           # GtkModelButton closes the popover before activating its action.
@@ -1192,6 +1204,11 @@ module Xd
         ) do
           dialogs(node.source).secrets
         end
+        add_menu_action(
+          menu, actions, popover, "Assistant Accounts…", "accounts"
+        ) do
+          auth(node.source, node.name)
+        end
         add_menu_action(menu, actions, popover, "Refresh", "refresh") do
           reload
         end
@@ -1541,6 +1558,10 @@ module Xd
           @on_error,
           source.remote
         )
+      end
+
+      private def auth(source : Source, machine : String? = nil) : Nil
+        AuthDialog.new(@parent, source.endpoint, machine).present
       end
 
       private def panel_call(source : Source) : PanelCall
