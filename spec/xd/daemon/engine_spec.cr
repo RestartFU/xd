@@ -58,6 +58,8 @@ private def with_daemon_engine(
   clock : Proc(Time::Instant) = -> { Time.instant },
   token_generator : Proc(String) = -> { Random::Secure.base64(32) },
   launcher : Xd::Agent::Launcher? = nil,
+  authentication_resolver : Xd::Agent::Authentication::Resolver? = nil,
+  authentication_environment : Hash(String, String)? = nil,
   & : Xd::Storage::Store, Xd::Daemon::Engine ->
 ) : Nil
   path = File.join(
@@ -70,7 +72,9 @@ private def with_daemon_engine(
     store,
     clock: clock,
     token_generator: token_generator,
-    launcher: launcher
+    launcher: launcher,
+    authentication_resolver: authentication_resolver,
+    authentication_environment: authentication_environment
   )
 
   begin
@@ -96,6 +100,31 @@ describe Xd::Daemon::Engine do
       remote_denied["error"].as_s.should eq(
         "Not authenticated. Say hello first."
       )
+    end
+  end
+
+  it "routes agent authentication through local and remote dispatch" do
+    with_daemon_engine(
+      authentication_resolver: ->(_provider : String) { "/bin/false" },
+      authentication_environment: {} of String => String
+    ) do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      remote.authenticated = true
+
+      [local, remote].each do |connection|
+        response = engine.dispatch(connection, %({"op":"agent-auth"}))
+        response.success?.should be_true
+        response["providers"].as_a.map { |row| row["provider"].as_s }
+          .should eq(["claude", "codex"])
+      end
+
+      refused = engine.dispatch(local, {
+        "op"       => "agent-auth-start",
+        "provider" => "other",
+      }.to_json)
+      refused.success?.should be_false
+      refused["error"].as_s.should eq("Unknown assistant: other")
     end
   end
 

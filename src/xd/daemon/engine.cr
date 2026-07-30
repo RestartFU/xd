@@ -1,5 +1,6 @@
 require "digest/sha256"
 require "random/secure"
+require "../agent/authentication"
 require "../agent/manager"
 require "../agent/secrets"
 require "../protocol/message"
@@ -44,6 +45,8 @@ module Xd
         @clock : Proc(Time::Instant) = -> { Time.instant },
         @token_generator : Proc(String) = -> { Random::Secure.base64(32) },
         launcher : Agent::Launcher? = nil,
+        authentication_resolver : Agent::Authentication::Resolver? = nil,
+        authentication_environment : Hash(String, String)? = nil,
       )
         @workspaces = workspaces || Workspace::Service.new(
           File.join(Path[@store.path].dirname, "Workspaces"),
@@ -78,6 +81,13 @@ module Xd
           },
           @git_worktrees,
           clock: @clock
+        )
+        @authentication = Agent::Authentication.new(
+          ->(name : String, fields : Hash(String, JSON::Any)) {
+            publish_async_event(name, fields)
+          },
+          resolver: authentication_resolver,
+          environment: authentication_environment
         )
       end
 
@@ -134,6 +144,8 @@ module Xd
         failed_outcome(error.message || "Worktree error")
       rescue error : Agent::Secrets::Error
         failed_outcome(error.message || "Agent secrets error")
+      rescue error : Agent::Authentication::Error
+        failed_outcome(error.message || "Agent authentication error")
       rescue error : Agent::Manager::Error
         failed_outcome(error.message || "Agent error")
       rescue error : Filesystem::Error
@@ -149,6 +161,7 @@ module Xd
       def close : Nil
         @repository_monitor.close
         @terminals.close
+        @authentication.close
         @agents.close
       end
 
@@ -165,6 +178,16 @@ module Xd
           agent_secrets(request)
         when Protocol::Operation::SetAgentSecrets
           set_agent_secrets(request)
+        when Protocol::Operation::AgentAuth
+          agent_auth
+        when Protocol::Operation::AgentAuthStart
+          agent_auth_start(request)
+        when Protocol::Operation::AgentAuthInput
+          agent_auth_input(request)
+        when Protocol::Operation::AgentAuthCancel
+          agent_auth_cancel(request)
+        when Protocol::Operation::AgentAuthLogout
+          agent_auth_logout(request)
         when Protocol::Operation::Tree
           tree
         when Protocol::Operation::NewFolder
@@ -354,6 +377,70 @@ module Xd
         end
         secrets.save
         Protocol::Response.ok
+      end
+
+      private def agent_auth : Protocol::Response
+        @authentication.refresh
+        Protocol::Response.ok({
+          "providers" => agent_auth_snapshots,
+        })
+      end
+
+      private def agent_auth_start(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        @authentication.login(agent_auth_provider(request))
+        Protocol::Response.ok
+      end
+
+      private def agent_auth_input(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        input = request.string(
+          "input",
+          "agent-auth-input needs text."
+        )
+        @authentication.input(agent_auth_provider(request), input)
+        Protocol::Response.ok
+      end
+
+      private def agent_auth_cancel(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        @authentication.cancel(agent_auth_provider(request))
+        Protocol::Response.ok
+      end
+
+      private def agent_auth_logout(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        @authentication.logout(agent_auth_provider(request))
+        Protocol::Response.ok
+      end
+
+      private def agent_auth_provider(
+        request : Protocol::Request,
+      ) : String
+        request.string(
+          "provider",
+          "Agent authentication needs a provider."
+        )
+      end
+
+      private def agent_auth_snapshots : JSON::Any
+        values = @authentication.snapshots.map do |snapshot|
+          fields = {
+            "provider"     => JSON::Any.new(snapshot.provider),
+            "display_name" => JSON::Any.new(snapshot.display_name),
+            "state"        => JSON::Any.new(snapshot.state.wire_name),
+            "output"       => JSON::Any.new(snapshot.output),
+          }
+          if detail = snapshot.detail
+            fields["detail"] = JSON::Any.new(detail)
+          end
+          JSON::Any.new(fields)
+        end
+        JSON::Any.new(values)
       end
 
       private def secrets_for(
