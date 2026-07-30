@@ -28,6 +28,8 @@ module Xd
       @pending_menu_action : Proc(Nil)?
       @restore_chat_id : String?
       @active_chat_key : String?
+      @reload_generation : Int64
+      @closed : Bool
 
       private class Source
         getter endpoint : Daemon::Endpoint
@@ -202,6 +204,8 @@ module Xd
         @restoring_expanded = false
         @closing = {} of UInt64 => {Gtk::TreeListRow, String}
         @save_expanded_queued = false
+        @reload_generation = 0_i64
+        @closed = false
 
         @root_model = Gio::ListStore.new(Gtk::StringObject.g_type)
         child_model_for_item = ->(item : Pointer(Void)) : Pointer(Void) {
@@ -353,24 +357,36 @@ module Xd
           return
         end
 
-        if response = call(
-             @local_source,
-             {"op" => JSON::Any.new("tree")}
-           )
-          @local_source.update(response)
-        end
+        @reload_generation += 1
+        generation = @reload_generation
+        load_remote = @remote.connected?
+        spawn do
+          local = request(
+            @local_source,
+            {"op" => JSON::Any.new("tree")}
+          )
+          remote = if load_remote
+                     request(
+                       @remote_source,
+                       {"op" => JSON::Any.new("tree")}
+                     )
+                   end
 
-        if @remote.connected?
-          if response = call(
-               @remote_source,
-               {"op" => JSON::Any.new("tree")},
-               quiet: true
-             )
-            @remote_source.update(response)
+          GLib.idle_add do
+            unless @closed || generation != @reload_generation
+              if response = local.body
+                @local_source.update(response)
+              elsif message = local.error
+                @on_error.call(message)
+              end
+              if response = remote.try(&.body)
+                @remote_source.update(response)
+              end
+              rebuild_tree
+            end
+            false
           end
         end
-
-        rebuild_tree
       end
 
       def reload(endpoint : Daemon::Endpoint) : Nil
@@ -426,6 +442,8 @@ module Xd
       end
 
       def close : Nil
+        @closed = true
+        @reload_generation += 1
         @remote.unsubscribe(@remote_state_subscription)
         @updater.close
       end
@@ -1367,11 +1385,13 @@ module Xd
           "name" => JSON::Any.new(name),
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
-        if created = call(
-             source,
-             request,
-             error_heading: "Could not create the folder"
-           )
+        call_async(
+          source,
+          request,
+          error_heading: "Could not create the folder"
+        ) do |created|
+          next unless created
+
           source.selected_folder = created["id"].as_s
           reload
         end
@@ -1382,18 +1402,23 @@ module Xd
         folder_id : String,
         title : String,
       ) : Nil
-        settings = call(source, {
-          "op"     => JSON::Any.new("folder-settings"),
-          "folder" => JSON::Any.new(folder_id),
-        }, error_heading: "Could not start the chat")
-        return unless settings
+        call_async(
+          source,
+          {
+            "op"     => JSON::Any.new("folder-settings"),
+            "folder" => JSON::Any.new(folder_id),
+          },
+          error_heading: "Could not start the chat"
+        ) do |settings|
+          next unless settings
 
-        DirectoryBrowser.present(
-          @parent,
-          panel_call(source),
-          settings["effective_workdir"]?.try(&.as_s?)
-        ) do |workdir|
-          create_chat_in(source, folder_id, title, workdir)
+          DirectoryBrowser.present(
+            @parent,
+            panel_call(source),
+            settings["effective_workdir"]?.try(&.as_s?)
+          ) do |workdir|
+            create_chat_in(source, folder_id, title, workdir)
+          end
         end
       end
 
@@ -1409,42 +1434,45 @@ module Xd
           "title"  => JSON::Any.new(title),
         }
         request["workdir"] = JSON::Any.new(workdir) if workdir
-        created = call(
+        call_async(
           source,
           request,
           error_heading: "Could not start the chat"
-        )
-        return unless created
+        ) do |created|
+          next unless created
 
-        source.selected_folder = folder_id
-        reload
-        @on_chat.call(source.endpoint, created["id"].as_s, title)
+          source.selected_folder = folder_id
+          reload
+          @on_chat.call(source.endpoint, created["id"].as_s, title)
+        end
       end
 
       private def rename_folder(node : Node, name : String) : Nil
-        if call(
-             node.source,
-             {
-               "op"     => JSON::Any.new("rename-folder"),
-               "folder" => JSON::Any.new(node.id),
-               "name"   => JSON::Any.new(name),
-             },
-             error_heading: "Could not rename the folder"
-           )
-          reload
+        call_async(
+          node.source,
+          {
+            "op"     => JSON::Any.new("rename-folder"),
+            "folder" => JSON::Any.new(node.id),
+            "name"   => JSON::Any.new(name),
+          },
+          error_heading: "Could not rename the folder"
+        ) do |renamed|
+          reload if renamed
         end
       end
 
       private def rename_chat(node : Node, title : String) : Nil
-        if call(
-             node.source,
-             {
-               "op"    => JSON::Any.new("rename-chat"),
-               "chat"  => JSON::Any.new(node.id),
-               "title" => JSON::Any.new(title),
-             },
-             error_heading: "Could not rename the chat"
-           )
+        call_async(
+          node.source,
+          {
+            "op"    => JSON::Any.new("rename-chat"),
+            "chat"  => JSON::Any.new(node.id),
+            "title" => JSON::Any.new(title),
+          },
+          error_heading: "Could not rename the chat"
+        ) do |renamed|
+          next unless renamed
+
           reload
           @on_chat.call(node.source.endpoint, node.id, title)
         end
@@ -1468,13 +1496,13 @@ module Xd
           "folder" => JSON::Any.new(folder_id),
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
-        return false unless call(
-                              source,
-                              request,
-                              error_heading: "Cannot Move the Folder"
-                            )
-
-        queue_tree_reload
+        call_async(
+          source,
+          request,
+          error_heading: "Cannot Move the Folder"
+        ) do |moved|
+          queue_tree_reload if moved
+        end
         true
       end
 
@@ -1500,15 +1528,15 @@ module Xd
           "“#{name}” and everything inside it will be moved to the trash.",
           "Move to Trash"
         ) do
-          if call(
-               source,
-               {
-                 "op"     => JSON::Any.new("trash-folder"),
-                 "folder" => JSON::Any.new(folder_id),
-               },
-               error_heading: "Could not move the folder to the trash"
-             )
-            reload
+          call_async(
+            source,
+            {
+              "op"     => JSON::Any.new("trash-folder"),
+              "folder" => JSON::Any.new(folder_id),
+            },
+            error_heading: "Could not move the folder to the trash"
+          ) do |trashed|
+            reload if trashed
           end
         end
       end
@@ -1517,14 +1545,16 @@ module Xd
         source : Source,
         chat_id : String,
       ) : Nil
-        if call(
-             source,
-             {
-               "op"   => JSON::Any.new("delete-chat"),
-               "chat" => JSON::Any.new(chat_id),
-             },
-             error_heading: "Could not delete the chat"
-           )
+        call_async(
+          source,
+          {
+            "op"   => JSON::Any.new("delete-chat"),
+            "chat" => JSON::Any.new(chat_id),
+          },
+          error_heading: "Could not delete the chat"
+        ) do |deleted|
+          next unless deleted
+
           @on_chat_deleted.call(source.endpoint, chat_id)
           reload
         end
@@ -1577,23 +1607,45 @@ module Xd
         }
       end
 
-      private def call(
+      private def request(
         source : Source,
         request : Hash(String, JSON::Any),
+      ) : PanelCallResult
+        PanelCallResult.new(source.endpoint.call(request), nil)
+      rescue error : Daemon::Client::Error
+        PanelCallResult.new(
+          nil,
+          error.message || "Daemon request failed."
+        )
+      end
+
+      private def call_async(
+        source : Source,
+        request_fields : Hash(String, JSON::Any),
         quiet : Bool = false,
         error_heading : String? = nil,
-      ) : Hash(String, JSON::Any)?
-        source.endpoint.call(request)
-      rescue error : Daemon::Client::Error
-        unless quiet
-          message = error.message || "Daemon request failed."
-          if heading = error_heading
-            show_error(heading, message)
-          else
-            @on_error.call(message)
+        &complete : Hash(String, JSON::Any)? -> Nil
+      ) : Nil
+        spawn do
+          result = request(source, request_fields)
+          GLib.idle_add do
+            unless @closed
+              if message = result.error
+                unless quiet
+                  if heading = error_heading
+                    show_error(heading, message)
+                  else
+                    @on_error.call(message)
+                  end
+                end
+                complete.call(nil)
+              else
+                complete.call(result.body)
+              end
+            end
+            false
           end
         end
-        nil
       end
 
       private def show_error(heading : String, message : String) : Nil
