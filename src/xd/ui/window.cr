@@ -14,6 +14,7 @@ require "./adw"
 require "./chat_controls"
 require "./pair_dialog"
 require "./pane_state"
+require "./search_dialog"
 require "./sidebar"
 require "./tool_panel"
 
@@ -311,6 +312,7 @@ module Xd
         overlay.child = @root_split
         overlay.add_overlay(divider_layer)
         @widget.content = overlay
+        install_selection_clearer
 
         @header_sizes = Gtk::SizeGroup.new(:vertical)
         @header_sizes.add_widget(@sidebar.header)
@@ -321,6 +323,7 @@ module Xd
           persist_window_layout
           false
         end
+        install_window_actions(application)
 
         subscribe(@local_client)
         subscribe(@remote)
@@ -340,6 +343,47 @@ module Xd
 
       def present : Nil
         @widget.present
+      end
+
+      private def install_window_actions(
+        application : Gtk::Application,
+      ) : Nil
+        search = Gio::SimpleAction.new("search", nil)
+        search.activate_signal.connect { show_search_dialog }
+        @widget.add_action(search)
+        application.set_accels_for_action(
+          "win.search",
+          ["<Control>k", "<Control>f"]
+        )
+      end
+
+      private def install_selection_clearer : Nil
+        press = Gtk::GestureClick.new
+        press.propagation_phase = Gtk::PropagationPhase::Capture
+        press.pressed_signal.connect do |_count, x, y|
+          focus = @widget.focus_widget
+          if label = focus.as?(Gtk::Label)
+            if label.has_css_class("xd-body")
+              target = @widget.pick(x, y, Gtk::PickFlags::Default)
+              label.select_region(0, 0) unless target &&
+                                               target.to_unsafe == label.to_unsafe
+            end
+          end
+        end
+        @widget.add_controller(press)
+      end
+
+      private def show_search_dialog : Nil
+        endpoint = @client
+        SearchDialog.new(
+          @widget,
+          ->(request : Hash(String, JSON::Any)) {
+            call_on(endpoint, request)
+          },
+          ->(id : String, title : String) {
+            open_chat(endpoint, id, title)
+          }
+        ).present
       end
 
       private def pane_button(
@@ -553,8 +597,15 @@ module Xd
       end
 
       private def call(fields : Hash(String, JSON::Any))
+        call_on(@client, fields)
+      end
+
+      private def call_on(
+        endpoint : Daemon::Endpoint,
+        fields : Hash(String, JSON::Any),
+      ) : Hash(String, JSON::Any)?
         @status.text = ""
-        @client.call(fields)
+        endpoint.call(fields)
       rescue error : Daemon::Client::Error
         @status.text = error.message || "Daemon request failed."
         nil
@@ -715,6 +766,7 @@ module Xd
         row.wrap = true
         row.wrap_mode = :word_char
         row.selectable = true
+        row.add_css_class("xd-body")
         row.add_css_class("xd-message")
         row.add_css_class("xd-message-#{role}")
         @transcript.append(row)
@@ -728,6 +780,7 @@ module Xd
         row.xalign = 0_f32
         row.wrap = false
         row.selectable = true
+        row.add_css_class("xd-body")
         row.add_css_class("xd-message")
         row.add_css_class("xd-message-diff")
         @transcript.append(row)
@@ -778,6 +831,7 @@ module Xd
         detail.wrap = true
         detail.wrap_mode = :word_char
         detail.selectable = true
+        detail.add_css_class("xd-body")
 
         card = Gtk::Box.new(:vertical, 6)
         card.add_css_class("xd-subagent")
