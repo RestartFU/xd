@@ -1,5 +1,6 @@
 require "gtk4"
 require "../agent/catalog"
+require "./adw"
 require "./context_usage"
 
 module Xd
@@ -31,6 +32,7 @@ module Xd
       @model_button : Gtk::Button
       @effort_button : Gtk::Button
       @access_button : Gtk::Button
+      @build_button : Gtk::ToggleButton
       @plan_button : Gtk::ToggleButton
       @workspace_button : Gtk::MenuButton
       @context_meter : Gtk::ProgressBar
@@ -60,11 +62,25 @@ module Xd
         @access_button.tooltip_text = "Filesystem access"
         @access_button.clicked_signal.connect { cycle_access }
 
-        @plan_button = Gtk::ToggleButton.new_with_label("Plan")
-        @plan_button.add_css_class("flat")
-        @plan_button.tooltip_text = "Plan without editing"
+        @build_button = Gtk::ToggleButton.new
+        @build_button.child = Adw::ButtonContent.new(
+          icon_name: "package-x-generic-symbolic",
+          label: "Build"
+        )
+        @build_button.tooltip_text = "Carry the work out"
+
+        @plan_button = Gtk::ToggleButton.new
+        @plan_button.child = Adw::ButtonContent.new(
+          icon_name: "view-list-bullet-symbolic",
+          label: "Plan"
+        )
+        @plan_button.tooltip_text =
+          "Work out an approach without changing anything"
+        @plan_button.group = @build_button
+        @build_button.active = true
         @plan_button.toggled_signal.connect do
           unless @updating
+            @access_button.sensitive = !@plan_button.active?
             @on_option.call(
               "plan",
               @plan_button.active? ? "true" : "false"
@@ -90,7 +106,11 @@ module Xd
         @identity.append(@context_meter)
         @run.append(@effort_button)
         @run.append(@access_button)
-        @run.append(@plan_button)
+        modes = Gtk::Box.new(:horizontal, 0)
+        modes.add_css_class("linked")
+        modes.append(@build_button)
+        modes.append(@plan_button)
+        @run.append(modes)
         @widget.append(@identity)
         @widget.append(@run)
         self.sensitive = false
@@ -100,7 +120,8 @@ module Xd
         @backend_button.sensitive = enabled
         @model_button.sensitive = enabled
         @effort_button.sensitive = enabled
-        @access_button.sensitive = enabled
+        @access_button.sensitive = enabled && !@plan_button.active?
+        @build_button.sensitive = enabled
         @plan_button.sensitive = enabled
         @workspace_button.sensitive = enabled
         enabled
@@ -122,7 +143,9 @@ module Xd
         @model_button.label = backend.model_label(@model)
         @effort_button.label = @effort.label
         @access_button.label = @access.label
-        @plan_button.active = state["plan"]?.try(&.as_bool?) || false
+        plan = state["plan"]?.try(&.as_bool?) || false
+        (plan ? @plan_button : @build_button).active = true
+        @access_button.sensitive = !plan
         update_context_meter(state)
 
         workdir = state["workdir"]?.try(&.as_s?)
