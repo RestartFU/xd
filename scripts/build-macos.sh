@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+#
+# Build, validate, and pack the complete Apple Silicon Crystal app.
+#
+#   build-macos.sh <output-directory> [nightly|release]
+#
+# Build dependencies are supplied by the native runner. Runtime dependencies,
+# Git, agents, whisper.cpp, and OpenSSL are all copied into the resulting app.
+
+set -euo pipefail
+
+OUT="${1:?empty output directory}"
+PROFILE="${2:-nightly}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+[ "$(uname -s)" = Darwin ] || {
+  echo "build-macos: macOS is required" >&2
+  exit 1
+}
+[ "$(uname -m)" = arm64 ] || {
+  echo "build-macos: Apple Silicon is required" >&2
+  exit 1
+}
+case "$PROFILE" in
+  nightly)
+    BUNDLE_NAME=xd-nightly
+    ASSET=xd-nightly-macos-arm64.zip
+    CRYSTAL_PROFILE=nightly
+    ;;
+  release)
+    BUNDLE_NAME=xd
+    ASSET=xd-macos-arm64.zip
+    CRYSTAL_PROFILE=default
+    ;;
+  *)
+    echo "build-macos: profile must be nightly or release" >&2
+    exit 1
+    ;;
+esac
+
+if [ -d "$OUT" ] && [ -n "$(find "$OUT" -mindepth 1 -print -quit)" ]; then
+  echo "build-macos: output directory must be empty" >&2
+  exit 1
+fi
+
+for command in crystal ditto pkg-config shards; do
+  command -v "$command" >/dev/null 2>&1 || {
+    echo "build-macos: $command is required" >&2
+    exit 1
+  }
+done
+crystal --version | grep -F 'Crystal 1.21.0'
+for package in gtk4 libadwaita-1 vte-2.91-gtk4 portaudio-2.0 sqlite3; do
+  pkg-config --exists "$package" || {
+    echo "build-macos: pkg-config package missing: $package" >&2
+    exit 1
+  }
+done
+
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-build.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+cd "$ROOT"
+shards install --production --frozen
+./bin/gi-crystal
+
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
+XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+  crystal spec --error-trace
+XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+  crystal build src/xd.cr --release --no-debug -o "$WORK/xd"
+"$WORK/xd" --bundle-runtime | grep -Fx crystal
+
+scripts/stage-native.sh "$WORK/xd" "$WORK/stage" "$PROFILE"
+scripts/fetch-native-agents.sh macos-arm64 "$WORK/stage"
+scripts/build-macos-git.sh "$WORK/stage"
+scripts/build-native-whisper.sh macos-arm64 "$WORK/stage"
+scripts/build-macos-openssl.sh "$WORK/stage"
+scripts/bundle-macos.sh "$WORK/stage" "$OUT" "$PROFILE"
+
+ditto -c -k --keepParent \
+  "$OUT/$BUNDLE_NAME.app" \
+  "$OUT/$ASSET"
+(
+  cd "$OUT"
+  shasum -a 256 "$ASSET" > "$ASSET.sha256"
+)
+
+printf 'macOS artifact: %s\n' "$OUT/$ASSET"
