@@ -2,6 +2,7 @@ require "json"
 require "gtk4"
 require "../agent/catalog"
 require "./adw"
+require "./context_dialog"
 require "./directory_browser"
 require "./dialogs"
 require "./panel_call"
@@ -225,56 +226,12 @@ module Xd
       end
 
       def context(folder_id : String, folder_name : String) : Nil
-        response = call({
-          "op"     => JSON::Any.new("folder-context"),
-          "folder" => JSON::Any.new(folder_id),
-        })
-        return unless response
-
-        window, content, actions = Dialogs.shell(
+        ContextDialog.new(
           @parent,
-          "#{folder_name} Agent Context"
-        )
-        window.resizable = true
-        window.set_default_size(620, 440)
-
-        description = Gtk::Label.new(
-          "Instructions accumulate from parent folders and are appended to " \
-          "every agent turn in this workspace."
-        )
-        description.xalign = 0_f32
-        description.wrap = true
-
-        editor = Gtk::TextView.new
-        editor.buffer.text = response["context"].as_s? || ""
-        editor.wrap_mode = :word_char
-        editor.monospace = true
-        editor.vexpand = true
-        scroll = Gtk::ScrolledWindow.new
-        scroll.vexpand = true
-        scroll.min_content_height = 260
-        scroll.child = editor
-
-        content.append(description)
-        content.append(scroll)
-
-        cancel = Gtk::Button.new_with_label("Cancel")
-        cancel.clicked_signal.connect { window.destroy }
-        save = Gtk::Button.new_with_label("Save")
-        save.add_css_class("suggested-action")
-        save.clicked_signal.connect do
-          text = clean(editor.buffer.text)
-          request = {
-            "op"      => JSON::Any.new("set-folder-context"),
-            "folder"  => JSON::Any.new(folder_id),
-            "context" => nullable(text),
-          }
-          window.destroy if call(request)
-        end
-        actions.append(cancel)
-        actions.append(save)
-        window.present
-        editor.grab_focus
+          @request,
+          folder_id,
+          folder_name
+        ).present
       end
 
       def secrets(
