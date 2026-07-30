@@ -334,6 +334,7 @@ module Xd
           end
         end
 
+        restore_active_chat
         @sidebar.reload
       end
 
@@ -569,6 +570,8 @@ module Xd
         clear_attachments
         @client = endpoint
         @active_chat = id
+        prefix = endpoint.same?(@local_client) ? "local:" : "remote:"
+        @settings.set_string("active-chat", "#{prefix}#{id}")
         @stream_label = nil
         @chat_title.title = title
         @chat_stack.visible_child_name = "chat"
@@ -600,6 +603,7 @@ module Xd
         remember_panes
         hide_panes_for_switch
         @active_chat = nil
+        @settings.set_string("active-chat", "")
         @stream_label = nil
         @working = false
         @chat_title.title = "xd"
@@ -623,6 +627,17 @@ module Xd
         @queue_box.visible = false
         clear_attachments
         @status.text = ""
+      end
+
+      private def restore_active_chat : Nil
+        saved = @settings.string("active-chat")
+        if saved.starts_with?("local:")
+          id = saved.lchop("local:")
+          @sidebar.restore_chat(id, false) unless id.empty?
+        elsif saved.starts_with?("remote:")
+          id = saved.lchop("remote:")
+          @sidebar.restore_chat(id, true) unless id.empty?
+        end
       end
 
       private def load_messages : Nil

@@ -25,7 +25,9 @@ checked against the C application where visual behavior is involved.
   restart verification remains.
 - `[x]` Restore the C overlay divider spanning the full header width.
 - `[x]` Sidebar and chat headers share one vertical `GtkSizeGroup`.
-- `[ ]` Restore active local/remote chat at startup.
+- `[~]` Active local/remote chat uses the C `local:`/`remote:` setting, restores
+  its ancestor branch, and clears on deletion/removal; restart UI verification
+  remains.
 - `[ ]` Clear text selection when clicking outside selectable message text.
 - `[~]` Search exists, but exact window actions and Ctrl+K/Ctrl+F behavior need
   verification.
@@ -145,8 +147,8 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   and terminal operations share the same protocol.
 - `[~]` Crystal storage and agent behavior have broad specs, but every old C
   test/edge case still needs a mapped Crystal assertion.
-- `[ ]` Restore active chat and per-device pane state without introducing a
-  second local implementation path.
+- `[~]` Active chat and per-device pane state restore through the same endpoint
+  path; full restart matrix remains.
 
 C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 `tests/*.c`.

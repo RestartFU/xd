@@ -21,6 +21,7 @@ module Xd
       @editing_parent_id : String?
       @pending_menu : Gtk::Popover?
       @pending_menu_action : Proc(Nil)?
+      @restore_chat_id : String?
 
       private class Source
         getter endpoint : Daemon::Endpoint
@@ -186,6 +187,9 @@ module Xd
         @tree_reload_queued = false
         @pending_menu = nil
         @pending_menu_action = nil
+        @restore_chat_id = nil
+        @restore_chat_remote = false
+        @restoring_chat = false
         @restore_queued = false
         @restoring_expanded = false
         @closing = {} of UInt64 => {Gtk::TreeListRow, String}
@@ -333,6 +337,14 @@ module Xd
       def reload(endpoint : Daemon::Endpoint) : Nil
         return reload if endpoint.same?(@local_source.endpoint)
         return reload if endpoint.same?(@remote_source.endpoint)
+      end
+
+      def restore_chat(id : String, remote : Bool) : Nil
+        return if id.empty?
+
+        @restore_chat_id = id
+        @restore_chat_remote = remote
+        queue_restore
       end
 
       def close : Nil
@@ -859,6 +871,7 @@ module Xd
         return if node.placeholder?
         return if @selected_key == node.key
 
+        @restore_chat_id = nil unless @restoring_chat
         @selected_key = node.key
         if folder_id = node.folder_id
           node.source.selected_folder = folder_id
@@ -944,6 +957,19 @@ module Xd
       end
 
       private def restore_tree_state : Nil
+        restore = restore_node
+        if restore
+          folder_id = restore.folder_id
+          while folder_id
+            @expanded << folder_id
+            folder_id = restore.source.folder_parents[folder_id]?
+          end
+          if restore.source.remote
+            remote_root = @nodes.each_value.find(&.kind.remote_root?)
+            @expanded << remote_root.id if remote_root
+          end
+        end
+
         @restoring_expanded = true
         index = 0_u32
         while index < @tree_model.n_items
@@ -958,20 +984,35 @@ module Xd
         end
         @restoring_expanded = false
 
-        selected = @selected_key
+        selected = restore.try(&.key) || @selected_key
         return unless selected
 
         index = 0_u32
         while index < @tree_model.n_items
           row = @tree_model.row(index)
           if row && node_for_row(row).try(&.key) == selected
+            @restoring_chat = !!restore
             @selection.selected = index
+            @restoring_chat = false
+            @restore_chat_id = nil if restore
             break
           end
           index += 1
         end
       ensure
+        @restoring_chat = false
         @restoring_expanded = false
+      end
+
+      private def restore_node : Node?
+        id = @restore_chat_id
+        return unless id
+
+        @nodes.each_value.find do |node|
+          node.chat? &&
+            node.id == id &&
+            node.source.remote == @restore_chat_remote
+        end
       end
 
       private def open_row_menu(box : Gtk::Box, node : Node) : Nil
