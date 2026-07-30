@@ -93,6 +93,23 @@ private def with_daemon_engine(
 end
 
 describe Xd::Daemon::Engine do
+  it "returns a response when a handler raises unexpectedly" do
+    token_generator = -> { raise "entropy source failed" }
+    with_daemon_engine(token_generator: token_generator) do |_store, engine|
+      remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      code = engine.arm_pairing(1.minute)
+
+      response = engine.dispatch(remote, {
+        "op"   => "pair",
+        "code" => code,
+        "name" => "failure proof",
+      }.to_json)
+
+      response.success?.should be_false
+      response["error"].as_s.should eq("Internal daemon error.")
+    end
+  end
+
   it "uses the same dispatcher after transport authentication" do
     with_daemon_engine do |_store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)

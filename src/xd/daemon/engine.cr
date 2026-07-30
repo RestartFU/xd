@@ -197,6 +197,12 @@ module Xd
         failed_outcome(error.message || "Terminal error")
       rescue error : VoiceJobs::Error
         failed_outcome(error.message || "Voice input error")
+      rescue error
+        STDERR.puts(
+          "xd: unexpected daemon request failure: " \
+          "#{error.class.name}: #{error.message}"
+        )
+        failed_outcome("Internal daemon error.")
       end
 
       # These operations must remain available while a repository read,
