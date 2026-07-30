@@ -1,14 +1,14 @@
 require "json"
 require "gtk4"
-require "../syntax"
+require "../syntax_highlight"
 require "./adw"
 require "./panel_call"
 
 module Xd
   module UI
     class FilePane
-      FILE_LIMIT           = 1024 * 1024
-      HIGHLIGHT_LINE_LIMIT = 8000
+      FILE_LIMIT      = 1024 * 1024
+      HIGHLIGHT_BATCH = 256
 
       record Entry, name : String, directory : Bool
 
@@ -104,7 +104,10 @@ module Xd
         @editor.bottom_margin = 10
         @editor.add_css_class("xd-file-preview")
         @preview = @editor.buffer
-        @preview.modified_changed_signal.connect { update_actions }
+        @preview.modified_changed_signal.connect do
+          @sequence += 1 if @preview.modified
+          update_actions
+        end
         build_syntax_tags
         capture_save_shortcut
 
@@ -345,13 +348,17 @@ module Xd
 
       private def show_preview_text(path : String, text : String) : Nil
         @preview.text = text
-        highlight_preview(path, text)
+        @preview.remove_all_tags(
+          @preview.start_iter,
+          @preview.end_iter
+        )
         @preview.modified = false
         @file_path = path
         @showing_preview = true
         set_header_path(path)
         @stack.visible_child_name = "preview"
         @editor.grab_focus
+        highlight_preview(path, text, next_token)
       end
 
       private def save_file : Nil
@@ -501,32 +508,45 @@ module Xd
         end
       end
 
-      private def highlight_preview(path : String, text : String) : Nil
-        @preview.remove_all_tags(
-          @preview.start_iter,
-          @preview.end_iter
-        )
-        language = Syntax.language_for_path(path)
-        return if language.none?
-
-        state = SyntaxState.new
-        offset = 0
-        lines = text.split('\n', remove_empty: false)
-        lines.first(HIGHLIGHT_LINE_LIMIT)
-          .each_with_index do |line, index|
-            Syntax.scan_line(language, line, state).each do |piece|
-              finish = offset + piece.text.size
-              if tag = @tags[piece.token]?
-                @preview.apply_tag(
-                  tag,
-                  @preview.iter_at_offset(offset),
-                  @preview.iter_at_offset(finish)
-                )
-              end
-              offset = finish
-            end
-            offset += 1 if index < lines.size - 1
+      private def highlight_preview(
+        path : String,
+        text : String,
+        token : Int64,
+      ) : Nil
+        Thread.new do
+          spans = SyntaxHighlight.prepare(path, text)
+          GLib.idle_add do
+            apply_highlight_batch(path, token, spans, 0)
           end
+        end
+      end
+
+      private def apply_highlight_batch(
+        path : String,
+        token : Int64,
+        spans : Array(HighlightSpan),
+        start : Int,
+      ) : Bool
+        return false unless active?(token, @chat_id || "") &&
+                            @file_path == path &&
+                            !@preview.modified
+
+        finish = Math.min(start + HIGHLIGHT_BATCH, spans.size)
+        spans[start...finish].each do |span|
+          if tag = @tags[span.token]?
+            @preview.apply_tag(
+              tag,
+              @preview.iter_at_offset(span.start),
+              @preview.iter_at_offset(span.finish)
+            )
+          end
+        end
+        if finish < spans.size
+          GLib.idle_add do
+            apply_highlight_batch(path, token, spans, finish)
+          end
+        end
+        false
       end
 
       private def capture_save_shortcut : Nil
