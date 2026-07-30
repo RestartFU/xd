@@ -133,7 +133,8 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 - `[ ]` Replace provisional GTK dialogs with the exact Adwaita dialog types,
   response appearance, focus, shortcuts, validation, and copy.
 - `[ ]` Port directory browser.
-- `[ ]` Port branch-build dialog.
+- `[~]` Branch/PR parsing and shell-safe fetch/build/install command match C;
+  panel UI and long-running build lifecycle remain.
 - `[ ]` Match toasts and startup/database error presentation.
 
 C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
