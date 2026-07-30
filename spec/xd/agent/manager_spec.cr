@@ -136,32 +136,6 @@ describe Xd::Agent::Manager do
     end
   end
 
-  it "coordinates CLI updates with active and new turns" do
-    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
-      chat_id = store.create_chat(folder_id, "Chat", "codex")
-
-      manager.begin_backend_update("codex")
-      expect_raises(
-        Xd::Agent::Manager::Error,
-        "Codex is updating. Try again when it finishes."
-      ) do
-        manager.send(chat_id, "blocked during replacement")
-      end
-      launcher.specs.should be_empty
-      store.list_messages(chat_id).should be_empty
-      manager.finish_backend_update("codex", true)
-
-      manager.send(chat_id, "running")
-      expect_raises(
-        Xd::Agent::Manager::Error,
-        "Stop active assistant turns before updating bundled CLIs."
-      ) do
-        manager.begin_backend_update("codex")
-      end
-      launcher.finish(0, true)
-    end
-  end
-
   it "stores and broadcasts a complete streamed turn" do
     with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
       chat_id = store.create_chat(folder_id, "New Chat", "claude")

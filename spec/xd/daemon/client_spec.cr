@@ -69,7 +69,7 @@ private def await_cli_event(
     end
     return last_event if last_event && ready.call(last_event)
     if Time.instant >= deadline
-      fail "#{provider} remote CLI update did not settle: #{last_event}"
+      fail "#{provider} remote CLI version did not settle: #{last_event}"
     end
     sleep 5.milliseconds
   end
@@ -520,7 +520,7 @@ describe Xd::Daemon::Client do
     end
   end
 
-  it "updates bundled assistant CLIs over paired TLS" do
+  it "reads bundled assistant CLI versions over paired TLS" do
     directory = File.join(
       Dir.tempdir,
       "xd-client-cli-update-#{Random::Secure.hex(12)}"
@@ -534,9 +534,6 @@ describe Xd::Daemon::Client do
       case "$*" in
         "--version")
           printf '%s %s\n' "$name" "$(cat "$CLI_STATE/$name")"
-          ;;
-        "update")
-          printf '2.0.0\n' > "$CLI_STATE/$name"
           ;;
         *)
           exit 2
@@ -552,11 +549,11 @@ describe Xd::Daemon::Client do
     store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
     engine = Xd::Daemon::Engine.new(
       store,
-      token_generator: -> { "cli-update-token" },
-      updates_resolver: ->(provider : String) {
+      token_generator: -> { "cli-version-token" },
+      cli_version_resolver: ->(provider : String) {
         File.join(directory, provider)
       },
-      updates_environment: {"CLI_STATE" => state}
+      cli_version_environment: {"CLI_STATE" => state}
     )
     server = Xd::Daemon::Server.new(engine)
     client : Xd::Daemon::Client? = nil
@@ -591,15 +588,6 @@ describe Xd::Daemon::Client do
             event["version"]?.try(&.as_s?).try(&.ends_with?("1.0.0")) == true
         end
         checked["version"].as_s.should end_with("1.0.0")
-      end
-
-      client.call({"op" => JSON::Any.new("agent-clis-update")})
-      %w(codex claude).each do |provider|
-        updated = await_cli_event(events, events_mutex, provider) do |event|
-          event["state"].as_s == "updated"
-        end
-        updated["version"].as_s.should end_with("2.0.0")
-        File.read(File.join(state, provider)).strip.should eq("2.0.0")
       end
     ensure
       client.try(&.close)

@@ -82,18 +82,14 @@ module Xd
           accounts.add(provider.row)
         end
 
-        cli_updates = Adw::PreferencesGroup.new
-        cli_updates.title = "Bundled CLI updates"
-        cli_updates.description =
-          "Updates run on this machine through its daemon."
-        @update_row = Adw::ActionRow.new
-        @update_row.title = "Codex and Claude Code"
-        @update_row.subtitle = "Checking installed versions…"
-        @update_button = Gtk::Button.new_with_label("Update CLIs")
-        @update_button.valign = :center
-        @update_button.clicked_signal.connect { update_clis }
-        @update_row.add_suffix(@update_button)
-        cli_updates.add(@update_row)
+        cli_versions = Adw::PreferencesGroup.new
+        cli_versions.title = "Bundled CLI versions"
+        cli_versions.description =
+          "Bundled with xd and updated only when xd updates."
+        @cli_version_row = Adw::ActionRow.new
+        @cli_version_row.title = "Codex and Claude Code"
+        @cli_version_row.subtitle = "Checking installed versions…"
+        cli_versions.add(@cli_version_row)
 
         @open = Gtk::Button.new_with_label("Open Sign-In Page")
         @open.add_css_class("suggested-action")
@@ -158,7 +154,7 @@ module Xd
         body.margin_end = 22
         body.vexpand = true
         body.append(accounts)
-        body.append(cli_updates)
+        body.append(cli_versions)
         body.append(@instructions)
         body.append(@status)
 
@@ -224,9 +220,9 @@ module Xd
         @subscription = @endpoint.subscribe do |event|
           name = event["event"]?.try(&.as_s?)
           next unless {
-            "agent-auth-changed",
-            "agent-cli-changed",
-          }.includes?(name)
+                        "agent-auth-changed",
+                        "agent-cli-changed",
+                      }.includes?(name)
 
           GLib.idle_add do
             if name == "agent-auth-changed"
@@ -279,21 +275,6 @@ module Xd
         return if @closed
 
         request_async({"op" => JSON::Any.new("agent-clis")}) do |body|
-          providers = body["providers"]?.try(&.as_a?) || [] of JSON::Any
-          providers.each do |provider|
-            if fields = provider.as_h?
-              apply_cli_snapshot(fields)
-            end
-          end
-        end
-      end
-
-      private def update_clis : Nil
-        return if @closed
-
-        @update_button.label = "Updating…"
-        @update_button.sensitive = false
-        request_async({"op" => JSON::Any.new("agent-clis-update")}) do |body|
           providers = body["providers"]?.try(&.as_a?) || [] of JSON::Any
           providers.each do |provider|
             if fields = provider.as_h?
@@ -396,8 +377,7 @@ module Xd
                 show_status(message, true)
                 @code.sensitive = true
                 @send.sensitive = true
-                @update_button.sensitive = true
-                update_cli_row
+                update_cli_version_row
               elsif response = body
                 on_success.call(response)
               end
@@ -421,33 +401,24 @@ module Xd
           fields["state"]?.try(&.as_s?) || "idle"
         @cli_versions[provider] = fields["version"]?.try(&.as_s?)
         @cli_details[provider] = fields["detail"]?.try(&.as_s?)
-        update_cli_row
+        update_cli_version_row
       end
 
-      private def update_cli_row : Nil
-        updating = @cli_states.any? { |_provider, state| state == "updating" }
+      private def update_cli_version_row : Nil
         failed = @cli_states.find { |_provider, state| state == "failed" }
         if failed
           provider = failed[0]
           backend = Agent::Catalog.lookup(provider)
-          @update_row.subtitle =
+          @cli_version_row.subtitle =
             @cli_details[provider] ||
-            "#{backend.try(&.display_name) || provider} update failed."
+              "#{backend.try(&.display_name) || provider} version check failed."
         else
           versions = Agent::Catalog.all.map do |backend|
             version = @cli_versions[backend.id]?
             version ? version : "#{backend.display_name}: checking…"
           end
-          @update_row.subtitle = versions.join(" · ")
+          @cli_version_row.subtitle = versions.join(" · ")
         end
-        @update_button.label = if updating
-                                 "Updating…"
-                               elsif failed
-                                 "Retry"
-                               else
-                                 "Update CLIs"
-                               end
-        @update_button.sensitive = !updating
       end
 
       private def apply_snapshot(

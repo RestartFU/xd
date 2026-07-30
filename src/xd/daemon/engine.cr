@@ -3,7 +3,7 @@ require "random/secure"
 require "../agent/authentication"
 require "../agent/manager"
 require "../agent/secrets"
-require "../agent/updates"
+require "../agent/cli_versions"
 require "../protocol/message"
 require "../storage/workflow_state"
 require "../version"
@@ -50,8 +50,8 @@ module Xd
         authentication_resolver : Agent::Authentication::Resolver? = nil,
         authentication_environment : Hash(String, String)? = nil,
         agent_authorizer : Agent::Manager::Authorizer? = nil,
-        updates_resolver : Agent::Updates::Resolver? = nil,
-        updates_environment : Hash(String, String)? = nil,
+        cli_version_resolver : Agent::CliVersions::Resolver? = nil,
+        cli_version_environment : Hash(String, String)? = nil,
         voice_model_factory : VoiceJobs::ModelFactory? = nil,
         voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
       )
@@ -100,18 +100,12 @@ module Xd
           clock: @clock,
           authorizer: authorizer
         )
-        @updates = Agent::Updates.new(
+        @cli_versions = Agent::CliVersions.new(
           ->(name : String, fields : Hash(String, JSON::Any)) {
             publish_async_event(name, fields)
           },
-          resolver: updates_resolver,
-          environment: updates_environment,
-          begin_update: ->(provider : String) {
-            @agents.begin_backend_update(provider)
-          },
-          finish_update: ->(provider : String, success : Bool) {
-            @agents.finish_backend_update(provider, success)
-          }
+          resolver: cli_version_resolver,
+          environment: cli_version_environment
         )
         @voice = VoiceJobs.new(
           ->(name : String, fields : Hash(String, JSON::Any), audience : UInt64) {
@@ -183,8 +177,8 @@ module Xd
         failed_outcome(error.message || "Agent secrets error")
       rescue error : Agent::Authentication::Error
         failed_outcome(error.message || "Agent authentication error")
-      rescue error : Agent::Updates::Error
-        failed_outcome(error.message || "Assistant update error")
+      rescue error : Agent::CliVersions::Error
+        failed_outcome(error.message || "Assistant version error")
       rescue error : Agent::Manager::Error
         failed_outcome(error.message || "Agent error")
       rescue error : Filesystem::Error
@@ -244,7 +238,7 @@ module Xd
         @repository_monitor.close
         @terminals.close
         @voice.close
-        @updates.close
+        @cli_versions.close
         @authentication.close
         @agents.close
       end
@@ -274,8 +268,6 @@ module Xd
           agent_auth_logout(request)
         when Protocol::Operation::AgentClis
           agent_clis
-        when Protocol::Operation::AgentClisUpdate
-          agent_clis_update
         when Protocol::Operation::Tree
           tree
         when Protocol::Operation::NewFolder
@@ -531,21 +523,14 @@ module Xd
       end
 
       private def agent_clis : Protocol::Response
-        @updates.refresh
-        Protocol::Response.ok({
-          "providers" => agent_cli_snapshots,
-        })
-      end
-
-      private def agent_clis_update : Protocol::Response
-        @updates.update_all
+        @cli_versions.refresh
         Protocol::Response.ok({
           "providers" => agent_cli_snapshots,
         })
       end
 
       private def agent_cli_snapshots : JSON::Any
-        values = @updates.snapshots.map do |snapshot|
+        values = @cli_versions.snapshots.map do |snapshot|
           JSON::Any.new(snapshot.wire_fields)
         end
         JSON::Any.new(values)

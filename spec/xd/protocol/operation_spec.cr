@@ -6,7 +6,7 @@ describe Xd::Protocol::Operation do
       Xd::Protocol::Operation::Invalid
     ))
 
-    operations.size.should eq(49)
+    operations.size.should eq(48)
 
     operations.each do |operation|
       operation.wire_name.should_not be_empty
@@ -17,6 +17,7 @@ describe Xd::Protocol::Operation do
   it "rejects unknown operations" do
     Xd::Protocol::Operation.from_wire?("").should be_nil
     Xd::Protocol::Operation.from_wire?("not-an-operation").should be_nil
+    Xd::Protocol::Operation.from_wire?("agent-clis-update").should be_nil
   end
 
   it "allows only handshake operations before authentication" do

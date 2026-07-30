@@ -5,12 +5,8 @@ require "./executable"
 
 module Xd
   module Agent
-    # Daemon-owned updater for official bundled assistant CLIs.
-    #
-    # Update commands can take time and replace their executable, so every
-    # operation runs in a fiber and publishes structured state over the same
-    # Unix/TLS event bus as authentication.
-    class Updates
+    # Daemon-owned version reader for bundled assistant CLIs.
+    class CliVersions
       OUTPUT_LIMIT = 4096
 
       class Error < Exception
@@ -19,16 +15,12 @@ module Xd
       enum State
         Idle
         Checking
-        Updating
-        Updated
         Failed
 
         def wire_name : String
           case self
           when Idle     then "idle"
           when Checking then "checking"
-          when Updating then "updating"
-          when Updated  then "updated"
           when Failed   then "failed"
           else               "idle"
           end
@@ -80,8 +72,6 @@ module Xd
 
       alias Publisher = Proc(String, Hash(String, JSON::Any), Nil)
       alias Resolver = Proc(String, String)
-      alias BeginUpdate = Proc(String, Nil)
-      alias FinishUpdate = Proc(String, Bool, Nil)
 
       @entries : Hash(String, Entry)
       @mutex = Mutex.new
@@ -91,8 +81,6 @@ module Xd
         @publisher : Publisher = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
         resolver : Resolver? = nil,
         environment : Hash(String, String)? = nil,
-        @begin_update : BeginUpdate = ->(_provider : String) { },
-        @finish_update : FinishUpdate = ->(_provider : String, _success : Bool) { },
       )
         @resolver = resolver || ->(name : String) { Executable.resolve(name) }
         @environment = environment || Environment.host
@@ -110,11 +98,7 @@ module Xd
       end
 
       def refresh : Nil
-        Catalog.all.each { |backend| begin_command(backend.id, false) }
-      end
-
-      def update_all : Nil
-        Catalog.all.each { |backend| begin_command(backend.id, true) }
+        Catalog.all.each { |backend| begin_check(backend.id) }
       end
 
       def close : Nil
@@ -130,74 +114,52 @@ module Xd
         end
       end
 
-      private def begin_command(provider : String, update : Bool) : Nil
+      private def begin_check(provider : String) : Nil
         serial = @mutex.synchronize do
-          raise Error.new("Assistant updater is stopping.") if @closed
+          raise Error.new("Assistant version reader is stopping.") if @closed
 
           entry = entry!(provider)
-          next nil if entry.process ||
-                      entry.state.checking? ||
-                      entry.state.updating?
+          next nil if entry.process || entry.state.checking?
 
-          @begin_update.call(provider) if update
           entry.serial += 1
-          entry.state = update ? State::Updating : State::Checking
+          entry.state = State::Checking
           entry.detail = nil
           publish_state(entry.snapshot)
           entry.serial
         end
-        spawn run_command(provider, serial.not_nil!, update) if serial
+        spawn run_check(provider, serial.not_nil!) if serial
       rescue error
         raise Error.new(error.message)
       end
 
-      private def run_command(
+      private def run_check(
         provider : String,
         serial : Int64,
-        update : Bool,
       ) : Nil
         backend = @mutex.synchronize { entry!(provider).backend }
         executable = @resolver.call(backend.program)
-        before = version(executable)
-        if update
-          status, output = run(executable, ["update"], provider, serial)
-          unless status.success?
-            return finish_failed(
-              provider,
-              serial,
-              command_error(output, status),
-              update
-            )
-          end
+        status, output = run(executable, ["--version"], provider, serial)
+        unless status.success?
+          return finish_failed(
+            provider,
+            serial,
+            version_error(output, status)
+          )
         end
-        after = version(executable)
-        detail = if update
-                   before == after ?
-                     "Already up to date." :
-                     "Updated from #{before || "unknown"} to #{after || "unknown"}."
-                 end
-        finish_success(provider, serial, after || before, detail, update)
+        version = clean(output).lines.map(&.strip).reject(&.empty?).first?
+        finish_success(provider, serial, version)
       rescue error : File::Error | IO::Error
         finish_failed(
           provider,
           serial,
-          "Cannot update #{provider}: #{error.message}",
-          update
+          "Cannot read #{provider} version: #{error.message}"
         )
       rescue error
         finish_failed(
           provider,
           serial,
-          error.message || "Assistant update failed.",
-          update
+          error.message || "Cannot read assistant version."
         )
-      end
-
-      private def version(executable : String) : String?
-        status, output = run(executable, ["--version"], nil, nil)
-        return unless status.success?
-
-        clean(output).lines.map(&.strip).reject(&.empty?).first?
       end
 
       private def run(
@@ -207,7 +169,7 @@ module Xd
         serial : Int64?,
       ) : {Process::Status, String}
         environment = @environment.dup
-        environment.delete("DISABLE_AUTOUPDATER")
+        environment["DISABLE_AUTOUPDATER"] = "1"
         environment["NO_COLOR"] = "1"
         environment["TERM"] = "dumb"
         output = IO::Memory.new
@@ -258,8 +220,6 @@ module Xd
         provider : String,
         serial : Int64,
         version : String?,
-        detail : String?,
-        update : Bool,
       ) : Nil
         snapshot = @mutex.synchronize do
           entry = entry!(provider)
@@ -267,11 +227,10 @@ module Xd
 
           entry.process = nil
           entry.version = version
-          entry.detail = detail
-          entry.state = update ? State::Updated : State::Idle
+          entry.detail = nil
+          entry.state = State::Idle
           entry.snapshot
         end
-        @finish_update.call(provider, true) if update && snapshot
         publish_state(snapshot) if snapshot
       end
 
@@ -279,7 +238,6 @@ module Xd
         provider : String,
         serial : Int64,
         message : String,
-        update : Bool,
       ) : Nil
         snapshot = @mutex.synchronize do
           entry = entry!(provider)
@@ -290,18 +248,15 @@ module Xd
           entry.state = State::Failed
           entry.snapshot
         end
-        @finish_update.call(provider, false) if update && snapshot
         publish_state(snapshot) if snapshot
       end
 
-      private def command_error(
+      private def version_error(
         output : String,
         status : Process::Status,
       ) : String
         text = clean(output).strip
-        text.empty? ?
-          "Update exited with status #{status.exit_code}." :
-          text
+        text.empty? ? "Version check exited with status #{status.exit_code}." : text
       end
 
       private def clean(text : String) : String

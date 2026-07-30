@@ -23,7 +23,6 @@ module Xd
       AgentAuthCancel
       AgentAuthLogout
       AgentClis
-      AgentClisUpdate
       NewFolder
       RenameFolder
       MoveFolder
@@ -75,7 +74,6 @@ module Xd
         when AgentAuthCancel    then "agent-auth-cancel"
         when AgentAuthLogout    then "agent-auth-logout"
         when AgentClis          then "agent-clis"
-        when AgentClisUpdate    then "agent-clis-update"
         when NewFolder          then "new-folder"
         when RenameFolder       then "rename-folder"
         when MoveFolder         then "move-folder"
@@ -130,7 +128,6 @@ module Xd
         when "agent-auth-cancel"    then AgentAuthCancel
         when "agent-auth-logout"    then AgentAuthLogout
         when "agent-clis"           then AgentClis
-        when "agent-clis-update"    then AgentClisUpdate
         when "new-folder"           then NewFolder
         when "rename-folder"        then RenameFolder
         when "move-folder"          then MoveFolder
