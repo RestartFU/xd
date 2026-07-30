@@ -29,9 +29,10 @@ checked against the C application where visual behavior is involved.
   its ancestor branch, and clears on deletion/removal. Local installed-bundle
   restart is UI-verified with fatal GTK criticals; paired reconnect restore
   remains.
-- `[ ]` Clear text selection when clicking outside selectable message text.
-- `[~]` Search exists, but exact window actions and Ctrl+K/Ctrl+F behavior need
-  verification.
+- `[~]` C capture-phase outside-click clearing is ported for selectable message
+  text; clipboard/selection interaction verification remains.
+- `[x]` Search is a real window action and Ctrl+K/Ctrl+F both open it from the
+  installed bundle with fatal GTK criticals enabled.
 
 C sources: `src/xd-window.c`, `src/xd-app.c`.
 
