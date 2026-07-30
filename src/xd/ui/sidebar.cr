@@ -1234,14 +1234,13 @@ module Xd
       private def chat_menu(node : Node) : Gtk::Popover
         source = node.source
         chat_id = node.id
-        title = node.name
         popover, choices = menu_shell
         add_choice(choices, popover, "Rename…") do
           begin_renaming(node)
         end
         choices.append(Gtk::Separator.new(:horizontal))
         add_choice(choices, popover, "Delete Chat") do
-          confirm_delete_chat(source, chat_id, title)
+          delete_chat(source, chat_id)
         end
         popover
       end
@@ -1393,8 +1392,8 @@ module Xd
         name = source.folder_names[folder_id]
         Dialogs.confirm(
           @parent,
-          "Move #{name} to Trash?",
-          "Workspace and everything inside it will leave the sidebar.",
+          "Move Folder to Trash?",
+          "“#{name}” and everything inside it will be moved to the trash.",
           "Move to Trash"
         ) do
           if call(source, {
@@ -1406,24 +1405,16 @@ module Xd
         end
       end
 
-      private def confirm_delete_chat(
+      private def delete_chat(
         source : Source,
         chat_id : String,
-        title : String,
       ) : Nil
-        Dialogs.confirm(
-          @parent,
-          "Delete #{title}?",
-          "Messages and active terminals for this chat will be deleted.",
-          "Delete Chat"
-        ) do
-          if call(source, {
-               "op"   => JSON::Any.new("delete-chat"),
-               "chat" => JSON::Any.new(chat_id),
-             })
-            @on_chat_deleted.call(source.endpoint, chat_id)
-            reload
-          end
+        if call(source, {
+             "op"   => JSON::Any.new("delete-chat"),
+             "chat" => JSON::Any.new(chat_id),
+           })
+          @on_chat_deleted.call(source.endpoint, chat_id)
+          reload
         end
       end
 
@@ -1432,7 +1423,7 @@ module Xd
           @parent,
           "Remove Remote Connection?",
           "“#{host}” will be removed from this device. Its workspaces and " \
-          "chats will stay on the remote machine.",
+          "chats will stay on the remote machine. Pair again to reconnect.",
           "Remove"
         ) do
           begin

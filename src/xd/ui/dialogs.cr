@@ -1,4 +1,5 @@
 require "gtk4"
+require "./adw"
 
 module Xd
   module UI
@@ -53,24 +54,18 @@ module Xd
         accept_label : String,
         &on_accept : -> Nil
       ) : Nil
-        window, content, actions = shell(parent, title)
-
-        description_label = Gtk::Label.new(description)
-        description_label.xalign = 0_f32
-        description_label.wrap = true
-        content.append(description_label)
-
-        cancel = Gtk::Button.new_with_label("Cancel")
-        cancel.clicked_signal.connect { window.destroy }
-        accept = Gtk::Button.new_with_label(accept_label)
-        accept.add_css_class("destructive-action")
-        accept.clicked_signal.connect do
-          on_accept.call
-          window.destroy
+        dialog = Adw::AlertDialog.new(
+          heading: title,
+          body: description
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("accept", accept_label)
+        dialog.set_response_appearance("accept", :destructive)
+        dialog.default_response = "cancel"
+        dialog.close_response = "cancel"
+        dialog.choose(parent, nil) do |_source, result|
+          on_accept.call if dialog.choose_finish(result) == "accept"
         end
-        actions.append(cancel)
-        actions.append(accept)
-        window.present
       end
 
       def shell(
