@@ -52,7 +52,8 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   state rules, including animated dots and tooltips; screenshot/event matrix
   remains.
 - `[~]` Updater row, release-channel checks/install/restart, and branch-build
-  entry point are ported; installed-bundle UI/build verification remains.
+  entry point are ported. Nightly installed-path row and branch panel are
+  screenshot-verified with fatal GTK criticals; real update/install remains.
 
 C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 `src/tree/xd-node.c`, `src/remote/remote-tree.c`, `src/ui/updater.c`.
@@ -136,7 +137,8 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 - `[ ]` Port directory browser.
 - `[~]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
   bounded live output, stop, persistence, and dialog-independent run lifecycle
-  match C; real branch installation verification remains.
+  match C. Panel is screenshot-verified from an installed-path nightly bundle
+  with zero GTK stderr; real branch installation remains.
 - `[ ]` Match toasts and startup/database error presentation.
 
 C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
