@@ -96,6 +96,18 @@ case "$(uname -m)" in
   *) die "only x86_64 is published so far; found $(uname -m)." ;;
 esac
 
+# Replacing a running bundle leaves its old GtkApplication registered with the
+# desktop. A later launch then activates stale code instead of the new binary.
+# Refusing is safer than killing a session that may contain unsent input.
+for process_exe in /proc/[0-9]*/exe; do
+  executable=$(readlink "$process_exe" 2>/dev/null || true)
+  case "$executable" in
+    "$OPT"/*)
+      die "$NAME is running. Quit it completely, then rerun this installer."
+      ;;
+  esac
+done
+
 # --- the bundle -------------------------------------------------------------
 
 WORK=$(mktemp -d)

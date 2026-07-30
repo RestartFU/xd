@@ -27,6 +27,20 @@ docker info >/dev/null 2>&1 \
 docker buildx version >/dev/null 2>&1 \
   || die "Docker Buildx is needed."
 
+# A running GtkApplication keeps owning its application id after its bundle is
+# replaced. Launching the newly installed desktop entry then activates that old
+# process, making an upgrade look as though it did nothing. Refuse before the
+# expensive Docker build so the commit printed below is always the one tested.
+INSTALL_ROOT="$HOME/.local/opt/xd-nightly"
+for process_exe in /proc/[0-9]*/exe; do
+  executable=$(readlink "$process_exe" 2>/dev/null || true)
+  case "$executable" in
+    "$INSTALL_ROOT"/*)
+      die "xd-nightly is running. Quit it completely, then rerun this installer."
+      ;;
+  esac
+done
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-branch-install.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM
 

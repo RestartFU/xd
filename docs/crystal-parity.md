@@ -303,16 +303,15 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[~]` Codex app-server and Claude stream-json turns work through the shared
   manager.
 - `[~]` Codex status, device login, browser link, cancellation, logout, and
-  streamed output run through the daemon-owned authentication service. The
-  exact `2b4002a` bundle is UI-verified with a deterministic CLI fixture:
-  local menu, signed-out state, device instructions, cancellation, process
-  cleanup, and stale-instruction retirement all pass with fatal GTK warnings.
+  structured login state run through the daemon-owned authentication service.
+  The panel exposes the browser action and one-time code without showing raw
+  CLI output. Local UI and an actual paired TLS client cover status, start,
+  cancellation, process cleanup, logout, and stale-instruction retirement.
   One real bundled OAuth completion remains.
 - `[~]` Claude status, browser login, pasted-code input, cancellation, and
-  logout use the same service and panel. The exact `2b4002a` bundle is
-  UI-verified through code entry, signed-in state, confirmation, sign-out, and
-  stale-instruction retirement with fatal GTK warnings. One real bundled OAuth
-  completion remains.
+  logout use the same structured service and panel. Local UI and an actual
+  paired TLS client cover clean code entry, signed-in state, sign-out, and
+  remote credential ownership. One real bundled OAuth completion remains.
 - `[ ]` Match all existing model, effort, access, plan/build, resume, and
   cancellation behavior.
 - `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
@@ -324,6 +323,8 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 - `[x]` Linux development, tests, and bundle builds require Docker only.
 - `[x]` One-line branch installer builds the latest branch commit.
+- `[x]` Installers reject replacement while xd is running, preventing GNOME
+  from reactivating a stale GtkApplication after an update.
 - `[x]` Linux bundle carries GTK, libadwaita, VTE, GL, fonts, icons, MIME, TLS,
   OpenSSL, Codex, and Claude.
 - `[~]` macOS and Windows bundle scripts exist but need end-to-end verification.
@@ -335,8 +336,8 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (228 examples).
-- `[ ]` Release bundle builds from a clean checkout in Docker.
+- `[x]` Crystal specs pass in Docker (236 examples).
+- `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
 - `[ ]` 1100x720 screenshots match the C app for empty, populated, active turn,

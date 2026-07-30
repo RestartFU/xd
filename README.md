@@ -33,7 +33,9 @@ curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/refs/heads/rewrite/cry
 That resolves the branch's latest commit, builds its self-contained bundle
 inside Docker, and installs it as `xd-nightly`. No host Crystal compiler, GTK
 SDK, Codex, or Claude installation is needed. Existing nightly chats and
-workspaces are preserved.
+workspaces are preserved. Quit a running `xd-nightly` before updating; the
+installer refuses to replace an active bundle so GNOME cannot reopen stale
+code.
 
 ## Install
 
