@@ -1,6 +1,7 @@
 # xd
 
-Workspace-organized AI conversations. A GTK4/libadwaita desktop app in C.
+Workspace-organized AI conversations. A plain GTK4 desktop app being rewritten
+in Crystal around one daemon protocol for both local and paired clients.
 
 Chats do not live in a flat list; they live in a tree of workspaces and folders,
 and each chat inherits its parent chain's context — backend, model, working
@@ -17,14 +18,22 @@ Personal
 └── Dotfiles
 ```
 
-The app does not talk to any AI API itself. It drives the coding-agent CLIs
-already installed and authenticated on your machine — `claude`, `codex`, and
-`opencode` for Cerebras — as subprocesses, streaming their JSONL output into
-the UI.
+The app does not talk to AI APIs itself. Its bundle ships pinned native Codex
+and Claude Code CLIs, runs them as subprocesses, and uses their normal
+authentication/config directories.
 
-For Cerebras, install [OpenCode](https://opencode.ai/docs/) and either export
-`CEREBRAS_API_KEY` before starting xd or run `opencode auth login`, choose
-Cerebras, and enter your API key. xd never stores the key.
+## Test the Crystal rewrite
+
+Linux x86_64, with Docker running:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/refs/heads/rewrite/crystal-unified-daemon/scripts/install-branch.sh | sh
+```
+
+That resolves the branch's latest commit, builds its self-contained bundle
+inside Docker, and installs it as `xd-nightly`. No host Crystal compiler, GTK
+SDK, Codex, or Claude installation is needed. Existing nightly chats and
+workspaces are preserved.
 
 ## Install
 
