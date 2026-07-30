@@ -22,7 +22,10 @@ checked against the C application where visual behavior is involved.
   startup-error surface instead of creating a half-working app.
   Clean and restored non-Git profiles stay alive under fatal GTK warnings;
   scheduler-backed background workers cover restored Markdown rendering
-  without raw-thread startup crashes.
+  without raw-thread startup crashes. The exact `f2b84ba` 1.1 GiB nightly
+  bundle passes its clean-PATH resource/Git smoke and maps the empty
+  1100×720 shell under isolated Xvfb and `G_DEBUG=fatal-warnings` with no
+  app or display-server stderr.
 - `[x]` Default window geometry is 1100x720.
 - `[x]` Dark style, DM Sans, icons, MIME data, and minimal-host launch work.
 - `[x]` Root horizontal `GtkPaned` has the C sidebar/chat child order and
@@ -244,8 +247,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 - `[~]` Terminal RPC, PTY output, input, resize, replay, and kill operations use
   the shared daemon. List/open/kill/input/resize requests never wait in GTK,
   and duplicate asynchronous opens are suppressed. An installed local client
-  verifies each operation across UI disconnect/reconnect; paired TLS proof
-  remains.
+  verifies each operation across UI disconnect/reconnect. Full 16 MiB history
+  replay is decoded and fed in bounded idle batches; output and geometry
+  arriving during replay stay ordered, and detached sessions cancel stale
+  batches. Paired TLS proof remains.
 - `[~]` Daemon-backed multi-session tabs, centered single-session title,
   add/kill controls, close request, focus, replay, resize, and per-chat view
   retention work. C palette/font, copy/paste, URL handling, and daemon-terminal
@@ -265,8 +270,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   Reads/writes are asynchronous and generation-scoped so stale remote replies
   cannot replace a newly selected chat. The 8,000-line syntax scan runs on a
   worker thread and applies at most 256 coloured spans per GTK idle turn,
-  cancelling stale work after edits or navigation. Explicit request
-  cancellation and paired-TLS latency proof remain.
+  cancelling stale work after edits or navigation. Directory JSON preparation
+  also runs off-thread and rows apply in 80-entry idle batches, so generated
+  dependency trees do not block GTK. Explicit request cancellation and
+  paired-TLS latency proof remain.
 - `[~]` Working and branch scopes use the C header, linked toggles, refresh,
   summary/empty/error states, and virtual `GtkListView` file sections.
   Per-file expansion, collapsed-path memory, 80-row chunks, scroll restoration,
@@ -481,7 +488,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (305 default, 2 PortAudio, and 5
+- `[x]` Crystal specs pass in Docker (320 default, 2 PortAudio, and 5
   authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
