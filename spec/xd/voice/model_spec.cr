@@ -98,4 +98,18 @@ describe Xd::Voice::Model do
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
+
+  it "does not lose cancellation before a download starts" do
+    model = Xd::Voice::Model.new(
+      path: File.join(Dir.tempdir, "xd-cancelled-model"),
+      url: "http://127.0.0.1:1/model",
+      expected_size: 1_u64,
+      expected_sha256: "unused"
+    )
+    model.cancel
+
+    expect_raises(Xd::Voice::Cancelled) do
+      model.ensure_available { |_value| }
+    end
+  end
 end

@@ -1,9 +1,8 @@
 require "base64"
 require "random/secure"
 require "gtk4"
-require "../daemon/endpoint"
+require "../daemon/client"
 require "../voice/recorder"
-require "./adw"
 require "./event_inbox"
 
 module Xd
@@ -17,11 +16,13 @@ module Xd
       enum State
         Idle
         Confirming
+        AwaitingDownload
         Downloading
         Recording
         Transcribing
       end
 
+      getter widget : Gtk::Box
       getter button : Gtk::Button
 
       @endpoint : Daemon::Endpoint?
@@ -29,10 +30,11 @@ module Xd
       @chat_id : String?
       @request_token : String?
       @recorder : Voice::Recorder?
+      @error_message : String?
       @event_inbox = EventInbox(Daemon::Endpoint).new
 
       def initialize(
-        @parent : Gtk::Window,
+        _parent : Gtk::Window,
         @composer : Gtk::TextView,
       )
         @state = State::Idle
@@ -41,6 +43,7 @@ module Xd
         @chat_id = nil
         @request_token = nil
         @recorder = nil
+        @error_message = nil
         @remote_target = false
         @closed = false
         @generation = 0_u64
@@ -48,11 +51,62 @@ module Xd
         @started_at = Time.instant
         @download_progress = 0
 
+        @widget = Gtk::Box.new(:horizontal, 6)
+        @widget.valign = :center
+
         @button = Gtk::Button.new_from_icon_name(
           "audio-input-microphone-symbolic"
         )
         @button.add_css_class("circular")
         @button.clicked_signal.connect { clicked }
+
+        @download_prompt = Gtk::Box.new(:horizontal, 6)
+        @download_prompt.valign = :center
+        @download_prompt.visible = false
+        @download_prompt_label = Gtk::Label.new("")
+        @download_prompt_label.ellipsize = :end
+        @download_action = Gtk::Button.new_with_label("Download")
+        @download_action.add_css_class("suggested-action")
+        @download_action.clicked_signal.connect do
+          start_download(@generation) if @state.awaiting_download?
+        end
+        @download_decline = Gtk::Button.new_with_label("Not now")
+        @download_decline.clicked_signal.connect { cancel }
+        @download_prompt.append(@download_prompt_label)
+        @download_prompt.append(@download_decline)
+        @download_prompt.append(@download_action)
+
+        @download_status = Gtk::Box.new(:horizontal, 6)
+        @download_status.valign = :center
+        @download_status.visible = false
+        @download_bar = Gtk::ProgressBar.new
+        @download_bar.show_text = true
+        @download_bar.set_size_request(160, -1)
+        @download_bar.valign = :center
+        @download_cancel = Gtk::Button.new_with_label("Cancel")
+        @download_cancel.add_css_class("destructive-action")
+        @download_cancel.clicked_signal.connect { cancel }
+        @download_status.append(@download_bar)
+        @download_status.append(@download_cancel)
+
+        @error_status = Gtk::Box.new(:horizontal, 6)
+        @error_status.valign = :center
+        @error_status.visible = false
+        @error_label = Gtk::Label.new("")
+        @error_label.ellipsize = :end
+        @error_label.max_width_chars = 38
+        @error_dismiss = Gtk::Button.new_with_label("Dismiss")
+        @error_dismiss.clicked_signal.connect do
+          @error_message = nil
+          update_button
+        end
+        @error_status.append(@error_label)
+        @error_status.append(@error_dismiss)
+
+        @widget.append(@button)
+        @widget.append(@download_prompt)
+        @widget.append(@download_status)
+        @widget.append(@error_status)
         update_button
       end
 
@@ -145,6 +199,7 @@ module Xd
       private def begin_voice : Nil
         endpoint = @endpoint || return
         chat_id = @chat_id || return
+        @error_message = nil
         @generation &+= 1
         generation = @generation
         @request_token = Random::Secure.hex(16)
@@ -180,28 +235,10 @@ module Xd
       end
 
       private def confirm_download(generation : UInt64) : Nil
-        target = @remote_target ? "selected remote machine" : "this machine"
-        dialog = Adw::AlertDialog.new(
-          heading: "Download Speech Model?",
-          body: "Microphone capture stays on this device. xd needs to " \
-                "download the 548 MiB Whisper large-v3-turbo model onto " \
-                "#{target} once."
-        )
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("download", "Download")
-        dialog.set_response_appearance("download", :suggested)
-        dialog.default_response = "download"
-        dialog.close_response = "cancel"
-        dialog.choose(@parent, nil) do |_source, result|
-          response = dialog.choose_finish(result)
-          next unless current?(generation)
+        return unless current?(generation)
 
-          if response == "download"
-            start_download(generation)
-          else
-            reset
-          end
-        end
+        @state = State::AwaitingDownload
+        update_button
       end
 
       private def start_download(generation : UInt64) : Nil
@@ -353,7 +390,7 @@ module Xd
         return if bounded < @download_progress
 
         @download_progress = bounded
-        update_download_button
+        update_download_status
       end
 
       private def insert_transcript(transcript : String) : Nil
@@ -395,6 +432,7 @@ module Xd
         @recorder = nil
         @request_token = nil
         @download_progress = 0
+        @error_message = nil
         update_button
       end
 
@@ -413,6 +451,23 @@ module Xd
       private def update_button : Nil
         @button.remove_css_class("destructive-action")
         @button.add_css_class("circular")
+        awaiting_download = @state.awaiting_download?
+        downloading = @state.downloading?
+        showing_error = !@error_message.nil?
+        @button.visible =
+          !awaiting_download && !downloading && !showing_error
+        @download_prompt.visible = awaiting_download
+        @download_status.visible = downloading
+        @error_status.visible = showing_error
+        @download_prompt_label.text =
+          "Speech model on #{target_name} · 548 MiB"
+        @download_prompt_label.tooltip_text =
+          "Download Whisper large-v3-turbo onto #{target_name} once."
+        if message = @error_message
+          @error_label.text = message
+          @error_label.tooltip_text = message
+        end
+
         case @state
         when .confirming?
           spinner = Gtk::Spinner.new
@@ -421,11 +476,10 @@ module Xd
           @button.sensitive = false
           @button.tooltip_text =
             "Checking speech model on #{target_name}…"
+        when .awaiting_download?
+          @download_action.sensitive = available?
         when .downloading?
-          @button.remove_css_class("circular")
-          @button.add_css_class("destructive-action")
-          @button.sensitive = true
-          update_download_button
+          update_download_status
         when .recording?
           @button.icon_name = "media-playback-stop-symbolic"
           @button.add_css_class("destructive-action")
@@ -447,24 +501,19 @@ module Xd
         end
       end
 
-      private def update_download_button : Nil
-        @button.label = "#{@download_progress}% · Cancel"
-        @button.tooltip_text =
+      private def update_download_status : Nil
+        @download_bar.fraction = @download_progress / 100.0
+        @download_bar.text = "#{@download_progress}%"
+        @download_bar.tooltip_text =
           "Downloading speech model on #{target_name}… " \
-          "#{@download_progress}% — click to cancel"
+          "#{@download_progress}%"
       end
 
       private def show_error(message : String?) : Nil
         return if @closed
 
-        dialog = Adw::AlertDialog.new(
-          heading: "Voice Input Failed",
-          body: message || "Voice input failed."
-        )
-        dialog.add_response("close", "Close")
-        dialog.default_response = "close"
-        dialog.close_response = "close"
-        dialog.present(@parent)
+        @error_message = message || "Voice input failed."
+        update_button
       end
     end
   end

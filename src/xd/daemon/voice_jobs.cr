@@ -24,8 +24,54 @@ module Xd
       alias TranscriberFactory = Proc(Voice::Transcriber)
 
       private record JobKey, owner : UInt64, token : String
+      private record DownloadSnapshot,
+        progress : Int32,
+        outcome : DownloadOutcome,
+        error : String?
+
+      private enum DownloadOutcome
+        Running
+        Ready
+        Cancelled
+        Failed
+      end
 
       @download : JobKey?
+
+      # HTTP, hashing, and file writes run on an OS thread. Only this small
+      # snapshot crosses back to the daemon scheduler, where events are
+      # published. That keeps both GTK and socket fibers responsive without
+      # calling scheduler-owned subscribers from a foreign thread.
+      private class DownloadState
+        @error : String?
+
+        def initialize
+          @progress = -1
+          @outcome = DownloadOutcome::Running
+          @error = nil
+          @mutex = Mutex.new
+        end
+
+        def report(progress : Int32) : Nil
+          @mutex.synchronize { @progress = progress }
+        end
+
+        def finish(
+          outcome : DownloadOutcome,
+          error : String? = nil,
+        ) : Nil
+          @mutex.synchronize do
+            @outcome = outcome
+            @error = error
+          end
+        end
+
+        def snapshot : DownloadSnapshot
+          @mutex.synchronize do
+            DownloadSnapshot.new(@progress, @outcome, @error)
+          end
+        end
+      end
 
       private class Job
         def initialize(
@@ -70,25 +116,23 @@ module Xd
           @download = key
         end
 
-        spawn do
+        state = DownloadState.new
+        Fiber::ExecutionContext::Isolated.new("xd speech model") do
           begin
             model.ensure_available do |progress|
-              publish_if_current(key, job, "downloading", {
-                "progress" => JSON::Any.new(progress.to_i64),
-              })
+              state.report(progress)
             end
-            finish(key, job, "ready")
+            state.finish(DownloadOutcome::Ready)
           rescue Voice::Cancelled
-            finish(key, job, "cancelled")
-          rescue error : Voice::Error
-            finish(
-              key,
-              job,
-              "error",
+            state.finish(DownloadOutcome::Cancelled)
+          rescue error
+            state.finish(
+              DownloadOutcome::Failed,
               error.message || "Speech model download failed."
             )
           end
         end
+        spawn monitor_download(key, job, state)
       end
 
       def transcribe(
@@ -173,14 +217,55 @@ module Xd
         cleaned
       end
 
+      private def monitor_download(
+        key : JobKey,
+        job : Job,
+        state : DownloadState,
+      ) : Nil
+        last_progress = -1
+        loop do
+          return unless current?(key, job)
+
+          snapshot = state.snapshot
+          if snapshot.progress != last_progress
+            publish_if_current(key, job, "downloading", {
+              "progress" => JSON::Any.new(snapshot.progress.to_i64),
+            })
+            last_progress = snapshot.progress
+          end
+
+          case snapshot.outcome
+          when .running?
+            sleep 50.milliseconds
+          when .ready?
+            finish(key, job, "ready")
+            return
+          when .cancelled?
+            finish(key, job, "cancelled")
+            return
+          when .failed?
+            finish(
+              key,
+              job,
+              "error",
+              snapshot.error || "Speech model download failed."
+            )
+            return
+          end
+        end
+      end
+
+      private def current?(key : JobKey, job : Job) : Bool
+        @mutex.synchronize { @jobs[key]?.try(&.same?(job)) || false }
+      end
+
       private def publish_if_current(
         key : JobKey,
         job : Job,
         state : String,
         fields = {} of String => JSON::Any,
       ) : Nil
-        current = @mutex.synchronize { @jobs[key]?.try(&.same?(job)) }
-        publish(key, state, fields) if current
+        publish(key, state, fields) if current?(key, job)
       end
 
       private def finish(

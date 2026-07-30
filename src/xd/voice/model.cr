@@ -47,8 +47,8 @@ module Xd
       def ensure_available(
         &on_progress : Int32 -> Nil
       ) : String
-        @cancelled.set(false)
         @reported_progress = -1
+        check_cancelled
         set_progress(0, on_progress)
         if verified?(@path)
           set_progress(100, on_progress)
@@ -106,7 +106,11 @@ module Xd
         client = HTTP::Client.new(uri)
         client.connect_timeout = 30.seconds
         client.read_timeout = 30.seconds
-        @client_mutex.synchronize { @client = client }
+        @client_mutex.synchronize do
+          check_cancelled
+          @client = client
+        end
+        check_cancelled
 
         digest = Digest::SHA256.new
         total = 0_u64

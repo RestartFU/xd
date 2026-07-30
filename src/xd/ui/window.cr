@@ -342,7 +342,7 @@ module Xd
         filler.hexpand = true
         @controls.run.append(filler)
         @controls.run.append(@attach)
-        @controls.run.append(@voice.button)
+        @controls.run.append(@voice.widget)
         @controls.run.append(@send)
 
         entry_scroll = Gtk::ScrolledWindow.new
