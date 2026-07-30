@@ -25,8 +25,13 @@ checked against the C application where visual behavior is involved.
   without raw-thread startup crashes.
 - `[x]` Default window geometry is 1100x720.
 - `[x]` Dark style, DM Sans, icons, MIME data, and minimal-host launch work.
-- `[~]` Root horizontal `GtkPaned` has the C sidebar/chat child order and
-  280-pixel initial position.
+- `[x]` Root horizontal `GtkPaned` has the C sidebar/chat child order and
+  280-pixel initial position. Resource-corrected C and Crystal captures from
+  the exact `b74ad2d` layout at 1100×720 have zero differing pixels across the
+  complete 740×720 sidebar/body region, including divider, shared header
+  height, title, empty-state icon, copy, and geometry. The only full-frame
+  delta is the intentional right-header reflow after removing the updater
+  control.
 - `[~]` Window size, maximized state, and sidebar position are persisted;
   restart verification remains.
 - `[x]` Restore the C overlay divider spanning the full header width.
