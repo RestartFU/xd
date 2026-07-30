@@ -354,7 +354,8 @@ module Xd
         row.action.label = label
         row.action.sensitive = sensitive
 
-        if row.state == "signing-in" || !row.output.empty?
+        if row.state == "signing-in" ||
+           (row.state == "failed" && !row.output.empty?)
           @active_provider = provider
           update_instructions(row)
         elsif @active_provider == provider
