@@ -35,6 +35,9 @@
   <data dest="${bundle}/Contents/Resources/libexec">
     ${prefix:app}/libexec
   </data>
+  <data dest="${bundle}/Contents/Resources/git">
+    ${prefix:app}/git
+  </data>
   <data dest="${bundle}/Contents/Resources/xd.icns">
     ${env:XD_MACOS_ICON}
   </data>
