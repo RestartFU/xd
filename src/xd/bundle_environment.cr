@@ -43,6 +43,7 @@ module Xd
         File.join(root, "bin", filename),
         File.join(root, "git", "cmd", filename),
         File.join(root, "git", "bin", filename),
+        File.join(root, "git", "mingw64", "bin", filename),
       ].each do |candidate|
         return candidate if executable_file?(candidate)
       end

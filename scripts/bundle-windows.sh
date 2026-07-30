@@ -32,6 +32,7 @@ mkdir -p "$OUT"/{bin,etc,lib,libexec,share}
 install -Dm755 "$STAGED_EXE" "$OUT/bin/xd.exe"
 cp -a "$STAGED_PREFIX/share/." "$OUT/share/"
 cp -a "$STAGED_PREFIX/libexec/." "$OUT/libexec/"
+cp -a "$STAGED_PREFIX/git" "$OUT/git"
 
 # GSettings schemas used by GTK/libadwaita plus xd's installed schema.
 mkdir -p "$OUT/share/glib-2.0/schemas"

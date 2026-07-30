@@ -140,7 +140,11 @@ module Xd
         ),
         requirement("Claude", "libexec/claude.exe"),
         requirement("whisper.cpp", "libexec/whisper.exe"),
-        requirement("OpenSSL", "libexec/openssl.exe"),
+        requirement(
+          "OpenSSL",
+          "libexec/openssl.exe",
+          "git/mingw64/bin/openssl.exe"
+        ),
       ]
     end
 
