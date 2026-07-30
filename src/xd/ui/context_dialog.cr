@@ -1,6 +1,7 @@
 require "json"
 require "gtk4"
 require "./panel_call"
+require "./panel_dialog"
 
 module Xd
   module UI
@@ -96,13 +97,8 @@ module Xd
         column.append(body)
         column.append(footer)
 
-        @window = Gtk::Window.new
-        @window.transient_for = @parent
-        @window.application = @parent.application
-        @window.destroy_with_parent = true
-        @window.modal = true
-        @window.decorated = false
-        @window.set_default_size(620, 500)
+        @window = PanelDialog.new(@parent, 620, 500)
+        @window.title = "Agent Context"
         @window.add_css_class("xd-panel")
         @window.child = column
         @window.destroy_signal.connect { closed }

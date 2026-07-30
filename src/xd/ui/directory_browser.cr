@@ -1,6 +1,7 @@
 require "json"
 require "gtk4"
 require "./panel_call"
+require "./panel_dialog"
 
 module Xd
   module UI
@@ -75,6 +76,13 @@ module Xd
         footer.append(hint("Enter", "Open"))
         footer.append(hint("Backspace", "Back"))
         footer.append(hint("Esc", "Use the folder's"))
+        spacer = Gtk::Box.new(:horizontal, 0)
+        spacer.hexpand = true
+        footer.append(spacer)
+        cancel = Gtk::Button.new_with_label("Cancel")
+        cancel.add_css_class("flat")
+        cancel.clicked_signal.connect { answer(nil) }
+        footer.append(cancel)
         footer.add_css_class("xd-panel-bar")
         footer.add_css_class("xd-panel-foot")
 
@@ -84,13 +92,8 @@ module Xd
         column.append(scrolled)
         column.append(footer)
 
-        @window = Gtk::Window.new
-        @window.transient_for = @parent
-        @window.application = @parent.application
-        @window.modal = true
-        @window.destroy_with_parent = true
-        @window.decorated = false
-        @window.set_default_size(620, 460)
+        @window = PanelDialog.new(@parent, 620, 460)
+        @window.title = "Choose a Folder"
         @window.add_css_class("xd-panel")
         @window.add_css_class("xd-browser")
         @window.child = column

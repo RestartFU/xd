@@ -1,5 +1,6 @@
 require "gtk4"
 require "./adw"
+require "./panel_dialog"
 
 module Xd
   module UI
@@ -71,14 +72,9 @@ module Xd
       def shell(
         parent : Gtk::Window,
         title : String,
-      ) : {Gtk::Window, Gtk::Box, Gtk::Box}
-        window = Gtk::Window.new
+      ) : {PanelDialog, Gtk::Box, Gtk::Box}
+        window = PanelDialog.new(parent, 420, -1)
         window.title = title
-        window.transient_for = parent
-        window.modal = true
-        window.destroy_with_parent = true
-        window.resizable = false
-        window.set_default_size(420, -1)
 
         heading = Gtk::Label.new(title)
         heading.xalign = 0_f32

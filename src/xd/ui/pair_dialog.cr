@@ -1,11 +1,12 @@
 require "gtk4"
 require "../remote/connection"
+require "./panel_dialog"
 
 module Xd
   module UI
     # Focused pairing panel matching the original C client.
     class PairDialog
-      @window : Gtk::Window
+      @window : PanelDialog
       @host : Gtk::Entry
       @port : Gtk::Entry
       @code : Gtk::Entry
@@ -24,13 +25,8 @@ module Xd
         @busy = false
         @closed = false
 
-        @window = Gtk::Window.new
+        @window = PanelDialog.new(@parent, 620, 460)
         @window.title = "Connect to a Remote"
-        @window.transient_for = @parent
-        @window.destroy_with_parent = true
-        @window.modal = true
-        @window.decorated = false
-        @window.set_default_size(620, 460)
         @window.add_css_class("xd-panel")
 
         title = Gtk::Label.new("Connect to a Remote")
@@ -125,6 +121,7 @@ module Xd
           end
         end
         @window.add_controller(keys)
+        @window.destroy_signal.connect { @closed = true }
       end
 
       def present : Nil

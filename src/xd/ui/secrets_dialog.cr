@@ -3,6 +3,7 @@ require "set"
 require "gtk4"
 require "../agent/secrets"
 require "./panel_call"
+require "./panel_dialog"
 
 module Xd
   module UI
@@ -110,13 +111,8 @@ module Xd
         column.append(body)
         column.append(footer)
 
-        @window = Gtk::Window.new
-        @window.transient_for = @parent
-        @window.application = @parent.application
-        @window.destroy_with_parent = true
-        @window.modal = true
-        @window.decorated = false
-        @window.set_default_size(700, 500)
+        @window = PanelDialog.new(@parent, 700, 500)
+        @window.title = "Agent Secrets"
         @window.add_css_class("xd-panel")
         @window.child = column
         @window.destroy_signal.connect { closed }
