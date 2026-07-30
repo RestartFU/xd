@@ -1,5 +1,6 @@
 require "gtk4"
 require "../agent/catalog"
+require "./context_usage"
 
 module Xd
   module UI
@@ -32,6 +33,7 @@ module Xd
       @access_button : Gtk::Button
       @plan_button : Gtk::ToggleButton
       @workspace_button : Gtk::MenuButton
+      @context_meter : Gtk::ProgressBar
 
       def initialize(
         @on_option : Proc(String, String?, Nil),
@@ -75,9 +77,17 @@ module Xd
         @workspace_button.add_css_class("flat")
         @workspace_button.tooltip_text = "Working directory"
 
+        @context_meter = Gtk::ProgressBar.new
+        @context_meter.show_text = true
+        @context_meter.set_size_request(108, -1)
+        @context_meter.valign = :center
+        @context_meter.visible = false
+        @context_meter.add_css_class("xd-context-meter")
+
         @identity.append(@workspace_button)
         @identity.append(@backend_button)
         @identity.append(@model_button)
+        @identity.append(@context_meter)
         @run.append(@effort_button)
         @run.append(@access_button)
         @run.append(@plan_button)
@@ -113,6 +123,7 @@ module Xd
         @effort_button.label = @effort.label
         @access_button.label = @access.label
         @plan_button.active = state["plan"]?.try(&.as_bool?) || false
+        update_context_meter(state)
 
         workdir = state["workdir"]?.try(&.as_s?)
         new_worktree = state["new_worktree"]?.try(&.as_bool?) || false
@@ -136,6 +147,35 @@ module Xd
         button = Gtk::Button.new_with_label(label)
         button.add_css_class("flat")
         button
+      end
+
+      private def update_context_meter(
+        state : Hash(String, JSON::Any),
+      ) : Nil
+        used = state["context_used"]?.try(&.as_i64?) || 0_i64
+        window = state["context_window"]?.try(&.as_i64?) || 0_i64
+        meter = if used > 0 && window > 0
+                  ContextUsage.meter(used.to_u64, window.to_u64)
+                end
+
+        @context_meter.remove_css_class("warning")
+        @context_meter.remove_css_class("error")
+        unless meter
+          @context_meter.visible = false
+          return
+        end
+
+        @context_meter.fraction = meter.fraction
+        @context_meter.text = meter.label
+        @context_meter.tooltip_text = meter.tooltip
+        case meter.severity
+        when ContextUsage::Severity::Warning
+          @context_meter.add_css_class("warning")
+        when ContextUsage::Severity::Error
+          @context_meter.add_css_class("error")
+        else
+        end
+        @context_meter.visible = true
       end
 
       private def cycle_backend : Nil
