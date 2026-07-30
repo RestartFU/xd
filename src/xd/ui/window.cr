@@ -12,6 +12,7 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./chat_controls"
+require "./message_row"
 require "./pair_dialog"
 require "./pane_state"
 require "./search_dialog"
@@ -43,7 +44,7 @@ module Xd
       getter widget : Adw::ApplicationWindow
 
       @active_chat : String?
-      @stream_label : Gtk::Label?
+      @stream_row : MessageRow?
       @working = false
       @workflow_ids = Set(String).new
       @attachments = [] of Attachment
@@ -68,7 +69,7 @@ module Xd
         @local_client = local_client
         @client = local_client
         @active_chat = nil
-        @stream_label = nil
+        @stream_row = nil
         @search_dialog = nil
         @settings = Gio::Settings.new(APP_ID)
         @widget = Adw::ApplicationWindow.new(application: application)
@@ -636,7 +637,7 @@ module Xd
         @sidebar.activate_chat(endpoint, id)
         prefix = endpoint.same?(@local_client) ? "local:" : "remote:"
         @settings.set_string("active-chat", "#{prefix}#{id}")
-        @stream_label = nil
+        @stream_row = nil
         @chat_title.title = title
         @chat_stack.visible_child_name = "chat"
         @composer.visible = true
@@ -669,7 +670,7 @@ module Xd
         @active_chat = nil
         @sidebar.clear_active_chat
         @settings.set_string("active-chat", "")
-        @stream_label = nil
+        @stream_row = nil
         @working = false
         @chat_title.title = "xd"
         @chat_stack.visible_child_name = "empty"
@@ -726,7 +727,7 @@ module Xd
             reply_answerable?(messages, index)
           )
         end
-        @stream_label = nil
+        @stream_row = nil
         scroll_to_bottom
       end
 
@@ -735,7 +736,7 @@ module Xd
         content : String,
         label : String? = nil,
         answerable : Bool = false,
-      ) : Gtk::Label?
+      ) : MessageRow?
         if role == "duration"
           @status.text = "Finished in #{content}s"
           return
@@ -743,13 +744,16 @@ module Xd
 
         if role == "tool"
           if patch = Agent::GitDiffTracker.patch(content)
-            return add_diff_message(patch)
+            add_diff_message(patch)
+            return
           end
           if workflow = Agent::WorkflowRun.parse(content)
-            return add_workflow_message(workflow)
+            add_workflow_message(workflow)
+            return
           end
           if subagent = Agent::SubagentTool.parse(content)
-            return add_subagent_message(subagent[0], subagent[1])
+            add_subagent_message(subagent[0], subagent[1])
+            return
           end
           content = "Files changed" if Agent::GitDiffTracker.file_change?(content)
         end
@@ -765,23 +769,9 @@ module Xd
                 else
                   assistant_text
                 end
-        heading = case role
-                  when "user"      then "You"
-                  when "assistant" then label || "Assistant"
-                  when "tool"      then "Tool"
-                  when "error"     then "Error"
-                  else                  role.capitalize
-                  end
-        text = shown.empty? ? heading : "#{heading}\n#{shown}"
-        row = Gtk::Label.new(text)
-        row.xalign = 0_f32
-        row.wrap = true
-        row.wrap_mode = :word_char
-        row.selectable = true
-        row.add_css_class("xd-body")
-        row.add_css_class("xd-message")
-        row.add_css_class("xd-message-#{role}")
-        @transcript.append(row)
+        row = MessageRow.new(MessageKind.from_role(role), shown)
+        row.source = label
+        @transcript.append(row.widget)
         append_message_images(images.paths) if images
         append_ask(parsed.ask) if parsed && answerable
         row
@@ -1307,26 +1297,24 @@ module Xd
         when "text"
           return unless active_event?(endpoint, event)
           text = event["text"]?.try(&.as_s?) || return
-          label = @stream_label
-          unless label
-            label = add_message("assistant", "")
-            @stream_label = label
+          row = @stream_row
+          unless row
+            row = add_message("assistant", "")
+            @stream_row = row
           end
-          if label
-            current = label.text
-            current = "Assistant\n" if current == "Assistant"
-            label.text = current + text
+          if row
+            row.set_stream_text(row.text + text)
           end
           scroll_to_bottom
         when "tool"
           return unless active_event?(endpoint, event)
           add_message("tool", event["text"]?.try(&.as_s?) || "Used a tool")
-          @stream_label = nil
+          @stream_row = nil
           scroll_to_bottom
         when "turn-started"
           return unless active_event?(endpoint, event)
           @status.text = "Working…"
-          @stream_label = nil
+          @stream_row = nil
           load_chat_state
         when "turn-finished"
           if active_event?(endpoint, event)

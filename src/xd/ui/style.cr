@@ -432,16 +432,6 @@ module Xd
       .xd-sidebar button.flat { background: transparent; border: 0; }
       .xd-search-result { border-radius: 10px; padding: 10px 12px; }
       .xd-search-result:hover { background: alpha(#ffffff, 0.07); }
-      .xd-message {
-        border-radius: 12px;
-        padding: 12px 14px;
-      }
-      .xd-message-user { background: alpha(#ffffff, 0.07); }
-      .xd-message-assistant { background: transparent; }
-      .xd-message-tool {
-        background: alpha(#3584e4, 0.10);
-        color: #b8d9ff;
-      }
       .xd-message-diff {
         background: alpha(#33d17a, 0.07);
         color: #d7f8e5;
