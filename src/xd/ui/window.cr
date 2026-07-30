@@ -916,6 +916,7 @@ module Xd
         @follow_bottom = false
         @history_bottom_distance =
           adjustment.upper - adjustment.value
+        @transcript_scroll.opacity = 0.0
         page.paging.load_earlier
         load_messages(force: true)
         queue_history_restore
@@ -1669,10 +1670,12 @@ module Xd
             upper = adjustment.upper
             page_size = adjustment.page_size
             value = Math.max(adjustment.lower, upper - distance)
-            adjustment.value = value if adjustment.value != value
+            value_held = adjustment.value == value
+            adjustment.value = value unless value_held
 
             if upper == @history_restore_upper &&
-               page_size == @history_restore_page_size
+               page_size == @history_restore_page_size &&
+               value_held
               @history_restore_stable_frames += 1
             else
               @history_restore_stable_frames = 0
@@ -1683,6 +1686,19 @@ module Xd
             if @history_restore_stable_frames >= 2
               @history_restore_tick = 0_u32
               @history_bottom_distance = -1.0
+              bottom = Math.max(
+                adjustment.lower,
+                upper - page_size
+              )
+              nudge = if value < bottom
+                        Math.min(value + 1.0, bottom)
+                      else
+                        Math.max(value - 1.0, adjustment.lower)
+                      end
+              adjustment.value = nudge if nudge != value
+              adjustment.value = value
+              @transcript_scroll.queue_draw
+              @transcript_scroll.opacity = 1.0
               false
             else
               true
@@ -1695,6 +1711,7 @@ module Xd
 
       private def cancel_history_restore : Nil
         @history_bottom_distance = -1.0
+        @transcript_scroll.opacity = 1.0
         return if @history_restore_tick == 0
 
         @transcript_scroll.remove_tick_callback(@history_restore_tick)
