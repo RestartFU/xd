@@ -14,6 +14,7 @@ require "./adw"
 require "./chat_controls"
 require "./command_suggestions"
 require "./dots"
+require "./image_presenter"
 require "./message_row"
 require "./pair_dialog"
 require "./pane_state"
@@ -143,6 +144,7 @@ module Xd
           @settings.int("window-height")
         )
         @widget.maximize if @settings.boolean("window-maximized")
+        @image_presenter = ImagePresenter.new
 
         @status = Gtk::Label.new("")
         @status.xalign = 0_f32
@@ -1092,10 +1094,29 @@ module Xd
                 else
                   assistant_text
                 end
-        row = MessageRow.new(MessageKind.from_role(role), shown)
+        literal_parts = if images
+                          number = 0
+                          images.parts.map do |part|
+                            if path = part.path
+                              number += 1
+                              @image_presenter.preview(
+                                @client,
+                                path,
+                                number
+                              ).as(MessageRow::LiteralPart)
+                            else
+                              part.text.not_nil!
+                                .as(MessageRow::LiteralPart)
+                            end
+                          end
+                        end
+        row = MessageRow.new(
+          MessageKind.from_role(role),
+          shown,
+          literal_parts
+        )
         row.source = label
         @transcript.append(row.widget)
-        append_message_images(images.paths) if images
         append_ask(parsed.ask) if parsed && answerable
         row
       end
@@ -1377,7 +1398,11 @@ module Xd
           File.basename(name),
           Base64.strict_encode(data),
           data.size,
-          texture
+          ImagePresenter.texture_from_png(
+            data,
+            ImagePresenter::INLINE_MAX_WIDTH,
+            ImagePresenter::INLINE_MAX_HEIGHT
+          ) || texture
         )
         @attachments << attachment
         append_attachment_chip(attachment)
@@ -1388,19 +1413,24 @@ module Xd
         attachment : Attachment,
       ) : Nil
         picture = Gtk::Picture.new_for_paintable(attachment.texture)
-        picture.content_fit = :contain
-        picture.can_shrink = true
-        picture.set_size_request(168, 96)
+        picture.halign = :center
+        picture.valign = :center
 
         label = Gtk::Label.new(attachment.name)
         label.ellipsize = :middle
         label.max_width_chars = 18
+        label.add_css_class("caption")
         label.add_css_class("dim-label")
 
         card = Gtk::Box.new(:vertical, 4)
         card.append(picture)
         card.append(label)
-        card.add_css_class("xd-attachment")
+        card.add_css_class("card")
+        card.margin_top = 6
+        card.margin_bottom = 6
+        card.margin_start = 6
+        card.margin_end = 6
+        card.halign = :start
 
         remove = Gtk::Button.new_from_icon_name(
           "window-close-symbolic"
@@ -1413,6 +1443,7 @@ module Xd
         chip = Gtk::Overlay.new
         chip.child = card
         chip.add_overlay(remove)
+        chip.halign = :start
         remove.clicked_signal.connect do
           @attachments.delete(attachment)
           @attachments_bar.remove(chip)
@@ -1427,111 +1458,6 @@ module Xd
         @attachments.clear
         clear(@attachments_bar)
         @attachments_bar.visible = false
-      end
-
-      private def append_message_images(paths : Array(String)) : Nil
-        images = Gtk::Box.new(:horizontal, 8)
-        images.add_css_class("xd-message-images")
-
-        paths.each_with_index do |path, index|
-          images.append(image_preview(path, index + 1))
-        end
-        @transcript.append(images)
-      end
-
-      private def image_preview(
-        path : String,
-        number : Int32,
-      ) : Gtk::Widget
-        response = fetch_image(path, true)
-        texture = response.try { |body| texture_from(body) }
-
-        content = if texture
-                    picture = Gtk::Picture.new_for_paintable(texture)
-                    picture.content_fit = :scale_down
-                    picture.set_size_request(168, 96)
-                    button = Gtk::Button.new
-                    button.child = picture
-                    button.add_css_class("flat")
-                    button.tooltip_text = "Open image"
-                    button.clicked_signal.connect do
-                      open_image(path, number)
-                    end
-                    button
-                  else
-                    unavailable = Gtk::Label.new("Preview unavailable")
-                    unavailable.add_css_class("dim-label")
-                    unavailable
-                  end
-
-        label = Gtk::Label.new("Image ##{number}")
-        label.xalign = 0_f32
-        label.add_css_class("dim-label")
-
-        card = Gtk::Box.new(:vertical, 4)
-        card.add_css_class("xd-image-preview")
-        card.append(content)
-        card.append(label)
-        card
-      end
-
-      private def open_image(path : String, number : Int32) : Nil
-        response = fetch_image(path, false)
-        unless response
-          @status.text = "Cannot load that image."
-          return
-        end
-        texture = texture_from(response)
-        unless texture
-          @status.text = "Cannot decode that image."
-          return
-        end
-
-        picture = Gtk::Picture.new_for_paintable(texture)
-        picture.content_fit = :scale_down
-        picture.can_shrink = true
-
-        scroll = Gtk::ScrolledWindow.new
-        scroll.child = picture
-
-        viewer = Gtk::Window.new
-        viewer.title = "Image ##{number}"
-        viewer.transient_for = @widget
-        viewer.destroy_with_parent = true
-        viewer.modal = true
-        viewer.set_default_size(960, 720)
-        viewer.child = scroll
-        viewer.present
-      end
-
-      private def fetch_image(
-        path : String,
-        preview : Bool,
-      ) : Hash(String, JSON::Any)?
-        @client.call({
-          "op"      => JSON::Any.new("image-read"),
-          "path"    => JSON::Any.new(path),
-          "preview" => JSON::Any.new(preview),
-        })
-      rescue Daemon::Client::Error
-        nil
-      end
-
-      private def texture_from(
-        body : Hash(String, JSON::Any),
-      ) : Gdk::Texture?
-        return unless body["mime"]?.try(&.as_s?) == "image/png"
-        encoded = body["data"]?.try(&.as_s?) || return
-        encoded_limit = ((MAX_IMAGE_BYTES + 2) // 3) * 4
-        return if encoded.bytesize > encoded_limit
-
-        data = Base64.decode(encoded)
-        return if data.empty? || data.size > MAX_IMAGE_BYTES
-
-        bytes = GLib::Bytes.new(data.to_unsafe, data.size)
-        Gdk::Texture.new_from_bytes(bytes)
-      rescue Base64::Error | GLib::Error
-        nil
       end
 
       private def cancel_turn : Nil

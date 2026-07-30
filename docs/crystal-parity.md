@@ -78,7 +78,10 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   recovery are ported. Inline diff cards are installed-bundle
   screenshot-verified at 1100x720 with fatal GTK criticals: full-width
   contiguous row backgrounds, syntax colours, horizontal scrolling, and C
-  padding/geometry match. Image cards remain.
+  padding/geometry match. Image markers now retain exact prose/image order;
+  daemon-backed loading, unavailable states, thumbnail geometry, linked
+  captions, and the transparent Adwaita viewer use the C widget hierarchy.
+  Installed-bundle image verification remains.
 - `[~]` Transcript requests use the C 100-message page size plus one boundary
   row; per-chat expanded limits and four-entry LRU widget-tree cache are
   ported. A 245-row installed-bundle transcript verifies the 100/45 history
@@ -118,7 +121,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   attachment button, model, effort, access, build, and plan controls exist.
   Send/Stop stays icon-only and circular with the C icons, tooltips, colours,
   and empty-Enter queue steering behavior.
-- `[~]` Image paste/chooser limits and previews exist.
+- `[~]` Image paste/chooser limits and previews use the C card hierarchy,
+  scaled thumbnail pixels, caption, remove overlay, and margins. Both Unix and
+  TLS clients send the same byte payload through the daemon. Installed GTK
+  verification remains.
 - `[~]` Ask questions stay bold in the transcript while answer controls use the
   exact C composer slot, flow layout, input row, and retirement lifecycle;
   installed GTK verification remains.

@@ -449,13 +449,6 @@ module Xd
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;
       }
-      .xd-attachment, .xd-image-preview {
-        background: alpha(#ffffff, 0.05);
-        border: 1px solid alpha(#ffffff, 0.10);
-        border-radius: 10px;
-        padding: 7px;
-      }
-      .xd-message-images { margin: 0 14px; }
       .xd-panel {
         background: #0b0b0b;
         border-radius: 14px;

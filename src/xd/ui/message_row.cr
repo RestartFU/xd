@@ -47,6 +47,7 @@ module Xd
 
     class MessageRow
       BUBBLE_MAX_WIDTH_CHARS = 60
+      alias LiteralPart = String | Gtk::Widget
 
       getter widget : Adw::Bin
       getter kind : MessageKind
@@ -57,6 +58,7 @@ module Xd
       def initialize(
         @kind : MessageKind,
         @text : String = "",
+        @literal_parts : Array(LiteralPart)? = nil,
       )
         @stream_label = nil
         @card = Gtk::Box.new(:vertical, 6)
@@ -95,12 +97,14 @@ module Xd
         return if @stream_label.nil? && @text == text
 
         @text = text
+        @literal_parts = nil
         @stream_label = nil
         render_body
       end
 
       def set_stream_text(text : String) : Nil
         @text = text
+        @literal_parts = nil
         unless label = @stream_label
           clear_body
           label = make_text_label
@@ -112,10 +116,20 @@ module Xd
 
       private def render_body : Nil
         clear_body
-        return if @text.empty?
+        return if @text.empty? && @literal_parts.nil?
 
         unless @kind.assistant?
-          append_prose(Markdown.urls_to_pango(@text))
+          if parts = @literal_parts
+            parts.each do |part|
+              if part.is_a?(String)
+                append_prose(Markdown.urls_to_pango(part))
+              else
+                @body.append(part)
+              end
+            end
+          else
+            append_prose(Markdown.urls_to_pango(@text))
+          end
           return
         end
 
