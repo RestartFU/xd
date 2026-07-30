@@ -122,6 +122,19 @@ describe Xd::Markdown do
     )
   end
 
+  it "scans long plain text without copying every remaining suffix" do
+    plain = ("héllo & world " * 8_000) +
+            "https://example.com/a?b=1&c=2"
+
+    result = Xd::Markdown.urls_to_pango(plain)
+
+    result.should start_with("héllo &amp; world")
+    result.should contain(
+      %(<a href="https://example.com/a?b=1&amp;c=2">) +
+      "https://example.com/a?b=1&amp;c=2</a>"
+    )
+  end
+
   it "renders list bullets and nesting" do
     result = Xd::Markdown.to_pango("- first\n- second\n  - nested")
 

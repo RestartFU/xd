@@ -290,23 +290,26 @@ module Xd
     private def autolink_text(text : String, enabled : Bool) : String
       String.build do |io|
         offset = 0
+        plain_start = 0
         while offset < text.bytesize
-          remaining = text.byte_slice(offset, text.bytesize - offset)
-          if enabled && starts_url?(remaining)
-            length = url_length(remaining)
+          if enabled && starts_url_at?(text, offset)
+            length = url_length(text, offset)
             if length > "http://".bytesize
-              url = remaining.byte_slice(0, length)
-              escaped = escape(url)
-              io << %(<a href="#{escaped}">#{escaped}</a>)
+              append_escaped(io, text, plain_start, offset - plain_start)
+              io << %(<a href=")
+              append_escaped(io, text, offset, length)
+              io << %(">)
+              append_escaped(io, text, offset, length)
+              io << "</a>"
               offset += length
+              plain_start = offset
               next
             end
           end
 
-          char = remaining.each_char.first
-          io << escape(char.to_s)
-          offset += char.bytesize
+          offset += 1
         end
+        append_escaped(io, text, plain_start, offset - plain_start)
       end
     end
 
@@ -314,14 +317,28 @@ module Xd
       text.starts_with?("https://") || text.starts_with?("http://")
     end
 
+    private def starts_url_at?(text : String, offset : Int32) : Bool
+      starts_with_at?(text, offset, "https://") ||
+        starts_with_at?(text, offset, "http://")
+    end
+
+    private def starts_with_at?(
+      text : String,
+      offset : Int32,
+      prefix : String,
+    ) : Bool
+      return false if offset + prefix.bytesize > text.bytesize
+      text.to_slice[offset, prefix.bytesize] == prefix.to_slice
+    end
+
     private def safe_link?(url : String) : Bool
       starts_url?(url) || url.starts_with?("mailto:")
     end
 
-    private def url_length(text : String) : Int32
+    private def url_length(text : String, start : Int32) : Int32
       length = 0
-      while length < text.bytesize
-        byte = text.byte_at(length)
+      while start + length < text.bytesize
+        byte = text.byte_at(start + length)
         break if ascii_whitespace?(byte)
         break if {'<', '>', '"', '\''}.includes?(byte.chr)
 
@@ -329,21 +346,21 @@ module Xd
       end
 
       while length > 0
-        last = text.byte_at(length - 1).chr
+        last = text.byte_at(start + length - 1).chr
         if {'.', ',', ';', ':', '!', '?'}.includes?(last)
           length -= 1
           next
         end
 
         if (last == ')' &&
-           count_byte(text, length, ')') >
-             count_byte(text, length, '(')) ||
+           count_byte(text, start, length, ')') >
+             count_byte(text, start, length, '(')) ||
            (last == ']' &&
-           count_byte(text, length, ']') >
-             count_byte(text, length, '[')) ||
+           count_byte(text, start, length, ']') >
+             count_byte(text, start, length, '[')) ||
            (last == '}' &&
-           count_byte(text, length, '}') >
-             count_byte(text, length, '{'))
+           count_byte(text, start, length, '}') >
+             count_byte(text, start, length, '{'))
           length -= 1
           next
         end
@@ -354,14 +371,45 @@ module Xd
 
     private def count_byte(
       text : String,
+      start : Int32,
       length : Int32,
       wanted : Char,
     ) : Int32
       count = 0
       length.times do |index|
-        count += 1 if text.byte_at(index) == wanted.ord
+        count += 1 if text.byte_at(start + index) == wanted.ord
       end
       count
+    end
+
+    private def append_escaped(
+      io : String::Builder,
+      text : String,
+      start : Int32,
+      length : Int32,
+    ) : Nil
+      return if length <= 0
+
+      finish = start + length
+      segment = start
+      position = start
+      while position < finish
+        entity = case text.byte_at(position)
+                 when '&'.ord  then "&amp;"
+                 when '<'.ord  then "&lt;"
+                 when '>'.ord  then "&gt;"
+                 when '"'.ord  then "&quot;"
+                 when '\''.ord then "&apos;"
+                 else               nil
+                 end
+        if entity
+          io.write(text.to_slice[segment, position - segment]) if position > segment
+          io << entity
+          segment = position + 1
+        end
+        position += 1
+      end
+      io.write(text.to_slice[segment, finish - segment]) if segment < finish
     end
 
     private def ascii_whitespace?(byte : UInt8) : Bool
