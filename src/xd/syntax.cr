@@ -340,6 +340,24 @@ module Xd
       elsif state.in_rust_raw_string
         at = scan_rust_raw_string(pieces, line, 0, state, false) || 0
         return pieces if state.in_rust_raw_string
+      elsif state.in_csharp_verbatim_string
+        at = scan_csharp_verbatim_string(
+          pieces,
+          line,
+          0,
+          state,
+          false
+        ) || 0
+        return pieces if state.in_csharp_verbatim_string
+      elsif state.csharp_raw_quotes > 0
+        at = scan_csharp_raw_string(
+          pieces,
+          line,
+          0,
+          state,
+          false
+        ) || 0
+        return pieces if state.csharp_raw_quotes > 0
       elsif state.in_heredoc
         closes = heredoc_terminator?(line, state)
         emit(pieces, SyntaxToken::String, line, 0, line.bytesize)
@@ -460,6 +478,58 @@ module Xd
               (paren_attributes?(language) &&
               byte(line, at + 1) == byte_of('(')))
           at = scan_at_attribute(pieces, line, at)
+        elsif csharp_strings?(language) &&
+              (byte(line, at) == byte_of('"') ||
+              byte(line, at) == byte_of('$'))
+          after = scan_csharp_raw_string(
+            pieces,
+            line,
+            at,
+            state,
+            true
+          )
+          unless after
+            after = scan_csharp_verbatim_string(
+              pieces,
+              line,
+              at,
+              state,
+              true
+            )
+          end
+          if after
+            at = after
+            return pieces if state.csharp_raw_quotes > 0 ||
+                             state.in_csharp_verbatim_string
+          elsif bytes_at?(line, at, "$\"")
+            at = scan_csharp_interpolated_string(pieces, line, at)
+          elsif byte(line, at) == byte_of('"')
+            at = scan_quoted(pieces, line, at, byte_of('"'))
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif csharp_strings?(language) &&
+              byte(line, at) == byte_of('@')
+          after = scan_csharp_verbatim_string(
+            pieces,
+            line,
+            at,
+            state,
+            true
+          )
+          after ||= scan_csharp_verbatim_identifier(
+            pieces,
+            line,
+            at
+          )
+          if after
+            at = after
+            return pieces if state.in_csharp_verbatim_string
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
         elsif triple_strings?(language) &&
               (bytes_at?(line, at, "\"\"\"") ||
               (single_triple_strings?(language) &&
@@ -686,6 +756,149 @@ module Xd
       end
 
       emit(pieces, SyntaxToken::Comment, line, at, scan)
+      scan
+    end
+
+    private def scan_csharp_interpolated_string(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at + 2
+      while scan < line.bytesize && byte(line, scan) != byte_of('"')
+        scan += byte(line, scan) == byte_of('\\') &&
+                scan + 1 < line.bytesize ? 2 : 1
+      end
+      scan += 1 if scan < line.bytesize
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def scan_csharp_verbatim_string(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+      opening : Bool,
+    ) : Int32?
+      scan = at
+      if opening
+        if bytes_at?(line, at, "@\"")
+          scan += 2
+        elsif bytes_at?(line, at, "$@\"") ||
+              bytes_at?(line, at, "@$\"")
+          scan += 3
+        else
+          return nil
+        end
+      end
+
+      while scan < line.bytesize
+        if bytes_at?(line, scan, "\"\"")
+          scan += 2
+        elsif byte(line, scan) == byte_of('"')
+          scan += 1
+          state.in_csharp_verbatim_string = false
+          emit(pieces, SyntaxToken::String, line, at, scan)
+          return scan
+        else
+          scan += 1
+        end
+      end
+
+      state.in_csharp_verbatim_string = true
+      emit(pieces, SyntaxToken::String, line, at, line.bytesize)
+      line.bytesize
+    end
+
+    private def scan_csharp_raw_string(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+      opening : Bool,
+    ) : Int32?
+      contents = at
+      quotes = state.csharp_raw_quotes
+      if opening
+        parsed = csharp_raw_opening(line, at)
+        return nil unless parsed
+        contents, quotes = parsed
+      end
+
+      close = csharp_raw_close(line, contents, quotes)
+      unless close
+        emit(pieces, SyntaxToken::String, line, at, line.bytesize)
+        state.csharp_raw_quotes = quotes
+        return line.bytesize
+      end
+
+      emit(pieces, SyntaxToken::String, line, at, close)
+      state.csharp_raw_quotes = 0
+      close
+    end
+
+    private def csharp_raw_opening(
+      line : String,
+      at : Int32,
+    ) : Tuple(Int32, Int32)?
+      scan = at
+      while byte(line, scan) == byte_of('$')
+        scan += 1
+      end
+      quotes = 0
+      while byte(line, scan) == byte_of('"') && quotes < UInt8::MAX
+        quotes += 1
+        scan += 1
+      end
+      return nil if quotes < 3
+
+      {scan, quotes}
+    end
+
+    private def csharp_raw_close(
+      line : String,
+      at : Int32,
+      quotes : Int32,
+    ) : Int32?
+      scan = at
+      while scan < line.bytesize
+        unless byte(line, scan) == byte_of('"')
+          scan += 1
+          next
+        end
+
+        count = 0
+        while byte(line, scan + count) == byte_of('"')
+          count += 1
+        end
+        return scan + quotes if count >= quotes
+        scan += count
+      end
+      nil
+    end
+
+    private def scan_csharp_verbatim_identifier(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      return nil unless ascii_alpha?(byte(line, scan)) ||
+                        byte(line, scan) == byte_of('_')
+
+      while word_byte?(byte(line, scan))
+        scan += 1
+      end
+      after = skip_space(line, scan)
+      token =
+        if byte(line, after) == byte_of('(') ||
+           followed_by_generic_call?(line, after)
+          SyntaxToken::Function
+        else
+          SyntaxToken::Text
+        end
+      emit(pieces, token, line, at, scan)
       scan
     end
 
@@ -1264,8 +1477,13 @@ module Xd
                 is_definition?(line, at, definitions)
               end
           SyntaxToken::Function
+        elsif type_context_keywords(language).try do |contexts|
+                is_definition?(line, at, contexts)
+              end
+          SyntaxToken::Type
         elsif capitalized_types?(language) &&
-              ascii_upper?(byte(line, at))
+              ascii_upper?(byte(line, at)) &&
+              !(pascal_functions?(language) && called)
           SyntaxToken::Type
         elsif composite_literals?(language) &&
               byte(line, scan) == byte_of('{')
@@ -1563,6 +1781,12 @@ module Xd
       end
     end
 
+    private def type_context_keywords(
+      language : SyntaxLanguage,
+    ) : Set(String)?
+      language.c_sharp? ? CSHARP_TYPE_CONTEXTS : nil
+    end
+
     private def listed?(
       words : Set(String),
       word : String,
@@ -1752,6 +1976,10 @@ module Xd
       language.crystal?
     end
 
+    private def csharp_strings?(language : SyntaxLanguage) : Bool
+      language.c_sharp?
+    end
+
     private def triple_strings?(language : SyntaxLanguage) : Bool
       language.kotlin? || language.toml?
     end
@@ -1784,6 +2012,10 @@ module Xd
 
     private def odin_procedures?(language : SyntaxLanguage) : Bool
       language.odin?
+    end
+
+    private def pascal_functions?(language : SyntaxLanguage) : Bool
+      language.c_sharp?
     end
 
     private def rust_lifetimes?(language : SyntaxLanguage) : Bool

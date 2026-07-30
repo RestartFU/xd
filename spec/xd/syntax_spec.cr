@@ -709,4 +709,102 @@ describe Xd::Syntax do
     Xd::Syntax.scan_line(Xd::SyntaxLanguage::Crystal, "  TEXT", state)
     state.in_heredoc.should be_false
   end
+
+  it "classifies C Sharp types, methods, strings, and escaped identifiers" do
+    declaration = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "public sealed record User(string Name, int Age = 42);",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(declaration, Xd::SyntaxToken::Keyword, "public")
+      .should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "User").should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "string").should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Number, "42").should be_true
+
+    method = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "public static async Task<string> LoadAsync<T>(T value) => " \
+      "new User(value.ToString(), 42);",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(method, Xd::SyntaxToken::Type, "Task").should be_true
+    syntax_has?(method, Xd::SyntaxToken::Function, "LoadAsync")
+      .should be_true
+    syntax_has?(method, Xd::SyntaxToken::Type, "User").should be_true
+    syntax_has?(method, Xd::SyntaxToken::Function, "ToString")
+      .should be_true
+
+    strings = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "var path = $@\"C:\\\\{folder}\\\\file\"; " \
+      "var said = @\"say \"\"hi\"\"\";",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(
+      strings,
+      Xd::SyntaxToken::String,
+      "$@\"C:\\\\{folder}\\\\file\""
+    ).should be_true
+    syntax_has?(strings, Xd::SyntaxToken::String, "@\"say \"\"hi\"\"\"")
+      .should be_true
+
+    escaped = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "@class = true; @await(); // legal identifiers",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(escaped, Xd::SyntaxToken::Keyword, "class").should be_false
+    syntax_has?(escaped, Xd::SyntaxToken::Keyword, "await").should be_false
+    syntax_has?(escaped, Xd::SyntaxToken::Function, "@await")
+      .should be_true
+    syntax_has?(escaped, Xd::SyntaxToken::Number, "true").should be_true
+  end
+
+  it "carries C Sharp verbatim and raw strings" do
+    state = Xd::SyntaxState.new
+    opened = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "var text = @\"first",
+      state
+    )
+    state.in_csharp_verbatim_string.should be_true
+    syntax_has?(opened, Xd::SyntaxToken::String, "@\"first").should be_true
+    closed = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "second \"\"quoted\"\"\"; return text;",
+      state
+    )
+    state.in_csharp_verbatim_string.should be_false
+    syntax_has?(
+      closed,
+      Xd::SyntaxToken::String,
+      "second \"\"quoted\"\"\""
+    ).should be_true
+    syntax_has?(closed, Xd::SyntaxToken::Keyword, "return").should be_true
+
+    raw_open = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "var json = $$\"\"\"\"",
+      state
+    )
+    state.csharp_raw_quotes.should eq(4)
+    syntax_has?(raw_open, Xd::SyntaxToken::String, "$$\"\"\"\"")
+      .should be_true
+    raw_body = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "{\"value\": {{value}}}",
+      state
+    )
+    raw_body.first.token.should eq(Xd::SyntaxToken::String)
+    raw_close = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::CSharp,
+      "\"\"\"\"; Console.WriteLine(json);",
+      state
+    )
+    state.csharp_raw_quotes.should eq(0)
+    syntax_has?(raw_close, Xd::SyntaxToken::Type, "Console").should be_true
+    syntax_has?(raw_close, Xd::SyntaxToken::Function, "WriteLine")
+      .should be_true
+  end
 end
