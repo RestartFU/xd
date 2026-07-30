@@ -42,6 +42,21 @@ describe Xd::Daemon::Filesystem do
     end
   end
 
+  it "reports unreadable picker paths instead of showing an empty disk" do
+    with_filesystem do |filesystem, folder, _chat_id|
+      missing = File.join(folder, "missing")
+      expect_raises(Xd::Daemon::Filesystem::Error, /missing/) do
+        filesystem.list_directory(missing)
+      end
+
+      regular = File.join(folder, "file")
+      File.write(regular, "not a directory")
+      expect_raises(Xd::Daemon::Filesystem::Error) do
+        filesystem.list_directory(regular)
+      end
+    end
+  end
+
   it "lists, reads, and writes regular files inside the chat workdir" do
     with_filesystem do |filesystem, folder, chat_id|
       Dir.mkdir(File.join(folder, "src"))

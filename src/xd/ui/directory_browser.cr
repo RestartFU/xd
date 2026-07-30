@@ -75,13 +75,6 @@ module Xd
         footer.append(hint("Enter", "Open"))
         footer.append(hint("Backspace", "Back"))
         footer.append(hint("Esc", "Use the folder's"))
-        spacer = Gtk::Box.new(:horizontal, 0)
-        spacer.hexpand = true
-        footer.append(spacer)
-        cancel = Gtk::Button.new_with_label("Cancel")
-        cancel.add_css_class("flat")
-        cancel.clicked_signal.connect { answer(nil) }
-        footer.append(cancel)
         footer.add_css_class("xd-panel-bar")
         footer.add_css_class("xd-panel-foot")
 
