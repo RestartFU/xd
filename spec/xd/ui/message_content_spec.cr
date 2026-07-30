@@ -79,4 +79,18 @@ describe Xd::UI::MessageContent do
     parts.first.kind.should eq(Xd::UI::MessagePartKind::Prose)
     parts.first.text.should contain("foo | bar")
   end
+
+  it "prepares large response blocks in bounded UTF-8 chunks" do
+    text = ("é" * 90_000) + "\n" + ("tail " * 20_000)
+    prepared = Xd::UI::MessageContent.prepare(text, 64 * 1024)
+
+    prepared.size.should be > 2
+    prepared.each do |part|
+      part.kind.should eq(Xd::UI::MessagePartKind::Prose)
+      part.text.bytesize.should be <= 64 * 1024
+      part.text.valid_encoding?.should be_true
+      part.markup.should_not be_nil
+    end
+    prepared.map(&.text).join.should eq(text)
+  end
 end

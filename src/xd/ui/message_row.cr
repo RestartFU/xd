@@ -138,40 +138,55 @@ module Xd
           return
         end
 
-        MessageContent.parse(@text).each do |part|
-          case part.kind
-          when MessagePartKind::Prose
-            append_assistant_prose(part.text, generation)
-          when MessagePartKind::Code
-            @body.append(make_code_card(part.text, false, true))
-          when MessagePartKind::Diff
-            @body.append(make_code_card(part.text, true, false))
-          when MessagePartKind::Table
-            @body.append(make_code_card(part.text, false, false))
-          end
-        end
+        placeholder = make_text_label
+        placeholder.text = "Rendering response…"
+        placeholder.add_css_class("dim-label")
+        @body.append(placeholder)
+        queue_assistant_render(@text, generation)
       end
 
-      private def append_assistant_prose(
+      private def queue_assistant_render(
         text : String,
         generation : Int64,
       ) : Nil
-        return if text.empty?
-
-        label = make_text_label
-        label.text = text
-        @body.append(label)
-        BackgroundWork.submit do
-          markup = Markdown.to_pango(text)
+        queued = BackgroundWork.submit do
+          parts = MessageContent.prepare(text)
+          index = 0
           GLib.idle_add do
-            if @render_generation == generation &&
-               label.parent &&
-               @stream_label.nil?
-              label.markup = markup
+            unless @render_generation == generation &&
+                   @stream_label.nil?
+              next false
             end
-            false
+
+            clear_body if index == 0
+            if part = parts[index]?
+              append_prepared_part(part)
+              index += 1
+            end
+            index < parts.size
           end
           nil
+        end
+        return if queued
+
+        GLib.timeout(25.milliseconds) do
+          if @render_generation == generation && @stream_label.nil?
+            queue_assistant_render(text, generation)
+          end
+          false
+        end
+      end
+
+      private def append_prepared_part(part : PreparedMessagePart) : Nil
+        case part.kind
+        when MessagePartKind::Prose
+          append_prose(part.markup || part.text)
+        when MessagePartKind::Code
+          @body.append(make_code_card(part.text, false, true))
+        when MessagePartKind::Diff
+          @body.append(make_code_card(part.text, true, false))
+        when MessagePartKind::Table
+          @body.append(make_code_card(part.text, false, false))
         end
       end
 

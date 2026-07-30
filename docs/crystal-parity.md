@@ -112,7 +112,11 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   screenshot-verified at 1100x720 with fatal GTK criticals. Exact 14-language
   path detection, stateful token scanning, token palette, unified-diff parser,
   independent old/new lexer state, gutters, metadata, row limits, and slice
-  recovery are ported. Inline diff cards are installed-bundle
+  recovery are ported. Completed-response Markdown planning runs on bounded
+  workers; prose, code, table, and diff blocks split at UTF-8-safe 64-KiB
+  boundaries and materialize one GTK widget per idle, preventing a large final
+  response from freezing the main loop after streaming settles. Inline diff
+  cards are installed-bundle
   screenshot-verified at 1100x720 with fatal GTK criticals: full-width
   contiguous row backgrounds, syntax colours, horizontal scrolling, and C
   padding/geometry match. Image markers now retain exact prose/image order;
@@ -495,7 +499,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (327 default, 2 PortAudio, and 5
+- `[x]` Crystal specs pass in Docker (328 default, 2 PortAudio, and 5
   authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
