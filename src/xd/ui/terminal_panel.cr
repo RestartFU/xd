@@ -3,6 +3,7 @@ require "json"
 require "gtk4"
 require "set"
 require "./adw"
+require "./host_launch"
 require "./vte"
 
 module Xd
@@ -12,6 +13,15 @@ module Xd
     # Local and remote terminals use the same RPC contract. AdwTabView state
     # remains device-local, while daemon replay makes reconnects authoritative.
     class TerminalPanel
+      URL_PATTERN = %q((?i)\b(?:https?|ftp)://[^[:space:]<>"']*[-[:alnum:]_~/#?&=%+])
+
+      PALETTE = {
+        "#23232a", "#e06c75", "#98c379", "#d19a66",
+        "#61afef", "#c678dd", "#56b6c2", "#b8bcc8",
+        "#5c6370", "#e06c75", "#98c379", "#d19a66",
+        "#61afef", "#c678dd", "#56b6c2", "#e6e6ec",
+      }
+
       private class Session
         getter id : String
         getter terminal : Vte::Terminal
@@ -295,12 +305,83 @@ module Xd
         terminal.scroll_on_keystroke = true
         terminal.scroll_on_output = false
         terminal.scrollback_lines = 10_000_u32
+        terminal.mouse_autohide = true
+        terminal.cursor_blink_mode = :on
+        terminal.allow_hyperlink = true
+        terminal.backspace_binding = :ascii_delete
+        terminal.font = Pango::FontDescription.from_string(
+          "JetBrains Mono, Monospace 10"
+        )
+        terminal.set_colors(
+          colour("#d4d4d4"),
+          colour("#0a0a0c"),
+          PALETTE.map { |spec| colour(spec) }
+        )
         terminal.add_css_class("xd-terminal")
+        configure_copy_paste(terminal)
+        configure_links(terminal)
         terminal.commit_signal.connect do |text, size|
           bytes = text.to_slice
           length = Math.min(size.to_i, bytes.size)
           send_input(id, bytes[0, length]) if length > 0
         end
+      end
+
+      private def configure_copy_paste(terminal : Vte::Terminal) : Nil
+        keys = Gtk::EventControllerKey.new
+        keys.propagation_phase = :capture
+        keys.key_pressed_signal.connect do |keyval, _keycode, state|
+          modifiers = Gdk::ModifierType::ControlMask |
+                      Gdk::ModifierType::ShiftMask
+          if state.includes?(modifiers) &&
+             Gdk.keyval_to_lower(keyval) == Gdk::KEY_c
+            terminal.copy_clipboard_format(:text)
+            true
+          elsif state.includes?(modifiers) &&
+                Gdk.keyval_to_lower(keyval) == Gdk::KEY_v
+            terminal.paste_clipboard
+            true
+          else
+            false
+          end
+        end
+        terminal.add_controller(keys)
+      end
+
+      private def configure_links(terminal : Vte::Terminal) : Nil
+        begin
+          regex = Vte::Regex.new_for_match(
+            URL_PATTERN,
+            -1_i64,
+            Vte::REGEX_FLAGS_DEFAULT.to_u32
+          )
+          tag = terminal.match_add_regex(regex, 0_u32)
+          terminal.match_set_cursor_name(tag, "pointer")
+        rescue Vte::VteError
+        end
+
+        links = Gtk::GestureClick.new
+        links.button = Gdk::BUTTON_PRIMARY.to_u32
+        links.propagation_phase = :capture
+        links.pressed_signal.connect do |presses, x, y|
+          if presses == 1
+            uri = terminal.check_hyperlink_at(x, y) ||
+                  terminal.check_match_at(x, y)
+            if uri
+              links.state = :claimed
+              HostLaunch.open_uri(uri)
+            end
+          end
+        end
+        terminal.add_controller(links)
+      end
+
+      private def colour(spec : String) : Gdk::RGBA
+        rgba = Gdk::RGBA.new
+        unless rgba.parse(spec)
+          raise ArgumentError.new("Invalid terminal colour: #{spec}")
+        end
+        rgba
       end
 
       private def feed_replay(
