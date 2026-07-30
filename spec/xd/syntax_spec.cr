@@ -433,4 +433,131 @@ describe Xd::Syntax do
     syntax_has?(comment_close, Xd::SyntaxToken::Function, "main")
       .should be_true
   end
+
+  it "classifies V attributes, generics, literals, and directives" do
+    attribute = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::V,
+      "@[json: 'userName']",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(
+      attribute,
+      Xd::SyntaxToken::Preprocessor,
+      "@[json: 'userName']"
+    ).should be_true
+
+    declaration = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::V,
+      "pub fn decode[T](name string) ?User {",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(declaration, Xd::SyntaxToken::Function, "decode")
+      .should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "T").should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "string").should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Type, "User").should be_true
+
+    body = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::V,
+      "user := User{name: r'Ada\\n'}; println(user); letter := `V` // done",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(body, Xd::SyntaxToken::String, "r'Ada\\n'").should be_true
+    syntax_has?(body, Xd::SyntaxToken::Function, "println").should be_true
+    syntax_has?(body, Xd::SyntaxToken::String, "`V`").should be_true
+    syntax_has?(body, Xd::SyntaxToken::Comment, "// done").should be_true
+
+    compile_time = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::V,
+      "$if linux { assert true }",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(compile_time, Xd::SyntaxToken::Preprocessor, "$if")
+      .should be_true
+    syntax_has?(compile_time, Xd::SyntaxToken::Number, "true").should be_true
+
+    shebang = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::V,
+      "#!/usr/bin/env -S v",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(
+      shebang,
+      Xd::SyntaxToken::Comment,
+      "#!/usr/bin/env -S v"
+    ).should be_true
+  end
+
+  it "classifies Odin procedures, attributes, directives, and state" do
+    attribute = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "@(private)",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(attribute, Xd::SyntaxToken::Preprocessor, "@(private)")
+      .should be_true
+
+    declaration = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "fibonacci :: #force_inline proc($T: typeid, n: int) -> int {",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(declaration, Xd::SyntaxToken::Function, "fibonacci")
+      .should be_true
+    syntax_has?(
+      declaration,
+      Xd::SyntaxToken::Preprocessor,
+      "#force_inline"
+    ).should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Keyword, "proc").should be_true
+    syntax_has?(declaration, Xd::SyntaxToken::Preprocessor, "$T")
+      .should be_true
+
+    body = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "user := User{name = \"Ada\"}; fmt.println(user, nil, 42)",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(body, Xd::SyntaxToken::Type, "User").should be_true
+    syntax_has?(body, Xd::SyntaxToken::Function, "println").should be_true
+    syntax_has?(body, Xd::SyntaxToken::Number, "nil").should be_true
+
+    tags = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "#+test value: int = ---",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(tags, Xd::SyntaxToken::Preprocessor, "#+test").should be_true
+    syntax_has?(tags, Xd::SyntaxToken::Number, "---").should be_true
+
+    state = Xd::SyntaxState.new
+    Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "data := `line // still raw",
+      state
+    )
+    state.in_raw_string.should be_true
+    raw_close = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "last`; #load(\"data.bin\")",
+      state
+    )
+    state.in_raw_string.should be_false
+    syntax_has?(raw_close, Xd::SyntaxToken::Preprocessor, "#load")
+      .should be_true
+
+    Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "/* outer /* inner */ still",
+      state
+    )
+    state.in_comment.should eq(1)
+    close = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Odin,
+      "comment */ main :: proc() {}",
+      state
+    )
+    state.in_comment.should eq(0)
+    syntax_has?(close, Xd::SyntaxToken::Function, "main").should be_true
+  end
 end

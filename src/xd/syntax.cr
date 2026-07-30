@@ -372,6 +372,12 @@ module Xd
               byte(line, at) == byte_of('[') &&
               starts_line?(line, at)
           at = scan_table_header(pieces, line, at)
+        elsif byte(line, at) == byte_of('@') &&
+              ((at_attributes?(language) &&
+              byte(line, at + 1) == byte_of('[')) ||
+              (paren_attributes?(language) &&
+              byte(line, at + 1) == byte_of('(')))
+          at = scan_at_attribute(pieces, line, at)
         elsif triple_strings?(language) &&
               (bytes_at?(line, at, "\"\"\"") ||
               (single_triple_strings?(language) &&
@@ -411,6 +417,11 @@ module Xd
           else
             at = scan_quoted(pieces, line, at, byte_of('\''))
           end
+        elsif prefixed_raw_strings?(language) &&
+              byte(line, at) == byte_of('r') &&
+              (byte(line, at + 1) == byte_of('\'') ||
+              byte(line, at + 1) == byte_of('"'))
+          at = scan_prefixed_raw_string(pieces, line, at)
         elsif quoted_keys?(language) &&
               (byte(line, at) == byte_of('"') ||
               byte(line, at) == byte_of('\'')) &&
@@ -419,6 +430,9 @@ module Xd
         elsif byte(line, at) == byte_of('"') ||
               byte(line, at) == byte_of('\'')
           at = scan_quoted(pieces, line, at, byte(line, at))
+        elsif backtick_literals?(language) &&
+              byte(line, at) == byte_of('`')
+          at = scan_quoted(pieces, line, at, byte_of('`'))
         elsif make_variables?(language) && byte(line, at) == byte_of('$')
           at = scan_make_variable(pieces, line, at)
         elsif raw_strings?(language) && byte(line, at) == byte_of('`')
@@ -436,6 +450,24 @@ module Xd
               byte(line, at) == byte_of('#') &&
               starts_line?(line, at)
           at = scan_directive(pieces, line, at)
+        elsif hash_word_directives?(language) &&
+              byte(line, at) == byte_of('#')
+          after = scan_hash_word_directive(pieces, line, at)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif dollar_directives?(language) &&
+              byte(line, at) == byte_of('$')
+          after = scan_dollar_directive(pieces, line, at)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
         elsif yaml_references?(language) &&
               (byte(line, at) == byte_of('&') ||
               byte(line, at) == byte_of('*') ||
@@ -450,6 +482,10 @@ module Xd
         elsif tilde_constant?(language) && byte(line, at) == byte_of('~')
           emit(pieces, SyntaxToken::Number, line, at, at + 1)
           at += 1
+        elsif undefined_constant?(language) &&
+              bytes_at?(line, at, "---")
+          emit(pieces, SyntaxToken::Number, line, at, at + 3)
+          at += 3
         elsif bare_keys?(language) &&
               (word_byte?(byte(line, at)) ||
               byte(line, at) == byte_of('-') ||
@@ -561,6 +597,88 @@ module Xd
       end
 
       emit(pieces, SyntaxToken::Comment, line, at, scan)
+      scan
+    end
+
+    private def scan_at_attribute(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at + 2
+      open = byte(line, at + 1)
+      close = open == byte_of('[') ? byte_of(']') : byte_of(')')
+      depth = 1
+
+      while scan < line.bytesize && depth > 0
+        current = byte(line, scan)
+        if current == byte_of('\'') || current == byte_of('"')
+          quote = current
+          scan += 1
+          while scan < line.bytesize && byte(line, scan) != quote
+            scan += byte(line, scan) == byte_of('\\') &&
+                    scan + 1 < line.bytesize ? 2 : 1
+          end
+          scan += 1 if scan < line.bytesize
+        elsif current == open
+          depth += 1
+          scan += 1
+        elsif current == close
+          depth -= 1
+          scan += 1
+        else
+          scan += 1
+        end
+      end
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_prefixed_raw_string(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      quote = byte(line, at + 1)
+      scan = at + 2
+      while scan < line.bytesize && byte(line, scan) != quote
+        scan += 1
+      end
+      scan += 1 if scan < line.bytesize
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def scan_hash_word_directive(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      scan += 1 if byte(line, scan) == byte_of('+')
+      while word_byte?(byte(line, scan)) ||
+            byte(line, scan) == byte_of('-')
+        scan += 1
+      end
+      return nil if scan == at + 1
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_dollar_directive(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      while word_byte?(byte(line, scan))
+        scan += 1
+      end
+      return nil if scan == at + 1
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
       scan
     end
 
@@ -784,7 +902,11 @@ module Xd
                (bang_functions?(language) &&
                 byte(line, after) == byte_of('!')) ||
                (generic_functions?(language) &&
-                followed_by_generic_call?(line, after))
+                followed_by_generic_call?(line, after)) ||
+               (square_generic_functions?(language) &&
+                followed_by_square_generic_call?(line, after)) ||
+               (odin_procedures?(language) &&
+                followed_by_odin_procedure?(line, after))
 
       token =
         if listed?(keywords(language), word, case_insensitive?(language))
@@ -945,6 +1067,47 @@ module Xd
 
       scan = skip_space(line, scan)
       depth == 0 && byte(line, scan) == byte_of('(')
+    end
+
+    private def followed_by_square_generic_call?(
+      line : String,
+      at : Int32,
+    ) : Bool
+      return false unless byte(line, at) == byte_of('[')
+
+      scan = at
+      depth = 0
+      loop do
+        current = byte(line, scan)
+        if current == byte_of('[')
+          depth += 1
+        elsif current == byte_of(']')
+          depth -= 1
+        end
+        scan += 1
+        break if scan >= line.bytesize || depth == 0
+      end
+
+      scan = skip_space(line, scan)
+      depth == 0 && byte(line, scan) == byte_of('(')
+    end
+
+    private def followed_by_odin_procedure?(
+      line : String,
+      at : Int32,
+    ) : Bool
+      return false unless bytes_at?(line, at, "::")
+
+      scan = skip_space(line, at + 2)
+      while byte(line, scan) == byte_of('#')
+        scan += 1
+        while word_byte?(byte(line, scan))
+          scan += 1
+        end
+        scan = skip_space(line, scan)
+      end
+      bytes_at?(line, scan, "proc") &&
+        !word_byte?(byte(line, scan + 4))
     end
 
     private def keywords(language : SyntaxLanguage) : Set(String)
@@ -1125,6 +1288,34 @@ module Xd
       language.makefile?
     end
 
+    private def prefixed_raw_strings?(language : SyntaxLanguage) : Bool
+      language.v?
+    end
+
+    private def backtick_literals?(language : SyntaxLanguage) : Bool
+      language.v? || language.crystal?
+    end
+
+    private def at_attributes?(language : SyntaxLanguage) : Bool
+      language.v? || language.crystal?
+    end
+
+    private def paren_attributes?(language : SyntaxLanguage) : Bool
+      language.odin?
+    end
+
+    private def hash_word_directives?(language : SyntaxLanguage) : Bool
+      language.odin?
+    end
+
+    private def dollar_directives?(language : SyntaxLanguage) : Bool
+      language.v? || language.odin?
+    end
+
+    private def undefined_constant?(language : SyntaxLanguage) : Bool
+      language.odin?
+    end
+
     private def triple_strings?(language : SyntaxLanguage) : Bool
       language.kotlin? || language.toml?
     end
@@ -1149,6 +1340,14 @@ module Xd
 
     private def generic_functions?(language : SyntaxLanguage) : Bool
       language.rust? || language.c_sharp?
+    end
+
+    private def square_generic_functions?(language : SyntaxLanguage) : Bool
+      language.v?
+    end
+
+    private def odin_procedures?(language : SyntaxLanguage) : Bool
+      language.odin?
     end
 
     private def rust_lifetimes?(language : SyntaxLanguage) : Bool
