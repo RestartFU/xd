@@ -133,7 +133,9 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   remote connection.
 - `[~]` Workspace create/rename/delete/settings/context and agent-secret
   dialogs exist.
-- `[~]` Search dialog exists.
+- `[x]` Search dialog matches the C Adwaita widget tree, empty/result states,
+  sizing, focus, and row activation; installed-bundle UI matrix passes with
+  fatal GTK criticals.
 - `[ ]` Replace provisional GTK dialogs with the exact Adwaita dialog types,
   response appearance, focus, shortcuts, validation, and copy.
 - `[ ]` Port directory browser.
