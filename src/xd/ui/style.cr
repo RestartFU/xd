@@ -450,11 +450,6 @@ module Xd
         color: #ffb4ab;
       }
       .xd-ask { margin: 0 14px 8px 14px; }
-      .xd-queue {
-        background: alpha(#f6d32d, 0.06);
-        border-radius: 10px;
-        padding: 6px 8px;
-      }
       .xd-attachment, .xd-image-preview {
         background: alpha(#ffffff, 0.05);
         border: 1px solid alpha(#ffffff, 0.10);

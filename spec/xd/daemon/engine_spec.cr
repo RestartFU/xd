@@ -448,6 +448,63 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "edits, drops, and steers the persisted turn queue" do
+    launcher = EngineLauncher.new
+
+    with_daemon_engine(launcher: launcher) do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Queue",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+
+      %w(running first second).each do |text|
+        engine.dispatch(local, {
+          "op"   => "send",
+          "chat" => chat,
+          "text" => text,
+        }.to_json).success?.should be_true
+      end
+      engine.dispatch(local, {
+        "op"       => "edit-queue",
+        "chat"     => chat,
+        "index"    => 1,
+        "old-text" => "second",
+        "text"     => "second edited",
+      }.to_json).success?.should be_true
+      engine.dispatch(local, {
+        "op"    => "drop-queue",
+        "chat"  => chat,
+        "index" => 0,
+      }.to_json).success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "send",
+        "chat" => chat,
+        "text" => "third",
+      }.to_json).success?.should be_true
+      engine.dispatch(local, {
+        "op"    => "steer-queue",
+        "chat"  => chat,
+        "index" => 1,
+        "text"  => "third",
+      }.to_json).success?.should be_true
+
+      state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)
+      state["queue"].as_a.map(&.as_s).should eq([
+        "third",
+        "second edited",
+      ])
+      launcher.handles.first.canceled.should be_true
+    end
+  end
+
   it "creates and selects worktrees through the shared engine" do
     launcher = EngineLauncher.new
 

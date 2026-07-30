@@ -258,10 +258,10 @@ module Xd
           @working ? cancel_turn : send_message
         end
 
-        @queue_box = Gtk::Box.new(:vertical, 4)
-        @queue_box.margin_start = 18
-        @queue_box.margin_end = 18
-        @queue_box.add_css_class("xd-queue")
+        @queue_box = Gtk::Box.new(:vertical, 2)
+        @queue_box.margin_top = 6
+        @queue_box.margin_start = 10
+        @queue_box.margin_end = 6
         @queue_box.visible = false
 
         @attachments_bar = Gtk::Box.new(:horizontal, 6)
@@ -1738,29 +1738,119 @@ module Xd
 
         queue.each_with_index do |node, index|
           text = node.as_s
+          icon = Gtk::Image.new_from_icon_name("document-send-symbolic")
           label = Gtk::Label.new(text)
           label.xalign = 0_f32
           label.hexpand = true
           label.ellipsize = :end
+          label.add_css_class("dim-label")
 
-          steer = Gtk::Button.new_with_label("Run next")
+          edit = Gtk::Button.new_from_icon_name(
+            "document-edit-symbolic"
+          )
+          edit.add_css_class("flat")
+          edit.tooltip_text = "Edit queued message"
+
+          steer = Gtk::Button.new_from_icon_name(
+            "media-skip-forward-symbolic"
+          )
           steer.add_css_class("flat")
+          steer.tooltip_text = "Send this now, interrupting the agent"
           steer.clicked_signal.connect do
             steer_queue(index, text)
           end
 
-          remove = Gtk::Button.new_with_label("×")
+          remove = Gtk::Button.new_from_icon_name(
+            "window-close-symbolic"
+          )
           remove.add_css_class("flat")
-          remove.tooltip_text = "Remove queued message"
+          remove.tooltip_text = "Discard"
           remove.clicked_signal.connect { drop_queue(index) }
 
           row = Gtk::Box.new(:horizontal, 6)
-          row.add_css_class("xd-queue-row")
+          edit.clicked_signal.connect do
+            show_queue_editor(row, index, text)
+          end
+          row.append(icon)
           row.append(label)
+          row.append(edit)
           row.append(steer)
           row.append(remove)
           @queue_box.append(row)
         end
+      end
+
+      private def show_queue_editor(
+        row : Gtk::Box,
+        index : Int,
+        old_text : String,
+      ) : Nil
+        clear(row)
+        icon = Gtk::Image.new_from_icon_name("document-send-symbolic")
+        editor = Gtk::TextView.new
+        editor.wrap_mode = :word_char
+        editor.top_margin = 6
+        editor.bottom_margin = 6
+        editor.left_margin = 8
+        editor.right_margin = 8
+        editor.buffer.text = old_text
+        editor.buffer.place_cursor(editor.buffer.end_iter)
+
+        scroller = Gtk::ScrolledWindow.new
+        scroller.set_policy(:never, :automatic)
+        scroller.max_content_height = 120
+        scroller.propagate_natural_height = true
+        scroller.hexpand = true
+        scroller.add_css_class("card")
+        scroller.child = editor
+
+        save = Gtk::Button.new_from_icon_name("document-save-symbolic")
+        save.add_css_class("flat")
+        save.tooltip_text = "Save queued message"
+        save.clicked_signal.connect do
+          save_queue_editor(index, old_text, editor)
+        end
+
+        cancel = Gtk::Button.new_from_icon_name(
+          "window-close-symbolic"
+        )
+        cancel.add_css_class("flat")
+        cancel.tooltip_text = "Cancel editing"
+        cancel.clicked_signal.connect { load_chat_state }
+
+        keys = Gtk::EventControllerKey.new
+        keys.key_pressed_signal.connect do |keyval, _keycode, state|
+          if keyval == Gdk::KEY_Escape
+            load_chat_state
+            true
+          elsif (keyval == Gdk::KEY_Return ||
+                keyval == Gdk::KEY_KP_Enter) &&
+                !state.includes?(Gdk::ModifierType::ShiftMask)
+            save_queue_editor(index, old_text, editor)
+            true
+          else
+            false
+          end
+        end
+        editor.add_controller(keys)
+
+        row.append(icon)
+        row.append(scroller)
+        row.append(save)
+        row.append(cancel)
+        editor.grab_focus
+      end
+
+      private def save_queue_editor(
+        index : Int,
+        old_text : String,
+        editor : Gtk::TextView,
+      ) : Nil
+        text = editor.buffer.text.strip
+        return if text.empty?
+        return load_chat_state if text == old_text
+
+        edit_queue(index, old_text, text)
       end
 
       private def steer_queue(index : Int, text : String) : Nil
@@ -1781,6 +1871,22 @@ module Xd
           "op"    => JSON::Any.new("drop-queue"),
           "chat"  => JSON::Any.new(chat_id),
           "index" => JSON::Any.new(index.to_i64),
+        })
+      end
+
+      private def edit_queue(
+        index : Int,
+        old_text : String,
+        text : String,
+      ) : Nil
+        chat_id = @active_chat
+        return unless chat_id
+        call({
+          "op"       => JSON::Any.new("edit-queue"),
+          "chat"     => JSON::Any.new(chat_id),
+          "index"    => JSON::Any.new(index.to_i64),
+          "old-text" => JSON::Any.new(old_text),
+          "text"     => JSON::Any.new(text),
         })
       end
 
