@@ -11,6 +11,22 @@ describe Xd::CLI do
     output.to_s.should eq("crystal\n")
   end
 
+  it "reports incomplete native bundles" do
+    output = IO::Memory.new
+    errors = IO::Memory.new
+    directory = File.join(
+      Dir.tempdir,
+      "xd-native-cli-#{Random::Secure.hex(12)}"
+    )
+
+    Xd::CLI.new(output, errors).run([
+      "--validate-native-bundle",
+      "windows",
+      directory,
+    ]).should eq(1)
+    errors.to_s.should contain("native bundle missing Crystal executable")
+  end
+
   it "parses daemon paths, bind address, ephemeral port, and pairing" do
     directory = File.join(
       Dir.tempdir,

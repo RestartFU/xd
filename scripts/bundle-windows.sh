@@ -94,6 +94,8 @@ GDK_PIXBUF_MODULEDIR="$OUT_LOADERS" "$QUERY_LOADERS" |
     cp -a "$dll" "$OUT/bin/"
   done
 
+"$OUT/bin/xd.exe" --validate-native-bundle windows "$OUT"
+
 printf 'windows bundle: %s DLLs, %s\n' \
   "$(find "$OUT/bin" -maxdepth 1 -name '*.dll' | wc -l)" \
   "$(du -sh "$OUT" | cut -f1)"

@@ -2,6 +2,7 @@ require "option_parser"
 require "./app_paths"
 require "./daemon/certificate"
 require "./daemon/server"
+require "./native_bundle"
 require "./workspace/service"
 
 module Xd
@@ -41,6 +42,22 @@ module Xd
       if arguments == ["--bundle-runtime"]
         @output.puts "crystal"
         return 0
+      end
+
+      if arguments.size == 3 &&
+         arguments.first? == "--validate-native-bundle"
+        platform = NativeBundle.parse_platform(arguments[1])
+        unless platform
+          @error.puts "xd: native bundle platform must be macos or windows"
+          return 2
+        end
+        missing = NativeBundle.validate(arguments[2], platform)
+        if missing.empty?
+          @output.puts "native bundle: ok"
+          return 0
+        end
+        missing.each { |item| @error.puts "xd: native bundle missing #{item}" }
+        return 1
       end
 
       if arguments.first? == "serve"

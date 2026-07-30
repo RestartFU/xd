@@ -60,6 +60,12 @@ mkdir -p \
   "$STAGE/share/icons/hicolor/symbolic/apps"
 
 install -m0755 "$BINARY" "$STAGE/bin/$EXECUTABLE"
+if [ "$EXECUTABLE" = xd.exe ]; then
+  for library in "$(dirname "$BINARY")"/*.dll; do
+    [ -e "$library" ] || continue
+    install -m0755 "$library" "$STAGE/bin/"
+  done
+fi
 install -m0644 \
   "$ROOT/data/fonts/DMSans-Variable.ttf" \
   "$STAGE/share/fonts/xd/DMSans-Variable.ttf"

@@ -1,5 +1,6 @@
 require "./xd/version"
 require "./xd/bundle_environment"
+require "./xd/native_bundle"
 require "./xd/protocol/operation"
 require "./xd/storage/workflow_state"
 require "./xd/daemon/server"

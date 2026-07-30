@@ -142,5 +142,7 @@ gio-querymodules "$RESOURCES/lib/gio/modules"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 "$APP/Contents/MacOS/xd" --version
+"$APP/Contents/MacOS/xd" \
+  --validate-native-bundle macos "$APP"
 
 printf 'macOS bundle: %s\n' "$(du -sh "$APP" | cut -f1)"
