@@ -488,7 +488,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (320 default, 2 PortAudio, and 5
+- `[x]` Crystal specs pass in Docker (321 default, 2 PortAudio, and 5
   authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and

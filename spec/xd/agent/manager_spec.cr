@@ -436,6 +436,34 @@ describe Xd::Agent::Manager do
     end
   end
 
+  it "keeps streamed transcript rows when cancellation finishes" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      manager.send(chat_id, "work")
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "Partial answer stays."
+      ))
+
+      manager.cancel(chat_id)
+      launcher.finish(0, true)
+      launcher.finish(0, true)
+
+      launcher.handles.first.canceled.should be_true
+      manager.running?(chat_id).should be_false
+      store.get_chat(chat_id).daemon_working.should be_false
+      messages = store.list_messages(chat_id)
+      messages.map(&.role).should eq([
+        "user",
+        "assistant",
+        "duration",
+      ])
+      messages[1].content.should eq("Partial answer stays.")
+      events.count(&.[0].==("turn-finished")).should eq(1)
+      events.last[1]["last_message_id"].as_i64.should eq(messages.last.id)
+    end
+  end
+
   it "keeps turn ownership when backend cancellation fails" do
     with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
       chat_id = store.create_chat(folder_id, "Chat", "claude")
