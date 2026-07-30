@@ -325,6 +325,11 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[x]` Pinned official Codex and Claude native binaries ship in the Linux
   bundle.
 - `[x]` Agent execution resolves bundled binaries before host binaries.
+- `[~]` Daemon-owned CLI updater runs the official `codex update` and
+  `claude update` commands asynchronously, checks structured before/after
+  versions, blocks replacement while turns run, blocks new turns during
+  replacement, and reloads the pooled Codex app-server after success. Unix/TLS
+  protocol operations exist; account-panel UI and paired-TLS proof remain.
 - `[~]` Codex app-server and Claude stream-json turns work through the shared
   manager.
 - `[~]` Codex status, device login, browser link, cancellation, logout, and

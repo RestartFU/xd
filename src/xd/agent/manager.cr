@@ -42,6 +42,9 @@ module Xd
 
       def close : Nil
       end
+
+      def reload(provider : String) : Nil
+      end
     end
 
     class ProcessLauncher < Launcher
@@ -89,6 +92,10 @@ module Xd
 
       def close : Nil
         @codex.close
+      end
+
+      def reload(provider : String) : Nil
+        @codex.close if provider == "codex"
       end
     end
 
@@ -155,6 +162,7 @@ module Xd
 
       @turns = {} of String => ActiveTurn
       @starting = Set(String).new
+      @updating = Set(String).new
       @command_sets = {} of String => Array(String)
       @mutex = Mutex.new
       @closed = false
@@ -309,6 +317,7 @@ module Xd
           current = @turns.values.dup
           @turns.clear
           @starting.clear
+          @updating.clear
           current
         end
 
@@ -318,6 +327,31 @@ module Xd
         rescue Storage::Error
         end
         @launcher.close
+      end
+
+      def begin_backend_update(provider : String) : Nil
+        unless Catalog.lookup(provider)
+          raise Error.new("Unknown assistant: #{provider}")
+        end
+        @mutex.synchronize do
+          if !@turns.empty? || !@starting.empty?
+            raise Error.new(
+              "Stop active assistant turns before updating bundled CLIs."
+            )
+          end
+          if @updating.includes?(provider)
+            raise Error.new("That assistant is already updating.")
+          end
+          @updating << provider
+        end
+      end
+
+      def finish_backend_update(provider : String, success : Bool) : Nil
+        reload = @mutex.synchronize do
+          @updating.delete(provider)
+          success && !@closed
+        end
+        @launcher.reload(provider) if reload
       end
 
       private def start_turn(
@@ -332,6 +366,12 @@ module Xd
           backend = Catalog.lookup(chat.backend)
           unless backend
             raise Error.new("Unknown backend \"#{chat.backend}\".")
+          end
+          updating = @mutex.synchronize { @updating.includes?(backend.id) }
+          if updating
+            raise Error.new(
+              "#{backend.display_name} is updating. Try again when it finishes."
+            )
           end
           if message = @authorizer.call(backend.id)
             raise Error.new(message)
