@@ -236,7 +236,9 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 ## Dialogs and auxiliary UI
 
 - `[x]` Pairing panel matches the C panel structure and routes into the durable
-  remote connection.
+  remote connection. Cancel and Escape remain available while connecting;
+  cancellation closes the returned client before credentials can be stored,
+  matching the C prompt lifecycle.
 - `[~]` Workspace create/rename/delete/settings/context and agent-secret
   dialogs exist.
 - `[x]` Search dialog matches the C Adwaita widget tree, empty/result states,
@@ -321,7 +323,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (224 examples).
+- `[x]` Crystal specs pass in Docker (225 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

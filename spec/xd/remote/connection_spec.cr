@@ -135,4 +135,45 @@ describe Xd::Remote::Connection do
       end
     end
   end
+
+  it "does not keep a pairing canceled while the connection was opening" do
+    with_remote_connection do |socket, path, _store, engine|
+      server = Xd::Daemon::Server.new(engine)
+      server.listen_local(socket)
+      paired_client = Xd::Daemon::Client.local(socket)
+      pairer = ->(_host : String, _port : Int32, _code : String, _name : String) {
+        Xd::Daemon::RemotePairing.new(
+          paired_client,
+          "paired-token",
+          "cd" * 32
+        )
+      }
+      connection = Xd::Remote::Connection.new(
+        Xd::Remote::CredentialsFile.new(path),
+        10.milliseconds,
+        pairer: pairer
+      )
+
+      begin
+        expect_raises(
+          Xd::Daemon::Client::Error,
+          "Pairing was cancelled."
+        ) do
+          connection.pair(
+            "remote.example",
+            4242,
+            "ABCD1234",
+            canceled: -> { true }
+          )
+        end
+        connection.connected?.should be_false
+        connection.configured?.should be_false
+        File.exists?(path).should be_false
+        paired_client.closed?.should be_true
+      ensure
+        connection.close
+        server.close
+      end
+    end
+  end
 end

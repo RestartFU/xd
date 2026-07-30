@@ -117,7 +117,7 @@ module Xd
 
         keys = Gtk::EventControllerKey.new
         keys.key_pressed_signal.connect do |keyval, _keycode, _state|
-          if keyval == Gdk::KEY_Escape && !@busy
+          if keyval == Gdk::KEY_Escape
             close
             true
           else
@@ -195,7 +195,12 @@ module Xd
         set_busy(true)
         spawn do
           begin
-            @connection.pair(host, port, code)
+            @connection.pair(
+              host,
+              port,
+              code,
+              canceled: -> { @closed }
+            )
             GLib.idle_add do
               unless @closed
                 @on_paired.call
@@ -231,7 +236,6 @@ module Xd
         @port.sensitive = !busy
         @code.sensitive = !busy
         @connect.sensitive = !busy
-        @cancel.sensitive = !busy
         @connect.label = busy ? "Connecting…" : "Connect"
       end
 

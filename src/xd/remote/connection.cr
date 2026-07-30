@@ -135,6 +135,7 @@ module Xd
         port : Int32,
         code : String,
         name : String = System.hostname,
+        canceled : Proc(Bool)? = nil,
       ) : Credentials
         normalized_host = host.strip
         if normalized_host.empty?
@@ -164,6 +165,9 @@ module Xd
         )
 
         begin
+          if canceled.try(&.call)
+            raise Daemon::Client::Error.new("Pairing was cancelled.")
+          end
           @credentials_file.save(credentials)
           replace(credentials, paired.client)
           credentials
