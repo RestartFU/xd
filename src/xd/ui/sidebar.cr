@@ -13,6 +13,8 @@ module Xd
   module UI
     class Sidebar
       @remote_state_subscription : Int64
+      @row_popover : Gtk::Popover?
+      @selected_key : String?
 
       private class Source
         getter endpoint : Daemon::Endpoint
@@ -165,20 +167,47 @@ module Xd
         @save_expanded_queued = false
 
         @root_model = Gio::ListStore.new(Gtk::StringObject.g_type)
-        create_children = ->(object : GObject::Object) : Gio::ListModel {
-          string = Gtk::StringObject.new(
-            object.to_unsafe,
-            GICrystal::Transfer::None
-          )
-          model = @nodes[string.string].children
-          LibGObject.g_object_ref(model.to_unsafe)
-          model
+        child_model_for_item = ->(item : Pointer(Void)) : Pointer(Void) {
+          string = Gtk::StringObject.new(item, GICrystal::Transfer::None)
+          node = @nodes[string.string]?
+
+          if node && node.kind == NodeKind::Folder
+            model = node.children
+            LibGObject.g_object_ref(model.to_unsafe)
+            model.to_unsafe
+          else
+            Pointer(Void).null
+          end
         }
+        child_model_data = GICrystal::ClosureDataManager.register(
+          ::Box.box(child_model_for_item)
+        )
+        create_children = ->(
+          item : Pointer(Void),
+          user_data : Pointer(Void),
+        ) : Pointer(Void) {
+          ::Box(Proc(Pointer(Void), Pointer(Void)))
+            .unbox(user_data)
+            .call(item)
+        }
+        destroy_children = ->
+          GICrystal::ClosureDataManager.deregister(Pointer(Void))
+
+        # gi-crystal's generated wrapper returns the Crystal ListModel wrapper
+        # itself from this callback instead of its GObject pointer. Use the raw
+        # constructor until that callback ABI is fixed upstream.
+        GICrystal.ref(@root_model)
+        tree_model = LibGtk.gtk_tree_list_model_new(
+          @root_model.to_unsafe,
+          0,
+          0,
+          create_children.pointer,
+          child_model_data,
+          destroy_children.pointer
+        )
         @tree_model = Gtk::TreeListModel.new(
-          @root_model,
-          false,
-          false,
-          create_children
+          tree_model,
+          GICrystal::Transfer::Full
         )
         @selection = Gtk::SingleSelection.new(@tree_model)
         @selection.autoselect = false
@@ -629,6 +658,8 @@ module Xd
                     folder_menu(node.source, node.id)
                   when NodeKind::Chat
                     chat_menu(node.source, node.id, node.name)
+                  else
+                    raise "Unknown sidebar node kind"
                   end
         popover.has_arrow = false
         popover.halign = :start

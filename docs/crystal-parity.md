@@ -38,8 +38,10 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
 - `[x]` Paired remote retains cached rows while offline and reconnects.
 - `[~]` Folder/chat create, rename, move, delete, context, and settings actions
   route through one daemon endpoint interface.
-- `[ ]` Match the C `GtkListView` tree rows, indentation, expanders, selection,
-  activation, inline editing, drag/drop, and state dots exactly.
+- `[~]` C `GtkTreeListModel`/`GtkListView` rows, indentation, expanders,
+  selection, activation, expansion persistence, and state dots are ported and
+  populated-tree startup is screenshot-verified; inline editing and drag/drop
+  remain.
 - `[ ]` Match local and remote root menus, confirmations, disabled states, and
   error presentation exactly.
 - `[ ]` Match chat working/waiting/done/offline state transitions.
