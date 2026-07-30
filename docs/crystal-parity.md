@@ -72,8 +72,9 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   user-only bubbles, literal streaming, source tooltips, and host link opening
   are integrated. Fenced code, unfinished fences, diff fences, and tables use
   the C card split and geometry. Populated installed-bundle rows are
-  screenshot-verified at 1100x720 with fatal GTK criticals; diff syntax and
-  image cards remain.
+  screenshot-verified at 1100x720 with fatal GTK criticals. Exact 14-language
+  path detection, lexer state shape, and token palette are ported; token
+  scanning, diff syntax, and image cards remain.
 - `[ ]` Port transcript pagination, four-page cache, and 100-message page size.
 - `[ ]` Match bottom pinning, history loading, scroll restoration, and hidden
   scrollbar behavior.
@@ -203,7 +204,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (165 examples).
+- `[x]` Crystal specs pass in Docker (168 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
