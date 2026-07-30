@@ -1,5 +1,6 @@
 require "json"
 require "gtk4"
+require "./adw"
 
 module Xd
   module UI
@@ -12,73 +13,65 @@ module Xd
         ),
         @on_chat : Proc(String, String, Nil),
       )
-        @generation = 0
-        @window = Gtk::Window.new
-        @window.title = "Search Chats"
-        @window.transient_for = @parent
-        @window.modal = true
-        @window.destroy_with_parent = true
-        @window.set_default_size(560, 480)
+        @rows = {} of UInt64 => Tuple(String, String)
+
+        @dialog = Adw::Dialog.new
+        @dialog.title = "Search"
+        @dialog.content_width = 560
+        @dialog.content_height = 480
 
         @entry = Gtk::SearchEntry.new
         @entry.hexpand = true
-        @entry.placeholder_text = "Find a conversation…"
-        @entry.search_changed_signal.connect { queue_search }
+        @entry.search_changed_signal.connect { run_search }
 
-        close = Gtk::Button.new_from_icon_name("window-close-symbolic")
-        close.add_css_class("flat")
-        close.tooltip_text = "Close"
-        close.clicked_signal.connect { @window.destroy }
+        header = Adw::HeaderBar.new
+        header.title_widget = @entry
 
-        header = Gtk::Box.new(:horizontal, 8)
-        header.margin_top = 12
-        header.margin_bottom = 12
-        header.margin_start = 12
-        header.margin_end = 12
-        header.append(@entry)
-        header.append(close)
-
-        @results = Gtk::Box.new(:vertical, 4)
+        @results = Gtk::ListBox.new
+        @results.selection_mode = :none
+        @results.add_css_class("boxed-list")
         @results.valign = :start
         @results.margin_top = 12
         @results.margin_bottom = 12
         @results.margin_start = 12
         @results.margin_end = 12
+        @results.row_activated_signal.connect do |row|
+          activate_result(row)
+        end
 
         scroll = Gtk::ScrolledWindow.new
-        scroll.vexpand = true
+        scroll.set_policy(:never, :automatic)
         scroll.child = @results
 
-        root = Gtk::Box.new(:vertical, 0)
-        root.append(header)
-        root.append(Gtk::Separator.new(:horizontal))
-        root.append(scroll)
-        @window.child = root
-        placeholder(
+        @placeholder = Adw::StatusPage.new(
+          icon_name: "system-search-symbolic"
+        )
+
+        @stack = Gtk::Stack.new
+        @stack.vexpand = true
+        @stack.add_named(@placeholder, "placeholder")
+        @stack.add_named(scroll, "results")
+        show_placeholder(
           "Search Chats",
           "Find a conversation by something said in it."
         )
+
+        toolbar = Adw::ToolbarView.new
+        toolbar.add_top_bar(header)
+        toolbar.content = @stack
+        @dialog.child = toolbar
       end
 
       def present : Nil
-        @window.present
+        @dialog.present(@parent)
         @entry.grab_focus
-      end
-
-      private def queue_search : Nil
-        @generation += 1
-        generation = @generation
-        GLib.timeout(150.milliseconds) do
-          run_search if generation == @generation
-          false
-        end
       end
 
       private def run_search : Nil
         clear_results
         query = @entry.text.strip
         if query.empty?
-          placeholder(
+          show_placeholder(
             "Search Chats",
             "Find a conversation by something said in it."
           )
@@ -89,69 +82,52 @@ module Xd
           "op"    => JSON::Any.new("search"),
           "query" => JSON::Any.new(query),
         })
-        return unless response
-
-        hits = response["results"].as_a
-        if hits.empty?
-          placeholder("No Results", "Nothing matches that.")
+        unless response
+          show_placeholder(
+            "Search Failed",
+            "The daemon could not search conversations."
+          )
           return
         end
 
-        hits.each do |hit|
-          add_result(hit)
+        hits = response["results"].as_a
+        if hits.empty?
+          show_placeholder("No Results", "Nothing matches that.")
+          return
         end
+
+        hits.each { |hit| add_result(hit) }
+        @stack.visible_child_name = "results"
       end
 
       private def add_result(hit : JSON::Any) : Nil
-        title_text = hit["title"].as_s
-        snippet_text = hit["snippet"].as_s
-        role = hit["role"].as_s.capitalize
-        chat_id = hit["chat"].as_s
-
-        title = Gtk::Label.new(title_text)
-        title.xalign = 0_f32
-        title.add_css_class("title")
-
-        snippet = Gtk::Label.new("#{role} · #{snippet_text}")
-        snippet.xalign = 0_f32
-        snippet.wrap = true
-        snippet.wrap_mode = :word_char
-        snippet.lines = 2
-        snippet.ellipsize = :end
-        snippet.add_css_class("dim-label")
-
-        content = Gtk::Box.new(:vertical, 3)
-        content.append(title)
-        content.append(snippet)
-
-        button = Gtk::Button.new
-        button.child = content
-        button.halign = :fill
-        button.add_css_class("flat")
-        button.add_css_class("xd-search-result")
-        button.clicked_signal.connect do
-          @on_chat.call(chat_id, title_text)
-          @window.destroy
-        end
-        @results.append(button)
+        title = hit["title"].as_s
+        row = Adw::ActionRow.new(
+          title: title,
+          subtitle: hit["snippet"].as_s,
+          subtitle_lines: 2
+        )
+        row.activatable = true
+        @rows[row.to_unsafe.address] = {hit["chat"].as_s, title}
+        @results.append(row)
       end
 
-      private def placeholder(title : String, detail : String) : Nil
-        clear_results
+      private def activate_result(row : Gtk::ListBoxRow) : Nil
+        result = @rows[row.to_unsafe.address]?
+        return unless result
 
-        heading = Gtk::Label.new(title)
-        heading.add_css_class("title-2")
-        heading.margin_top = 48
+        @on_chat.call(result[0], result[1])
+        @dialog.close
+      end
 
-        description = Gtk::Label.new(detail)
-        description.wrap = true
-        description.add_css_class("dim-label")
-
-        @results.append(heading)
-        @results.append(description)
+      private def show_placeholder(title : String, detail : String) : Nil
+        @placeholder.title = title
+        @placeholder.description = detail
+        @stack.visible_child_name = "placeholder"
       end
 
       private def clear_results : Nil
+        @rows.clear
         while child = @results.first_child
           @results.remove(child)
         end
