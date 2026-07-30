@@ -126,7 +126,27 @@ module Xd
           model_factory: voice_model_factory ||
                          -> { Voice::Model.new },
           transcriber_factory: voice_transcriber_factory ||
-                               -> { Voice::Transcriber.new }
+                               -> { Voice::Transcriber.new },
+          agent_transcriber: ->(provider : String, chat_id : String, audio_path : String, finished : Proc(Voice::Transcription, Nil)) {
+            unless provider == "codex"
+              raise VoiceJobs::Error.new(
+                "#{provider} does not support audio input."
+              )
+            end
+            completed = ->(ok : Bool, text : String?, error : String?) {
+              finished.call(Voice::Transcription.new(
+                ok ? text : nil,
+                error,
+                false
+              ))
+            }
+            handle = @agents.transcribe_audio(
+              chat_id,
+              audio_path,
+              completed
+            )
+            -> { handle.cancel }
+          }
         )
       end
 
@@ -1274,13 +1294,19 @@ module Xd
         connection : Connection,
         request : Protocol::Request,
       ) : Protocol::Response
-        voice_chat(request, "voice-transcribe")
+        chat_id = voice_chat(request, "voice-transcribe")
         token = voice_token(request, "voice-transcribe")
         audio = request.string(
           "audio",
           "voice-transcribe needs audio."
         )
-        @voice.transcribe(connection.object_id, token, audio)
+        @voice.transcribe(
+          connection.object_id,
+          token,
+          audio,
+          chat_id,
+          request.string?("provider") || "local"
+        )
         Protocol::Response.ok
       end
 

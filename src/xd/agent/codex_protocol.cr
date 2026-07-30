@@ -220,7 +220,7 @@ module Xd
           policy = {
             "inherit"                 => JSON::Any.new("all"),
             "ignore_default_excludes" => JSON::Any.new(true),
-            "include_only" => JSON::Any.new(
+            "include_only"            => JSON::Any.new(
               names.map { |name| JSON::Any.new(name) }
             ),
           }
@@ -265,14 +265,22 @@ module Xd
           sandbox["networkAccess"] = JSON::Any.new(false)
         end
 
+        input = [
+          {"type" => "text", "text" => spec.prompt},
+        ]
+        if audio_path = spec.audio_path
+          input << {
+            "type" => "localAudio",
+            "path" => audio_path,
+          }
+        end
+
         params = {
           "threadId"       => JSON::Any.new(thread_id),
           "approvalPolicy" => JSON::Any.new("never"),
           "effort"         => JSON::Any.new(spec.effort.wire_name),
           "sandboxPolicy"  => JSON::Any.new(sandbox),
-          "input" => json_any([
-            {"type" => "text", "text" => spec.prompt},
-          ]),
+          "input"          => json_any(input),
         }
         if model = spec.model
           params["model"] = JSON::Any.new(model)
@@ -393,8 +401,7 @@ module Xd
           usage = object?(params, "tokenUsage")
           last = usage.try { |item| object?(item, "last") }
           used = last ? positive_u64(last, "totalTokens") : 0_u64
-          window = usage ?
-            positive_u64(usage, "modelContextWindow") : 0_u64
+          window = usage ? positive_u64(usage, "modelContextWindow") : 0_u64
           turn.emit(EventType::Usage, used: used, window: window)
         when "error"
           return unless turn
@@ -437,7 +444,7 @@ module Xd
              "item/fileChange/requestApproval"
           if id = int?(root, "id")
             write({
-              "id" => JSON::Any.new(id),
+              "id"     => JSON::Any.new(id),
               "result" => json_any({
                 "decision" => "cancel",
               }),
@@ -446,7 +453,7 @@ module Xd
         else
           if id = int?(root, "id")
             write({
-              "id" => JSON::Any.new(id),
+              "id"    => JSON::Any.new(id),
               "error" => json_any({
                 "code"    => -32601,
                 "message" => "xd does not support this server request",
@@ -477,11 +484,11 @@ module Xd
         end
 
         return if {
-          "userMessage",
-          "reasoning",
-          "hookPrompt",
-          "subAgentActivity",
-        }.includes?(type)
+                    "userMessage",
+                    "reasoning",
+                    "hookPrompt",
+                    "subAgentActivity",
+                  }.includes?(type)
 
         if type == "commandExecution"
           return unless started && id
@@ -497,7 +504,7 @@ module Xd
                        when "collabAgentToolCall" then "collab_agent_tool_call"
                        when "webSearch"           then "web_search"
                        when "imageView"           then "image_view"
-                       else                           type
+                       else                            type
                        end
         turn.emit(
           EventType::ToolUse,

@@ -109,6 +109,7 @@ module Xd
       getter folder_ids : Array(String)
       getter effort : Effort
       getter access : Access
+      getter audio_path : String?
 
       def initialize(
         @prompt : String,
@@ -119,6 +120,7 @@ module Xd
         @folder_ids = [] of String,
         @effort = Effort::High,
         @access = Access::ReadOnly,
+        @audio_path : String? = nil,
       )
       end
     end

@@ -64,6 +64,55 @@ private class StalledVoiceTranscriber < Xd::Voice::Transcriber
 end
 
 describe Xd::Daemon::VoiceJobs do
+  it "uses Codex audio input without a local speech model" do
+    events = Channel(Hash(String, JSON::Any)).new(2)
+    callback : Proc(Xd::Voice::Transcription, Nil)? = nil
+    provider : String? = nil
+    chat_id : String? = nil
+    audio_path : String? = nil
+    cancelled = false
+    jobs = Xd::Daemon::VoiceJobs.new(
+      ->(_name : String, fields : Hash(String, JSON::Any), _owner : UInt64) {
+        events.send(fields)
+        nil
+      },
+      agent_transcriber: ->(selected : String, chat : String, path : String, finished : Proc(Xd::Voice::Transcription, Nil)) {
+        provider = selected
+        chat_id = chat
+        audio_path = path
+        callback = finished
+        -> {
+          cancelled = true
+          nil
+        }
+      }
+    )
+    audio = Bytes[1, 2, 3, 4]
+
+    jobs.transcribe(
+      12_u64,
+      "codex-token",
+      Base64.strict_encode(audio),
+      "chat-12",
+      "codex"
+    )
+    provider.should eq("codex")
+    chat_id.should eq("chat-12")
+    path = audio_path.not_nil!
+    File.read(path).to_slice.should eq(audio)
+
+    callback.not_nil!.call(
+      Xd::Voice::Transcription.new("cloud transcript", nil, false)
+    )
+    event = events.receive
+    event["state"].as_s.should eq("transcribed")
+    event["text"].as_s.should eq("cloud transcript")
+    File.exists?(path).should be_false
+    cancelled.should be_false
+  ensure
+    jobs.try(&.close)
+  end
+
   it "cancels a stalled transcription and releases its request token" do
     events = Channel(Hash(String, JSON::Any)).new(4)
     transcribers = [] of StalledVoiceTranscriber
@@ -82,7 +131,7 @@ describe Xd::Daemon::VoiceJobs do
     audio = Base64.strict_encode(Bytes[1, 2, 3, 4])
 
     2.times do
-      jobs.transcribe(11_u64, "repeat-token", audio)
+      jobs.transcribe(11_u64, "repeat-token", audio, "chat")
       select
       when event = events.receive
         event["state"].as_s.should eq("error")

@@ -32,6 +32,9 @@ module Xd
       @request_token : String?
       @recorder : Voice::Recorder?
       @error_message : String?
+      @busy_spinner : Gtk::Spinner
+      @provider_popover : Gtk::Popover?
+      @provider : String
       @event_inbox = EventInbox(Daemon::Endpoint).new
 
       def initialize(
@@ -51,6 +54,7 @@ module Xd
         @timer = 0_u32
         @started_at = Time.instant
         @download_progress = 0
+        @provider = "local"
 
         @widget = Gtk::Box.new(:horizontal, 6)
         @widget.valign = :center
@@ -61,6 +65,7 @@ module Xd
         @button.add_css_class("circular")
         @button.clicked_signal.connect { clicked }
         @busy_spinner = Gtk::Spinner.new
+        @provider_popover = nil
 
         @download_prompt = Gtk::Box.new(:horizontal, 6)
         @download_prompt.valign = :center
@@ -105,6 +110,8 @@ module Xd
         @error_status.append(@error_label)
         @error_status.append(@error_dismiss)
 
+        @provider_popover = build_provider_popover
+        @provider_popover.not_nil!.parent = @button
         @widget.append(@button)
         @widget.append(@download_prompt)
         @widget.append(@download_status)
@@ -145,6 +152,7 @@ module Xd
       end
 
       def cancel : Nil
+        @provider_popover.try(&.popdown)
         endpoint = @endpoint
         token = @request_token
         daemon_job = @state.downloading? || @state.transcribing?
@@ -179,6 +187,10 @@ module Xd
         @endpoint = nil
         @chat_id = nil
         @event_inbox.clear
+        if popover = @provider_popover
+          popover.unparent if popover.parent
+        end
+        @provider_popover = nil
         update_button
       end
 
@@ -193,18 +205,29 @@ module Xd
         when .downloading?
           cancel
         when .idle?
-          begin_voice if available?
+          @provider_popover.try(&.popup) if available?
         else
         end
       end
 
-      private def begin_voice : Nil
+      private def choose_provider(provider : String) : Nil
+        @provider_popover.try(&.popdown)
+        begin_voice(provider)
+      end
+
+      private def begin_voice(provider : String) : Nil
         endpoint = @endpoint || return
         chat_id = @chat_id || return
+        @provider = provider
         @error_message = nil
         @generation &+= 1
         generation = @generation
         @request_token = Random::Secure.hex(16)
+        if provider == "codex"
+          start_recording(generation)
+          return
+        end
+
         @state = State::Confirming
         update_button
 
@@ -316,6 +339,7 @@ module Xd
         wav : Bytes,
         generation : UInt64,
       ) : Nil
+        provider = @provider
         queued = BackgroundWork.submit do
           encoded : String? = nil
           message : String? = nil
@@ -328,7 +352,7 @@ module Xd
           GLib.idle_add do
             if current?(generation)
               if payload = encoded
-                send_transcription(payload, generation)
+                send_transcription(payload, generation, provider)
               else
                 reset
                 show_error(message)
@@ -347,6 +371,7 @@ module Xd
       private def send_transcription(
         encoded : String,
         generation : UInt64,
+        provider : String,
       ) : Nil
         endpoint = @endpoint || return reset
         chat_id = @chat_id || return reset
@@ -356,10 +381,11 @@ module Xd
           message : String? = nil
           begin
             endpoint.call({
-              "op"      => JSON::Any.new("voice-transcribe"),
-              "chat"    => JSON::Any.new(chat_id),
-              "request" => JSON::Any.new(token),
-              "audio"   => JSON::Any.new(encoded),
+              "op"       => JSON::Any.new("voice-transcribe"),
+              "chat"     => JSON::Any.new(chat_id),
+              "request"  => JSON::Any.new(token),
+              "audio"    => JSON::Any.new(encoded),
+              "provider" => JSON::Any.new(provider),
             })
           rescue error : Daemon::Client::Error
             message = error.message || "Voice transcription failed."
@@ -481,6 +507,83 @@ module Xd
         @remote_target ? "remote machine" : "this machine"
       end
 
+      private def provider_name : String
+        @provider == "codex" ? "Codex" : "local speech model"
+      end
+
+      private def build_provider_popover : Gtk::Popover
+        content = Gtk::Box.new(:vertical, 4)
+        content.margin_top = 6
+        content.margin_bottom = 6
+        content.margin_start = 6
+        content.margin_end = 6
+        content.add_css_class("xd-menu")
+
+        heading = Gtk::Label.new("Transcribe with")
+        heading.xalign = 0_f32
+        heading.add_css_class("heading")
+        heading.margin_start = 8
+        heading.margin_end = 8
+        heading.margin_bottom = 2
+        content.append(heading)
+        content.append(provider_button(
+          "audio-input-microphone-symbolic",
+          "Local speech model",
+          "Private · downloads 548 MiB only if selected"
+        ) { choose_provider("local") })
+        content.append(provider_button(
+          "xd-backend-codex-symbolic",
+          "Codex",
+          "Uses signed-in Codex on chat machine · no download"
+        ) { choose_provider("codex") })
+        claude = provider_button(
+          "xd-backend-claude",
+          "Claude Code",
+          "Unavailable · Claude has no audio input"
+        ) { }
+        claude.sensitive = false
+        content.append(claude)
+
+        popover = Gtk::Popover.new
+        popover.child = content
+        popover.has_arrow = true
+        popover
+      end
+
+      private def provider_button(
+        icon_name : String,
+        title : String,
+        description : String,
+        &selected : -> Nil
+      ) : Gtk::Button
+        icon = Gtk::Image.new_from_icon_name(icon_name)
+        icon.valign = :center
+        name = Gtk::Label.new(title)
+        name.xalign = 0_f32
+        detail = Gtk::Label.new(description)
+        detail.xalign = 0_f32
+        detail.add_css_class("dim-label")
+        detail.add_css_class("caption")
+
+        labels = Gtk::Box.new(:vertical, 0)
+        labels.hexpand = true
+        labels.append(name)
+        labels.append(detail)
+        row = Gtk::Box.new(:horizontal, 10)
+        row.margin_top = 4
+        row.margin_bottom = 4
+        row.margin_start = 4
+        row.margin_end = 4
+        row.append(icon)
+        row.append(labels)
+
+        button = Gtk::Button.new
+        button.child = row
+        button.add_css_class("flat")
+        button.clicked_signal.connect { selected.call }
+        button
+      end
+
       private def update_button : Nil
         @button.remove_css_class("destructive-action")
         @button.add_css_class("circular")
@@ -526,7 +629,7 @@ module Xd
           @button.child = @busy_spinner
           @button.sensitive = false
           @button.tooltip_text =
-            "Transcribing voice on #{target_name}…"
+            "Transcribing voice with #{provider_name} on #{target_name}…"
         else
           @button.icon_name = "audio-input-microphone-symbolic"
           @button.sensitive = available?

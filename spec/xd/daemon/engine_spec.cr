@@ -383,10 +383,11 @@ describe Xd::Daemon::Engine do
         subscription = engine.events.subscribe { |event| events.send(event) }
         begin
           started = engine.dispatch(remote, {
-            "op"      => "voice-transcribe",
-            "chat"    => chat_id,
-            "request" => "remote-voice",
-            "audio"   => Base64.strict_encode(Bytes[1, 2, 3, 4]),
+            "op"       => "voice-transcribe",
+            "chat"     => chat_id,
+            "request"  => "remote-voice",
+            "audio"    => Base64.strict_encode(Bytes[1, 2, 3, 4]),
+            "provider" => "local",
           }.to_json)
           started.success?.should be_true
 
@@ -403,6 +404,52 @@ describe Xd::Daemon::Engine do
       end
     ensure
       FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "routes Codex voice input without downloading a local model" do
+    launcher = EngineLauncher.new
+
+    with_daemon_engine(launcher: launcher) do |store, engine|
+      connection = Xd::Daemon::Connection.new(
+        Xd::Daemon::Transport::Local
+      )
+      folder_id = engine.dispatch(connection, {
+        "op"   => "new-folder",
+        "name" => "Codex voice",
+      }.to_json)["id"].as_s
+      chat_id = store.create_chat(folder_id, "Voice", "claude")
+      events = Channel(Xd::Protocol::Event).new(2)
+      subscription = engine.events.subscribe { |event| events.send(event) }
+      begin
+        started = engine.dispatch(connection, {
+          "op"       => "voice-transcribe",
+          "chat"     => chat_id,
+          "request"  => "codex-voice",
+          "audio"    => Base64.strict_encode(Bytes[5, 6, 7, 8]),
+          "provider" => "codex",
+        }.to_json)
+        started.success?.should be_true
+
+        launcher.specs.size.should eq(1)
+        spec = launcher.specs.first
+        spec.audio_path.should_not be_nil
+        File.exists?(spec.audio_path.not_nil!).should be_true
+        launcher.emit(0, Xd::Agent::Event.new(
+          Xd::Agent::EventType::TextDelta,
+          text: "Codex transcript"
+        ))
+        launcher.finish_callbacks[0].call(true, nil)
+
+        event = events.receive
+        event["state"].as_s.should eq("transcribed")
+        event["text"].as_s.should eq("Codex transcript")
+        event.audience.should eq(connection.object_id)
+        File.exists?(spec.audio_path.not_nil!).should be_false
+        store.list_messages(chat_id).should be_empty
+      ensure
+        engine.events.unsubscribe(subscription)
+      end
     end
   end
 

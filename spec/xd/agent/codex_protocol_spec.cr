@@ -29,7 +29,8 @@ describe Xd::Agent::CodexProtocol do
         model: "gpt-5.6-sol",
         workdir: "/tmp",
         effort: Xd::Agent::Effort::XHigh,
-        access: Xd::Agent::Access::Edit
+        access: Xd::Agent::Access::Edit,
+        audio_path: "/tmp/voice.wav"
       ),
       nil,
       ->(event : Xd::Agent::Event) { events << event },
@@ -49,7 +50,7 @@ describe Xd::Agent::CodexProtocol do
     sent_json(lines, 2)["method"].as_s.should eq("thread/start")
 
     protocol.receive_line({
-      "id" => 2,
+      "id"     => 2,
       "result" => {"thread" => {"id" => "thread-1"}},
     }.to_json)
     turn.thread_id.should eq("thread-1")
@@ -60,9 +61,12 @@ describe Xd::Agent::CodexProtocol do
     start["sandboxPolicy"]["type"].as_s.should eq("workspaceWrite")
     start["sandboxPolicy"]["writableRoots"][0].as_s.should eq("/tmp")
     start["sandboxPolicy"]["networkAccess"].as_bool.should be_false
+    start["input"].as_a.map(&.["type"].as_s)
+      .should eq(["text", "localAudio"])
+    start["input"][1]["path"].as_s.should eq("/tmp/voice.wav")
 
     protocol.receive_line({
-      "id" => 3,
+      "id"     => 3,
       "result" => {"turn" => {"id" => "turn-1"}},
     }.to_json)
     turn.turn_id.should eq("turn-1")
@@ -79,7 +83,7 @@ describe Xd::Agent::CodexProtocol do
       "method" => "item/completed",
       "params" => {
         "threadId" => "thread-1",
-        "item" => {
+        "item"     => {
           "id"   => "message-1",
           "type" => "agentMessage",
           "text" => "hello",
@@ -90,7 +94,7 @@ describe Xd::Agent::CodexProtocol do
       "method" => "item/started",
       "params" => {
         "threadId" => "thread-1",
-        "item" => {
+        "item"     => {
           "id"      => "command-1",
           "type"    => "commandExecution",
           "command" => "pwd",
@@ -101,7 +105,7 @@ describe Xd::Agent::CodexProtocol do
       "method" => "item/completed",
       "params" => {
         "threadId" => "thread-1",
-        "item" => {
+        "item"     => {
           "id"      => "change-1",
           "type"    => "fileChange",
           "changes" => [
@@ -117,7 +121,7 @@ describe Xd::Agent::CodexProtocol do
     protocol.receive_line({
       "method" => "thread/tokenUsage/updated",
       "params" => {
-        "threadId" => "thread-1",
+        "threadId"   => "thread-1",
         "tokenUsage" => {
           "last"               => {"totalTokens" => 456},
           "modelContextWindow" => 272_000,
@@ -186,11 +190,11 @@ describe Xd::Agent::CodexProtocol do
       .should eq(["PATH", "CUSTOM_TOKEN"])
 
     protocol.receive_line({
-      "id" => 2,
+      "id"     => 2,
       "result" => {"thread" => {"id" => "thread-old"}},
     }.to_json)
     protocol.receive_line({
-      "id" => 3,
+      "id"     => 3,
       "result" => {"turn" => {"id" => "turn-live"}},
     }.to_json)
     protocol.cancel(turn)
