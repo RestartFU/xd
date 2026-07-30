@@ -163,7 +163,13 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   checkout rows, detached labels, locking rule, and daemon-owned selection.
   Effort and access use the same picker widget; the current/new checkout,
   effort, and access popovers are installed-bundle screenshot-verified.
-- `[ ]` Port optional voice recording/download/transcription behavior.
+- `[x]` Optional voice input matches the C composer position and client-local
+  lifecycle: first-use 548 MiB model confirmation/download/cancel, recording
+  timer/stop, transcription, whitespace-safe insertion, errors, chat-switch
+  cancellation, and shutdown cleanup. The relocatable bundle carries the
+  PulseAudio runtime and CPU-dispatched whisper.cpp build. Installed-bundle
+  GTK proof verifies the idle microphone control, first-use Adwaita prompt,
+  and responsive Cancel path.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
   tooltip, and geometry. The daemon computes it once for Unix and TLS clients;
   installed GTK geometry is verified; live branch-change verification remains.
@@ -270,7 +276,11 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 - `[~]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
   bounded live output, stop, persistence, and dialog-independent run lifecycle
   match C. Panel is screenshot-verified from an installed-path nightly bundle
-  with zero GTK stderr; real branch installation remains.
+  with zero GTK stderr. A deliberately infinite noisy build proves GTK
+  scheduler responsiveness and bounded Stop; close destruction is deferred
+  outside Mutter focus notification. In-app replacement now uses an atomic
+  old/new bundle swap with rollback, while direct installers reject active
+  bundles. Real branch installation remains.
 - `[ ]` Match toasts and startup/database error presentation.
 
 C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,

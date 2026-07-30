@@ -25,6 +25,7 @@ require "./text_reveal"
 require "./tool_panel"
 require "./transcript_paging"
 require "./turn_timing"
+require "./voice_input"
 
 module Xd
   module UI
@@ -299,6 +300,7 @@ module Xd
         @send.clicked_signal.connect do
           @working ? cancel_turn : send_message
         end
+        @voice = VoiceInput.new(@widget, @entry)
 
         @queue_box = Gtk::Box.new(:vertical, 2)
         @queue_box.margin_top = 6
@@ -323,6 +325,7 @@ module Xd
         filler.hexpand = true
         @controls.run.append(filler)
         @controls.run.append(@attach)
+        @controls.run.append(@voice.button)
         @controls.run.append(@send)
 
         entry_scroll = Gtk::ScrolledWindow.new
@@ -448,6 +451,7 @@ module Xd
         @header_sizes.add_widget(header_spacer)
 
         @widget.close_request_signal.connect do
+          @voice.close
           persist_window_layout
           false
         end
@@ -854,6 +858,7 @@ module Xd
       ) : Nil
         changed = @active_chat != id || !@client.same?(endpoint)
         if changed
+          @voice.cancel
           keep_previous = current_transcript_cacheable?
           retire_open_questions
           leave_current_transcript(keep_previous)
@@ -875,6 +880,7 @@ module Xd
         @composer.visible = true
         @entry.sensitive = true
         @attach.sensitive = true
+        @voice.available = true
         @send.sensitive = true
         @controls.sensitive = true
         @terminal_button.sensitive = true
@@ -921,6 +927,7 @@ module Xd
         @entry.buffer.text = ""
         @entry.sensitive = false
         @attach.sensitive = false
+        @voice.available = false
         update_send_button
         @send.sensitive = false
         @send.remove_css_class("destructive-action")
