@@ -21,7 +21,15 @@ module Xd
 
       def publish(event : Protocol::Event) : Nil
         subscribers = @lock.synchronize { @subscribers.values.dup }
-        subscribers.each { |subscriber| subscriber.call(event) }
+        subscribers.each do |subscriber|
+          begin
+            subscriber.call(event)
+          rescue error
+            STDERR.puts(
+              "xd: daemon event subscriber failed: #{error.message}"
+            )
+          end
+        end
       end
     end
   end

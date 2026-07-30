@@ -243,11 +243,21 @@ module Xd
         disconnect("Daemon sent invalid JSON.")
       rescue error : IO::Error
         disconnect("Daemon connection failed: #{error.message}")
+      rescue error
+        disconnect("Daemon client failed: #{error.message}")
       end
 
       private def publish(event : Hash(String, JSON::Any)) : Nil
         subscribers = @lock.synchronize { @subscribers.values.dup }
-        subscribers.each { |subscriber| subscriber.call(event) }
+        subscribers.each do |subscriber|
+          begin
+            subscriber.call(event)
+          rescue error
+            STDERR.puts(
+              "xd: client event subscriber failed: #{error.message}"
+            )
+          end
+        end
       end
 
       private def disconnect(message : String) : Nil
@@ -275,7 +285,15 @@ module Xd
         pending.each do |answer|
           answer.send(ClientAnswer.new(nil, message))
         end
-        subscribers.each { |subscriber| subscriber.call(message) }
+        subscribers.each do |subscriber|
+          begin
+            subscriber.call(message)
+          rescue error
+            STDERR.puts(
+              "xd: disconnect subscriber failed: #{error.message}"
+            )
+          end
+        end
       end
     end
   end

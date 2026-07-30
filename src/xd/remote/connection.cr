@@ -355,14 +355,30 @@ module Xd
         subscribers = @lock.synchronize do
           @event_subscribers.values.dup
         end
-        subscribers.each { |subscriber| subscriber.call(event) }
+        subscribers.each do |subscriber|
+          begin
+            subscriber.call(event)
+          rescue error
+            STDERR.puts(
+              "xd: remote event subscriber failed: #{error.message}"
+            )
+          end
+        end
       end
 
       private def publish_state(snapshot : ConnectionSnapshot) : Nil
         subscribers = @lock.synchronize do
           @state_subscribers.values.dup
         end
-        subscribers.each { |subscriber| subscriber.call(snapshot) }
+        subscribers.each do |subscriber|
+          begin
+            subscriber.call(snapshot)
+          rescue error
+            STDERR.puts(
+              "xd: remote state subscriber failed: #{error.message}"
+            )
+          end
+        end
       end
 
       private def next_generation : Int64

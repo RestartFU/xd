@@ -90,10 +90,9 @@ describe Xd::Daemon::Client do
       second = JSON.parse(socket.gets.not_nil!).as_h
       [second, first].each do |request|
         socket << {
-          Xd::Protocol::REQUEST_ID =>
-            request[Xd::Protocol::REQUEST_ID],
-          "ok"    => true,
-          "value" => request["value"],
+          Xd::Protocol::REQUEST_ID => request[Xd::Protocol::REQUEST_ID],
+          "ok"                     => true,
+          "value"                  => request["value"],
         }.to_json << '\n'
         socket.flush
       end
@@ -121,6 +120,80 @@ describe Xd::Daemon::Client do
     client.try(&.close)
     server.try(&.close)
     FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
+  it "keeps reading replies after an event subscriber fails" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-subscriber-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    server = UNIXServer.new(path)
+    start = Channel(Nil).new
+    spawn do
+      socket = server.accept
+      start.receive
+      socket << %({"event":"test"}) << '\n'
+      socket.flush
+      request = JSON.parse(socket.gets.not_nil!).as_h
+      socket << {
+        Xd::Protocol::REQUEST_ID => request[Xd::Protocol::REQUEST_ID],
+        "ok"                     => true,
+        "value"                  => "still alive",
+      }.to_json << '\n'
+      socket.flush
+    ensure
+      socket.try(&.close)
+    end
+
+    client = Xd::Daemon::Client.local(path)
+    client.subscribe { |_event| raise "subscriber failed" }
+    start.send(nil)
+    answer = Channel(Tuple(Hash(String, JSON::Any)?, String?)).new(1)
+    spawn do
+      begin
+        response = client.call({"op" => JSON::Any.new("ping")})
+        answer.send({response, nil})
+      rescue error
+        answer.send({nil, error.message})
+      end
+    end
+
+    select
+    when result = answer.receive
+      result[1].should be_nil
+      result[0].not_nil!["value"].as_s.should eq("still alive")
+    when timeout(2.seconds)
+      fail "event subscriber killed the reply reader"
+    end
+  ensure
+    client.try(&.close)
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
+  it "delivers daemon events after another observer fails" do
+    with_client_server do |server, engine, _store, directory|
+      engine.events.subscribe { |_event| raise "observer failed" }
+      path = File.join(directory, "daemon.sock")
+      server.listen_local(path)
+      client = Xd::Daemon::Client.local(path)
+      events = Channel(Hash(String, JSON::Any)).new(1)
+      client.subscribe { |event| events.send(event) }
+
+      client.call({
+        "op"   => JSON::Any.new("new-folder"),
+        "name" => JSON::Any.new("Subscriber proof"),
+      })
+      select
+      when event = events.receive
+        event["event"].as_s.should eq("tree")
+      when timeout(2.seconds)
+        fail "failed daemon observer blocked later subscribers"
+      end
+      client.close
+    end
   end
 
   it "yields while a daemon continuously streams events" do

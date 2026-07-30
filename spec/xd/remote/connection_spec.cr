@@ -37,6 +37,74 @@ private def await_remote_state(
 end
 
 describe Xd::Remote::Connection do
+  it "isolates state subscriber failures" do
+    with_remote_connection do |_socket, path, _store, _engine|
+      connection = Xd::Remote::Connection.new(
+        Xd::Remote::CredentialsFile.new(path),
+        10.milliseconds
+      )
+      first = true
+      connection.on_state do |_snapshot|
+        if first
+          first = false
+        else
+          raise "state subscriber failed"
+        end
+      end
+      states = Channel(Xd::Remote::ConnectionState).new(2)
+      connection.on_state { |snapshot| states.send(snapshot.state) }
+      states.receive.should eq(Xd::Remote::ConnectionState::Unconfigured)
+
+      connection.close
+      select
+      when state = states.receive
+        state.should eq(Xd::Remote::ConnectionState::Closed)
+      when timeout(2.seconds)
+        fail "failed state subscriber blocked connection shutdown"
+      end
+    end
+  end
+
+  it "isolates event subscriber failures" do
+    with_remote_connection do |socket, path, _store, engine|
+      server = Xd::Daemon::Server.new(engine)
+      server.listen_local(socket)
+      paired_client = Xd::Daemon::Client.local(socket)
+      pairer = ->(_host : String, _port : Int32, _code : String, _name : String) {
+        Xd::Daemon::RemotePairing.new(
+          paired_client,
+          "paired-token",
+          "cd" * 32
+        )
+      }
+      connection = Xd::Remote::Connection.new(
+        Xd::Remote::CredentialsFile.new(path),
+        10.milliseconds,
+        pairer: pairer
+      )
+      connection.subscribe { |_event| raise "event subscriber failed" }
+      events = Channel(Hash(String, JSON::Any)).new(1)
+      connection.subscribe { |event| events.send(event) }
+
+      begin
+        connection.pair("remote.example", 4242, "ABCD1234")
+        connection.call({
+          "op"   => JSON::Any.new("new-folder"),
+          "name" => JSON::Any.new("Remote subscriber proof"),
+        })
+        select
+        when event = events.receive
+          event["event"].as_s.should eq("tree")
+        when timeout(2.seconds)
+          fail "failed event subscriber blocked later subscribers"
+        end
+      ensure
+        connection.close
+        server.close
+      end
+    end
+  end
+
   it "reconnects and keeps endpoint subscribers across clients" do
     with_remote_connection do |socket, path, _store, engine|
       credentials = Xd::Remote::Credentials.new(

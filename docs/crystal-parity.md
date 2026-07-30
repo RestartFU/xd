@@ -355,6 +355,9 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   starving GTK. The client UI additionally coalesces adjacent text deltas and
   drains one event source in 32-event batches, preventing fast agent output
   from flooding GLib's idle queue; ordering/bounds/rescheduling have specs.
+  Event observers are failure-isolated at daemon, client, and reconnecting
+  remote boundaries; an exception can no longer kill the only reply-reader
+  fiber and strand later Git/file/control calls forever.
 - `[x]` Remote pairing uses a short-lived code, token, and pinned certificate.
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
@@ -456,7 +459,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (294 examples).
+- `[x]` Crystal specs pass in Docker (298 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
