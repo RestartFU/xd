@@ -180,8 +180,16 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   retention work. C palette/font, copy/paste, URL handling, and daemon-terminal
   Backspace behavior are ported. Offline status, reconnect reconciliation, and
   pending-kill retry are implemented; paired reconnect UI verification remains.
-- `[~]` File list/read/write RPC works, but C pane layout and behavior are not
-  yet matched.
+- `[~]` File list/read/write uses the C `AdwBin`/toast overlay, exact
+  header/list/preview/status stack, directory-first UTF-8 collation, hidden
+  filtering, back/refresh modified guards, Ctrl+S save state, 1 MiB and binary
+  statuses, and the shared 14-language syntax highlighter with the C 8,000-line
+  cap. An exact-commit installed bundle is verified at 1100x720 with fatal GTK
+  criticals: root/nested navigation, row geometry, Crystal colours, modified
+  sensitivity, guard/save toasts, persisted edits, and binary/large-file
+  status pages all match. Pane errors no longer leak into the chat footer.
+  Cancellable nonblocking reads and paired-TLS latency/cancellation proof
+  remain.
 - `[~]` Working/branch diff RPC works, but C diff list, expansion, syntax,
   actions, and layout are not yet matched.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
