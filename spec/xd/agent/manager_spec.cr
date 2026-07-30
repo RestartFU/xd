@@ -112,41 +112,6 @@ private def with_agent_manager(
 end
 
 describe Xd::Agent::Manager do
-  it "runs Codex audio transcription outside chat history" do
-    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
-      chat_id = store.create_chat(folder_id, "Voice", "claude")
-      results = [] of Tuple(Bool, String?, String?)
-
-      completed = ->(ok : Bool, text : String?, error : String?) {
-        results << {ok, text, error}
-      }
-      manager.transcribe_audio(
-        chat_id,
-        "/tmp/xd-voice.wav",
-        completed
-      )
-
-      launcher.backends.should eq(["codex"])
-      spec = launcher.specs.first
-      spec.audio_path.should eq("/tmp/xd-voice.wav")
-      spec.model.should eq(Xd::Agent::Catalog::CODEX.default_model)
-      spec.access.read_only?.should be_true
-      store.list_messages(chat_id).should be_empty
-
-      launcher.emit(0, Xd::Agent::Event.new(
-        Xd::Agent::EventType::TextDelta,
-        text: "hello "
-      ))
-      launcher.emit(0, Xd::Agent::Event.new(
-        Xd::Agent::EventType::TextDelta,
-        text: "world"
-      ))
-      launcher.finish(0, true)
-      results.should eq([{true, "hello world", nil}])
-      store.list_messages(chat_id).should be_empty
-    end
-  end
-
   it "rejects unsigned assistants before storing or launching a turn" do
     checked = [] of String
     authorizer = ->(provider : String) : String? {

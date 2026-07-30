@@ -318,11 +318,10 @@ describe Xd::Daemon::Server do
           JSON.parse(second.gets.not_nil!)["ok"].as_bool.should be_true
 
           first.puts({
-            "op"       => "voice-transcribe",
-            "chat"     => chat_id,
-            "request"  => "tls-voice",
-            "audio"    => Base64.strict_encode(Bytes[1, 2, 3, 4]),
-            "provider" => "local",
+            "op"      => "voice-transcribe",
+            "chat"    => chat_id,
+            "request" => "tls-voice",
+            "audio"   => Base64.strict_encode(Bytes[1, 2, 3, 4]),
           }.to_json)
           first.flush
           messages = 2.times.map do

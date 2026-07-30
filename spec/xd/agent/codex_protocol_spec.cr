@@ -29,8 +29,7 @@ describe Xd::Agent::CodexProtocol do
         model: "gpt-5.6-sol",
         workdir: "/tmp",
         effort: Xd::Agent::Effort::XHigh,
-        access: Xd::Agent::Access::Edit,
-        audio_path: "/tmp/voice.wav"
+        access: Xd::Agent::Access::Edit
       ),
       nil,
       ->(event : Xd::Agent::Event) { events << event },
@@ -61,9 +60,7 @@ describe Xd::Agent::CodexProtocol do
     start["sandboxPolicy"]["type"].as_s.should eq("workspaceWrite")
     start["sandboxPolicy"]["writableRoots"][0].as_s.should eq("/tmp")
     start["sandboxPolicy"]["networkAccess"].as_bool.should be_false
-    start["input"].as_a.map(&.["type"].as_s)
-      .should eq(["text", "localAudio"])
-    start["input"][1]["path"].as_s.should eq("/tmp/voice.wav")
+    start["input"].as_a.map(&.["type"].as_s).should eq(["text"])
 
     protocol.receive_line({
       "id"     => 3,

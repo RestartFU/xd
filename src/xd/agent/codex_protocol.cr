@@ -268,22 +268,14 @@ module Xd
           sandbox["networkAccess"] = JSON::Any.new(false)
         end
 
-        input = [
-          {"type" => "text", "text" => spec.prompt},
-        ]
-        if audio_path = spec.audio_path
-          input << {
-            "type" => "localAudio",
-            "path" => audio_path,
-          }
-        end
-
         params = {
           "threadId"       => JSON::Any.new(thread_id),
           "approvalPolicy" => JSON::Any.new("never"),
           "effort"         => JSON::Any.new(spec.effort.wire_name),
           "sandboxPolicy"  => JSON::Any.new(sandbox),
-          "input"          => json_any(input),
+          "input"          => json_any([
+            {"type" => "text", "text" => spec.prompt},
+          ]),
         }
         if model = spec.model
           params["model"] = JSON::Any.new(model)

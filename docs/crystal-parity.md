@@ -201,12 +201,6 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   storage and transcription run through the selected chat's daemon, so paired
   chats install and execute Whisper on the remote machine. Targeted daemon
   events keep transcripts private to the requesting local/TLS connection. The
-  microphone popover also offers Codex: its native `localAudio` input receives
-  a short-lived WAV in an isolated, low-effort turn, returns only transcript
-  text, never enters chat history, and requires no local model download.
-  Claude Code remains visibly unavailable because its CLI has no native audio
-  input; the UI does not pretend binary-file tool access is transcription.
-  Local download begins only after explicitly choosing the local provider. The
   relocatable Linux bundle carries the PulseAudio runtime and CPU-dispatched
   whisper.cpp build. macOS and Windows select PortAudio behind the same
   recorder contract; the Docker build compiles and links that backend without

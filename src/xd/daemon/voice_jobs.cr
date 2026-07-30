@@ -23,13 +23,6 @@ module Xd
       )
       alias ModelFactory = Proc(Voice::Model)
       alias TranscriberFactory = Proc(Voice::Transcriber)
-      alias AgentTranscriber = Proc(
-        String,
-        String,
-        String,
-        Proc(Voice::Transcription, Nil),
-        Proc(Nil),
-      )
 
       private record JobKey, owner : UInt64, token : String
       private record DownloadSnapshot,
@@ -83,72 +76,20 @@ module Xd
 
       private class Job
         @done = Channel(Nil).new(1)
-        @cancel_callback : Proc(Nil)?
-        @temporary_path : String?
-        @stopped = false
-        @state_mutex = Mutex.new
 
         def initialize(
           @model : Voice::Model? = nil,
           @transcriber : Voice::Transcriber? = nil,
-          @temporary_path : String? = nil,
         )
-          @cancel_callback = nil
-        end
-
-        def cancel_callback=(callback : Proc(Nil)) : Proc(Nil)
-          cancel_now = @state_mutex.synchronize do
-            if @stopped
-              true
-            else
-              @cancel_callback = callback
-              false
-            end
-          end
-          callback.call if cancel_now
-          callback
         end
 
         def cancel : Nil
-          callback : Proc(Nil)? = nil
-          path : String? = nil
-          active = @state_mutex.synchronize do
-            next false if @stopped
-
-            @stopped = true
-            callback = @cancel_callback
-            @cancel_callback = nil
-            path = @temporary_path
-            @temporary_path = nil
-            true
-          end
-          return unless active
-
           @model.try(&.cancel)
           @transcriber.try(&.cancel)
-          callback.try(&.call)
-          cleanup(path)
-          signal_done
+          complete
         end
 
         def complete : Nil
-          path : String? = nil
-          active = @state_mutex.synchronize do
-            next false if @stopped
-
-            @stopped = true
-            @cancel_callback = nil
-            path = @temporary_path
-            @temporary_path = nil
-            true
-          end
-          return unless active
-
-          cleanup(path)
-          signal_done
-        end
-
-        private def signal_done : Nil
           select
           when @done.send(nil)
           else
@@ -163,18 +104,12 @@ module Xd
             true
           end
         end
-
-        private def cleanup(path : String?) : Nil
-          File.delete?(path) if path
-        rescue File::Error
-        end
       end
 
       def initialize(
         @publish : Publisher,
         @model_factory : ModelFactory = -> { Voice::Model.new },
         @transcriber_factory : TranscriberFactory = -> { Voice::Transcriber.new },
-        @agent_transcriber : AgentTranscriber? = nil,
         @transcription_timeout : Time::Span = TRANSCRIPTION_TIMEOUT,
       )
         @jobs = {} of JobKey => Job
@@ -225,8 +160,6 @@ module Xd
         owner : UInt64,
         token : String,
         encoded_audio : String,
-        chat_id : String,
-        provider : String = "local",
       ) : Nil
         if encoded_audio.bytesize > MAX_AUDIO_BYTES * 2
           raise Error.new("Voice recording is too large.")
@@ -239,23 +172,6 @@ module Xd
           raise Error.new("Voice recording is too large.")
         end
 
-        case provider
-        when "local"
-          transcribe_local(owner, token, audio)
-        when "codex"
-          transcribe_with_agent(owner, token, chat_id, provider, audio)
-        else
-          raise Error.new("Unknown voice transcription provider.")
-        end
-      rescue error : Base64::Error
-        raise Error.new("Voice recording is not valid base64.")
-      end
-
-      private def transcribe_local(
-        owner : UInt64,
-        token : String,
-        audio : Bytes,
-      ) : Nil
         key = JobKey.new(owner, validate_token(token))
         transcriber = @transcriber_factory.call
         job = Job.new(transcriber: transcriber)
@@ -287,69 +203,8 @@ module Xd
           end
         end
         spawn monitor_transcription(key, job)
-      end
-
-      private def transcribe_with_agent(
-        owner : UInt64,
-        token : String,
-        chat_id : String,
-        provider : String,
-        audio : Bytes,
-      ) : Nil
-        transcribe = @agent_transcriber ||
-                     raise Error.new(
-                       "Cloud voice transcription is unavailable."
-                     )
-        recording = File.tempfile("xd-voice-agent-", suffix: ".wav")
-        recording_path = recording.path
-        recording.write(audio)
-        recording.close
-
-        key = JobKey.new(owner, validate_token(token))
-        job = Job.new(temporary_path: recording_path)
-        @mutex.synchronize do
-          raise Error.new("Voice service is closed.") if @closed
-          raise Error.new("That voice request is already running.") if @jobs.has_key?(key)
-          @jobs[key] = job
-        end
-
-        callback = ->(result : Voice::Transcription) {
-          if result.cancelled
-            finish(key, job, "cancelled")
-          elsif text = result.text
-            finish(key, job, "transcribed", fields: {
-              "text" => JSON::Any.new(text),
-            })
-          else
-            finish(
-              key,
-              job,
-              "error",
-              result.error || "Voice transcription failed."
-            )
-          end
-        }
-        job.cancel_callback = transcribe.call(
-          provider,
-          chat_id,
-          recording_path,
-          callback
-        )
-        spawn monitor_transcription(key, job)
-      rescue error
-        if job && key
-          @mutex.synchronize do
-            @jobs.delete(key) if @jobs[key]?.try(&.same?(job))
-          end
-          job.cancel
-        elsif recording_path
-          File.delete?(recording_path)
-        end
-        raise Error.new(
-          error.message || "Cannot start cloud voice transcription."
-        )
-      ensure
-        recording.try(&.close)
+      rescue error : Base64::Error
+        raise Error.new("Voice recording is not valid base64.")
       end
 
       def cancel(owner : UInt64, token : String) : Bool
