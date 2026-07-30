@@ -8,6 +8,8 @@ module Xd
     # Both platform-local IPC and TLS sockets call this exact runner. Transport
     # only controls initial authentication; it never selects app handlers.
     class Session
+      EVENT_QUEUE_SIZE = 256
+
       private class Writer
         @lock = Mutex.new
 
@@ -23,6 +25,60 @@ module Xd
         end
       end
 
+      # Engine publishers must never inherit socket backpressure from one
+      # client. Queue events per session and disconnect a client that cannot
+      # consume a bounded backlog; responses retain the same serialized writer.
+      private class OutboundEvents
+        @queue = Channel(Protocol::Event).new(EVENT_QUEUE_SIZE)
+        @lock = Mutex.new
+        @closed = false
+
+        def initialize(@writer : Writer, @output : IO)
+          spawn run
+        end
+
+        def enqueue(event : Protocol::Event) : Nil
+          overflow = @lock.synchronize do
+            next false if @closed
+
+            select
+            when @queue.send(event)
+              false
+            else
+              @closed = true
+              true
+            end
+          end
+          shutdown if overflow
+        rescue Channel::ClosedError
+        end
+
+        def close : Nil
+          should_close = @lock.synchronize do
+            next false if @closed
+
+            @closed = true
+            true
+          end
+          shutdown if should_close
+        end
+
+        private def run : Nil
+          while event = @queue.receive?
+            @writer.write(event)
+          end
+        rescue IO::Error | Channel::ClosedError
+        ensure
+          close
+        end
+
+        private def shutdown : Nil
+          @queue.close
+          @output.close
+        rescue IO::Error
+        end
+      end
+
       def initialize(@engine : Engine, @events : EventBus? = nil)
       end
 
@@ -33,16 +89,14 @@ module Xd
       ) : Nil
         connection = Connection.new(transport)
         writer = Writer.new(output)
+        outbound = OutboundEvents.new(writer, output)
         subscription = @events.try do |events|
           events.subscribe do |event|
             next unless connection.authenticated
             next if (audience = event.audience) &&
                     audience != connection.object_id
 
-            begin
-              writer.write(event)
-            rescue IO::Error
-            end
+            outbound.enqueue(event)
           end
         end
 
@@ -68,6 +122,7 @@ module Xd
           if id = subscription
             @events.try(&.unsubscribe(id))
           end
+          outbound.close
         end
       rescue IO::Error
         # EOF, disconnect, and a listener shutdown all end only this session.

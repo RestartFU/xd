@@ -135,6 +135,63 @@ describe Xd::Daemon::Server do
     end
   end
 
+  it "disconnects a slow event client without blocking the daemon" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-server-backpressure-#{Random::Secure.hex(12)}"
+    )
+    database_path = File.join(directory, "chats.db")
+    socket_path = File.join(directory, "daemon.sock")
+    store = Xd::Storage::Store.new(database_path)
+    engine = Xd::Daemon::Engine.new(store)
+    server = Xd::Daemon::Server.new(engine)
+    slow : UNIXSocket? = nil
+    fast : Xd::Daemon::Client? = nil
+
+    begin
+      server.listen_local(socket_path)
+      slow = UNIXSocket.new(socket_path)
+      slow.read_timeout = 2.seconds
+      slow.puts %({"op":"ping"})
+      JSON.parse(slow.gets.not_nil!)["ok"].as_bool.should be_true
+
+      payload = "x" * (64 * 1024)
+      finished = Channel(Exception?).new(1)
+      spawn do
+        begin
+          1_024.times do |index|
+            engine.events.publish(Xd::Protocol::Event.new(
+              "burst",
+              index.to_i64,
+              {"payload" => JSON::Any.new(payload)}
+            ))
+          end
+          finished.send(nil)
+        rescue error
+          finished.send(error)
+        end
+      end
+
+      select
+      when error = finished.receive
+        raise error if error
+      when timeout(2.seconds)
+        fail "slow event client blocked daemon publication"
+      end
+
+      fast = Xd::Daemon::Client.local(socket_path)
+      fast.call({"op" => JSON::Any.new("ping")})["ok"]
+        .as_bool.should be_true
+    ensure
+      fast.try(&.close)
+      slow.try(&.close)
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "serves the same session engine over TLS" do
     directory = File.join(
       Dir.tempdir,
