@@ -369,6 +369,9 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   request ids are retired so late replies cannot poison later calls.
 - `[x]` Remote pairing uses a short-lived code, token, and pinned certificate.
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
+- `[x]` The desktop local endpoint also reconnects across Unix-socket or
+  authenticated Windows-loopback client replacement while retaining the same
+  UI event subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
   and terminal operations share the same protocol.
 - `[x]` Actual Unix-socket and paired TLS clients pass one normalized stateful
@@ -468,7 +471,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (302 examples).
+- `[x]` Crystal specs pass in Docker (303 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

@@ -1,6 +1,7 @@
 require "../app_paths"
 require "../daemon/client"
 require "../daemon/engine"
+require "../daemon/local_connection"
 require "../daemon/server"
 require "../remote/connection"
 require "../storage/store"
@@ -15,7 +16,7 @@ module Xd
     class Runtime
       CONNECT_TIMEOUT = 2.seconds
 
-      getter client : Daemon::Client
+      getter client : Daemon::LocalConnection
       getter remote : Remote::Connection
 
       @store : Storage::Store?
@@ -26,7 +27,12 @@ module Xd
         @store = nil
         @engine = nil
         @server = nil
-        @client = connect
+        initial = connect
+        @client = Daemon::LocalConnection.new(
+          AppPaths.local_socket,
+          initial_client: initial,
+          connector: ->(_path : String) { connect_existing }
+        )
         @remote = Remote::Connection.new
       end
 
