@@ -7,7 +7,8 @@ require "../agent/image_reference"
 require "../agent/subagent_tool"
 require "../agent/workflow_run"
 require "../agent/workspace_block"
-require "../daemon/client"
+require "../daemon/endpoint"
+require "./adw"
 require "./chat_controls"
 require "./sidebar"
 require "./tool_panel"
@@ -34,7 +35,7 @@ module Xd
       MAX_IMAGE_BYTES = 10 * 1024 * 1024
       MAX_TOTAL_BYTES = 20 * 1024 * 1024
 
-      getter widget : Gtk::ApplicationWindow
+      getter widget : Adw::ApplicationWindow
 
       @active_chat : String?
       @stream_label : Gtk::Label?
@@ -44,13 +45,13 @@ module Xd
 
       def initialize(
         application : Gtk::Application,
-        @client : Daemon::Client,
+        @client : Daemon::Endpoint,
       )
         @active_chat = nil
         @stream_label = nil
-        @widget = Gtk::ApplicationWindow.new(application)
+        @widget = Adw::ApplicationWindow.new(application: application)
         @widget.title = "xd"
-        @widget.set_default_size(1380, 820)
+        @widget.set_default_size(1100, 720)
 
         @sidebar = Sidebar.new(
           @widget,
@@ -62,26 +63,24 @@ module Xd
           ->(request : Hash(String, JSON::Any)) { call(request) }
         )
 
-        @chat_title = Gtk::Label.new("Select a chat")
-        @chat_title.xalign = 0_f32
-        @chat_title.hexpand = true
-        @chat_title.add_css_class("title")
-
-        chat_header = Gtk::Box.new(:horizontal, 8)
-        chat_header.margin_top = 12
-        chat_header.margin_bottom = 12
-        chat_header.margin_start = 18
-        chat_header.margin_end = 18
-        chat_header.append(@chat_title)
+        @chat_title = Adw::WindowTitle.new(title: "xd")
+        chat_header = Adw::HeaderBar.new
+        chat_header.title_widget = @chat_title
+        chat_header.show_start_title_buttons = false
         {
-          "Files"    => "files",
-          "Diff"     => "diff",
-          "Terminal" => "terminal",
+          "folder-symbolic"             => {"files", "Browse files"},
+          "view-list-ordered-symbolic"  => {"diff", "Changed files"},
+          "utilities-terminal-symbolic" => {
+            "terminal",
+            "Terminal",
+          },
         }.each do |label, page|
-          button = Gtk::Button.new_with_label(label)
+          name, tooltip = page
+          button = Gtk::Button.new_from_icon_name(label)
           button.add_css_class("flat")
-          button.clicked_signal.connect { @tool_panel.toggle(page) }
-          chat_header.append(button)
+          button.tooltip_text = tooltip
+          button.clicked_signal.connect { @tool_panel.toggle(name) }
+          chat_header.pack_end(button)
         end
 
         @controls = ChatControls.new(
@@ -89,31 +88,45 @@ module Xd
             set_option(option, value)
           }
         )
-        @controls.widget.margin_start = 12
-        @controls.widget.margin_end = 12
+        @controls.widget.add_css_class("xd-composer")
+        @controls.widget.margin_top = 10
         @controls.widget.margin_bottom = 6
+        @controls.widget.margin_start = 6
+        @controls.widget.margin_end = 6
 
-        @transcript = Gtk::Box.new(:vertical, 10)
-        @transcript.margin_top = 18
-        @transcript.margin_bottom = 18
-        @transcript.margin_start = 24
-        @transcript.margin_end = 24
+        @transcript = Gtk::Box.new(:vertical, 8)
         @transcript.valign = :start
 
         @transcript_scroll = Gtk::ScrolledWindow.new
         @transcript_scroll.vexpand = true
-        @transcript_scroll.child = @transcript
+        @transcript_scroll.set_policy(:never, :external)
+        transcript_clamp = Adw::Clamp.new(
+          child: @transcript,
+          maximum_size: 1040,
+          tightening_threshold: 1040
+        )
+        transcript_clamp.margin_top = 12
+        transcript_clamp.margin_bottom = 12
+        @transcript_scroll.child = transcript_clamp
 
-        @entry = Gtk::Entry.new
+        @entry = Gtk::TextView.new
         @entry.hexpand = true
-        @entry.placeholder_text = "Ask Codex or Claude…"
+        @entry.wrap_mode = :word_char
+        @entry.top_margin = 10
+        @entry.bottom_margin = 10
+        @entry.left_margin = 10
+        @entry.right_margin = 10
         @entry.sensitive = false
-        @entry.activate_signal.connect { send_message }
         paste_keys = Gtk::EventControllerKey.new
         paste_keys.key_pressed_signal.connect do |keyval, _keycode, state|
           if keyval == Gdk::KEY_v &&
              state.includes?(Gdk::ModifierType::ControlMask)
             paste_image
+          elsif (keyval == Gdk::KEY_Return ||
+                keyval == Gdk::KEY_KP_Enter) &&
+                !state.includes?(Gdk::ModifierType::ShiftMask)
+            send_message
+            true
           else
             false
           end
@@ -128,9 +141,11 @@ module Xd
         @attach.add_css_class("flat")
         @attach.clicked_signal.connect { choose_images }
 
-        @send = Gtk::Button.new_with_label("Send")
+        @send = Gtk::Button.new_from_icon_name("go-up-symbolic")
         @send.sensitive = false
         @send.add_css_class("suggested-action")
+        @send.add_css_class("circular")
+        @send.tooltip_text = "Send (Enter)"
         @send.clicked_signal.connect do
           @working ? cancel_turn : send_message
         end
@@ -148,41 +163,95 @@ module Xd
         @attachments_bar.add_css_class("xd-attachments")
         @attachments_bar.visible = false
 
-        composer = Gtk::Box.new(:horizontal, 8)
-        composer.margin_top = 10
-        composer.margin_bottom = 14
-        composer.margin_start = 18
-        composer.margin_end = 18
-        composer.add_css_class("xd-composer")
-        composer.append(@attach)
-        composer.append(@entry)
-        composer.append(@send)
+        filler = Gtk::Box.new(:horizontal, 0)
+        filler.hexpand = true
+        @controls.run.append(filler)
+        @controls.run.append(@attach)
+        @controls.run.append(@send)
+
+        entry_scroll = Gtk::ScrolledWindow.new
+        entry_scroll.set_policy(:never, :automatic)
+        entry_scroll.max_content_height = 180
+        entry_scroll.propagate_natural_height = true
+        entry_scroll.child = @entry
 
         @status = Gtk::Label.new("")
         @status.xalign = 0_f32
-        @status.margin_start = 18
-        @status.margin_end = 18
+        @status.hexpand = true
         @status.add_css_class("dim-label")
 
-        chat = Gtk::Box.new(:vertical, 0)
-        chat.hexpand = true
-        chat.add_css_class("xd-chat")
-        chat.append(chat_header)
-        chat.append(@controls.widget)
-        chat.append(Gtk::Separator.new(:horizontal))
-        chat.append(@transcript_scroll)
-        chat.append(@queue_box)
-        chat.append(@status)
-        chat.append(@attachments_bar)
-        chat.append(composer)
+        composer_column = Gtk::Box.new(:vertical, 0)
+        composer_column.append(@queue_box)
+        composer_column.append(@attachments_bar)
+        composer_column.append(entry_scroll)
+        composer_column.append(@controls.widget)
+        composer_frame = Gtk::Frame.new
+        composer_frame.child = composer_column
+        composer_frame.margin_top = 6
+        composer_frame.margin_start = 12
+        composer_frame.margin_end = 12
 
-        root = Gtk::Box.new(:horizontal, 0)
-        root.append(@sidebar.widget)
-        root.append(Gtk::Separator.new(:vertical))
-        root.append(chat)
-        root.append(Gtk::Separator.new(:vertical))
-        root.append(@tool_panel.widget)
-        @widget.child = root
+        context = Gtk::Box.new(:horizontal, 8)
+        context.append(@status)
+        context.add_css_class("xd-context")
+        context.add_css_class("dim-label")
+        context.margin_start = 26
+        context.margin_end = 26
+        context.margin_bottom = 12
+
+        @composer = Gtk::Box.new(:vertical, 0)
+        @composer.append(composer_frame)
+        @composer.append(context)
+        @composer.visible = false
+        composer_clamp = Adw::Clamp.new(
+          child: @composer,
+          maximum_size: 1040,
+          tightening_threshold: 1040
+        )
+
+        empty = Adw::StatusPage.new(
+          icon_name: "chat-message-new-symbolic",
+          title: "No Chat Selected",
+          description: "Pick a chat in the sidebar, or start a new one " \
+                       "in a folder."
+        )
+        @chat_stack = Gtk::Stack.new
+        @chat_stack.vexpand = true
+        @chat_stack.add_named(empty, "empty")
+        @chat_stack.add_named(@transcript_scroll, "chat")
+        @chat_stack.visible_child_name = "empty"
+
+        content = Gtk::Box.new(:vertical, 0)
+        content.append(@chat_stack)
+        content.append(composer_clamp)
+        content.add_css_class("xd-surface")
+
+        side_split = Gtk::Paned.new(:horizontal)
+        side_split.start_child = content
+        side_split.end_child = @tool_panel.widget
+        side_split.resize_start_child = true
+        side_split.shrink_start_child = false
+        side_split.resize_end_child = false
+        side_split.shrink_end_child = false
+
+        chat = Adw::ToolbarView.new
+        chat.add_css_class("xd-surface")
+        chat.add_top_bar(chat_header)
+        chat.content = side_split
+
+        root = Gtk::Paned.new(:horizontal)
+        root.start_child = @sidebar.widget
+        root.end_child = chat
+        root.position = 280
+        root.resize_start_child = false
+        root.shrink_start_child = false
+        root.resize_end_child = true
+        root.shrink_end_child = false
+        @widget.content = root
+
+        headers = Gtk::SizeGroup.new(:vertical)
+        headers.add_widget(@sidebar.header)
+        headers.add_widget(chat_header)
 
         @client.subscribe do |event|
           GLib.idle_add do
@@ -210,7 +279,9 @@ module Xd
         clear_attachments
         @active_chat = id
         @stream_label = nil
-        @chat_title.text = title
+        @chat_title.title = title
+        @chat_stack.visible_child_name = "chat"
+        @composer.visible = true
         @entry.sensitive = true
         @attach.sensitive = true
         @send.sensitive = true
@@ -227,8 +298,10 @@ module Xd
         @active_chat = nil
         @stream_label = nil
         @working = false
-        @chat_title.text = "Select a chat"
-        @entry.text = ""
+        @chat_title.title = "xd"
+        @chat_stack.visible_child_name = "empty"
+        @composer.visible = false
+        @entry.buffer.text = ""
         @entry.sensitive = false
         @attach.sensitive = false
         @send.label = "Send"
@@ -439,14 +512,14 @@ module Xd
         text = answer.strip
         return if text.empty?
 
-        @entry.text = text
+        @entry.buffer.text = text
         send_message
       end
 
       private def send_message : Nil
         chat_id = @active_chat
         return unless chat_id
-        text = @entry.text.strip
+        text = @entry.buffer.text.strip
         return if text.empty? && @attachments.empty?
 
         request = {
@@ -467,7 +540,7 @@ module Xd
 
         response = call(request)
         if response
-          @entry.text = ""
+          @entry.buffer.text = ""
           clear_attachments
           if response["queued"]?.try(&.as_bool?) == true
             @status.text = "Message queued"

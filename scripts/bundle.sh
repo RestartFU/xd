@@ -82,6 +82,11 @@ cp -a /usr/share/icons/hicolor "$OUT/share/icons/"
 cp -a "$STAGE/usr/share/icons/hicolor/." "$OUT/share/icons/hicolor/"
 gtk4-update-icon-cache -q -t -f "$OUT/share/icons/hicolor" 2>/dev/null || true
 
+# --- MIME database ---------------------------------------------------------
+# GdkPixbuf finds the SVG loader through its cache, but GIO must first classify
+# the icon as image/svg+xml. Minimal hosts do not carry a shared MIME database.
+cp -a /usr/share/mime "$OUT/share/mime"
+
 # --- keyboard data ----------------------------------------------------------
 # libxkbcommon compiles the keymap the compositor hands over against these
 # files. Without them GDK ends up with no keymap at all and crashes on the
@@ -146,6 +151,7 @@ for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu 
            /usr/share/fonts/truetype/noto; do
   [ -d "$dir" ] && cp -a "$dir" "$OUT/share/fonts/"
 done
+cp -a "$STAGE/usr/share/fonts/." "$OUT/share/fonts/"
 
 # conf.d entries are symlinks into conf.avail; -L flattens them so the bundle
 # stays self-contained.

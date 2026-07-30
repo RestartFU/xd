@@ -5,6 +5,8 @@ module Xd
   module UI
     class ChatControls
       getter widget : Gtk::Box
+      getter identity : Gtk::Box
+      getter run : Gtk::Box
 
       EFFORTS = [
         Agent::Effort::Low,
@@ -35,8 +37,10 @@ module Xd
         @on_option : Proc(String, String?, Nil),
       )
         @model = nil
-        @widget = Gtk::Box.new(:horizontal, 6)
+        @widget = Gtk::Box.new(:vertical, 2)
         @widget.add_css_class("xd-controls")
+        @identity = Gtk::Box.new(:horizontal, 8)
+        @run = Gtk::Box.new(:horizontal, 8)
 
         @backend_button = control_button("Claude Code")
         @backend_button.tooltip_text = "Agent backend"
@@ -71,12 +75,14 @@ module Xd
         @workspace_button.add_css_class("flat")
         @workspace_button.tooltip_text = "Working directory"
 
-        @widget.append(@backend_button)
-        @widget.append(@model_button)
-        @widget.append(@effort_button)
-        @widget.append(@access_button)
-        @widget.append(@plan_button)
-        @widget.append(@workspace_button)
+        @identity.append(@workspace_button)
+        @identity.append(@backend_button)
+        @identity.append(@model_button)
+        @run.append(@effort_button)
+        @run.append(@access_button)
+        @run.append(@plan_button)
+        @widget.append(@identity)
+        @widget.append(@run)
         self.sensitive = false
       end
 
@@ -114,9 +120,7 @@ module Xd
         @workspace_button.label = if new_worktree
                                     "New worktree"
                                   elsif workdir
-                                    linked ?
-                                      "#{File.basename(workdir)} · worktree" :
-                                      File.basename(workdir)
+                                    linked ? "#{File.basename(workdir)} · worktree" : File.basename(workdir)
                                   else
                                     "Workspace"
                                   end

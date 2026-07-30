@@ -115,6 +115,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       librsvg2-common \
       openssl \
       patchelf \
+      shared-mime-info \
       xkb-data \
     && rm -rf /var/lib/apt/lists/*
 
@@ -148,9 +149,13 @@ RUN set -eux; \
     fi; \
     install -d \
       /stage/usr/share/applications \
+      /stage/usr/share/fonts/xd \
       /stage/usr/share/glib-2.0/schemas \
       /stage/usr/share/icons/hicolor/scalable/apps \
       /stage/usr/share/icons/hicolor/symbolic/apps; \
+    install -m0644 \
+      data/fonts/DMSans-Variable.ttf \
+      /stage/usr/share/fonts/xd/DMSans-Variable.ttf; \
     sed \
       -e "s|@APP_ID@|$app_id|g" \
       -e "s|@APP_NAME@|$app_name|g" \

@@ -1,5 +1,6 @@
 require "json"
 require "gtk4"
+require "./adw"
 require "./dialogs"
 require "./folder_dialogs"
 require "./search_dialog"
@@ -7,7 +8,8 @@ require "./search_dialog"
 module Xd
   module UI
     class Sidebar
-      getter widget : Gtk::Box
+      getter widget : Adw::ToolbarView
+      getter header : Adw::HeaderBar
 
       ROOT = ""
 
@@ -24,6 +26,7 @@ module Xd
         ),
         @on_chat : Proc(String, String, Nil),
         @on_chat_deleted : Proc(String, Nil),
+        @on_pair : Proc(Nil)? = nil,
       )
         @selected_folder = nil
         @dialogs = FolderDialogs.new(@parent, @call)
@@ -37,50 +40,41 @@ module Xd
         scroll.vexpand = true
         scroll.child = @rows
 
-        title = Gtk::Label.new("Workspaces")
-        title.xalign = 0_f32
-        title.hexpand = true
-        title.add_css_class("title")
-
-        new_workspace = Gtk::Button.new_with_label("Folder +")
-        new_workspace.tooltip_text = "New workspace"
-        new_workspace.add_css_class("flat")
-        new_workspace.clicked_signal.connect { prompt_new_folder(nil) }
-
-        new_chat = Gtk::Button.new_with_label("Chat +")
-        new_chat.tooltip_text = "New chat"
-        new_chat.add_css_class("flat")
-        new_chat.clicked_signal.connect { prompt_new_chat(@selected_folder) }
-
-        secrets = Gtk::Button.new_with_label("Keys")
-        secrets.tooltip_text = "Global agent secrets"
-        secrets.add_css_class("flat")
-        secrets.clicked_signal.connect { @dialogs.secrets }
-
-        search = Gtk::Button.new_from_icon_name("system-search-symbolic")
-        search.tooltip_text = "Search chats"
-        search.add_css_class("flat")
-        search.clicked_signal.connect do
-          SearchDialog.new(@parent, @call, @on_chat).present
+        add = Gtk::MenuButton.new
+        add.icon_name = "list-add-symbolic"
+        add.tooltip_text = "Add a workspace or a machine"
+        menu = Gtk::Popover.new
+        choices = Gtk::Box.new(:vertical, 2)
+        choices.margin_top = 6
+        choices.margin_bottom = 6
+        choices.margin_start = 6
+        choices.margin_end = 6
+        add_choice(choices, menu, "New Workspace") do
+          prompt_new_folder(nil)
         end
+        if @on_pair
+          add_choice(choices, menu, "Connect to a Machine…") do
+            @on_pair.try(&.call)
+          end
+        end
+        add_choice(choices, menu, "Agent Secrets…") do
+          @dialogs.secrets
+        end
+        menu.child = choices
+        menu.add_css_class("xd-menu-popover")
+        add.popover = menu
 
-        header = Gtk::Box.new(:horizontal, 6)
-        header.margin_top = 8
-        header.margin_bottom = 8
-        header.margin_start = 12
-        header.margin_end = 8
-        header.append(title)
-        header.append(new_workspace)
-        header.append(new_chat)
-        header.append(search)
-        header.append(secrets)
+        title = Adw::WindowTitle.new(title: "Workspaces")
+        @header = Adw::HeaderBar.new
+        @header.title_widget = title
+        @header.show_end_title_buttons = false
+        @header.pack_start(add)
 
-        @widget = Gtk::Box.new(:vertical, 0)
+        @widget = Adw::ToolbarView.new
         @widget.width_request = 300
         @widget.add_css_class("xd-sidebar")
-        @widget.append(header)
-        @widget.append(Gtk::Separator.new(:horizontal))
-        @widget.append(scroll)
+        @widget.add_top_bar(@header)
+        @widget.content = scroll
       end
 
       def reload : Nil
