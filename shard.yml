@@ -12,6 +12,9 @@ dependencies:
   gtk4:
     github: hugopl/gtk4.cr
     version: 0.18.0
+  markd:
+    github: icyleaf/markd
+    version: 0.6.0
   sqlite3:
     github: crystal-lang/crystal-sqlite3
     version: 0.23.0

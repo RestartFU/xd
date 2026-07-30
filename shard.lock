@@ -16,6 +16,10 @@ shards:
     git: https://github.com/hugopl/harfbuzz.cr.git
     version: 0.2.1
 
+  markd:
+    git: https://github.com/icyleaf/markd.git
+    version: 0.6.0
+
   pango:
     git: https://github.com/hugopl/pango.cr.git
     version: 0.3.1
