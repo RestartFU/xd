@@ -304,7 +304,14 @@ module Xd
         ) do
           dialogs(@local_source).secrets
         end
-        menu.closed_signal.connect { finish_menu_action(menu) }
+        menu.closed_signal.connect do
+          # GtkModelButton closes the popover before activating its action.
+          # Wait one idle so the action can enter the pending queue first.
+          GLib.idle_add do
+            finish_menu_action(menu)
+            false
+          end
+        end
         add.popover = menu
 
         title = Adw::WindowTitle.new(title: "Workspaces")
