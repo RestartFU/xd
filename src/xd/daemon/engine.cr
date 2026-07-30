@@ -16,6 +16,7 @@ require "./repository"
 require "./repository_monitor"
 require "./search"
 require "./terminals"
+require "./voice_jobs"
 
 module Xd
   module Daemon
@@ -47,6 +48,8 @@ module Xd
         launcher : Agent::Launcher? = nil,
         authentication_resolver : Agent::Authentication::Resolver? = nil,
         authentication_environment : Hash(String, String)? = nil,
+        voice_model_factory : VoiceJobs::ModelFactory? = nil,
+        voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
       )
         @workspaces = workspaces || Workspace::Service.new(
           File.join(Path[@store.path].dirname, "Workspaces"),
@@ -88,6 +91,15 @@ module Xd
           },
           resolver: authentication_resolver,
           environment: authentication_environment
+        )
+        @voice = VoiceJobs.new(
+          ->(name : String, fields : Hash(String, JSON::Any), audience : UInt64) {
+            publish_async_event(name, fields, audience)
+          },
+          model_factory: voice_model_factory ||
+                         -> { Voice::Model.new },
+          transcriber_factory: voice_transcriber_factory ||
+                               -> { Voice::Transcriber.new }
         )
       end
 
@@ -156,11 +168,14 @@ module Xd
         failed_outcome(error.message || "Repository error")
       rescue error : Terminals::Error
         failed_outcome(error.message || "Terminal error")
+      rescue error : VoiceJobs::Error
+        failed_outcome(error.message || "Voice input error")
       end
 
       def close : Nil
         @repository_monitor.close
         @terminals.close
+        @voice.close
         @authentication.close
         @agents.close
       end
@@ -254,6 +269,14 @@ module Xd
           terminal_resize(request)
         when Protocol::Operation::TerminalKill
           terminal_kill(request)
+        when Protocol::Operation::VoiceModel
+          voice_model(request)
+        when Protocol::Operation::VoiceModelDownload
+          voice_model_download(connection, request)
+        when Protocol::Operation::VoiceTranscribe
+          voice_transcribe(connection, request)
+        when Protocol::Operation::VoiceCancel
+          voice_cancel(connection, request)
         when Protocol::Operation::Ping
           Protocol::Response.ok
         else
@@ -1116,6 +1139,73 @@ module Xd
         Protocol::Response.ok
       end
 
+      private def voice_model(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        voice_chat(request, "voice-model")
+        Protocol::Response.ok({
+          "available" => JSON::Any.new(@voice.model_available?),
+        })
+      end
+
+      private def voice_model_download(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        voice_chat(request, "voice-model-download")
+        token = voice_token(request, "voice-model-download")
+        @voice.download(connection.object_id, token)
+        Protocol::Response.ok
+      end
+
+      private def voice_transcribe(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        voice_chat(request, "voice-transcribe")
+        token = voice_token(request, "voice-transcribe")
+        audio = request.string(
+          "audio",
+          "voice-transcribe needs audio."
+        )
+        @voice.transcribe(connection.object_id, token, audio)
+        Protocol::Response.ok
+      end
+
+      private def voice_cancel(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        token = voice_token(request, "voice-cancel")
+        Protocol::Response.ok({
+          "cancelled" => JSON::Any.new(
+            @voice.cancel(connection.object_id, token)
+          ),
+        })
+      end
+
+      private def voice_chat(
+        request : Protocol::Request,
+        operation : String,
+      ) : String
+        chat_id = request.string(
+          "chat",
+          "#{operation} needs a chat id."
+        )
+        @store.get_chat(chat_id)
+        chat_id
+      end
+
+      private def voice_token(
+        request : Protocol::Request,
+        operation : String,
+      ) : String
+        request.string(
+          "request",
+          "#{operation} needs a request token."
+        )
+      end
+
       private def drop_queue(
         request : Protocol::Request,
       ) : Protocol::Response
@@ -1245,18 +1335,20 @@ module Xd
       private def protocol_event(
         name : String,
         fields = {} of String => JSON::Any,
+        audience : UInt64? = nil,
       ) : Protocol::Event
         @event_mutex.synchronize do
           @next_event_id += 1
-          Protocol::Event.new(name, @next_event_id, fields)
+          Protocol::Event.new(name, @next_event_id, fields, audience)
         end
       end
 
       private def publish_async_event(
         name : String,
         fields : Hash(String, JSON::Any),
+        audience : UInt64? = nil,
       ) : Nil
-        @events.publish(protocol_event(name, fields))
+        @events.publish(protocol_event(name, fields, audience))
       end
 
       private def failed_outcome(message : String) : Protocol::Outcome

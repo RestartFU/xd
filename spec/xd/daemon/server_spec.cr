@@ -1,4 +1,5 @@
 require "../../spec_helper"
+require "base64"
 require "file_utils"
 require "random/secure"
 require "socket"
@@ -181,6 +182,119 @@ describe Xd::Daemon::Server do
       end
     ensure
       server.close
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
+  it "returns remote voice results only to the requesting TLS client" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-server-voice-tls-#{Random::Secure.hex(12)}"
+    )
+    database_path = File.join(directory, "chats.db")
+    certificate = File.join(directory, "certificate.pem")
+    key = File.join(directory, "private-key.pem")
+    model_path = File.join(directory, "model.bin")
+    executable = File.join(directory, "whisper")
+    Dir.mkdir_p(directory)
+    File.write(model_path, "remote-daemon-model")
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      set -eu
+      printf 'private remote transcript\n'
+      SH
+    File.chmod(executable, 0o700)
+
+    store = Xd::Storage::Store.new(database_path)
+    chat_id = store.create_chat("folder", "Remote Voice", "claude")
+    engine = Xd::Daemon::Engine.new(
+      store,
+      token_generator: -> { "voice-token" },
+      voice_model_factory: -> {
+        Xd::Voice::Model.new(override_path: model_path)
+      },
+      voice_transcriber_factory: -> {
+        Xd::Voice::Transcriber.new(
+          resolver: -> { executable },
+          environment: {} of String => String
+        )
+      }
+    )
+    code = engine.arm_pairing(1.minute)
+    server = Xd::Daemon::Server.new(engine)
+
+    begin
+      Xd::Daemon::Certificate.ensure_pair(certificate, key)
+      port = server.listen_remote("127.0.0.1", 0, certificate, key)
+      context = OpenSSL::SSL::Context::Client.new
+      context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
+      first_socket = TCPSocket.new("127.0.0.1", port)
+      second_socket = TCPSocket.new("127.0.0.1", port)
+
+      OpenSSL::SSL::Socket::Client.open(
+        first_socket,
+        context,
+        sync_close: true
+      ) do |first|
+        OpenSSL::SSL::Socket::Client.open(
+          second_socket,
+          context,
+          sync_close: true
+        ) do |second|
+          first.read_timeout = 2.seconds
+          second.read_timeout = 2.seconds
+          first.puts({
+            "op"   => "pair",
+            "code" => code,
+            "name" => "voice-requester",
+          }.to_json)
+          first.flush
+          JSON.parse(first.gets.not_nil!)["token"].as_s
+            .should eq("voice-token")
+
+          second.puts({
+            "op"    => "hello",
+            "token" => "voice-token",
+          }.to_json)
+          second.flush
+          JSON.parse(second.gets.not_nil!)["ok"].as_bool.should be_true
+
+          first.puts({
+            "op"      => "voice-transcribe",
+            "chat"    => chat_id,
+            "request" => "tls-voice",
+            "audio"   => Base64.strict_encode(Bytes[1, 2, 3, 4]),
+          }.to_json)
+          first.flush
+          messages = 2.times.map do
+            JSON.parse(first.gets.not_nil!)
+          end
+          response = messages.find { |message| !message["ok"]?.nil? }
+          response.not_nil!["ok"].as_bool.should be_true
+          event = messages.find { |message| !message["event"]?.nil? }
+            .not_nil!
+          event["event"].as_s.should eq("voice")
+          event["request"].as_s.should eq("tls-voice")
+          event["text"].as_s.should eq("private remote transcript")
+
+          leaked = Channel(String?).new(1)
+          spawn do
+            begin
+              leaked.send(second.gets)
+            rescue IO::Error
+            end
+          end
+          select
+          when line = leaked.receive
+            fail("voice result leaked to second TLS client: #{line}")
+          when timeout(250.milliseconds)
+          end
+        end
+      end
+    ensure
+      server.close
+      engine.close
       store.close
       FileUtils.rm_r(directory)
     end

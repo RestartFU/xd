@@ -163,13 +163,17 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   checkout rows, detached labels, locking rule, and daemon-owned selection.
   Effort and access use the same picker widget; the current/new checkout,
   effort, and access popovers are installed-bundle screenshot-verified.
-- `[x]` Optional voice input matches the C composer position and client-local
-  lifecycle: first-use 548 MiB model confirmation/download/cancel, recording
-  timer/stop, transcription, whitespace-safe insertion, errors, chat-switch
-  cancellation, and shutdown cleanup. The relocatable bundle carries the
-  PulseAudio runtime and CPU-dispatched whisper.cpp build. Installed-bundle
-  GTK proof verifies the idle microphone control, first-use Adwaita prompt,
-  and responsive Cancel path.
+- `[x]` Optional voice input matches the C composer position and lifecycle:
+  first-use 548 MiB model confirmation/download/cancel, recording timer/stop,
+  transcription, whitespace-safe insertion, errors, chat-switch cancellation,
+  and shutdown cleanup. Microphone capture stays on the GTK client; model
+  storage and transcription run through the selected chat's daemon, so paired
+  chats install and execute Whisper on the remote machine. Targeted daemon
+  events keep transcripts private to the requesting Unix/TLS connection. The
+  relocatable bundle carries the PulseAudio runtime and CPU-dispatched
+  whisper.cpp build. Installed-bundle GTK proof verifies the idle microphone
+  control, first-use Adwaita prompt, and responsive Cancel path; actual paired
+  TLS specs verify remote execution and event isolation.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
   tooltip, and geometry. The daemon computes it once for Unix and TLS clients;
   installed GTK geometry is verified; live branch-change verification remains.

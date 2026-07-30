@@ -60,6 +60,8 @@ private def with_daemon_engine(
   launcher : Xd::Agent::Launcher? = nil,
   authentication_resolver : Xd::Agent::Authentication::Resolver? = nil,
   authentication_environment : Hash(String, String)? = nil,
+  voice_model_factory : Xd::Daemon::VoiceJobs::ModelFactory? = nil,
+  voice_transcriber_factory : Xd::Daemon::VoiceJobs::TranscriberFactory? = nil,
   & : Xd::Storage::Store, Xd::Daemon::Engine ->
 ) : Nil
   path = File.join(
@@ -74,7 +76,9 @@ private def with_daemon_engine(
     token_generator: token_generator,
     launcher: launcher,
     authentication_resolver: authentication_resolver,
-    authentication_environment: authentication_environment
+    authentication_environment: authentication_environment,
+    voice_model_factory: voice_model_factory,
+    voice_transcriber_factory: voice_transcriber_factory
   )
 
   begin
@@ -239,6 +243,81 @@ describe Xd::Daemon::Engine do
         "chat" => chat_id,
       }.to_json)
       chat["queue"].as_a.map(&.as_s).should eq(["next"])
+    end
+  end
+
+  it "runs voice models and transcription on the selected daemon connection" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-engine-voice-#{Random::Secure.hex(12)}"
+    )
+    Dir.mkdir_p(directory)
+    model_path = File.join(directory, "model.bin")
+    executable = File.join(directory, "whisper")
+    File.write(model_path, "daemon-owned-model")
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      set -eu
+      printf 'daemon transcript\n'
+      SH
+    File.chmod(executable, 0o700)
+    model_factory = -> {
+      Xd::Voice::Model.new(override_path: model_path)
+    }
+    transcriber_factory = -> {
+      Xd::Voice::Transcriber.new(
+        resolver: -> { executable },
+        environment: {} of String => String
+      )
+    }
+
+    begin
+      with_daemon_engine(
+        voice_model_factory: model_factory,
+        voice_transcriber_factory: transcriber_factory
+      ) do |store, engine|
+        chat_id = store.create_chat("folder", "Voice", "claude")
+        local = Xd::Daemon::Connection.new(
+          Xd::Daemon::Transport::Local
+        )
+        remote = Xd::Daemon::Connection.new(
+          Xd::Daemon::Transport::Remote
+        )
+        remote.authenticated = true
+
+        [local, remote].each do |connection|
+          status = engine.dispatch(connection, {
+            "op"   => "voice-model",
+            "chat" => chat_id,
+          }.to_json)
+          status.success?.should be_true
+          status["available"].as_bool.should be_true
+        end
+
+        events = Channel(Xd::Protocol::Event).new(2)
+        subscription = engine.events.subscribe { |event| events.send(event) }
+        begin
+          started = engine.dispatch(remote, {
+            "op"      => "voice-transcribe",
+            "chat"    => chat_id,
+            "request" => "remote-voice",
+            "audio"   => Base64.strict_encode(Bytes[1, 2, 3, 4]),
+          }.to_json)
+          started.success?.should be_true
+
+          event = events.receive
+          event["event"].as_s.should eq("voice")
+          event["state"].as_s.should eq("transcribed")
+          event["request"].as_s.should eq("remote-voice")
+          event["text"].as_s.should eq("daemon transcript")
+          event.audience.should eq(remote.object_id)
+          event.audience.should_not eq(local.object_id)
+        ensure
+          engine.events.unsubscribe(subscription)
+        end
+      end
+    ensure
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
 

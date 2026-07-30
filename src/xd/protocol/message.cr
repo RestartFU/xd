@@ -82,8 +82,14 @@ module Xd
 
     class Event
       getter body : Hash(String, JSON::Any)
+      getter audience : UInt64?
 
-      def initialize(name : String, id : Int64, fields)
+      def initialize(
+        name : String,
+        id : Int64,
+        fields,
+        @audience : UInt64? = nil,
+      )
         @body = {
           "event" => JSON::Any.new(name),
           "id"    => JSON::Any.new(id),

@@ -36,6 +36,8 @@ module Xd
         subscription = @events.try do |events|
           events.subscribe do |event|
             next unless connection.authenticated
+            next if (audience = event.audience) &&
+                    audience != connection.object_id
 
             begin
               writer.write(event)

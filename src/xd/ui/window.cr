@@ -858,7 +858,6 @@ module Xd
       ) : Nil
         changed = @active_chat != id || !@client.same?(endpoint)
         if changed
-          @voice.cancel
           keep_previous = current_transcript_cacheable?
           retire_open_questions
           leave_current_transcript(keep_previous)
@@ -871,6 +870,13 @@ module Xd
         clear_attachments
         @client = endpoint
         @active_chat = id
+        if changed
+          @voice.select(
+            endpoint,
+            id,
+            remote: !endpoint.same?(@local_client)
+          )
+        end
         @sidebar.activate_chat(endpoint, id)
         prefix = endpoint.same?(@local_client) ? "local:" : "remote:"
         @settings.set_string("active-chat", "#{prefix}#{id}")
@@ -880,7 +886,6 @@ module Xd
         @composer.visible = true
         @entry.sensitive = true
         @attach.sensitive = true
-        @voice.available = true
         @send.sensitive = true
         @controls.sensitive = true
         @terminal_button.sensitive = true
@@ -927,7 +932,7 @@ module Xd
         @entry.buffer.text = ""
         @entry.sensitive = false
         @attach.sensitive = false
-        @voice.available = false
+        @voice.select(nil, nil)
         update_send_button
         @send.sensitive = false
         @send.remove_css_class("destructive-action")
