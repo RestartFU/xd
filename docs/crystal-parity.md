@@ -65,8 +65,10 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 - `[~]` Local and remote chats use one active endpoint path.
 - `[~]` Stored messages, streamed text, tool rows, images, ask blocks,
   subagent/workflow/workspace cards, and inline diffs render.
-- `[ ]` Port the exact `XdMessageRow` hierarchy, typography, selectable text,
-  Markdown, syntax highlighting, code blocks, and copy controls.
+- `[~]` Port the exact `XdMessageRow` hierarchy, typography, selectable text,
+  Markdown, syntax highlighting, code blocks, and copy controls. CommonMark,
+  safe links, streaming fragments, lists, tables, and Pango validation now
+  match all 18 C Markdown test cases; message-row integration remains.
 - `[ ]` Port transcript pagination, four-page cache, and 100-message page size.
 - `[ ]` Match bottom pinning, history loading, scroll restoration, and hidden
   scrollbar behavior.
@@ -196,7 +198,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (139 examples).
+- `[x]` Crystal specs pass in Docker (157 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
