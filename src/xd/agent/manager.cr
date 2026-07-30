@@ -223,6 +223,16 @@ module Xd
         end
       end
 
+      # Durable transcript revision captured after storing the user message
+      # that started this turn. Rows written while the agent is running are
+      # replayed through semantic events, so snapshot readers stop here and
+      # never draw those live rows twice.
+      def transcript_message_id(chat_id : String) : Int64?
+        @mutex.synchronize do
+          @turns[chat_id]?.try(&.transcript_message_id)
+        end
+      end
+
       def commands(chat_id : String) : Array(String)
         backend = @store.get_chat(chat_id).backend
         @mutex.synchronize do

@@ -202,6 +202,54 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "pages recent transcript rows at the active turn revision" do
+    launcher = EngineLauncher.new
+
+    with_daemon_engine(launcher: launcher) do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Transcript",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+
+      102.times do |index|
+        store.append_message(chat, "event", "history-#{index}")
+      end
+
+      page = engine.dispatch(local, {
+        "op"    => "messages",
+        "chat"  => chat,
+        "limit" => 101,
+      }.to_json)
+      page["total_messages"].as_i64.should eq(102)
+      page["messages"].as_a.size.should eq(101)
+      page["messages"].as_a.first["content"].as_s.should eq("history-1")
+
+      engine.dispatch(local, {
+        "op"   => "send",
+        "chat" => chat,
+        "text" => "keep going",
+      }.to_json).success?.should be_true
+      revision = store.last_message_id(chat)
+      store.append_message(chat, "assistant", "live row")
+
+      live = engine.dispatch(local, {
+        "op"    => "messages",
+        "chat"  => chat,
+        "limit" => 101,
+      }.to_json)
+      live["total_messages"].as_i64.should eq(103)
+      live["last_message_id"].as_i64.should eq(revision)
+      live["messages"].as_a.map { |row| row["content"].as_s }
+        .should_not contain("live row")
+      live["messages"].as_a.last["content"].as_s.should eq("keep going")
+    end
+  end
+
   it "owns workspace and chat mutations behind the same protocol" do
     with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)

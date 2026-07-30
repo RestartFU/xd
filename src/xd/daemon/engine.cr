@@ -549,11 +549,14 @@ module Xd
       private def messages(request : Protocol::Request) : Protocol::Response
         chat_id = request.string("chat", "messages needs a chat id")
         requested = request.int?("limit") || 0_i64
+        transcript_id = @agents.transcript_message_id(chat_id)
 
-        if requested > 0
-          page = @store.list_recent_messages(
+        if transcript_id || requested > 0
+          limit = requested > 0 ? Math.min(requested, Int32::MAX).to_i : Int32::MAX
+          page = @store.list_recent_messages_through(
             chat_id,
-            Math.min(requested, Int32::MAX).to_i
+            transcript_id || Int64::MAX,
+            limit
           )
           rows = page.messages
           total = page.total
@@ -565,7 +568,7 @@ module Xd
         Protocol::Response.ok({
           "total_messages"  => JSON::Any.new(total),
           "last_message_id" => JSON::Any.new(
-            @store.last_message_id(chat_id)
+            transcript_id || @store.last_message_id(chat_id)
           ),
           "messages" => messages_json(rows),
         })
