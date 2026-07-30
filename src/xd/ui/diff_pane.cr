@@ -216,17 +216,26 @@ module Xd
 
       private def show_call_error(result : PanelCallResult) : Nil
         detail = result.error || "The diff could not be read."
-        title = if detail.includes?("too large")
-                  "Diff Too Large"
-                elsif detail.includes?("not a git repository")
-                  "Not a Git Repository"
-                else
-                  "Could Not Read Changes"
-                end
+        title = self.class.error_title(detail)
+        if title == "Not a Git Repository"
+          detail += " Inline file edits still appear in the chat."
+        end
         show_empty(
           title,
           detail
         )
+      end
+
+      def self.error_title(detail : String) : String
+        normalized = detail.downcase
+        if normalized.includes?("too large")
+          "Diff Too Large"
+        elsif normalized.includes?("not in a git repository") ||
+              normalized.includes?("not a git repository")
+          "Not a Git Repository"
+        else
+          "Could Not Read Changes"
+        end
       end
 
       private def request_async(

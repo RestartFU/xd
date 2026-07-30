@@ -284,7 +284,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   fatal GTK criticals across multi-file working changes, branch-vs-main,
   refresh after collapse, clean/error states, and a 180-line patch; the
   80→81 chunk boundary has no visual seam and collapsing preserves its header
-  position. Diff state/base/patch requests are asynchronous and
+  position. Non-repository chats classify the daemon's exact mixed-case error
+  as `Not a Git Repository` while explaining that inline edits remain visible.
+  Diff state/base/patch requests are asynchronous and
   generation-scoped; pure patch parsing and file-section calculation run on a
   worker thread before GTK receives the virtual model. Explicit cancellation,
   paired-TLS latency, and live Git-head refresh proof remain. Agent-native edit,
@@ -490,7 +492,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (322 default, 2 PortAudio, and 5
+- `[x]` Crystal specs pass in Docker (324 default, 2 PortAudio, and 5
   authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
