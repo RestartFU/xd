@@ -9,7 +9,8 @@ describe Xd::UI::UpdateChannel do
     )
     Xd::UI::UpdateChannel.install_command(channel).should eq(
       "curl -fsSL https://github.com/RestartFU/xd/releases/latest/" \
-      "download/install.sh | sh -s -- --release"
+      "download/install.sh | XD_ALLOW_RUNNING_INSTALL=1 " \
+      "sh -s -- --release"
     )
   end
 
@@ -20,7 +21,7 @@ describe Xd::UI::UpdateChannel do
     )
     Xd::UI::UpdateChannel.install_command(channel).should eq(
       "curl -fsSL https://github.com/RestartFU/xd/releases/download/" \
-      "nightly/install.sh | sh"
+      "nightly/install.sh | XD_ALLOW_RUNNING_INSTALL=1 sh"
     )
   end
 

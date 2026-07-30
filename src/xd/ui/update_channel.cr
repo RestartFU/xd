@@ -32,10 +32,12 @@ module Xd
       def install_command(channel : Channel) : String
         if release = tag(channel)
           "curl -fsSL https://github.com/#{REPOSITORY}/releases/" \
-          "download/#{release}/install.sh | sh"
+          "download/#{release}/install.sh | " \
+          "XD_ALLOW_RUNNING_INSTALL=1 sh"
         else
           "curl -fsSL https://github.com/#{REPOSITORY}/releases/" \
-          "latest/download/install.sh | sh -s -- --release"
+          "latest/download/install.sh | " \
+          "XD_ALLOW_RUNNING_INSTALL=1 sh -s -- --release"
         end
       end
 

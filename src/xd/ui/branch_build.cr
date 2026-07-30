@@ -59,7 +59,7 @@ module Xd
         cd "$checkout"
         grep -q -- '--from)' scripts/install.sh || { echo "this branch's installer cannot install a local build; rebase it on master" >&2; exit 1; }
         ./scripts/build.sh --build-arg PROFILE=nightly
-        sh scripts/install.sh --from dist
+        XD_ALLOW_RUNNING_INSTALL=1 sh scripts/install.sh --from dist
         SHELL
       end
 

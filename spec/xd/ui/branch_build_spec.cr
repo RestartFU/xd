@@ -75,6 +75,8 @@ describe Xd::UI::BranchBuild do
     command.should contain(
       "./scripts/build.sh --build-arg PROFILE=nightly"
     )
-    command.should contain("sh scripts/install.sh --from dist")
+    command.should contain(
+      "XD_ALLOW_RUNNING_INSTALL=1 sh scripts/install.sh --from dist"
+    )
   end
 end
