@@ -18,6 +18,7 @@ module Xd
         @widget.valign = :center
         @at = 0
         @tick_id = 0_u32
+        @animated = true
         @widget.map_signal.connect { start }
         @widget.unmap_signal.connect { stop }
       end
@@ -26,7 +27,16 @@ module Xd
         @widget.visible = visible
       end
 
+      def animated=(animated : Bool) : Bool
+        return animated if @animated == animated
+
+        @animated = animated
+        animated ? start : stop
+        animated
+      end
+
       private def start : Nil
+        return unless @animated
         return unless @widget.mapped
         return unless @tick_id == 0
 

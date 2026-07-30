@@ -12,13 +12,16 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./chat_controls"
+require "./dots"
 require "./message_row"
 require "./pair_dialog"
 require "./pane_state"
 require "./search_dialog"
 require "./sidebar"
+require "./text_reveal"
 require "./tool_panel"
 require "./transcript_paging"
+require "./turn_timing"
 
 module Xd
   module UI
@@ -97,6 +100,16 @@ module Xd
       @history_restore_upper = -1.0
       @history_restore_page_size = -1.0
       @history_restore_stable_frames = 0
+      @working_row : Gtk::Box?
+      @working_label : Gtk::Label?
+      @working_dots : Dots?
+      @working_timer = 0_u32
+      @working_started_at : Time::Instant?
+      @stream_buffer = ""
+      @stream_source : String?
+      @stream_reveal = TextReveal.new
+      @stream_render_timer = 0_u32
+      @clock_origin : Time::Instant
 
       def initialize(
         application : Gtk::Application,
@@ -107,6 +120,12 @@ module Xd
         @client = local_client
         @active_chat = nil
         @stream_row = nil
+        @working_row = nil
+        @working_label = nil
+        @working_dots = nil
+        @working_started_at = nil
+        @stream_source = nil
+        @clock_origin = Time.instant
         @search_dialog = nil
         @settings = Gio::Settings.new(APP_ID)
         @widget = Adw::ApplicationWindow.new(application: application)
@@ -749,6 +768,7 @@ module Xd
 
         page.revision = -1_i64 if @working
         @transcript_lru.touch(page.key)
+        reset_live_turn_ui
         return if keep
 
         activate_empty_transcript
@@ -871,6 +891,8 @@ module Xd
           begin_bottom_jump
         end
         page.choices_visible = false
+        reset_stream_segment
+        remove_working_row(reset_started_at: false)
         clear(@transcript)
         @workflow_ids.clear
         messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
@@ -880,6 +902,11 @@ module Xd
         start = page.paging.start(messages.size)
         (start...messages.size).each do |index|
           message = messages[index]
+          if seconds = turn_duration(messages, index)
+            append_worked_for(seconds)
+          end
+          next if message["role"].as_s == "duration"
+
           add_message(
             message["role"].as_s,
             message["content"].as_s,
@@ -889,7 +916,57 @@ module Xd
         end
         page.revision = revision
         @stream_row = nil
+        set_working(@working)
         scroll_to_bottom
+      end
+
+      private def turn_duration(
+        messages : Array(JSON::Any),
+        position : Int,
+      ) : Int64?
+        return if position <= 0
+        before = messages[position - 1]
+        return unless before["role"].as_s == "user"
+
+        seconds : Int64? = nil
+        (position...messages.size).each do |index|
+          at = messages[index]
+          role = at["role"].as_s
+          break if role == "user"
+          next unless role == "duration"
+
+          stored = at["content"].as_s.to_i64?
+          seconds = stored if stored && stored >= 0
+          break
+        end
+
+        message = messages[position]
+        if seconds.nil? && message["role"].as_s == "assistant"
+          last = message
+          (position...messages.size).each do |index|
+            at = messages[index]
+            break unless at["role"].as_s == "assistant"
+            last = at
+          end
+          started_at = before["at"]?.try(&.as_i64?)
+          finished_at = last["at"]?.try(&.as_i64?)
+          if started_at && finished_at
+            seconds = finished_at - started_at
+          end
+        end
+
+        seconds if seconds && seconds >= 1
+      end
+
+      private def append_worked_for(seconds : Int64) : Gtk::Label
+        row = Gtk::Label.new(TurnTiming.format("Worked", seconds))
+        row.xalign = 0_f32
+        row.add_css_class("caption")
+        row.add_css_class("dim-label")
+        row.margin_start = 24
+        row.margin_top = 6
+        @transcript.append(row)
+        row
       end
 
       private def append_history_button(
@@ -1401,6 +1478,188 @@ module Xd
         load_chat_state if call(request)
       end
 
+      private def monotonic_microseconds : Int64
+        ((Time.instant - @clock_origin).total_seconds * 1_000_000).to_i64
+      end
+
+      private def reset_stream_segment : Nil
+        unless @stream_render_timer == 0
+          GLib.source_remove(@stream_render_timer)
+          @stream_render_timer = 0_u32
+        end
+        @stream_row = nil
+        @stream_buffer = ""
+        @stream_reveal.reset
+      end
+
+      private def finish_stream_segment : Nil
+        unless @stream_render_timer == 0
+          GLib.source_remove(@stream_render_timer)
+          @stream_render_timer = 0_u32
+        end
+
+        unless @stream_buffer.empty?
+          row = @stream_row || add_message("assistant", "")
+          if row
+            row.source = @stream_source
+            row.set_text(@stream_buffer)
+          end
+          keep_working_last
+          scroll_to_bottom
+        end
+        @stream_row = nil
+        @stream_buffer = ""
+        @stream_reveal.reset
+      end
+
+      private def schedule_stream_text(text : String) : Nil
+        @stream_buffer += text
+        @stream_reveal.note_append(monotonic_microseconds)
+        return unless @stream_render_timer == 0
+
+        @stream_render_timer = GLib.timeout(
+          TextReveal::FRAME_MILLISECONDS.milliseconds
+        ) do
+          render_stream_text
+        end
+      end
+
+      private def render_stream_text : Bool
+        if @stream_buffer.empty?
+          @stream_render_timer = 0_u32
+          return false
+        end
+
+        frame = @stream_reveal.advance(
+          @stream_buffer,
+          monotonic_microseconds
+        )
+        if frame.shown > 0
+          row = @stream_row
+          unless row
+            row = add_message("assistant", "")
+            @stream_row = row
+            row.try { |created| created.source = @stream_source }
+          end
+          if row
+            row.set_stream_text(
+              TextReveal.prefix(@stream_buffer, frame.shown)
+            )
+          end
+          keep_working_last
+          scroll_to_bottom
+        end
+
+        if frame.settled
+          @stream_row.try(&.set_text(@stream_buffer))
+          @stream_render_timer = 0_u32
+          false
+        else
+          true
+        end
+      end
+
+      private def working_seconds : Int64
+        started_at = @working_started_at
+        return 0_i64 unless started_at
+
+        Math.max(
+          (Time.instant - started_at).total_seconds.to_i64,
+          0_i64
+        )
+      end
+
+      private def update_working_label : Nil
+        @working_label.try do |label|
+          label.text = TurnTiming.format("Working", working_seconds)
+        end
+      end
+
+      private def set_working_animation(animated : Bool) : Nil
+        return unless @working_label
+
+        if animated
+          update_working_label
+          if @working_timer == 0
+            @working_timer = GLib.timeout(1.second) do
+              update_working_label
+              true
+            end
+          end
+        elsif @working_timer != 0
+          GLib.source_remove(@working_timer)
+          @working_timer = 0_u32
+        end
+
+        @working_dots.try { |dots| dots.animated = animated }
+      end
+
+      private def remove_working_row(reset_started_at = true) : Nil
+        unless @working_timer == 0
+          GLib.source_remove(@working_timer)
+          @working_timer = 0_u32
+        end
+        @working_label = nil
+        @working_dots = nil
+        if row = @working_row
+          @transcript.remove(row) if row.parent
+        end
+        @working_row = nil
+        @working_started_at = nil if reset_started_at
+      end
+
+      private def set_working(working : Bool) : Nil
+        @working = working
+        unless working
+          remove_working_row
+          return
+        end
+
+        @working_started_at ||= Time.instant
+        if @working_row
+          update_working_label if @follow_bottom
+          keep_working_last
+          return
+        end
+
+        dots = Dots.new
+        label = Gtk::Label.new("Working for 0s")
+        label.xalign = 0_f32
+        label.add_css_class("caption")
+        label.add_css_class("dim-label")
+        dots.widget.add_css_class("caption")
+        dots.widget.add_css_class("dim-label")
+
+        row = Gtk::Box.new(:horizontal, 4)
+        row.halign = :start
+        row.margin_start = 24
+        row.margin_top = 6
+        row.append(label)
+        row.append(dots.widget)
+        @transcript.append(row)
+
+        @working_row = row
+        @working_label = label
+        @working_dots = dots
+        set_working_animation(@follow_bottom)
+      end
+
+      private def keep_working_last : Nil
+        row = @working_row
+        return unless row && row.parent
+        last = @transcript.last_child
+        return if last && last.to_unsafe == row.to_unsafe
+
+        @transcript.reorder_child_after(row, last)
+      end
+
+      private def reset_live_turn_ui : Nil
+        finish_stream_segment
+        remove_working_row
+        @working = false
+        @stream_source = nil
+      end
+
       private def load_chat_state : Nil
         chat_id = @active_chat
         return unless chat_id
@@ -1412,7 +1671,8 @@ module Xd
         return unless state
 
         @controls.update(state)
-        @working = state["working"]?.try(&.as_bool?) || false
+        working = state["working"]?.try(&.as_bool?) || false
+        set_working(working)
         @send.label = @working ? "Stop" : "Send"
         if @working
           @send.remove_css_class("suggested-action")
@@ -1492,27 +1752,24 @@ module Xd
         when "text"
           return unless active_event?(endpoint, event)
           text = event["text"]?.try(&.as_s?) || return
-          row = @stream_row
-          unless row
-            row = add_message("assistant", "")
-            @stream_row = row
-          end
-          if row
-            row.set_stream_text(row.text + text)
-          end
-          scroll_to_bottom
+          schedule_stream_text(text)
         when "tool"
           return unless active_event?(endpoint, event)
+          finish_stream_segment
           add_message("tool", event["text"]?.try(&.as_s?) || "Used a tool")
-          @stream_row = nil
+          keep_working_last
           scroll_to_bottom
         when "turn-started"
           return unless active_event?(endpoint, event)
-          @status.text = "Working…"
-          @stream_row = nil
+          reset_stream_segment
+          @stream_source = event["label"]?.try(&.as_s?)
+          @working_started_at = Time.instant
+          set_working(true)
           load_chat_state
         when "turn-finished"
           if active_event?(endpoint, event)
+            finish_stream_segment
+            set_working(false)
             load_messages
             load_chat_state
             if event["waiting"]?.try(&.as_bool?) == true
@@ -1591,6 +1848,7 @@ module Xd
       private def begin_bottom_jump : Nil
         @follow_bottom = true
         @history_bottom_distance = -1.0
+        set_working_animation(true)
         @bottom_jump_upper = -1.0
         @bottom_jump_page_size = -1.0
         @bottom_jump_stable_frames = 0
@@ -1643,6 +1901,8 @@ module Xd
           adjustment.value = value if adjustment.value != value
         elsif adjustment.value >= bottom - 1.0
           @follow_bottom = true
+          @history_bottom_distance = -1.0
+          set_working_animation(true)
         end
       end
 
@@ -1651,6 +1911,8 @@ module Xd
         cancel_history_restore if dy != 0
         if dy < 0 && adjustment.value > adjustment.lower
           @follow_bottom = false
+          @history_bottom_distance = -1.0
+          set_working_animation(false)
         end
       end
 
