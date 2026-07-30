@@ -1724,7 +1724,7 @@ module Xd
         scroll_to_bottom
       end
 
-      private def load_chat_state : Nil
+      private def load_chat_state(recover_turn : Bool = true) : Nil
         chat_id = @active_chat
         return unless chat_id
 
@@ -1748,7 +1748,7 @@ module Xd
         refresh_command_suggestions
         working = state["working"]?.try(&.as_bool?) || false
         if working
-          recover_active_turn(state)
+          recover_active_turn(state) if recover_turn
           set_working(true)
           keep_working_last
         else
@@ -2012,13 +2012,17 @@ module Xd
           # recovering that snapshot and then consuming the queued events
           # would draw the same live text twice.
           @live_turn_key = @transcript_page.try(&.key)
-          load_chat_state
+          load_chat_state(recover_turn: false)
         when "turn-finished"
           if active_event?(endpoint, event)
             finish_stream_segment
             set_working(false)
             load_messages
-            load_chat_state
+            # A queued turn may already be running in the daemon while its
+            # ordered start/text events are still waiting in this GTK idle
+            # queue. Refresh controls and queue, but let those events attach
+            # and draw it.
+            load_chat_state(recover_turn: false)
             if event["waiting"]?.try(&.as_bool?) == true
               @status.text = "Waiting for your answer"
             end
@@ -2032,7 +2036,7 @@ module Xd
           return unless active_event?(endpoint, event)
           queue = event["queue"]?.try(&.as_a?)
           @status.text = queue && !queue.empty? ? "Message queued" : ""
-          load_chat_state
+          load_chat_state(recover_turn: false)
         end
       end
 
