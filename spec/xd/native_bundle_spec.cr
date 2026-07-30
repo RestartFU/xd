@@ -30,6 +30,10 @@ describe Xd::NativeBundle do
         missing.should contain("bundled Git")
         missing.should contain("PortAudio runtime")
         missing.should contain("Codex")
+        missing.should contain("Adwaita icon theme")
+        missing.should contain("chat symbolic icon")
+        missing.should contain("microphone symbolic icon")
+        missing.should contain("SVG pixbuf loader")
 
         materialize_bundle(directory, platform)
         Xd::NativeBundle.validate(directory, platform).should be_empty

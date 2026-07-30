@@ -54,10 +54,34 @@ module Xd
         ),
         requirement("DM Sans", "#{resources}/share/fonts/xd/DMSans-Variable.ttf"),
         requirement("application icon", "#{resources}/xd.icns"),
+        requirement(
+          "Adwaita icon theme",
+          "#{resources}/share/icons/Adwaita/index.theme"
+        ),
+        requirement(
+          "chat symbolic icon",
+          "#{resources}/share/icons/Adwaita/symbolic/actions/chat-message-new-symbolic.svg"
+        ),
+        requirement(
+          "microphone symbolic icon",
+          "#{resources}/share/icons/Adwaita/symbolic/devices/audio-input-microphone-symbolic.svg"
+        ),
+        requirement(
+          "Claude icon",
+          "#{resources}/share/icons/hicolor/scalable/apps/xd-backend-claude.svg"
+        ),
+        requirement(
+          "Codex icon",
+          "#{resources}/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg"
+        ),
         requirement("GIO TLS module", "#{resources}/lib/gio/modules/*.so"),
         requirement(
           "pixbuf loader",
           "#{resources}/lib/gdk-pixbuf-2.0/*/loaders/*.so"
+        ),
+        requirement(
+          "SVG pixbuf loader",
+          "#{resources}/lib/gdk-pixbuf-2.0/*/loaders/libpixbufloader*svg*.so"
         ),
         requirement(
           "pixbuf loader cache",
@@ -106,11 +130,38 @@ module Xd
           "share/glib-2.0/schemas/gschemas.compiled"
         ),
         requirement("DM Sans", "share/fonts/xd/DMSans-Variable.ttf"),
-        requirement("application icon", "share/icons/hicolor/scalable/apps/*.svg"),
+        requirement(
+          "application icon",
+          "share/icons/hicolor/scalable/apps/com.restartfu.Xd*.svg"
+        ),
+        requirement(
+          "Adwaita icon theme",
+          "share/icons/Adwaita/index.theme"
+        ),
+        requirement(
+          "chat symbolic icon",
+          "share/icons/Adwaita/symbolic/actions/chat-message-new-symbolic.svg"
+        ),
+        requirement(
+          "microphone symbolic icon",
+          "share/icons/Adwaita/symbolic/devices/audio-input-microphone-symbolic.svg"
+        ),
+        requirement(
+          "Claude icon",
+          "share/icons/hicolor/scalable/apps/xd-backend-claude.svg"
+        ),
+        requirement(
+          "Codex icon",
+          "share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg"
+        ),
         requirement("GIO TLS module", "lib/gio/modules/*.dll"),
         requirement(
           "pixbuf loader",
           "lib/gdk-pixbuf-2.0/*/loaders/*.dll"
+        ),
+        requirement(
+          "SVG pixbuf loader",
+          "lib/gdk-pixbuf-2.0/*/loaders/libpixbufloader*svg*.dll"
         ),
         requirement(
           "pixbuf loader cache",

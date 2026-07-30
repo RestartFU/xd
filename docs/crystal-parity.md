@@ -467,8 +467,11 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
   and portable Git, and removes the Git pane's POSIX-shell dependency. Windows
   local IPC uses authenticated loopback with a 256-bit endpoint token protected
   to the current user by DPAPI, bounded handshakes, startup locking, and
-  stale-endpoint recovery. Native build/bundle jobs plus platform terminal,
-  PortAudio delivery, and actual-host verification remain.
+  stale-endpoint recovery. Linux, macOS, and Windows release gates require the
+  exact Adwaita chat/microphone icons, custom backend icons, and SVG pixbuf
+  loader rather than accepting an arbitrary icon or image loader that still
+  renders missing-image placeholders. Native build/bundle jobs plus platform
+  terminal, PortAudio delivery, and actual-host verification remain.
 - `[x]` README and CI use the Crystal Docker workflow; no active workflow builds
   or publishes Meson/C artifacts.
 - `[ ]` Remove Odin experiment and old C implementation only after every C
