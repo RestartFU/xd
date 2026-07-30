@@ -14,6 +14,7 @@ module Xd
     # remains device-local, while daemon replay makes reconnects authoritative.
     class TerminalPanel
       URL_PATTERN = %q((?i)\b(?:https?|ftp)://[^[:space:]<>"']*[-[:alnum:]_~/#?&=%+])
+      REGEX_MULTILINE = 0x00000400_u32
 
       PALETTE = {
         "#23232a", "#e06c75", "#98c379", "#d19a66",
@@ -312,11 +313,7 @@ module Xd
         terminal.font = Pango::FontDescription.from_string(
           "JetBrains Mono, Monospace 10"
         )
-        terminal.set_colors(
-          colour("#d4d4d4"),
-          colour("#0a0a0c"),
-          PALETTE.map { |spec| colour(spec) }
-        )
+        apply_colours(terminal)
         terminal.add_css_class("xd-terminal")
         configure_copy_paste(terminal)
         configure_links(terminal)
@@ -353,7 +350,7 @@ module Xd
           regex = Vte::Regex.new_for_match(
             URL_PATTERN,
             -1_i64,
-            Vte::REGEX_FLAGS_DEFAULT.to_u32
+            Vte::REGEX_FLAGS_DEFAULT.to_u32 | REGEX_MULTILINE
           )
           tag = terminal.match_add_regex(regex, 0_u32)
           terminal.match_set_cursor_name(tag, "pointer")
@@ -376,12 +373,35 @@ module Xd
         terminal.add_controller(links)
       end
 
-      private def colour(spec : String) : Gdk::RGBA
-        rgba = Gdk::RGBA.new
-        unless rgba.parse(spec)
+      private def apply_colours(terminal : Vte::Terminal) : Nil
+        foreground = raw_colour("#d4d4d4")
+        background = raw_colour("#0a0a0c")
+        palette = PALETTE.map { |spec| raw_colour(spec) }.to_a
+
+        # gi-crystal 0.25.1 marshals Enumerable(Gdk::RGBA) as an array of
+        # pointers, but VTE expects one contiguous GdkRGBA array. Call the
+        # generated ABI declaration with the correct layout.
+        LibVte.vte_terminal_set_colors(
+          terminal.to_unsafe,
+          pointerof(foreground).as(Void*),
+          pointerof(background).as(Void*),
+          palette.to_unsafe,
+          palette.size.to_u64
+        )
+      end
+
+      private def raw_colour(spec : String) : LibGdk::RGBA
+        hex = spec.lchop('#')
+        unless hex.size == 6
           raise ArgumentError.new("Invalid terminal colour: #{spec}")
         end
-        rgba
+
+        colour = LibGdk::RGBA.new
+        colour.red = hex[0, 2].to_i(16).to_f32 / 255_f32
+        colour.green = hex[2, 2].to_i(16).to_f32 / 255_f32
+        colour.blue = hex[4, 2].to_i(16).to_f32 / 255_f32
+        colour.alpha = 1_f32
+        colour
       end
 
       private def feed_replay(
