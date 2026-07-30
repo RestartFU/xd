@@ -285,7 +285,12 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   outside Mutter focus notification. In-app replacement now uses an atomic
   old/new bundle swap with rollback, while direct installers reject active
   bundles. Real branch installation remains.
-- `[ ]` Match toasts and startup/database error presentation.
+- `[x]` File save/guard failures use the C `AdwToastOverlay` placement and
+  messages. Startup and database failures keep the normal 1100×720 app surface
+  behind one modal `AdwAlertDialog`; database failures use the exact C heading
+  and Quit-only lifecycle. A deliberately invalid SQLite path is
+  installed-bundle screenshot-verified under `G_DEBUG=fatal-warnings`, and
+  Quit closes the process cleanly.
 
 C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 `src/chat/search-dialog.c`, `src/ui/dir-browser.c`,
