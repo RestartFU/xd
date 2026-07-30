@@ -292,6 +292,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   paired-TLS latency, and live Git-head refresh proof remain. Agent-native edit,
   write, multi-edit, NotebookEdit, apply-patch, and file-change payloads also
   produce inline unified diffs without a Git repository or Git executable.
+  Patch construction, multi-change aggregation, line counting, and apply-patch
+  parsing stop at the 256-KiB display budget, so generated multi-megabyte files
+  cannot allocate or render an unbounded inline diff.
   Codex's native turn-level diff is retained as a fallback for shell-generated
   files and other changes without a completed file-change item, while normal
   file-change items suppress the duplicate aggregate card.
@@ -492,7 +495,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (324 default, 2 PortAudio, and 5
+- `[x]` Crystal specs pass in Docker (327 default, 2 PortAudio, and 5
   authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and

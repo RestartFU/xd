@@ -102,6 +102,39 @@ describe Xd::Agent::ToolSummary do
     write_summary.should contain("+created")
   end
 
+  it "bounds generated-file diffs while building them" do
+    content = ("é" * (2 * 1024 * 1024)) + "\nnever reached\n"
+    write = summary_input({
+      "file_path" => "generated.txt",
+      "content"   => content,
+    })
+
+    summary = Xd::Agent::ToolDiff.build("Write", write).not_nil!
+    summary.bytesize.should be < Xd::Agent::ToolDiff::LIMIT + 128
+    summary.valid_encoding?.should be_true
+    summary.should contain("… diff truncated …")
+    summary.should_not contain("never reached")
+  end
+
+  it "shares one output budget across multi-edit patches" do
+    edits = (0...32).map do |index|
+      JSON::Any.new({
+        "old_string" => JSON::Any.new("old #{index}\n"),
+        "new_string" => JSON::Any.new(("x" * (512 * 1024)) + "\n"),
+      })
+    end
+    input = {
+      "file_path" => JSON::Any.new("generated.txt"),
+      "edits"     => JSON::Any.new(edits),
+    }
+
+    summary = Xd::Agent::ToolDiff.build("MultiEdit", input).not_nil!
+    summary.bytesize.should be < Xd::Agent::ToolDiff::LIMIT + 128
+    summary.should contain("… diff truncated …")
+    summary.should contain("old 0")
+    summary.should_not contain("old 31")
+  end
+
   it "builds apply-patch diffs without reading a repository" do
     input = summary_input({
       "patch" => <<-PATCH,
@@ -126,6 +159,20 @@ describe Xd::Agent::ToolSummary do
     summary.should contain("+puts :new")
     summary.should contain("new file mode 100644")
     summary.should contain("deleted file mode 100644")
+  end
+
+  it "bounds apply-patch parsing before splitting lines" do
+    body = (0...200_000).map { |index| "+generated #{index}" }.join('\n')
+    input = summary_input({
+      "patch" => "*** Begin Patch\n*** Add File: generated.txt\n" \
+                 "#{body}\n*** End Patch",
+    })
+
+    summary = Xd::Agent::ToolDiff.build("apply_patch", input).not_nil!
+    summary.bytesize.should be < Xd::Agent::ToolDiff::LIMIT + 128
+    summary.should contain("new file mode 100644")
+    summary.should contain("… diff truncated …")
+    summary.should_not contain("generated 199999")
   end
 
   it "builds notebook edits from source arguments" do
