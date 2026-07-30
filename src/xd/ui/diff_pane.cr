@@ -165,14 +165,43 @@ module Xd
             next
           end
 
-          parsed = @sections.fill(output)
-          changed = @sections.sections.size
-          noun = changed == 1 ? "file" : "files"
-          @summary.text =
-            "#{changed} #{noun} changed  ·  " \
-            "+#{parsed.additions}  −#{parsed.deletions}"
-          @summary.tooltip_text = nil
-          @stack.visible_child_name = "changes"
+          prepare_diff(output, token, chat_id)
+        end
+      end
+
+      private def prepare_diff(
+        output : String,
+        token : Int64,
+        chat_id : String,
+      ) : Nil
+        Thread.new do
+          prepared : DiffFileSections::Prepared? = nil
+          message : String? = nil
+          begin
+            prepared = DiffFileSections.prepare(output)
+          rescue error
+            message = error.message || "The diff could not be parsed."
+          end
+          GLib.idle_add do
+            if active?(token, chat_id)
+              if result = prepared
+                parsed = @sections.fill(result)
+                changed = result.sections.size
+                noun = changed == 1 ? "file" : "files"
+                @summary.text =
+                  "#{changed} #{noun} changed  ·  " \
+                  "+#{parsed.additions}  −#{parsed.deletions}"
+                @summary.tooltip_text = nil
+                @stack.visible_child_name = "changes"
+              else
+                show_empty(
+                  "Could not read changes",
+                  message
+                )
+              end
+            end
+            false
+          end
         end
       end
 

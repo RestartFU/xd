@@ -9,6 +9,10 @@ module Xd
     class DiffFileSections
       CHUNK_ROWS = 80
 
+      record Prepared,
+        parsed : ParsedDiff,
+        sections : Array(DiffFileSection)
+
       record RowWidgets,
         expander : Gtk::Expander,
         path : Gtk::Label,
@@ -41,9 +45,21 @@ module Xd
       end
 
       def fill(patch : String) : ParsedDiff
+        fill(self.class.prepare(patch))
+      end
+
+      def self.prepare(patch : String) : Prepared
+        parsed = UnifiedDiff.parse(patch)
+        Prepared.new(
+          parsed,
+          UnifiedDiff.file_sections(parsed.lines)
+        )
+      end
+
+      def fill(prepared : Prepared) : ParsedDiff
         @widget.model = nil
-        @parsed = UnifiedDiff.parse(patch)
-        @sections = UnifiedDiff.file_sections(@parsed.lines)
+        @parsed = prepared.parsed
+        @sections = prepared.sections
 
         descriptors = Gtk::StringList.new(
           @sections.each_index.map(&.to_s).to_a
