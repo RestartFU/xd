@@ -96,7 +96,8 @@ module Xd
           ->(message : String) { @status.text = message }
         )
         @tool_panel = ToolPanel.new(
-          ->(request : Hash(String, JSON::Any)) { call(request) }
+          ->(request : Hash(String, JSON::Any)) { call(request) },
+          -> { close_terminal_panel }
         )
 
         @chat_title = Adw::WindowTitle.new(title: "xd")
@@ -361,6 +362,10 @@ module Xd
         remember_panes
       end
 
+      private def close_terminal_panel : Nil
+        @terminal_button.active = false
+      end
+
       private def file_toggled : Nil
         if @file_button.active?
           @diff_button.active = false if @diff_button.active?
@@ -566,7 +571,7 @@ module Xd
         @terminal_button.sensitive = true
         @file_button.sensitive = true
         @diff_button.sensitive = true
-        @tool_panel.chat = id
+        @tool_panel.select_chat(id, pane_key)
         apply_panes(saved_panes)
         load_chat_state
         load_messages
@@ -602,7 +607,7 @@ module Xd
         @terminal_button.sensitive = false
         @file_button.sensitive = false
         @diff_button.sensitive = false
-        @tool_panel.chat = nil
+        @tool_panel.select_chat(nil, nil)
         clear(@transcript)
         @workflow_ids.clear
         clear(@queue_box)

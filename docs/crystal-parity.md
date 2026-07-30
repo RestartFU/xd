@@ -97,8 +97,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   visibility.
 - `[~]` Terminal RPC, PTY output, input, resize, replay, and kill operations use
   the shared daemon.
-- `[ ]` Port terminal multi-session tabs, centered title, add/kill controls,
-  close request, focus behavior, replay, and per-chat session retention.
+- `[~]` Daemon-backed multi-session tabs, centered single-session title,
+  add/kill controls, close request, focus, replay, resize, and per-chat view
+  retention work. Exact C palette/font, copy/paste, URL handling, backspace
+  binding, and disconnected status/retry behavior remain.
 - `[~]` File list/read/write RPC works, but C pane layout and behavior are not
   yet matched.
 - `[~]` Working/branch diff RPC works, but C diff list, expansion, syntax,
@@ -174,9 +176,9 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[ ]` Crystal specs pass in Docker.
+- `[x]` Crystal specs pass in Docker (126 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
-- `[ ]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
+- `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
 - `[ ]` 1100x720 screenshots match the C app for empty, populated, active turn,
   question, terminal, files, diff, search, settings, secrets, and pairing

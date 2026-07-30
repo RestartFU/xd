@@ -1,7 +1,6 @@
-require "base64"
 require "json"
 require "gtk4"
-require "./vte"
+require "./terminal_panel"
 
 module Xd
   module UI
@@ -11,13 +10,11 @@ module Xd
       getter repository_page : String?
 
       @chat_id : String?
+      @view_key : String?
       @file_directory = ""
       @open_file : String?
       @diff_mode = "working"
       @repository_page : String?
-      @terminal_id : String?
-      @last_columns = 0_i64
-      @last_rows = 0_i64
 
       @file_path = Gtk::Label.new("")
       @file_list = Gtk::Box.new(:vertical, 2)
@@ -26,21 +23,19 @@ module Xd
       @file_status = Gtk::Label.new("")
       @diff_view = Gtk::TextView.new
       @diff_status = Gtk::Label.new("")
-      @terminal = Vte::Terminal.new
-      @terminal_status = Gtk::Label.new("")
-      @terminal_title_sizes : Gtk::SizeGroup
+      @terminal_panel : TerminalPanel
 
       def initialize(
         @call : Proc(
           Hash(String, JSON::Any),
           Hash(String, JSON::Any)?,
         ),
+        on_terminal_empty : Proc(Nil),
       )
         @chat_id = nil
+        @view_key = nil
         @open_file = nil
         @repository_page = nil
-        @terminal_id = nil
-        @terminal_title_sizes = Gtk::SizeGroup.new(:horizontal)
 
         @repository_widget = Gtk::Stack.new
         @repository_widget.hexpand = true
@@ -51,36 +46,29 @@ module Xd
         @repository_widget.add_css_class("xd-divider-left")
         @repository_widget.visible = false
 
-        @terminal_widget = build_terminal
+        @terminal_panel = TerminalPanel.new(@call, on_terminal_empty)
+        @terminal_widget = @terminal_panel.widget
         @terminal_widget.add_css_class("xd-tool-panel")
         @terminal_widget.add_css_class("xd-divider-top")
         @terminal_widget.visible = false
-
-        GLib.timeout(250.milliseconds) do
-          sync_terminal_size
-          true
-        end
       end
 
-      def chat=(chat_id : String?) : String?
-        return chat_id if @chat_id == chat_id
+      def select_chat(chat_id : String?, view_key : String?) : Nil
+        return if @chat_id == chat_id && @view_key == view_key
 
         @chat_id = chat_id
+        @view_key = view_key
         @file_directory = ""
         @open_file = nil
-        @terminal_id = nil
-        @terminal.reset(true, true)
-        @terminal_status.text = ""
+        @terminal_panel.select_chat(chat_id, view_key)
         refresh_visible
-        chat_id
       end
 
       def show_terminal(shown : Bool, focus : Bool = true) : Nil
         @terminal_widget.visible = shown
         return unless shown
 
-        load_terminal
-        @terminal.grab_focus if focus
+        @terminal_panel.activate(focus)
       end
 
       def show_repository(page : String?) : Nil
@@ -98,31 +86,11 @@ module Xd
       def handle_event(event : Hash(String, JSON::Any)) : Nil
         return unless event["chat"]?.try(&.as_s?) == @chat_id
 
-        case event["event"]?.try(&.as_s?)
-        when "terminal-opened"
-          @terminal_id = event["terminal"].as_s
-          @last_columns = event["columns"]?.try(&.as_i64?) || 0_i64
-          @last_rows = event["rows"]?.try(&.as_i64?) || 0_i64
-          @terminal_status.text = event["title"]?.try(&.as_s?) || ""
-        when "terminal-output"
-          return unless event["terminal"]?.try(&.as_s?) == @terminal_id
-          if encoded = event["data"]?.try(&.as_s?)
-            @terminal.feed(Base64.decode(encoded))
-          end
-        when "terminal-resized"
-          return unless event["terminal"]?.try(&.as_s?) == @terminal_id
-          @last_columns = event["columns"]?.try(&.as_i64?) || @last_columns
-          @last_rows = event["rows"]?.try(&.as_i64?) || @last_rows
-        when "terminal-closed"
-          return unless event["terminal"]?.try(&.as_s?) == @terminal_id
-          @terminal_id = nil
-          @terminal_status.text = "Terminal closed"
-        when "turn-finished"
+        @terminal_panel.handle_event(event)
+        if event["event"]?.try(&.as_s?) == "turn-finished"
           refresh_diff if @repository_widget.visible? &&
                           @repository_page == "diff"
         end
-      rescue Base64::Error
-        @terminal_status.text = "Terminal sent invalid data"
       end
 
       private def build_files : Gtk::Widget
@@ -233,75 +201,10 @@ module Xd
         box
       end
 
-      private def build_terminal : Gtk::Box
-        new_terminal = Gtk::Button.new_from_icon_name("list-add-symbolic")
-        new_terminal.add_css_class("flat")
-        new_terminal.tooltip_text = "New session"
-        new_terminal.clicked_signal.connect { open_terminal(false) }
-        kill = Gtk::Button.new_from_icon_name("user-trash-symbolic")
-        kill.add_css_class("flat")
-        kill.tooltip_text = "Kill this session"
-        kill.clicked_signal.connect { kill_terminal }
-
-        @terminal_status.xalign = 0.5_f32
-        @terminal_status.hexpand = true
-        @terminal_status.ellipsize = :end
-        @terminal_status.add_css_class("heading")
-
-        controls = Gtk::Box.new(:horizontal, 2)
-        controls.margin_top = 4
-        controls.margin_bottom = 4
-        controls.margin_start = 4
-        controls.margin_end = 8
-        controls.append(new_terminal)
-        controls.append(kill)
-
-        title_start = Gtk::Box.new(:horizontal, 0)
-        title_end = Gtk::Box.new(:horizontal, 0)
-        @terminal_title_sizes.add_widget(title_start)
-        @terminal_title_sizes.add_widget(title_end)
-        @terminal_title_sizes.add_widget(controls)
-
-        title_row = Gtk::Box.new(:horizontal, 0)
-        title_row.append(title_start)
-        title_row.append(@terminal_status)
-        title_row.append(title_end)
-        title_row.can_target = false
-
-        tabs = Gtk::Box.new(:horizontal, 0)
-        filler = Gtk::Box.new(:horizontal, 0)
-        filler.hexpand = true
-        tabs.append(filler)
-        tabs.append(controls)
-
-        header = Gtk::Overlay.new
-        header.child = tabs
-        header.add_overlay(title_row)
-        header.add_css_class("xd-divider-bottom")
-
-        @terminal.hexpand = true
-        @terminal.vexpand = true
-        @terminal.input_enabled = true
-        @terminal.scroll_on_keystroke = true
-        @terminal.scroll_on_output = true
-        @terminal.scrollback_lines = 10_000_u32
-        @terminal.add_css_class("xd-terminal")
-        @terminal.commit_signal.connect do |text, size|
-          bytes = text.to_slice
-          length = Math.min(size.to_i, bytes.size)
-          send_terminal_input(bytes[0, length]) if length > 0
-        end
-
-        box = Gtk::Box.new(:vertical, 0)
-        box.append(header)
-        box.append(@terminal)
-        box
-      end
-
       private def refresh_visible : Nil
         return unless @chat_id
 
-        load_terminal if @terminal_widget.visible?
+        @terminal_panel.activate(false) if @terminal_widget.visible?
         refresh_repository(@repository_page) if @repository_widget.visible?
       end
 
@@ -425,100 +328,6 @@ module Xd
         output = response["output"].as_s
         @diff_view.buffer.text = output
         @diff_status.text += output.empty? ? " · clean" : ""
-      end
-
-      private def load_terminal : Nil
-        chat_id = @chat_id
-        return unless chat_id
-
-        response = @call.call({
-          "op"   => JSON::Any.new("terminal-list"),
-          "chat" => JSON::Any.new(chat_id),
-        })
-        return unless response
-
-        terminals = response["terminals"].as_a
-        if terminal = terminals.first?
-          @terminal_id = terminal["id"].as_s
-          @terminal_status.text = terminal["title"].as_s
-          @terminal.reset(true, true)
-          terminal["replay"].as_a.each do |item|
-            if encoded = item["data"]?.try(&.as_s?)
-              @terminal.feed(Base64.decode(encoded))
-            else
-              columns = item["columns"].as_i64
-              rows = item["rows"].as_i64
-              @terminal.set_size(columns, rows)
-              @last_columns = columns
-              @last_rows = rows
-            end
-          end
-        else
-          open_terminal(true)
-        end
-      rescue Base64::Error
-        @terminal_status.text = "Terminal replay is invalid"
-      end
-
-      private def open_terminal(reuse : Bool) : Nil
-        chat_id = @chat_id
-        return unless chat_id
-
-        @terminal.reset(true, true) unless reuse
-        response = @call.call({
-          "op"      => JSON::Any.new("terminal-open"),
-          "chat"    => JSON::Any.new(chat_id),
-          "columns" => JSON::Any.new(100_i64),
-          "rows"    => JSON::Any.new(30_i64),
-          "reuse"   => JSON::Any.new(reuse),
-        })
-        return unless response
-
-        @terminal_id = response["id"].as_s
-        @last_columns = 100_i64
-        @last_rows = 30_i64
-        @terminal_status.text = "Terminal"
-        @terminal.grab_focus
-      end
-
-      private def send_terminal_input(data : Bytes) : Nil
-        terminal_id = @terminal_id
-        return unless terminal_id
-
-        @call.call({
-          "op"       => JSON::Any.new("terminal-input"),
-          "terminal" => JSON::Any.new(terminal_id),
-          "data"     => JSON::Any.new(Base64.strict_encode(data)),
-        })
-      end
-
-      private def sync_terminal_size : Nil
-        terminal_id = @terminal_id
-        return unless terminal_id && @terminal_widget.visible?
-
-        columns = @terminal.column_count
-        rows = @terminal.row_count
-        return if columns <= 0 || rows <= 0
-        return if columns == @last_columns && rows == @last_rows
-
-        @last_columns = columns
-        @last_rows = rows
-        @call.call({
-          "op"       => JSON::Any.new("terminal-resize"),
-          "terminal" => JSON::Any.new(terminal_id),
-          "columns"  => JSON::Any.new(columns),
-          "rows"     => JSON::Any.new(rows),
-        })
-      end
-
-      private def kill_terminal : Nil
-        terminal_id = @terminal_id
-        return unless terminal_id
-
-        @call.call({
-          "op"       => JSON::Any.new("terminal-kill"),
-          "terminal" => JSON::Any.new(terminal_id),
-        })
       end
 
       private def join_path(parent : String, name : String) : String
