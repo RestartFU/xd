@@ -2,6 +2,7 @@ require "gtk4"
 require "../agent/catalog"
 require "./adw"
 require "./context_usage"
+require "./model_picker"
 require "./option_picker"
 
 module Xd
@@ -29,8 +30,7 @@ module Xd
       @effort = Agent::Effort::High
       @access = Agent::Access::ReadOnly
       @updating = false
-      @backend_button : Gtk::Button
-      @model_button : Gtk::Button
+      @model_picker : ModelPicker
       @effort_picker : OptionPicker
       @access_picker : OptionPicker
       @build_button : Gtk::ToggleButton
@@ -41,6 +41,7 @@ module Xd
 
       def initialize(
         @on_option : Proc(String, String?, Nil),
+        @on_model : Proc(String, String, Nil),
       )
         @model = nil
         @widget = Gtk::Box.new(:vertical, 2)
@@ -48,13 +49,9 @@ module Xd
         @identity = Gtk::Box.new(:horizontal, 8)
         @run = Gtk::Box.new(:horizontal, 8)
 
-        @backend_button = control_button("Claude Code")
-        @backend_button.tooltip_text = "Agent backend"
-        @backend_button.clicked_signal.connect { cycle_backend }
-
-        @model_button = control_button("Model")
-        @model_button.tooltip_text = "Model"
-        @model_button.clicked_signal.connect { cycle_model }
+        @model_picker = ModelPicker.new(@on_model)
+        @model_picker.widget.tooltip_text =
+          "Which assistant and model answer in this chat"
 
         @effort_picker = OptionPicker.new(
           EFFORTS.map_with_index do |effort, index|
@@ -144,8 +141,7 @@ module Xd
         @context_meter.add_css_class("xd-context-meter")
 
         @identity.append(@workspace_picker.widget)
-        @identity.append(@backend_button)
-        @identity.append(@model_button)
+        @identity.append(@model_picker.widget)
         @identity.append(@context_meter)
         @run.append(@effort_picker.widget)
         @run.append(@access_picker.widget)
@@ -160,8 +156,7 @@ module Xd
       end
 
       def sensitive=(enabled : Bool) : Bool
-        @backend_button.sensitive = enabled
-        @model_button.sensitive = enabled
+        @model_picker.widget.sensitive = enabled
         @effort_picker.widget.sensitive = enabled
         @access_picker.widget.sensitive =
           enabled && !@plan_button.active?
@@ -183,8 +178,7 @@ module Xd
           state["access"]?.try(&.as_s?)
         )
 
-        @backend_button.label = backend.display_name
-        @model_button.label = backend.model_label(@model)
+        @model_picker.select(backend.id, @model)
         @effort_picker.selected = EFFORTS.index(@effort) || 0
         @access_picker.selected = ACCESS.index(@access) || 0
         plan = state["plan"]?.try(&.as_bool?) || false
@@ -200,12 +194,6 @@ module Xd
         @workspace_picker.widget.sensitive = !has_messages
       ensure
         @updating = false
-      end
-
-      private def control_button(label : String) : Gtk::Button
-        button = Gtk::Button.new_with_label(label)
-        button.add_css_class("flat")
-        button
       end
 
       private def update_context_meter(
@@ -235,20 +223,6 @@ module Xd
         else
         end
         @context_meter.visible = true
-      end
-
-      private def cycle_backend : Nil
-        backends = Agent::Catalog.all
-        index = backends.index { |item| item.id == @backend } || 0
-        selected = backends[(index + 1) % backends.size]
-        @on_option.call("backend", selected.id)
-      end
-
-      private def cycle_model : Nil
-        backend = Agent::Catalog.lookup(@backend) || Agent::Catalog::CLAUDE
-        index = backend.models.index { |item| item.id == @model } || -1
-        selected = backend.models[(index + 1) % backend.models.size]
-        @on_option.call("model", selected.id)
       end
 
       private def build_workspace_menu(

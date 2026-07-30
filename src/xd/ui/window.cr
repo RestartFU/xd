@@ -189,6 +189,9 @@ module Xd
         @controls = ChatControls.new(
           ->(option : String, value : String?) {
             set_option(option, value)
+          },
+          ->(backend : String, model : String) {
+            set_model(backend, model)
           }
         )
         @controls.widget.add_css_class("xd-composer")
@@ -1547,6 +1550,19 @@ module Xd
         }
         request["value"] = JSON::Any.new(value) if value
         load_chat_state if call(request)
+      end
+
+      private def set_model(backend : String, model : String) : Nil
+        chat_id = @active_chat
+        return unless chat_id
+
+        load_chat_state if call({
+                             "op"      => JSON::Any.new("set-option"),
+                             "chat"    => JSON::Any.new(chat_id),
+                             "option"  => JSON::Any.new("model"),
+                             "backend" => JSON::Any.new(backend),
+                             "value"   => JSON::Any.new(model),
+                           })
       end
 
       private def monotonic_microseconds : Int64

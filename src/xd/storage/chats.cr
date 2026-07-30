@@ -113,6 +113,26 @@ module Xd
         )
       end
 
+      def set_model_selection(
+        chat_id : String,
+        backend : String,
+        model : String,
+      ) : Nil
+        database_error("Cannot change the assistant and model") do
+          @database.exec(
+            <<-SQL,
+              UPDATE chats
+                 SET backend = ?, model = ?, updated_at = ?
+               WHERE id = ?
+              SQL
+            backend,
+            model,
+            now_seconds,
+            chat_id
+          )
+        end
+      end
+
       def set_effort(chat_id : String, effort : String?) : Nil
         update_chat_column(
           "effort",

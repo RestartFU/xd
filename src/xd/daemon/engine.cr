@@ -736,7 +736,20 @@ module Xd
 
         case option
         when "model"
-          @store.set_model(chat_id, value)
+          if backend = request.string?("backend")
+            model = value || raise Protocol::Error.new(
+              "A model value is required."
+            )
+            unless selected = Agent::Catalog.lookup(backend)
+              raise Protocol::Error.new("No such assistant.")
+            end
+            unless selected.models.any?(&.id.==(model))
+              raise Protocol::Error.new("No such model.")
+            end
+            @store.set_model_selection(chat_id, backend, model)
+          else
+            @store.set_model(chat_id, value)
+          end
         when "effort"
           @store.set_effort(chat_id, value)
         when "access"

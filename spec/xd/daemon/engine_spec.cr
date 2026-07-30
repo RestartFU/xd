@@ -578,6 +578,50 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "selects an assistant and model atomically" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Models",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+
+      selected = engine.dispatch(local, {
+        "op"      => "set-option",
+        "chat"    => chat,
+        "option"  => "model",
+        "backend" => "codex",
+        "value"   => "gpt-5.6-terra",
+      }.to_json)
+      selected.success?.should be_true
+      state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)
+      state["backend"].as_s.should eq("codex")
+      state["model"].as_s.should eq("gpt-5.6-terra")
+
+      rejected = engine.dispatch(local, {
+        "op"      => "set-option",
+        "chat"    => chat,
+        "option"  => "model",
+        "backend" => "claude",
+        "value"   => "gpt-5.6-terra",
+      }.to_json)
+      rejected.success?.should be_false
+      unchanged = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)
+      unchanged["backend"].as_s.should eq("codex")
+      unchanged["model"].as_s.should eq("gpt-5.6-terra")
+    end
+  end
+
   it "routes terminal sessions through the shared daemon engine" do
     with_daemon_engine do |_store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)

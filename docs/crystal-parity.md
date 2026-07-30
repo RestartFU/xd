@@ -120,8 +120,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
 - `[~]` Ask questions stay bold in the transcript while answer controls use the
   exact C composer slot, flow layout, input row, and retirement lifecycle;
   installed GTK verification remains.
-- `[ ]` Match exact control order, labels, tooltips, picker popovers, spacing,
-  sensitivity, and active states.
+- `[~]` Control order, labels, tooltips, spacing, sensitivity, and active
+  states match C. The combined assistant/model picker includes its icon,
+  provider rail, persisted favorites, search, empty state, row shortcuts, and
+  atomic daemon selection; installed GTK verification remains.
 - `[~]` Queued-message drop/edit/steer controls and multiline editor match C;
   installed GTK verification remains.
 - `[~]` Slash-command discovery, filtering, layout, and insertion match C;
@@ -239,7 +241,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (211 examples).
+- `[x]` Crystal specs pass in Docker (212 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
