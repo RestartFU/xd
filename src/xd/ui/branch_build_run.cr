@@ -29,6 +29,7 @@ module Xd
         @stopped = false
         @on_change = nil
         @on_installed = nil
+        @lines_mutex = Mutex.new
       end
 
       def start(target : BranchBuild::Target) : Bool
@@ -56,6 +57,10 @@ module Xd
         changed(false)
 
         output_done = Channel(Nil).new
+        # Docker can keep this pipe readable for minutes. Draining it in a
+        # Crystal fiber lets a hot pipe monopolize the scheduler that GTK
+        # yields into, making the entire window appear frozen. Yield after each
+        # line so a hot Docker pipe cannot consume an entire GTK main-loop turn.
         spawn read_output(reader, output_done)
         spawn finish_process(process, output_done)
         true
@@ -86,11 +91,13 @@ module Xd
       end
 
       def last_line : String
-        @lines.last? || ""
+        @lines_mutex.synchronize { @lines.last? || "" }
       end
 
       def tail : String
-        @lines.last(TAIL_LINES).join('\n').strip
+        @lines_mutex.synchronize do
+          @lines.last(TAIL_LINES).join('\n').strip
+        end
       end
 
       private def read_output(
@@ -99,6 +106,7 @@ module Xd
       ) : Nil
         while line = reader.gets
           append_output(line.rstrip)
+          Fiber.yield
         end
       rescue IO::Error
       ensure
@@ -138,19 +146,21 @@ module Xd
       end
 
       private def append_output(line : String) : Nil
-        @lines << line
-        size = @lines.sum { |value| value.bytesize + 1 }
-        while size > OUTPUT_LIMIT && @lines.size > 1
-          removed = @lines.shift
-          size -= removed.bytesize + 1
-        end
-        if size > OUTPUT_LIMIT
-          if first = @lines.first?
-            keep = first.byte_slice(
-              Math.max(first.bytesize - OUTPUT_LIMIT, 0),
-              Math.min(first.bytesize, OUTPUT_LIMIT)
-            )
-            @lines[0] = keep.scrub
+        @lines_mutex.synchronize do
+          @lines << line
+          size = @lines.sum { |value| value.bytesize + 1 }
+          while size > OUTPUT_LIMIT && @lines.size > 1
+            removed = @lines.shift
+            size -= removed.bytesize + 1
+          end
+          if size > OUTPUT_LIMIT
+            if first = @lines.first?
+              keep = first.byte_slice(
+                Math.max(first.bytesize - OUTPUT_LIMIT, 0),
+                Math.min(first.bytesize, OUTPUT_LIMIT)
+              )
+              @lines[0] = keep.scrub
+            end
           end
         end
       end

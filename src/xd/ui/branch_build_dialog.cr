@@ -143,14 +143,20 @@ module Xd
           if @window.is_active?
             @focused = true
           elsif @focused
-            close
+            # Destroying a window from inside its focus notification is
+            # re-entrant in Mutter: GTK is still dispatching against widgets
+            # that cleanup would release. Close on the next main-loop turn.
+            GLib.idle_add do
+              close unless @closed
+              false
+            end
           end
         end
         @window.close_request_signal.connect do
           save_source
-          cleanup
           false
         end
+        @window.destroy_signal.connect { cleanup }
         @run.on_change = ->(installed : Bool) {
           GLib.idle_add do
             unless @closed
@@ -240,8 +246,7 @@ module Xd
         return if @closed
 
         save_source
-        cleanup
-        @window.close
+        @window.destroy
       end
 
       private def save_source : Nil
