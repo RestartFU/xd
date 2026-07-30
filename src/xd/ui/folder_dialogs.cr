@@ -1,7 +1,10 @@
 require "json"
 require "gtk4"
 require "../agent/catalog"
+require "./adw"
+require "./directory_browser"
 require "./dialogs"
+require "./panel_call"
 
 module Xd
   module UI
@@ -23,91 +26,206 @@ module Xd
 
       def initialize(
         @parent : Gtk::Window,
-        @call : Proc(
-          Hash(String, JSON::Any),
-          Hash(String, JSON::Any)?
-        ),
+        @request : PanelCall,
+        @on_error : Proc(String, Nil),
       )
       end
 
       def settings(folder_id : String, folder_name : String) : Nil
-        state = @call.call({
+        state = call({
           "op"     => JSON::Any.new("folder-settings"),
           "folder" => JSON::Any.new(folder_id),
         })
         return unless state
 
-        window, content, actions = Dialogs.shell(
-          @parent,
-          "#{folder_name} Settings"
-        )
-        window.resizable = true
-        window.set_default_size(560, -1)
+        inherited_backend =
+          state["inherited_backend"]?.try(&.as_s?) ||
+            state["effective_backend"].as_s
+        inherited_model =
+          state["inherited_model"]?.try(&.as_s?) ||
+            state["effective_model"]?.try(&.as_s?)
+        inherited_workdir =
+          state["inherited_workdir"]?.try(&.as_s?) ||
+            state["effective_workdir"]?.try(&.as_s?)
+        inherited_repo =
+          state["inherited_repo"]?.try(&.as_s?) ||
+            state["effective_repo"]?.try(&.as_s?)
+
+        dialog = Adw::PreferencesDialog.new
+        dialog.title = folder_name
+        page = Adw::PreferencesPage.new
+
+        assistant = Adw::PreferencesGroup.new
+        assistant.title = "Assistant"
+        assistant.description =
+          "Chats started in this folder use these unless they say otherwise."
 
         backend_ids = [nil, "claude", "codex"] of String?
-        inherited = state["effective_backend"].as_s
-        backend = Gtk::DropDown.new_from_strings([
-          "Inherit (#{inherited})",
+        backend_names = Gtk::StringList.new([
+          "Inherit (#{inherited_backend})",
           "Claude Code",
           "Codex",
         ])
-        backend.selected = (
+        backend_row = Adw::ComboRow.new
+        backend_row.title = "Backend"
+        backend_row.model = backend_names
+        backend_row.selected = (
           backend_ids.index(state["backend"].as_s?) || 0
         ).to_u32
-        backend.hexpand = true
 
-        model = Gtk::Entry.new
-        model.text = state["model"].as_s? || ""
-        if effective = state["effective_model"].as_s?
-          model.placeholder_text = "Inherit (#{effective})"
-        else
-          model.placeholder_text = "CLI default"
+        model_row = Adw::EntryRow.new
+        model_row.title = inherited_model ? "Model (blank inherits)" : "Model (blank: CLI default)"
+        model_row.text = state["model"].as_s? || ""
+
+        assistant.add(backend_row)
+        assistant.add(model_row)
+        page.add(assistant)
+
+        project = Adw::PreferencesGroup.new
+        project.title = "Project"
+        project.description =
+          "Where the assistant runs. The code does not have to live inside " \
+          "the workspace tree."
+
+        workdir = state["workdir"].as_s?
+        repo = state["repo"].as_s?
+        workdir_row, choose_workdir, clear_workdir =
+          build_path_row("Working Directory")
+        repo_row, choose_repo, clear_repo =
+          build_path_row("Repository")
+
+        refresh_paths = -> {
+          update_path_row(
+            workdir_row,
+            workdir,
+            inherited_workdir,
+            state["inherited_workdir_from"]?.try(&.as_s?)
+          )
+          update_path_row(
+            repo_row,
+            repo,
+            inherited_repo,
+            state["inherited_repo_from"]?.try(&.as_s?)
+          )
+        }
+        choose_workdir.clicked_signal.connect do
+          DirectoryBrowser.present(
+            @parent,
+            @request,
+            workdir || inherited_workdir
+          ) do |chosen|
+            if chosen
+              workdir = chosen
+              refresh_paths.call
+            end
+          end
+        end
+        choose_repo.clicked_signal.connect do
+          DirectoryBrowser.present(
+            @parent,
+            @request,
+            repo || inherited_repo || inherited_workdir
+          ) do |chosen|
+            if chosen
+              repo = chosen
+              refresh_paths.call
+            end
+          end
+        end
+        clear_workdir.clicked_signal.connect do
+          workdir = nil
+          refresh_paths.call
+        end
+        clear_repo.clicked_signal.connect do
+          repo = nil
+          refresh_paths.call
         end
 
-        workdir = Gtk::Entry.new
-        workdir.text = state["workdir"].as_s? || ""
-        workdir.placeholder_text = state["effective_workdir"].as_s
+        project.add(workdir_row)
+        project.add(repo_row)
+        page.add(project)
+        refresh_paths.call
 
-        repo = Gtk::Entry.new
-        repo.text = state["repo"].as_s? || ""
-        repo.placeholder_text = state["effective_repo"].as_s? || "Not set"
-
-        content.append(field("Backend", backend))
-        content.append(field("Model", model))
-        content.append(field("Working Directory", workdir))
-        content.append(field("Repository", repo))
-
-        help = Gtk::Label.new(
-          "Blank values inherit from parent folders. Paths belong to the " \
-          "daemon machine and must already exist."
-        )
-        help.xalign = 0_f32
-        help.wrap = true
-        help.add_css_class("dim-label")
-        content.append(help)
-
-        cancel = Gtk::Button.new_with_label("Cancel")
-        cancel.clicked_signal.connect { window.destroy }
-        save = Gtk::Button.new_with_label("Save")
-        save.add_css_class("suggested-action")
-        save.clicked_signal.connect do
-          request = {
+        dialog.add(page)
+        dialog.closed_signal.connect do
+          save_async({
             "op"      => JSON::Any.new("set-folder-settings"),
             "folder"  => JSON::Any.new(folder_id),
-            "backend" => nullable(backend_ids[backend.selected.to_i]),
-            "model"   => nullable(clean(model.text)),
-            "workdir" => nullable(clean(workdir.text)),
-            "repo"    => nullable(clean(repo.text)),
-          }
-          window.destroy if @call.call(request)
+            "backend" => nullable(backend_ids[backend_row.selected.to_i]),
+            "model"   => nullable(clean(model_row.text)),
+            "workdir" => nullable(workdir),
+            "repo"    => nullable(repo),
+          })
         end
-        actions.append(cancel)
-        actions.append(save)
-        window.present
+        dialog.present(@parent)
+      end
+
+      private def build_path_row(
+        title : String,
+      ) : {Adw::ActionRow, Gtk::Button, Gtk::Button}
+        row = Adw::ActionRow.new
+        row.title = title
+        row.subtitle_lines = 2
+
+        choose = Gtk::Button.new_from_icon_name("folder-open-symbolic")
+        choose.add_css_class("flat")
+        choose.valign = :center
+        choose.tooltip_text = "Choose…"
+
+        clear = Gtk::Button.new_from_icon_name("edit-clear-symbolic")
+        clear.add_css_class("flat")
+        clear.valign = :center
+        clear.tooltip_text = "Inherit from the parent folder"
+
+        buttons = Gtk::Box.new(:horizontal, 6)
+        buttons.append(choose)
+        buttons.append(clear)
+        row.add_suffix(buttons)
+        {row, choose, clear}
+      end
+
+      private def update_path_row(
+        row : Adw::ActionRow,
+        value : String?,
+        inherited : String?,
+        inherited_from : String?,
+      ) : Nil
+        row.subtitle = if value && !value.empty?
+                         value
+                       elsif inherited && inherited_from
+                         "#{inherited} — inherited from #{inherited_from}"
+                       else
+                         inherited || "Not set"
+                       end
+      end
+
+      private def save_async(
+        request : Hash(String, JSON::Any),
+      ) : Nil
+        spawn do
+          result = @request.call(request)
+          if error = result.error
+            GLib.idle_add do
+              @on_error.call(error)
+              false
+            end
+          end
+        end
+      end
+
+      private def call(
+        request : Hash(String, JSON::Any),
+      ) : Hash(String, JSON::Any)?
+        result = @request.call(request)
+        if error = result.error
+          @on_error.call(error)
+          return nil
+        end
+        result.body
       end
 
       def context(folder_id : String, folder_name : String) : Nil
-        response = @call.call({
+        response = call({
           "op"     => JSON::Any.new("folder-context"),
           "folder" => JSON::Any.new(folder_id),
         })
@@ -151,7 +269,7 @@ module Xd
             "folder"  => JSON::Any.new(folder_id),
             "context" => nullable(text),
           }
-          window.destroy if @call.call(request)
+          window.destroy if call(request)
         end
         actions.append(cancel)
         actions.append(save)
@@ -165,7 +283,7 @@ module Xd
       ) : Nil
         request = {"op" => JSON::Any.new("agent-secrets")}
         request["folder"] = JSON::Any.new(folder_id) if folder_id
-        response = @call.call(request)
+        response = call(request)
         return unless response
 
         window, content, actions = Dialogs.shell(@parent, title)
@@ -217,7 +335,7 @@ module Xd
           if folder_id
             save_request["folder"] = JSON::Any.new(folder_id)
           end
-          window.destroy if @call.call(save_request)
+          window.destroy if call(save_request)
         end
         actions.append(cancel)
         actions.append(add)

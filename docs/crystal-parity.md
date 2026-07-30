@@ -237,8 +237,10 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 - `[x]` Search dialog matches the C Adwaita widget tree, empty/result states,
   sizing, focus, and row activation; installed-bundle UI matrix passes with
   fatal GTK criticals.
-- `[ ]` Replace provisional GTK dialogs with the exact Adwaita dialog types,
-  response appearance, focus, shortcuts, validation, and copy.
+- `[~]` Folder settings now uses the C `AdwPreferencesDialog`, groups, combo,
+  entry and path rows, inherited subtitles, suffix controls, and save-on-close
+  lifecycle. Path browsing stays daemon-backed for both transports. Installed
+  GTK proof remains; context and secret panels are still provisional.
 - `[~]` C directory-browser hierarchy, row factory, navigation keys, dismissal
   semantics, and styling are ported. Both Unix and TLS sources list only
   through the daemon `list-dir` operation, and new-chat creation waits for its

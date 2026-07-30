@@ -1492,9 +1492,8 @@ module Xd
       private def dialogs(source : Source) : FolderDialogs
         FolderDialogs.new(
           @parent,
-          ->(request : Hash(String, JSON::Any)) {
-            call(source, request)
-          }
+          panel_call(source),
+          @on_error
         )
       end
 
