@@ -118,6 +118,20 @@ describe Xd::Workspace::Service do
       resolved.instructions.should eq(
         "Always answer in French.\n\nThis is a Go codebase."
       )
+      inherited = service.inherited_settings(child_id)
+      inherited.backend.should eq("claude")
+      inherited.model.should eq("claude-opus")
+      inherited.workdir.should eq("/code/proxy")
+      inherited.backend_from.should be_nil
+      inherited.model_from.should be_nil
+      inherited.workdir_from.should be_nil
+
+      grandchild_id = service.create_folder(child_id, "API")
+      grandchild_inherited = service.inherited_settings(grandchild_id)
+      grandchild_inherited.backend.should eq("codex")
+      grandchild_inherited.model.should eq("claude-opus")
+      grandchild_inherited.backend_from.should be_nil
+      grandchild_inherited.model_from.should eq("Lunar")
       service.folder_ids(child_id).should eq([parent_id, child_id])
       service.describe_place(child_id, "/code/proxy").should eq(
         "[This conversation belongs to the folder “Lunar / Proxy” in the " \

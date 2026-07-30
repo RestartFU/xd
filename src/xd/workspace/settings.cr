@@ -3,7 +3,7 @@ require "uuid"
 
 module Xd
   module Workspace
-    SETTINGS_FILE = ".xd.json"
+    SETTINGS_FILE        = ".xd.json"
     LEGACY_SETTINGS_FILE = ".hy.json"
 
     class Error < Exception
@@ -88,5 +88,15 @@ module Xd
       workdir : String,
       repo : String?,
       instructions : String?
+
+    record SettingsInheritance,
+      backend : String,
+      model : String?,
+      workdir : String?,
+      repo : String?,
+      backend_from : String?,
+      model_from : String?,
+      workdir_from : String?,
+      repo_from : String?
   end
 end

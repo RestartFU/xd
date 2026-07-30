@@ -139,6 +139,63 @@ module Xd
         SettingsFile.ensure(find_folder(folder_id))
       end
 
+      # Values a folder receives when its own scalar settings are blank.
+      #
+      # This mirrors the C settings dialog: resolve from the parent upward,
+      # preserving the nearest named ancestor for inherited subtitles.
+      def inherited_settings(
+        folder_id : String,
+        default_backend : String = "claude",
+      ) : SettingsInheritance
+        folder = find_folder(folder_id)
+        parent = File.dirname(folder)
+        paths = within_root?(parent) ? ancestor_paths(parent) : [] of String
+        backend = nil
+        model = nil
+        workdir = nil
+        repo = nil
+        backend_from = nil
+        model_from = nil
+        workdir_from = nil
+        repo_from = nil
+
+        paths.each do |path|
+          settings = SettingsFile.load?(path)
+          next unless settings
+
+          source = path == parent ? nil : File.basename(path)
+          if value = settings.backend
+            backend = value
+            backend_from = source
+          end
+          if value = settings.model
+            model = value
+            model_from = source
+          end
+          if value = settings.workdir
+            workdir = value
+            workdir_from = source
+          end
+          if value = settings.repo
+            repo = value
+            repo_from = source
+          end
+        end
+
+        workdir ||= repo
+        workdir ||= parent if within_root?(parent)
+        SettingsInheritance.new(
+          backend || default_backend,
+          model,
+          workdir,
+          repo,
+          backend_from,
+          model_from,
+          workdir_from,
+          repo_from
+        )
+      end
+
       def set_folder_settings(
         folder_id : String,
         backend : String?,

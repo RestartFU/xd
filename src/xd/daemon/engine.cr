@@ -490,15 +490,24 @@ module Xd
         )
         settings = @workspaces.folder_settings(folder_id)
         effective = @workspaces.resolve(folder_id)
+        inherited = @workspaces.inherited_settings(folder_id)
         Protocol::Response.ok({
-          "backend"           => json_any(settings.backend),
-          "model"             => json_any(settings.model),
-          "workdir"           => json_any(settings.workdir),
-          "repo"              => json_any(settings.repo),
-          "effective_backend" => JSON::Any.new(effective.backend),
-          "effective_model"   => json_any(effective.model),
-          "effective_workdir" => JSON::Any.new(effective.workdir),
-          "effective_repo"    => json_any(effective.repo),
+          "backend"                => json_any(settings.backend),
+          "model"                  => json_any(settings.model),
+          "workdir"                => json_any(settings.workdir),
+          "repo"                   => json_any(settings.repo),
+          "effective_backend"      => JSON::Any.new(effective.backend),
+          "effective_model"        => json_any(effective.model),
+          "effective_workdir"      => JSON::Any.new(effective.workdir),
+          "effective_repo"         => json_any(effective.repo),
+          "inherited_backend"      => JSON::Any.new(inherited.backend),
+          "inherited_model"        => json_any(inherited.model),
+          "inherited_workdir"      => json_any(inherited.workdir),
+          "inherited_repo"         => json_any(inherited.repo),
+          "inherited_backend_from" => json_any(inherited.backend_from),
+          "inherited_model_from"   => json_any(inherited.model_from),
+          "inherited_workdir_from" => json_any(inherited.workdir_from),
+          "inherited_repo_from"    => json_any(inherited.repo_from),
         })
       end
 
