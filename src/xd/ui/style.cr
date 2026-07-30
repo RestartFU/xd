@@ -483,6 +483,11 @@ module Xd
         border-radius: 6px;
         background: alpha(#ffffff, 0.09);
       }
+      .xd-auth-code {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 1.2em;
+        font-weight: 700;
+      }
       .xd-browser scrolledwindow,
       .xd-browser listview {
         background: transparent;

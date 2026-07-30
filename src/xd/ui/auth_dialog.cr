@@ -16,9 +16,6 @@ module Xd
     # endpoint, so local Unix and paired TLS clients operate the same daemon
     # service and credentials remain on the machine that runs the agent.
     class AuthDialog
-      ANSI = /\e\[[0-?]*[ -\/]*[@-~]/
-      URL  = %r{https://[^\s<>"']+}
-
       @active_provider : String?
 
       private class ProviderRow
@@ -27,7 +24,9 @@ module Xd
         getter action : Gtk::Button
         property state = "unknown"
         property detail : String?
-        property output = ""
+        property login_url : String?
+        property device_code : String?
+        property needs_input = false
 
         def initialize(
           @provider : String,
@@ -35,6 +34,8 @@ module Xd
           @action : Gtk::Button,
         )
           @detail = nil
+          @login_url = nil
+          @device_code = nil
         end
       end
 
@@ -79,59 +80,55 @@ module Xd
           accounts.add(provider.row)
         end
 
-        @instructions_label = Gtk::Label.new("Sign-in instructions")
-        @instructions_label.xalign = 0_f32
-        @instructions_label.add_css_class("caption")
-        @instructions_label.add_css_class("dim-label")
-        @instructions_label.visible = false
-
-        @output = Gtk::TextView.new
-        @output.editable = false
-        @output.cursor_visible = false
-        @output.wrap_mode = :word_char
-        @output.top_margin = 10
-        @output.bottom_margin = 10
-        @output.left_margin = 10
-        @output.right_margin = 10
-        @output.add_css_class("monospace")
-
-        output_scroll = Gtk::ScrolledWindow.new
-        output_scroll.set_policy(:never, :automatic)
-        output_scroll.vexpand = true
-        output_scroll.child = @output
-
-        @output_frame = Gtk::Frame.new
-        @output_frame.vexpand = true
-        @output_frame.child = output_scroll
-        @output_frame.visible = false
-
         @open = Gtk::Button.new_with_label("Open Sign-In Page")
-        @open.add_css_class("flat")
-        @open.visible = false
+        @open.add_css_class("suggested-action")
+        @open.valign = :center
         @open.clicked_signal.connect do
           if uri = current_uri
             HostLaunch.open_uri(uri)
           end
         end
 
-        @code = Gtk::Entry.new
-        @code.placeholder_text = "Paste the authorization code"
-        @code.hexpand = true
-        @code.visible = false
-        @code.activate_signal.connect { send_input }
+        @open_row = Adw::ActionRow.new
+        @open_row.title = "Continue in your browser"
+        @open_row.subtitle =
+          "Open the official sign-in page for this assistant."
+        @open_row.add_suffix(@open)
 
-        @send = Gtk::Button.new_with_label("Send Code")
+        @device_code = Gtk::Label.new("")
+        @device_code.selectable = true
+        @device_code.add_css_class("xd-auth-code")
+        @device_code.valign = :center
+
+        copy = Gtk::Button.new_with_label("Copy")
+        copy.add_css_class("flat")
+        copy.valign = :center
+        copy.clicked_signal.connect { copy_device_code }
+
+        @device_row = Adw::ActionRow.new
+        @device_row.title = "One-time code"
+        @device_row.subtitle = "Enter this code on the sign-in page."
+        @device_row.add_suffix(@device_code)
+        @device_row.add_suffix(copy)
+
+        @code = Adw::EntryRow.new
+        @code.title = "Paste authorization code"
+        @code.apply_signal.connect { send_input }
+
+        @send = Gtk::Button.new_with_label("Finish Sign-In")
+        @send.valign = :center
         @send.add_css_class("suggested-action")
-        @send.visible = false
         @send.clicked_signal.connect { send_input }
+        @code.add_suffix(@send)
 
-        input_row = Gtk::Box.new(:horizontal, 8)
-        input_row.append(@code)
-        input_row.append(@send)
-
-        controls = Gtk::Box.new(:horizontal, 8)
-        controls.append(@open)
-        controls.append(input_row)
+        @instructions = Adw::PreferencesGroup.new
+        @instructions.title = "Sign in"
+        @instructions.description =
+          "Complete authentication with the official assistant service."
+        @instructions.add(@open_row)
+        @instructions.add(@device_row)
+        @instructions.add(@code)
+        @instructions.visible = false
 
         @status = Gtk::Label.new("")
         @status.xalign = 0_f32
@@ -146,9 +143,7 @@ module Xd
         body.margin_end = 22
         body.vexpand = true
         body.append(accounts)
-        body.append(@instructions_label)
-        body.append(@output_frame)
-        body.append(controls)
+        body.append(@instructions)
         body.append(@status)
 
         footer = Gtk::Box.new(:horizontal, 12)
@@ -174,7 +169,7 @@ module Xd
         column.append(body)
         column.append(footer)
 
-        @window = PanelDialog.new(@parent, 700, 560)
+        @window = PanelDialog.new(@parent, 700, -1)
         @window.title = "Assistant Accounts"
         @window.add_css_class("xd-panel")
         @window.child = column
@@ -196,8 +191,7 @@ module Xd
       def present : Nil
         @subscription = @endpoint.subscribe do |event|
           name = event["event"]?.try(&.as_s?)
-          next unless name == "agent-auth-changed" ||
-                      name == "agent-auth-output"
+          next unless name == "agent-auth-changed"
 
           GLib.idle_add do
             handle_event(event) unless @closed
@@ -251,7 +245,12 @@ module Xd
         when "checking", "signing-out"
         else
           @active_provider = provider
-          row.output = ""
+          row.state = "signing-in"
+          row.detail = nil
+          row.login_url = nil
+          row.device_code = nil
+          row.needs_input = false
+          update_provider(row)
           update_instructions(row)
           request_provider("agent-auth-start", provider)
         end
@@ -322,16 +321,7 @@ module Xd
       end
 
       private def handle_event(event : Hash(String, JSON::Any)) : Nil
-        provider = event["provider"]?.try(&.as_s?) || return
-        row = @rows[provider]? || return
-        case event["event"]?.try(&.as_s?)
-        when "agent-auth-changed"
-          apply_snapshot(event)
-        when "agent-auth-output"
-          row.output += event["text"]?.try(&.as_s?) || ""
-          @active_provider = provider
-          update_instructions(row)
-        end
+        apply_snapshot(event)
       end
 
       private def apply_snapshot(
@@ -341,23 +331,26 @@ module Xd
         row = @rows[provider]? || return
         row.state = fields["state"]?.try(&.as_s?) || "unknown"
         row.detail = fields["detail"]?.try(&.as_s?)
-        if output = fields["output"]?.try(&.as_s?)
-          row.output = output
-        end
+        row.login_url = fields["login_url"]?.try(&.as_s?)
+        row.device_code = fields["device_code"]?.try(&.as_s?)
+        row.needs_input =
+          fields["needs_input"]?.try(&.as_bool?) || false
+        update_provider(row)
 
-        row.row.subtitle = row.detail || state_label(row.state)
-        label, sensitive = action_state(row.state)
-        row.action.label = label
-        row.action.sensitive = sensitive
-
-        if row.state == "signing-in" ||
-           (row.state == "failed" && !row.output.empty?)
+        if row.state == "signing-in"
           @active_provider = provider
           update_instructions(row)
         elsif @active_provider == provider
           @active_provider = nil
           hide_instructions
         end
+      end
+
+      private def update_provider(row : ProviderRow) : Nil
+        row.row.subtitle = row.detail || state_label(row.state)
+        label, sensitive = action_state(row.state)
+        row.action.label = label
+        row.action.sensitive = sensitive
       end
 
       private def state_label(state : String) : String
@@ -383,35 +376,41 @@ module Xd
       end
 
       private def update_instructions(row : ProviderRow) : Nil
-        text = row.output.gsub(ANSI, "")
-        @output.buffer.text = text
-        visible = row.state == "signing-in" || !text.empty?
-        @instructions_label.visible = visible
-        @output_frame.visible = visible
-        @open.visible = !!text.match(URL)
-
-        wants_input = row.provider == "claude" &&
-                      row.state == "signing-in"
-        @code.visible = wants_input
-        @send.visible = wants_input
-        if wants_input && text.includes?("Paste code")
+        @instructions.title = "Sign in to #{row.row.title}"
+        @instructions.description = if row.provider == "codex"
+                                      "Open the page and enter the one-time code."
+                                    else
+                                      "Open the page, authorize Claude Code, then paste the code."
+                                    end
+        @instructions.visible = row.state == "signing-in"
+        @open_row.visible = !row.login_url.nil?
+        @device_row.visible = !row.device_code.nil?
+        @device_code.label = row.device_code || ""
+        @code.visible = row.needs_input
+        if row.needs_input
           @code.grab_focus
         end
       end
 
       private def hide_instructions : Nil
-        @instructions_label.visible = false
-        @output_frame.visible = false
-        @open.visible = false
+        @instructions.visible = false
+        @open_row.visible = false
+        @device_row.visible = false
         @code.visible = false
-        @send.visible = false
       end
 
       private def current_uri : String?
         provider = @active_provider
         return unless provider
-        text = @rows[provider]?.try(&.output) || ""
-        text.gsub(ANSI, "").match(URL).try(&.[0])
+        @rows[provider]?.try(&.login_url)
+      end
+
+      private def copy_device_code : Nil
+        code = @device_code.label
+        return if code.empty?
+
+        @device_code.clipboard.set(code)
+        show_status("One-time code copied.", false)
       end
 
       private def show_status(message : String?, error : Bool) : Nil
