@@ -81,7 +81,7 @@ module Xd
 
         directory = File.dirname(File.dirname(executable))
         launcher = File.join(directory, "xd.sh")
-        return unless File.info(launcher).executable?
+        return unless File::Info.executable?(launcher)
 
         expected = File.join(
           Path.home.to_s,
