@@ -246,7 +246,10 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   busy state, Escape, and Ctrl+Enter behavior through the same endpoint. Agent
   Secrets now matches the C 700×500 local/remote/folder panel, copy, row
   lifecycle, inline validation, busy state, shortcuts, and value-withholding
-  protocol. Installed GTK proof remains for both panels.
+  protocol. The exact `ce4199e` binary is installed-bundle verified: Context
+  loads, saves and cancels; Secrets validates, creates, reloads name-only,
+  preserves a blank existing value, and saves by Ctrl+Enter with fatal GTK
+  warnings enabled.
 - `[~]` C directory-browser hierarchy, row factory, navigation keys, dismissal
   semantics, and styling are ported. Both Unix and TLS sources list only
   through the daemon `list-dir` operation, and new-chat creation waits for its
