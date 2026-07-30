@@ -14,6 +14,18 @@ private def ui_event(
   event
 end
 
+private def voice_progress(
+  request : String,
+  progress : Int,
+) : Hash(String, JSON::Any)
+  {
+    "event"    => JSON::Any.new("voice"),
+    "request"  => JSON::Any.new(request),
+    "state"    => JSON::Any.new("downloading"),
+    "progress" => JSON::Any.new(progress.to_i64),
+  }
+end
+
 describe Xd::UI::EventInbox do
   it "uses one scheduled drain and merges adjacent text deltas" do
     inbox = Xd::UI::EventInbox(String).new
@@ -60,5 +72,24 @@ describe Xd::UI::EventInbox do
     second.size.should eq(9)
     more.should be_false
     inbox.push("local", ui_event("tool", "new")).should be_true
+  end
+
+  it "keeps only the latest adjacent speech download progress" do
+    inbox = Xd::UI::EventInbox(String).new
+
+    inbox.push("local", voice_progress("voice-1", 1)).should be_true
+    98.times do |offset|
+      inbox.push("local", voice_progress("voice-1", offset + 2))
+        .should be_false
+    end
+    inbox.push("local", voice_progress("voice-2", 20)).should be_false
+    inbox.push("remote", voice_progress("voice-2", 30)).should be_false
+
+    batch, more = inbox.drain
+    more.should be_false
+    batch.size.should eq(3)
+    batch[0][1]["progress"].as_i.should eq(99)
+    batch[1][1]["progress"].as_i.should eq(20)
+    batch[2][1]["progress"].as_i.should eq(30)
   end
 end

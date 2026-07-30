@@ -4,6 +4,7 @@ require "gtk4"
 require "../daemon/endpoint"
 require "../voice/recorder"
 require "./adw"
+require "./event_inbox"
 
 module Xd
   module UI
@@ -28,6 +29,7 @@ module Xd
       @chat_id : String?
       @request_token : String?
       @recorder : Voice::Recorder?
+      @event_inbox = EventInbox(Daemon::Endpoint).new
 
       def initialize(
         @parent : Gtk::Window,
@@ -44,6 +46,7 @@ module Xd
         @generation = 0_u64
         @timer = 0_u32
         @started_at = Time.instant
+        @download_progress = 0
 
         @button = Gtk::Button.new_from_icon_name(
           "audio-input-microphone-symbolic"
@@ -70,11 +73,15 @@ module Xd
         @endpoint = endpoint
         @chat_id = chat_id
         @remote_target = remote
+        @event_inbox.clear
         if endpoint && @subscription.nil?
           @subscription = endpoint.subscribe do |event|
-            GLib.idle_add do
-              handle_event(endpoint, event)
-              false
+            next unless event["event"]?.try(&.as_s?) == "voice"
+
+            if @event_inbox.push(endpoint, event)
+              GLib.idle_add do
+                drain_events
+              end
             end
           end
         end
@@ -115,6 +122,7 @@ module Xd
         @subscription = nil
         @endpoint = nil
         @chat_id = nil
+        @event_inbox.clear
         update_button
       end
 
@@ -201,6 +209,7 @@ module Xd
         chat_id = @chat_id || return reset
         token = @request_token || return reset
         @state = State::Downloading
+        @download_progress = 0
         update_button
 
         spawn do
@@ -329,12 +338,22 @@ module Xd
         end
       end
 
+      private def drain_events : Bool
+        events, more = @event_inbox.drain
+        events.each do |endpoint, event|
+          handle_event(endpoint, event)
+        end
+        more && !@closed
+      end
+
       private def update_download_progress(progress : Int) : Nil
         return unless @state.downloading?
 
-        @button.tooltip_text =
-          "Downloading speech model on #{target_name}… " \
-          "#{progress}% — click to cancel"
+        bounded = progress.clamp(0, 100)
+        return if bounded < @download_progress
+
+        @download_progress = bounded
+        update_download_button
       end
 
       private def insert_transcript(transcript : String) : Nil
@@ -375,6 +394,7 @@ module Xd
         @state = State::Idle
         @recorder = nil
         @request_token = nil
+        @download_progress = 0
         update_button
       end
 
@@ -392,6 +412,7 @@ module Xd
 
       private def update_button : Nil
         @button.remove_css_class("destructive-action")
+        @button.add_css_class("circular")
         case @state
         when .confirming?
           spinner = Gtk::Spinner.new
@@ -401,12 +422,10 @@ module Xd
           @button.tooltip_text =
             "Checking speech model on #{target_name}…"
         when .downloading?
-          @button.icon_name = "media-playback-stop-symbolic"
+          @button.remove_css_class("circular")
           @button.add_css_class("destructive-action")
           @button.sensitive = true
-          @button.tooltip_text =
-            "Downloading speech model on #{target_name}… " \
-            "0% — click to cancel"
+          update_download_button
         when .recording?
           @button.icon_name = "media-playback-stop-symbolic"
           @button.add_css_class("destructive-action")
@@ -426,6 +445,13 @@ module Xd
           @button.tooltip_text =
             "Record here and transcribe on #{target_name}"
         end
+      end
+
+      private def update_download_button : Nil
+        @button.label = "#{@download_progress}% · Cancel"
+        @button.tooltip_text =
+          "Downloading speech model on #{target_name}… " \
+          "#{@download_progress}% — click to cancel"
       end
 
       private def show_error(message : String?) : Nil

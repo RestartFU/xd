@@ -37,7 +37,11 @@ describe Xd::Voice::Model do
       File.read(path).to_slice.should eq(payload)
       File.info(path).permissions.to_i.should eq(0o600)
       File.read("#{path}.sha256").strip.should eq(digest)
+      progress.first.should eq(0)
       progress.last.should eq(100)
+      progress.should eq(progress.uniq)
+      progress.each_cons(2).all? { |pair| pair[0] < pair[1] }
+        .should be_true
 
       model.ensure_available { |_value| }.should eq(path)
       requests.should eq(1)
@@ -57,6 +61,41 @@ describe Xd::Voice::Model do
     ensure
       file.close
       File.delete(file.path) if File.exists?(file.path)
+    end
+  end
+
+  it "reports each download percentage at most once" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-voice-progress-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "speech", "model.bin")
+    payload = Bytes.new(14 * 1024 * 1024, 0x5a_u8)
+    digest = Digest::SHA256.hexdigest(payload)
+    server = HTTP::Server.new do |context|
+      context.response.content_length = payload.size
+      context.response.write(payload)
+    end
+    address = server.bind_tcp("127.0.0.1", 0)
+    spawn server.listen
+
+    begin
+      progress = [] of Int32
+      model = Xd::Voice::Model.new(
+        path: path,
+        url: "http://127.0.0.1:#{address.port}/model",
+        expected_size: payload.size.to_u64,
+        expected_sha256: digest
+      )
+      model.ensure_available { |value| progress << value }
+
+      progress.first.should eq(0)
+      progress.last.should eq(100)
+      progress.should eq(progress.uniq)
+      progress.size.should be <= 101
+    ensure
+      server.close
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
 end

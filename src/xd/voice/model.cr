@@ -31,6 +31,7 @@ module Xd
         @override_path : String? = ENV["XD_VOICE_MODEL_PATH"]?,
       )
         @progress = 0
+        @reported_progress = -1
         @cancelled = Atomic(Bool).new(false)
         @client = nil
         @client_mutex = Mutex.new
@@ -47,6 +48,7 @@ module Xd
         &on_progress : Int32 -> Nil
       ) : String
         @cancelled.set(false)
+        @reported_progress = -1
         set_progress(0, on_progress)
         if verified?(@path)
           set_progress(100, on_progress)
@@ -172,6 +174,9 @@ module Xd
         callback : Int32 -> Nil,
       ) : Nil
         @progress = value
+        return if @reported_progress == value
+
+        @reported_progress = value
         callback.call(value)
       end
 
