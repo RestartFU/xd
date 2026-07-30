@@ -1343,7 +1343,11 @@ module Xd
           "name" => JSON::Any.new(name),
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
-        if created = call(source, request)
+        if created = call(
+             source,
+             request,
+             error_heading: "Could not create the folder"
+           )
           source.selected_folder = created["id"].as_s
           reload
         end
@@ -1357,7 +1361,7 @@ module Xd
         settings = call(source, {
           "op"     => JSON::Any.new("folder-settings"),
           "folder" => JSON::Any.new(folder_id),
-        })
+        }, error_heading: "Could not start the chat")
         return unless settings
 
         DirectoryBrowser.present(
@@ -1381,7 +1385,11 @@ module Xd
           "title"  => JSON::Any.new(title),
         }
         request["workdir"] = JSON::Any.new(workdir) if workdir
-        created = call(source, request)
+        created = call(
+          source,
+          request,
+          error_heading: "Could not start the chat"
+        )
         return unless created
 
         source.selected_folder = folder_id
@@ -1390,21 +1398,29 @@ module Xd
       end
 
       private def rename_folder(node : Node, name : String) : Nil
-        if call(node.source, {
-             "op"     => JSON::Any.new("rename-folder"),
-             "folder" => JSON::Any.new(node.id),
-             "name"   => JSON::Any.new(name),
-           })
+        if call(
+             node.source,
+             {
+               "op"     => JSON::Any.new("rename-folder"),
+               "folder" => JSON::Any.new(node.id),
+               "name"   => JSON::Any.new(name),
+             },
+             error_heading: "Could not rename the folder"
+           )
           reload
         end
       end
 
       private def rename_chat(node : Node, title : String) : Nil
-        if call(node.source, {
-             "op"    => JSON::Any.new("rename-chat"),
-             "chat"  => JSON::Any.new(node.id),
-             "title" => JSON::Any.new(title),
-           })
+        if call(
+             node.source,
+             {
+               "op"    => JSON::Any.new("rename-chat"),
+               "chat"  => JSON::Any.new(node.id),
+               "title" => JSON::Any.new(title),
+             },
+             error_heading: "Could not rename the chat"
+           )
           reload
           @on_chat.call(node.source.endpoint, node.id, title)
         end
@@ -1428,7 +1444,11 @@ module Xd
           "folder" => JSON::Any.new(folder_id),
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
-        return false unless call(source, request)
+        return false unless call(
+                              source,
+                              request,
+                              error_heading: "Cannot Move the Folder"
+                            )
 
         queue_tree_reload
         true
@@ -1456,10 +1476,14 @@ module Xd
           "“#{name}” and everything inside it will be moved to the trash.",
           "Move to Trash"
         ) do
-          if call(source, {
-               "op"     => JSON::Any.new("trash-folder"),
-               "folder" => JSON::Any.new(folder_id),
-             })
+          if call(
+               source,
+               {
+                 "op"     => JSON::Any.new("trash-folder"),
+                 "folder" => JSON::Any.new(folder_id),
+               },
+               error_heading: "Could not move the folder to the trash"
+             )
             reload
           end
         end
@@ -1469,10 +1493,14 @@ module Xd
         source : Source,
         chat_id : String,
       ) : Nil
-        if call(source, {
-             "op"   => JSON::Any.new("delete-chat"),
-             "chat" => JSON::Any.new(chat_id),
-           })
+        if call(
+             source,
+             {
+               "op"   => JSON::Any.new("delete-chat"),
+               "chat" => JSON::Any.new(chat_id),
+             },
+             error_heading: "Could not delete the chat"
+           )
           @on_chat_deleted.call(source.endpoint, chat_id)
           reload
         end
@@ -1525,13 +1553,29 @@ module Xd
         source : Source,
         request : Hash(String, JSON::Any),
         quiet : Bool = false,
+        error_heading : String? = nil,
       ) : Hash(String, JSON::Any)?
         source.endpoint.call(request)
       rescue error : Daemon::Client::Error
         unless quiet
-          @on_error.call(error.message || "Daemon request failed.")
+          message = error.message || "Daemon request failed."
+          if heading = error_heading
+            show_error(heading, message)
+          else
+            @on_error.call(message)
+          end
         end
         nil
+      end
+
+      private def show_error(heading : String, message : String) : Nil
+        dialog = Adw::AlertDialog.new(
+          heading: heading,
+          body: message
+        )
+        dialog.add_response("close", "Close")
+        dialog.default_response = "close"
+        dialog.present(@parent)
       end
 
       private def clear(box : Gtk::Box) : Nil

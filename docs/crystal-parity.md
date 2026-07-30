@@ -48,8 +48,11 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   gesture-tested for Enter, Escape, and click-away with fatal GTK criticals
   enabled. Folder drag/drop into a row and back to empty top-level space is
   filesystem- and screenshot-verified under the same fatal-critical check.
-- `[ ]` Match local and remote root menus, confirmations, disabled states, and
-  error presentation exactly.
+- `[~]` Local, remote-root, folder, and chat menus use the C `GMenu`/
+  `GtkPopoverMenu` sections, labels, and action order. Folder/chat mutation
+  failures use the same operation-specific `AdwAlertDialog` headings.
+  Runtime menu-action proof, disabled-state matrix, and new remote-connection
+  error dialogs remain.
 - `[~]` Chat working/waiting/done and remote-root offline transitions match C
   state rules, including animated dots and tooltips; screenshot/event matrix
   remains.
