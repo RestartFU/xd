@@ -1,4 +1,5 @@
 require "uuid"
+require "../bundle_environment"
 
 module Xd
   module Daemon
@@ -71,15 +72,8 @@ module Xd
           return configured
         end
 
-        if executable = Process.executable_path
-          bundled = File.expand_path(
-            File.join(File.dirname(executable), "..", "libexec", "openssl")
-          )
-          if info = File.info?(bundled)
-            if info.type.file? && info.permissions.owner_execute?
-              return bundled
-            end
-          end
+        if bundled = BundleEnvironment.executable("openssl")
+          return bundled
         end
         "openssl"
       end

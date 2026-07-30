@@ -1,3 +1,5 @@
+require "../bundle_environment"
+
 module Xd
   module Agent
     module Executable
@@ -9,24 +11,8 @@ module Xd
           return configured unless configured.empty?
         end
 
-        if executable = Process.executable_path
-          filename = {% if flag?(:win32) %}
-                       "#{name}.exe"
-                     {% else %}
-                       name
-                     {% end %}
-          bundled = File.expand_path(
-            File.join(
-              File.dirname(executable),
-              "..",
-              "libexec",
-              filename
-            )
-          )
-          if info = File.info?(bundled)
-            return bundled if info.type.file? &&
-                              info.permissions.owner_execute?
-          end
+        if bundled = BundleEnvironment.executable(name)
+          return bundled
         end
 
         Process.find_executable(name) || name

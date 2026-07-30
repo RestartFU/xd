@@ -91,6 +91,18 @@ describe Xd::Daemon::Repository do
       all.should contain("+after")
       all.should contain("new.txt")
       all.should contain("+new")
+      repository.read(
+        chat_id,
+        "working-file",
+        "tracked.txt",
+        nil
+      ).should contain("+after")
+      repository.read(
+        chat_id,
+        "untracked-file",
+        "new.txt",
+        nil
+      ).should contain("+new")
     end
   end
 
@@ -132,6 +144,71 @@ describe Xd::Daemon::Repository do
       commands = File.read(calls).lines
       commands.count(&.starts_with?("--no-pager diff ")).should eq(1)
       commands.any?(&.includes?("--no-index")).should be_false
+    end
+  end
+
+  it "reads action state without a POSIX shell" do
+    with_repository do |repository, folder, chat_id|
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+      tools = File.join(folder, "tools")
+      Dir.mkdir(tools)
+      File.symlink(
+        Process.find_executable("git").not_nil!,
+        File.join(tools, "git")
+      )
+      previous_path = ENV["PATH"]?
+      ENV["PATH"] = tools
+
+      begin
+        state = repository.state(chat_id)
+        state.visible.should be_true
+        state.action.should eq("commit")
+      ensure
+        if previous_path
+          ENV["PATH"] = previous_path
+        else
+          ENV.delete("PATH")
+        end
+      end
+    end
+  end
+
+  it "recognizes the checked-out remote base as up to date" do
+    with_repository do |repository, folder, chat_id|
+      git(folder, "add", "-A")
+      git(folder, "commit", "-q", "-m", "Track workspace settings")
+      git(folder, "checkout", "-q", "-b", "release/next")
+      git(
+        folder,
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/repository.git"
+      )
+      git(
+        folder,
+        "update-ref",
+        "refs/remotes/origin/release/next",
+        "HEAD"
+      )
+      git(
+        folder,
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/release/next"
+      )
+      git(
+        folder,
+        "branch",
+        "--set-upstream-to=origin/release/next",
+        "release/next"
+      )
+
+      state = repository.state(chat_id)
+      state.visible.should be_true
+      state.action.should eq("none")
+      state.label.should eq("Up to date")
+      state.enabled.should be_false
     end
   end
 

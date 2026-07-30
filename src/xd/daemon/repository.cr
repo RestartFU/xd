@@ -12,20 +12,6 @@ module Xd
       READ_BUFFER_BYTES = 16 * 1024
       BASE_PATTERN      = /\A[A-Za-z0-9_\.\/-]{1,256}\z/
       URL_PATTERN       = /https:\/\/[^\s]+/
-      STATE_SCRIPT      =
-        "printf '%s\\n' \"$(git status --porcelain 2>/dev/null | head -n 1)\"; " \
-        "git rev-parse --abbrev-ref HEAD 2>/dev/null || echo; " \
-        "git rev-parse --abbrev-ref --symbolic-full-name '@{u}' " \
-        "2>/dev/null || echo; " \
-        "git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0; " \
-        "for ref in " \
-        "\"$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD)\" " \
-        "origin/main origin/master main master; do " \
-        "  [ -n \"$ref\" ] || continue; " \
-        "  git rev-parse --verify --quiet \"$ref\" >/dev/null && " \
-        "    { echo \"${ref##*/}\"; break; }; " \
-        "done; " \
-        "gh pr view --json url --jq .url 2>/dev/null || true"
 
       class Error < Exception
       end
@@ -38,6 +24,11 @@ module Xd
         url : String? = nil
 
       record ActionResult, state : State, url : String? = nil
+      private record GitSnapshot,
+        dirty : Bool,
+        branch : String,
+        upstream : String,
+        ahead : Int32
       private record StreamCapture,
         text : String,
         overflowed : Bool
@@ -155,7 +146,10 @@ module Xd
                    selected = safe_path(workdir, root, path)
                    capture(
                      workdir,
-                     ["--no-pager", "diff", "HEAD", "--", selected]
+                     [
+                       "--no-pager", "diff", working_treeish(workdir),
+                       "--", selected,
+                     ]
                    )
                  when "untracked-file"
                    selected = safe_path(workdir, root, path)
@@ -163,7 +157,7 @@ module Xd
                      workdir,
                      [
                        "--no-pager", "diff", "--no-index", "--",
-                       "/dev/null", selected,
+                       null_device, selected,
                      ]
                    )
                  when "branch-file"
@@ -211,30 +205,18 @@ module Xd
       end
 
       private def state_at(workdir : String) : State
-        output, _status, _error = command(
-          workdir,
-          "sh",
-          ["-c", STATE_SCRIPT]
-        )
-        lines = output.split('\n')
-        return hidden_state if lines.size < 5
-
-        dirty = lines[0]
-        branch = lines[1]
-        upstream = lines[2]
-        ahead = lines[3].to_i?
-        base = lines[4]
-        url = lines[5]?.try do |value|
-          stripped = value.strip
-          stripped unless stripped.empty?
-        end
+        snapshot = git_snapshot(workdir)
+        branch = snapshot.branch
         return hidden_state if branch.empty?
 
-        action = if !dirty.empty?
+        base = local_branch(find_base(workdir).strip)
+        url : String? = nil
+        action = if snapshot.dirty
                    "commit"
-                 elsif (ahead || 0) > 0 || upstream.empty?
+                 elsif snapshot.ahead > 0 || snapshot.upstream.empty?
                    "push"
                  elsif branch != base
+                   url = pull_request_url(workdir)
                    url ? "view-pr" : "create-pr"
                  else
                    "none"
@@ -248,6 +230,60 @@ module Xd
         )
       rescue File::Error | IO::Error
         hidden_state
+      end
+
+      private def git_snapshot(workdir : String) : GitSnapshot
+        output = capture(
+          workdir,
+          [
+            "status", "--porcelain=v2", "--branch",
+            "--untracked-files=normal",
+          ],
+          errors: false
+        )
+        dirty = false
+        branch = ""
+        upstream = ""
+        ahead = 0
+
+        output.each_line(chomp: true) do |line|
+          if line.starts_with?("# branch.head ")
+            value = line.lchop("# branch.head ")
+            branch = value == "(detached)" ? "HEAD" : value
+          elsif line.starts_with?("# branch.upstream ")
+            upstream = line.lchop("# branch.upstream ")
+          elsif line.starts_with?("# branch.ab ")
+            value = line.lchop("# branch.ab ")
+            value.split.each do |field|
+              if field.starts_with?('+')
+                ahead = field.lchop('+').to_i? || 0
+                break
+              end
+            end
+          elsif !line.empty? && !line.starts_with?('#')
+            dirty = true
+          end
+        end
+        GitSnapshot.new(dirty, branch, upstream, ahead)
+      end
+
+      private def local_branch(reference : String) : String
+        if slash = reference.index('/')
+          reference.byte_slice(slash + 1)
+        else
+          reference
+        end
+      end
+
+      private def pull_request_url(workdir : String) : String?
+        output, status, _error = command(
+          workdir,
+          "gh",
+          ["pr", "view", "--json", "url", "--jq", ".url"]
+        )
+        status.success? ? web_url(output) : nil
+      rescue File::Error | IO::Error
+        nil
       end
 
       private def hidden_state : State
@@ -356,7 +392,7 @@ module Xd
 
         empty = capture(
           workdir,
-          ["hash-object", "-t", "tree", "/dev/null"]
+          ["mktree"]
         ).strip
         if empty.empty?
           raise Error.new("Git could not create an empty repository baseline.")
@@ -399,6 +435,14 @@ module Xd
           raise Error.new("That diff path is outside the repository.")
         end
         path
+      end
+
+      private def null_device : String
+        {% if flag?(:win32) %}
+          "NUL"
+        {% else %}
+          "/dev/null"
+        {% end %}
       end
 
       private def capture(
@@ -454,6 +498,7 @@ module Xd
           chdir: workdir,
           env: environment,
           clear_env: true,
+          input: Process::Redirect::Close,
           output: output,
           error: error
         )
