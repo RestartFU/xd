@@ -183,6 +183,7 @@ module Xd
         @creating = false
         @placeholder_serial = 0_u64
         @reload_after_edit = false
+        @tree_reload_queued = false
         @pending_menu = nil
         @pending_menu_action = nil
         @restore_queued = false
@@ -1230,8 +1231,19 @@ module Xd
         request["parent"] = JSON::Any.new(parent_id) if parent_id
         return false unless call(source, request)
 
-        reload
+        queue_tree_reload
         true
+      end
+
+      private def queue_tree_reload : Nil
+        return if @tree_reload_queued
+
+        @tree_reload_queued = true
+        GLib.idle_add do
+          @tree_reload_queued = false
+          reload
+          false
+        end
       end
 
       private def confirm_trash_folder(
