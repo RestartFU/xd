@@ -47,6 +47,9 @@ module Xd
         @subscription = 0_i64
         @active_provider = nil
         @rows = {} of String => ProviderRow
+        @cli_states = {} of String => String
+        @cli_versions = {} of String => String?
+        @cli_details = {} of String => String?
 
         title = Gtk::Label.new(
           machine ? "Assistant Accounts · #{machine}" : "Assistant Accounts · This Machine"
@@ -78,6 +81,19 @@ module Xd
           @rows[backend.id] = provider
           accounts.add(provider.row)
         end
+
+        cli_updates = Adw::PreferencesGroup.new
+        cli_updates.title = "Bundled CLI updates"
+        cli_updates.description =
+          "Updates run on this machine through its daemon."
+        @update_row = Adw::ActionRow.new
+        @update_row.title = "Codex and Claude Code"
+        @update_row.subtitle = "Checking installed versions…"
+        @update_button = Gtk::Button.new_with_label("Update CLIs")
+        @update_button.valign = :center
+        @update_button.clicked_signal.connect { update_clis }
+        @update_row.add_suffix(@update_button)
+        cli_updates.add(@update_row)
 
         @open = Gtk::Button.new_with_label("Open Sign-In Page")
         @open.add_css_class("suggested-action")
@@ -142,6 +158,7 @@ module Xd
         body.margin_end = 22
         body.vexpand = true
         body.append(accounts)
+        body.append(cli_updates)
         body.append(@instructions)
         body.append(@status)
 
@@ -206,15 +223,23 @@ module Xd
       def present : Nil
         @subscription = @endpoint.subscribe do |event|
           name = event["event"]?.try(&.as_s?)
-          next unless name == "agent-auth-changed"
+          next unless {
+            "agent-auth-changed",
+            "agent-cli-changed",
+          }.includes?(name)
 
           GLib.idle_add do
-            handle_event(event) unless @closed
+            if name == "agent-auth-changed"
+              handle_event(event) unless @closed
+            else
+              apply_cli_snapshot(event) unless @closed
+            end
             false
           end
         end
         @window.present
         load
+        load_clis
       end
 
       private def build_provider(
@@ -247,6 +272,34 @@ module Xd
             end
           end
           show_status(nil, false)
+        end
+      end
+
+      private def load_clis : Nil
+        return if @closed
+
+        request_async({"op" => JSON::Any.new("agent-clis")}) do |body|
+          providers = body["providers"]?.try(&.as_a?) || [] of JSON::Any
+          providers.each do |provider|
+            if fields = provider.as_h?
+              apply_cli_snapshot(fields)
+            end
+          end
+        end
+      end
+
+      private def update_clis : Nil
+        return if @closed
+
+        @update_button.label = "Updating…"
+        @update_button.sensitive = false
+        request_async({"op" => JSON::Any.new("agent-clis-update")}) do |body|
+          providers = body["providers"]?.try(&.as_a?) || [] of JSON::Any
+          providers.each do |provider|
+            if fields = provider.as_h?
+              apply_cli_snapshot(fields)
+            end
+          end
         end
       end
 
@@ -343,6 +396,8 @@ module Xd
                 show_status(message, true)
                 @code.sensitive = true
                 @send.sensitive = true
+                @update_button.sensitive = true
+                update_cli_row
               elsif response = body
                 on_success.call(response)
               end
@@ -354,6 +409,45 @@ module Xd
 
       private def handle_event(event : Hash(String, JSON::Any)) : Nil
         apply_snapshot(event)
+      end
+
+      private def apply_cli_snapshot(
+        fields : Hash(String, JSON::Any),
+      ) : Nil
+        provider = fields["provider"]?.try(&.as_s?) || return
+        return unless Agent::Catalog.lookup(provider)
+
+        @cli_states[provider] =
+          fields["state"]?.try(&.as_s?) || "idle"
+        @cli_versions[provider] = fields["version"]?.try(&.as_s?)
+        @cli_details[provider] = fields["detail"]?.try(&.as_s?)
+        update_cli_row
+      end
+
+      private def update_cli_row : Nil
+        updating = @cli_states.any? { |_provider, state| state == "updating" }
+        failed = @cli_states.find { |_provider, state| state == "failed" }
+        if failed
+          provider = failed[0]
+          backend = Agent::Catalog.lookup(provider)
+          @update_row.subtitle =
+            @cli_details[provider] ||
+            "#{backend.try(&.display_name) || provider} update failed."
+        else
+          versions = Agent::Catalog.all.map do |backend|
+            version = @cli_versions[backend.id]?
+            version ? version : "#{backend.display_name}: checking…"
+          end
+          @update_row.subtitle = versions.join(" · ")
+        end
+        @update_button.label = if updating
+                                 "Updating…"
+                               elsif failed
+                                 "Retry"
+                               else
+                                 "Update CLIs"
+                               end
+        @update_button.sensitive = !updating
       end
 
       private def apply_snapshot(

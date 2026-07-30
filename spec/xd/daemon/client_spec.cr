@@ -52,6 +52,29 @@ private def await_auth_event(
   end
 end
 
+private def await_cli_event(
+  events : Array(Hash(String, JSON::Any)),
+  mutex : Mutex,
+  provider : String,
+  &ready : Hash(String, JSON::Any) -> Bool
+) : Hash(String, JSON::Any)
+  deadline = Time.instant + 3.seconds
+  last_event : Hash(String, JSON::Any)? = nil
+  loop do
+    last_event = mutex.synchronize do
+      events.reverse.find do |event|
+        event["event"]?.try(&.as_s?) == "agent-cli-changed" &&
+          event["provider"]?.try(&.as_s?) == provider
+      end
+    end
+    return last_event if last_event && ready.call(last_event)
+    if Time.instant >= deadline
+      fail "#{provider} remote CLI update did not settle: #{last_event}"
+    end
+    sleep 5.milliseconds
+  end
+end
+
 describe Xd::Daemon::Client do
   it "uses ordered calls and events over local IPC" do
     with_client_server do |server, _engine, _store, directory|
@@ -263,6 +286,96 @@ describe Xd::Daemon::Client do
       end
       event.should_not be_nil
       event.not_nil!.has_key?("output").should be_false
+    ensure
+      client.try(&.close)
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "updates bundled assistant CLIs over paired TLS" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-cli-update-#{Random::Secure.hex(12)}"
+    )
+    state = File.join(directory, "versions")
+    Dir.mkdir_p(state)
+    script = <<-'SH'
+      #!/bin/sh
+      set -eu
+      name=${0##*/}
+      case "$*" in
+        "--version")
+          printf '%s %s\n' "$name" "$(cat "$CLI_STATE/$name")"
+          ;;
+        "update")
+          printf '2.0.0\n' > "$CLI_STATE/$name"
+          ;;
+        *)
+          exit 2
+          ;;
+      esac
+      SH
+    %w(codex claude).each do |name|
+      File.write(File.join(directory, name), script)
+      File.chmod(File.join(directory, name), 0o700)
+      File.write(File.join(state, name), "1.0.0\n")
+    end
+
+    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+    engine = Xd::Daemon::Engine.new(
+      store,
+      token_generator: -> { "cli-update-token" },
+      updates_resolver: ->(provider : String) {
+        File.join(directory, provider)
+      },
+      updates_environment: {"CLI_STATE" => state}
+    )
+    server = Xd::Daemon::Server.new(engine)
+    client : Xd::Daemon::Client? = nil
+
+    begin
+      certificate = File.join(directory, "certificate.pem")
+      private_key = File.join(directory, "private-key.pem")
+      Xd::Daemon::Certificate.ensure_pair(certificate, private_key)
+      port = server.listen_remote(
+        "127.0.0.1",
+        0,
+        certificate,
+        private_key
+      )
+      paired = Xd::Daemon::Client.pair_remote(
+        "127.0.0.1",
+        port,
+        engine.arm_pairing(1.minute),
+        "cli-update-manager"
+      )
+      client = paired.client
+      events = [] of Hash(String, JSON::Any)
+      events_mutex = Mutex.new
+      client.subscribe do |event|
+        events_mutex.synchronize { events << event }
+      end
+
+      client.call({"op" => JSON::Any.new("agent-clis")})
+      %w(codex claude).each do |provider|
+        checked = await_cli_event(events, events_mutex, provider) do |event|
+          event["state"].as_s == "idle" &&
+            event["version"]?.try(&.as_s?).try(&.ends_with?("1.0.0")) == true
+        end
+        checked["version"].as_s.should end_with("1.0.0")
+      end
+
+      client.call({"op" => JSON::Any.new("agent-clis-update")})
+      %w(codex claude).each do |provider|
+        updated = await_cli_event(events, events_mutex, provider) do |event|
+          event["state"].as_s == "updated"
+        end
+        updated["version"].as_s.should end_with("2.0.0")
+        File.read(File.join(state, provider)).strip.should eq("2.0.0")
+      end
     ensure
       client.try(&.close)
       server.close

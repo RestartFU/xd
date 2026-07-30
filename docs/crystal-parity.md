@@ -329,7 +329,10 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   `claude update` commands asynchronously, checks structured before/after
   versions, blocks replacement while turns run, blocks new turns during
   replacement, and reloads the pooled Codex app-server after success. Unix/TLS
-  protocol operations exist; account-panel UI and paired-TLS proof remain.
+  protocol operations drive a clean account-panel version row and Update CLIs
+  button against the selected daemon. An actual paired TLS client checks and
+  updates both fixture binaries on the remote machine. Real official-release
+  replacement remains.
 - `[~]` Codex app-server and Claude stream-json turns work through the shared
   manager.
 - `[~]` Codex status, device login, browser link, cancellation, logout, and
@@ -352,7 +355,9 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[~]` Claude status, browser login, pasted-code input, cancellation, and
   logout use the same structured service and panel. Local UI and an actual
   paired TLS client cover clean code entry, signed-in state, sign-out, and
-  remote credential ownership. One real bundled OAuth completion remains.
+  remote credential ownership. Ctrl+V is handled explicitly for the visible
+  authorization-code row so modal key capture cannot suppress clipboard text.
+  One real bundled OAuth completion remains.
 - `[~]` Model, effort, access, plan/build, resume, and cancellation run through
   the shared manager. Assistant/model changes are atomic and append the same
   visible `Switched to …` transcript event for Unix and TLS clients without
@@ -382,7 +387,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (244 examples).
+- `[x]` Crystal specs pass in Docker (248 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
