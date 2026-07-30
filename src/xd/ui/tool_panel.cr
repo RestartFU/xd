@@ -6,17 +6,19 @@ require "./vte"
 module Xd
   module UI
     class ToolPanel
-      getter widget : Gtk::Box
+      getter terminal_widget : Gtk::Box
+      getter repository_widget : Gtk::Stack
+      getter repository_page : String?
 
       @chat_id : String?
       @file_directory = ""
       @open_file : String?
       @diff_mode = "working"
+      @repository_page : String?
       @terminal_id : String?
       @last_columns = 0_i64
       @last_rows = 0_i64
 
-      @stack : Gtk::Stack
       @file_path = Gtk::Label.new("")
       @file_list = Gtk::Box.new(:vertical, 2)
       @file_editor = Gtk::TextView.new
@@ -26,49 +28,33 @@ module Xd
       @diff_status = Gtk::Label.new("")
       @terminal = Vte::Terminal.new
       @terminal_status = Gtk::Label.new("")
+      @terminal_title_sizes : Gtk::SizeGroup
 
       def initialize(
         @call : Proc(
           Hash(String, JSON::Any),
-          Hash(String, JSON::Any)?
+          Hash(String, JSON::Any)?,
         ),
       )
         @chat_id = nil
         @open_file = nil
+        @repository_page = nil
         @terminal_id = nil
+        @terminal_title_sizes = Gtk::SizeGroup.new(:horizontal)
 
-        @widget = Gtk::Box.new(:vertical, 0)
-        @widget.width_request = 460
-        @widget.add_css_class("xd-tool-panel")
-        @widget.visible = false
+        @repository_widget = Gtk::Stack.new
+        @repository_widget.hexpand = true
+        @repository_widget.vexpand = true
+        @repository_widget.add_named(build_files, "files")
+        @repository_widget.add_named(build_diff, "diff")
+        @repository_widget.add_css_class("xd-tool-panel")
+        @repository_widget.add_css_class("xd-divider-left")
+        @repository_widget.visible = false
 
-        @stack = Gtk::Stack.new
-        @stack.hexpand = true
-        @stack.vexpand = true
-        @stack.add_titled(build_files, "files", "Files")
-        @stack.add_titled(build_diff, "diff", "Diff")
-        @stack.add_titled(build_terminal, "terminal", "Terminal")
-
-        switcher = Gtk::StackSwitcher.new
-        switcher.stack = @stack
-        switcher.halign = :center
-
-        close = Gtk::Button.new_from_icon_name("window-close-symbolic")
-        close.add_css_class("flat")
-        close.tooltip_text = "Close developer panel"
-        close.clicked_signal.connect { @widget.visible = false }
-
-        header = Gtk::Box.new(:horizontal, 8)
-        header.margin_top = 8
-        header.margin_bottom = 8
-        header.margin_start = 8
-        header.margin_end = 8
-        header.append(switcher)
-        header.append(close)
-
-        @widget.append(header)
-        @widget.append(Gtk::Separator.new(:horizontal))
-        @widget.append(@stack)
+        @terminal_widget = build_terminal
+        @terminal_widget.add_css_class("xd-tool-panel")
+        @terminal_widget.add_css_class("xd-divider-top")
+        @terminal_widget.visible = false
 
         GLib.timeout(250.milliseconds) do
           sync_terminal_size
@@ -85,19 +71,28 @@ module Xd
         @terminal_id = nil
         @terminal.reset(true, true)
         @terminal_status.text = ""
-        refresh_visible if @widget.visible?
+        refresh_visible
         chat_id
       end
 
-      def toggle(page : String) : Nil
-        if @widget.visible? && @stack.visible_child_name == page
-          @widget.visible = false
+      def show_terminal(shown : Bool, focus : Bool = true) : Nil
+        @terminal_widget.visible = shown
+        return unless shown
+
+        load_terminal
+        @terminal.grab_focus if focus
+      end
+
+      def show_repository(page : String?) : Nil
+        @repository_page = page
+        unless page
+          @repository_widget.visible = false
           return
         end
 
-        @stack.visible_child_name = page
-        @widget.visible = true
-        refresh_visible
+        @repository_widget.visible_child_name = page
+        @repository_widget.visible = true
+        refresh_repository(page)
       end
 
       def handle_event(event : Hash(String, JSON::Any)) : Nil
@@ -123,8 +118,8 @@ module Xd
           @terminal_id = nil
           @terminal_status.text = "Terminal closed"
         when "turn-finished"
-          refresh_diff if @widget.visible? &&
-                          @stack.visible_child_name == "diff"
+          refresh_diff if @repository_widget.visible? &&
+                          @repository_page == "diff"
         end
       rescue Base64::Error
         @terminal_status.text = "Terminal sent invalid data"
@@ -238,27 +233,51 @@ module Xd
         box
       end
 
-      private def build_terminal : Gtk::Widget
-        new_terminal = Gtk::Button.new_with_label("New")
+      private def build_terminal : Gtk::Box
+        new_terminal = Gtk::Button.new_from_icon_name("list-add-symbolic")
         new_terminal.add_css_class("flat")
+        new_terminal.tooltip_text = "New session"
         new_terminal.clicked_signal.connect { open_terminal(false) }
-        close_terminal = Gtk::Button.new_with_label("Close")
-        close_terminal.add_css_class("flat")
-        close_terminal.clicked_signal.connect { kill_terminal }
+        kill = Gtk::Button.new_from_icon_name("user-trash-symbolic")
+        kill.add_css_class("flat")
+        kill.tooltip_text = "Kill this session"
+        kill.clicked_signal.connect { kill_terminal }
 
-        @terminal_status.xalign = 0_f32
+        @terminal_status.xalign = 0.5_f32
         @terminal_status.hexpand = true
-        @terminal_status.ellipsize = :middle
-        @terminal_status.add_css_class("dim-label")
+        @terminal_status.ellipsize = :end
+        @terminal_status.add_css_class("heading")
 
-        header = Gtk::Box.new(:horizontal, 6)
-        header.margin_top = 8
-        header.margin_bottom = 8
-        header.margin_start = 8
-        header.margin_end = 8
-        header.append(new_terminal)
-        header.append(close_terminal)
-        header.append(@terminal_status)
+        controls = Gtk::Box.new(:horizontal, 2)
+        controls.margin_top = 4
+        controls.margin_bottom = 4
+        controls.margin_start = 4
+        controls.margin_end = 8
+        controls.append(new_terminal)
+        controls.append(kill)
+
+        title_start = Gtk::Box.new(:horizontal, 0)
+        title_end = Gtk::Box.new(:horizontal, 0)
+        @terminal_title_sizes.add_widget(title_start)
+        @terminal_title_sizes.add_widget(title_end)
+        @terminal_title_sizes.add_widget(controls)
+
+        title_row = Gtk::Box.new(:horizontal, 0)
+        title_row.append(title_start)
+        title_row.append(@terminal_status)
+        title_row.append(title_end)
+        title_row.can_target = false
+
+        tabs = Gtk::Box.new(:horizontal, 0)
+        filler = Gtk::Box.new(:horizontal, 0)
+        filler.hexpand = true
+        tabs.append(filler)
+        tabs.append(controls)
+
+        header = Gtk::Overlay.new
+        header.child = tabs
+        header.add_overlay(title_row)
+        header.add_css_class("xd-divider-bottom")
 
         @terminal.hexpand = true
         @terminal.vexpand = true
@@ -282,10 +301,14 @@ module Xd
       private def refresh_visible : Nil
         return unless @chat_id
 
-        case @stack.visible_child_name
-        when "files"    then refresh_files
-        when "diff"     then refresh_diff
-        when "terminal" then load_terminal
+        load_terminal if @terminal_widget.visible?
+        refresh_repository(@repository_page) if @repository_widget.visible?
+      end
+
+      private def refresh_repository(page : String?) : Nil
+        case page
+        when "files" then refresh_files
+        when "diff"  then refresh_diff
         end
       end
 
@@ -302,8 +325,7 @@ module Xd
         return unless response
 
         clear(@file_list)
-        @file_path.text = @file_directory.empty? ?
-                          "/" : "/#{@file_directory}"
+        @file_path.text = @file_directory.empty? ? "/" : "/#{@file_directory}"
         response["entries"].as_a.each do |entry|
           name = entry["name"].as_s
           directory = entry["directory"].as_bool
@@ -472,8 +494,7 @@ module Xd
 
       private def sync_terminal_size : Nil
         terminal_id = @terminal_id
-        return unless terminal_id && @widget.visible? &&
-                      @stack.visible_child_name == "terminal"
+        return unless terminal_id && @terminal_widget.visible?
 
         columns = @terminal.column_count
         rows = @terminal.row_count

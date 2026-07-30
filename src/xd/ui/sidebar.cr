@@ -128,7 +128,6 @@ module Xd
         @header.pack_start(add)
 
         @widget = Adw::ToolbarView.new
-        @widget.width_request = 300
         @widget.add_css_class("xd-sidebar")
         @widget.add_top_bar(@header)
         @widget.content = scroll

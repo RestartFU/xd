@@ -9,6 +9,7 @@ require "../agent/workflow_run"
 require "../agent/workspace_block"
 require "../daemon/endpoint"
 require "../remote/connection"
+require "../version"
 require "./adw"
 require "./chat_controls"
 require "./pair_dialog"
@@ -46,6 +47,15 @@ module Xd
       @attachments = [] of Attachment
       @client : Daemon::Endpoint
       @local_client : Daemon::Endpoint
+      @settings : Gio::Settings
+      @root_split : Gtk::Paned
+      @terminal_split : Gtk::Paned
+      @side_split : Gtk::Paned
+      @terminal_button : Gtk::ToggleButton
+      @file_button : Gtk::ToggleButton
+      @diff_button : Gtk::ToggleButton
+      @header_sizes : Gtk::SizeGroup
+      @syncing_panes = false
 
       def initialize(
         application : Gtk::Application,
@@ -56,9 +66,14 @@ module Xd
         @client = local_client
         @active_chat = nil
         @stream_label = nil
+        @settings = Gio::Settings.new(APP_ID)
         @widget = Adw::ApplicationWindow.new(application: application)
         @widget.title = "xd"
-        @widget.set_default_size(1100, 720)
+        @widget.set_default_size(
+          @settings.int("window-width"),
+          @settings.int("window-height")
+        )
+        @widget.maximize if @settings.boolean("window-maximized")
 
         @status = Gtk::Label.new("")
         @status.xalign = 0_f32
@@ -87,21 +102,21 @@ module Xd
         chat_header = Adw::HeaderBar.new
         chat_header.title_widget = @chat_title
         chat_header.show_start_title_buttons = false
-        {
-          "folder-symbolic"             => {"files", "Browse files"},
-          "view-list-ordered-symbolic"  => {"diff", "Changed files"},
-          "utilities-terminal-symbolic" => {
-            "terminal",
-            "Terminal",
-          },
-        }.each do |label, page|
-          name, tooltip = page
-          button = Gtk::Button.new_from_icon_name(label)
-          button.add_css_class("flat")
-          button.tooltip_text = tooltip
-          button.clicked_signal.connect { @tool_panel.toggle(name) }
-          chat_header.pack_end(button)
-        end
+        @terminal_button = pane_button(
+          "utilities-terminal-symbolic",
+          "Terminal"
+        )
+        @file_button = pane_button("folder-symbolic", "Browse files")
+        @diff_button = pane_button(
+          "view-list-ordered-symbolic",
+          "Changed files"
+        )
+        @terminal_button.toggled_signal.connect { terminal_toggled }
+        @file_button.toggled_signal.connect { file_toggled }
+        @diff_button.toggled_signal.connect { diff_toggled }
+        chat_header.pack_end(@terminal_button)
+        chat_header.pack_end(@file_button)
+        chat_header.pack_end(@diff_button)
 
         @controls = ChatControls.new(
           ->(option : String, value : String?) {
@@ -241,32 +256,69 @@ module Xd
         content.append(composer_clamp)
         content.add_css_class("xd-surface")
 
-        side_split = Gtk::Paned.new(:horizontal)
-        side_split.start_child = content
-        side_split.end_child = @tool_panel.widget
-        side_split.resize_start_child = true
-        side_split.shrink_start_child = false
-        side_split.resize_end_child = false
-        side_split.shrink_end_child = false
+        @terminal_split = Gtk::Paned.new(:vertical)
+        @terminal_split.start_child = content
+        @terminal_split.end_child = @tool_panel.terminal_widget
+        @terminal_split.resize_start_child = true
+        @terminal_split.shrink_start_child = false
+        @terminal_split.resize_end_child = false
+        @terminal_split.shrink_end_child = false
+        @terminal_split.notify_signal["position"].connect do |_property|
+          remember_terminal_height
+        end
+
+        @side_split = Gtk::Paned.new(:horizontal)
+        @side_split.start_child = @terminal_split
+        @side_split.end_child = @tool_panel.repository_widget
+        @side_split.resize_start_child = true
+        @side_split.shrink_start_child = false
+        @side_split.resize_end_child = false
+        @side_split.shrink_end_child = false
+        @side_split.notify_signal["position"].connect do |_property|
+          remember_repository_width
+        end
 
         chat = Adw::ToolbarView.new
         chat.add_css_class("xd-surface")
         chat.add_top_bar(chat_header)
-        chat.content = side_split
+        chat.content = @side_split
+        chat.add_css_class("xd-divider-left")
 
-        root = Gtk::Paned.new(:horizontal)
-        root.start_child = @sidebar.widget
-        root.end_child = chat
-        root.position = 280
-        root.resize_start_child = false
-        root.shrink_start_child = false
-        root.resize_end_child = true
-        root.shrink_end_child = false
-        @widget.content = root
+        @root_split = Gtk::Paned.new(:horizontal)
+        @root_split.start_child = @sidebar.widget
+        @root_split.end_child = chat
+        @root_split.position = @settings.int("sidebar-width")
+        @root_split.resize_start_child = false
+        @root_split.shrink_start_child = false
+        @root_split.resize_end_child = true
+        @root_split.shrink_end_child = false
 
-        headers = Gtk::SizeGroup.new(:vertical)
-        headers.add_widget(@sidebar.header)
-        headers.add_widget(chat_header)
+        header_spacer = Gtk::Box.new(:vertical, 0)
+        divider = Gtk::Separator.new(:horizontal)
+        divider.add_css_class("xd-header-divider")
+        divider_layer = Gtk::Box.new(:vertical, 0)
+        divider_layer.append(header_spacer)
+        divider_layer.append(divider)
+        divider_layer.halign = :fill
+        divider_layer.valign = :start
+        divider_layer.can_target = false
+        header_spacer.can_target = false
+        divider.can_target = false
+
+        overlay = Gtk::Overlay.new
+        overlay.child = @root_split
+        overlay.add_overlay(divider_layer)
+        @widget.content = overlay
+
+        @header_sizes = Gtk::SizeGroup.new(:vertical)
+        @header_sizes.add_widget(@sidebar.header)
+        @header_sizes.add_widget(chat_header)
+        @header_sizes.add_widget(header_spacer)
+
+        @widget.close_request_signal.connect do
+          persist_window_layout
+          false
+        end
 
         subscribe(@local_client)
         subscribe(@remote)
@@ -276,6 +328,110 @@ module Xd
 
       def present : Nil
         @widget.present
+      end
+
+      private def pane_button(
+        icon_name : String,
+        tooltip : String,
+      ) : Gtk::ToggleButton
+        button = Gtk::ToggleButton.new
+        button.icon_name = icon_name
+        button.add_css_class("flat")
+        button.tooltip_text = tooltip
+        button.sensitive = false
+        button
+      end
+
+      private def terminal_toggled : Nil
+        shown = @terminal_button.active?
+        unless shown
+          remember_terminal_height
+          @tool_panel.show_terminal(false)
+          return
+        end
+
+        @tool_panel.show_terminal(true, focus: !@syncing_panes)
+        set_end_child_size(
+          @terminal_split,
+          @settings.int("terminal-height"),
+          vertical: true
+        )
+      end
+
+      private def file_toggled : Nil
+        if @file_button.active?
+          @diff_button.active = false if @diff_button.active?
+          @tool_panel.show_repository("files")
+          set_end_child_size(
+            @side_split,
+            @settings.int("diff-width"),
+            vertical: false
+          )
+        elsif !@diff_button.active?
+          remember_repository_width
+          @tool_panel.show_repository(nil)
+        end
+      end
+
+      private def diff_toggled : Nil
+        if @diff_button.active?
+          @file_button.active = false if @file_button.active?
+          @tool_panel.show_repository("diff")
+          set_end_child_size(
+            @side_split,
+            @settings.int("diff-width"),
+            vertical: false
+          )
+        elsif !@file_button.active?
+          remember_repository_width
+          @tool_panel.show_repository(nil)
+        end
+      end
+
+      private def set_end_child_size(
+        paned : Gtk::Paned,
+        size : Int32,
+        vertical : Bool,
+      ) : Nil
+        return if size <= 0
+
+        attempts = 0
+        GLib.timeout(16.milliseconds) do
+          attempts += 1
+          available = vertical ? paned.height : paned.width
+          if available > 0
+            paned.position = Math.max(available - size, 0)
+            false
+          else
+            attempts < 30
+          end
+        end
+      end
+
+      private def remember_terminal_height : Nil
+        return unless @tool_panel.terminal_widget.visible?
+
+        height = @tool_panel.terminal_widget.height
+        @settings.set_int("terminal-height", height.to_i32) if height > 0
+      end
+
+      private def remember_repository_width : Nil
+        return unless @tool_panel.repository_widget.visible?
+
+        width = @tool_panel.repository_widget.width
+        @settings.set_int("diff-width", width.to_i32) if width > 0
+      end
+
+      private def persist_window_layout : Nil
+        remember_terminal_height
+        remember_repository_width
+        @settings.set_int("window-width", @widget.default_width)
+        @settings.set_int("window-height", @widget.default_height)
+        @settings.set_int("sidebar-width", @root_split.position)
+        @settings.set_boolean(
+          "window-maximized",
+          @widget.is_maximized
+        )
       end
 
       private def subscribe(endpoint : Daemon::Endpoint) : Nil
@@ -329,6 +485,9 @@ module Xd
         @attach.sensitive = true
         @send.sensitive = true
         @controls.sensitive = true
+        @terminal_button.sensitive = true
+        @file_button.sensitive = true
+        @diff_button.sensitive = true
         @tool_panel.chat = id
         load_chat_state
         load_messages
@@ -359,8 +518,15 @@ module Xd
         @send.remove_css_class("destructive-action")
         @send.add_css_class("suggested-action")
         @controls.sensitive = false
+        @syncing_panes = true
+        @terminal_button.active = false
+        @file_button.active = false
+        @diff_button.active = false
+        @syncing_panes = false
+        @terminal_button.sensitive = false
+        @file_button.sensitive = false
+        @diff_button.sensitive = false
         @tool_panel.chat = nil
-        @tool_panel.widget.visible = false
         clear(@transcript)
         @workflow_ids.clear
         clear(@queue_box)
