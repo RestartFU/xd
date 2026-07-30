@@ -42,7 +42,8 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   selection, activation, expansion persistence, and state dots are ported and
   populated-tree startup is screenshot-verified. Inline create/rename is
   gesture-tested for Enter, Escape, and click-away with fatal GTK criticals
-  enabled; drag/drop remains.
+  enabled. Folder drag/drop into a row and back to empty top-level space is
+  filesystem- and screenshot-verified under the same fatal-critical check.
 - `[ ]` Match local and remote root menus, confirmations, disabled states, and
   error presentation exactly.
 - `[ ]` Match chat working/waiting/done/offline state transitions.
