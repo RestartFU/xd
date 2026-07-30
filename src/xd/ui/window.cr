@@ -1812,7 +1812,8 @@ module Xd
           @live_turn_key = nil
           @stream_source = event["label"]?.try(&.as_s?)
           @working_started_at = Time.instant
-          set_working(true)
+          @working = true
+          load_messages
           load_chat_state
         when "turn-finished"
           if active_event?(endpoint, event)
