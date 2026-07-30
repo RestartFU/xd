@@ -17,6 +17,9 @@ checked against the C application where visual behavior is involved.
 ## Window and application shell
 
 - `[x]` Crystal GTK4/libadwaita application starts from the relocatable bundle.
+  Existing local endpoints must answer a bounded ping before the window is
+  constructed; an accepting but unresponsive daemon now reaches the normal
+  startup-error surface instead of creating a half-working app.
   Clean and restored non-Git profiles stay alive under fatal GTK warnings;
   scheduler-backed background workers cover restored Markdown rendering
   without raw-thread startup crashes.
@@ -465,7 +468,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (301 examples).
+- `[x]` Crystal specs pass in Docker (302 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

@@ -13,6 +13,8 @@ module Xd
     # Existing daemon wins. Otherwise desktop starts exact same Engine and
     # Server used by `xd serve`, then talks to it through platform-local IPC.
     class Runtime
+      CONNECT_TIMEOUT = 2.seconds
+
       getter client : Daemon::Client
       getter remote : Remote::Connection
 
@@ -20,7 +22,7 @@ module Xd
       @engine : Daemon::Engine?
       @server : Daemon::Server?
 
-      def initialize
+      def initialize(@connect_timeout : Time::Span = CONNECT_TIMEOUT)
         @store = nil
         @engine = nil
         @server = nil
@@ -40,9 +42,23 @@ module Xd
       end
 
       private def connect : Daemon::Client
-        return Daemon::Client.local(AppPaths.local_socket)
+        return connect_existing
       rescue Daemon::Client::Error
         start_local_daemon
+      end
+
+      private def connect_existing : Daemon::Client
+        client = Daemon::Client.local(
+          AppPaths.local_socket,
+          request_timeout: @connect_timeout
+        )
+        begin
+          client.call({"op" => JSON::Any.new("ping")})
+          client
+        rescue error
+          client.close
+          raise error
+        end
       end
 
       private def start_local_daemon : Daemon::Client
@@ -54,7 +70,7 @@ module Xd
         begin
           store.clear_daemon_working
           server.listen_local(AppPaths.local_socket)
-          client = Daemon::Client.local(AppPaths.local_socket)
+          client = connect_existing
           @store = store
           @engine = engine
           @server = server
@@ -67,7 +83,7 @@ module Xd
           # Another desktop may have won startup between first connect and
           # bind. Its endpoint is authoritative.
           begin
-            Daemon::Client.local(AppPaths.local_socket)
+            connect_existing
           rescue Daemon::Client::Error
             raise error
           end
