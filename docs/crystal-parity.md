@@ -123,8 +123,11 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   and empty-Enter queue steering behavior.
 - `[~]` Image paste/chooser limits and previews use the C card hierarchy,
   scaled thumbnail pixels, caption, remove overlay, and margins. Both Unix and
-  TLS clients send the same byte payload through the daemon. Installed GTK
-  verification remains.
+  TLS clients send the same byte payload through the daemon. An installed
+  nightly bundle verifies mixed prose/image ordering, image-only rows,
+  thumbnail sizing, the transparent Adwaita viewer, and dialog close with
+  fatal GTK criticals enabled. Composer chooser/chip re-verification follows
+  the generic `GListModel` wrapper fix.
 - `[~]` Ask questions stay bold in the transcript while answer controls use the
   exact C composer slot, flow layout, input row, and retirement lifecycle;
   installed GTK verification remains.

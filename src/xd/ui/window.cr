@@ -1320,7 +1320,14 @@ module Xd
             if files
               files.n_items.times do |index|
                 object = files.item(index)
-                add_file_attachment(object.as(Gio::File)) if object
+                if object
+                  add_file_attachment(
+                    Gio::AbstractFile.new(
+                      object.to_unsafe,
+                      GICrystal::Transfer::None
+                    )
+                  )
+                end
               end
             end
           rescue Gio::IOErrorEnum::Cancelled
