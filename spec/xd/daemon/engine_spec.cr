@@ -629,6 +629,57 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "retains control-lane cancellation while send is still starting" do
+    launcher = EngineLauncher.new
+    entered = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    authorizer : Xd::Agent::Manager::Authorizer = ->(_provider : String) do
+      entered.send(nil)
+      release.receive
+      nil.as(String?)
+    end
+
+    with_daemon_engine(
+      launcher: launcher,
+      agent_authorizer: authorizer
+    ) do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Cancel race",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+
+      sent = Channel(Xd::Protocol::Response).new(1)
+      spawn do
+        sent.send(engine.dispatch(local, {
+          "op"   => "send",
+          "chat" => chat,
+          "text" => "stop before launch",
+        }.to_json))
+      end
+
+      entered.receive
+      stopped = engine.dispatch(local, {
+        "op"   => "cancel",
+        "chat" => chat,
+      }.to_json)
+      release.send(nil)
+
+      stopped.success?.should be_true
+      select
+      when response = sent.receive
+        response.success?.should be_true
+      when timeout(2.seconds)
+        fail("serialized send did not finish")
+      end
+      launcher.handles.first.canceled.should be_true
+    end
+  end
+
   it "edits, drops, and steers the persisted turn queue" do
     launcher = EngineLauncher.new
 

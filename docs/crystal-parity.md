@@ -140,7 +140,13 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   manager retries a silent stale resumed session exactly once without
   duplicating the user row, stores the C `(no reply)` fallback, advances
   backend `last_seen` only after success, and runs Stop/Steer through the same
-  durable queue finish path. The bundle from `21008c6` is verified at
+  durable queue finish path. Stop requests arriving while authorization,
+  worktree preparation, or other turn startup work is still running are
+  retained until the session handle exists instead of leaving the UI stuck in
+  `Stopping…`; backend interrupt failures preserve active-turn ownership so
+  Stop can be retried instead of creating durable ghost-working state, and
+  shutdown remains best-effort when a child still rejects interruption. The
+  bundle from `21008c6` is verified at
   1100x720 with fatal GTK criticals: queue edit, Steer, Drop, Stop, retry,
   partial-output preservation, duration placement, and `(no reply)` all match
   storage and draw once. Event-driven metadata refresh no longer replays a
@@ -450,7 +456,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (291 examples).
+- `[x]` Crystal specs pass in Docker (294 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

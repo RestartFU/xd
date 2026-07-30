@@ -5,8 +5,12 @@ require "../../../src/xd/agent/manager"
 
 private class FakeSessionHandle < Xd::Agent::SessionHandle
   getter canceled = false
+  property cancel_error : Exception?
 
   def cancel : Nil
+    if error = @cancel_error
+      raise error
+    end
     @canceled = true
   end
 end
@@ -455,6 +459,66 @@ describe Xd::Agent::Manager do
       manager.cancel(chat_id)
 
       launcher.handles.first.canceled.should be_true
+    end
+  end
+
+  it "keeps turn ownership when backend cancellation fails" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      manager.send(chat_id, "work")
+      launcher.handles.first.cancel_error =
+        IO::Error.new("interrupt failed")
+
+      expect_raises(
+        Xd::Agent::Manager::Error,
+        "interrupt failed"
+      ) do
+        manager.cancel(chat_id)
+      end
+
+      manager.running?(chat_id).should be_true
+      manager.active_turn(chat_id).should_not be_nil
+    end
+  end
+
+  it "retains cancellation while a turn is still starting" do
+    entered = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    authorizer : Xd::Agent::Manager::Authorizer = ->(_provider : String) do
+      entered.send(nil)
+      release.receive
+      nil.as(String?)
+    end
+
+    with_agent_manager(authorizer) do |manager, store, _workspaces, folder_id, launcher, events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      finished = Channel(Exception?).new(1)
+      spawn do
+        begin
+          manager.send(chat_id, "work")
+          finished.send(nil)
+        rescue error
+          finished.send(error)
+        end
+      end
+
+      entered.receive
+      manager.cancel(chat_id)
+      release.send(nil)
+      select
+      when error = finished.receive
+        raise error if error
+      when timeout(2.seconds)
+        fail("starting turn did not finish")
+      end
+
+      launcher.handles.first.canceled.should be_true
+      manager.active_turn(chat_id).should_not be_nil
+      events.map(&.[0]).should_not contain("turn-started")
+
+      launcher.finish(0, true)
+      manager.active_turn(chat_id).should be_nil
+      events.map(&.[0]).should contain("turn-finished")
     end
   end
 

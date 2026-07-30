@@ -162,6 +162,7 @@ module Xd
 
       @turns = {} of String => ActiveTurn
       @starting = Set(String).new
+      @starting_cancellations = Set(String).new
       @updating = Set(String).new
       @command_sets = {} of String => Array(String)
       @mutex = Mutex.new
@@ -227,7 +228,9 @@ module Xd
             else
               turn.cancel_requested = true
             end
-          elsif !@starting.includes?(chat_id)
+          elsif @starting.includes?(chat_id)
+            @starting_cancellations << chat_id
+          else
             queued = @store.queue_take_first(chat_id)
             @starting << chat_id if queued
           end
@@ -239,10 +242,12 @@ module Xd
         else
           handle.try(&.cancel)
         end
-      rescue error : Error
+      rescue error : Xd::Agent::Manager::Error
         raise error
-      rescue error
-        fail_start(chat_id, error)
+      rescue error : Exception
+        raise Xd::Agent::Manager::Error.new(
+          error.message || "Cannot stop the agent."
+        )
       end
 
       def running?(chat_id : String) : Bool
@@ -301,6 +306,7 @@ module Xd
       def forget(chat_id : String) : Nil
         handle = @mutex.synchronize do
           @starting.delete(chat_id)
+          @starting_cancellations.delete(chat_id)
           turn = @turns.delete(chat_id)
           if turn
             turn.finished = true
@@ -317,6 +323,7 @@ module Xd
           current = @turns.values.dup
           @turns.clear
           @starting.clear
+          @starting_cancellations.clear
           @updating.clear
           current
         end
@@ -325,6 +332,10 @@ module Xd
           @store.set_daemon_working(turn.chat_id, false)
           turn.handle.try(&.cancel)
         rescue Storage::Error
+        rescue error
+          STDERR.puts(
+            "xd: cannot stop agent during shutdown: #{error.message}"
+          )
         end
         @launcher.close
       end
@@ -441,6 +452,8 @@ module Xd
           @mutex.synchronize do
             raise Error.new("The daemon is stopping.") if @closed
             @starting.delete(chat_id)
+            turn.cancel_requested =
+              @starting_cancellations.delete(chat_id)
             @turns[chat_id] = turn
           end
 
@@ -494,6 +507,7 @@ module Xd
       ) : Nil
         @mutex.synchronize do
           @starting.delete(chat_id)
+          @starting_cancellations.delete(chat_id)
           @turns.delete(chat_id)
         end
         if input_stored && message
@@ -507,6 +521,7 @@ module Xd
       private def fail_start(chat_id : String, error : Exception) : NoReturn
         @mutex.synchronize do
           @starting.delete(chat_id)
+          @starting_cancellations.delete(chat_id)
           @turns.delete(chat_id)
         end
         raise Error.new(error.message || "Cannot start the agent")
@@ -683,7 +698,7 @@ module Xd
           "silent"  => JSON::Any.new(
             success && !turn.had_text && !turn.had_tool
           ),
-          "duration" => JSON::Any.new(elapsed),
+          "duration"        => JSON::Any.new(elapsed),
           "last_message_id" => JSON::Any.new(last_message_id),
         }
         fields["error"] = JSON::Any.new(error_text) if error_text
