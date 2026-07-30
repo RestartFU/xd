@@ -10,6 +10,7 @@ module Xd
     class FilePane
       FILE_LIMIT      = 1024 * 1024
       HIGHLIGHT_BATCH = 256
+      ENTRY_BATCH     =  80
 
       record Entry, name : String, directory : Bool
 
@@ -227,37 +228,80 @@ module Xd
             next
           end
 
-          entries = response["entries"]?.try(&.as_a?).try do |nodes|
-            nodes.compact_map do |node|
-              value = node.as_h?
-              next unless value
-              name = value["name"]?.try(&.as_s?)
-              next unless name
-              Entry.new(
-                name,
-                value["directory"]?.try(&.as_bool?) || false
-              )
-            end
-          end || [] of Entry
+          nodes = response["entries"]?.try(&.as_a?) || [] of JSON::Any
+          prepare_entries(path, chat_id, token, nodes)
+        end
+      end
 
-          fill_entries(path, entries)
+      def self.prepare_entries(nodes : Array(JSON::Any)) : Array(Entry)
+        entries = nodes.compact_map do |node|
+          value = node.as_h?
+          next unless value
+          name = value["name"]?.try(&.as_s?)
+          next unless name
+          Entry.new(
+            name,
+            value["directory"]?.try(&.as_bool?) || false
+          )
+        end
+        entries.sort do |left, right|
+          if left.directory != right.directory
+            left.directory ? -1 : 1
+          else
+            left.name <=> right.name
+          end
+        end
+      end
+
+      def self.entry_batch_finish(start : Int, total : Int) : Int32
+        Math.min(start.to_i64 + ENTRY_BATCH, total.to_i64).to_i32
+      end
+
+      private def prepare_entries(
+        path : String,
+        chat_id : String,
+        token : Int64,
+        nodes : Array(JSON::Any),
+      ) : Nil
+        queued = BackgroundWork.submit do
+          entries : Array(Entry)? = nil
+          message : String? = nil
+          begin
+            entries = self.class.prepare_entries(nodes)
+          rescue error
+            message = error.message || "Directory entries could not be prepared."
+          end
+          GLib.idle_add do
+            if active?(token, chat_id)
+              if result = entries
+                fill_entries(path, result, chat_id, token)
+              else
+                show_status(
+                  "Could Not Open Files",
+                  message || "Directory entries could not be prepared."
+                )
+              end
+            end
+            false
+          end
+          nil
+        end
+        unless queued
+          show_status(
+            "Still Loading Files",
+            "Too many previews are being prepared. Try again shortly."
+          )
         end
       end
 
       private def fill_entries(
         path : String,
         entries : Array(Entry),
+        chat_id : String,
+        token : Int64,
       ) : Nil
         @entries.remove_all
-        @entries_data = entries.sort do |left, right|
-          if left.directory != right.directory
-            left.directory ? -1 : 1
-          else
-            LibGLib.g_utf8_collate(left.name, right.name)
-          end
-        end
-        @entries_data.each { |entry| add_entry_row(entry) }
-
+        @entries_data = entries
         @path = path
         @file_path = nil
         @showing_preview = false
@@ -267,6 +311,38 @@ module Xd
             "Empty Folder",
             "This folder has no visible files."
           )
+        else
+          show_status(
+            "Loading Files…",
+            "Preparing #{entries.size} entries."
+          )
+          append_entry_batch(path, entries, chat_id, token, 0)
+        end
+      end
+
+      private def append_entry_batch(
+        path : String,
+        entries : Array(Entry),
+        chat_id : String,
+        token : Int64,
+        start : Int,
+      ) : Nil
+        return unless active?(token, chat_id) && @path == path
+
+        finish = self.class.entry_batch_finish(start, entries.size)
+        entries[start...finish].each { |entry| add_entry_row(entry) }
+        if finish < entries.size
+          @status.description = "#{finish} of #{entries.size} entries"
+          GLib.idle_add do
+            append_entry_batch(
+              path,
+              entries,
+              chat_id,
+              token,
+              finish
+            )
+            false
+          end
         else
           @stack.visible_child_name = "entries"
         end
