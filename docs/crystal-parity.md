@@ -87,9 +87,21 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   and frame-stable scroll restoration are ported. Installed-bundle proof at
   1100x720 keeps marker 146 at the same y-position while inserting 100 older
   rows, with fatal GTK criticals enabled and empty stderr. Live streaming
-  follow/opt-out matrix remains.
-- `[ ]` Match working dots, elapsed time, live reveal cadence, and turn labels.
-- `[ ]` Match local/daemon/remote turn recovery when switching chats.
+  stays bottom-pinned through partial and settled frames from an external
+  daemon turn; live wheel opt-out verification remains.
+- `[~]` One C-shaped working row stays last, uses the same animated dots,
+  second/minute/hour elapsed labels, and pauses both timers when bottom follow
+  is disabled. Stored duration rows move above their turn exactly as in C.
+  The 33-millisecond reveal, 80-millisecond initial delay, two-character live
+  tail, 100-millisecond settle, and UTF-8 prefixes have deterministic specs.
+  An installed nightly bundle shows partial and settled live frames, correct
+  Stop state, and zero fatal GTK criticals; off-bottom pause and source-tooltip
+  interaction verification remain.
+- `[~]` Daemon active-turn snapshots carry label, elapsed time, completed
+  text/tool items, and the safe current segment over the shared endpoint.
+  Installed local-daemon proof switches away and back during a turn, restores
+  the initiating user row and live output, then appends a later delta once and
+  in order. Paired TLS UI recovery verification remains.
 - `[ ]` Match context-window meter and token formatting.
 - `[ ]` Match handover, retry, cancellation, and queued-turn timeline behavior.
 
@@ -214,7 +226,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (197 examples).
+- `[x]` Crystal specs pass in Docker (204 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
