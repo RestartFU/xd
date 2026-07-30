@@ -125,7 +125,7 @@ noise is cosmetic.
 
 | Path               | What lives there                                      |
 | ------------------ | ----------------------------------------------------- |
-| `src/xd/daemon/`   | Shared Engine, Unix/TLS transports, filesystem, PTY    |
+| `src/xd/daemon/`   | Shared Engine, local/TLS transports, filesystem, PTY   |
 | `src/xd/agent/`    | Bundled CLI lifecycle, protocols, auth, turn handling |
 | `src/xd/ui/`       | GTK4/libadwaita client                                |
 | `src/xd/storage/`  | SQLite chats, messages, sessions, workflow state      |

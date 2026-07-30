@@ -11,7 +11,7 @@ module Xd
     # Desktop-owned daemon lifetime.
     #
     # Existing daemon wins. Otherwise desktop starts exact same Engine and
-    # Server used by `xd serve`, then talks to it through Unix IPC.
+    # Server used by `xd serve`, then talks to it through platform-local IPC.
     class Runtime
       getter client : Daemon::Client
       getter remote : Remote::Connection

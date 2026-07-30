@@ -73,7 +73,7 @@ module Xd
         command.on("--database FILE", "chat database") do |value|
           options.database = File.expand_path(value)
         end
-        command.on("--socket FILE", "local IPC socket") do |value|
+        command.on("--socket FILE", "local IPC endpoint") do |value|
           options.socket = File.expand_path(value)
         end
         command.on("--certificate FILE", "TLS certificate") do |value|

@@ -10,9 +10,9 @@ module Xd
       property authenticated : Bool
 
       def initialize(@transport)
-        # Local IPC is authenticated by its filesystem/OS boundary. Remote
-        # transport must pair and present a token. Both run the same handlers
-        # after this transport-only gate.
+        # Local IPC is authenticated by Unix permissions or the per-user
+        # Windows endpoint token. Remote transport must pair and present a
+        # device token. Both run the same handlers after this transport gate.
         @authenticated = @transport.local?
       end
     end

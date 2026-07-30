@@ -179,7 +179,7 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   and shutdown cleanup. Microphone capture stays on the GTK client; model
   storage and transcription run through the selected chat's daemon, so paired
   chats install and execute Whisper on the remote machine. Targeted daemon
-  events keep transcripts private to the requesting Unix/TLS connection. The
+  events keep transcripts private to the requesting local/TLS connection. The
   relocatable Linux bundle carries the PulseAudio runtime and CPU-dispatched
   whisper.cpp build. macOS and Windows select PortAudio behind the same
   recorder contract; the Docker build compiles and links that backend without
@@ -188,7 +188,7 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   responsive Cancel path pass fatal-warning GTK smoke. Actual paired TLS specs
   verify remote execution and event isolation.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
-  tooltip, and geometry. The daemon computes it once for Unix and TLS clients;
+  tooltip, and geometry. The daemon computes it once for local and TLS clients;
   installed GTK geometry is verified; live branch-change verification remains.
 
 C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
@@ -292,7 +292,7 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   preserves a blank existing value, and saves by Ctrl+Enter with fatal GTK
   warnings enabled.
 - `[x]` C directory-browser hierarchy, row factory, navigation keys, dismissal
-  semantics, and styling are ported. Both Unix and TLS sources list only
+  semantics, and styling are ported. Both local and TLS sources list only
   through the daemon `list-dir` operation, and new-chat creation waits for its
   chosen daemon-side working directory. Installed-bundle screenshots cover
   selection, Enter descent, Backspace ascent, and missing-path error state.
@@ -325,7 +325,7 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 
 ## Daemon, storage, and remote behavior
 
-- `[x]` Local Unix IPC and remote TLS dispatch through one `Daemon::Engine`.
+- `[x]` Platform-local IPC and remote TLS dispatch through one `Daemon::Engine`.
 - `[x]` Continuously readable Codex/Claude pipes, client/server sockets,
   terminal PTYs, updater/auth streams, and voice streams yield cooperatively
   after bounded chunks. Regression bursts of 100,000 CLI lines and 20,000
@@ -341,7 +341,8 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   matrix against separate Engine instances: workspace/context/settings,
   daemon-owned secrets, directory and file operations, Git diff, atomic model
   selection, effort/access/Plan, queue edits, send/cancel, transcript/search,
-  terminal open/resize/kill, voice-model ownership, events, and deletion.
+  terminal open/resize/kill, voice-model ownership, events, and deletion. The
+  authenticated Windows-loopback build passes that same matrix in Docker.
 - `[x]` Checkout context and worktree identity are daemon-owned protocol state;
   local and paired clients do not probe Git through separate UI logic.
 - `[~]` Crystal storage and agent behavior have broad specs, but every old C
@@ -364,7 +365,7 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[~]` Daemon-owned CLI updater runs the official `codex update` and
   `claude update` commands asynchronously, checks structured before/after
   versions, blocks replacement while turns run, blocks new turns during
-  replacement, and reloads the pooled Codex app-server after success. Unix/TLS
+  replacement, and reloads the pooled Codex app-server after success. Local/TLS
   protocol operations drive a clean account-panel version row and Update CLIs
   button against the selected daemon. An actual paired TLS client checks and
   updates both fixture binaries on the remote machine. Real official-release
@@ -396,10 +397,10 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   One real bundled OAuth completion remains.
 - `[~]` Model, effort, access, plan/build, resume, and cancellation run through
   the shared manager. Assistant/model changes are atomic and append the same
-  visible `Switched to …` transcript event for Unix and TLS clients without
+  visible `Switched to …` transcript event for local and TLS clients without
   duplicating unchanged selections. Manager specs verify exact selected
   backend/model/effort, Plan's temporary access override, and restoration of
-  the stored access mode. The shared Unix/TLS protocol matrix also verifies
+  the stored access mode. The shared local/TLS protocol matrix also verifies
   exact model, effort, stored access, temporary Plan access, prompt, daemon
   secret environment, send, and cancel. Installed GTK matrix remains.
 - `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
@@ -419,9 +420,11 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
   builds; do not publish old C artifacts under Crystal releases. Runtime
   discovery now handles both flat payloads and macOS `Contents/Resources`,
   prepares relocatable GTK/GIO/font caches in-process, resolves bundled tools
-  and portable Git, and removes the Git pane's POSIX-shell dependency. Native
-  build/bundle jobs plus platform terminal, local IPC, and PortAudio delivery
-  remain.
+  and portable Git, and removes the Git pane's POSIX-shell dependency. Windows
+  local IPC uses authenticated loopback with a 256-bit endpoint token protected
+  to the current user by DPAPI, bounded handshakes, startup locking, and
+  stale-endpoint recovery. Native build/bundle jobs plus platform terminal,
+  PortAudio delivery, and actual-host verification remain.
 - `[x]` README and CI use the Crystal Docker workflow; no active workflow builds
   or publishes Meson/C artifacts.
 - `[ ]` Remove Odin experiment and old C implementation only after every C
@@ -431,7 +434,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (276 examples).
+- `[x]` Crystal specs pass in Docker (277 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

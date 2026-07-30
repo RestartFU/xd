@@ -5,8 +5,8 @@ module Xd
   module Daemon
     # One newline-delimited protocol session.
     #
-    # Both Unix IPC and TLS sockets call this exact runner. Transport only
-    # controls initial authentication; it never selects application handlers.
+    # Both platform-local IPC and TLS sockets call this exact runner. Transport
+    # only controls initial authentication; it never selects app handlers.
     class Session
       private class Writer
         @lock = Mutex.new

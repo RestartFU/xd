@@ -2,6 +2,7 @@ require "json"
 require "openssl"
 require "socket"
 require "./endpoint"
+require "./local_ipc"
 
 module Xd
   module Daemon
@@ -37,7 +38,11 @@ module Xd
       end
 
       def self.local(path : String) : self
-        new(UNIXSocket.new(path))
+        {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+          new(LocalIPC.connect(path))
+        {% else %}
+          new(UNIXSocket.new(path))
+        {% end %}
       rescue error : IO::Error
         raise Error.new("Cannot connect to local daemon: #{error.message}")
       end

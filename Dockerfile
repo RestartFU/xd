@@ -94,6 +94,11 @@ RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec spec/xd/voice/recorder_spec.cr \
         -Dxd_portaudio_backend --error-trace \
+ && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+      crystal spec \
+        spec/xd/daemon/local_ipc_spec.cr \
+        spec/xd/daemon/transport_parity_spec.cr \
+        -Dxd_loopback_local --error-trace \
  && mkdir -p /crystal-build \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal build src/xd.cr --release --no-debug -o /crystal-build/xd \

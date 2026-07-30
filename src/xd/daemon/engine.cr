@@ -28,9 +28,9 @@ module Xd
 
     # Sole application command dispatcher.
     #
-    # Socket, Unix-domain IPC, and future in-process test transports stop at
-    # this boundary. Every state-changing command is serialized here so local
-    # and remote clients cannot diverge or race separate implementations.
+    # Socket, platform-local IPC, and future in-process test transports stop
+    # at this boundary. Every state-changing command is serialized here so
+    # local and remote clients cannot diverge or race separate implementations.
     class Engine
       getter events : EventBus
 

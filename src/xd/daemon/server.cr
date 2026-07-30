@@ -1,5 +1,6 @@
 require "openssl"
 require "socket"
+require "./local_ipc"
 require "./session"
 
 module Xd
@@ -8,7 +9,15 @@ module Xd
       getter remote_port : Int32?
       getter local_path : String?
 
-      @local_listener : UNIXServer?
+      {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+        alias LocalListener = TCPServer
+      {% else %}
+        alias LocalListener = UNIXServer
+      {% end %}
+
+      @local_listener : LocalListener?
+      @local_token : String?
+      @local_lock_path : String?
       @remote_listener : TCPServer?
       @tls_context : OpenSSL::SSL::Context::Server?
       @clients = [] of IO
@@ -21,42 +30,46 @@ module Xd
       end
 
       def listen_local(path : String) : Nil
-        if info = File.info?(path, follow_symlinks: false)
-          unless info.type.socket?
-            raise IO::Error.new(
-              "Refusing to replace non-socket local endpoint: #{path}"
-            )
+        {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+          listen_local_loopback(path)
+        {% else %}
+          if info = File.info?(path, follow_symlinks: false)
+            unless info.type.socket?
+              raise IO::Error.new(
+                "Refusing to replace non-socket local endpoint: #{path}"
+              )
+            end
+
+            live = begin
+              probe = UNIXSocket.new(path)
+              probe.close
+              true
+            rescue IO::Error
+              false
+            end
+            if live
+              raise IO::Error.new("Local daemon is already running at #{path}")
+            end
+            File.delete(path)
           end
 
-          live = begin
-            probe = UNIXSocket.new(path)
-            probe.close
-            true
-          rescue IO::Error
-            false
-          end
-          if live
-            raise IO::Error.new("Local daemon is already running at #{path}")
-          end
-          File.delete(path)
-        end
+          directory = Path[path].dirname
+          Dir.mkdir_p(directory, 0o700) unless directory.to_s == "."
+          listener = UNIXServer.new(path)
+          File.chmod(path, 0o600)
 
-        directory = Path[path].dirname
-        Dir.mkdir_p(directory, 0o700) unless directory.to_s == "."
-        listener = UNIXServer.new(path)
-        File.chmod(path, 0o600)
-
-        @lock.synchronize do
-          raise IO::Error.new("Server is closed") if @closed
-          if @local_listener
-            listener.close
-            raise IO::Error.new("Local listener is already running")
+          @lock.synchronize do
+            raise IO::Error.new("Server is closed") if @closed
+            if @local_listener
+              listener.close
+              raise IO::Error.new("Local listener is already running")
+            end
+            @local_listener = listener
+            @local_path = path
           end
-          @local_listener = listener
-          @local_path = path
-        end
 
-        spawn accept_local(listener)
+          spawn accept_local(listener)
+        {% end %}
       end
 
       def listen_remote(
@@ -93,10 +106,12 @@ module Xd
       end
 
       def close : Nil
-        local : UNIXServer? = nil
+        local : LocalListener? = nil
         remote : TCPServer? = nil
         clients = [] of IO
         local_path : String? = nil
+        local_token : String? = nil
+        local_lock_path : String? = nil
 
         @lock.synchronize do
           return if @closed
@@ -107,6 +122,10 @@ module Xd
           @remote_listener = nil
           local_path = @local_path
           @local_path = nil
+          local_token = @local_token
+          @local_token = nil
+          local_lock_path = @local_lock_path
+          @local_lock_path = nil
           clients = @clients.dup
           @clients.clear
         end
@@ -120,17 +139,81 @@ module Xd
           end
         end
         if path = local_path
-          info = File.info?(path, follow_symlinks: false)
-          File.delete?(path) if info.try(&.type.socket?)
+          {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+            if token = local_token
+              LocalIPC.remove_if_owned(path, token)
+            end
+          {% else %}
+            info = File.info?(path, follow_symlinks: false)
+            File.delete?(path) if info.try(&.type.socket?)
+          {% end %}
         end
+        LocalIPC.release(local_lock_path.not_nil!) if local_lock_path
       end
 
-      private def accept_local(listener : UNIXServer) : Nil
-        while client = listener.accept?
-          spawn serve_client(client, Transport::Local)
+      {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+        private def listen_local_loopback(path : String) : Nil
+          lock_path = LocalIPC.claim(path)
+          token = Random::Secure.hex(LocalIPC::TOKEN_BYTES)
+          listener : TCPServer? = nil
+          published = false
+          owned = false
+
+          begin
+            LocalIPC.prepare(path)
+            listener = TCPServer.new("127.0.0.1", 0)
+            port = listener.local_address.as(Socket::IPAddress).port
+            LocalIPC.publish(path, port, token)
+            published = true
+
+            active = listener.not_nil!
+            @lock.synchronize do
+              raise IO::Error.new("Server is closed") if @closed
+              if @local_listener
+                raise IO::Error.new("Local listener is already running")
+              end
+              @local_listener = active
+              @local_path = path
+              @local_token = token
+              @local_lock_path = lock_path
+              owned = true
+            end
+
+            spawn accept_local(active, token)
+          rescue error
+            listener.try(&.close)
+            LocalIPC.remove_if_owned(path, token) if published && !owned
+            LocalIPC.release(lock_path) unless owned
+            raise error
+          end
         end
-      rescue IO::Error
-      end
+
+        private def accept_local(
+          listener : TCPServer,
+          token : String,
+        ) : Nil
+          while client = listener.accept?
+            spawn serve_local(client, token)
+          end
+        rescue IO::Error
+        end
+
+        private def serve_local(client : TCPSocket, token : String) : Nil
+          unless LocalIPC.authenticate(client, token)
+            return client.close
+          end
+          serve_client(client, Transport::Local)
+        rescue IO::Error
+          client.close unless client.closed?
+        end
+      {% else %}
+        private def accept_local(listener : UNIXServer) : Nil
+          while client = listener.accept?
+            spawn serve_client(client, Transport::Local)
+          end
+        rescue IO::Error
+        end
+      {% end %}
 
       private def accept_remote(
         listener : TCPServer,
