@@ -1159,16 +1159,25 @@ module Xd
       end
 
       private def remote_menu(node : Node) : Gtk::Popover
-        popover, choices = menu_shell
-        add_choice(choices, popover, "New Workspace") do
+        popover, menu, actions = row_menu_shell
+        add_menu_action(
+          menu, actions, popover, "New Workspace", "new-workspace"
+        ) do
           begin_creating(node.source, node, NodeKind::Folder)
         end
-        add_choice(choices, popover, "Agent Secrets…") do
+        add_menu_action(
+          menu, actions, popover, "Agent Secrets…", "agent-secrets"
+        ) do
           dialogs(node.source).secrets
         end
-        add_choice(choices, popover, "Refresh") { reload }
-        choices.append(Gtk::Separator.new(:horizontal))
-        add_choice(choices, popover, "Remove Connection…") do
+        add_menu_action(menu, actions, popover, "Refresh", "refresh") do
+          reload
+        end
+        section = Gio::Menu.new
+        menu.append_section(nil, section)
+        add_menu_action(
+          section, actions, popover, "Remove Connection…", "remove"
+        ) do
           confirm_remove_remote(node.name)
         end
         popover
@@ -1177,30 +1186,38 @@ module Xd
       private def folder_menu(node : Node) : Gtk::Popover
         source = node.source
         folder_id = node.id
-        popover, choices = menu_shell
-        add_choice(choices, popover, "New Chat") do
+        popover, menu, actions = row_menu_shell
+        add_menu_action(menu, actions, popover, "New Chat", "new-chat") do
           begin_creating(source, node, NodeKind::Chat)
         end
-        add_choice(choices, popover, "New Folder") do
+        add_menu_action(
+          menu, actions, popover, "New Folder", "new-folder"
+        ) do
           begin_creating(source, node, NodeKind::Folder)
         end
-        add_choice(choices, popover, "Rename…") do
+        add_menu_action(menu, actions, popover, "Rename…", "rename") do
           begin_renaming(node)
         end
-        add_choice(choices, popover, "Agent Context…") do
+        add_menu_action(
+          menu, actions, popover, "Agent Context…", "context"
+        ) do
           dialogs(source).context(
             folder_id,
             source.folder_names[folder_id]
           )
         end
-        add_choice(choices, popover, "Agent Secrets…") do
+        add_menu_action(
+          menu, actions, popover, "Agent Secrets…", "secrets"
+        ) do
           dialogs(source).secrets(
             folder_id,
             source.folder_names[folder_id]
           )
         end
         unless source.remote
-          add_choice(choices, popover, "Folder Settings…") do
+          add_menu_action(
+            menu, actions, popover, "Folder Settings…", "settings"
+          ) do
             dialogs(source).settings(
               folder_id,
               source.folder_names[folder_id]
@@ -1208,8 +1225,11 @@ module Xd
           end
         end
 
-        choices.append(Gtk::Separator.new(:horizontal))
-        add_choice(choices, popover, "Move to Trash") do
+        section = Gio::Menu.new
+        menu.append_section(nil, section)
+        add_menu_action(
+          section, actions, popover, "Move to Trash", "trash"
+        ) do
           confirm_trash_folder(source, folder_id)
         end
         popover
@@ -1218,26 +1238,43 @@ module Xd
       private def chat_menu(node : Node) : Gtk::Popover
         source = node.source
         chat_id = node.id
-        popover, choices = menu_shell
-        add_choice(choices, popover, "Rename…") do
+        popover, menu, actions = row_menu_shell
+        add_menu_action(menu, actions, popover, "Rename…", "rename") do
           begin_renaming(node)
         end
-        choices.append(Gtk::Separator.new(:horizontal))
-        add_choice(choices, popover, "Delete Chat") do
+        section = Gio::Menu.new
+        menu.append_section(nil, section)
+        add_menu_action(
+          section, actions, popover, "Delete Chat", "delete"
+        ) do
           delete_chat(source, chat_id)
         end
         popover
       end
 
-      private def menu_shell : {Gtk::Popover, Gtk::Box}
-        popover = Gtk::Popover.new
-        choices = Gtk::Box.new(:vertical, 2)
-        choices.margin_top = 6
-        choices.margin_bottom = 6
-        choices.margin_start = 6
-        choices.margin_end = 6
-        popover.child = choices
-        {popover, choices}
+      private def row_menu_shell : {Gtk::PopoverMenu, Gio::Menu, Gio::SimpleActionGroup}
+        menu = Gio::Menu.new
+        popover = Gtk::PopoverMenu.new_from_model(menu)
+        popover.add_css_class("xd-menu-popover")
+        actions = Gio::SimpleActionGroup.new
+        popover.insert_action_group("row", actions)
+        {popover, menu, actions}
+      end
+
+      private def add_menu_action(
+        menu : Gio::Menu,
+        actions : Gio::SimpleActionGroup,
+        popover : Gtk::Popover,
+        label : String,
+        name : String,
+        &callback : -> Nil
+      ) : Nil
+        action = Gio::SimpleAction.new(name, nil)
+        action.activate_signal.connect do
+          queue_menu_action(popover, callback)
+        end
+        actions.add_action(action)
+        menu.append(label, "row.#{name}")
       end
 
       private def add_choice(
