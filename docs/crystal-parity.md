@@ -50,9 +50,11 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   filesystem- and screenshot-verified under the same fatal-critical check.
 - `[~]` Local, remote-root, folder, and chat menus use the C `GMenu`/
   `GtkPopoverMenu` sections, labels, and action order. Folder/chat mutation
-  failures use the same operation-specific `AdwAlertDialog` headings.
-  Runtime menu-action proof, disabled-state matrix, and new remote-connection
-  error dialogs remain.
+  failures use the same operation-specific `AdwAlertDialog` headings. The
+  exact `09dc473` bundle is screenshot-verified with fatal GTK warnings:
+  header create, folder create/rename, chat create/delete, trash confirmation,
+  and duplicate-name error all survive menu close ordering. Paired remote-root
+  menu/state and new remote-connection error dialogs remain.
 - `[~]` Chat working/waiting/done and remote-root offline transitions match C
   state rules, including animated dots and tooltips; screenshot/event matrix
   remains.
