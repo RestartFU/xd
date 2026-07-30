@@ -131,7 +131,9 @@ module Xd
                 keyval == Gdk::KEY_KP_Enter) &&
                 state.includes?(Gdk::ModifierType::ControlMask)
             save
-            true
+            # GtkEntry's internal GtkText still needs the event so its focus
+            # state is balanced before the asynchronous save closes the panel.
+            false
           else
             false
           end
