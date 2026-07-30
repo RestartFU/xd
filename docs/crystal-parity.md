@@ -98,8 +98,10 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   activity immediately before a completed subagent now moves behind the same
   collapsed arrow toggle as C instead of remaining as a detached transcript
   row. A restored non-Git bundle profile containing generic tools, an inline
-  diff, and a subagent card survives fatal GTK warnings; the broader paired
-  card matrix remains.
+  diff, and a subagent card survives fatal GTK warnings. Codex native
+  file-change items and Claude streamed Edit arguments both produce bounded
+  unified patches without a repository, Git executable, or filesystem
+  snapshot; the broader paired card matrix remains.
 - `[~]` Port the exact `XdMessageRow` hierarchy, typography, selectable text,
   Markdown, syntax highlighting, code blocks, and copy controls. CommonMark,
   safe links, streaming fragments, lists, tables, and Pango validation now
@@ -488,7 +490,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (321 default, 2 PortAudio, and 5
+- `[x]` Crystal specs pass in Docker (322 default, 2 PortAudio, and 5
   authenticated-loopback examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and

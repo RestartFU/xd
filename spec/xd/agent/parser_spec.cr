@@ -234,4 +234,64 @@ describe Xd::Agent::Parser do
     after.count(&.type.tool_use?).should eq(1)
     after.first.text.should eq("file_change  src/main.c")
   end
+
+  it "emits Claude inline edit diffs without a repository" do
+    parser = Xd::Agent::Parser.new(Xd::Agent::Catalog::CLAUDE)
+    request = [
+      {
+        type:  "stream_event",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type:  "tool_use",
+            id:    "toolu_inline_edit",
+            name:  "Edit",
+            input: {} of String => String,
+          },
+        },
+      }.to_json,
+      {
+        type:  "stream_event",
+        event: {
+          type:  "content_block_delta",
+          index: 0,
+          delta: {
+            type: "input_json_delta",
+            partial_json: {
+              file_path: "src/main.c",
+              old_string: "puts(\"old\")\n",
+              new_string: "puts(\"new\")\n",
+            }.to_json,
+          },
+        },
+      }.to_json,
+      {
+        type:  "stream_event",
+        event: {type: "content_block_stop", index: 0},
+      }.to_json,
+    ]
+    request.each { |line| parser.feed_line(line) }
+
+    events = parser.feed_line({
+      type:    "user",
+      message: {
+        content: [
+          {
+            type:        "tool_result",
+            tool_use_id: "toolu_inline_edit",
+            content:     "updated",
+          },
+        ],
+      },
+    }.to_json)
+
+    events.size.should eq(1)
+    patch = events.first.text.not_nil!
+    patch.should start_with(
+      "file_change\ndiff --git a/src/main.c b/src/main.c"
+    )
+    patch.should contain("-puts(\"old\")")
+    patch.should contain("+puts(\"new\")")
+  end
 end
