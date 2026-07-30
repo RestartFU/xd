@@ -18,10 +18,30 @@ require "./pane_state"
 require "./search_dialog"
 require "./sidebar"
 require "./tool_panel"
+require "./transcript_paging"
 
 module Xd
   module UI
     class Window
+      class TranscriptPage
+        getter key : String
+        getter chat_id : String
+        getter endpoint : Daemon::Endpoint
+        getter transcript : Gtk::Box
+        getter paging = TranscriptPaging.new
+        getter workflow_ids = Set(String).new
+        property revision = -1_i64
+        property choices_visible = false
+
+        def initialize(
+          @key : String,
+          @chat_id : String,
+          @endpoint : Daemon::Endpoint,
+          @transcript : Gtk::Box,
+        )
+        end
+      end
+
       class Attachment
         getter name : String
         getter data : String
@@ -60,6 +80,19 @@ module Xd
       @header_sizes : Gtk::SizeGroup
       @syncing_panes = false
       @search_dialog : SearchDialog?
+      @empty_transcript : Gtk::Box
+      @transcript : Gtk::Box
+      @transcript_stack : Gtk::Stack
+      @transcript_pages : Hash(String, TranscriptPage)
+      @transcript_lru : TranscriptLru
+      @transcript_page : TranscriptPage?
+      @follow_bottom = true
+      @history_bottom_distance = -1.0
+      @bottom_pin_tick = 0_u32
+      @bottom_jump_tick = 0_u32
+      @bottom_jump_upper = -1.0
+      @bottom_jump_page_size = -1.0
+      @bottom_jump_stable_frames = 0
 
       def initialize(
         application : Gtk::Application,
@@ -135,20 +168,29 @@ module Xd
         @controls.widget.margin_start = 6
         @controls.widget.margin_end = 6
 
-        @transcript = Gtk::Box.new(:vertical, 8)
-        @transcript.valign = :start
+        @transcript_pages = {} of String => TranscriptPage
+        @transcript_lru = TranscriptLru.new
+        @transcript_page = nil
+        @empty_transcript = new_transcript
+        @transcript = @empty_transcript
+        @transcript_stack = Gtk::Stack.new
+        @transcript_stack.hhomogeneous = true
+        @transcript_stack.vhomogeneous = false
+        @transcript_stack.transition_type = :none
+        @transcript_stack.add_named(@empty_transcript, "empty")
 
         @transcript_scroll = Gtk::ScrolledWindow.new
         @transcript_scroll.vexpand = true
         @transcript_scroll.set_policy(:never, :external)
         transcript_clamp = Adw::Clamp.new(
-          child: @transcript,
+          child: @transcript_stack,
           maximum_size: 1040,
           tightening_threshold: 1040
         )
         transcript_clamp.margin_top = 12
         transcript_clamp.margin_bottom = 12
         @transcript_scroll.child = transcript_clamp
+        install_transcript_scrolling
 
         @entry = Gtk::TextView.new
         @entry.hexpand = true
@@ -603,10 +645,14 @@ module Xd
       end
 
       private def remote_forgot : Nil
-        return unless @client.same?(@remote)
-
-        @client = @local_client
-        clear_active_chat
+        if @client.same?(@remote)
+          @client = @local_client
+          clear_active_chat
+        end
+        keys = @transcript_pages.values
+          .select { |page| page.endpoint.same?(@remote) }
+          .map(&.key)
+        keys.each { |key| remove_transcript_page(key) }
       end
 
       private def call(fields : Hash(String, JSON::Any))
@@ -624,11 +670,98 @@ module Xd
         nil
       end
 
+      private def new_transcript : Gtk::Box
+        transcript = Gtk::Box.new(:vertical, 8)
+        transcript.valign = :start
+        transcript
+      end
+
+      private def transcript_page_key(
+        endpoint : Daemon::Endpoint,
+        chat_id : String,
+      ) : String
+        if endpoint.same?(@local_client)
+          "local:#{chat_id}"
+        else
+          "remote:#{endpoint.object_id}:#{chat_id}"
+        end
+      end
+
+      private def activate_transcript_page(
+        endpoint : Daemon::Endpoint,
+        chat_id : String,
+      ) : Bool
+        key = transcript_page_key(endpoint, chat_id)
+        reused = !!@transcript_pages[key]?
+        page = @transcript_pages[key]? || begin
+          transcript = new_transcript
+          created = TranscriptPage.new(
+            key,
+            chat_id,
+            endpoint,
+            transcript
+          )
+          @transcript_stack.add_named(transcript, key)
+          @transcript_pages[key] = created
+          created
+        end
+
+        @transcript_stack.visible_child = page.transcript
+        @transcript = page.transcript
+        @transcript_page = page
+        @workflow_ids = page.workflow_ids
+        if evicted = @transcript_lru.touch(key)
+          remove_transcript_page(evicted)
+        end
+        reused
+      end
+
+      private def activate_empty_transcript : Nil
+        @transcript_stack.visible_child = @empty_transcript
+        @transcript = @empty_transcript
+        @transcript_page = nil
+        @workflow_ids = Set(String).new
+      end
+
+      private def remove_transcript_page(key : String) : Nil
+        page = @transcript_pages.delete(key)
+        return unless page
+
+        @transcript_lru.delete(key)
+        @transcript_stack.remove(page.transcript)
+      end
+
+      private def current_transcript_cacheable? : Bool
+        page = @transcript_page
+        return false unless page
+        return true unless @client.same?(@local_client)
+
+        !@working && !page.choices_visible
+      end
+
+      private def leave_current_transcript(keep : Bool) : Nil
+        page = @transcript_page
+        return unless page
+
+        page.revision = -1_i64 if @working
+        @transcript_lru.touch(page.key)
+        return if keep
+
+        activate_empty_transcript
+        remove_transcript_page(page.key)
+      end
+
       private def open_chat(
         endpoint : Daemon::Endpoint,
         id : String,
         title : String,
       ) : Nil
+        changed = @active_chat != id || !@client.same?(endpoint)
+        if changed
+          leave_current_transcript(current_transcript_cacheable?)
+          @follow_bottom = true
+          @history_bottom_distance = -1.0
+        end
         remember_panes
         hide_panes_for_switch
         clear_attachments
@@ -650,6 +783,10 @@ module Xd
         @diff_button.sensitive = true
         @tool_panel.select_chat(id, pane_key)
         apply_panes(saved_panes)
+        if changed
+          activate_transcript_page(endpoint, id)
+          begin_bottom_jump
+        end
         load_chat_state
         load_messages
         @entry.grab_focus
@@ -659,7 +796,11 @@ module Xd
         endpoint : Daemon::Endpoint,
         id : String,
       ) : Nil
-        return unless @client.same?(endpoint) && @active_chat == id
+        active = @client.same?(endpoint) && @active_chat == id
+        unless active
+          remove_transcript_page(transcript_page_key(endpoint, id))
+          return
+        end
 
         clear_active_chat
       end
@@ -667,6 +808,7 @@ module Xd
       private def clear_active_chat : Nil
         remember_panes
         hide_panes_for_switch
+        leave_current_transcript(false)
         @active_chat = nil
         @sidebar.clear_active_chat
         @settings.set_string("active-chat", "")
@@ -687,8 +829,6 @@ module Xd
         @file_button.sensitive = false
         @diff_button.sensitive = false
         @tool_panel.select_chat(nil, nil)
-        clear(@transcript)
-        @workflow_ids.clear
         clear(@queue_box)
         @queue_box.visible = false
         clear_attachments
@@ -706,20 +846,36 @@ module Xd
         end
       end
 
-      private def load_messages : Nil
+      private def load_messages(force = false) : Nil
         chat_id = @active_chat
         return unless chat_id
+        page = @transcript_page
+        return unless page
 
         response = call({
-          "op"   => JSON::Any.new("messages"),
-          "chat" => JSON::Any.new(chat_id),
+          "op"    => JSON::Any.new("messages"),
+          "chat"  => JSON::Any.new(chat_id),
+          "limit" => JSON::Any.new(page.paging.query_limit.to_i64),
         })
         return unless response
+        return unless @transcript_page.same?(page)
 
+        revision = response["last_message_id"]?.try(&.as_i64?) || 0_i64
+        return if !force && page.revision == revision
+
+        if @follow_bottom
+          begin_bottom_jump
+        end
+        page.choices_visible = false
         clear(@transcript)
         @workflow_ids.clear
-        messages = response["messages"].as_a
-        messages.each_with_index do |message, index|
+        messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
+        total = response["total_messages"]?.try(&.as_i64?) ||
+                messages.size.to_i64
+        append_history_button(page, total, messages.size)
+        start = page.paging.start(messages.size)
+        (start...messages.size).each do |index|
+          message = messages[index]
           add_message(
             message["role"].as_s,
             message["content"].as_s,
@@ -727,8 +883,37 @@ module Xd
             reply_answerable?(messages, index)
           )
         end
+        page.revision = revision
         @stream_row = nil
         scroll_to_bottom
+      end
+
+      private def append_history_button(
+        page : TranscriptPage,
+        total : Int64,
+        fetched : Int,
+      ) : Nil
+        label = page.paging.earlier_label(total, fetched)
+        return unless label
+
+        button = Gtk::Button.new_with_label(label)
+        button.halign = :center
+        button.margin_bottom = 8
+        button.add_css_class("flat")
+        button.add_css_class("pill")
+        button.clicked_signal.connect { load_earlier_messages(page) }
+        @transcript.append(button)
+      end
+
+      private def load_earlier_messages(page : TranscriptPage) : Nil
+        return unless @transcript_page.same?(page)
+
+        adjustment = @transcript_scroll.vadjustment
+        @follow_bottom = false
+        @history_bottom_distance =
+          adjustment.upper - adjustment.value
+        page.paging.load_earlier
+        load_messages(force: true)
       end
 
       private def add_message(
@@ -855,6 +1040,9 @@ module Xd
       end
 
       private def append_ask(ask : Agent::Ask) : Nil
+        if page = @transcript_page
+          page.choices_visible = true
+        end
         choices = Gtk::Box.new(:vertical, 5)
         choices.add_css_class("xd-ask")
 
@@ -918,6 +1106,7 @@ module Xd
           request["attachments"] = JSON::Any.new(attachments)
         end
 
+        begin_bottom_jump
         response = call(request)
         if response
           @entry.buffer.text = ""
@@ -1351,12 +1540,121 @@ module Xd
         end
       end
 
-      private def scroll_to_bottom : Nil
-        GLib.idle_add do
-          adjustment = @transcript_scroll.vadjustment
-          adjustment.value = adjustment.upper
+      private def install_transcript_scrolling : Nil
+        adjustment = @transcript_scroll.vadjustment
+        adjustment.changed_signal.connect do
+          on_scroll_adjustment_changed(adjustment)
+        end
+        adjustment.value_changed_signal.connect do
+          on_scroll_adjustment_changed(adjustment)
+        end
+
+        scroll = Gtk::EventControllerScroll.new(
+          Gtk::EventControllerScrollFlags::Vertical
+        )
+        scroll.propagation_phase = Gtk::PropagationPhase::Capture
+        scroll.scroll_signal.connect do |_dx, dy|
+          on_transcript_scrolled(dy)
           false
         end
+        @transcript_scroll.add_controller(scroll)
+      end
+
+      private def set_scroll_at_bottom(
+        adjustment = @transcript_scroll.vadjustment,
+      ) : Nil
+        bottom = Math.max(
+          adjustment.lower,
+          adjustment.upper - adjustment.page_size
+        )
+        adjustment.value = bottom if adjustment.value != bottom
+      end
+
+      private def queue_bottom_pin : Nil
+        return unless @bottom_pin_tick == 0
+
+        callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
+          @bottom_pin_tick = 0_u32
+          set_scroll_at_bottom if @follow_bottom
+          false
+        }
+        @bottom_pin_tick =
+          @transcript_scroll.add_tick_callback(callback)
+      end
+
+      private def begin_bottom_jump : Nil
+        @follow_bottom = true
+        @history_bottom_distance = -1.0
+        @bottom_jump_upper = -1.0
+        @bottom_jump_page_size = -1.0
+        @bottom_jump_stable_frames = 0
+        @transcript_scroll.opacity = 0.0
+        return unless @bottom_jump_tick == 0
+
+        callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
+          adjustment = @transcript_scroll.vadjustment
+          upper = adjustment.upper
+          page_size = adjustment.page_size
+          set_scroll_at_bottom(adjustment)
+
+          if upper == @bottom_jump_upper &&
+             page_size == @bottom_jump_page_size
+            @bottom_jump_stable_frames += 1
+          else
+            @bottom_jump_stable_frames = 0
+          end
+          @bottom_jump_upper = upper
+          @bottom_jump_page_size = page_size
+
+          if @bottom_jump_stable_frames >= 2
+            @bottom_jump_tick = 0_u32
+            @transcript_scroll.queue_draw
+            @transcript_scroll.opacity = 1.0
+            false
+          else
+            true
+          end
+        }
+        @bottom_jump_tick =
+          @transcript_scroll.add_tick_callback(callback)
+      end
+
+      private def on_scroll_adjustment_changed(
+        adjustment : Gtk::Adjustment,
+      ) : Nil
+        bottom = Math.max(
+          adjustment.lower,
+          adjustment.upper - adjustment.page_size
+        )
+
+        if @follow_bottom
+          queue_bottom_pin
+        elsif adjustment.value >= bottom - 1.0
+          @follow_bottom = true
+          @history_bottom_distance = -1.0
+        elsif @history_bottom_distance >= 0
+          value = Math.max(
+            adjustment.lower,
+            adjustment.upper - @history_bottom_distance
+          )
+          adjustment.value = value if adjustment.value != value
+        end
+      end
+
+      private def on_transcript_scrolled(dy : Float64) : Nil
+        adjustment = @transcript_scroll.vadjustment
+        if dy < 0 && adjustment.value > adjustment.lower
+          @follow_bottom = false
+          @history_bottom_distance = -1.0
+        end
+      end
+
+      private def scroll_to_bottom : Nil
+        return unless @follow_bottom
+
+        @history_bottom_distance = -1.0
+        set_scroll_at_bottom
+        queue_bottom_pin
       end
     end
   end
