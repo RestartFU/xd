@@ -109,6 +109,7 @@ module Xd
       @stream_source : String?
       @stream_reveal = TextReveal.new
       @stream_render_timer = 0_u32
+      @live_turn_key : String?
       @clock_origin : Time::Instant
 
       def initialize(
@@ -125,6 +126,7 @@ module Xd
         @working_dots = nil
         @working_started_at = nil
         @stream_source = nil
+        @live_turn_key = nil
         @clock_origin = Time.instant
         @search_dialog = nil
         @settings = Gio::Settings.new(APP_ID)
@@ -811,8 +813,8 @@ module Xd
           activate_transcript_page(endpoint, id)
           begin_bottom_jump
         end
-        load_chat_state
         load_messages
+        load_chat_state
         @entry.grab_focus
       end
 
@@ -891,6 +893,7 @@ module Xd
           begin_bottom_jump
         end
         page.choices_visible = false
+        @live_turn_key = nil
         reset_stream_segment
         remove_working_row(reset_started_at: false)
         clear(@transcript)
@@ -1658,6 +1661,43 @@ module Xd
         remove_working_row
         @working = false
         @stream_source = nil
+        @live_turn_key = nil
+      end
+
+      private def recover_active_turn(
+        state : Hash(String, JSON::Any),
+      ) : Nil
+        page = @transcript_page
+        return unless page
+        return if @live_turn_key == page.key
+
+        @stream_source = state["label"]?.try(&.as_s?)
+        elapsed = state["working_for"]?.try(&.as_i64?) || 0_i64
+        @working_started_at = Time.instant - Math.max(elapsed, 0_i64).seconds
+
+        items = state["items"]?.try(&.as_a?) || [] of JSON::Any
+        items.each do |node|
+          item = node.as_h
+          text = item["text"]?.try(&.as_s?) || ""
+          if item["tool"]?.try(&.as_bool?) == true
+            add_message("tool", text)
+          elsif !text.empty?
+            row = add_message("assistant", text)
+            row.try { |message| message.source = @stream_source }
+          end
+        end
+
+        segment = state["segment"]?.try(&.as_s?) || ""
+        unless segment.empty?
+          @stream_buffer = segment
+          @stream_reveal.sync(segment)
+          @stream_row = add_message("assistant", segment)
+          @stream_row.try { |message| message.source = @stream_source }
+        end
+
+        @live_turn_key = page.key
+        keep_working_last
+        scroll_to_bottom
       end
 
       private def load_chat_state : Nil
@@ -1672,7 +1712,14 @@ module Xd
 
         @controls.update(state)
         working = state["working"]?.try(&.as_bool?) || false
-        set_working(working)
+        if working
+          recover_active_turn(state)
+          set_working(true)
+          keep_working_last
+        else
+          @live_turn_key = nil
+          set_working(false)
+        end
         @send.label = @working ? "Stop" : "Send"
         if @working
           @send.remove_css_class("suggested-action")
@@ -1762,6 +1809,7 @@ module Xd
         when "turn-started"
           return unless active_event?(endpoint, event)
           reset_stream_segment
+          @live_turn_key = nil
           @stream_source = event["label"]?.try(&.as_s?)
           @working_started_at = Time.instant
           set_working(true)

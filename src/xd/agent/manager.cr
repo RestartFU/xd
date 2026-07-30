@@ -97,6 +97,14 @@ module Xd
       Queued
     end
 
+    record TurnItem, text : String, tool : Bool
+
+    record TurnSnapshot,
+      label : String,
+      working_for : Int64,
+      segment : String,
+      items : Array(TurnItem)
+
     class Manager
       class Error < Exception
       end
@@ -129,7 +137,7 @@ module Xd
           @label,
           @workdir,
           @transcript_message_id,
-          @started_at = Time.instant,
+          @started_at,
         )
           @diff_tracker = GitDiffTracker.open(@workdir)
         end
@@ -148,6 +156,7 @@ module Xd
         @launcher : Launcher = ProcessLauncher.new("unknown"),
         @on_event : Proc(String, Hash(String, JSON::Any), Nil) = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
         worktree_service : Workspace::Worktrees? = nil,
+        @clock : Proc(Time::Instant) = -> { Time.instant },
       )
         @worktree_service = worktree_service ||
                             Workspace::Worktrees.new(@store, @workspaces)
@@ -230,6 +239,34 @@ module Xd
       def transcript_message_id(chat_id : String) : Int64?
         @mutex.synchronize do
           @turns[chat_id]?.try(&.transcript_message_id)
+        end
+      end
+
+      def active_turn(chat_id : String) : TurnSnapshot?
+        @mutex.synchronize do
+          turn = @turns[chat_id]?
+          next unless turn
+
+          visible_bytes = Math.min(
+            Ask.visible_bytes(turn.segment),
+            WorkspaceBlock.visible_bytes(turn.segment)
+          )
+          segment = turn.segment.byte_slice(0, visible_bytes)
+          items = @store.list_messages_since(
+            chat_id,
+            turn.transcript_message_id
+          ).compact_map do |message|
+            next if message.id == turn.segment_message_id
+            next unless message.role == "assistant" ||
+                        message.role == "tool"
+
+            TurnItem.new(message.content, message.role == "tool")
+          end
+          elapsed = Math.max(
+            (@clock.call - turn.started_at).total_seconds.to_i64,
+            0_i64
+          )
+          TurnSnapshot.new(turn.label, elapsed, segment, items)
         end
       end
 
@@ -331,7 +368,8 @@ module Xd
             effort,
             "#{backend.model_label(model)} · #{effort.label}",
             workdir,
-            transcript_message_id
+            transcript_message_id,
+            @clock.call
           )
 
           @mutex.synchronize do
@@ -514,7 +552,7 @@ module Xd
         asked = Ask.parse(turn.segment).try(&.ask)
         close_segment(turn)
         elapsed = Math.max(
-          (Time.instant - turn.started_at).total_seconds.to_i64,
+          (@clock.call - turn.started_at).total_seconds.to_i64,
           0_i64
         )
         @store.append_message(turn.chat_id, "duration", elapsed.to_s)

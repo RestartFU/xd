@@ -67,7 +67,8 @@ module Xd
           ->(name : String, fields : Hash(String, JSON::Any)) {
             publish_async_event(name, fields)
           },
-          @git_worktrees
+          @git_worktrees,
+          clock: @clock
         )
       end
 
@@ -666,7 +667,21 @@ module Xd
         fields["plan"] = JSON::Any.new(stored.plan)
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?
         fields["queue"] = json_any(stored.queue)
-        fields["working"] = JSON::Any.new(stored.daemon_working)
+        active_turn = @agents.active_turn(chat_id)
+        fields["working"] = JSON::Any.new(
+          !active_turn.nil? || stored.daemon_working
+        )
+        if turn = active_turn
+          fields["label"] = JSON::Any.new(turn.label)
+          fields["working_for"] = JSON::Any.new(turn.working_for)
+          fields["segment"] = JSON::Any.new(turn.segment)
+          fields["items"] = JSON::Any.new(turn.items.map do |item|
+            JSON::Any.new({
+              "text" => JSON::Any.new(item.text),
+              "tool" => JSON::Any.new(item.tool),
+            })
+          end)
+        end
         fields["model"] = JSON::Any.new(stored.model) if stored.model
         fields["effort"] = JSON::Any.new(stored.effort) if stored.effort
         fields["access"] = JSON::Any.new(stored.access) if stored.access

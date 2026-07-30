@@ -30,6 +30,7 @@ end
 private class EngineLauncher < Xd::Agent::Launcher
   getter specs = [] of Xd::Agent::RunSpec
   getter handles = [] of EngineSessionHandle
+  getter event_callbacks = [] of Proc(Xd::Agent::Event, Nil)
   getter finish_callbacks = [] of Proc(Bool, String?, Nil)
 
   def start(
@@ -43,8 +44,13 @@ private class EngineLauncher < Xd::Agent::Launcher
     handle = EngineSessionHandle.new
     @specs << spec
     @handles << handle
+    @event_callbacks << on_event
     @finish_callbacks << on_finished
     handle
+  end
+
+  def emit(index : Int, event : Xd::Agent::Event) : Nil
+    @event_callbacks[index].call(event)
   end
 end
 
@@ -384,6 +390,33 @@ describe Xd::Daemon::Engine do
         launcher.specs.first.prompt.should eq("inspect")
         seen.map { |event| event["event"].as_s }
           .should contain("turn-started")
+
+        launcher.emit(0, Xd::Agent::Event.new(
+          Xd::Agent::EventType::TextDelta,
+          text: "Before."
+        ))
+        launcher.emit(0, Xd::Agent::Event.new(
+          Xd::Agent::EventType::ToolUse,
+          text: "Read src/main.cr"
+        ))
+        launcher.emit(0, Xd::Agent::Event.new(
+          Xd::Agent::EventType::TextDelta,
+          text: "After."
+        ))
+        state = engine.dispatch(local, {
+          "op"   => "chat",
+          "chat" => chat,
+        }.to_json)
+        state["working"].as_bool.should be_true
+        state["label"].as_s.should start_with("Claude Opus 5 · ")
+        state["working_for"].as_i64.should be >= 0
+        state["segment"].as_s.should eq("After.")
+        state["items"].as_a.map do |item|
+          {item["text"].as_s, item["tool"].as_bool}
+        end.should eq([
+          {"Before.", false},
+          {"Read src/main.cr", true},
+        ])
 
         engine.dispatch(local, {
           "op"   => "cancel",

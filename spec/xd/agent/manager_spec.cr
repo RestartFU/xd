@@ -216,6 +216,38 @@ describe Xd::Agent::Manager do
     end
   end
 
+  it "snapshots a running turn for clients that join late" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      manager.send(chat_id, "inspect")
+
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "Before."
+      ))
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::ToolUse,
+        text: "Read src/main.cr"
+      ))
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "After.<ask>\nChoose?\n- Yes\n- No\n</ask>"
+      ))
+
+      snapshot = manager.active_turn(chat_id).not_nil!
+      snapshot.label.should start_with("Claude Opus 5 · ")
+      snapshot.working_for.should be >= 0
+      snapshot.items.should eq([
+        Xd::Agent::TurnItem.new("Before.", false),
+        Xd::Agent::TurnItem.new("Read src/main.cr", true),
+      ])
+      snapshot.segment.should eq("After.")
+
+      launcher.finish(0, true)
+      manager.active_turn(chat_id).should be_nil
+    end
+  end
+
   it "accepts only a registered workspace report" do
     with_agent_manager do |manager, store, workspaces, folder_id, launcher, events|
       repository = workspaces.find_folder(folder_id)
