@@ -40,8 +40,9 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   route through one daemon endpoint interface.
 - `[~]` C `GtkTreeListModel`/`GtkListView` rows, indentation, expanders,
   selection, activation, expansion persistence, and state dots are ported and
-  populated-tree startup is screenshot-verified; inline editing and drag/drop
-  remain.
+  populated-tree startup is screenshot-verified. Inline create/rename is
+  gesture-tested for Enter, Escape, and click-away with fatal GTK criticals
+  enabled; drag/drop remains.
 - `[ ]` Match local and remote root menus, confirmations, disabled states, and
   error presentation exactly.
 - `[ ]` Match chat working/waiting/done/offline state transitions.

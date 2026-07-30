@@ -460,7 +460,15 @@ module Xd
         editor_focus.leave_signal.connect do
           node = @bound_nodes[pointer_key(box)]?
           if node && @editing_key == node.key
-            end_editing(true)
+            # Rebuilding the list inside GTK's focus traversal invalidates the
+            # widget chain that the current click is still walking. The C tree
+            # mutates individual rows; this snapshot-backed client waits one
+            # idle before its equivalent rebuild.
+            key = node.key
+            GLib.idle_add do
+              end_editing(true) if @editing_key == key
+              false
+            end
           end
         end
         entry.add_controller(editor_focus)
@@ -884,7 +892,6 @@ module Xd
 
         if previous = @row_popover
           previous.popdown
-          previous.unparent if previous.parent
         end
 
         popover = case node.kind
@@ -902,11 +909,19 @@ module Xd
         popover.parent = box
         @row_popover = popover
         popover.closed_signal.connect do
-          popover.unparent if popover.parent
-          if @row_popover.try(&.to_unsafe) == popover.to_unsafe
-            @row_popover = nil
+          # GtkModelButton closes a popover before its action runs. Keep the
+          # row attached through that activation, exactly as the C sidebar
+          # does, then detach from an idle so recycled list rows stay safe.
+          GLib.idle_add do
+            unless popover.visible?
+              popover.unparent if popover.parent
+              if @row_popover.try(&.to_unsafe) == popover.to_unsafe
+                @row_popover = nil
+              end
+              finish_menu_action(popover)
+            end
+            false
           end
-          finish_menu_action(popover)
         end
         popover.popup
       end
