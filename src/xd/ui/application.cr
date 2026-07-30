@@ -20,7 +20,7 @@ module Xd
 
       application.activate_signal.connect do
         begin
-          application.style_manager.color_scheme =
+          Adw::StyleManager.default.color_scheme =
             Adw::ColorScheme::ForceDark
           install_style
           runtime ||= Runtime.new
