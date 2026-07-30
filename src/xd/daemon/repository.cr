@@ -286,7 +286,10 @@ module Xd
       end
 
       private def working_all(workdir : String, root : String) : String
-        output = capture(workdir, ["--no-pager", "diff", "HEAD"])
+        output = capture(
+          workdir,
+          ["--no-pager", "diff", working_treeish(workdir)]
+        )
         untracked = capture(
           workdir,
           ["ls-files", "--others", "--exclude-standard", "-z"]
@@ -308,6 +311,23 @@ module Xd
           end
         end
         output
+      end
+
+      private def working_treeish(workdir : String) : String
+        head = run(
+          workdir,
+          ["rev-parse", "--verify", "--quiet", "HEAD"]
+        )[1]
+        return "HEAD" if head.success?
+
+        empty = capture(
+          workdir,
+          ["hash-object", "-t", "tree", "/dev/null"]
+        ).strip
+        if empty.empty?
+          raise Error.new("Git could not create an empty repository baseline.")
+        end
+        empty
       end
 
       private def repository_root(workdir : String) : String

@@ -15,6 +15,7 @@ private def git(workdir : String, *arguments : String) : Nil
 end
 
 private def with_repository(
+  commit : Bool = true,
   & : Xd::Daemon::Repository, String, String ->
 ) : Nil
   directory = File.join(
@@ -41,7 +42,7 @@ private def with_repository(
   git(folder, "config", "user.name", "Test")
   File.write(File.join(folder, "tracked.txt"), "before\n")
   git(folder, "add", "tracked.txt")
-  git(folder, "commit", "-q", "-m", "initial")
+  git(folder, "commit", "-q", "-m", "initial") if commit
 
   begin
     yield repository, folder, chat_id
@@ -77,6 +78,19 @@ describe Xd::Daemon::Repository do
       all = repository.read(chat_id, "working-all", nil, nil)
       all.should contain("+after")
       all.should contain("nested/new.txt")
+    end
+  end
+
+  it "reads staged, unstaged, and untracked files before the first commit" do
+    with_repository(commit: false) do |repository, folder, chat_id|
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+      File.write(File.join(folder, "new.txt"), "new\n")
+
+      all = repository.read(chat_id, "working-all", nil, nil)
+      all.should contain("tracked.txt")
+      all.should contain("+after")
+      all.should contain("new.txt")
+      all.should contain("+new")
     end
   end
 
