@@ -1,6 +1,7 @@
 require "gtk4"
 require "../markdown"
 require "./adw"
+require "./diff_view"
 require "./host_launch"
 require "./message_content"
 
@@ -145,22 +146,30 @@ module Xd
         diff : Bool,
         wrap : Bool,
       ) : Gtk::Box
-        label = Gtk::Label.new(code)
-        label.wrap = wrap
-        label.wrap_mode = :word_char
-        label.xalign = 0_f32
-        label.selectable = true
-        label.add_css_class("xd-body")
-
         content : Gtk::Widget
-        if wrap
-          content = label
-        else
+        if diff
           scroller = Gtk::ScrolledWindow.new
           scroller.set_policy(:automatic, :never)
           scroller.propagate_natural_height = true
-          scroller.child = label
+          scroller.child = DiffView.build(code, true)
           content = scroller
+        else
+          label = Gtk::Label.new(code)
+          label.wrap = wrap
+          label.wrap_mode = :word_char
+          label.xalign = 0_f32
+          label.selectable = true
+          label.add_css_class("xd-body")
+
+          if wrap
+            content = label
+          else
+            scroller = Gtk::ScrolledWindow.new
+            scroller.set_policy(:automatic, :never)
+            scroller.propagate_natural_height = true
+            scroller.child = label
+            content = scroller
+          end
         end
         content.hexpand = true
 
