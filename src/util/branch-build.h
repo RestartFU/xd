@@ -15,9 +15,9 @@ G_BEGIN_DECLS
  * What comes out is a nightly like any other, at the nightly's paths, and the
  * update button is the way back to master.
  *
- * The machine needs git and docker, which is what building xd has always
- * needed. Nothing here is done for a release build: an installed nightly is
- * the only thing this can replace.
+ * The machine needs Docker; Git comes from the installed bundle. Nothing here
+ * is done for a release build: an installed nightly is the only thing this can
+ * replace.
  */
 
 /*

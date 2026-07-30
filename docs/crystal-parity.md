@@ -354,6 +354,9 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 
 - `[x]` Pinned official Codex and Claude native binaries ship in the Linux
   bundle.
+- `[x]` Pinned Git, its exec-path helpers, templates, HTTPS transport, and CA
+  roots ship in the Linux bundle; a no-host-Git smoke test covers repository
+  creation, commits, diffs, worktrees, and HTTPS helper loading.
 - `[x]` Agent execution resolves bundled binaries before host binaries.
 - `[~]` Daemon-owned CLI updater runs the official `codex update` and
   `claude update` commands asynchronously, checks structured before/after
@@ -408,7 +411,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 - `[x]` Installers reject replacement while xd is running, preventing GNOME
   from reactivating a stale GtkApplication after an update.
 - `[x]` Linux bundle carries GTK, libadwaita, VTE, GL, fonts, icons, MIME, TLS,
-  OpenSSL, Codex, and Claude.
+  OpenSSL, Git, Codex, and Claude.
 - `[ ]` Replace paused legacy macOS and Windows packaging with Crystal-native
   builds; do not publish old C artifacts under Crystal releases.
 - `[x]` README and CI use the Crystal Docker workflow; no active workflow builds

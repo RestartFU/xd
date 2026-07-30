@@ -595,7 +595,7 @@ xd_branch_build_dialog_present (GtkWidget             *parent,
 
   description = gtk_label_new (
     "The branch is fetched, built the way the nightly is built, and installed "
-    "over this copy. It needs git and docker. The update button puts the "
+    "over this copy. It needs Docker; Git is bundled. The update button puts the "
     "nightly back.");
   gtk_label_set_xalign (GTK_LABEL (description), 0.0f);
   gtk_label_set_wrap (GTK_LABEL (description), TRUE);

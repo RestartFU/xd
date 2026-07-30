@@ -137,6 +137,8 @@ FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+ARG GIT_VERSION=2.47.3
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       adwaita-icon-theme \
       ca-certificates \
@@ -148,6 +150,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-inter \
       fonts-jetbrains-mono \
       fonts-noto-color-emoji \
+      git \
       glib-networking \
       libegl-mesa0 \
       libegl1 \
@@ -164,6 +167,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       patchelf \
       shared-mime-info \
       xkb-data \
+    && git --version | grep -F "git version $GIT_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep established CI target name.
@@ -177,8 +181,11 @@ ARG PROFILE=default
 WORKDIR /src
 COPY data ./data
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
+COPY scripts/smoke-bundle.sh /usr/local/bin/smoke-bundle.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 COPY scripts/claude.sh /stage/usr/libexec/claude
+COPY scripts/git.sh /stage/usr/bin/git
+COPY scripts/git-helper.sh /stage/usr/libexec/git-helper
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
 COPY scripts/whisper.sh /stage/usr/libexec/whisper
 COPY --from=crystal /crystal-build/xd /stage/usr/bin/xd
@@ -225,14 +232,21 @@ RUN set -eux; \
     install -m0644 \
       data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg \
       /stage/usr/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg; \
+    install -Dm755 /usr/bin/git /stage/usr/libexec/git-bin; \
+    cp -a /usr/lib/git-core /stage/usr/libexec/git-core-real; \
+    mkdir -p /stage/usr/share/git-core; \
+    cp -a /usr/share/git-core/templates /stage/usr/share/git-core/; \
     mv /usr/bin/openssl /stage/usr/libexec/openssl-bin; \
     chmod 0755 \
+      /stage/usr/bin/git \
       /stage/usr/libexec/claude \
+      /stage/usr/libexec/git-helper \
       /stage/usr/libexec/openssl \
       /stage/usr/libexec/whisper; \
     desktop-file-validate "/stage/usr/share/applications/$app_id.desktop"; \
     bash /usr/local/bin/bundle.sh \
-      /stage /out /usr/local/share/xd-launcher.sh
+      /stage /out /usr/local/share/xd-launcher.sh; \
+    sh /usr/local/bin/smoke-bundle.sh /out
 
 # --- export ----------------------------------------------------------------
 FROM scratch AS bundle

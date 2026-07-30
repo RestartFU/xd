@@ -51,7 +51,7 @@ module Xd
 
         description = Gtk::Label.new(
           "The branch is fetched, built the way the nightly is built, " \
-          "and installed over this copy. It needs git and docker. " \
+          "and installed over this copy. It needs Docker; Git is bundled. " \
           "The update button puts the nightly back."
         )
         description.xalign = 0_f32

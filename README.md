@@ -19,7 +19,7 @@ Personal
 ```
 
 The app does not talk to AI APIs itself. Its bundle ships pinned native Codex
-and Claude Code CLIs, runs them as subprocesses, and uses their normal
+and Claude Code CLIs plus Git, runs them as subprocesses, and uses their normal
 authentication/config directories.
 
 ## Test the Crystal rewrite
@@ -47,8 +47,8 @@ curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh 
 
 That fetches the latest nightly, puts it in `~/.local/opt/xd-nightly`, adds the
 command `xd-nightly` and an entry in the app menu. No root, no package manager,
-and nothing compiled: the bundle carries its own GTK and everything under it, so
-it runs anywhere with glibc.
+and nothing compiled: the bundle carries its own GTK, Git, and everything under
+them, so it runs anywhere with glibc.
 
 Chats and workspaces live in `~/.local/share/xd-nightly`, which is the nightly's
 own — it installs beside a release rather than over it, and neither edits the
@@ -60,8 +60,8 @@ update button in the sidebar takes a pull request link, a branch link, a number
 or a branch name; it fetches that code, builds the bundle the way the nightly is
 built and installs the result over itself, then offers the restart. What it is
 given is remembered, so trying the next commit on the same branch is opening it
-and pressing the one button. Docker and git are what it needs, and Linux is
-where it runs; the update button is the way back to master's nightly.
+and pressing the one button. Docker is what it needs; Git comes with xd. Linux
+is where it runs, and the update button is the way back to master's nightly.
 
 Crystal builds currently target Linux x86_64. Windows and macOS installers are
 paused until they build this same Crystal client and daemon; old C artifacts
@@ -88,11 +88,11 @@ system GTK such as NixOS.
 ```
 
 The app itself is deliberately *not* run inside Docker. Its daemon starts the
-bundled Codex and Claude CLIs and uses credentials stored on the daemon host.
-For a paired chat, authentication, CLI updates, and speech-model downloads all
-happen on that remote host. The launcher invokes the bundled loader with
-`--library-path` rather than exporting `LD_LIBRARY_PATH`, so ordinary child
-processes still use host libraries.
+bundled Codex, Claude, and Git CLIs and uses credentials stored on the daemon
+host. For a paired chat, authentication, CLI updates, repository operations,
+and speech-model downloads all happen on that remote host. The launcher invokes
+the bundled loader with `--library-path` rather than exporting
+`LD_LIBRARY_PATH`, so ordinary child processes still use host libraries.
 
 ### Known wart
 

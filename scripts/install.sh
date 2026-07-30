@@ -18,9 +18,9 @@
 # most recent nightly.
 #
 # Nothing is compiled and nothing is needed on the machine: the bundle carries
-# its own GTK, glib and everything under them, so it runs on any glibc x86_64
-# system. It goes in the home directory -- no root, no package manager, and
-# nothing outside these three paths:
+# its own GTK, glib, Git and everything under them, so it runs on any glibc
+# x86_64 system. It goes in the home directory -- no root, no package manager,
+# and nothing outside these paths:
 #
 #   ~/.local/opt/xd-nightly           the program
 #   ~/.local/bin/xd-nightly           the command

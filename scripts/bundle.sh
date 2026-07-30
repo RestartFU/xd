@@ -28,10 +28,30 @@ mkdir -p "$OUT/lib/ossl-modules"
 cp -a "$ARCH_DIR"/ossl-modules/*.so "$OUT/lib/ossl-modules/" 2>/dev/null || true
 
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
+install -Dm755 "$STAGE/usr/bin/git" "$OUT/bin/git"
 cp -a "$STAGE/usr/libexec/." "$OUT/libexec/"
 if [ -d "$STAGE/usr/lib" ]; then
   cp -a "$STAGE/usr/lib/." "$OUT/lib/"
 fi
+if [ -d "$STAGE/usr/share/git-core" ]; then
+  mkdir -p "$OUT/share/git-core"
+  cp -a "$STAGE/usr/share/git-core/." "$OUT/share/git-core/"
+fi
+
+# Git's compiled exec path points into Debian's /usr/lib. Rebuild that path
+# inside the bundle. Scripts stay scripts; ELF helpers become symlinks to one
+# loader wrapper, which preserves each helper's argv[0] before dispatch.
+mkdir -p "$OUT/libexec/git-core"
+for helper in "$OUT/libexec/git-core-real/"*; do
+  name=$(basename "$helper")
+  if [ -d "$helper" ]; then
+    cp -a "$helper" "$OUT/libexec/git-core/$name"
+  elif file -Lb "$(readlink -f "$helper")" | grep -q '^ELF '; then
+    ln -s ../git-helper "$OUT/libexec/git-core/$name"
+  else
+    cp -aL "$helper" "$OUT/libexec/git-core/$name"
+  fi
+done
 
 # --- gdk-pixbuf loaders (dlopened, so they are extra closure roots) ---------
 mkdir -p "$OUT/lib/gdk-pixbuf-2.0/loaders"
@@ -51,6 +71,8 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
   "$OUT/libexec/claude-bin" \
+  "$OUT/libexec/git-bin" \
+  "$OUT/libexec/git-core-real"/* \
   "$OUT/libexec/openssl-bin" \
   "$OUT/libexec/whisper-bin" \
   "$OUT/lib/ossl-modules"/*.so \
@@ -60,6 +82,7 @@ mapfile -t roots < <(printf '%s\n' \
 
 for root in "${roots[@]}"; do
   [ -e "$root" ] || continue
+  file -Lb "$root" | grep -q '^ELF ' || continue
   LD_LIBRARY_PATH="$OUT/lib" \
     ldd "$root" 2>/dev/null | awk '/=> \//{print $3}'
 done | sort -u | while read -r lib; do

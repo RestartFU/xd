@@ -79,6 +79,7 @@ export GDK_PIXBUF_MODULE_FILE="$RUNTIME/loaders.cache"
 export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"
 export XDG_DATA_DIRS="$HERE/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/icons}"
+export PATH="$HERE/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 
 # The keyfile backend keeps settings in $XDG_CONFIG_HOME/glib-2.0/settings and
 # is built into GIO, so the bundle needs no dconf module or D-Bus round trip.
@@ -86,6 +87,9 @@ export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
 export SSL_CERT_FILE="$HERE/etc/ssl/certs/ca-certificates.crt"
 export OPENSSL_CONF="$HERE/etc/ssl/openssl.cnf"
 export OPENSSL_MODULES="$HERE/lib/ossl-modules"
+export GIT_EXEC_PATH="$HERE/libexec/git-core"
+export GIT_TEMPLATE_DIR="$HERE/share/git-core/templates"
+export GIT_SSL_CAINFO="$HERE/etc/ssl/certs/ca-certificates.crt"
 
 # GL is the host's own stack end to end: the bundle carries no Mesa, so
 # libepoxy dlopens the host's libGL -- the same one the desktop runs on.
