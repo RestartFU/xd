@@ -41,6 +41,11 @@ module Xd
         File.join(data_dir, "agent-secrets.json")
     end
 
+    def remote_credentials : String
+      ENV["XD_REMOTE_CREDENTIALS_FILE"]? ||
+        File.join(data_dir, "remote.json")
+    end
+
     def remote_pastes : String
       path = File.join(cache_home, data_name, "remote-pasted")
       Dir.mkdir_p(path, 0o700)

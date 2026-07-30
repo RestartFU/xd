@@ -23,6 +23,7 @@ module Xd
 
       @pending = Deque(Channel(ClientAnswer)).new
       @subscribers = {} of Int64 => Proc(Hash(String, JSON::Any), Nil)
+      @disconnect_subscribers = {} of Int64 => Proc(String, Nil)
       @next_subscriber = 0_i64
       @lock = Mutex.new
       @closed = false
@@ -117,7 +118,22 @@ module Xd
       end
 
       def unsubscribe(id : Int64) : Nil
-        @lock.synchronize { @subscribers.delete(id) }
+        @lock.synchronize do
+          @subscribers.delete(id)
+          @disconnect_subscribers.delete(id)
+        end
+      end
+
+      def on_disconnect(&subscriber : String ->) : Int64
+        @lock.synchronize do
+          @next_subscriber += 1
+          @disconnect_subscribers[@next_subscriber] = subscriber
+          @next_subscriber
+        end
+      end
+
+      def closed? : Bool
+        @lock.synchronize { @closed }
       end
 
       def close : Nil
@@ -204,11 +220,13 @@ module Xd
 
       private def disconnect(message : String) : Nil
         pending = [] of Channel(ClientAnswer)
+        subscribers = [] of Proc(String, Nil)
         should_close = @lock.synchronize do
           unless @closed
             @closed = true
             pending = @pending.to_a
             @pending.clear
+            subscribers = @disconnect_subscribers.values.dup
             true
           else
             false
@@ -223,6 +241,7 @@ module Xd
         pending.each do |answer|
           answer.send(ClientAnswer.new(nil, message))
         end
+        subscribers.each { |subscriber| subscriber.call(message) }
       end
     end
   end

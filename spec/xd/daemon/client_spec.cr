@@ -89,4 +89,30 @@ describe Xd::Daemon::Client do
       end
     end
   end
+
+  it "reports a dropped connection exactly once" do
+    with_client_server do |server, _engine, _store, directory|
+      path = File.join(directory, "daemon.sock")
+      server.listen_local(path)
+      client = Xd::Daemon::Client.local(path)
+      closed = Channel(String).new(2)
+      client.on_disconnect { |message| closed.send(message) }
+
+      server.close
+
+      select
+      when message = closed.receive
+        message.should contain("Daemon")
+      when timeout(2.seconds)
+        fail "client did not report the disconnect"
+      end
+      client.close
+      select
+      when closed.receive
+        fail "client reported the disconnect twice"
+      when timeout(50.milliseconds)
+      end
+      client.closed?.should be_true
+    end
+  end
 end
