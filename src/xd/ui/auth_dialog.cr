@@ -187,8 +187,13 @@ module Xd
 
         keys = Gtk::EventControllerKey.new
         keys.propagation_phase = :capture
-        keys.key_pressed_signal.connect do |keyval, _keycode, _state|
-          if keyval == Gdk::KEY_Escape
+        keys.key_pressed_signal.connect do |keyval, _keycode, state|
+          if @code.visible? &&
+             state.includes?(Gdk::ModifierType::ControlMask) &&
+             Gdk.keyval_to_lower(keyval) == Gdk::KEY_v
+            paste_code
+            true
+          elsif keyval == Gdk::KEY_Escape
             close
             true
           else
@@ -300,6 +305,23 @@ module Xd
           @code.text = ""
           @code.sensitive = true
           @send.sensitive = true
+        end
+      end
+
+      private def paste_code : Nil
+        @code.clipboard.read_text_async(nil) do |source, result|
+          begin
+            text = source.as(Gdk::Clipboard).read_text_finish(result)
+            unless @closed || !@code.visible? || text.nil?
+              @code.text = text
+              @code.grab_focus
+            end
+          rescue error
+            show_status(
+              error.message || "Cannot paste the authorization code.",
+              true
+            )
+          end
         end
       end
 
