@@ -74,7 +74,7 @@ module Xd
         footer.append(hint("↑↓", "Move"))
         footer.append(hint("Enter", "Open"))
         footer.append(hint("Backspace", "Back"))
-        footer.append(hint("Esc", "Use the folder’s"))
+        footer.append(hint("Esc", "Use the folder's"))
         footer.add_css_class("xd-panel-bar")
         footer.add_css_class("xd-panel-foot")
 

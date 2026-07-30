@@ -239,13 +239,17 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   fatal GTK criticals.
 - `[~]` Folder settings now uses the C `AdwPreferencesDialog`, groups, combo,
   entry and path rows, inherited subtitles, suffix controls, and save-on-close
-  lifecycle. Path browsing stays daemon-backed for both transports. Installed
-  GTK proof remains; context and secret panels are still provisional.
+  lifecycle. Path browsing stays daemon-backed for both transports. The exact
+  `634879f` bundle is screenshot-verified and persists a browser-chosen path
+  on close with fatal GTK warnings enabled. Context and secret panels are
+  still provisional.
 - `[~]` C directory-browser hierarchy, row factory, navigation keys, dismissal
   semantics, and styling are ported. Both Unix and TLS sources list only
   through the daemon `list-dir` operation, and new-chat creation waits for its
-  chosen daemon-side working directory. Installed-bundle screenshot and
-  keyboard proof remain.
+  chosen daemon-side working directory. The exact `634879f` bundle is
+  screenshot-verified through row selection, Right descent, and Ctrl+Enter
+  choice with fatal GTK warnings enabled. Back/Escape/error-state matrix
+  remains.
 - `[~]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
   bounded live output, stop, persistence, and dialog-independent run lifecycle
   match C. Panel is screenshot-verified from an installed-path nightly bundle
