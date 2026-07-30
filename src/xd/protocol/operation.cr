@@ -17,6 +17,11 @@ module Xd
       FileBrowse
       AgentSecrets
       SetAgentSecrets
+      AgentAuth
+      AgentAuthStart
+      AgentAuthInput
+      AgentAuthCancel
+      AgentAuthLogout
       NewFolder
       RenameFolder
       MoveFolder
@@ -58,6 +63,11 @@ module Xd
         when FileBrowse        then "file-browse"
         when AgentSecrets      then "agent-secrets"
         when SetAgentSecrets   then "set-agent-secrets"
+        when AgentAuth         then "agent-auth"
+        when AgentAuthStart    then "agent-auth-start"
+        when AgentAuthInput    then "agent-auth-input"
+        when AgentAuthCancel   then "agent-auth-cancel"
+        when AgentAuthLogout   then "agent-auth-logout"
         when NewFolder         then "new-folder"
         when RenameFolder      then "rename-folder"
         when MoveFolder        then "move-folder"
@@ -102,6 +112,11 @@ module Xd
         when "file-browse"         then FileBrowse
         when "agent-secrets"       then AgentSecrets
         when "set-agent-secrets"   then SetAgentSecrets
+        when "agent-auth"          then AgentAuth
+        when "agent-auth-start"    then AgentAuthStart
+        when "agent-auth-input"    then AgentAuthInput
+        when "agent-auth-cancel"   then AgentAuthCancel
+        when "agent-auth-logout"   then AgentAuthLogout
         when "new-folder"          then NewFolder
         when "rename-folder"       then RenameFolder
         when "move-folder"         then MoveFolder
