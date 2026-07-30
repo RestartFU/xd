@@ -228,8 +228,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   sensitivity, guard/save toasts, persisted edits, and binary/large-file
   status pages all match. Pane errors no longer leak into the chat footer.
   Reads/writes are asynchronous and generation-scoped so stale remote replies
-  cannot replace a newly selected chat. Explicit cancellation and paired-TLS
-  latency proof remain.
+  cannot replace a newly selected chat. The 8,000-line syntax scan runs on a
+  worker thread and applies at most 256 coloured spans per GTK idle turn,
+  cancelling stale work after edits or navigation. Explicit request
+  cancellation and paired-TLS latency proof remain.
 - `[~]` Working and branch scopes use the C header, linked toggles, refresh,
   summary/empty/error states, and virtual `GtkListView` file sections.
   Per-file expansion, collapsed-path memory, 80-row chunks, scroll restoration,
@@ -239,8 +241,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   refresh after collapse, clean/error states, and a 180-line patch; the
   80→81 chunk boundary has no visual seam and collapsing preserves its header
   position. Diff state/base/patch requests are asynchronous and
-  generation-scoped. Explicit cancellation, paired-TLS latency, and live
-  Git-head refresh proof remain.
+  generation-scoped; pure patch parsing and file-section calculation run on a
+  worker thread before GTK receives the virtual model. Explicit cancellation,
+  paired-TLS latency, and live Git-head refresh proof remain.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
   paired restart matrices remain.
