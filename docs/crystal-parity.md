@@ -26,7 +26,8 @@ checked against the C application where visual behavior is involved.
 - `[x]` Restore the C overlay divider spanning the full header width.
 - `[x]` Sidebar and chat headers share one vertical `GtkSizeGroup`.
 - `[~]` Active local/remote chat uses the C `local:`/`remote:` setting, restores
-  its ancestor branch, and clears on deletion/removal; restart UI verification
+  its ancestor branch, and clears on deletion/removal. Local installed-bundle
+  restart is UI-verified with fatal GTK criticals; paired reconnect restore
   remains.
 - `[ ]` Clear text selection when clicking outside selectable message text.
 - `[~]` Search exists, but exact window actions and Ctrl+K/Ctrl+F behavior need
@@ -155,7 +156,8 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 - `[~]` Crystal storage and agent behavior have broad specs, but every old C
   test/edge case still needs a mapped Crystal assertion.
 - `[~]` Active chat and per-device pane state restore through the same endpoint
-  path; full restart matrix remains.
+  path. Local active-chat restart is UI-verified; paired reconnect and pane
+  state restart matrices remain.
 
 C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 `tests/*.c`.
@@ -190,7 +192,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (126 examples).
+- `[x]` Crystal specs pass in Docker (139 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
