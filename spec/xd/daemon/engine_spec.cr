@@ -717,6 +717,26 @@ describe Xd::Daemon::Engine do
       }.to_json)
       state["backend"].as_s.should eq("codex")
       state["model"].as_s.should eq("gpt-5.6-terra")
+      switch = engine.dispatch(local, {
+        "op"   => "messages",
+        "chat" => chat,
+      }.to_json)["messages"].as_a
+      switch.map { |message| message["role"].as_s }.should eq(["event"])
+      switch.first["content"].as_s.should eq("Switched to GPT-5.6 Terra")
+
+      duplicate = engine.dispatch(local, {
+        "op"      => "set-option",
+        "chat"    => chat,
+        "option"  => "model",
+        "backend" => "codex",
+        "value"   => "gpt-5.6-terra",
+      }.to_json)
+      duplicate.success?.should be_true
+      unchanged_messages = engine.dispatch(local, {
+        "op"   => "messages",
+        "chat" => chat,
+      }.to_json)["messages"].as_a
+      unchanged_messages.size.should eq(1)
 
       rejected = engine.dispatch(local, {
         "op"      => "set-option",

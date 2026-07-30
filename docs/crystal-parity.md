@@ -341,8 +341,13 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   logout use the same structured service and panel. Local UI and an actual
   paired TLS client cover clean code entry, signed-in state, sign-out, and
   remote credential ownership. One real bundled OAuth completion remains.
-- `[ ]` Match all existing model, effort, access, plan/build, resume, and
-  cancellation behavior.
+- `[~]` Model, effort, access, plan/build, resume, and cancellation run through
+  the shared manager. Assistant/model changes are atomic and append the same
+  visible `Switched to …` transcript event for Unix and TLS clients without
+  duplicating unchanged selections. Manager specs verify exact selected
+  backend/model/effort, Plan's temporary access override, and restoration of
+  the stored access mode. Full bundled-protocol and installed GTK matrices
+  remain.
 - `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
   removed; Claude Code and Codex are the only backends.
 
@@ -365,7 +370,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (236 examples).
+- `[x]` Crystal specs pass in Docker (242 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

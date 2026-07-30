@@ -870,7 +870,15 @@ module Xd
             unless selected.models.any?(&.id.==(model))
               raise Protocol::Error.new("No such model.")
             end
+            previous = @store.get_chat(chat_id)
             @store.set_model_selection(chat_id, backend, model)
+            if previous.backend != backend || previous.model != model
+              @store.append_message(
+                chat_id,
+                "event",
+                "Switched to #{selected.model_label(model)}"
+              )
+            end
           else
             @store.set_model(chat_id, value)
           end
