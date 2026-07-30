@@ -1,4 +1,5 @@
 require "base64"
+require "gtk4"
 require "json"
 require "uuid"
 require "../app_paths"
@@ -81,7 +82,10 @@ module Xd
         )
       end
 
-      def read(path : String?) : Hash(String, JSON::Any)
+      def read(
+        path : String?,
+        preview : Bool = false,
+      ) : Hash(String, JSON::Any)
         unless path && Path[path].absolute?
           raise Error.new("image-read needs an image path.")
         end
@@ -97,7 +101,11 @@ module Xd
           raise Error.new("That remote paste is not a valid PNG.")
         end
 
-        data = File.read(path).to_slice
+        data = if preview
+                 preview(path)
+               else
+                 File.read(path).to_slice
+               end
         unless png?(data) && data.size <= MAX_IMAGE_BYTES
           raise Error.new("That remote paste is not a valid PNG.")
         end
@@ -108,8 +116,24 @@ module Xd
         }
       rescue error : Error
         raise error
-      rescue error : File::Error | IO::Error
+      rescue error : File::Error | IO::Error | GLib::Error
         raise Error.new("That image is not a remote paste.")
+      end
+
+      private def preview(path : String) : Bytes
+        pixbuf = GdkPixbuf::Pixbuf.new_from_file_at_scale(
+          path,
+          640,
+          360,
+          true
+        )
+        unless pixbuf
+          raise Error.new("That remote paste is not a valid PNG.")
+        end
+
+        texture = Gdk::Texture.new_for_pixbuf(pixbuf)
+        texture.save_to_png_bytes.data ||
+          raise Error.new("That remote paste is not a valid PNG.")
       end
 
       private def png?(data : Bytes) : Bool

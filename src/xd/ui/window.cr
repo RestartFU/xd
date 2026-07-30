@@ -3,6 +3,7 @@ require "gtk4"
 require "set"
 require "../agent/ask"
 require "../agent/git_diff_tracker"
+require "../agent/image_reference"
 require "../agent/subagent_tool"
 require "../agent/workflow_run"
 require "../agent/workspace_block"
@@ -294,6 +295,8 @@ module Xd
           content = "Files changed" if Agent::GitDiffTracker.file_change?(content)
         end
 
+        images = role == "assistant" ? nil : Agent::ImageReference.parse(content)
+        content = images.remainder if images
         workspace = role == "assistant" ? Agent::WorkspaceBlock.parse(content) : nil
         assistant_text = workspace.try(&.remainder) || content
         parsed = role == "assistant" ? Agent::Ask.parse(assistant_text) : nil
@@ -319,6 +322,7 @@ module Xd
         row.add_css_class("xd-message")
         row.add_css_class("xd-message-#{role}")
         @transcript.append(row)
+        append_message_images(images.paths) if images
         append_ask(parsed.ask) if parsed && answerable
         row
       end
@@ -619,6 +623,111 @@ module Xd
         @attachments.clear
         clear(@attachments_bar)
         @attachments_bar.visible = false
+      end
+
+      private def append_message_images(paths : Array(String)) : Nil
+        images = Gtk::Box.new(:horizontal, 8)
+        images.add_css_class("xd-message-images")
+
+        paths.each_with_index do |path, index|
+          images.append(image_preview(path, index + 1))
+        end
+        @transcript.append(images)
+      end
+
+      private def image_preview(
+        path : String,
+        number : Int32,
+      ) : Gtk::Widget
+        response = fetch_image(path, true)
+        texture = response.try { |body| texture_from(body) }
+
+        content = if texture
+                    picture = Gtk::Picture.new_for_paintable(texture)
+                    picture.content_fit = :scale_down
+                    picture.set_size_request(168, 96)
+                    button = Gtk::Button.new
+                    button.child = picture
+                    button.add_css_class("flat")
+                    button.tooltip_text = "Open image"
+                    button.clicked_signal.connect do
+                      open_image(path, number)
+                    end
+                    button
+                  else
+                    unavailable = Gtk::Label.new("Preview unavailable")
+                    unavailable.add_css_class("dim-label")
+                    unavailable
+                  end
+
+        label = Gtk::Label.new("Image ##{number}")
+        label.xalign = 0_f32
+        label.add_css_class("dim-label")
+
+        card = Gtk::Box.new(:vertical, 4)
+        card.add_css_class("xd-image-preview")
+        card.append(content)
+        card.append(label)
+        card
+      end
+
+      private def open_image(path : String, number : Int32) : Nil
+        response = fetch_image(path, false)
+        unless response
+          @status.text = "Cannot load that image."
+          return
+        end
+        texture = texture_from(response)
+        unless texture
+          @status.text = "Cannot decode that image."
+          return
+        end
+
+        picture = Gtk::Picture.new_for_paintable(texture)
+        picture.content_fit = :scale_down
+        picture.can_shrink = true
+
+        scroll = Gtk::ScrolledWindow.new
+        scroll.child = picture
+
+        viewer = Gtk::Window.new
+        viewer.title = "Image ##{number}"
+        viewer.transient_for = @widget
+        viewer.destroy_with_parent = true
+        viewer.modal = true
+        viewer.set_default_size(960, 720)
+        viewer.child = scroll
+        viewer.present
+      end
+
+      private def fetch_image(
+        path : String,
+        preview : Bool,
+      ) : Hash(String, JSON::Any)?
+        @client.call({
+          "op"      => JSON::Any.new("image-read"),
+          "path"    => JSON::Any.new(path),
+          "preview" => JSON::Any.new(preview),
+        })
+      rescue Daemon::Client::Error
+        nil
+      end
+
+      private def texture_from(
+        body : Hash(String, JSON::Any),
+      ) : Gdk::Texture?
+        return unless body["mime"]?.try(&.as_s?) == "image/png"
+        encoded = body["data"]?.try(&.as_s?) || return
+        encoded_limit = ((MAX_IMAGE_BYTES + 2) // 3) * 4
+        return if encoded.bytesize > encoded_limit
+
+        data = Base64.decode(encoded)
+        return if data.empty? || data.size > MAX_IMAGE_BYTES
+
+        bytes = GLib::Bytes.new(data.to_unsafe, data.size)
+        Gdk::Texture.new_from_bytes(bytes)
+      rescue Base64::Error | GLib::Error
+        nil
       end
 
       private def cancel_turn : Nil

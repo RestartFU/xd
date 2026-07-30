@@ -70,4 +70,24 @@ describe Xd::Daemon::Images do
       end
     end
   end
+
+  it "decodes bounded previews for paired clients" do
+    with_images do |images, _directory|
+      png = Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC" \
+        "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      )
+      message = images.materialize({
+        "attachments" => JSON.parse([{
+          "mime" => "image/png",
+          "data" => Base64.strict_encode(png),
+        }].to_json),
+      }, "")
+      path = message.match(/\[image: (.+)\]/).not_nil![1]
+
+      preview = Base64.decode(images.read(path, true)["data"].as_s)
+      preview[0, Xd::Daemon::Images::PNG_SIGNATURE.size]
+        .should eq(Xd::Daemon::Images::PNG_SIGNATURE)
+    end
+  end
 end

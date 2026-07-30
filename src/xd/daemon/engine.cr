@@ -472,10 +472,10 @@ module Xd
         settings = @workspaces.folder_settings(folder_id)
         effective = @workspaces.resolve(folder_id)
         Protocol::Response.ok({
-          "backend"          => json_any(settings.backend),
-          "model"            => json_any(settings.model),
-          "workdir"          => json_any(settings.workdir),
-          "repo"             => json_any(settings.repo),
+          "backend"           => json_any(settings.backend),
+          "model"             => json_any(settings.model),
+          "workdir"           => json_any(settings.workdir),
+          "repo"              => json_any(settings.repo),
           "effective_backend" => JSON::Any.new(effective.backend),
           "effective_model"   => json_any(effective.model),
           "effective_workdir" => JSON::Any.new(effective.workdir),
@@ -578,7 +578,10 @@ module Xd
       private def image_read(
         request : Protocol::Request,
       ) : Protocol::Response
-        Protocol::Response.ok(@images.read(request.string?("path")))
+        preview = request.body["preview"]?.try(&.as_bool?) || false
+        Protocol::Response.ok(
+          @images.read(request.string?("path"), preview)
+        )
       end
 
       private def file_browse(

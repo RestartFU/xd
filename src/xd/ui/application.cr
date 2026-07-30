@@ -98,6 +98,18 @@ module Xd
         min-height: 24px;
         padding: 0;
       }
+      .xd-message-images {
+        margin: 0 14px;
+      }
+      .xd-image-preview {
+        background: alpha(#ffffff, 0.045);
+        border: 1px solid alpha(#ffffff, 0.09);
+        border-radius: 10px;
+        padding: 7px;
+      }
+      .xd-image-preview > button {
+        padding: 0;
+      }
       .xd-composer entry {
         border-radius: 12px;
         padding: 10px 12px;
