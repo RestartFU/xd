@@ -26,6 +26,13 @@ module Xd
         padding: 7px 9px;
       }
       .xd-sidebar button.flat:hover { background: alpha(#ffffff, 0.07); }
+      .xd-search-result {
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+      .xd-search-result:hover {
+        background: alpha(#ffffff, 0.07);
+      }
       .xd-message {
         border-radius: 12px;
         padding: 12px 14px;

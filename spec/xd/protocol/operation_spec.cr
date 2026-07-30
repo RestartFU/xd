@@ -6,7 +6,7 @@ describe Xd::Protocol::Operation do
       Xd::Protocol::Operation::Invalid
     ))
 
-    operations.size.should eq(35)
+    operations.size.should eq(36)
 
     operations.each do |operation|
       operation.wire_name.should_not be_empty

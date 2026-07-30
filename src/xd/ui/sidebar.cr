@@ -2,6 +2,7 @@ require "json"
 require "gtk4"
 require "./dialogs"
 require "./folder_dialogs"
+require "./search_dialog"
 
 module Xd
   module UI
@@ -19,7 +20,7 @@ module Xd
         @parent : Gtk::Window,
         @call : Proc(
           Hash(String, JSON::Any),
-          Hash(String, JSON::Any)?
+          Hash(String, JSON::Any)?,
         ),
         @on_chat : Proc(String, String, Nil),
         @on_chat_deleted : Proc(String, Nil),
@@ -56,6 +57,13 @@ module Xd
         secrets.add_css_class("flat")
         secrets.clicked_signal.connect { @dialogs.secrets }
 
+        search = Gtk::Button.new_from_icon_name("system-search-symbolic")
+        search.tooltip_text = "Search chats"
+        search.add_css_class("flat")
+        search.clicked_signal.connect do
+          SearchDialog.new(@parent, @call, @on_chat).present
+        end
+
         header = Gtk::Box.new(:horizontal, 6)
         header.margin_top = 8
         header.margin_bottom = 8
@@ -64,6 +72,7 @@ module Xd
         header.append(title)
         header.append(new_workspace)
         header.append(new_chat)
+        header.append(search)
         header.append(secrets)
 
         @widget = Gtk::Box.new(:vertical, 0)
@@ -168,8 +177,7 @@ module Xd
         folder_id = chat["folder"].as_s
         title = chat["title"].as_s? || "New Chat"
         title = "New Chat" if title.empty?
-        display = chat["working"]?.try(&.as_bool?) == true ?
-                  "#{title}  •" : title
+        display = chat["working"]?.try(&.as_bool?) == true ? "#{title}  •" : title
 
         open = Gtk::Button.new_with_label(display)
         open.hexpand = true

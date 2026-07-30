@@ -182,6 +182,13 @@ describe Xd::Daemon::Engine do
         parse_response(engine.dispatch(remote, request))
       )
 
+      search = {"op" => "search", "query" => "hell"}.to_json
+      parse_response(engine.dispatch(local, search)).should eq(
+        parse_response(engine.dispatch(remote, search))
+      )
+      engine.dispatch(local, search)["results"].as_a
+        .first["chat"].as_s.should eq(chat_id)
+
       engine.dispatch(local, {
         "op"   => "queue",
         "chat" => chat_id,

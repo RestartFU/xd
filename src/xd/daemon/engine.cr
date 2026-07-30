@@ -12,6 +12,7 @@ require "./event_bus"
 require "./filesystem"
 require "./images"
 require "./repository"
+require "./search"
 require "./terminals"
 
 module Xd
@@ -50,6 +51,7 @@ module Xd
         @events = EventBus.new
         @filesystem = Filesystem.new(@store, @workspaces)
         @images = Images.new
+        @search = Search.new(@store)
         @git_worktrees = Workspace::Worktrees.new(@store, @workspaces)
         @repository = Repository.new(@store, @workspaces, @filesystem)
         @terminals = Terminals.new(
@@ -174,6 +176,8 @@ module Xd
           new_chat(request)
         when Protocol::Operation::Messages
           messages(request)
+        when Protocol::Operation::Search
+          search(request)
         when Protocol::Operation::ImageRead
           image_read(request)
         when Protocol::Operation::ListDir
@@ -582,6 +586,24 @@ module Xd
         Protocol::Response.ok(
           @images.read(request.string?("path"), preview)
         )
+      end
+
+      private def search(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        query = request.string?("query") || ""
+        hits = @search.call(query).map do |hit|
+          JSON::Any.new({
+            "id"      => JSON::Any.new(hit.message_id),
+            "chat"    => JSON::Any.new(hit.chat_id),
+            "title"   => JSON::Any.new(hit.title),
+            "role"    => JSON::Any.new(hit.role),
+            "snippet" => JSON::Any.new(hit.snippet),
+          })
+        end
+        Protocol::Response.ok({
+          "results" => JSON::Any.new(hits),
+        })
       end
 
       private def file_browse(
