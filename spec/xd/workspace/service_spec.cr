@@ -78,6 +78,7 @@ describe Xd::Workspace::Service do
       second = service.create_folder(nil, "Second")
       child = service.create_folder(first, "Child")
       service.rename_folder(child, "Renamed")
+      service.move_folder(child, first)
       service.move_folder(child, second)
 
       service.find_folder(child).should end_with(

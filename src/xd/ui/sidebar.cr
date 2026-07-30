@@ -145,7 +145,9 @@ module Xd
         status : Gtk::Box,
         working : Gtk::Label,
         label : Gtk::Label,
-        entry : Gtk::Entry
+        entry : Gtk::Entry,
+        drag_source : Gtk::DragSource,
+        drop_target : Gtk::DropTarget
 
       getter widget : Adw::ToolbarView
       getter header : Adw::HeaderBar
@@ -251,6 +253,7 @@ module Xd
         @list_view.activate_signal.connect do |position|
           activate_row(position)
         end
+        @list_view.add_controller(build_drop_target(nil))
 
         scroll = Gtk::ScrolledWindow.new
         scroll.vexpand = true
@@ -434,6 +437,8 @@ module Xd
         working = Gtk::Label.new("...")
         label = Gtk::Label.new("")
         entry = Gtk::Entry.new
+        drag_source = Gtk::DragSource.new
+        drop_target = build_drop_target(box)
 
         label.xalign = 0_f32
         label.ellipsize = :end
@@ -499,6 +504,12 @@ module Xd
         end
         box.add_controller(gesture)
 
+        drag_source.drag_begin_signal.connect do |_drag|
+          drag_source.set_icon(Gtk::WidgetPaintable.new(box), 0, 0)
+        end
+        box.add_controller(drag_source)
+        box.add_controller(drop_target)
+
         expander.child = box
         item.child = expander
         @row_widgets[pointer_key(item)] = RowWidgets.new(
@@ -509,7 +520,9 @@ module Xd
           status,
           working,
           label,
-          entry
+          entry,
+          drag_source,
+          drop_target
         )
       end
 
@@ -543,6 +556,15 @@ module Xd
         end
 
         @bound_nodes[pointer_key(widgets.box)] = node
+        if node.kind.folder? && !node.placeholder?
+          widgets.drag_source.actions = Gdk::DragAction::Move
+          widgets.drag_source.content = Gdk::ContentProvider.new_for_value(
+            Gtk::StringObject.new(node.key)
+          )
+        else
+          widgets.drag_source.actions = Gdk::DragAction.new(0_u32)
+          widgets.drag_source.content = nil
+        end
         show_editor(widgets, node, @editing_key == node.key)
         if node.folder?
           connection = row.notify_signal["expanded"].connect do |_property|
@@ -562,6 +584,8 @@ module Xd
         @expand_connections.delete(key).try(&.disconnect)
         if widgets = @row_widgets[key]?
           @bound_nodes.delete(pointer_key(widgets.box))
+          widgets.drag_source.actions = Gdk::DragAction.new(0_u32)
+          widgets.drag_source.content = nil
           widgets.expander.list_row = nil
         end
       end
@@ -575,6 +599,7 @@ module Xd
         @expand_connections.delete(key).try(&.disconnect)
         if widgets = @row_widgets.delete(key)
           @bound_nodes.delete(pointer_key(widgets.box))
+          widgets.drag_source.content = nil
         end
       end
 
@@ -760,6 +785,67 @@ module Xd
           GICrystal::Transfer::None
         )
         @nodes[string.string]?
+      end
+
+      private def build_drop_target(box : Gtk::Box?) : Gtk::DropTarget
+        target = Gtk::DropTarget.new(
+          GObject::TYPE_OBJECT,
+          Gdk::DragAction::Move
+        )
+        target.drop_signal.connect do |value, _x, _y|
+          drop_folder(value, box)
+        end
+        target
+      end
+
+      private def drop_folder(
+        value : GObject::Value,
+        target_box : Gtk::Box?,
+      ) : Bool
+        object = value.as_gobject?
+        return false unless object
+
+        dragged_object = Gtk::StringObject.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        dragged = @nodes[dragged_object.string]?
+        return false unless dragged &&
+                            dragged.kind.folder? &&
+                            !dragged.placeholder?
+
+        onto = if target_box
+                 @bound_nodes[pointer_key(target_box)]?
+               end
+        target_source = onto.try(&.source) || @local_source
+
+        if onto.try(&.kind.chat?)
+          folder_id = onto.not_nil!.folder_id
+          onto = folder_id ? folder_node(target_source, folder_id) : nil
+          return false unless onto
+        end
+        return false unless dragged.source.same?(target_source)
+
+        parent_id = case onto.try(&.kind)
+                    when NodeKind::Folder
+                      onto.not_nil!.id
+                    when NodeKind::RemoteRoot, nil
+                      nil
+                    else
+                      return false
+                    end
+        current_parent = dragged.source.folder_parents[dragged.id]?
+        return true if current_parent == parent_id
+
+        move_folder_request(dragged.source, dragged.id, parent_id)
+      end
+
+      private def folder_node(source : Source, id : String) : Node?
+        @nodes.each_value.find do |node|
+          node.source.same?(source) &&
+            node.kind.folder? &&
+            node.id == id
+        end
       end
 
       private def selection_changed : Nil
@@ -1129,12 +1215,23 @@ module Xd
         folder_id : String,
         parent_id : String?,
       ) : Nil
+        move_folder_request(source, folder_id, parent_id)
+      end
+
+      private def move_folder_request(
+        source : Source,
+        folder_id : String,
+        parent_id : String?,
+      ) : Bool
         request = {
           "op"     => JSON::Any.new("move-folder"),
           "folder" => JSON::Any.new(folder_id),
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
-        reload if call(source, request)
+        return false unless call(source, request)
+
+        reload
+        true
       end
 
       private def confirm_trash_folder(

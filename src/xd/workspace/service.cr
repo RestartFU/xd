@@ -87,6 +87,8 @@ module Xd
         parent = parent_id ? find_folder(parent_id) : @root
         path_prefix = path + File::SEPARATOR
 
+        return if File.dirname(path) == parent
+
         if parent == path || parent.starts_with?(path_prefix)
           raise Error.new("A folder cannot be moved inside itself.")
         end
