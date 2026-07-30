@@ -2,7 +2,6 @@ require "gtk4"
 require "../version"
 require "./branch_build"
 require "./branch_build_run"
-require "./panel_dialog"
 
 module Xd
   module UI
@@ -35,9 +34,15 @@ module Xd
       )
         @settings = Gio::Settings.new(APP_ID)
         @closed = false
+        @focused = false
 
-        @window = PanelDialog.new(@parent, 620, -1)
+        @window = Gtk::Window.new
         @window.title = "Build a Branch"
+        @window.transient_for = @parent
+        @window.application = @parent.application
+        @window.destroy_with_parent = true
+        @window.decorated = false
+        @window.set_default_size(620, -1)
         @window.add_css_class("xd-panel")
 
         title = Gtk::Label.new("Build a Branch")
@@ -134,9 +139,17 @@ module Xd
         end
         @window.add_controller(keys)
 
-        @window.destroy_signal.connect do
+        @window.notify_signal["is-active"].connect do |_property|
+          if @window.is_active?
+            @focused = true
+          elsif @focused
+            close
+          end
+        end
+        @window.close_request_signal.connect do
           save_source
           cleanup
+          false
         end
         @run.on_change = ->(installed : Bool) {
           GLib.idle_add do
@@ -227,6 +240,7 @@ module Xd
         return if @closed
 
         save_source
+        cleanup
         @window.close
       end
 

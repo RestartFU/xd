@@ -1,7 +1,6 @@
 require "json"
 require "gtk4"
 require "./panel_call"
-require "./panel_dialog"
 
 module Xd
   module UI
@@ -92,12 +91,22 @@ module Xd
         column.append(scrolled)
         column.append(footer)
 
-        @window = PanelDialog.new(@parent, 620, 460)
+        @window = Gtk::Window.new
         @window.title = "Choose a Folder"
+        @window.transient_for = @parent
+        @window.application = @parent.application
+        @window.modal = true
+        @window.destroy_with_parent = true
+        @window.decorated = false
+        @window.set_default_size(620, 460)
         @window.add_css_class("xd-panel")
         @window.add_css_class("xd-browser")
         @window.child = column
         @window.destroy_signal.connect { closed }
+        @window.close_request_signal.connect do
+          answer(nil)
+          true
+        end
 
         keys = Gtk::EventControllerKey.new
         keys.propagation_phase = :capture

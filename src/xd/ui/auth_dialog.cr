@@ -6,7 +6,6 @@ require "../daemon/endpoint"
 require "./adw"
 require "./dialogs"
 require "./host_launch"
-require "./panel_dialog"
 
 module Xd
   module UI
@@ -169,11 +168,22 @@ module Xd
         column.append(body)
         column.append(footer)
 
-        @window = PanelDialog.new(@parent, 700, -1)
+        @window = Gtk::Window.new
         @window.title = "Assistant Accounts"
+        @window.transient_for = @parent
+        @window.application = @parent.application
+        @window.destroy_with_parent = true
+        @window.modal = true
+        @window.decorated = false
+        @window.resizable = false
+        @window.set_default_size(700, -1)
         @window.add_css_class("xd-panel")
         @window.child = column
         @window.destroy_signal.connect { closed }
+        @window.close_request_signal.connect do
+          close
+          true
+        end
 
         keys = Gtk::EventControllerKey.new
         keys.propagation_phase = :capture
@@ -258,7 +268,7 @@ module Xd
 
       private def confirm_logout(row : ProviderRow) : Nil
         Dialogs.confirm(
-          @parent,
+          @window,
           "Sign Out of #{row.row.title}?",
           "The bundled CLI on this machine will stop using this account.",
           "Sign Out"
