@@ -483,6 +483,27 @@ module Xd
         border-radius: 6px;
         background: alpha(#ffffff, 0.09);
       }
+      .xd-browser scrolledwindow,
+      .xd-browser listview {
+        background: transparent;
+      }
+      .xd-browser listview > row {
+        border-radius: 9px;
+        margin: 1px 8px;
+        padding: 7px 10px;
+      }
+      .xd-browser listview > row:hover {
+        background: alpha(#ffffff, 0.05);
+      }
+      .xd-browser listview > row:selected {
+        background: alpha(#ffffff, 0.11);
+        color: inherit;
+      }
+      .xd-browser-path {
+        font-family: monospace;
+        font-size: 96%;
+        color: alpha(#ffffff, 0.85);
+      }
       CSS
   end
 end

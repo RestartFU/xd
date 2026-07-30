@@ -239,7 +239,11 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   fatal GTK criticals.
 - `[ ]` Replace provisional GTK dialogs with the exact Adwaita dialog types,
   response appearance, focus, shortcuts, validation, and copy.
-- `[ ]` Port directory browser.
+- `[~]` C directory-browser hierarchy, row factory, navigation keys, dismissal
+  semantics, and styling are ported. Both Unix and TLS sources list only
+  through the daemon `list-dir` operation, and new-chat creation waits for its
+  chosen daemon-side working directory. Installed-bundle screenshot and
+  keyboard proof remain.
 - `[~]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
   bounded live output, stop, persistence, and dialog-independent run lifecycle
   match C. Panel is screenshot-verified from an installed-path nightly bundle

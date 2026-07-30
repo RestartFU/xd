@@ -7,6 +7,7 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./dialogs"
+require "./directory_browser"
 require "./dots"
 require "./folder_dialogs"
 require "./sidebar_state"
@@ -1317,11 +1318,34 @@ module Xd
         folder_id : String,
         title : String,
       ) : Nil
-        created = call(source, {
+        settings = call(source, {
+          "op"     => JSON::Any.new("folder-settings"),
+          "folder" => JSON::Any.new(folder_id),
+        })
+        return unless settings
+
+        DirectoryBrowser.present(
+          @parent,
+          panel_call(source),
+          settings["effective_workdir"]?.try(&.as_s?)
+        ) do |workdir|
+          create_chat_in(source, folder_id, title, workdir)
+        end
+      end
+
+      private def create_chat_in(
+        source : Source,
+        folder_id : String,
+        title : String,
+        workdir : String?,
+      ) : Nil
+        request = {
           "op"     => JSON::Any.new("new-chat"),
           "folder" => JSON::Any.new(folder_id),
           "title"  => JSON::Any.new(title),
-        })
+        }
+        request["workdir"] = JSON::Any.new(workdir) if workdir
+        created = call(source, request)
         return unless created
 
         source.selected_folder = folder_id
@@ -1472,6 +1496,19 @@ module Xd
             call(source, request)
           }
         )
+      end
+
+      private def panel_call(source : Source) : PanelCall
+        ->(request : Hash(String, JSON::Any)) {
+          begin
+            PanelCallResult.new(source.endpoint.call(request), nil)
+          rescue error : Daemon::Client::Error
+            PanelCallResult.new(
+              nil,
+              error.message || "Daemon request failed."
+            )
+          end
+        }
       end
 
       private def call(
