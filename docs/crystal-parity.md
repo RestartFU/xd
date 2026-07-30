@@ -103,8 +103,8 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   yet matched.
 - `[~]` Working/branch diff RPC works, but C diff list, expansion, syntax,
   actions, and layout are not yet matched.
-- `[ ]` Persist pane visibility per local/remote chat without duplicating
-  daemon logic.
+- `[~]` Pane visibility persists per local/remote chat in the same typed
+  `a{su}` device map; restart/UI verification remains.
 - `[ ]` Refresh repository panes after agent turns and terminal activity.
 
 C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,

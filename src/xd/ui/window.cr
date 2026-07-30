@@ -13,6 +13,7 @@ require "../version"
 require "./adw"
 require "./chat_controls"
 require "./pair_dialog"
+require "./pane_state"
 require "./sidebar"
 require "./tool_panel"
 
@@ -347,6 +348,7 @@ module Xd
         unless shown
           remember_terminal_height
           @tool_panel.show_terminal(false)
+          remember_panes
           return
         end
 
@@ -356,6 +358,7 @@ module Xd
           @settings.int("terminal-height"),
           vertical: true
         )
+        remember_panes
       end
 
       private def file_toggled : Nil
@@ -371,6 +374,7 @@ module Xd
           remember_repository_width
           @tool_panel.show_repository(nil)
         end
+        remember_panes
       end
 
       private def diff_toggled : Nil
@@ -386,6 +390,7 @@ module Xd
           remember_repository_width
           @tool_panel.show_repository(nil)
         end
+        remember_panes
       end
 
       private def set_end_child_size(
@@ -423,6 +428,7 @@ module Xd
       end
 
       private def persist_window_layout : Nil
+        remember_panes
         remember_terminal_height
         remember_repository_width
         @settings.set_int("window-width", @widget.default_width)
@@ -432,6 +438,76 @@ module Xd
           "window-maximized",
           @widget.is_maximized
         )
+      end
+
+      private def pane_key : String?
+        chat_id = @active_chat
+        return unless chat_id
+
+        if @client.same?(@local_client)
+          "local/#{chat_id}"
+        else
+          snapshot = @remote.snapshot
+          host = snapshot.host || "remote"
+          port = snapshot.port || 0
+          "remote/#{host}:#{port}/#{chat_id}"
+        end
+      end
+
+      private def current_panes : UInt32
+        state = PaneState::None
+        state |= PaneState::Terminal if @terminal_button.active?
+        state |= PaneState::Files if @file_button.active?
+        state |= PaneState::Diff if @diff_button.active?
+        state
+      end
+
+      private def remember_panes : Nil
+        return if @syncing_panes
+        key = pane_key
+        return unless key
+
+        states = PaneState.update(
+          @settings.value("pane-state"),
+          key,
+          current_panes
+        )
+        @settings.set_value("pane-state", states)
+      end
+
+      private def saved_panes : UInt32
+        key = pane_key
+        return PaneState::None unless key
+
+        PaneState.fetch(@settings.value("pane-state"), key)
+      end
+
+      private def apply_panes(state : UInt32) : Nil
+        if (state & PaneState::Files) != 0
+          state &= ~PaneState::Diff
+        end
+        return if current_panes == state
+
+        @syncing_panes = true
+        @terminal_button.active = (state & PaneState::Terminal) != 0
+        @file_button.active = false
+        @diff_button.active = false
+        if (state & PaneState::Files) != 0
+          @file_button.active = true
+        elsif (state & PaneState::Diff) != 0
+          @diff_button.active = true
+        end
+      ensure
+        @syncing_panes = false
+      end
+
+      private def hide_panes_for_switch : Nil
+        @syncing_panes = true
+        @terminal_button.active = false
+        @file_button.active = false
+        @diff_button.active = false
+      ensure
+        @syncing_panes = false
       end
 
       private def subscribe(endpoint : Daemon::Endpoint) : Nil
@@ -474,6 +550,8 @@ module Xd
         id : String,
         title : String,
       ) : Nil
+        remember_panes
+        hide_panes_for_switch
         clear_attachments
         @client = endpoint
         @active_chat = id
@@ -489,6 +567,7 @@ module Xd
         @file_button.sensitive = true
         @diff_button.sensitive = true
         @tool_panel.chat = id
+        apply_panes(saved_panes)
         load_chat_state
         load_messages
         @entry.grab_focus
@@ -504,6 +583,8 @@ module Xd
       end
 
       private def clear_active_chat : Nil
+        remember_panes
+        hide_panes_for_switch
         @active_chat = nil
         @stream_label = nil
         @working = false
@@ -518,11 +599,6 @@ module Xd
         @send.remove_css_class("destructive-action")
         @send.add_css_class("suggested-action")
         @controls.sensitive = false
-        @syncing_panes = true
-        @terminal_button.active = false
-        @file_button.active = false
-        @diff_button.active = false
-        @syncing_panes = false
         @terminal_button.sensitive = false
         @file_button.sensitive = false
         @diff_button.sensitive = false
