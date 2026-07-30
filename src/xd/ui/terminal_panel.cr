@@ -5,6 +5,7 @@ require "set"
 require "./adw"
 require "./host_launch"
 require "./panel_call"
+require "./terminal_replay"
 require "./vte"
 
 module Xd
@@ -31,6 +32,8 @@ module Xd
         property columns : Int64
         property rows : Int64
         property removing = false
+        property replay : TerminalReplay?
+        property replay_token = 0_i64
 
         def initialize(
           @id : String,
@@ -39,6 +42,7 @@ module Xd
           @columns : Int64,
           @rows : Int64,
         )
+          @replay = nil
         end
       end
 
@@ -210,14 +214,22 @@ module Xd
         when "terminal-output"
           session = view.sessions[id]? || return
           encoded = event["data"]?.try(&.as_s?) || return
-          session.terminal.feed(Base64.decode(encoded))
+          if replay = session.replay
+            replay.append_data(encoded)
+          else
+            feed_output(session.terminal, encoded)
+          end
         when "terminal-resized"
           session = view.sessions[id]? || return
           columns = event["columns"]?.try(&.as_i64?) || session.columns
           rows = event["rows"]?.try(&.as_i64?) || session.rows
           session.columns = columns
           session.rows = rows
-          session.terminal.set_size(columns, rows)
+          if replay = session.replay
+            replay.append_geometry(columns, rows)
+          else
+            session.terminal.set_size(columns, rows)
+          end
         when "terminal-closed"
           view.pending_kills.delete(id)
           remove_session(view, id)
@@ -347,9 +359,9 @@ module Xd
           session.rows = rows
           if replay
             session.terminal.reset(true, true)
-            feed_replay(session, replay)
+            start_replay(session, replay)
           end
-          session.terminal.set_size(columns, rows)
+          session.terminal.set_size(columns, rows) unless replay
           clear_status(view)
           return session
         end
@@ -364,8 +376,11 @@ module Xd
         end
         session = Session.new(id, terminal, page, columns, rows)
         view.sessions[id] = session
-        feed_replay(session, replay) if replay
-        terminal.set_size(columns, rows)
+        if replay
+          start_replay(session, replay)
+        else
+          terminal.set_size(columns, rows)
+        end
         clear_status(view)
         update_title
         session
@@ -476,19 +491,65 @@ module Xd
         colour
       end
 
-      private def feed_replay(
+      private def start_replay(
         session : Session,
         replay : Array(JSON::Any),
       ) : Nil
-        replay.each do |item|
-          if encoded = item["data"]?.try(&.as_s?)
-            session.terminal.feed(Base64.decode(encoded))
+        session.replay_token &+= 1
+        token = session.replay_token
+        session.replay = TerminalReplay.new(
+          replay,
+          session.columns,
+          session.rows
+        )
+        GLib.idle_add do
+          feed_replay_batch(session, token)
+          false
+        end
+      end
+
+      private def feed_replay_batch(
+        session : Session,
+        token : Int64,
+      ) : Nil
+        return unless session.replay_token == token
+        replay = session.replay || return
+
+        replay.next_batch.each do |action|
+          if action.is_a?(Bytes)
+            session.terminal.feed(action)
           else
-            columns = item["columns"]?.try(&.as_i64?) || session.columns
-            rows = item["rows"]?.try(&.as_i64?) || session.rows
-            session.terminal.set_size(columns, rows)
+            session.terminal.set_size(action.columns, action.rows)
           end
         end
+
+        if replay.done?
+          session.replay = nil
+          session.terminal.set_size(session.columns, session.rows)
+        else
+          GLib.idle_add do
+            feed_replay_batch(session, token)
+            false
+          end
+        end
+      end
+
+      private def feed_output(
+        terminal : Vte::Terminal,
+        encoded : String,
+      ) : Nil
+        if encoded.bytesize > TerminalReplay::MAX_ENCODED_ITEM
+          terminal.feed(TerminalReplay::INVALID_REPLAY_NOTICE.to_slice)
+          return
+        end
+        terminal.feed(Base64.decode(encoded))
+      rescue Base64::Error
+        terminal.feed(TerminalReplay::INVALID_REPLAY_NOTICE.to_slice)
+      end
+
+      private def cancel_replay(session : Session) : Nil
+        session.replay_token &+= 1
+        session.replay = nil
       end
 
       private def open_terminal(reuse : Bool) : Nil
@@ -563,6 +624,7 @@ module Xd
           end
         end
         if session = session_for_page(view, page)
+          cancel_replay(session)
           view.sessions.delete(session.id)
         end
         update_title if @current.same?(view)
@@ -570,6 +632,7 @@ module Xd
 
       private def remove_session(view : View, id : String) : Nil
         session = view.sessions[id]? || return
+        cancel_replay(session)
         session.removing = true
         view.tabs.close_page(session.page)
       end
