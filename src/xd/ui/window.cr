@@ -2007,6 +2007,11 @@ module Xd
           @working_started_at = Time.instant
           @working = true
           load_messages
+          # This event attaches us to a new turn before its ordered deltas.
+          # The state call below may already see those deltas in the daemon;
+          # recovering that snapshot and then consuming the queued events
+          # would draw the same live text twice.
+          @live_turn_key = @transcript_page.try(&.key)
           load_chat_state
         when "turn-finished"
           if active_event?(endpoint, event)
