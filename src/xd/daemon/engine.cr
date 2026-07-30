@@ -429,16 +429,7 @@ module Xd
 
       private def agent_auth_snapshots : JSON::Any
         values = @authentication.snapshots.map do |snapshot|
-          fields = {
-            "provider"     => JSON::Any.new(snapshot.provider),
-            "display_name" => JSON::Any.new(snapshot.display_name),
-            "state"        => JSON::Any.new(snapshot.state.wire_name),
-            "output"       => JSON::Any.new(snapshot.output),
-          }
-          if detail = snapshot.detail
-            fields["detail"] = JSON::Any.new(detail)
-          end
-          JSON::Any.new(fields)
+          JSON::Any.new(snapshot.wire_fields)
         end
         JSON::Any.new(values)
       end

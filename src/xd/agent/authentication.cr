@@ -12,6 +12,10 @@ module Xd
     # event bus used by local Unix and remote TLS clients.
     class Authentication
       OUTPUT_LIMIT = 64 * 1024
+      DETAIL_LIMIT = 2048
+      ANSI         = /\e\[[0-?]*[ -\/]*[@-~]/
+      URL          = %r{https://[^\s<>"']+}
+      DEVICE_CODE  = /\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/
 
       class Error < Exception
       end
@@ -45,7 +49,24 @@ module Xd
         display_name : String,
         state : State,
         detail : String?,
-        output : String
+        login_url : String?,
+        device_code : String?,
+        needs_input : Bool do
+        def wire_fields : Hash(String, JSON::Any)
+          fields = {
+            "provider"     => JSON::Any.new(provider),
+            "display_name" => JSON::Any.new(display_name),
+            "state"        => JSON::Any.new(state.wire_name),
+            "needs_input"  => JSON::Any.new(needs_input),
+          }
+          fields["detail"] = JSON::Any.new(value) if value = detail
+          fields["login_url"] = JSON::Any.new(value) if value = login_url
+          if value = device_code
+            fields["device_code"] = JSON::Any.new(value)
+          end
+          fields
+        end
+      end
 
       private enum Command
         Check
@@ -58,6 +79,9 @@ module Xd
         property state = State::Unknown
         property detail : String?
         property output = ""
+        property login_url : String?
+        property device_code : String?
+        property needs_input = false
         property process : Process?
         property input : IO?
         property serial = 0_i64
@@ -66,6 +90,8 @@ module Xd
 
         def initialize(@backend : Backend)
           @detail = nil
+          @login_url = nil
+          @device_code = nil
           @process = nil
           @input = nil
         end
@@ -76,7 +102,9 @@ module Xd
             @backend.display_name,
             @state,
             @detail,
-            @output
+            @login_url,
+            @device_code,
+            @needs_input
           )
         end
       end
@@ -198,6 +226,7 @@ module Xd
           entry.cancel_requested = false
           entry.output = "" if command.login?
           entry.detail = nil
+          clear_instructions(entry)
           entry.state = case command
                         when .check?  then State::Checking
                         when .login?  then State::SigningIn
@@ -329,23 +358,19 @@ module Xd
         serial : Int64,
         text : String,
       ) : Nil
-        accepted = @mutex.synchronize do
+        snapshot = @mutex.synchronize do
           entry = entry!(provider)
-          next false unless entry.serial == serial
+          next nil unless entry.serial == serial
 
           entry.output += text
           if entry.output.bytesize > OUTPUT_LIMIT
             start = entry.output.bytesize - OUTPUT_LIMIT
             entry.output = entry.output.byte_slice(start, OUTPUT_LIMIT)
           end
-          true
+          parse_instructions(entry)
+          entry.snapshot
         end
-        return unless accepted
-
-        @publisher.call("agent-auth-output", {
-          "provider" => JSON::Any.new(provider),
-          "text"     => JSON::Any.new(text),
-        })
+        publish_state(snapshot) if snapshot
       end
 
       private def complete_command(
@@ -380,6 +405,7 @@ module Xd
           else
             entry.state = State::Failed
             entry.detail = command_error(output, errors, status)
+            clear_instructions(entry)
           end
           entry.snapshot
         end
@@ -406,6 +432,7 @@ module Xd
           entry.cancel_requested = false
           entry.state = State::Failed
           entry.detail = message
+          clear_instructions(entry)
           entry.snapshot
         end
         publish_state(snapshot) if snapshot
@@ -478,7 +505,43 @@ module Xd
       ) : String
         text = errors.strip
         text = output.strip if text.empty?
-        text.empty? ? "Authentication exited with status #{status.exit_code}." : text
+        text = clean_output(text)
+        if text.empty?
+          "Authentication exited with status #{status.exit_code}."
+        elsif text.bytesize > DETAIL_LIMIT
+          text.byte_slice(0, DETAIL_LIMIT)
+        else
+          text
+        end
+      end
+
+      private def parse_instructions(entry : Entry) : Nil
+        text = clean_output(entry.output)
+        entry.login_url = extract_url(text)
+        case entry.backend.id
+        when "codex"
+          entry.device_code = text.match(DEVICE_CODE).try(&.[0])
+          entry.needs_input = false
+        when "claude"
+          entry.device_code = nil
+          entry.needs_input = text.downcase.includes?("paste code")
+        end
+      end
+
+      private def extract_url(text : String) : String?
+        text.match(URL).try(&.[0]).try do |url|
+          url.rstrip(".,;:)]}")
+        end
+      end
+
+      private def clean_output(text : String) : String
+        text.gsub(ANSI, "")
+      end
+
+      private def clear_instructions(entry : Entry) : Nil
+        entry.login_url = nil
+        entry.device_code = nil
+        entry.needs_input = false
       end
 
       private def command_arguments(
@@ -527,16 +590,7 @@ module Xd
       end
 
       private def publish_state(snapshot : Snapshot) : Nil
-        fields = {
-          "provider"     => JSON::Any.new(snapshot.provider),
-          "display_name" => JSON::Any.new(snapshot.display_name),
-          "state"        => JSON::Any.new(snapshot.state.wire_name),
-          "output"       => JSON::Any.new(snapshot.output),
-        }
-        if detail = snapshot.detail
-          fields["detail"] = JSON::Any.new(detail)
-        end
-        @publisher.call("agent-auth-changed", fields)
+        @publisher.call("agent-auth-changed", snapshot.wire_fields)
       end
 
       private def entry!(provider : String) : Entry

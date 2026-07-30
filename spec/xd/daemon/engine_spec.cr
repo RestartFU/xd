@@ -115,8 +115,13 @@ describe Xd::Daemon::Engine do
       [local, remote].each do |connection|
         response = engine.dispatch(connection, %({"op":"agent-auth"}))
         response.success?.should be_true
-        response["providers"].as_a.map { |row| row["provider"].as_s }
+        providers = response["providers"].as_a
+        providers.map { |row| row["provider"].as_s }
           .should eq(["claude", "codex"])
+        providers.each do |provider|
+          provider["needs_input"].as_bool.should be_false
+          provider.as_h.has_key?("output").should be_false
+        end
       end
 
       refused = engine.dispatch(local, {

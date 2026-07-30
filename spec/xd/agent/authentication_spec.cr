@@ -51,11 +51,18 @@ private def with_authentication_fixture(
         exit 1
         ;;
       "login --device-auth")
-        printf 'Open https://auth.example/device and enter CODEX-1234\n'
+        printf '\033[90mFollow these steps to sign in:\033[0m\n'
+        printf '1. Open this link in your browser\n'
+        printf ' https://auth.openai.com/codex/device\n'
+        printf '2. Enter this one-time code (expires in 15 minutes)\n'
+        printf ' \033[94mABCD-EFGH\033[0m\n'
+        IFS= read -r _
         touch "$AUTH_STATE/codex"
         ;;
       "auth login")
-        printf 'Paste code here > '
+        printf 'Opening browser to sign in…\n'
+        printf '%s\n' "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=test"
+        printf 'Paste code here if prompted > '
         IFS= read -r code
         test "$code" = "CLAUDE-1234"
         touch "$AUTH_STATE/claude"
@@ -108,21 +115,45 @@ describe Xd::Agent::Authentication do
       )
 
       authentication.login("codex")
+      deadline = Time.instant + 3.seconds
+      codex_prompt = nil
+      until codex_prompt = authentication.snapshots.find do |snapshot|
+              snapshot.provider == "codex" &&
+              snapshot.login_url &&
+              snapshot.device_code
+            end
+        fail "Codex never returned structured login data" if Time.instant >= deadline
+        sleep 5.milliseconds
+      end
+      codex_prompt.not_nil!.login_url.should eq(
+        "https://auth.openai.com/codex/device"
+      )
+      codex_prompt.not_nil!.device_code.should eq("ABCD-EFGH")
+      codex_prompt.not_nil!.needs_input.should be_false
+      authentication.input("codex", "CONTINUE")
       codex = await_auth_state(
         authentication,
         "codex",
         Xd::Agent::Authentication::State::SignedIn
       )
-      codex.output.should contain("https://auth.example/device")
+      codex.login_url.should be_nil
+      codex.device_code.should be_nil
 
       authentication.login("claude")
       deadline = Time.instant + 3.seconds
-      until authentication.snapshots
-              .find(&.provider.==("claude"))
-              .try(&.output.includes?("Paste code"))
+      claude_prompt = nil
+      until claude_prompt = authentication.snapshots.find do |snapshot|
+              snapshot.provider == "claude" &&
+              snapshot.login_url &&
+              snapshot.needs_input
+            end
         fail "Claude never requested its code" if Time.instant >= deadline
         sleep 5.milliseconds
       end
+      claude_prompt.not_nil!.login_url.not_nil!.should start_with(
+        "https://claude.com/cai/oauth/authorize?"
+      )
+      claude_prompt.not_nil!.device_code.should be_nil
       authentication.input("claude", "CLAUDE-1234")
       claude = await_auth_state(
         authentication,
@@ -144,8 +175,8 @@ describe Xd::Agent::Authentication do
         Xd::Agent::Authentication::State::SignedOut
       )
 
-      events.should contain("agent-auth-output")
       events.should contain("agent-auth-changed")
+      events.should_not contain("agent-auth-output")
     end
   end
 
