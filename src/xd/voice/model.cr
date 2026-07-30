@@ -15,6 +15,8 @@ module Xd
     end
 
     class Model
+      MAX_REDIRECTS = 8
+
       getter progress : Int32
 
       @client : HTTP::Client?
@@ -103,47 +105,96 @@ module Xd
         on_progress : Int32 -> Nil,
       ) : Nil
         uri = URI.parse(@url)
-        client = HTTP::Client.new(uri)
-        client.connect_timeout = 30.seconds
-        client.read_timeout = 30.seconds
-        @client_mutex.synchronize do
-          check_cancelled
-          @client = client
-        end
-        check_cancelled
-
         digest = Digest::SHA256.new
         total = 0_u64
-        client.get(uri.request_target) do |response|
-          unless response.status_code.in?(200..299)
-            raise Error.new(
-              "Speech model download failed with HTTP status " \
-              "#{response.status_code}."
-            )
-          end
+        redirects = 0
 
-          buffer = Bytes.new(128 * 1024)
-          loop do
+        loop do
+          client = HTTP::Client.new(uri)
+          client.connect_timeout = 30.seconds
+          client.read_timeout = 30.seconds
+          @client_mutex.synchronize do
             check_cancelled
-            count = response.body_io.read(buffer)
-            break if count == 0
-            if total + count.to_u64 > @expected_size
-              raise Error.new(
-                "Speech model download is larger than expected."
-              )
-            end
-
-            chunk = buffer[0, count]
-            temporary.write(chunk)
-            digest.update(chunk)
-            total += count.to_u64
-            percent = Math.min(
-              99,
-              (total * 100 // @expected_size).to_i
-            )
-            set_progress(percent, on_progress)
-            Fiber.yield
+            @client = client
           end
+          check_cancelled
+
+          location : String? = nil
+          downloaded = false
+          begin
+            client.get(uri.request_target) do |response|
+              if redirect?(response.status_code)
+                location = response.headers["Location"]?
+                unless location
+                  raise Error.new(
+                    "Speech model download redirect had no location."
+                  )
+                end
+                next
+              end
+
+              unless response.status_code.in?(200..299)
+                raise Error.new(
+                  "Speech model download failed with HTTP status " \
+                  "#{response.status_code}."
+                )
+              end
+
+              buffer = Bytes.new(128 * 1024)
+              loop do
+                check_cancelled
+                count = response.body_io.read(buffer)
+                break if count == 0
+                if total + count.to_u64 > @expected_size
+                  raise Error.new(
+                    "Speech model download is larger than expected."
+                  )
+                end
+
+                chunk = buffer[0, count]
+                temporary.write(chunk)
+                digest.update(chunk)
+                total += count.to_u64
+                percent = Math.min(
+                  99,
+                  (total * 100 // @expected_size).to_i
+                )
+                set_progress(percent, on_progress)
+                Fiber.yield
+              end
+              downloaded = true
+            end
+          ensure
+            clear_client(client)
+            client.close
+          end
+
+          break if downloaded
+
+          redirects += 1
+          if redirects > MAX_REDIRECTS
+            raise Error.new(
+              "Speech model download followed too many redirects."
+            )
+          end
+          target = location.not_nil!
+          redirected = uri.resolve(target)
+          unless {"http", "https"}.includes?(redirected.scheme)
+            raise Error.new(
+              "Speech model download redirect used an unsupported URL."
+            )
+          end
+          if uri.scheme == "https" && redirected.scheme != "https"
+            raise Error.new(
+              "Speech model download redirect tried to leave HTTPS."
+            )
+          end
+          unless redirected.host
+            raise Error.new(
+              "Speech model download redirect had no host."
+            )
+          end
+          uri = redirected
         end
         check_cancelled
 
@@ -153,8 +204,10 @@ module Xd
             "Speech model download failed its integrity check."
           )
         end
-      ensure
-        client.try(&.close)
+      end
+
+      private def redirect?(status : Int32) : Bool
+        status.in?({301, 302, 303, 307, 308})
       end
 
       private def verified?(path : String) : Bool
@@ -194,8 +247,10 @@ module Xd
         end
       end
 
-      private def clear_client : Nil
-        @client_mutex.synchronize { @client = nil }
+      private def clear_client(client : HTTP::Client? = nil) : Nil
+        @client_mutex.synchronize do
+          @client = nil if client.nil? || @client.same?(client)
+        end
       end
     end
   end

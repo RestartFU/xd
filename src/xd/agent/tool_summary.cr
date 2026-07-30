@@ -1,5 +1,6 @@
 require "json"
 require "./subagent_tool"
+require "./tool_diff"
 
 module Xd
   module Agent
@@ -25,6 +26,9 @@ module Xd
         input : Hash(String, JSON::Any)?,
       ) : String
         tool = name || "tool"
+        if patch = ToolDiff.build(name, input)
+          return patch
+        end
 
         if tool == "Task" || tool == "Agent"
           return SubagentTool.build(

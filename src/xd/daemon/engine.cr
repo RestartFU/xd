@@ -146,6 +146,10 @@ module Xd
       def process(connection : Connection, line : String) : Protocol::Outcome
         request = Protocol::Request.parse(line)
 
+        if control_operation?(request.operation)
+          return process_control(connection, request)
+        end
+
         @command_mutex.synchronize do
           @command_events.clear
           @after_write = nil
@@ -193,6 +197,41 @@ module Xd
         failed_outcome(error.message || "Terminal error")
       rescue error : VoiceJobs::Error
         failed_outcome(error.message || "Voice input error")
+      end
+
+      # These operations must remain available while a repository read,
+      # installer, or other serialized command is slow. Their services own
+      # their own locks and none use per-command event scratch state.
+      private def control_operation?(operation : Protocol::Operation) : Bool
+        case operation
+        when Protocol::Operation::Cancel,
+             Protocol::Operation::VoiceCancel,
+             Protocol::Operation::AgentAuthCancel,
+             Protocol::Operation::Ping
+          true
+        else
+          false
+        end
+      end
+
+      private def process_control(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Outcome
+        if request.operation.authentication_required? &&
+           !connection.authenticated
+          return Protocol::Outcome.new(
+            Protocol::Response.error(
+              "Not authenticated. Say hello first."
+            ),
+            [] of Protocol::Event
+          )
+        end
+
+        Protocol::Outcome.new(
+          dispatch_request(connection, request),
+          [] of Protocol::Event
+        )
       end
 
       def close : Nil

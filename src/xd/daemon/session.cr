@@ -50,14 +50,17 @@ module Xd
           while line = input.gets
             next if line.empty?
 
-            outcome = @engine.process(connection, line)
-            begin
-              writer.write(outcome.response)
-              if events = @events
-                outcome.events.each { |event| events.publish(event) }
-              end
-            ensure
-              outcome.after_write.try(&.call)
+            if request_id = request_id(line)
+              spawn process_request(
+                connection,
+                line,
+                request_id,
+                writer
+              )
+            else
+              # Old clients receive FIFO replies and therefore remain
+              # serialized. New clients opt into multiplexing with an id.
+              process_request(connection, line, nil, writer)
             end
             Fiber.yield
           end
@@ -68,6 +71,35 @@ module Xd
         end
       rescue IO::Error
         # EOF, disconnect, and a listener shutdown all end only this session.
+      end
+
+      private def process_request(
+        connection : Connection,
+        line : String,
+        request_id : Int64?,
+        writer : Writer,
+      ) : Nil
+        outcome = @engine.process(connection, line)
+        if id = request_id
+          outcome.response.body[Protocol::REQUEST_ID] = JSON::Any.new(id)
+        end
+        begin
+          writer.write(outcome.response)
+          if events = @events
+            outcome.events.each { |event| events.publish(event) }
+          end
+        ensure
+          outcome.after_write.try(&.call)
+        end
+      rescue IO::Error
+      end
+
+      private def request_id(line : String) : Int64?
+        JSON.parse(line).as_h?
+          .try(&.[Protocol::REQUEST_ID]?)
+          .try(&.as_i64?)
+      rescue JSON::ParseException
+        nil
       end
     end
   end

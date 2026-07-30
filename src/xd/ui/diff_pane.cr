@@ -1,6 +1,7 @@
 require "json"
 require "gtk4"
 require "./adw"
+require "./background_work"
 require "./diff_file_sections"
 require "./panel_call"
 
@@ -175,7 +176,7 @@ module Xd
         token : Int64,
         chat_id : String,
       ) : Nil
-        Thread.new do
+        queued = BackgroundWork.submit do
           prepared : DiffFileSections::Prepared? = nil
           message : String? = nil
           begin
@@ -203,14 +204,25 @@ module Xd
             end
             false
           end
+          nil
+        end
+        unless queued
+          show_empty(
+            "Still Loading Changes",
+            "Too many previews are being prepared. Try again shortly."
+          )
         end
       end
 
       private def show_call_error(result : PanelCallResult) : Nil
         detail = result.error || "The diff could not be read."
-        title = detail.includes?("too large") ?
-                  "Diff Too Large" :
+        title = if detail.includes?("too large")
+                  "Diff Too Large"
+                elsif detail.includes?("not a git repository")
+                  "Not a Git Repository"
+                else
                   "Could Not Read Changes"
+                end
         show_empty(
           title,
           detail

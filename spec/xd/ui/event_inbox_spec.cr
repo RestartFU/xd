@@ -57,6 +57,19 @@ describe Xd::UI::EventInbox do
       .should eq(%w(a b cd))
   end
 
+  it "caps text coalescing to avoid quadratic giant-string copies" do
+    inbox = Xd::UI::EventInbox(String).new
+    chunk = "x" * (16 * 1024 // 2 + 1)
+
+    inbox.push("local", ui_event("text", chunk)).should be_true
+    inbox.push("local", ui_event("text", chunk)).should be_false
+    batch, more = inbox.drain
+
+    more.should be_false
+    batch.size.should eq(2)
+    batch.each { |item| item[1]["text"].as_s.should eq(chunk) }
+  end
+
   it "bounds each GTK batch and reschedules after becoming empty" do
     inbox = Xd::UI::EventInbox(String).new
     40.times do |index|

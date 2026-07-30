@@ -76,6 +76,53 @@ private def await_cli_event(
 end
 
 describe Xd::Daemon::Client do
+  it "matches out-of-order replies by request id" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-order-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    server = UNIXServer.new(path)
+    spawn do
+      socket = server.accept
+      first = JSON.parse(socket.gets.not_nil!).as_h
+      second = JSON.parse(socket.gets.not_nil!).as_h
+      [second, first].each do |request|
+        socket << {
+          Xd::Protocol::REQUEST_ID =>
+            request[Xd::Protocol::REQUEST_ID],
+          "ok"    => true,
+          "value" => request["value"],
+        }.to_json << '\n'
+        socket.flush
+      end
+    ensure
+      socket.try(&.close)
+    end
+
+    client = Xd::Daemon::Client.local(path)
+    answers = Channel(Tuple(String, String)).new(2)
+    {"first", "second"}.each do |value|
+      spawn do
+        response = client.call({
+          "op"    => JSON::Any.new("ping"),
+          "value" => JSON::Any.new(value),
+        })
+        answers.send({value, response["value"].as_s})
+      end
+    end
+    received = {answers.receive, answers.receive}.to_a.to_h
+    received.should eq({
+      "first"  => "first",
+      "second" => "second",
+    })
+  ensure
+    client.try(&.close)
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
   it "yields while a daemon continuously streams events" do
     directory = File.join(
       Dir.tempdir,

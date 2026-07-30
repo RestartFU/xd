@@ -24,22 +24,22 @@ module Xd
         end
 
         parts = [] of MessagePart
-        chunk = ""
+        chunk = [] of String
         in_fence = false
         diff_fence = false
 
         text.split('\n').each do |line|
           if line.starts_with?("```")
-            append_chunk(parts, chunk, in_fence, diff_fence)
-            chunk = ""
+            append_chunk(parts, chunk.join('\n'), in_fence, diff_fence)
+            chunk.clear
             in_fence = !in_fence
             diff_fence = in_fence && line.lchop("```") == "diff"
             next
           end
 
-          chunk = append_line(chunk, line)
+          chunk << line
         end
-        append_chunk(parts, chunk, in_fence, diff_fence)
+        append_chunk(parts, chunk.join('\n'), in_fence, diff_fence)
         parts
       end
 
@@ -64,37 +64,38 @@ module Xd
         text : String,
       ) : Nil
         lines = text.split('\n')
-        prose = ""
+        prose = [] of String
         line = 0
 
         while line < lines.size
           if blank?(lines[line])
-            prose = append_line(prose, lines[line])
+            prose << lines[line]
             line += 1
             next
           end
 
           finish = line
-          paragraph = ""
+          paragraph = [] of String
           while finish < lines.size && !blank?(lines[finish])
-            paragraph = append_line(paragraph, lines[finish])
+            paragraph << lines[finish]
             finish += 1
           end
 
-          grid = if paragraph.includes?('|') &&
-                    paragraph.includes?('\n')
-                   Markdown.table_to_text(paragraph)
+          paragraph_text = paragraph.join('\n')
+          grid = if paragraph_text.includes?('|') &&
+                    paragraph_text.includes?('\n')
+                   Markdown.table_to_text(paragraph_text)
                  end
           unless grid
             while line < finish
-              prose = append_line(prose, lines[line])
+              prose << lines[line]
               line += 1
             end
             next
           end
 
-          append_prose(parts, prose)
-          prose = ""
+          append_prose(parts, prose.join('\n'))
+          prose.clear
           parts << MessagePart.new(MessagePartKind::Table, grid)
           line = finish
           while line < lines.size && blank?(lines[line])
@@ -102,7 +103,7 @@ module Xd
           end
         end
 
-        append_prose(parts, prose)
+        append_prose(parts, prose.join('\n'))
       end
 
       private def append_prose(

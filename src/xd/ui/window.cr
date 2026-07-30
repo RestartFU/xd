@@ -12,6 +12,7 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./auth_dialog"
+require "./background_work"
 require "./chat_controls"
 require "./command_suggestions"
 require "./dots"
@@ -24,6 +25,7 @@ require "./pane_state"
 require "./search_dialog"
 require "./sidebar"
 require "./text_reveal"
+require "./tool_call_group"
 require "./tool_panel"
 require "./transcript_paging"
 require "./turn_timing"
@@ -41,6 +43,7 @@ module Xd
         getter workflow_ids = Set(String).new
         property revision = -1_i64
         property choices_visible = false
+        property tool_group : ToolCallGroup?
 
         def initialize(
           @key : String,
@@ -48,6 +51,7 @@ module Xd
           @endpoint : Daemon::Endpoint,
           @transcript : Gtk::Box,
         )
+          @tool_group = nil
         end
       end
 
@@ -65,6 +69,12 @@ module Xd
         )
         end
       end
+
+      record PreparedAttachment,
+        name : String,
+        data : String,
+        bytesize : Int32,
+        preview : GdkPixbuf::Pixbuf
 
       MAX_IMAGES      = 4
       MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -128,6 +138,7 @@ module Xd
       @messages_request = 0_i64
       @state_request = 0_i64
       @send_pending = false
+      @cancel_pending = false
       @closed = false
 
       def initialize(
@@ -305,9 +316,9 @@ module Xd
           "mail-attachment-symbolic"
         )
         @attach.sensitive = false
-        @attach.tooltip_text = "Attach images"
+        @attach.tooltip_text = "Attach image"
         @attach.add_css_class("flat")
-        @attach.clicked_signal.connect { choose_images }
+        @attach.clicked_signal.connect { choose_image }
 
         @send = Gtk::Button.new_from_icon_name("go-up-symbolic")
         @send.sensitive = false
@@ -1180,19 +1191,25 @@ module Xd
 
         if role == "tool"
           if patch = Agent::GitDiffTracker.patch(content)
+            end_tool_group
             add_diff_message(patch)
             return
           end
           if workflow = Agent::WorkflowRun.parse(content)
+            end_tool_group
             add_workflow_message(workflow)
             return
           end
           if subagent = Agent::SubagentTool.parse(content)
+            end_tool_group
             add_subagent_message(subagent[0], subagent[1])
             return
           end
           content = "Files changed" if Agent::GitDiffTracker.file_change?(content)
+          append_tool_line(content)
+          return
         end
+        end_tool_group
 
         images = role == "assistant" ? nil : Agent::ImageReference.parse(content)
         content = images.remainder if images
@@ -1232,15 +1249,29 @@ module Xd
         row
       end
 
-      private def add_diff_message(patch : String) : Gtk::Label
-        row = Gtk::Label.new("Files changed\n#{patch}")
-        row.xalign = 0_f32
-        row.wrap = false
-        row.selectable = true
-        row.add_css_class("xd-body")
-        row.add_css_class("xd-message")
-        row.add_css_class("xd-message-diff")
-        @transcript.append(row)
+      private def append_tool_line(summary : String) : Nil
+        page = @transcript_page
+        return unless page
+
+        group = page.tool_group
+        unless group && group.widget.parent
+          group = ToolCallGroup.new
+          page.tool_group = group
+          @transcript.append(group.widget)
+        end
+        group.append(summary)
+      end
+
+      private def end_tool_group : Nil
+        @transcript_page.try(&.tool_group=(nil))
+      end
+
+      private def add_diff_message(patch : String) : MessageRow
+        row = MessageRow.new(
+          MessageKind::Assistant,
+          "```diff\n#{patch}\n```"
+        )
+        @transcript.append(row.widget)
         row
       end
 
@@ -1429,62 +1460,6 @@ module Xd
         end
       end
 
-      private def choose_images : Nil
-        return unless @active_chat
-
-        filter = Gtk::FileFilter.new
-        filter.name = "Images"
-        filter.add_mime_type("image/*")
-        dialog = Gtk::FileDialog.new(
-          title: "Attach images",
-          modal: true,
-          default_filter: filter
-        )
-        dialog.open_multiple(@widget, nil) do |source, result|
-          begin
-            files = source.as(Gtk::FileDialog)
-              .open_multiple_finish(result)
-            if files
-              files.n_items.times do |index|
-                object = files.item(index)
-                if object
-                  add_file_attachment(
-                    Gio::AbstractFile.new(
-                      object.to_unsafe,
-                      GICrystal::Transfer::None
-                    )
-                  )
-                end
-              end
-            end
-          rescue Gio::IOErrorEnum::Cancelled
-          rescue error
-            @status.text = error.message || "Cannot attach that image."
-          end
-        end
-      end
-
-      private def add_file_attachment(file : Gio::File) : Nil
-        path = file.path
-        unless path
-          @status.text = "Only local image files can be attached."
-          return
-        end
-        info = File.info(path)
-        if info.size > MAX_IMAGE_BYTES
-          @status.text = "Each source image must be 10 MiB or smaller."
-          return
-        end
-
-        texture = Gdk::Texture.new_from_file(file)
-        add_attachment(
-          file.basename.try(&.to_s) || "image.png",
-          texture
-        )
-      rescue error
-        @status.text = error.message || "Cannot attach that image."
-      end
-
       private def paste_image : Bool
         clipboard = @entry.clipboard
         formats = clipboard.formats
@@ -1505,6 +1480,120 @@ module Xd
           end
         end
         true
+      end
+
+      private def choose_image : Nil
+        return unless @active_chat
+
+        filter = Gtk::FileFilter.new
+        filter.name = "Images"
+        filter.add_mime_type("image/*")
+        dialog = Gtk::FileDialog.new(
+          title: "Attach image",
+          modal: true,
+          default_filter: filter
+        )
+        dialog.open(@widget, nil) do |_source, result|
+          begin
+            if file = dialog.open_finish(result)
+              if path = file.path
+                prepare_file_attachment(path.to_s)
+              else
+                @status.text = "Only local image files can be attached."
+              end
+            end
+          rescue Gio::IOErrorEnum::Cancelled
+          rescue error
+            @status.text = error.message || "Cannot attach that image."
+          end
+        end
+      end
+
+      private def prepare_file_attachment(path : String) : Nil
+        chat_id = @active_chat || return
+        endpoint = @client
+        @status.text = "Preparing image…"
+        queued = BackgroundWork.submit do
+          prepared : PreparedAttachment? = nil
+          message : String? = nil
+          begin
+            info = File.info(path)
+            if info.size > MAX_IMAGE_BYTES
+              message = "Each source image must be 10 MiB or smaller."
+            else
+              pixbuf = GdkPixbuf::Pixbuf.new_from_file_at_scale(
+                path,
+                1920,
+                1920,
+                true
+              )
+              unless pixbuf
+                raise IO::Error.new("Image decoder returned no pixels.")
+              end
+              stream = Gio::MemoryOutputStream.new_resizable
+              pixbuf.save_to_streamv(stream, "png", nil, nil, nil)
+              stream.close(nil)
+              bytes = stream.steal_as_bytes.data ||
+                      raise IO::Error.new("Image encoder returned no data.")
+              if bytes.size > MAX_IMAGE_BYTES
+                message = "Encoded image must be 10 MiB or smaller."
+              else
+                preview = ImagePresenter.pixbuf_from_png(
+                  bytes,
+                  ImagePresenter::INLINE_MAX_WIDTH,
+                  ImagePresenter::INLINE_MAX_HEIGHT
+                ) || pixbuf
+                prepared = PreparedAttachment.new(
+                  File.basename(path),
+                  Base64.strict_encode(bytes),
+                  bytes.size,
+                  preview
+                )
+              end
+            end
+          rescue error
+            message = error.message || "Cannot attach that image."
+          end
+          GLib.idle_add do
+            if @client.same?(endpoint) && @active_chat == chat_id
+              if attachment = prepared
+                finish_file_attachment(attachment)
+              else
+                @status.text = message || "Cannot attach that image."
+              end
+            end
+            false
+          end
+          nil
+        end
+        unless queued
+          @status.text =
+            "Image workers are busy. Try again shortly."
+        end
+      end
+
+      private def finish_file_attachment(
+        prepared : PreparedAttachment,
+      ) : Nil
+        if @attachments.size >= MAX_IMAGES
+          @status.text = "A message can contain at most 4 images."
+          return
+        end
+        total = @attachments.sum(&.bytesize)
+        if total > MAX_TOTAL_BYTES - prepared.bytesize
+          @status.text = "Attached images must stay under 20 MiB total."
+          return
+        end
+
+        attachment = Attachment.new(
+          prepared.name,
+          prepared.data,
+          prepared.bytesize,
+          Gdk::Texture.new_for_pixbuf(prepared.preview)
+        )
+        @attachments << attachment
+        append_attachment_chip(attachment)
+        @status.text = ""
       end
 
       private def add_attachment(
@@ -1597,15 +1686,23 @@ module Xd
       private def cancel_turn : Nil
         chat_id = @active_chat
         return unless chat_id
+        return if @cancel_pending
+
         endpoint = @client
+        @cancel_pending = true
+        @status.text = "Stopping…"
+        update_send_button
 
         call_async(endpoint, {
           "op"   => JSON::Any.new("cancel"),
           "chat" => JSON::Any.new(chat_id),
         }) do |_response, error|
-          @status.text = error if error &&
-                                  @client.same?(endpoint) &&
-                                  @active_chat == chat_id
+          if error && @client.same?(endpoint) &&
+             @active_chat == chat_id
+            @cancel_pending = false
+            @status.text = error
+            update_send_button
+          end
         end
       end
 
@@ -1775,7 +1872,9 @@ module Xd
         @working_label = nil
         @working_dots = nil
         if row = @working_row
-          @transcript.remove(row) if row.parent
+          if parent = row.parent.as?(Gtk::Box)
+            parent.remove(row)
+          end
         end
         @working_row = nil
         @working_started_at = nil if reset_started_at
@@ -1783,6 +1882,7 @@ module Xd
 
       private def set_working(working : Bool) : Nil
         @working = working
+        @cancel_pending = false unless working
         update_send_button
         unless working
           remove_working_row
@@ -1820,7 +1920,10 @@ module Xd
 
       private def keep_working_last : Nil
         row = @working_row
-        return unless row && row.parent
+        return unless row
+        parent = row.parent
+        return unless parent &&
+                      parent.to_unsafe == @transcript.to_unsafe
         last = @transcript.last_child
         return if last && last.to_unsafe == row.to_unsafe
 
@@ -1929,7 +2032,7 @@ module Xd
       private def update_send_button : Nil
         if @working
           @send.icon_name = "media-playback-stop-symbolic"
-          @send.tooltip_text = "Stop"
+          @send.tooltip_text = @cancel_pending ? "Stopping…" : "Stop"
           @send.remove_css_class("suggested-action")
           @send.add_css_class("destructive-action")
         else
@@ -1938,7 +2041,7 @@ module Xd
           @send.remove_css_class("destructive-action")
           @send.add_css_class("suggested-action")
         end
-        @send.sensitive = @working ||
+        @send.sensitive = (@working && !@cancel_pending) ||
                           (@auth_state == "signed-in" && !@send_pending)
       end
 
@@ -2219,6 +2322,8 @@ module Xd
           scroll_to_bottom
         when "turn-started"
           return unless active_event?(endpoint, event)
+          @cancel_pending = false
+          end_tool_group
           reset_stream_segment
           @live_turn_key = nil
           @stream_source = event["label"]?.try(&.as_s?)
@@ -2233,9 +2338,41 @@ module Xd
           load_chat_state(recover_turn: false)
         when "turn-finished"
           if active_event?(endpoint, event)
+            end_tool_group
+            @messages_request += 1
             finish_stream_segment
             set_working(false)
-            load_messages
+            if last_id = event["last_message_id"]?.try(&.as_i64?)
+              if event["silent"]?.try(&.as_bool?) == true
+                add_message("assistant", "(no reply)")
+              end
+              if seconds = event["duration"]?.try(&.as_i64?)
+                append_worked_for(seconds)
+              end
+              if error = event["error"]?.try(&.as_s?)
+                add_message("error", error)
+              end
+              if event["waiting"]?.try(&.as_bool?) == true
+                options = (
+                  event["options"]?.try(&.as_a?) || [] of JSON::Any
+                ).compact_map(&.as_s?)
+                question = event["question"]?.try(&.as_s?) ||
+                           "Which one?"
+                accepts_input =
+                  event["accepts_input"]?.try(&.as_bool?) || false
+                append_ask(Agent::Ask.new(
+                  question,
+                  options,
+                  accepts_input
+                ))
+              end
+              @transcript_page.try(&.revision=(last_id))
+              keep_working_last
+              scroll_to_bottom
+            else
+              # Compatibility with daemons predating finish metadata.
+              load_messages
+            end
             # A queued turn may already be running in the daemon while its
             # ordered start/text events are still waiting in this GTK idle
             # queue. Refresh controls and queue, but let those events attach

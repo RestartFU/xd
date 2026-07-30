@@ -102,8 +102,15 @@ describe Xd::Agent::CodexProtocol do
       "params" => {
         "threadId" => "thread-1",
         "item" => {
-          "id"   => "change-1",
-          "type" => "fileChange",
+          "id"      => "change-1",
+          "type"    => "fileChange",
+          "changes" => [
+            {
+              "path" => "hello.txt",
+              "kind" => "add",
+              "diff" => "hello\n",
+            },
+          ],
         },
       },
     }.to_json)
@@ -128,7 +135,16 @@ describe Xd::Agent::CodexProtocol do
     events.select(&.type.text_delta?).compact_map(&.text).join
       .should eq("hello")
     events.select(&.type.tool_use?).compact_map(&.text)
-      .should eq(["$ pwd", "file_change"])
+      .should eq([
+        "$ pwd",
+        "file_change\n" \
+        "diff --git a/hello.txt b/hello.txt\n" \
+        "new file mode 100644\n" \
+        "--- /dev/null\n" \
+        "+++ b/hello.txt\n" \
+        "@@ -0,0 +1,1 @@\n" \
+        "+hello",
+      ])
     usage = events.find(&.type.usage?).not_nil!
     usage.context_used.should eq(456_u64)
     usage.context_window.should eq(272_000_u64)

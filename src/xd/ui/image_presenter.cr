@@ -2,6 +2,7 @@ require "base64"
 require "gtk4"
 require "../daemon/endpoint"
 require "./adw"
+require "./background_work"
 
 module Xd
   module UI
@@ -71,14 +72,13 @@ module Xd
         preview.valign = :start
         preview.vexpand = false
 
-        fetch(endpoint, path, true) do |body|
-          texture = body.try do |response|
-            self.class.texture_from(
-              response,
-              INLINE_MAX_WIDTH,
-              INLINE_MAX_HEIGHT
-            )
-          end
+        fetch_texture(
+          endpoint,
+          path,
+          true,
+          INLINE_MAX_WIDTH,
+          INLINE_MAX_HEIGHT
+        ) do |texture|
           if texture
             picture.paintable = texture
             picture.content_fit = :scale_down
@@ -98,6 +98,15 @@ module Xd
         max_width : Int32,
         max_height : Int32,
       ) : Gdk::Texture?
+        pixbuf = pixbuf_from_png(data, max_width, max_height)
+        pixbuf ? Gdk::Texture.new_for_pixbuf(pixbuf) : nil
+      end
+
+      def self.pixbuf_from_png(
+        data : Bytes,
+        max_width : Int32,
+        max_height : Int32,
+      ) : GdkPixbuf::Pixbuf?
         return if data.empty? || data.size > MAX_IMAGE_BYTES
 
         loader = GdkPixbuf::PixbufLoader.new_with_type("png")
@@ -116,23 +125,22 @@ module Xd
         end
         loader.write(data)
         loader.close
-        pixbuf = loader.pixbuf
-        pixbuf ? Gdk::Texture.new_for_pixbuf(pixbuf) : nil
+        loader.pixbuf
       rescue GLib::Error
         nil
       end
 
-      def self.texture_from(
+      def self.pixbuf_from(
         body : Hash(String, JSON::Any),
         max_width : Int32,
         max_height : Int32,
-      ) : Gdk::Texture?
+      ) : GdkPixbuf::Pixbuf?
         return unless body["mime"]?.try(&.as_s?) == "image/png"
         encoded = body["data"]?.try(&.as_s?) || return
         encoded_limit = ((MAX_IMAGE_BYTES + 2) // 3) * 4
         return if encoded.bytesize > encoded_limit
 
-        texture_from_png(
+        pixbuf_from_png(
           Base64.decode(encoded),
           max_width,
           max_height
@@ -207,15 +215,14 @@ module Xd
         dialog.closed_signal.connect { closed = true }
         dialog.present(anchor)
 
-        fetch(endpoint, path, false) do |body|
+        fetch_texture(
+          endpoint,
+          path,
+          false,
+          VIEWER_MAX_WIDTH,
+          VIEWER_MAX_HEIGHT
+        ) do |texture|
           unless closed
-            texture = body.try do |response|
-              self.class.texture_from(
-                response,
-                VIEWER_MAX_WIDTH,
-                VIEWER_MAX_HEIGHT
-              )
-            end
             if texture
               picture.paintable = texture
               stack.visible_child_name = "picture"
@@ -226,11 +233,13 @@ module Xd
         end
       end
 
-      private def fetch(
+      private def fetch_texture(
         endpoint : Daemon::Endpoint,
         path : String,
         preview : Bool,
-        &callback : Hash(String, JSON::Any)? ->
+        max_width : Int32,
+        max_height : Int32,
+        &callback : Gdk::Texture? ->
       ) : Nil
         spawn do
           response : Hash(String, JSON::Any)? = nil
@@ -242,9 +251,24 @@ module Xd
             })
           rescue
           end
-          GLib.idle_add do
-            callback.call(response)
-            false
+          queued = BackgroundWork.submit do
+            pixbuf = response.try do |body|
+              self.class.pixbuf_from(body, max_width, max_height)
+            end
+            GLib.idle_add do
+              texture = pixbuf.try do |decoded|
+                Gdk::Texture.new_for_pixbuf(decoded)
+              end
+              callback.call(texture)
+              false
+            end
+            nil
+          end
+          unless queued
+            GLib.idle_add do
+              callback.call(nil)
+              false
+            end
           end
         end
       end

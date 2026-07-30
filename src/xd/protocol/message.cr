@@ -3,6 +3,8 @@ require "./operation"
 
 module Xd
   module Protocol
+    REQUEST_ID = "_xd_request"
+
     class Error < Exception
     end
 

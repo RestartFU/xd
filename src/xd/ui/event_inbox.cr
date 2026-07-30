@@ -10,7 +10,8 @@ module Xd
     # GTK paints it. Keep one source active, merge replaceable events, and let
     # GTK regain control between bounded batches.
     class EventInbox(T)
-      BATCH_SIZE = 32
+      BATCH_SIZE         = 32
+      TEXT_COALESCE_LIMIT = 16 * 1024
 
       @items = Deque({T, Hash(String, JSON::Any)}).new
       @scheduled = false
@@ -67,6 +68,9 @@ module Xd
 
         old_text = before["text"]?.try(&.as_s?) || ""
         new_text = event["text"]?.try(&.as_s?) || ""
+        return false if old_text.bytesize + new_text.bytesize >
+                        TEXT_COALESCE_LIMIT
+
         merged = before.dup
         merged["text"] = JSON::Any.new(old_text + new_text)
         @items.pop

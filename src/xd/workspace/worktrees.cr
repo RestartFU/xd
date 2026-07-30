@@ -1,3 +1,4 @@
+require "../git_path"
 require "../storage/workflow_state"
 require "./service"
 
@@ -277,7 +278,7 @@ module Xd
           )
         end
         validate_output(output)
-        root = output.strip
+        root = GitPath.native(output.strip)
         if root.empty?
           raise Error.new(
             "Worktree selection needs a Git working directory."

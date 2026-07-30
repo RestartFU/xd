@@ -1,4 +1,6 @@
 require "file_utils"
+require "../git_path"
+require "./tool_diff"
 
 module Xd
   module Agent
@@ -6,8 +8,8 @@ module Xd
     # the user's index. Each snapshot is a Git tree written through a private
     # temporary index beside the real one.
     class GitDiffTracker
-      FILE_CHANGE_PREFIX = "file_change\n"
-      DIFF_LIMIT         = 256 * 1024
+      FILE_CHANGE_PREFIX = ToolDiff::PREFIX
+      DIFF_LIMIT         = ToolDiff::LIMIT
 
       getter root : String
 
@@ -81,7 +83,7 @@ module Xd
       private def self.repository_root(workdir : String) : String?
         output = git(workdir, ["rev-parse", "--show-toplevel"])
         return unless output
-        path = output.strip
+        path = GitPath.native(output.strip)
         return if path.empty?
         File.realpath(path)
       rescue File::Error
@@ -94,7 +96,7 @@ module Xd
       ) : String?
         index_output = git(root, ["rev-parse", "--git-path", "index"])
         return unless index_output
-        reported = index_output.strip
+        reported = GitPath.native(index_output.strip)
         return if reported.empty?
         user_index = Path[reported].absolute? ? reported : File.expand_path(reported, root)
         index_dir = File.dirname(user_index)
@@ -146,7 +148,9 @@ module Xd
         output = IO::Memory.new
         error = IO::Memory.new
         environment = {"GIT_LITERAL_PATHSPECS" => "1"}
-        environment["GIT_INDEX_FILE"] = index_path if index_path
+        if index_path
+          environment["GIT_INDEX_FILE"] = GitPath.environment(index_path)
+        end
         status = Process.run(
           "git",
           arguments,

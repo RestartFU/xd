@@ -309,7 +309,7 @@ describe Xd::Agent::Manager do
   end
 
   it "stores a labeled no-reply row when a successful turn is silent" do
-    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
       chat_id = store.create_chat(folder_id, "Chat", "claude")
 
       manager.send(chat_id, "hello?")
@@ -324,6 +324,10 @@ describe Xd::Agent::Manager do
       messages[1].content.should eq("(no reply)")
       messages[1].label.not_nil!.should start_with("Claude Opus 5 · ")
       store.get_last_seen(chat_id, "claude").should eq(messages.last.id)
+      finished = events.reverse.find(&.[0].==("turn-finished")).not_nil![1]
+      finished["silent"].as_bool.should be_true
+      finished["duration"].as_i64.should be >= 0
+      finished["last_message_id"].as_i64.should eq(messages.last.id)
     end
   end
 
@@ -372,6 +376,12 @@ describe Xd::Agent::Manager do
       )
       finished = events.reverse.find(&.[0].==("turn-finished")).not_nil!
       finished[1]["waiting"].as_bool.should be_true
+      finished[1]["question"].as_s.should eq("Choose?")
+      finished[1]["options"].as_a.map(&.as_s).should eq([
+        "First",
+        "Second",
+      ])
+      finished[1]["accepts_input"].as_bool.should be_false
     end
   end
 

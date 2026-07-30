@@ -118,6 +118,20 @@ module Xd
         interrupt_turn(turn)
       end
 
+      # Cancellation timeout owns local completion. Server is discarded by
+      # caller afterward, so no late notification may revive this turn.
+      def complete_cancel(turn : CodexTurn) : Nil
+        @waiting.delete(turn)
+        if id = turn.thread_id
+          @turns.delete(id)
+        end
+        stale = @pending.compact_map do |id, request|
+          id if request.turn.try(&.same?(turn))
+        end
+        stale.each { |id| @pending.delete(id) }
+        turn.finish(true, nil)
+      end
+
       def receive_line(line : String) : Nil
         root = JSON.parse(line).as_h?
         return unless root

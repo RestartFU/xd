@@ -25,6 +25,7 @@ module Xd
         @environment : Hash(String, String),
         version : String,
         arguments : Array(String)? = nil,
+        @cancel_grace : Time::Span = 5.seconds,
       )
         command = arguments || @backend.build_argv(RunSpec.new(""))
         unless arguments
@@ -88,6 +89,13 @@ module Xd
 
       def cancel(turn : CodexTurn) : Nil
         @protocol.cancel(turn)
+        spawn do
+          sleep @cancel_grace
+          unless turn.finished
+            @protocol.complete_cancel(turn)
+            fail_server("Codex app-server ignored cancellation")
+          end
+        end
       rescue error : IO::Error
         fail_server(error.message || "Cannot write to Codex app-server")
       end

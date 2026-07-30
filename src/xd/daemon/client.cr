@@ -1,6 +1,7 @@
 require "json"
 require "openssl"
 require "socket"
+require "../protocol/message"
 require "./endpoint"
 require "./local_ipc"
 
@@ -15,18 +16,21 @@ module Xd
       token : String,
       fingerprint : String
 
-    # One ordered client for both local IPC and remote TLS.
+    # One multiplexed client for both local IPC and remote TLS.
     #
-    # Wire replies have no request id, so calls and replies remain FIFO while
-    # unsolicited event objects bypass that queue.
+    # Current daemons echo the private request id, so a slow repository read
+    # cannot hold a cancel, terminal input, or model-status call behind it.
+    # The FIFO remains as a compatibility path for older daemons.
     class Client < Endpoint
       class Error < Exception
       end
 
-      @pending = Deque(Channel(ClientAnswer)).new
+      @pending = {} of Int64 => Channel(ClientAnswer)
+      @pending_order = Deque(Int64).new
       @subscribers = {} of Int64 => Proc(Hash(String, JSON::Any), Nil)
       @disconnect_subscribers = {} of Int64 => Proc(String, Nil)
       @next_subscriber = 0_i64
+      @next_request = 0_i64
       @lock = Mutex.new
       @closed = false
       @disconnect_message : String?
@@ -94,13 +98,18 @@ module Xd
         request : Hash(String, JSON::Any),
       ) : Hash(String, JSON::Any)
         answer = Channel(ClientAnswer).new(1)
-        line = request.to_json
 
         begin
           @lock.synchronize do
             raise Error.new("Daemon connection is closed.") if @closed
-            @pending << answer
-            @io << line << '\n'
+
+            @next_request &+= 1
+            request_id = @next_request
+            body = request.dup
+            body[Protocol::REQUEST_ID] = JSON::Any.new(request_id)
+            @pending[request_id] = answer
+            @pending_order << request_id
+            @io << body.to_json << '\n'
             @io.flush
           end
         rescue error : IO::Error
@@ -207,7 +216,14 @@ module Xd
           if root.has_key?("event")
             publish(root)
           else
-            answer = @lock.synchronize { @pending.shift? }
+            answer = @lock.synchronize do
+              if request_id = root[Protocol::REQUEST_ID]?.try(&.as_i64?)
+                @pending_order.delete(request_id)
+                @pending.delete(request_id)
+              elsif oldest = @pending_order.shift?
+                @pending.delete(oldest)
+              end
+            end
             unless answer
               return disconnect("Daemon sent an unanswerable response.")
             end
@@ -241,8 +257,9 @@ module Xd
           unless @closed
             @closed = true
             @disconnect_message = message
-            pending = @pending.to_a
+            pending = @pending.values
             @pending.clear
+            @pending_order.clear
             subscribers = @disconnect_subscribers.values.dup
             true
           else

@@ -1,5 +1,6 @@
 require "file_utils"
 require "../agent/environment"
+require "../git_path"
 require "../storage/workflow_state"
 require "../workspace/service"
 require "./filesystem"
@@ -337,6 +338,7 @@ module Xd
           raise Error.new("Git could not locate the repository index.")
         end
 
+        reported = GitPath.native(reported)
         user_index = Path[reported].absolute? ? reported : File.expand_path(reported, workdir)
         temporary = File.tempfile(
           "xd-pane-index",
@@ -345,7 +347,7 @@ module Xd
         index_path = temporary.path
         temporary.close
         environment = Agent::Environment.host
-        environment["GIT_INDEX_FILE"] = index_path
+        environment["GIT_INDEX_FILE"] = GitPath.environment(index_path)
 
         begin
           if File.file?(user_index)
@@ -401,7 +403,9 @@ module Xd
       end
 
       private def repository_root(workdir : String) : String
-        root = capture(workdir, ["rev-parse", "--show-toplevel"]).strip
+        root = GitPath.native(
+          capture(workdir, ["rev-parse", "--show-toplevel"]).strip
+        )
         if root.empty?
           raise Error.new("This chat is not in a Git repository.")
         end

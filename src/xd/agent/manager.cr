@@ -657,11 +657,12 @@ module Xd
                        end
           @store.append_message(turn.chat_id, "error", error_text)
         end
+        last_message_id = @store.last_message_id(turn.chat_id)
         if success
           @store.set_last_seen(
             turn.chat_id,
             turn.backend.id,
-            @store.last_message_id(turn.chat_id)
+            last_message_id
           )
         end
 
@@ -679,8 +680,20 @@ module Xd
           "chat"    => JSON::Any.new(turn.chat_id),
           "ok"      => JSON::Any.new(success),
           "waiting" => JSON::Any.new(!asked.nil?),
+          "silent"  => JSON::Any.new(
+            success && !turn.had_text && !turn.had_tool
+          ),
+          "duration" => JSON::Any.new(elapsed),
+          "last_message_id" => JSON::Any.new(last_message_id),
         }
         fields["error"] = JSON::Any.new(error_text) if error_text
+        if ask = asked
+          fields["question"] = JSON::Any.new(ask.question)
+          fields["options"] = JSON::Any.new(
+            ask.options.map { |option| JSON::Any.new(option) }
+          )
+          fields["accepts_input"] = JSON::Any.new(ask.accepts_input)
+        end
         publish("turn-finished", fields)
 
         if text = next_text

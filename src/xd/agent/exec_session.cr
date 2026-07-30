@@ -72,8 +72,10 @@ module Xd
 
         {% if flag?(:win32) %}
           process.terminate(graceful: false)
+          close_streams(process)
         {% else %}
           process.signal(Signal::INT)
+          close_streams(process)
           spawn do
             sleep 2.seconds
             kill = @mutex.synchronize { !@finished }
@@ -158,6 +160,14 @@ module Xd
         end
       rescue error
         finish(false, error.message || "Agent process failed")
+      end
+
+      # Descendants can inherit stdout/stderr after the CLI parent exits.
+      # Closing our read ends makes cancellation independent of those handles.
+      private def close_streams(process : Process) : Nil
+        process.output.close
+        process.error.close
+      rescue IO::Error
       end
 
       private def finish(success : Bool, message : String?) : Nil

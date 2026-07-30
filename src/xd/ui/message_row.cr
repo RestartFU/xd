@@ -1,6 +1,7 @@
 require "gtk4"
 require "../markdown"
 require "./adw"
+require "./background_work"
 require "./diff_view"
 require "./host_launch"
 require "./message_content"
@@ -54,6 +55,7 @@ module Xd
       getter text : String
 
       @stream_label : Gtk::Label?
+      @render_generation = 0_i64
 
       def initialize(
         @kind : MessageKind,
@@ -106,6 +108,7 @@ module Xd
         @text = text
         @literal_parts = nil
         unless label = @stream_label
+          @render_generation += 1
           clear_body
           label = make_text_label
           @body.append(label)
@@ -115,6 +118,8 @@ module Xd
       end
 
       private def render_body : Nil
+        @render_generation += 1
+        generation = @render_generation
         clear_body
         return if @text.empty? && @literal_parts.nil?
 
@@ -136,7 +141,7 @@ module Xd
         MessageContent.parse(@text).each do |part|
           case part.kind
           when MessagePartKind::Prose
-            append_prose(Markdown.to_pango(part.text))
+            append_assistant_prose(part.text, generation)
           when MessagePartKind::Code
             @body.append(make_code_card(part.text, false, true))
           when MessagePartKind::Diff
@@ -144,6 +149,29 @@ module Xd
           when MessagePartKind::Table
             @body.append(make_code_card(part.text, false, false))
           end
+        end
+      end
+
+      private def append_assistant_prose(
+        text : String,
+        generation : Int64,
+      ) : Nil
+        return if text.empty?
+
+        label = make_text_label
+        label.text = text
+        @body.append(label)
+        BackgroundWork.submit do
+          markup = Markdown.to_pango(text)
+          GLib.idle_add do
+            if @render_generation == generation &&
+               label.parent &&
+               @stream_label.nil?
+              label.markup = markup
+            end
+            false
+          end
+          nil
         end
       end
 

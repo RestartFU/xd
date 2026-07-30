@@ -112,4 +112,47 @@ describe Xd::Agent::CodexAppServer do
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
+
+  it "finishes cancellation when app-server ignores interrupt" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-codex-cancel-#{Random::Secure.hex(12)}"
+    )
+    Dir.mkdir_p(directory)
+    script = fake_codex_script(directory, <<-SH)
+      IFS= read -r initialize
+      printf '%s\\n' '{"id":1,"result":{}}'
+      IFS= read -r initialized
+      IFS= read -r open_thread
+      printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+      IFS= read -r start_turn
+      printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1"}}}'
+      while IFS= read -r ignored; do :; done
+      SH
+    finished = Channel(Tuple(Bool, String?)).new(1)
+    server = Xd::Agent::CodexAppServer.new(
+      Xd::Agent::Catalog::CODEX,
+      ENV.to_h,
+      "spec",
+      [script],
+      50.milliseconds
+    )
+    turn = server.start_turn(
+      Xd::Agent::RunSpec.new("hello"),
+      nil,
+      ->(_event : Xd::Agent::Event) { },
+      ->(ok : Bool, message : String?) { finished.send({ok, message}) }
+    )
+
+    100.times do
+      break if turn.turn_id
+      sleep 10.milliseconds
+    end
+    server.cancel(turn)
+    await_codex_finish(finished).should eq({true, nil})
+    server.failed?.should be_true
+  ensure
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
 end

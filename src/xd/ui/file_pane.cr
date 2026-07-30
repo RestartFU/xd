@@ -2,6 +2,7 @@ require "json"
 require "gtk4"
 require "../syntax_highlight"
 require "./adw"
+require "./background_work"
 require "./panel_call"
 
 module Xd
@@ -513,11 +514,12 @@ module Xd
         text : String,
         token : Int64,
       ) : Nil
-        Thread.new do
+        BackgroundWork.submit do
           spans = SyntaxHighlight.prepare(path, text)
           GLib.idle_add do
             apply_highlight_batch(path, token, spans, 0)
           end
+          nil
         end
       end
 
