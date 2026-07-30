@@ -60,6 +60,7 @@ private def with_daemon_engine(
   launcher : Xd::Agent::Launcher? = nil,
   authentication_resolver : Xd::Agent::Authentication::Resolver? = nil,
   authentication_environment : Hash(String, String)? = nil,
+  agent_authorizer : Xd::Agent::Manager::Authorizer? = ->(_provider : String) : String? { nil },
   voice_model_factory : Xd::Daemon::VoiceJobs::ModelFactory? = nil,
   voice_transcriber_factory : Xd::Daemon::VoiceJobs::TranscriberFactory? = nil,
   & : Xd::Storage::Store, Xd::Daemon::Engine ->
@@ -77,6 +78,7 @@ private def with_daemon_engine(
     launcher: launcher,
     authentication_resolver: authentication_resolver,
     authentication_environment: authentication_environment,
+    agent_authorizer: agent_authorizer,
     voice_model_factory: voice_model_factory,
     voice_transcriber_factory: voice_transcriber_factory
   )
@@ -243,6 +245,72 @@ describe Xd::Daemon::Engine do
         "chat" => chat_id,
       }.to_json)
       chat["queue"].as_a.map(&.as_s).should eq(["next"])
+    end
+  end
+
+  it "blocks signed-out local and remote turns before the launcher" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-engine-auth-gate-#{Random::Secure.hex(12)}"
+    )
+    state = File.join(directory, "auth-state")
+    Dir.mkdir_p(state)
+    executable = File.join(directory, "agent-auth")
+    FileUtils.cp(
+      File.expand_path(
+        "../../../tests/fixtures/agent-auth.sh",
+        __DIR__
+      ),
+      executable
+    )
+    File.chmod(executable, 0o700)
+    launcher = EngineLauncher.new
+
+    begin
+      with_daemon_engine(
+        launcher: launcher,
+        authentication_resolver: ->(_provider : String) { executable },
+        authentication_environment: {"AUTH_STATE" => state},
+        agent_authorizer: nil
+      ) do |store, engine|
+        chat_id = store.create_chat("folder", "Chat", "claude")
+        local = Xd::Daemon::Connection.new(
+          Xd::Daemon::Transport::Local
+        )
+        remote = Xd::Daemon::Connection.new(
+          Xd::Daemon::Transport::Remote
+        )
+        remote.authenticated = true
+
+        deadline = Time.instant + 3.seconds
+        loop do
+          current = engine.dispatch(local, {
+            "op"   => "chat",
+            "chat" => chat_id,
+          }.to_json)
+          break if current["auth_state"].as_s == "signed-out"
+          fail "authentication status did not settle" if Time.instant >= deadline
+          sleep 5.milliseconds
+        end
+
+        [local, remote].each do |connection|
+          denied = engine.dispatch(connection, {
+            "op"   => "send",
+            "chat" => chat_id,
+            "text" => "never reaches the provider",
+          }.to_json)
+          denied.success?.should be_false
+          denied["error"].as_s.should eq(
+            "Sign in to Claude Code before starting a turn."
+          )
+        end
+
+        launcher.specs.should be_empty
+        store.list_messages(chat_id).should be_empty
+        store.get_chat(chat_id).daemon_working.should be_false
+      end
+    ensure
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
 

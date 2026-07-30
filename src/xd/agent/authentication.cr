@@ -136,10 +136,43 @@ module Xd
         end
       end
 
+      def snapshot(provider : String) : Snapshot
+        @mutex.synchronize { entry!(provider).snapshot }
+      end
+
+      def authorization_error(provider : String) : String?
+        current = snapshot(provider)
+        case current.state
+        when .signed_in?
+          nil
+        when .signed_out?
+          "Sign in to #{current.display_name} before starting a turn."
+        when .checking?, .unknown?
+          "Still checking #{current.display_name} sign-in status."
+        when .signing_in?
+          "Finish signing in to #{current.display_name} before starting a turn."
+        when .signing_out?
+          "#{current.display_name} is signing out."
+        when .failed?
+          detail = current.detail.try(&.strip)
+          if detail && !detail.empty?
+            "Cannot verify #{current.display_name} sign-in: #{detail}"
+          else
+            "Cannot verify #{current.display_name} sign-in."
+          end
+        else
+          "Cannot verify #{current.display_name} sign-in."
+        end
+      end
+
       def refresh : Nil
         Catalog.all.each do |backend|
-          begin_command(backend.id, Command::Check, required: false)
+          refresh(backend.id)
         end
+      end
+
+      def refresh(provider : String) : Nil
+        begin_command(provider, Command::Check, required: false)
       end
 
       def login(provider : String) : Nil

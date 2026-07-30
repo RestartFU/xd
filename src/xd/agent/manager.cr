@@ -109,6 +109,8 @@ module Xd
       class Error < Exception
       end
 
+      alias Authorizer = Proc(String, String?)
+
       private class ActiveTurn
         getter chat_id : String
         getter backend : Backend
@@ -165,6 +167,7 @@ module Xd
         @on_event : Proc(String, Hash(String, JSON::Any), Nil) = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
         worktree_service : Workspace::Worktrees? = nil,
         @clock : Proc(Time::Instant) = -> { Time.instant },
+        @authorizer : Authorizer = ->(_provider : String) : String? { nil },
       )
         @worktree_service = worktree_service ||
                             Workspace::Worktrees.new(@store, @workspaces)
@@ -329,6 +332,9 @@ module Xd
           backend = Catalog.lookup(chat.backend)
           unless backend
             raise Error.new("Unknown backend \"#{chat.backend}\".")
+          end
+          if message = @authorizer.call(backend.id)
+            raise Error.new(message)
           end
 
           if chat.title == "New Chat" &&

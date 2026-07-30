@@ -48,6 +48,7 @@ module Xd
         launcher : Agent::Launcher? = nil,
         authentication_resolver : Agent::Authentication::Resolver? = nil,
         authentication_environment : Hash(String, String)? = nil,
+        agent_authorizer : Agent::Manager::Authorizer? = nil,
         voice_model_factory : VoiceJobs::ModelFactory? = nil,
         voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
       )
@@ -75,6 +76,16 @@ module Xd
             publish_async_event(name, fields)
           }
         )
+        @authentication = Agent::Authentication.new(
+          ->(name : String, fields : Hash(String, JSON::Any)) {
+            publish_async_event(name, fields)
+          },
+          resolver: authentication_resolver,
+          environment: authentication_environment
+        )
+        authorizer = agent_authorizer || ->(provider : String) {
+          @authentication.authorization_error(provider)
+        }
         @agents = Agent::Manager.new(
           @store,
           @workspaces,
@@ -83,14 +94,8 @@ module Xd
             publish_async_event(name, fields)
           },
           @git_worktrees,
-          clock: @clock
-        )
-        @authentication = Agent::Authentication.new(
-          ->(name : String, fields : Hash(String, JSON::Any)) {
-            publish_async_event(name, fields)
-          },
-          resolver: authentication_resolver,
-          environment: authentication_environment
+          clock: @clock,
+          authorizer: authorizer
         )
         @voice = VoiceJobs.new(
           ->(name : String, fields : Hash(String, JSON::Any), audience : UInt64) {
@@ -787,6 +792,17 @@ module Xd
 
         fields["title"] = json_any(stored.title)
         fields["backend"] = JSON::Any.new(stored.backend)
+        authentication = @authentication.snapshot(stored.backend)
+        if authentication.state.unknown?
+          @authentication.refresh(stored.backend)
+          authentication = @authentication.snapshot(stored.backend)
+        end
+        fields["auth_state"] = JSON::Any.new(
+          authentication.state.wire_name
+        )
+        if detail = authentication.detail
+          fields["auth_detail"] = JSON::Any.new(detail)
+        end
         fields["commands"] = json_any(@agents.commands(chat_id))
         fields["plan"] = JSON::Any.new(stored.plan)
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?

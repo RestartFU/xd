@@ -335,8 +335,11 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   Authentication pipe reads explicitly yield to GTK and publish only changed
   structured instructions. A million-line synthetic CLI login leaves Escape
   responsive in 21 ms and the visible Close button responsive in 110 ms while
-  cancellation cleans up the process. One real bundled OAuth completion
-  remains.
+  cancellation cleans up the process. Every actual manager launch is gated by
+  daemon-owned structured auth state, including queued and remote callers, so
+  a signed-out turn never reaches the provider or stores a false user row.
+  Unix and authenticated TLS rejection are covered before the fake launcher.
+  One real bundled OAuth completion remains.
 - `[~]` Claude status, browser login, pasted-code input, cancellation, and
   logout use the same structured service and panel. Local UI and an actual
   paired TLS client cover clean code entry, signed-in state, sign-out, and
@@ -370,7 +373,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (242 examples).
+- `[x]` Crystal specs pass in Docker (244 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

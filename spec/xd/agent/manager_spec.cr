@@ -65,6 +65,7 @@ private def manager_git(workdir : String, *arguments : String) : Nil
 end
 
 private def with_agent_manager(
+  authorizer : Xd::Agent::Manager::Authorizer = ->(_provider : String) : String? { nil },
   & : Xd::Agent::Manager, Xd::Storage::Store, Xd::Workspace::Service, String, FakeLauncher, Array(Tuple(String, Hash(String, JSON::Any))) ->
 ) : Nil
   directory = File.join(
@@ -88,7 +89,8 @@ private def with_agent_manager(
     ->(name : String, fields : Hash(String, JSON::Any)) {
       events << {name, fields}
       nil
-    }
+    },
+    authorizer: authorizer
   )
 
   begin
@@ -106,6 +108,30 @@ private def with_agent_manager(
 end
 
 describe Xd::Agent::Manager do
+  it "rejects unsigned assistants before storing or launching a turn" do
+    checked = [] of String
+    authorizer = ->(provider : String) : String? {
+      checked << provider
+      "Sign in to Claude Code before starting a turn."
+    }
+    with_agent_manager(authorizer) do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "New Chat", "claude")
+
+      expect_raises(
+        Xd::Agent::Manager::Error,
+        "Sign in to Claude Code before starting a turn."
+      ) do
+        manager.send(chat_id, "do not send this upstream")
+      end
+
+      checked.should eq(["claude"])
+      launcher.specs.should be_empty
+      store.list_messages(chat_id).should be_empty
+      store.get_chat(chat_id).title.should eq("New Chat")
+      store.get_chat(chat_id).daemon_working.should be_false
+    end
+  end
+
   it "stores and broadcasts a complete streamed turn" do
     with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
       chat_id = store.create_chat(folder_id, "New Chat", "claude")
