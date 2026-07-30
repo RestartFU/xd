@@ -14,11 +14,13 @@ FROM crystallang/crystal:1.21.0@sha256:32b7b908a8c3625ebd629053daf48b6f469deaf74
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+      gir1.2-adw-1 \
       gir1.2-gtk-4.0 \
       gir1.2-vte-3.91 \
       gobject-introspection \
       libgirepository1.0-dev \
       libgtk-4-dev \
+      libadwaita-1-dev \
       libsqlite3-dev \
       libvte-2.91-gtk4-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -104,6 +106,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libegl-mesa0 \
       libegl1 \
       libgl1-mesa-dri \
+      libadwaita-1-dev \
       libgtk-4-dev \
       libsqlite3-dev \
       libssl-dev \
