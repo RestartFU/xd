@@ -15,6 +15,12 @@ module Xd
       @remote_state_subscription : Int64
       @row_popover : Gtk::Popover?
       @selected_key : String?
+      @editing_key : String?
+      @editing_model : Gio::ListStore?
+      @editing_source : Source?
+      @editing_parent_id : String?
+      @pending_menu : Gtk::Popover?
+      @pending_menu_action : Proc(Nil)?
 
       private class Source
         getter endpoint : Daemon::Endpoint
@@ -94,6 +100,7 @@ module Xd
         getter backend : String?
         getter working : Bool
         getter offline : Bool
+        getter placeholder : Bool
 
         def initialize(
           @key : String,
@@ -105,6 +112,7 @@ module Xd
           @backend : String? = nil,
           @working : Bool = false,
           @offline : Bool = false,
+          @placeholder : Bool = false,
         )
           @children = Gio::ListStore.new(Gtk::StringObject.g_type)
         end
@@ -115,6 +123,10 @@ module Xd
 
         def chat? : Bool
           @kind.chat?
+        end
+
+        def placeholder? : Bool
+          @placeholder
         end
 
         def icon_name : String
@@ -161,6 +173,16 @@ module Xd
           {} of UInt64 => GObject::SignalConnection
         @row_popover = nil
         @selected_key = nil
+        @editing_key = nil
+        @editing_model = nil
+        @editing_source = nil
+        @editing_parent_id = nil
+        @editing_kind = NodeKind::Folder
+        @creating = false
+        @placeholder_serial = 0_u64
+        @reload_after_edit = false
+        @pending_menu = nil
+        @pending_menu_action = nil
         @restore_queued = false
         @restoring_expanded = false
         @closing = {} of UInt64 => {Gtk::TreeListRow, String}
@@ -171,7 +193,7 @@ module Xd
           string = Gtk::StringObject.new(item, GICrystal::Transfer::None)
           node = @nodes[string.string]?
 
-          if node && node.kind == NodeKind::Folder
+          if node && node.folder?
             model = node.children
             LibGObject.g_object_ref(model.to_unsafe)
             model.to_unsafe
@@ -246,7 +268,7 @@ module Xd
         choices.margin_start = 6
         choices.margin_end = 6
         add_choice(choices, menu, "New Workspace") do
-          prompt_new_folder(@local_source, nil)
+          begin_creating(@local_source, nil, NodeKind::Folder)
         end
         add_choice(choices, menu, "Connect to a Machine…") do
           @on_pair.call
@@ -256,6 +278,7 @@ module Xd
         end
         menu.child = choices
         menu.add_css_class("xd-menu-popover")
+        menu.closed_signal.connect { finish_menu_action(menu) }
         add.popover = menu
 
         title = Adw::WindowTitle.new(title: "Workspaces")
@@ -278,6 +301,11 @@ module Xd
       end
 
       def reload : Nil
+        if @editing_key
+          @reload_after_edit = true
+          return
+        end
+
         if response = call(
              @local_source,
              {"op" => JSON::Any.new("tree")}
@@ -415,6 +443,27 @@ module Xd
         entry.hexpand = true
         entry.valign = :center
         entry.add_css_class("xd-inline-entry")
+        entry.activate_signal.connect { end_editing(true) }
+
+        editor_keys = Gtk::EventControllerKey.new
+        editor_keys.key_pressed_signal.connect do |keyval, _keycode, _state|
+          if keyval == Gdk::KEY_Escape
+            end_editing(false)
+            true
+          else
+            false
+          end
+        end
+        entry.add_controller(editor_keys)
+
+        editor_focus = Gtk::EventControllerFocus.new
+        editor_focus.leave_signal.connect do
+          node = @bound_nodes[pointer_key(box)]?
+          if node && @editing_key == node.key
+            end_editing(true)
+          end
+        end
+        entry.add_controller(editor_focus)
 
         working.visible = false
         working.valign = :center
@@ -472,8 +521,6 @@ module Xd
         widgets.expander.list_row = row
         widgets.icon.icon_name = node.icon_name
         widgets.label.text = node.name
-        widgets.label.visible = true
-        widgets.entry.visible = false
         widgets.working.visible = node.working
         widgets.icon_overlay.visible = !node.working
         widgets.status.visible = false
@@ -488,6 +535,7 @@ module Xd
         end
 
         @bound_nodes[pointer_key(widgets.box)] = node
+        show_editor(widgets, node, @editing_key == node.key)
         if node.folder?
           connection = row.notify_signal["expanded"].connect do |_property|
             expanded_changed(row, node)
@@ -522,6 +570,190 @@ module Xd
         end
       end
 
+      private def widgets_for_node(key : String) : RowWidgets?
+        @row_widgets.each_value do |widgets|
+          node = @bound_nodes[pointer_key(widgets.box)]?
+          return widgets if node && node.key == key
+        end
+        nil
+      end
+
+      private def show_editor(
+        widgets : RowWidgets,
+        node : Node,
+        editing : Bool,
+      ) : Nil
+        widgets.label.visible = !editing
+        widgets.entry.visible = editing
+        return unless editing
+
+        widgets.entry.text = node.name
+        widgets.entry.select_region(0, -1)
+        widgets.entry.grab_focus
+
+        key = node.key
+        GLib.idle_add do
+          current = @bound_nodes[pointer_key(widgets.box)]?
+          if current &&
+             current.key == key &&
+             @editing_key == key &&
+             widgets.entry.mapped &&
+             widgets.entry.visible?
+            widgets.entry.grab_focus
+            widgets.entry.select_region(0, -1)
+          end
+          false
+        end
+      end
+
+      private def begin_renaming(node : Node) : Nil
+        key = node.key
+        end_editing(true)
+        current = @nodes[key]? || return
+        return if current.placeholder? || current.kind.remote_root?
+
+        @editing_key = current.key
+        @editing_model = nil
+        @editing_source = current.source
+        @editing_parent_id = current.folder_id
+        @editing_kind = current.kind
+        @creating = false
+
+        if widgets = widgets_for_node(current.key)
+          show_editor(widgets, current, true)
+        end
+      end
+
+      private def begin_creating(
+        source : Source,
+        parent : Node?,
+        kind : NodeKind,
+      ) : Nil
+        parent_key = parent.try(&.key)
+        end_editing(true)
+
+        current_parent = parent_key ? @nodes[parent_key]? : nil
+        return if parent_key && !current_parent
+        return if kind.chat? && !current_parent.try(&.kind.folder?)
+
+        model = current_parent.try(&.children) || @root_model
+        parent_id = if current_parent.try(&.kind.folder?)
+                      current_parent.not_nil!.id
+                    end
+        name = kind.chat? ? "New Chat" : ""
+        @placeholder_serial += 1
+        key = "placeholder/#{@placeholder_serial}"
+        placeholder = Node.new(
+          key,
+          "",
+          name,
+          kind,
+          source,
+          folder_id: kind.chat? ? parent_id : nil,
+          placeholder: true
+        )
+
+        if current_parent
+          if widgets = widgets_for_node(current_parent.key)
+            widgets.expander.list_row.try { |row| row.expanded = true }
+          end
+        end
+
+        position = placeholder_position(model, kind)
+        @editing_key = key
+        @editing_model = model
+        @editing_source = source
+        @editing_parent_id = parent_id
+        @editing_kind = kind
+        @creating = true
+        @nodes[key] = placeholder
+        model.insert(position, Gtk::StringObject.new(key))
+      end
+
+      private def placeholder_position(
+        model : Gio::ListStore,
+        kind : NodeKind,
+      ) : UInt32
+        return 0_u32 unless kind.chat?
+
+        position = 0_u32
+        while position < model.n_items
+          child = node_for_model_item(model.item(position))
+          break unless child.try(&.kind.folder?)
+          position += 1
+        end
+        position
+      end
+
+      private def end_editing(keep : Bool) : Nil
+        key = @editing_key
+        return unless key
+
+        node = @nodes[key]?
+        widgets = widgets_for_node(key)
+        name = widgets.try(&.entry.text)
+        creating = @creating
+        model = @editing_model
+        source = @editing_source
+        parent_id = @editing_parent_id
+        kind = @editing_kind
+        reload_after = @reload_after_edit
+
+        @editing_key = nil
+        @editing_model = nil
+        @editing_source = nil
+        @editing_parent_id = nil
+        @creating = false
+        @reload_after_edit = false
+
+        show_editor(widgets, node, false) if widgets && node
+        if creating && model
+          remove_model_key(model, key)
+          @nodes.delete(key)
+        end
+
+        if keep && source && node && name && !name.empty?
+          if creating
+            if kind.chat?
+              create_chat(source, parent_id.not_nil!, name) if parent_id
+            else
+              create_folder(source, parent_id, name)
+            end
+          elsif kind.chat?
+            rename_chat(node, name)
+          elsif kind.folder? && name != node.name
+            rename_folder(node, name)
+          end
+        end
+
+        reload if reload_after
+      end
+
+      private def remove_model_key(
+        model : Gio::ListStore,
+        key : String,
+      ) : Nil
+        position = 0_u32
+        while position < model.n_items
+          node = node_for_model_item(model.item(position))
+          if node.try(&.key) == key
+            model.remove(position)
+            return
+          end
+          position += 1
+        end
+      end
+
+      private def node_for_model_item(object : GObject::Object?) : Node?
+        return unless object
+
+        string = Gtk::StringObject.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        @nodes[string.string]?
+      end
+
       private def selection_changed : Nil
         object = @selection.selected_item || return
         row = Gtk::TreeListRow.new(
@@ -529,6 +761,7 @@ module Xd
           GICrystal::Transfer::None
         )
         node = node_for_row(row) || return
+        return if node.placeholder?
         return if @selected_key == node.key
 
         @selected_key = node.key
@@ -541,6 +774,7 @@ module Xd
       private def activate_row(position : UInt32) : Nil
         row = @tree_model.row(position) || return
         node = node_for_row(row) || return
+        return if node.placeholder?
 
         if node.folder?
           row.expanded = !row.expanded?
@@ -571,7 +805,7 @@ module Xd
         row : Gtk::TreeListRow,
         node : Node,
       ) : Nil
-        return if @restoring_expanded
+        return if @restoring_expanded || node.placeholder?
 
         key = pointer_key(row)
         if row.expanded?
@@ -646,6 +880,8 @@ module Xd
       end
 
       private def open_row_menu(box : Gtk::Box, node : Node) : Nil
+        return if node.placeholder?
+
         if previous = @row_popover
           previous.popdown
           previous.unparent if previous.parent
@@ -653,11 +889,11 @@ module Xd
 
         popover = case node.kind
                   when NodeKind::RemoteRoot
-                    remote_menu(node.name)
+                    remote_menu(node)
                   when NodeKind::Folder
-                    folder_menu(node.source, node.id)
+                    folder_menu(node)
                   when NodeKind::Chat
-                    chat_menu(node.source, node.id, node.name)
+                    chat_menu(node)
                   else
                     raise "Unknown sidebar node kind"
                   end
@@ -670,6 +906,7 @@ module Xd
           if @row_popover.try(&.to_unsafe) == popover.to_unsafe
             @row_popover = nil
           end
+          finish_menu_action(popover)
         end
         popover.popup
       end
@@ -678,35 +915,34 @@ module Xd
         object.to_unsafe.address
       end
 
-      private def remote_menu(host : String) : Gtk::Popover
+      private def remote_menu(node : Node) : Gtk::Popover
         popover, choices = menu_shell
         add_choice(choices, popover, "New Workspace") do
-          prompt_new_folder(@remote_source, nil)
+          begin_creating(node.source, node, NodeKind::Folder)
         end
         add_choice(choices, popover, "Agent Secrets…") do
-          dialogs(@remote_source).secrets
+          dialogs(node.source).secrets
         end
         add_choice(choices, popover, "Refresh") { reload }
         choices.append(Gtk::Separator.new(:horizontal))
         add_choice(choices, popover, "Remove Connection…") do
-          confirm_remove_remote(host)
+          confirm_remove_remote(node.name)
         end
         popover
       end
 
-      private def folder_menu(
-        source : Source,
-        folder_id : String,
-      ) : Gtk::Popover
+      private def folder_menu(node : Node) : Gtk::Popover
+        source = node.source
+        folder_id = node.id
         popover, choices = menu_shell
         add_choice(choices, popover, "New Chat") do
-          prompt_new_chat(source, folder_id)
+          begin_creating(source, node, NodeKind::Chat)
         end
         add_choice(choices, popover, "New Folder") do
-          prompt_new_folder(source, folder_id)
+          begin_creating(source, node, NodeKind::Folder)
         end
         add_choice(choices, popover, "Rename…") do
-          prompt_rename_folder(source, folder_id)
+          begin_renaming(node)
         end
         add_choice(choices, popover, "Settings…") do
           dialogs(source).settings(
@@ -753,14 +989,13 @@ module Xd
         popover
       end
 
-      private def chat_menu(
-        source : Source,
-        chat_id : String,
-        title : String,
-      ) : Gtk::Popover
+      private def chat_menu(node : Node) : Gtk::Popover
+        source = node.source
+        chat_id = node.id
+        title = node.name
         popover, choices = menu_shell
         add_choice(choices, popover, "Rename…") do
-          prompt_rename_chat(source, chat_id, title)
+          begin_renaming(node)
         end
         choices.append(Gtk::Separator.new(:horizontal))
         add_choice(choices, popover, "Delete Chat") do
@@ -790,61 +1025,49 @@ module Xd
         button.add_css_class("flat")
         button.halign = :fill
         button.clicked_signal.connect do
-          popover.popdown
-          action.call
+          queue_menu_action(popover, action)
         end
         choices.append(button)
       end
 
-      private def prompt_new_folder(
-        source : Source,
-        parent_id : String?,
+      private def queue_menu_action(
+        popover : Gtk::Popover,
+        action : Proc(Nil),
       ) : Nil
-        workspace = parent_id.nil?
-        Dialogs.prompt(
-          @parent,
-          workspace ? "New Workspace" : "New Folder",
-          workspace ? "Workspace name" : "Folder name",
-          workspace ? "New Workspace" : "New Folder"
-        ) do |name|
-          request = {
-            "op"   => JSON::Any.new("new-folder"),
-            "name" => JSON::Any.new(name),
-          }
-          request["parent"] = JSON::Any.new(parent_id) if parent_id
-          if created = call(source, request)
-            source.selected_folder = created["id"].as_s
-            reload
-          end
+        @pending_menu = popover
+        @pending_menu_action = action
+        popover.popdown
+      end
+
+      private def finish_menu_action(popover : Gtk::Popover) : Nil
+        pending = @pending_menu
+        return unless pending &&
+                      pending.to_unsafe == popover.to_unsafe
+
+        action = @pending_menu_action
+        @pending_menu = nil
+        @pending_menu_action = nil
+        return unless action
+
+        GLib.idle_add do
+          action.call
+          false
         end
       end
 
-      private def prompt_new_chat(
+      private def create_folder(
         source : Source,
-        folder_id : String?,
+        parent_id : String?,
+        name : String,
       ) : Nil
-        folder = folder_id ||
-                 source.selected_folder ||
-                 source.folder_ids.first?
-        unless folder
-          created = call(source, {
-            "op"   => JSON::Any.new("new-folder"),
-            "name" => JSON::Any.new("Workspace"),
-          })
-          return unless created
-          folder = created["id"].as_s
-          source.selected_folder = folder
+        request = {
+          "op"   => JSON::Any.new("new-folder"),
+          "name" => JSON::Any.new(name),
+        }
+        request["parent"] = JSON::Any.new(parent_id) if parent_id
+        if created = call(source, request)
+          source.selected_folder = created["id"].as_s
           reload
-        end
-
-        target = folder.not_nil!
-        Dialogs.prompt(
-          @parent,
-          "New Chat",
-          "Chat title",
-          "New Chat"
-        ) do |title|
-          create_chat(source, target, title)
         end
       end
 
@@ -865,45 +1088,24 @@ module Xd
         @on_chat.call(source.endpoint, created["id"].as_s, title)
       end
 
-      private def prompt_rename_folder(
-        source : Source,
-        folder_id : String,
-      ) : Nil
-        Dialogs.prompt(
-          @parent,
-          "Rename Folder",
-          "Folder name",
-          source.folder_names[folder_id]
-        ) do |name|
-          if call(source, {
-               "op"     => JSON::Any.new("rename-folder"),
-               "folder" => JSON::Any.new(folder_id),
-               "name"   => JSON::Any.new(name),
-             })
-            reload
-          end
+      private def rename_folder(node : Node, name : String) : Nil
+        if call(node.source, {
+             "op"     => JSON::Any.new("rename-folder"),
+             "folder" => JSON::Any.new(node.id),
+             "name"   => JSON::Any.new(name),
+           })
+          reload
         end
       end
 
-      private def prompt_rename_chat(
-        source : Source,
-        chat_id : String,
-        current : String,
-      ) : Nil
-        Dialogs.prompt(
-          @parent,
-          "Rename Chat",
-          "Chat title",
-          current
-        ) do |title|
-          if call(source, {
-               "op"    => JSON::Any.new("rename-chat"),
-               "chat"  => JSON::Any.new(chat_id),
-               "title" => JSON::Any.new(title),
-             })
-            reload
-            @on_chat.call(source.endpoint, chat_id, title)
-          end
+      private def rename_chat(node : Node, title : String) : Nil
+        if call(node.source, {
+             "op"    => JSON::Any.new("rename-chat"),
+             "chat"  => JSON::Any.new(node.id),
+             "title" => JSON::Any.new(title),
+           })
+          reload
+          @on_chat.call(node.source.endpoint, node.id, title)
         end
       end
 
