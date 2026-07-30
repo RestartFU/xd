@@ -1,7 +1,10 @@
 require "json"
 require "gtk4"
+require "set"
+require "../agent/catalog"
 require "../daemon/endpoint"
 require "../remote/connection"
+require "../version"
 require "./adw"
 require "./dialogs"
 require "./folder_dialogs"
@@ -72,6 +75,64 @@ module Xd
         end
       end
 
+      private enum NodeKind
+        Folder
+        Chat
+        RemoteRoot
+      end
+
+      private class Node
+        getter key : String
+        getter id : String
+        getter name : String
+        getter kind : NodeKind
+        getter source : Source
+        getter children : Gio::ListStore
+        getter folder_id : String?
+        getter backend : String?
+        getter working : Bool
+        getter offline : Bool
+
+        def initialize(
+          @key : String,
+          @id : String,
+          @name : String,
+          @kind : NodeKind,
+          @source : Source,
+          @folder_id : String? = nil,
+          @backend : String? = nil,
+          @working : Bool = false,
+          @offline : Bool = false,
+        )
+          @children = Gio::ListStore.new(Gtk::StringObject.g_type)
+        end
+
+        def folder? : Bool
+          @kind.folder? || @kind.remote_root?
+        end
+
+        def chat? : Bool
+          @kind.chat?
+        end
+
+        def icon_name : String
+          return @offline ? "network-offline-symbolic" : "network-server-symbolic" if @kind.remote_root?
+          return "folder-symbolic" if @kind.folder?
+          Agent::Catalog.lookup(@backend).try(&.icon_name) ||
+            "chat-message-symbolic"
+        end
+      end
+
+      private record RowWidgets,
+        expander : Gtk::TreeExpander,
+        box : Gtk::Box,
+        icon_overlay : Gtk::Overlay,
+        icon : Gtk::Image,
+        status : Gtk::Box,
+        working : Gtk::Label,
+        label : Gtk::Label,
+        entry : Gtk::Entry
+
       getter widget : Adw::ToolbarView
       getter header : Adw::HeaderBar
 
@@ -89,15 +150,62 @@ module Xd
       )
         @local_source = Source.new(local, false)
         @remote_source = Source.new(@remote, true)
-        @rows = Gtk::Box.new(:vertical, 2)
-        @rows.margin_top = 6
-        @rows.margin_bottom = 6
-        @rows.margin_start = 6
-        @rows.margin_end = 6
+        @settings = Gio::Settings.new(APP_ID)
+        @expanded = Set(String).new(@settings.strv("expanded-folders"))
+        @nodes = {} of String => Node
+        @row_widgets = {} of UInt64 => RowWidgets
+        @bound_nodes = {} of UInt64 => Node
+        @expand_connections =
+          {} of UInt64 => GObject::SignalConnection
+        @row_popover = nil
+        @selected_key = nil
+        @restore_queued = false
+        @restoring_expanded = false
+        @closing = {} of UInt64 => {Gtk::TreeListRow, String}
+        @save_expanded_queued = false
+
+        @root_model = Gio::ListStore.new(Gtk::StringObject.g_type)
+        create_children = ->(object : GObject::Object) : Gio::ListModel {
+          string = Gtk::StringObject.new(
+            object.to_unsafe,
+            GICrystal::Transfer::None
+          )
+          model = @nodes[string.string].children
+          LibGObject.g_object_ref(model.to_unsafe)
+          model
+        }
+        @tree_model = Gtk::TreeListModel.new(
+          @root_model,
+          false,
+          false,
+          create_children
+        )
+        @selection = Gtk::SingleSelection.new(@tree_model)
+        @selection.autoselect = false
+        @selection.can_unselect = true
+        @selection.notify_signal["selected"].connect do |_property|
+          selection_changed
+        end
+
+        factory = Gtk::SignalListItemFactory.new
+        factory.setup_signal.connect { |object| setup_item(object) }
+        factory.bind_signal.connect { |object| bind_item(object) }
+        factory.unbind_signal.connect { |object| unbind_item(object) }
+        factory.teardown_signal.connect { |object| teardown_item(object) }
+
+        @list_view = Gtk::ListView.new(@selection, factory)
+        @list_view.single_click_activate = false
+        @list_view.add_css_class("navigation-sidebar")
+        @list_view.add_css_class("xd-sidebar")
+        @list_view.activate_signal.connect do |position|
+          activate_row(position)
+        end
 
         scroll = Gtk::ScrolledWindow.new
         scroll.vexpand = true
-        scroll.child = @rows
+        scroll.set_policy(:never, :external)
+        scroll.add_css_class("xd-sidebar")
+        scroll.child = @list_view
 
         add = Gtk::MenuButton.new
         add.icon_name = "list-add-symbolic"
@@ -158,17 +266,7 @@ module Xd
           end
         end
 
-        clear(@rows)
-        render_source(@rows, @local_source)
-        render_remote if @remote.configured?
-
-        if @local_source.folder_ids.empty? && !@remote.configured?
-          empty = Gtk::Label.new("Create a workspace to start")
-          empty.wrap = true
-          empty.margin_top = 24
-          empty.add_css_class("dim-label")
-          @rows.append(empty)
-        end
+        rebuild_tree
       end
 
       def reload(endpoint : Daemon::Endpoint) : Nil
@@ -180,134 +278,373 @@ module Xd
         @remote.unsubscribe(@remote_state_subscription)
       end
 
-      private def render_remote : Nil
-        snapshot = @remote.snapshot
-        host = snapshot.host || "Remote"
+      private def rebuild_tree : Nil
+        @root_model.remove_all
+        @nodes.clear
 
-        icon = Gtk::Image.new_from_icon_name("network-server-symbolic")
-        icon.add_css_class("xd-offline") if snapshot.state.offline?
-
-        label = Gtk::Label.new(host)
-        label.xalign = 0_f32
-        label.hexpand = true
-        label.add_css_class("xd-offline") if snapshot.state.offline?
-
-        menu = Gtk::MenuButton.new
-        menu.icon_name = "view-more-symbolic"
-        menu.tooltip_text = "#{host} actions"
-        menu.add_css_class("flat")
-        menu.popover = remote_menu(host)
-
-        heading = Gtk::Box.new(:horizontal, 6)
-        heading.append(icon)
-        heading.append(label)
-        heading.append(menu)
-
-        contents = Gtk::Box.new(:vertical, 2)
-        contents.margin_start = 14
-        if @remote_source.loaded
-          render_source(contents, @remote_source)
-        else
-          status = case snapshot.state
-                   when Remote::ConnectionState::Connecting
-                     "Connecting…"
-                   when Remote::ConnectionState::Offline
-                     snapshot.error || "Remote unavailable"
-                   else
-                     "No workspaces"
-                   end
-          message = Gtk::Label.new(status)
-          message.xalign = 0_f32
-          message.wrap = true
-          message.add_css_class("dim-label")
-          message.add_css_class("xd-offline") if snapshot.state.offline?
-          contents.append(message)
+        add_source_roots(@local_source, @root_model)
+        if @remote.configured?
+          snapshot = @remote.snapshot
+          host = snapshot.host || "Remote"
+          port = snapshot.port || 0
+          root = Node.new(
+            "remote/root/#{host}:#{port}",
+            "remote://#{host}:#{port}",
+            host,
+            NodeKind::RemoteRoot,
+            @remote_source,
+            offline: !snapshot.state.connected?
+          )
+          append_node(@root_model, root)
+          add_source_roots(@remote_source, root.children)
         end
-
-        expander = Gtk::Expander.new
-        expander.label_widget = heading
-        expander.child = contents
-        expander.expanded = true
-        @rows.append(expander)
+        queue_restore
       end
 
-      private def render_source(
-        container : Gtk::Box,
+      private def add_source_roots(
         source : Source,
+        model : Gio::ListStore,
       ) : Nil
         source.children[ROOT].each do |folder_id|
-          add_folder(container, source, folder_id)
+          add_folder_node(source, folder_id, model)
         end
       end
 
-      private def add_folder(
-        container : Gtk::Box,
+      private def add_folder_node(
         source : Source,
         folder_id : String,
+        model : Gio::ListStore,
       ) : Nil
-        name = source.folder_names[folder_id]
-        label = Gtk::Label.new(name)
-        label.xalign = 0_f32
-        label.hexpand = true
+        prefix = source.remote ? "remote" : "local"
+        node = Node.new(
+          "#{prefix}/folder/#{folder_id}",
+          folder_id,
+          source.folder_names[folder_id],
+          NodeKind::Folder,
+          source,
+          folder_id: folder_id
+        )
+        append_node(model, node)
 
-        menu = Gtk::MenuButton.new
-        menu.icon_name = "view-more-symbolic"
-        menu.tooltip_text = "#{name} actions"
-        menu.add_css_class("flat")
-        menu.popover = folder_menu(source, folder_id)
-
-        heading = Gtk::Box.new(:horizontal, 4)
-        heading.add_css_class("xd-folder-row")
-        heading.append(label)
-        heading.append(menu)
-
-        contents = Gtk::Box.new(:vertical, 2)
-        contents.margin_start = 14
         source.children[folder_id].each do |child_id|
-          add_folder(contents, source, child_id)
+          add_folder_node(source, child_id, node.children)
         end
         source.chats[folder_id].each do |chat|
-          add_chat(contents, source, chat)
+          add_chat_node(source, chat, node.children)
         end
-
-        expander = Gtk::Expander.new
-        expander.label_widget = heading
-        expander.child = contents
-        expander.expanded = true
-        container.append(expander)
       end
 
-      private def add_chat(
-        container : Gtk::Box,
+      private def add_chat_node(
         source : Source,
         chat : JSON::Any,
+        model : Gio::ListStore,
       ) : Nil
         id = chat["id"].as_s
         folder_id = chat["folder"].as_s
         title = chat["title"].as_s? || "New Chat"
         title = "New Chat" if title.empty?
-        display = chat["working"]?.try(&.as_bool?) == true ? "#{title}  •" : title
+        prefix = source.remote ? "remote" : "local"
+        append_node(
+          model,
+          Node.new(
+            "#{prefix}/chat/#{id}",
+            id,
+            title,
+            NodeKind::Chat,
+            source,
+            folder_id: folder_id,
+            backend: chat["backend"]?.try(&.as_s?),
+            working: chat["working"]?.try(&.as_bool?) == true
+          )
+        )
+      end
 
-        open = Gtk::Button.new_with_label(display)
-        open.hexpand = true
-        open.halign = :fill
-        open.add_css_class("flat")
-        open.add_css_class("xd-chat-row")
-        open.clicked_signal.connect do
-          source.selected_folder = folder_id
-          @on_chat.call(source.endpoint, id, title)
+      private def append_node(model : Gio::ListStore, node : Node) : Nil
+        @nodes[node.key] = node
+        model.append(Gtk::StringObject.new(node.key))
+      end
+
+      private def setup_item(object : GObject::Object) : Nil
+        item = Gtk::ListItem.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        expander = Gtk::TreeExpander.new
+        box = Gtk::Box.new(:horizontal, 8)
+        icon_overlay = Gtk::Overlay.new
+        icon = Gtk::Image.new
+        status = Gtk::Box.new(:horizontal, 0)
+        working = Gtk::Label.new("...")
+        label = Gtk::Label.new("")
+        entry = Gtk::Entry.new
+
+        label.xalign = 0_f32
+        label.ellipsize = :end
+        label.hexpand = true
+
+        entry.visible = false
+        entry.hexpand = true
+        entry.valign = :center
+        entry.add_css_class("xd-inline-entry")
+
+        working.visible = false
+        working.valign = :center
+        working.add_css_class("dim-label")
+
+        status.visible = false
+        status.halign = :end
+        status.valign = :end
+        status.can_target = false
+        status.add_css_class("xd-status-dot")
+
+        icon_overlay.child = icon
+        icon_overlay.add_overlay(status)
+        box.append(icon_overlay)
+        box.append(working)
+        box.append(label)
+        box.append(entry)
+
+        gesture = Gtk::GestureClick.new
+        gesture.button = Gdk::BUTTON_SECONDARY.to_u32
+        gesture.pressed_signal.connect do |_presses, _x, _y|
+          if node = @bound_nodes[pointer_key(box)]?
+            open_row_menu(box, node)
+          end
+        end
+        box.add_controller(gesture)
+
+        expander.child = box
+        item.child = expander
+        @row_widgets[pointer_key(item)] = RowWidgets.new(
+          expander,
+          box,
+          icon_overlay,
+          icon,
+          status,
+          working,
+          label,
+          entry
+        )
+      end
+
+      private def bind_item(object : GObject::Object) : Nil
+        item = Gtk::ListItem.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        widgets = @row_widgets[pointer_key(item)]? || return
+        row_object = item.item || return
+        row = Gtk::TreeListRow.new(
+          row_object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        node = node_for_row(row) || return
+
+        widgets.expander.list_row = row
+        widgets.icon.icon_name = node.icon_name
+        widgets.label.text = node.name
+        widgets.label.visible = true
+        widgets.entry.visible = false
+        widgets.working.visible = node.working
+        widgets.icon_overlay.visible = !node.working
+        widgets.status.visible = false
+
+        if node.offline
+          widgets.icon.add_css_class("xd-offline")
+          widgets.icon_overlay.tooltip_text =
+            "Not connected. Trying again every few seconds."
+        else
+          widgets.icon.remove_css_class("xd-offline")
+          widgets.icon_overlay.tooltip_text = nil
         end
 
-        menu = Gtk::MenuButton.new
-        menu.icon_name = "view-more-symbolic"
-        menu.tooltip_text = "#{title} actions"
-        menu.add_css_class("flat")
-        menu.popover = chat_menu(source, id, title)
+        @bound_nodes[pointer_key(widgets.box)] = node
+        if node.folder?
+          connection = row.notify_signal["expanded"].connect do |_property|
+            expanded_changed(row, node)
+          end
+          @expand_connections[pointer_key(item)] = connection
+        end
+        queue_restore
+      end
 
-        row = Gtk::Box.new(:horizontal, 2)
-        row.append(open)
-        row.append(menu)
-        container.append(row)
+      private def unbind_item(object : GObject::Object) : Nil
+        item = Gtk::ListItem.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        key = pointer_key(item)
+        @expand_connections.delete(key).try(&.disconnect)
+        if widgets = @row_widgets[key]?
+          @bound_nodes.delete(pointer_key(widgets.box))
+          widgets.expander.list_row = nil
+        end
+      end
+
+      private def teardown_item(object : GObject::Object) : Nil
+        item = Gtk::ListItem.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        key = pointer_key(item)
+        @expand_connections.delete(key).try(&.disconnect)
+        if widgets = @row_widgets.delete(key)
+          @bound_nodes.delete(pointer_key(widgets.box))
+        end
+      end
+
+      private def selection_changed : Nil
+        object = @selection.selected_item || return
+        row = Gtk::TreeListRow.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        node = node_for_row(row) || return
+        return if @selected_key == node.key
+
+        @selected_key = node.key
+        if folder_id = node.folder_id
+          node.source.selected_folder = folder_id
+        end
+        open_node(node) if node.chat?
+      end
+
+      private def activate_row(position : UInt32) : Nil
+        row = @tree_model.row(position) || return
+        node = node_for_row(row) || return
+
+        if node.folder?
+          row.expanded = !row.expanded?
+        else
+          open_node(node)
+        end
+      end
+
+      private def open_node(node : Node) : Nil
+        return unless node.chat?
+
+        if folder_id = node.folder_id
+          node.source.selected_folder = folder_id
+        end
+        @on_chat.call(node.source.endpoint, node.id, node.name)
+      end
+
+      private def node_for_row(row : Gtk::TreeListRow) : Node?
+        object = row.item || return
+        string = Gtk::StringObject.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        )
+        @nodes[string.string]?
+      end
+
+      private def expanded_changed(
+        row : Gtk::TreeListRow,
+        node : Node,
+      ) : Nil
+        return if @restoring_expanded
+
+        key = pointer_key(row)
+        if row.expanded?
+          @expanded << node.id
+          @closing.delete(key)
+        else
+          @closing[key] = {row, node.id}
+        end
+        queue_save_expanded
+      end
+
+      private def queue_save_expanded : Nil
+        return if @save_expanded_queued
+
+        @save_expanded_queued = true
+        GLib.idle_add do
+          @save_expanded_queued = false
+          @closing.each_value do |row, id|
+            @expanded.delete(id) if row_in_tree?(row)
+          end
+          @closing.clear
+          @settings.set_strv("expanded-folders", @expanded.to_a)
+          false
+        end
+      end
+
+      private def row_in_tree?(row : Gtk::TreeListRow) : Bool
+        current = @tree_model.row(row.position)
+        !!current && current.to_unsafe == row.to_unsafe
+      end
+
+      private def queue_restore : Nil
+        return if @restore_queued
+
+        @restore_queued = true
+        GLib.idle_add do
+          @restore_queued = false
+          restore_tree_state
+          false
+        end
+      end
+
+      private def restore_tree_state : Nil
+        @restoring_expanded = true
+        index = 0_u32
+        while index < @tree_model.n_items
+          row = @tree_model.row(index)
+          if row
+            node = node_for_row(row)
+            if node && node.folder? && @expanded.includes?(node.id)
+              row.expanded = true unless row.expanded?
+            end
+          end
+          index += 1
+        end
+        @restoring_expanded = false
+
+        selected = @selected_key
+        return unless selected
+
+        index = 0_u32
+        while index < @tree_model.n_items
+          row = @tree_model.row(index)
+          if row && node_for_row(row).try(&.key) == selected
+            @selection.selected = index
+            break
+          end
+          index += 1
+        end
+      ensure
+        @restoring_expanded = false
+      end
+
+      private def open_row_menu(box : Gtk::Box, node : Node) : Nil
+        if previous = @row_popover
+          previous.popdown
+          previous.unparent if previous.parent
+        end
+
+        popover = case node.kind
+                  when NodeKind::RemoteRoot
+                    remote_menu(node.name)
+                  when NodeKind::Folder
+                    folder_menu(node.source, node.id)
+                  when NodeKind::Chat
+                    chat_menu(node.source, node.id, node.name)
+                  end
+        popover.has_arrow = false
+        popover.halign = :start
+        popover.parent = box
+        @row_popover = popover
+        popover.closed_signal.connect do
+          popover.unparent if popover.parent
+          if @row_popover.try(&.to_unsafe) == popover.to_unsafe
+            @row_popover = nil
+          end
+        end
+        popover.popup
+      end
+
+      private def pointer_key(object : GObject::Object) : UInt64
+        object.to_unsafe.address
       end
 
       private def remote_menu(host : String) : Gtk::Popover
