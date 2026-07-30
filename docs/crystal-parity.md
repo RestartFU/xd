@@ -302,8 +302,17 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[x]` Agent execution resolves bundled binaries before host binaries.
 - `[~]` Codex app-server and Claude stream-json turns work through the shared
   manager.
-- `[ ]` Add Codex login/logout/status UI and verify bundled authentication.
-- `[ ]` Add Claude login/logout/status UI and verify bundled authentication.
+- `[~]` Codex status, device login, browser link, cancellation, logout, and
+  streamed output run through the daemon-owned authentication service. The
+  exact `2b4002a` bundle is UI-verified with a deterministic CLI fixture:
+  local menu, signed-out state, device instructions, cancellation, process
+  cleanup, and stale-instruction retirement all pass with fatal GTK warnings.
+  One real bundled OAuth completion remains.
+- `[~]` Claude status, browser login, pasted-code input, cancellation, and
+  logout use the same service and panel. The exact `2b4002a` bundle is
+  UI-verified through code entry, signed-in state, confirmation, sign-out, and
+  stale-instruction retirement with fatal GTK warnings. One real bundled OAuth
+  completion remains.
 - `[ ]` Match all existing model, effort, access, plan/build, resume, and
   cancellation behavior.
 - `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
@@ -326,7 +335,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (225 examples).
+- `[x]` Crystal specs pass in Docker (228 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
