@@ -5,6 +5,51 @@
 # GTK support data + launcher) so the result runs on any glibc-based x86_64
 # host, including NixOS where there is no /lib64 loader and no system GTK.
 
+# --- local speech engine ---------------------------------------------------
+#
+# whisper.cpp is built from pinned source because Debian does not package its
+# C library or CLI. Dynamic CPU variants keep one bundle portable across x64
+# generations while retaining optimized inference on newer machines.
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS voice-build
+
+ARG WHISPER_VERSION=1.9.1
+ARG WHISPER_SHA256=147267177eef7b22ec3d2476dd514d1b12e160e176230b740e3d1bd600118447
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      cmake \
+      curl \
+      g++ \
+      make \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    curl --fail --location --silent --show-error \
+      "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v${WHISPER_VERSION}.tar.gz" \
+      --output /tmp/whisper.tar.gz; \
+    printf '%s  %s\n' "$WHISPER_SHA256" /tmp/whisper.tar.gz \
+      | sha256sum --check; \
+    mkdir /source; \
+    tar -xzf /tmp/whisper.tar.gz -C /source --strip-components=1; \
+    cmake -S /source -B /build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON \
+      -DWHISPER_BUILD_TESTS=OFF \
+      -DWHISPER_BUILD_EXAMPLES=ON \
+      -DWHISPER_BUILD_SERVER=OFF \
+      -DGGML_NATIVE=OFF \
+      -DGGML_BACKEND_DL=ON \
+      -DGGML_CPU_ALL_VARIANTS=ON \
+      -DGGML_OPENMP=OFF \
+      -DGGML_CCACHE=OFF; \
+    cmake --build /build --target whisper-cli --parallel 4; \
+    install -d /voice/lib /voice/libexec; \
+    install -m0755 /build/bin/whisper-cli /voice/libexec/whisper-bin; \
+    cp -a /build/bin/libwhisper.so* /build/bin/libggml*.so* /voice/lib/; \
+    find /voice -type f -exec strip --strip-unneeded {} +; \
+    rm -rf /build /source /tmp/whisper.tar.gz
+
 # --- Crystal migration toolchain -------------------------------------------
 #
 # Pin the multi-platform manifest, not only the tag. Developers need Docker,
@@ -21,6 +66,7 @@ RUN apt-get update \
       libgirepository1.0-dev \
       libgtk-4-dev \
       libadwaita-1-dev \
+      libpulse-dev \
       libsqlite3-dev \
       libvte-2.91-gtk4-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -108,6 +154,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1-mesa-dri \
       libadwaita-1-dev \
       libgtk-4-dev \
+      libpulse-dev \
       libsqlite3-dev \
       libssl-dev \
       libvte-2.91-gtk4-dev \
@@ -133,8 +180,11 @@ COPY scripts/bundle.sh /usr/local/bin/bundle.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 COPY scripts/claude.sh /stage/usr/libexec/claude
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
+COPY scripts/whisper.sh /stage/usr/libexec/whisper
 COPY --from=crystal /crystal-build/xd /stage/usr/bin/xd
 COPY --from=agent-binaries /agents/ /stage/usr/libexec/
+COPY --from=voice-build /voice/libexec/ /stage/usr/libexec/
+COPY --from=voice-build /voice/lib/ /stage/usr/lib/
 
 RUN set -eux; \
     test "$PROFILE" = default || test "$PROFILE" = nightly; \
@@ -176,7 +226,10 @@ RUN set -eux; \
       data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg \
       /stage/usr/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg; \
     mv /usr/bin/openssl /stage/usr/libexec/openssl-bin; \
-    chmod 0755 /stage/usr/libexec/claude /stage/usr/libexec/openssl; \
+    chmod 0755 \
+      /stage/usr/libexec/claude \
+      /stage/usr/libexec/openssl \
+      /stage/usr/libexec/whisper; \
     desktop-file-validate "/stage/usr/share/applications/$app_id.desktop"; \
     bash /usr/local/bin/bundle.sh \
       /stage /out /usr/local/share/xd-launcher.sh

@@ -29,6 +29,9 @@ cp -a "$ARCH_DIR"/ossl-modules/*.so "$OUT/lib/ossl-modules/" 2>/dev/null || true
 
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
 cp -a "$STAGE/usr/libexec/." "$OUT/libexec/"
+if [ -d "$STAGE/usr/lib" ]; then
+  cp -a "$STAGE/usr/lib/." "$OUT/lib/"
+fi
 
 # --- gdk-pixbuf loaders (dlopened, so they are extra closure roots) ---------
 mkdir -p "$OUT/lib/gdk-pixbuf-2.0/loaders"
@@ -49,6 +52,7 @@ mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
   "$OUT/libexec/claude-bin" \
   "$OUT/libexec/openssl-bin" \
+  "$OUT/libexec/whisper-bin" \
   "$OUT/lib/ossl-modules"/*.so \
   "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \
