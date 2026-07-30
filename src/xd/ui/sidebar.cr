@@ -272,23 +272,38 @@ module Xd
         add = Gtk::MenuButton.new
         add.icon_name = "list-add-symbolic"
         add.tooltip_text = "Add a workspace or a machine"
-        menu = Gtk::Popover.new
-        choices = Gtk::Box.new(:vertical, 2)
-        choices.margin_top = 6
-        choices.margin_bottom = 6
-        choices.margin_start = 6
-        choices.margin_end = 6
-        add_choice(choices, menu, "New Workspace") do
+        menu_model = Gio::Menu.new
+        menu = Gtk::PopoverMenu.new_from_model(menu_model)
+        menu.add_css_class("xd-menu-popover")
+        menu_actions = Gio::SimpleActionGroup.new
+        menu.insert_action_group("add", menu_actions)
+        add_header_action(
+          menu_model,
+          menu_actions,
+          menu,
+          "New Workspace",
+          "new-workspace"
+        ) do
           begin_creating(@local_source, nil, NodeKind::Folder)
         end
-        add_choice(choices, menu, "Connect to a Machine…") do
+        add_header_action(
+          menu_model,
+          menu_actions,
+          menu,
+          "Connect to a Machine…",
+          "pair"
+        ) do
           @on_pair.call
         end
-        add_choice(choices, menu, "Agent Secrets…") do
+        add_header_action(
+          menu_model,
+          menu_actions,
+          menu,
+          "Agent Secrets…",
+          "secrets"
+        ) do
           dialogs(@local_source).secrets
         end
-        menu.child = choices
-        menu.add_css_class("xd-menu-popover")
         menu.closed_signal.connect { finish_menu_action(menu) }
         add.popover = menu
 
@@ -1277,19 +1292,20 @@ module Xd
         menu.append(label, "row.#{name}")
       end
 
-      private def add_choice(
-        choices : Gtk::Box,
+      private def add_header_action(
+        menu : Gio::Menu,
+        actions : Gio::SimpleActionGroup,
         popover : Gtk::Popover,
         label : String,
-        &action : -> Nil
+        name : String,
+        &callback : -> Nil
       ) : Nil
-        button = Gtk::Button.new_with_label(label)
-        button.add_css_class("flat")
-        button.halign = :fill
-        button.clicked_signal.connect do
-          queue_menu_action(popover, action)
+        action = Gio::SimpleAction.new(name, nil)
+        action.activate_signal.connect do
+          queue_menu_action(popover, callback)
         end
-        choices.append(button)
+        actions.add_action(action)
+        menu.append(label, "add.#{name}")
       end
 
       private def queue_menu_action(
