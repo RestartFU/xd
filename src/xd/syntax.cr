@@ -253,6 +253,7 @@ module Xd
       "spawn",
     }
     CRYSTAL_DEFINITION_KEYWORDS = Set{"def", "fun", "macro"}
+    NO_WORDS                    = Set(String).new
 
     def language_for_path(path : String?) : SyntaxLanguage
       return SyntaxLanguage::None unless path
@@ -308,9 +309,605 @@ module Xd
       return [] of SyntaxPiece if line.empty?
       return [SyntaxPiece.new(SyntaxToken::Text, line)] if language.none?
 
-      # Language scanners land in later parity slices. Returning every byte as
-      # text keeps this foundation lossless until classification is connected.
-      [SyntaxPiece.new(SyntaxToken::Text, line)]
+      pieces = [] of SyntaxPiece
+      at = 0
+
+      if state.in_comment > 0
+        at = scan_comment_continuation(pieces, language, line, state)
+        return pieces if state.in_comment > 0
+      elsif state.in_raw_string
+        close = line.index('`')
+        unless close
+          emit(pieces, SyntaxToken::String, line, 0, line.bytesize)
+          return pieces
+        end
+
+        at = close + 1
+        emit(pieces, SyntaxToken::String, line, 0, at)
+        state.in_raw_string = false
+      elsif state.in_triple_string
+        marker = state.triple_quote.to_s * 3
+        close = line.index(marker)
+        unless close
+          emit(pieces, SyntaxToken::String, line, 0, line.bytesize)
+          return pieces
+        end
+
+        at = close + 3
+        emit(pieces, SyntaxToken::String, line, 0, at)
+        state.in_triple_string = false
+        state.triple_quote = '\0'
+      elsif state.in_rust_raw_string
+        at = scan_rust_raw_string(pieces, line, 0, state, false) || 0
+        return pieces if state.in_rust_raw_string
+      end
+
+      while at < line.bytesize
+        if block_comments?(language) && bytes_at?(line, at, "/*")
+          at = scan_block_comment(pieces, language, line, at, state)
+          return pieces if state.in_comment > 0
+        elsif slash_comments?(language) && bytes_at?(line, at, "//")
+          emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+          return pieces
+        elsif triple_strings?(language) &&
+              (bytes_at?(line, at, "\"\"\"") ||
+              (single_triple_strings?(language) &&
+              bytes_at?(line, at, "'''")))
+          quote = byte(line, at)
+          marker = byte_slice(line, at, at + 3)
+          close = line.index(marker, at + 3)
+          unless close
+            emit(pieces, SyntaxToken::String, line, at, line.bytesize)
+            state.in_triple_string = true
+            state.triple_quote = quote.chr
+            return pieces
+          end
+
+          finish = close + 3
+          emit(pieces, SyntaxToken::String, line, at, finish)
+          at = finish
+        elsif rust_strings?(language) &&
+              (byte(line, at) == byte_of('r') ||
+              ((byte(line, at) == byte_of('b') ||
+              byte(line, at) == byte_of('c')) &&
+              byte(line, at + 1) == byte_of('r')))
+          after = scan_rust_raw_string(pieces, line, at, state, true)
+          if after
+            at = after
+            return pieces if state.in_rust_raw_string
+          else
+            at = scan_word(pieces, language, line, at)
+          end
+        elsif rust_lifetimes?(language) &&
+              byte(line, at) == byte_of('\'') &&
+              (ascii_alpha?(byte(line, at + 1)) ||
+              byte(line, at + 1) == byte_of('_'))
+          after = scan_rust_lifetime(pieces, line, at)
+          if after
+            at = after
+          else
+            at = scan_quoted(pieces, line, at, byte_of('\''))
+          end
+        elsif byte(line, at) == byte_of('"') ||
+              byte(line, at) == byte_of('\'')
+          at = scan_quoted(pieces, line, at, byte(line, at))
+        elsif raw_strings?(language) && byte(line, at) == byte_of('`')
+          close = line.index('`', at + 1)
+          unless close
+            emit(pieces, SyntaxToken::String, line, at, line.bytesize)
+            state.in_raw_string = true
+            return pieces
+          end
+
+          finish = close + 1
+          emit(pieces, SyntaxToken::String, line, at, finish)
+          at = finish
+        elsif directives?(language) &&
+              byte(line, at) == byte_of('#') &&
+              starts_line?(line, at)
+          at = scan_directive(pieces, line, at)
+        elsif ascii_digit?(byte(line, at)) ||
+              (byte(line, at) == byte_of('.') &&
+              ascii_digit?(byte(line, at + 1)))
+          at = scan_number(pieces, line, at)
+        elsif ascii_alpha?(byte(line, at)) ||
+              byte(line, at) == byte_of('_')
+          at = scan_word(pieces, language, line, at)
+        else
+          emit(pieces, SyntaxToken::Text, line, at, at + 1)
+          at += 1
+        end
+      end
+
+      pieces
+    end
+
+    private def scan_comment_continuation(
+      pieces : Array(SyntaxPiece),
+      language : SyntaxLanguage,
+      line : String,
+      state : SyntaxState,
+    ) : Int32
+      if nested_block_comments?(language)
+        return scan_nested_comment(pieces, line, 0, state, false)
+      end
+
+      close = line.index("*/")
+      unless close
+        emit(pieces, SyntaxToken::Comment, line, 0, line.bytesize)
+        return line.bytesize
+      end
+
+      finish = close + 2
+      emit(pieces, SyntaxToken::Comment, line, 0, finish)
+      state.in_comment = 0
+      finish
+    end
+
+    private def scan_block_comment(
+      pieces : Array(SyntaxPiece),
+      language : SyntaxLanguage,
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+    ) : Int32
+      if nested_block_comments?(language)
+        return scan_nested_comment(pieces, line, at, state, true)
+      end
+
+      close = line.index("*/", at + 2)
+      unless close
+        emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+        state.in_comment = 1
+        return line.bytesize
+      end
+
+      finish = close + 2
+      emit(pieces, SyntaxToken::Comment, line, at, finish)
+      finish
+    end
+
+    private def scan_nested_comment(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+      opening : Bool,
+    ) : Int32
+      scan = at
+      if opening
+        state.in_comment = 1
+        scan += 2
+      end
+
+      while scan < line.bytesize
+        if bytes_at?(line, scan, "/*")
+          state.in_comment += 1 if state.in_comment < UInt8::MAX
+          scan += 2
+        elsif bytes_at?(line, scan, "*/")
+          state.in_comment -= 1
+          scan += 2
+          break if state.in_comment == 0
+        else
+          scan += 1
+        end
+      end
+
+      emit(pieces, SyntaxToken::Comment, line, at, scan)
+      scan
+    end
+
+    private def scan_quoted(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      quote : UInt8,
+    ) : Int32
+      scan = at + 1
+      while scan < line.bytesize && byte(line, scan) != quote
+        scan += byte(line, scan) == byte_of('\\') &&
+                scan + 1 < line.bytesize ? 2 : 1
+      end
+      scan += 1 if scan < line.bytesize
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def scan_number(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at
+      while scan < line.bytesize
+        current = byte(line, scan)
+        if word_byte?(current) || current == byte_of('.')
+          scan += 1
+        elsif (current == byte_of('+') || current == byte_of('-')) &&
+              scan > at && exponent_byte?(byte(line, scan - 1))
+          scan += 1
+        else
+          break
+        end
+      end
+
+      emit(pieces, SyntaxToken::Number, line, at, scan)
+      scan
+    end
+
+    private def scan_word(
+      pieces : Array(SyntaxPiece),
+      language : SyntaxLanguage,
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at
+      while scan < line.bytesize && word_byte?(byte(line, scan))
+        scan += 1
+      end
+
+      word = byte_slice(line, at, scan)
+      after = skip_space(line, scan)
+      called = byte(line, after) == byte_of('(') ||
+               (bang_functions?(language) &&
+                byte(line, after) == byte_of('!')) ||
+               (generic_functions?(language) &&
+                followed_by_generic_call?(line, after))
+
+      token =
+        if listed?(keywords(language), word, case_insensitive?(language))
+          SyntaxToken::Keyword
+        elsif listed?(types(language), word, case_insensitive?(language))
+          SyntaxToken::Type
+        elsif listed?(constants(language), word, case_insensitive?(language))
+          SyntaxToken::Number
+        elsif capitalized_types?(language) &&
+              ascii_upper?(byte(line, at))
+          SyntaxToken::Type
+        elsif composite_literals?(language) &&
+              byte(line, scan) == byte_of('{')
+          SyntaxToken::Type
+        elsif called
+          SyntaxToken::Function
+        else
+          SyntaxToken::Text
+        end
+
+      emit(pieces, token, line, at, scan)
+      scan
+    end
+
+    private def scan_directive(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at + 1
+      while scan < line.bytesize && ascii_alpha?(byte(line, scan))
+        scan += 1
+      end
+      name = byte_slice(line, at + 1, scan)
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+
+      if name == "include"
+        open = skip_space(line, scan)
+        if byte(line, open) == byte_of('<')
+          close = line.index('>', open)
+          if close
+            emit(pieces, SyntaxToken::Text, line, scan, open)
+            emit(pieces, SyntaxToken::String, line, open, close + 1)
+            return close + 1
+          end
+        end
+      end
+
+      scan
+    end
+
+    private def scan_rust_lifetime(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 2
+      while scan < line.bytesize && word_byte?(byte(line, scan))
+        scan += 1
+      end
+      return nil if byte(line, scan) == byte_of('\'')
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_rust_raw_string(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+      opening : Bool,
+    ) : Int32?
+      contents = at
+      hashes = state.rust_raw_hashes
+
+      if opening
+        parsed = rust_raw_opening(line, at)
+        return nil unless parsed
+        contents, hashes = parsed
+      end
+
+      close = rust_raw_close(line, contents, hashes)
+      unless close
+        emit(pieces, SyntaxToken::String, line, at, line.bytesize)
+        state.in_rust_raw_string = true
+        state.rust_raw_hashes = hashes
+        return line.bytesize
+      end
+
+      emit(pieces, SyntaxToken::String, line, at, close)
+      state.in_rust_raw_string = false
+      state.rust_raw_hashes = 0
+      close
+    end
+
+    private def rust_raw_opening(
+      line : String,
+      at : Int32,
+    ) : Tuple(Int32, Int32)?
+      scan = at
+      if byte(line, scan) == byte_of('r')
+        scan += 1
+      elsif (byte(line, scan) == byte_of('b') ||
+            byte(line, scan) == byte_of('c')) &&
+            byte(line, scan + 1) == byte_of('r')
+        scan += 2
+      else
+        return nil
+      end
+
+      hashes = 0
+      while byte(line, scan) == byte_of('#')
+        return nil if hashes == UInt8::MAX
+        hashes += 1
+        scan += 1
+      end
+      return nil unless byte(line, scan) == byte_of('"')
+
+      {scan + 1, hashes}
+    end
+
+    private def rust_raw_close(
+      line : String,
+      at : Int32,
+      hashes : Int32,
+    ) : Int32?
+      scan = at
+      while quote = line.index('"', scan)
+        valid = true
+        hashes.times do |offset|
+          unless byte(line, quote + 1 + offset) == byte_of('#')
+            valid = false
+            break
+          end
+        end
+        return quote + 1 + hashes if valid
+        scan = quote + 1
+      end
+      nil
+    end
+
+    private def followed_by_generic_call?(line : String, at : Int32) : Bool
+      return false unless byte(line, at) == byte_of('<')
+
+      scan = at
+      depth = 0
+      loop do
+        current = byte(line, scan)
+        if current == byte_of('<')
+          depth += 1
+        elsif current == byte_of('>')
+          depth -= 1
+        end
+        scan += 1
+        break if scan >= line.bytesize || depth == 0
+      end
+
+      scan = skip_space(line, scan)
+      depth == 0 && byte(line, scan) == byte_of('(')
+    end
+
+    private def keywords(language : SyntaxLanguage) : Set(String)
+      case language
+      when .c?          then C_KEYWORDS
+      when .c_sharp?    then CSHARP_KEYWORDS
+      when .go?         then GO_KEYWORDS
+      when .kotlin?     then KOTLIN_KEYWORDS
+      when .dockerfile? then DOCKERFILE_KEYWORDS
+      when .makefile?   then MAKEFILE_KEYWORDS
+      when .rust?       then RUST_KEYWORDS
+      when .v?          then V_KEYWORDS
+      when .odin?       then ODIN_KEYWORDS
+      when .ruby?       then RUBY_KEYWORDS
+      when .crystal?    then CRYSTAL_KEYWORDS
+      else                   NO_WORDS
+      end
+    end
+
+    private def types(language : SyntaxLanguage) : Set(String)
+      case language
+      when .c?       then C_TYPES
+      when .c_sharp? then CSHARP_TYPES
+      when .go?      then GO_TYPES
+      when .kotlin?  then KOTLIN_TYPES
+      when .rust?    then RUST_TYPES
+      when .v?       then V_TYPES
+      when .odin?    then ODIN_TYPES
+      when .crystal? then CRYSTAL_TYPES
+      else                NO_WORDS
+      end
+    end
+
+    private def constants(language : SyntaxLanguage) : Set(String)
+      case language
+      when .c?       then C_CONSTANTS
+      when .c_sharp? then CSHARP_CONSTANTS
+      when .go?      then GO_CONSTANTS
+      when .kotlin?  then KOTLIN_CONSTANTS
+      when .rust?    then RUST_CONSTANTS
+      when .json?    then JSON_CONSTANTS
+      when .yaml?    then YAML_CONSTANTS
+      when .toml?    then TOML_CONSTANTS
+      when .v?       then V_CONSTANTS
+      when .odin?    then ODIN_CONSTANTS
+      when .ruby?    then RUBY_CONSTANTS
+      when .crystal? then CRYSTAL_CONSTANTS
+      else                NO_WORDS
+      end
+    end
+
+    private def listed?(
+      words : Set(String),
+      word : String,
+      case_insensitive : Bool,
+    ) : Bool
+      case_insensitive ? words.any? { |entry| entry.compare(word, case_insensitive: true) == 0 } : words.includes?(word)
+    end
+
+    private def emit(
+      pieces : Array(SyntaxPiece),
+      token : SyntaxToken,
+      line : String,
+      from : Int32,
+      to : Int32,
+    ) : Nil
+      return if to <= from
+
+      text = byte_slice(line, from, to)
+      if token == SyntaxToken::Text &&
+         (last = pieces.last?) &&
+         last.token == SyntaxToken::Text
+        pieces[-1] = SyntaxPiece.new(SyntaxToken::Text, last.text + text)
+      else
+        pieces << SyntaxPiece.new(token, text)
+      end
+    end
+
+    private def byte_slice(line : String, from : Int32, to : Int32) : String
+      line.byte_slice(from, to - from)
+    end
+
+    private def byte(line : String, at : Int32) : UInt8
+      return 0_u8 if at < 0 || at >= line.bytesize
+      line.byte_at(at)
+    end
+
+    private def byte_of(char : Char) : UInt8
+      char.ord.to_u8
+    end
+
+    private def bytes_at?(line : String, at : Int32, bytes : String) : Bool
+      return false if at < 0 || at + bytes.bytesize > line.bytesize
+      line.byte_slice(at, bytes.bytesize) == bytes
+    end
+
+    private def ascii_alpha?(byte : UInt8) : Bool
+      ascii_lower?(byte) || ascii_upper?(byte)
+    end
+
+    private def ascii_lower?(byte : UInt8) : Bool
+      byte >= byte_of('a') && byte <= byte_of('z')
+    end
+
+    private def ascii_upper?(byte : UInt8) : Bool
+      byte >= byte_of('A') && byte <= byte_of('Z')
+    end
+
+    private def ascii_digit?(byte : UInt8) : Bool
+      byte >= byte_of('0') && byte <= byte_of('9')
+    end
+
+    private def word_byte?(byte : UInt8) : Bool
+      ascii_alpha?(byte) || ascii_digit?(byte) || byte == byte_of('_')
+    end
+
+    private def exponent_byte?(byte : UInt8) : Bool
+      byte == byte_of('e') || byte == byte_of('E') ||
+        byte == byte_of('p') || byte == byte_of('P')
+    end
+
+    private def skip_space(line : String, at : Int32) : Int32
+      scan = at
+      while byte(line, scan) == byte_of(' ') ||
+            byte(line, scan) == byte_of('\t')
+        scan += 1
+      end
+      scan
+    end
+
+    private def starts_line?(line : String, at : Int32) : Bool
+      (0...at).all? do |scan|
+        byte(line, scan) == byte_of(' ') ||
+          byte(line, scan) == byte_of('\t')
+      end
+    end
+
+    private def directives?(language : SyntaxLanguage) : Bool
+      language.c? || language.c_sharp? || language.v?
+    end
+
+    private def slash_comments?(language : SyntaxLanguage) : Bool
+      language.c? || language.c_sharp? || language.go? ||
+        language.kotlin? || language.rust? || language.v? ||
+        language.odin?
+    end
+
+    private def block_comments?(language : SyntaxLanguage) : Bool
+      slash_comments?(language)
+    end
+
+    private def nested_block_comments?(language : SyntaxLanguage) : Bool
+      language.rust? || language.v? || language.odin?
+    end
+
+    private def raw_strings?(language : SyntaxLanguage) : Bool
+      language.go? || language.odin?
+    end
+
+    private def triple_strings?(language : SyntaxLanguage) : Bool
+      language.kotlin? || language.toml?
+    end
+
+    private def single_triple_strings?(language : SyntaxLanguage) : Bool
+      language.toml?
+    end
+
+    private def capitalized_types?(language : SyntaxLanguage) : Bool
+      language.c_sharp? || language.kotlin? || language.rust? ||
+        language.v? || language.odin? || language.ruby? ||
+        language.crystal?
+    end
+
+    private def composite_literals?(language : SyntaxLanguage) : Bool
+      language.go? || language.v? || language.odin?
+    end
+
+    private def bang_functions?(language : SyntaxLanguage) : Bool
+      language.rust?
+    end
+
+    private def generic_functions?(language : SyntaxLanguage) : Bool
+      language.rust? || language.c_sharp?
+    end
+
+    private def rust_lifetimes?(language : SyntaxLanguage) : Bool
+      language.rust?
+    end
+
+    private def rust_strings?(language : SyntaxLanguage) : Bool
+      language.rust?
+    end
+
+    private def case_insensitive?(language : SyntaxLanguage) : Bool
+      language.dockerfile? || language.yaml?
     end
   end
 end
