@@ -841,7 +841,7 @@ module Xd
         request : Protocol::Request,
       ) : Protocol::Response
         chat_id = request.string("chat", "git-state needs a chat id.")
-        refresh_id = request.int?("request")
+        refresh_id = request.string?("request")
         @store.get_chat(chat_id)
         @after_write = -> {
           spawn do
@@ -881,6 +881,9 @@ module Xd
               "action"  => JSON::Any.new(action),
               "success" => JSON::Any.new(false),
             }
+            if id = request.string?("request")
+              fields["request"] = JSON::Any.new(id)
+            end
             begin
               result = @repository.perform(
                 chat_id,

@@ -14,6 +14,7 @@ require "./adw"
 require "./chat_controls"
 require "./command_suggestions"
 require "./dots"
+require "./git_actions"
 require "./image_presenter"
 require "./message_row"
 require "./pair_dialog"
@@ -82,6 +83,7 @@ module Xd
       @terminal_button : Gtk::ToggleButton
       @file_button : Gtk::ToggleButton
       @diff_button : Gtk::ToggleButton
+      @git_actions : GitActions
       @header_sizes : Gtk::SizeGroup
       @syncing_panes = false
       @search_dialog : SearchDialog?
@@ -175,6 +177,13 @@ module Xd
         chat_header = Adw::HeaderBar.new
         chat_header.title_widget = @chat_title
         chat_header.show_start_title_buttons = false
+        @git_actions = GitActions.new(
+          @widget,
+          ->(request : Hash(String, JSON::Any)) {
+            panel_call(request)
+          }
+        )
+        chat_header.pack_end(@git_actions.widget)
         @terminal_button = pane_button(
           "utilities-terminal-symbolic",
           "Terminal"
@@ -452,6 +461,9 @@ module Xd
               snapshot.state.connected?,
               snapshot.error
             )
+            if @client.same?(@remote)
+              @git_actions.connection_changed(snapshot.state.connected?)
+            end
             false
           end
         end
@@ -869,6 +881,7 @@ module Xd
         @file_button.sensitive = true
         @diff_button.sensitive = true
         @tool_panel.select_chat(id, pane_key)
+        @git_actions.select_chat(id)
         apply_panes(saved_panes)
         if changed
           activate_transcript_page(endpoint, id)
@@ -917,6 +930,7 @@ module Xd
         @file_button.sensitive = false
         @diff_button.sensitive = false
         @tool_panel.select_chat(nil, nil)
+        @git_actions.select_chat(nil)
         clear_queue
         @commands.clear
         refresh_command_suggestions
@@ -1981,6 +1995,7 @@ module Xd
       ) : Nil
         if @client.same?(endpoint)
           @tool_panel.handle_event(event)
+          @git_actions.handle_event(event)
         end
         name = event["event"]?.try(&.as_s?) || return
         @sidebar.handle_event(endpoint, event)
