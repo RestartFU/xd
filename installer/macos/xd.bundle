@@ -32,6 +32,9 @@
   <data dest="${bundle}/Contents/Resources/share/icons">
     ${prefix:app}/share/icons
   </data>
+  <data dest="${bundle}/Contents/Resources/libexec">
+    ${prefix:app}/libexec
+  </data>
   <data dest="${bundle}/Contents/Resources/xd.icns">
     ${env:XD_MACOS_ICON}
   </data>

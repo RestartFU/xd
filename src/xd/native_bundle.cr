@@ -83,7 +83,11 @@ module Xd
           "#{resources}/git/ssl/certs/ca-bundle.crt",
           "#{resources}/etc/ssl/certs/ca-certificates.crt"
         ),
-        requirement("Codex", "#{resources}/libexec/codex"),
+        requirement(
+          "Codex",
+          "#{resources}/libexec/codex",
+          "#{resources}/libexec/codex-package/bin/codex"
+        ),
         requirement("Claude", "#{resources}/libexec/claude"),
         requirement("whisper.cpp", "#{resources}/libexec/whisper"),
         requirement("OpenSSL", "#{resources}/libexec/openssl"),
@@ -129,7 +133,11 @@ module Xd
           "git/mingw64/ssl/certs/ca-bundle.crt",
           "git/ssl/certs/ca-bundle.crt"
         ),
-        requirement("Codex", "libexec/codex.exe"),
+        requirement(
+          "Codex",
+          "libexec/codex.exe",
+          "libexec/codex-package/bin/codex.exe"
+        ),
         requirement("Claude", "libexec/claude.exe"),
         requirement("whisper.cpp", "libexec/whisper.exe"),
         requirement("OpenSSL", "libexec/openssl.exe"),

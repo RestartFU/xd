@@ -27,10 +27,11 @@ STAGED_PREFIX="${STAGED_EXE%/bin/xd.exe}"
   exit 1
 }
 
-mkdir -p "$OUT"/{bin,etc,lib,share}
+mkdir -p "$OUT"/{bin,etc,lib,libexec,share}
 
 install -Dm755 "$STAGED_EXE" "$OUT/bin/xd.exe"
 cp -a "$STAGED_PREFIX/share/." "$OUT/share/"
+cp -a "$STAGED_PREFIX/libexec/." "$OUT/libexec/"
 
 # GSettings schemas used by GTK/libadwaita plus xd's installed schema.
 mkdir -p "$OUT/share/glib-2.0/schemas"
@@ -86,6 +87,10 @@ GDK_PIXBUF_MODULEDIR="$OUT_LOADERS" "$QUERY_LOADERS" |
   ldd "$OUT/bin/xd.exe" 2>/dev/null || true
   for module in "$OUT_LOADERS/"*.dll "$OUT/lib/gio/modules/"*.dll; do
     [ -e "$module" ] && ldd "$module" 2>/dev/null || true
+  done
+  for tool in "$OUT/libexec/"*.exe \
+    "$OUT/libexec/codex-package/bin/"*.exe; do
+    [ -e "$tool" ] && ldd "$tool" 2>/dev/null || true
   done
 } |
   awk -v prefix="$PREFIX/bin/" '$3 ~ ("^" prefix) { print $3 }' |

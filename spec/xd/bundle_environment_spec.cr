@@ -64,7 +64,8 @@ describe Xd::BundleEnvironment do
     certificates = File.join(root, "git", "ssl", "certs")
     [bin, git_bin, git_exec, templates, modules, schemas, fonts, certificates]
       .each { |path| Dir.mkdir_p(path) }
-    executable_file(File.join(root, "libexec", "codex"))
+    codex = File.join(root, "libexec", "codex-package", "bin", "codex")
+    executable_file(codex)
     executable_file(File.join(root, "libexec", "openssl"))
     executable_file(File.join(git_bin, "git"))
     File.write(
@@ -125,7 +126,7 @@ describe Xd::BundleEnvironment do
           File.join(certificates, "ca-bundle.crt")
         )
         Xd::BundleEnvironment.executable("codex", root).should eq(
-          File.join(root, "libexec", "codex")
+          codex
         )
         Xd::BundleEnvironment.executable("git", root).should eq(
           File.join(git_bin, "git")

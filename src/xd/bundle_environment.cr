@@ -39,6 +39,7 @@ module Xd
       filename = platform_filename(name)
       [
         File.join(root, "libexec", filename),
+        File.join(root, "libexec", "codex-package", "bin", filename),
         File.join(root, "bin", filename),
         File.join(root, "git", "cmd", filename),
         File.join(root, "git", "bin", filename),
