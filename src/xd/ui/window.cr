@@ -15,6 +15,7 @@ require "./auth_dialog"
 require "./chat_controls"
 require "./command_suggestions"
 require "./dots"
+require "./event_inbox"
 require "./git_actions"
 require "./image_presenter"
 require "./message_row"
@@ -143,6 +144,7 @@ module Xd
         @working_dots = nil
         @working_started_at = nil
         @stream_source = nil
+        @event_inbox = EventInbox(Daemon::Endpoint).new
         @live_turn_key = nil
         @clock_origin = Time.instant
         @search_dialog = nil
@@ -469,6 +471,7 @@ module Xd
 
         @widget.close_request_signal.connect do
           @closed = true
+          @event_inbox.clear
           @voice.close
           persist_window_layout
           false
@@ -732,11 +735,20 @@ module Xd
 
       private def subscribe(endpoint : Daemon::Endpoint) : Nil
         endpoint.subscribe do |event|
-          GLib.idle_add do
-            handle_event(endpoint, event)
-            false
+          if @event_inbox.push(endpoint, event)
+            GLib.idle_add do
+              drain_events
+            end
           end
         end
+      end
+
+      private def drain_events : Bool
+        events, more = @event_inbox.drain
+        events.each do |endpoint, event|
+          handle_event(endpoint, event) unless @closed
+        end
+        more && !@closed
       end
 
       private def show_pair_dialog : Nil
@@ -1933,8 +1945,8 @@ module Xd
 
       private def show_auth_dialog : Nil
         machine = unless @client.same?(@local_client)
-                    @remote.snapshot.host
-                  end
+          @remote.snapshot.host
+        end
         AuthDialog.new(@widget, @client, machine).present
       end
 
