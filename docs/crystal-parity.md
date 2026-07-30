@@ -79,9 +79,15 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   screenshot-verified at 1100x720 with fatal GTK criticals: full-width
   contiguous row backgrounds, syntax colours, horizontal scrolling, and C
   padding/geometry match. Image cards remain.
-- `[ ]` Port transcript pagination, four-page cache, and 100-message page size.
-- `[ ]` Match bottom pinning, history loading, scroll restoration, and hidden
-  scrollbar behavior.
+- `[~]` Transcript requests use the C 100-message page size plus one boundary
+  row; per-chat expanded limits and four-entry LRU widget-tree cache are
+  ported. A 245-row installed-bundle transcript verifies the 100/45 history
+  pills; five-chat GTK eviction verification remains.
+- `[~]` Hidden scrollbar, bottom pinning, user-scroll opt-out, history loading,
+  and frame-stable scroll restoration are ported. Installed-bundle proof at
+  1100x720 keeps marker 146 at the same y-position while inserting 100 older
+  rows, with fatal GTK criticals enabled and empty stderr. Live streaming
+  follow/opt-out matrix remains.
 - `[ ]` Match working dots, elapsed time, live reveal cadence, and turn labels.
 - `[ ]` Match local/daemon/remote turn recovery when switching chats.
 - `[ ]` Match context-window meter and token formatting.
@@ -208,7 +214,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (193 examples).
+- `[x]` Crystal specs pass in Docker (197 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
