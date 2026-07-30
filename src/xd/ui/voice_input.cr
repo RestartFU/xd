@@ -3,6 +3,7 @@ require "random/secure"
 require "gtk4"
 require "../daemon/client"
 require "../voice/recorder"
+require "./background_work"
 require "./event_inbox"
 
 module Xd
@@ -59,6 +60,7 @@ module Xd
         )
         @button.add_css_class("circular")
         @button.clicked_signal.connect { clicked }
+        @busy_spinner = Gtk::Spinner.new
 
         @download_prompt = Gtk::Box.new(:horizontal, 6)
         @download_prompt.valign = :center
@@ -314,10 +316,41 @@ module Xd
         wav : Bytes,
         generation : UInt64,
       ) : Nil
+        queued = BackgroundWork.submit do
+          encoded : String? = nil
+          message : String? = nil
+          begin
+            encoded = Base64.strict_encode(wav)
+          rescue error
+            message = error.message || "Cannot prepare voice recording."
+          end
+
+          GLib.idle_add do
+            if current?(generation)
+              if payload = encoded
+                send_transcription(payload, generation)
+              else
+                reset
+                show_error(message)
+              end
+            end
+            false
+          end
+          nil
+        end
+        unless queued
+          reset
+          show_error("Voice workers are busy. Try again shortly.")
+        end
+      end
+
+      private def send_transcription(
+        encoded : String,
+        generation : UInt64,
+      ) : Nil
         endpoint = @endpoint || return reset
         chat_id = @chat_id || return reset
         token = @request_token || return reset
-        encoded = Base64.strict_encode(wav)
 
         spawn do
           message : String? = nil
@@ -467,12 +500,14 @@ module Xd
           @error_label.text = message
           @error_label.tooltip_text = message
         end
+        unless @state.confirming? || @state.transcribing?
+          @busy_spinner.stop
+        end
 
         case @state
         when .confirming?
-          spinner = Gtk::Spinner.new
-          spinner.start
-          @button.child = spinner
+          @busy_spinner.start
+          @button.child = @busy_spinner
           @button.sensitive = false
           @button.tooltip_text =
             "Checking speech model on #{target_name}…"
@@ -487,9 +522,8 @@ module Xd
           @button.tooltip_text =
             "Recording voice… click to transcribe on #{target_name}"
         when .transcribing?
-          spinner = Gtk::Spinner.new
-          spinner.start
-          @button.child = spinner
+          @busy_spinner.start
+          @button.child = @busy_spinner
           @button.sensitive = false
           @button.tooltip_text =
             "Transcribing voice on #{target_name}…"

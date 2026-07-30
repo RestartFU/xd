@@ -12,7 +12,8 @@ module Xd
       class Error < Exception
       end
 
-      MAX_AUDIO_BYTES = 64 * 1024 * 1024
+      MAX_AUDIO_BYTES       = 64 * 1024 * 1024
+      TRANSCRIPTION_TIMEOUT = 5.minutes
 
       alias Publisher = Proc(
         String,
@@ -74,6 +75,8 @@ module Xd
       end
 
       private class Job
+        @done = Channel(Nil).new(1)
+
         def initialize(
           @model : Voice::Model? = nil,
           @transcriber : Voice::Transcriber? = nil,
@@ -83,6 +86,23 @@ module Xd
         def cancel : Nil
           @model.try(&.cancel)
           @transcriber.try(&.cancel)
+          complete
+        end
+
+        def complete : Nil
+          select
+          when @done.send(nil)
+          else
+          end
+        end
+
+        def timed_out?(duration : Time::Span) : Bool
+          select
+          when @done.receive
+            false
+          when timeout(duration)
+            true
+          end
         end
       end
 
@@ -90,6 +110,7 @@ module Xd
         @publish : Publisher,
         @model_factory : ModelFactory = -> { Voice::Model.new },
         @transcriber_factory : TranscriberFactory = -> { Voice::Transcriber.new },
+        @transcription_timeout : Time::Span = TRANSCRIPTION_TIMEOUT,
       )
         @jobs = {} of JobKey => Job
         @download = nil
@@ -181,6 +202,7 @@ module Xd
             )
           end
         end
+        spawn monitor_transcription(key, job)
       rescue error : Base64::Error
         raise Error.new("Voice recording is not valid base64.")
       end
@@ -286,8 +308,30 @@ module Xd
         end
         return unless current
 
+        job.complete
         fields["error"] = JSON::Any.new(error) if error
         publish(key, state, fields)
+      end
+
+      private def monitor_transcription(key : JobKey, job : Job) : Nil
+        return unless job.timed_out?(@transcription_timeout)
+
+        current = @mutex.synchronize do
+          if @jobs[key]?.try(&.same?(job))
+            @jobs.delete(key)
+            true
+          else
+            false
+          end
+        end
+        return unless current
+
+        job.cancel
+        publish(key, "error", {
+          "error" => JSON::Any.new(
+            "Voice transcription timed out. Try a shorter recording."
+          ),
+        })
       end
 
       private def publish(

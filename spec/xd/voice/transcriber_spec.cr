@@ -4,6 +4,13 @@ require "random/secure"
 require "../../../src/xd/voice/transcriber"
 
 describe Xd::Voice::Transcriber do
+  it "leaves CPU headroom for the desktop" do
+    Xd::Voice::Transcriber.thread_count(1).should eq(1)
+    Xd::Voice::Transcriber.thread_count(2).should eq(1)
+    Xd::Voice::Transcriber.thread_count(4).should eq(3)
+    Xd::Voice::Transcriber.thread_count(64).should eq(6)
+  end
+
   it "runs the bundled speech CLI with the C transcription settings" do
     directory = File.join(
       Dir.tempdir,
@@ -38,6 +45,7 @@ describe Xd::Voice::Transcriber do
       argv = File.read_lines(arguments)
       argv.should contain("--model")
       argv.should contain("/models/local.bin")
+      argv.should contain(Xd::Voice::Transcriber.thread_count.to_s)
       argv.should contain("--no-gpu")
       argv.should contain("--flash-attn")
       argv.should contain("--no-timestamps")

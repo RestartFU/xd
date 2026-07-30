@@ -31,18 +31,80 @@ private class ThreadProbeVoiceModel < Xd::Voice::Model
   end
 end
 
+private class InstalledVoiceModel < Xd::Voice::Model
+  def initialize
+    super(override_path: "/xd-test-model")
+  end
+
+  def find : String?
+    "/xd-test-model"
+  end
+end
+
+private class StalledVoiceTranscriber < Xd::Voice::Transcriber
+  def initialize
+    super(resolver: -> { "/xd-test-whisper" })
+    @was_cancelled = Atomic(Bool).new(false)
+  end
+
+  def transcribe(
+    _wav : Bytes,
+    _model_path : String,
+    &finished : Xd::Voice::Transcription -> Nil
+  ) : Nil
+  end
+
+  def cancel : Nil
+    @was_cancelled.set(true)
+  end
+
+  def cancelled? : Bool
+    @was_cancelled.get
+  end
+end
+
 describe Xd::Daemon::VoiceJobs do
+  it "cancels a stalled transcription and releases its request token" do
+    events = Channel(Hash(String, JSON::Any)).new(4)
+    transcribers = [] of StalledVoiceTranscriber
+    jobs = Xd::Daemon::VoiceJobs.new(
+      ->(_name : String, fields : Hash(String, JSON::Any), _owner : UInt64) { events.send(fields) },
+      model_factory: -> {
+        InstalledVoiceModel.new.as(Xd::Voice::Model)
+      },
+      transcriber_factory: -> {
+        transcriber = StalledVoiceTranscriber.new
+        transcribers << transcriber
+        transcriber.as(Xd::Voice::Transcriber)
+      },
+      transcription_timeout: 25.milliseconds
+    )
+    audio = Base64.strict_encode(Bytes[1, 2, 3, 4])
+
+    2.times do
+      jobs.transcribe(11_u64, "repeat-token", audio)
+      select
+      when event = events.receive
+        event["state"].as_s.should eq("error")
+        event["error"].as_s.should contain("timed out")
+      when timeout(1.second)
+        fail("stalled transcription did not time out")
+      end
+    end
+
+    transcribers.size.should eq(2)
+    transcribers.all?(&.cancelled?).should be_true
+  ensure
+    jobs.try(&.close)
+  end
+
   it "downloads on an OS thread and publishes from the daemon scheduler" do
     model = ThreadProbeVoiceModel.new
     events = [] of Hash(String, JSON::Any)
     event_threads = [] of Thread
     mutex = Mutex.new
     ready = Channel(Nil).new(1)
-    publisher = ->(
-      _name : String,
-      fields : Hash(String, JSON::Any),
-      _owner : UInt64,
-    ) {
+    publisher = ->(_name : String, fields : Hash(String, JSON::Any), _owner : UInt64) {
       mutex.synchronize do
         events << fields
         event_threads << Thread.current
@@ -100,11 +162,7 @@ describe Xd::Daemon::VoiceJobs do
     )
     events = Channel(Hash(String, JSON::Any)).new(128)
     jobs = Xd::Daemon::VoiceJobs.new(
-      ->(
-        _name : String,
-        fields : Hash(String, JSON::Any),
-        _owner : UInt64,
-      ) { events.send(fields) },
+      ->(_name : String, fields : Hash(String, JSON::Any), _owner : UInt64) { events.send(fields) },
       model_factory: -> { model }
     )
 
