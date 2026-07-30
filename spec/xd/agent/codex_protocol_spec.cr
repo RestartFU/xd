@@ -91,6 +91,14 @@ describe Xd::Agent::CodexProtocol do
       },
     }.to_json)
     protocol.receive_line({
+      "method" => "turn/diff/updated",
+      "params" => {
+        "threadId" => "thread-1",
+        "turnId"   => "turn-1",
+        "diff"     => "diff --git a/hello.txt b/hello.txt\n+hello\n",
+      },
+    }.to_json)
+    protocol.receive_line({
       "method" => "item/started",
       "params" => {
         "threadId" => "thread-1",
@@ -153,6 +161,58 @@ describe Xd::Agent::CodexProtocol do
     usage.context_used.should eq(456_u64)
     usage.context_window.should eq(272_000_u64)
     events.count(&.type.result?).should eq(1)
+    finished.should eq([{true, nil}])
+  end
+
+  it "emits the native turn diff when no file-change item arrives" do
+    lines = [] of String
+    events = [] of Xd::Agent::Event
+    finished = [] of Tuple(Bool, String?)
+    protocol = initialize_codex_protocol(lines)
+    protocol.receive_line({
+      "id"     => 1,
+      "result" => {} of String => String,
+    }.to_json)
+    protocol.start_turn(
+      Xd::Agent::RunSpec.new("create a file", workdir: "/tmp"),
+      nil,
+      ->(event : Xd::Agent::Event) { events << event },
+      ->(ok : Bool, message : String?) { finished << {ok, message} }
+    )
+    protocol.receive_line({
+      "id"     => 2,
+      "result" => {"thread" => {"id" => "thread-native-diff"}},
+    }.to_json)
+    protocol.receive_line({
+      "id"     => 3,
+      "result" => {"turn" => {"id" => "turn-native-diff"}},
+    }.to_json)
+
+    patch = "diff --git a/generated.txt b/generated.txt\n" \
+            "new file mode 100644\n" \
+            "--- /dev/null\n" \
+            "+++ b/generated.txt\n" \
+            "@@ -0,0 +1 @@\n" \
+            "+generated\n"
+    protocol.receive_line({
+      "method" => "turn/diff/updated",
+      "params" => {
+        "threadId" => "thread-native-diff",
+        "turnId"   => "turn-native-diff",
+        "diff"     => patch,
+      },
+    }.to_json)
+    protocol.receive_line({
+      "method" => "turn/completed",
+      "params" => {
+        "threadId" => "thread-native-diff",
+        "turn"     => {"status" => "completed"},
+      },
+    }.to_json)
+
+    events.select(&.type.tool_use?).compact_map(&.text)
+      .should eq(["file_change\n#{patch.rstrip}"])
+    events.map(&.type).last.result?.should be_true
     finished.should eq([{true, nil}])
   end
 

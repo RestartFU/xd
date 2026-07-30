@@ -15,6 +15,8 @@ module Xd
       property cancel_callback : Proc(Nil)? = nil
       property stopping = false
       property finished = false
+      property latest_diff : String?
+      property emitted_file_diff = false
       getter streamed_messages = Set(String).new
       getter started_commands = Set(String).new
 
@@ -24,6 +26,7 @@ module Xd
         @on_event : Proc(Event, Nil),
         @on_finished : Proc(Bool, String?, Nil),
       )
+        @latest_diff = nil
       end
 
       def emit(
@@ -403,6 +406,9 @@ module Xd
           used = last ? positive_u64(last, "totalTokens") : 0_u64
           window = usage ? positive_u64(usage, "modelContextWindow") : 0_u64
           turn.emit(EventType::Usage, used: used, window: window)
+        when "turn/diff/updated"
+          return unless turn
+          turn.latest_diff = string?(params, "diff")
         when "error"
           return unless turn
           error = object?(params, "error")
@@ -427,6 +433,7 @@ module Xd
               message || turn.backend_error
             )
           elsif status == "completed"
+            emit_pending_diff(turn)
             turn.emit(EventType::Result)
             finish_turn(
               turn,
@@ -508,8 +515,27 @@ module Xd
                        end
         turn.emit(
           EventType::ToolUse,
-          ToolSummary.build(summary_name, item)
+          tool_summary(turn, summary_name, item)
         )
+      end
+
+      private def tool_summary(
+        turn : CodexTurn,
+        name : String,
+        item : Hash(String, JSON::Any),
+      ) : String
+        summary = ToolSummary.build(name, item)
+        return summary unless name == "file_change"
+
+        if summary.starts_with?(ToolDiff::PREFIX)
+          turn.emitted_file_diff = true
+          summary
+        elsif fallback = ToolDiff.wrap_unified(turn.latest_diff)
+          turn.emitted_file_diff = true
+          fallback
+        else
+          summary
+        end
       end
 
       private def finish_turn(
@@ -517,10 +543,19 @@ module Xd
         success : Bool,
         message : String?,
       ) : Nil
+        emit_pending_diff(turn)
         if id = turn.thread_id
           @turns.delete(id)
         end
         turn.finish(success, message)
+      end
+
+      private def emit_pending_diff(turn : CodexTurn) : Nil
+        return if turn.emitted_file_diff
+        return unless summary = ToolDiff.wrap_unified(turn.latest_diff)
+
+        turn.emitted_file_diff = true
+        turn.emit(EventType::ToolUse, summary)
       end
 
       private def object?(

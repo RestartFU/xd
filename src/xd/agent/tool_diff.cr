@@ -39,6 +39,14 @@ module Xd
         PREFIX + truncate(patch)
       end
 
+      def wrap_unified(patch : String?) : String?
+        return unless patch
+
+        patch = patch.rstrip
+        return if patch.empty? || !patch.starts_with?("diff --git ")
+        PREFIX + truncate(patch)
+      end
+
       private def codex(input : Hash(String, JSON::Any)) : String?
         changes = input["changes"]?.try(&.as_a?)
         return unless changes

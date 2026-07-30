@@ -20,8 +20,7 @@ describe Xd::Agent::ToolSummary do
     Xd::Agent::ToolSummary.build(
       "command_execution",
       summary_input({
-        "command" =>
-          %(/run/current-system/sw/bin/bash -lc "rg -n 'x|y' src/"),
+        "command" => %(/run/current-system/sw/bin/bash -lc "rg -n 'x|y' src/"),
       })
     ).should eq("$ rg -n 'x|y' src/")
 
@@ -85,7 +84,7 @@ describe Xd::Agent::ToolSummary do
 
   it "builds Claude edit and write diffs from tool arguments" do
     edit = JSON.parse({
-      "file_path" => "README.md",
+      "file_path"  => "README.md",
       "old_string" => "before\n",
       "new_string" => "after\n",
     }.to_json).as_h
@@ -96,7 +95,7 @@ describe Xd::Agent::ToolSummary do
 
     write = JSON.parse({
       "file_path" => "new.txt",
-      "content" => "created\n",
+      "content"   => "created\n",
     }.to_json).as_h
     write_summary = Xd::Agent::ToolSummary.build("Write", write)
     write_summary.should contain("new file mode 100644")
@@ -148,5 +147,12 @@ describe Xd::Agent::ToolSummary do
       "patch" => "*** Begin Patch\nnot a file\n*** End Patch",
     })
     Xd::Agent::ToolDiff.build("apply_patch", input).should be_nil
+  end
+
+  it "wraps bounded native unified diffs" do
+    patch = "diff --git a/new.txt b/new.txt\n+created\n"
+    Xd::Agent::ToolDiff.wrap_unified(patch)
+      .should eq("file_change\n#{patch.rstrip}")
+    Xd::Agent::ToolDiff.wrap_unified("not a diff").should be_nil
   end
 end

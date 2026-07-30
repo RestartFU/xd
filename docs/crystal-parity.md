@@ -282,6 +282,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   paired-TLS latency, and live Git-head refresh proof remain. Agent-native edit,
   write, multi-edit, NotebookEdit, apply-patch, and file-change payloads also
   produce inline unified diffs without a Git repository or Git executable.
+  Codex's native turn-level diff is retained as a fallback for shell-generated
+  files and other changes without a completed file-change item, while normal
+  file-change items suppress the duplicate aggregate card.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
   paired restart matrices remain.
