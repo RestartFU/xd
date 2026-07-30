@@ -1187,12 +1187,6 @@ module Xd
         add_choice(choices, popover, "Rename…") do
           begin_renaming(node)
         end
-        add_choice(choices, popover, "Settings…") do
-          dialogs(source).settings(
-            folder_id,
-            source.folder_names[folder_id]
-          )
-        end
         add_choice(choices, popover, "Agent Context…") do
           dialogs(source).context(
             folder_id,
@@ -1205,23 +1199,12 @@ module Xd
             source.folder_names[folder_id]
           )
         end
-
-        if source.folder_parents[folder_id]?
-          add_choice(choices, popover, "Move to top level") do
-            move_folder(source, folder_id, nil)
-          end
-        end
-        source.folder_ids.each do |candidate|
-          next if candidate == folder_id
-          next if descendant?(source, candidate, folder_id)
-
-          target = candidate
-          add_choice(
-            choices,
-            popover,
-            "Move into #{folder_path(source, target)}"
-          ) do
-            move_folder(source, folder_id, target)
+        unless source.remote
+          add_choice(choices, popover, "Folder Settings…") do
+            dialogs(source).settings(
+              folder_id,
+              source.folder_names[folder_id]
+            )
           end
         end
 
@@ -1461,32 +1444,6 @@ module Xd
             )
           end
         end
-      end
-
-      private def descendant?(
-        source : Source,
-        candidate : String,
-        folder_id : String,
-      ) : Bool
-        current = source.folder_parents[candidate]?
-        while current
-          return true if current == folder_id
-          current = source.folder_parents[current]?
-        end
-        false
-      end
-
-      private def folder_path(
-        source : Source,
-        folder_id : String,
-      ) : String
-        names = [] of String
-        current : String? = folder_id
-        while current
-          names.unshift(source.folder_names[current])
-          current = source.folder_parents[current]?
-        end
-        names.join(" / ")
       end
 
       private def dialogs(source : Source) : FolderDialogs
