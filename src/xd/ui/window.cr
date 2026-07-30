@@ -165,7 +165,9 @@ module Xd
           ->(message : String) { @status.text = message }
         )
         @tool_panel = ToolPanel.new(
-          ->(request : Hash(String, JSON::Any)) { call(request) },
+          ->(request : Hash(String, JSON::Any)) {
+            panel_call(request)
+          },
           -> { close_terminal_panel }
         )
 
@@ -729,6 +731,17 @@ module Xd
 
       private def call(fields : Hash(String, JSON::Any))
         call_on(@client, fields)
+      end
+
+      private def panel_call(
+        fields : Hash(String, JSON::Any),
+      ) : PanelCallResult
+        @status.text = ""
+        PanelCallResult.new(@client.call(fields), nil)
+      rescue error : Daemon::Client::Error
+        message = error.message || "Daemon request failed."
+        @status.text = message
+        PanelCallResult.new(nil, message)
       end
 
       private def call_on(

@@ -1,5 +1,7 @@
 require "json"
 require "gtk4"
+require "./file_pane"
+require "./panel_call"
 require "./terminal_panel"
 
 module Xd
@@ -11,36 +13,34 @@ module Xd
 
       @chat_id : String?
       @view_key : String?
-      @file_directory = ""
-      @open_file : String?
       @diff_mode = "working"
       @repository_page : String?
 
-      @file_path = Gtk::Label.new("")
-      @file_list = Gtk::Box.new(:vertical, 2)
-      @file_editor = Gtk::TextView.new
-      @file_save = Gtk::Button.new_with_label("Save")
-      @file_status = Gtk::Label.new("")
       @diff_view = Gtk::TextView.new
       @diff_status = Gtk::Label.new("")
+      @call : Proc(
+        Hash(String, JSON::Any),
+        Hash(String, JSON::Any)?,
+      )
+      @file_pane : FilePane
       @terminal_panel : TerminalPanel
 
       def initialize(
-        @call : Proc(
-          Hash(String, JSON::Any),
-          Hash(String, JSON::Any)?,
-        ),
+        @request : PanelCall,
         on_terminal_empty : Proc(Nil),
       )
         @chat_id = nil
         @view_key = nil
-        @open_file = nil
         @repository_page = nil
+        @call = ->(request : Hash(String, JSON::Any)) {
+          @request.call(request).body
+        }
+        @file_pane = FilePane.new(@request)
 
         @repository_widget = Gtk::Stack.new
         @repository_widget.hexpand = true
         @repository_widget.vexpand = true
-        @repository_widget.add_named(build_files, "files")
+        @repository_widget.add_named(@file_pane.widget, "files")
         @repository_widget.add_named(build_diff, "diff")
         @repository_widget.add_css_class("xd-tool-panel")
         @repository_widget.add_css_class("xd-divider-left")
@@ -58,8 +58,7 @@ module Xd
 
         @chat_id = chat_id
         @view_key = view_key
-        @file_directory = ""
-        @open_file = nil
+        @file_pane.select_chat(chat_id)
         @terminal_panel.select_chat(chat_id, view_key)
         refresh_visible
       end
@@ -98,69 +97,6 @@ module Xd
         error : String?,
       ) : Nil
         @terminal_panel.remote_connection_changed(connected, error)
-      end
-
-      private def build_files : Gtk::Widget
-        @file_path.text = "/"
-        @file_path.xalign = 0_f32
-        @file_path.hexpand = true
-        @file_path.ellipsize = :middle
-
-        up = Gtk::Button.new_from_icon_name("go-up-symbolic")
-        up.add_css_class("flat")
-        up.tooltip_text = "Parent directory"
-        up.clicked_signal.connect { file_up }
-
-        refresh = Gtk::Button.new_from_icon_name("view-refresh-symbolic")
-        refresh.add_css_class("flat")
-        refresh.tooltip_text = "Refresh files"
-        refresh.clicked_signal.connect { refresh_files }
-
-        file_header = Gtk::Box.new(:horizontal, 6)
-        file_header.margin_top = 8
-        file_header.margin_bottom = 8
-        file_header.margin_start = 8
-        file_header.margin_end = 8
-        file_header.append(up)
-        file_header.append(@file_path)
-        file_header.append(refresh)
-
-        list_scroll = Gtk::ScrolledWindow.new
-        list_scroll.min_content_height = 180
-        list_scroll.vexpand = false
-        list_scroll.child = @file_list
-
-        @file_editor.monospace = true
-        @file_editor.wrap_mode = :none
-        @file_editor.editable = false
-        editor_scroll = Gtk::ScrolledWindow.new
-        editor_scroll.vexpand = true
-        editor_scroll.child = @file_editor
-
-        @file_save.sensitive = false
-        @file_save.add_css_class("suggested-action")
-        @file_save.clicked_signal.connect { save_file }
-
-        @file_status.xalign = 0_f32
-        @file_status.hexpand = true
-        @file_status.ellipsize = :middle
-        @file_status.add_css_class("dim-label")
-
-        editor_actions = Gtk::Box.new(:horizontal, 8)
-        editor_actions.margin_top = 6
-        editor_actions.margin_bottom = 8
-        editor_actions.margin_start = 8
-        editor_actions.margin_end = 8
-        editor_actions.append(@file_status)
-        editor_actions.append(@file_save)
-
-        box = Gtk::Box.new(:vertical, 0)
-        box.append(file_header)
-        box.append(list_scroll)
-        box.append(Gtk::Separator.new(:horizontal))
-        box.append(editor_scroll)
-        box.append(editor_actions)
-        box
       end
 
       private def build_diff : Gtk::Widget
@@ -217,87 +153,8 @@ module Xd
 
       private def refresh_repository(page : String?) : Nil
         case page
-        when "files" then refresh_files
+        when "files" then @file_pane.refresh
         when "diff"  then refresh_diff
-        end
-      end
-
-      private def refresh_files : Nil
-        chat_id = @chat_id
-        return unless chat_id
-
-        response = @call.call({
-          "op"     => JSON::Any.new("file-browse"),
-          "chat"   => JSON::Any.new(chat_id),
-          "action" => JSON::Any.new("list"),
-          "path"   => JSON::Any.new(@file_directory),
-        })
-        return unless response
-
-        clear(@file_list)
-        @file_path.text = @file_directory.empty? ? "/" : "/#{@file_directory}"
-        response["entries"].as_a.each do |entry|
-          name = entry["name"].as_s
-          directory = entry["directory"].as_bool
-          relative = join_path(@file_directory, name)
-          button = Gtk::Button.new_with_label(
-            directory ? "▸ #{name}" : name
-          )
-          button.add_css_class("flat")
-          button.halign = :fill
-          button.clicked_signal.connect do
-            if directory
-              @file_directory = relative
-              refresh_files
-            else
-              read_file(relative)
-            end
-          end
-          @file_list.append(button)
-        end
-      end
-
-      private def file_up : Nil
-        return if @file_directory.empty?
-
-        parts = @file_directory.split('/')
-        parts.pop?
-        @file_directory = parts.join("/")
-        refresh_files
-      end
-
-      private def read_file(path : String) : Nil
-        chat_id = @chat_id
-        return unless chat_id
-
-        response = @call.call({
-          "op"     => JSON::Any.new("file-browse"),
-          "chat"   => JSON::Any.new(chat_id),
-          "action" => JSON::Any.new("read"),
-          "path"   => JSON::Any.new(path),
-        })
-        return unless response
-
-        @open_file = path
-        @file_editor.buffer.text = response["content"].as_s
-        @file_editor.editable = true
-        @file_save.sensitive = true
-        @file_status.text = path
-      end
-
-      private def save_file : Nil
-        chat_id = @chat_id
-        path = @open_file
-        return unless chat_id && path
-
-        if @call.call({
-             "op"      => JSON::Any.new("file-browse"),
-             "chat"    => JSON::Any.new(chat_id),
-             "action"  => JSON::Any.new("write"),
-             "path"    => JSON::Any.new(path),
-             "content" => JSON::Any.new(@file_editor.buffer.text),
-           })
-          @file_status.text = "#{path} · saved"
         end
       end
 
@@ -335,16 +192,6 @@ module Xd
         output = response["output"].as_s
         @diff_view.buffer.text = output
         @diff_status.text += output.empty? ? " · clean" : ""
-      end
-
-      private def join_path(parent : String, name : String) : String
-        parent.empty? ? name : "#{parent}/#{name}"
-      end
-
-      private def clear(box : Gtk::Box) : Nil
-        while child = box.first_child
-          box.remove(child)
-        end
       end
     end
   end
