@@ -80,8 +80,8 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   contiguous row backgrounds, syntax colours, horizontal scrolling, and C
   padding/geometry match. Image markers now retain exact prose/image order;
   daemon-backed loading, unavailable states, thumbnail geometry, linked
-  captions, and the transparent Adwaita viewer use the C widget hierarchy.
-  Installed-bundle image verification remains.
+  captions, and the transparent Adwaita viewer use the C widget hierarchy and
+  are installed-bundle verified.
 - `[~]` Transcript requests use the C 100-message page size plus one boundary
   row; per-chat expanded limits and four-entry LRU widget-tree cache are
   ported. A 245-row installed-bundle transcript verifies the 100/45 history
@@ -108,11 +108,15 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 - `[~]` Context-window meter uses the C 108-pixel progress bar, compact token
   formatting, raw-count tooltip, and 75/90-percent warning states; installed
   GTK verification remains.
-- `[~]` Handover keeps the C 12,000-byte role-filtered boundary. The unified
+- `[x]` Handover keeps the C 12,000-byte role-filtered boundary. The unified
   manager retries a silent stale resumed session exactly once without
   duplicating the user row, stores the C `(no reply)` fallback, advances
   backend `last_seen` only after success, and runs Stop/Steer through the same
-  durable queue finish path. Installed GTK timeline verification remains.
+  durable queue finish path. The bundle from `21008c6` is verified at
+  1100x720 with fatal GTK criticals: queue edit, Steer, Drop, Stop, retry,
+  partial-output preservation, duration placement, and `(no reply)` all match
+  storage and draw once. Event-driven metadata refresh no longer replays a
+  queued turn snapshot over its pending ordered text delta.
 
 C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
 `src/util/markdown.c`, `src/util/syntax.c`, `src/ui/dots.c`,
@@ -142,8 +146,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   atomic daemon selection. An installed nightly bundle verifies all four
   popovers, favorite persistence, provider switching, Ctrl+2 selection, and
   Plan disabling access with fatal GTK criticals enabled.
-- `[~]` Queued-message drop/edit/steer controls and multiline editor match C;
-  installed GTK verification remains.
+- `[x]` Queued-message drop/edit/steer controls and multiline editor match C.
+  Installed GTK verification covers persistence, promotion, cancellation,
+  partial-output retention, next-turn placement, and empty queue retirement.
 - `[~]` Slash-command discovery, filtering, layout, and insertion match C;
   installed GTK verification remains.
 - `[~]` Worktree chooser uses the C descriptive popover, current/new/existing
