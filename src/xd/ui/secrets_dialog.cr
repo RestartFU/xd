@@ -130,9 +130,12 @@ module Xd
           elsif (keyval == Gdk::KEY_Return ||
                 keyval == Gdk::KEY_KP_Enter) &&
                 state.includes?(Gdk::ModifierType::ControlMask)
-            save
-            # GtkEntry's internal GtkText still needs the event so its focus
-            # state is balanced before the asynchronous save closes the panel.
+            # Let GtkEntry's internal GtkText finish this event before the
+            # busy state makes its row insensitive.
+            GLib.idle_add do
+              save
+              false
+            end
             false
           else
             false
