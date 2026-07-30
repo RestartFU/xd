@@ -570,6 +570,7 @@ module Xd
         clear_attachments
         @client = endpoint
         @active_chat = id
+        @sidebar.activate_chat(endpoint, id)
         prefix = endpoint.same?(@local_client) ? "local:" : "remote:"
         @settings.set_string("active-chat", "#{prefix}#{id}")
         @stream_label = nil
@@ -603,6 +604,7 @@ module Xd
         remember_panes
         hide_panes_for_switch
         @active_chat = nil
+        @sidebar.clear_active_chat
         @settings.set_string("active-chat", "")
         @stream_label = nil
         @working = false
@@ -842,6 +844,7 @@ module Xd
         return unless chat_id
         text = @entry.buffer.text.strip
         return if text.empty? && @attachments.empty?
+        @sidebar.answer_chat(@client, chat_id)
 
         request = {
           "op"   => JSON::Any.new("send"),
@@ -1231,6 +1234,7 @@ module Xd
           @tool_panel.handle_event(event)
         end
         name = event["event"]?.try(&.as_s?) || return
+        @sidebar.handle_event(endpoint, event)
         case name
         when "tree"
           @sidebar.reload(endpoint)

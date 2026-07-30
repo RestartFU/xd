@@ -48,7 +48,9 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   filesystem- and screenshot-verified under the same fatal-critical check.
 - `[ ]` Match local and remote root menus, confirmations, disabled states, and
   error presentation exactly.
-- `[ ]` Match chat working/waiting/done/offline state transitions.
+- `[~]` Chat working/waiting/done and remote-root offline transitions match C
+  state rules, including animated dots and tooltips; screenshot/event matrix
+  remains.
 - `[ ]` Restore updater row and branch-build entry point.
 
 C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,

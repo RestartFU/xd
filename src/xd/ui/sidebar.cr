@@ -7,7 +7,9 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./dialogs"
+require "./dots"
 require "./folder_dialogs"
+require "./sidebar_state"
 
 module Xd
   module UI
@@ -22,6 +24,7 @@ module Xd
       @pending_menu : Gtk::Popover?
       @pending_menu_action : Proc(Nil)?
       @restore_chat_id : String?
+      @active_chat_key : String?
 
       private class Source
         getter endpoint : Daemon::Endpoint
@@ -99,8 +102,7 @@ module Xd
         getter children : Gio::ListStore
         getter folder_id : String?
         getter backend : String?
-        getter working : Bool
-        getter offline : Bool
+        property state : SidebarState
         getter placeholder : Bool
 
         def initialize(
@@ -111,8 +113,7 @@ module Xd
           @source : Source,
           @folder_id : String? = nil,
           @backend : String? = nil,
-          @working : Bool = false,
-          @offline : Bool = false,
+          @state : SidebarState = SidebarState::Idle,
           @placeholder : Bool = false,
         )
           @children = Gio::ListStore.new(Gtk::StringObject.g_type)
@@ -131,7 +132,9 @@ module Xd
         end
 
         def icon_name : String
-          return @offline ? "network-offline-symbolic" : "network-server-symbolic" if @kind.remote_root?
+          if @kind.remote_root?
+            return @state.offline? ? "network-offline-symbolic" : "network-server-symbolic"
+          end
           return "folder-symbolic" if @kind.folder?
           Agent::Catalog.lookup(@backend).try(&.icon_name) ||
             "chat-message-symbolic"
@@ -144,7 +147,7 @@ module Xd
         icon_overlay : Gtk::Overlay,
         icon : Gtk::Image,
         status : Gtk::Box,
-        working : Gtk::Label,
+        working : Dots,
         label : Gtk::Label,
         entry : Gtk::Entry,
         drag_source : Gtk::DragSource,
@@ -190,6 +193,8 @@ module Xd
         @restore_chat_id = nil
         @restore_chat_remote = false
         @restoring_chat = false
+        @active_chat_key = nil
+        @chat_states = {} of String => SidebarState
         @restore_queued = false
         @restoring_expanded = false
         @closing = {} of UInt64 => {Gtk::TreeListRow, String}
@@ -211,16 +216,12 @@ module Xd
         child_model_data = GICrystal::ClosureDataManager.register(
           ::Box.box(child_model_for_item)
         )
-        create_children = ->(
-          item : Pointer(Void),
-          user_data : Pointer(Void),
-        ) : Pointer(Void) {
+        create_children = ->(item : Pointer(Void), user_data : Pointer(Void)) : Pointer(Void) {
           ::Box(Proc(Pointer(Void), Pointer(Void)))
             .unbox(user_data)
             .call(item)
         }
-        destroy_children = ->
-          GICrystal::ClosureDataManager.deregister(Pointer(Void))
+        destroy_children = ->GICrystal::ClosureDataManager.deregister(Pointer(Void))
 
         # gi-crystal's generated wrapper returns the Crystal ListModel wrapper
         # itself from this callback instead of its GObject pointer. Use the raw
@@ -347,6 +348,45 @@ module Xd
         queue_restore
       end
 
+      def activate_chat(endpoint : Daemon::Endpoint, id : String) : Nil
+        source = source_for(endpoint) || return
+        key = chat_key(source, id)
+        @active_chat_key = key
+        set_chat_state(source, id, chat_state(key).opened)
+      end
+
+      def clear_active_chat : Nil
+        @active_chat_key = nil
+      end
+
+      def answer_chat(endpoint : Daemon::Endpoint, id : String) : Nil
+        source = source_for(endpoint) || return
+        key = chat_key(source, id)
+        set_chat_state(source, id, chat_state(key).answered)
+      end
+
+      def handle_event(
+        endpoint : Daemon::Endpoint,
+        event : Hash(String, JSON::Any),
+      ) : Nil
+        source = source_for(endpoint) || return
+        id = event["chat"]?.try(&.as_s?) || return
+        name = event["event"]?.try(&.as_s?) || return
+        key = chat_key(source, id)
+        state = case name
+                when "turn-started"
+                  SidebarState::Working
+                when "turn-finished"
+                  chat_state(key).finish(
+                    event["waiting"]?.try(&.as_bool?) == true,
+                    @active_chat_key == key
+                  )
+                else
+                  return
+                end
+        set_chat_state(source, id, state)
+      end
+
       def close : Nil
         @remote.unsubscribe(@remote_state_subscription)
       end
@@ -366,11 +406,12 @@ module Xd
             host,
             NodeKind::RemoteRoot,
             @remote_source,
-            offline: !snapshot.state.connected?
+            state: snapshot.state.connected? ? SidebarState::Idle : SidebarState::Offline
           )
           append_node(@root_model, root)
           add_source_roots(@remote_source, root.children)
         end
+        @chat_states.select! { |key, _state| @nodes.has_key?(key) }
         queue_restore
       end
 
@@ -417,17 +458,25 @@ module Xd
         title = chat["title"].as_s? || "New Chat"
         title = "New Chat" if title.empty?
         prefix = source.remote ? "remote" : "local"
+        key = "#{prefix}/chat/#{id}"
+        current = chat_state(key)
+        state = current.reconcile_tree(
+          chat["working"]?.try(&.as_bool?) == true,
+          @active_chat_key == key,
+          source.remote
+        )
+        @chat_states[key] = state
         append_node(
           model,
           Node.new(
-            "#{prefix}/chat/#{id}",
+            key,
             id,
             title,
             NodeKind::Chat,
             source,
             folder_id: folder_id,
             backend: chat["backend"]?.try(&.as_s?),
-            working: chat["working"]?.try(&.as_bool?) == true
+            state: state
           )
         )
       end
@@ -447,7 +496,7 @@ module Xd
         icon_overlay = Gtk::Overlay.new
         icon = Gtk::Image.new
         status = Gtk::Box.new(:horizontal, 0)
-        working = Gtk::Label.new("...")
+        working = Dots.new
         label = Gtk::Label.new("")
         entry = Gtk::Entry.new
         drag_source = Gtk::DragSource.new
@@ -492,8 +541,7 @@ module Xd
         entry.add_controller(editor_focus)
 
         working.visible = false
-        working.valign = :center
-        working.add_css_class("dim-label")
+        working.widget.add_css_class("dim-label")
 
         status.visible = false
         status.halign = :end
@@ -504,7 +552,7 @@ module Xd
         icon_overlay.child = icon
         icon_overlay.add_overlay(status)
         box.append(icon_overlay)
-        box.append(working)
+        box.append(working.widget)
         box.append(label)
         box.append(entry)
 
@@ -555,18 +603,7 @@ module Xd
         widgets.expander.list_row = row
         widgets.icon.icon_name = node.icon_name
         widgets.label.text = node.name
-        widgets.working.visible = node.working
-        widgets.icon_overlay.visible = !node.working
-        widgets.status.visible = false
-
-        if node.offline
-          widgets.icon.add_css_class("xd-offline")
-          widgets.icon_overlay.tooltip_text =
-            "Not connected. Trying again every few seconds."
-        else
-          widgets.icon.remove_css_class("xd-offline")
-          widgets.icon_overlay.tooltip_text = nil
-        end
+        show_state(widgets, node)
 
         @bound_nodes[pointer_key(widgets.box)] = node
         if node.kind.folder? && !node.placeholder?
@@ -622,6 +659,64 @@ module Xd
           return widgets if node && node.key == key
         end
         nil
+      end
+
+      private def show_state(widgets : RowWidgets, node : Node) : Nil
+        state = node.state
+        waiting = state.waiting?
+        done = state.done?
+
+        widgets.working.visible = state.working?
+        widgets.icon_overlay.visible = !state.working?
+        widgets.status.visible = waiting || done
+
+        widgets.status.remove_css_class("xd-status-waiting")
+        widgets.status.remove_css_class("xd-status-done")
+        widgets.status.add_css_class("xd-status-waiting") if waiting
+        widgets.status.add_css_class("xd-status-done") if done
+
+        if state.offline?
+          widgets.icon.add_css_class("xd-offline")
+        else
+          widgets.icon.remove_css_class("xd-offline")
+        end
+        widgets.icon_overlay.tooltip_text =
+          if state.offline?
+            "Not connected. Trying again every few seconds."
+          elsif waiting
+            "Waiting for your answer"
+          elsif done
+            "New reply"
+          end
+      end
+
+      private def source_for(endpoint : Daemon::Endpoint) : Source?
+        return @local_source if endpoint.same?(@local_source.endpoint)
+        return @remote_source if endpoint.same?(@remote_source.endpoint)
+      end
+
+      private def chat_key(source : Source, id : String) : String
+        "#{source.remote ? "remote" : "local"}/chat/#{id}"
+      end
+
+      private def chat_state(key : String) : SidebarState
+        @chat_states[key]? || SidebarState::Idle
+      end
+
+      private def set_chat_state(
+        source : Source,
+        id : String,
+        state : SidebarState,
+      ) : Nil
+        key = chat_key(source, id)
+        @chat_states[key] = state
+        node = @nodes[key]?
+        return unless node
+
+        node.state = state
+        if widgets = widgets_for_node(key)
+          show_state(widgets, node)
+        end
       end
 
       private def show_editor(
