@@ -265,8 +265,8 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   generation-scoped; pure patch parsing and file-section calculation run on a
   worker thread before GTK receives the virtual model. Explicit cancellation,
   paired-TLS latency, and live Git-head refresh proof remain. Agent-native edit,
-  write, and file-change payloads also produce inline unified diffs without a
-  Git repository or Git executable.
+  write, multi-edit, NotebookEdit, apply-patch, and file-change payloads also
+  produce inline unified diffs without a Git repository or Git executable.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
   paired restart matrices remain.
@@ -450,7 +450,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (288 examples).
+- `[x]` Crystal specs pass in Docker (291 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

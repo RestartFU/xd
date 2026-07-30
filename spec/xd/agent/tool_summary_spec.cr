@@ -102,4 +102,51 @@ describe Xd::Agent::ToolSummary do
     write_summary.should contain("new file mode 100644")
     write_summary.should contain("+created")
   end
+
+  it "builds apply-patch diffs without reading a repository" do
+    input = summary_input({
+      "patch" => <<-PATCH,
+        *** Begin Patch
+        *** Update File: src/old.cr
+        *** Move to: src/new.cr
+        @@
+        -puts :old
+        +puts :new
+        *** Add File: notes.txt
+        +hello
+        *** Delete File: gone.txt
+        *** End Patch
+        PATCH
+    })
+
+    summary = Xd::Agent::ToolSummary.build("apply_patch", input)
+    summary.should start_with("file_change\ndiff --git ")
+    summary.should contain("rename from src/old.cr")
+    summary.should contain("rename to src/new.cr")
+    summary.should contain("-puts :old")
+    summary.should contain("+puts :new")
+    summary.should contain("new file mode 100644")
+    summary.should contain("deleted file mode 100644")
+  end
+
+  it "builds notebook edits from source arguments" do
+    input = summary_input({
+      "notebook_path" => "analysis.ipynb",
+      "old_source"    => "before()",
+      "new_source"    => "after()",
+    })
+
+    summary = Xd::Agent::ToolSummary.build("NotebookEdit", input)
+    summary.should start_with("file_change\ndiff --git ")
+    summary.should contain("--- a/analysis.ipynb")
+    summary.should contain("-before()")
+    summary.should contain("+after()")
+  end
+
+  it "rejects malformed apply-patch bodies" do
+    input = summary_input({
+      "patch" => "*** Begin Patch\nnot a file\n*** End Patch",
+    })
+    Xd::Agent::ToolDiff.build("apply_patch", input).should be_nil
+  end
 end

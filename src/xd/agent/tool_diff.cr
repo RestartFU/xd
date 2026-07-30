@@ -25,6 +25,10 @@ module Xd
                   write(input)
                 when "multiedit"
                   multi_edit(input)
+                when "notebookedit", "notebook_edit"
+                  notebook_edit(input)
+                when "apply_patch", "patch"
+                  patch(input)
                 else
                   nil
                 end
@@ -104,6 +108,165 @@ module Xd
         end
         return if patches.empty?
         patches.join("\n")
+      end
+
+      private def notebook_edit(input : Hash(String, JSON::Any)) : String?
+        path = file_path(input)
+        return unless path
+        old_text = string?(input, "old_source") ||
+                   string?(input, "oldSource")
+        new_text = string?(input, "new_source") ||
+                   string?(input, "newSource")
+        return unless old_text || new_text
+
+        replacement(path, old_text, new_text)
+      end
+
+      private def patch(input : Hash(String, JSON::Any)) : String?
+        raw = string?(input, "patch") ||
+              string?(input, "diff") ||
+              string?(input, "input")
+        return unless raw
+        return raw if raw.starts_with?("diff --git ")
+
+        apply_patch(raw)
+      end
+
+      private def apply_patch(raw : String) : String?
+        lines = raw.lines(chomp: true)
+        return unless lines.first? == "*** Begin Patch"
+        return unless lines.last? == "*** End Patch"
+
+        patches = [] of String
+        index = 1
+        finish = lines.size - 1
+        while index < finish
+          header = lines[index]
+          kind, path = apply_header(header)
+          return unless kind && path
+          index += 1
+
+          move : String? = nil
+          if kind == :update && index < finish &&
+             lines[index].starts_with?("*** Move to: ")
+            move = apply_path(lines[index], "*** Move to: ")
+            return unless move
+            index += 1
+          end
+
+          start = index
+          while index < finish && !apply_file_header?(lines[index])
+            index += 1
+          end
+          body = lines[start...index]
+          if body.last? == "*** End of File"
+            body = body[0...-1]
+          end
+          rendered = case kind
+                     when :add
+                       apply_add(path, body)
+                     when :delete
+                       apply_delete(path, body)
+                     else
+                       apply_update(path, move || path, body)
+                     end
+          return unless rendered
+          patches << rendered
+        end
+        return if patches.empty?
+
+        patches.join("\n")
+      end
+
+      private def apply_header(line : String) : Tuple(Symbol?, String?)
+        {
+          {"*** Add File: ", :add},
+          {"*** Delete File: ", :delete},
+          {"*** Update File: ", :update},
+        }.each do |entry|
+          prefix, kind = entry
+          if line.starts_with?(prefix)
+            return {kind, apply_path(line, prefix)}
+          end
+        end
+        {nil, nil}
+      end
+
+      private def apply_path(line : String, prefix : String) : String?
+        path = line.byte_slice(prefix.bytesize).strip
+        path unless path.empty?
+      end
+
+      private def apply_file_header?(line : String) : Bool
+        line.starts_with?("*** Add File: ") ||
+          line.starts_with?("*** Delete File: ") ||
+          line.starts_with?("*** Update File: ")
+      end
+
+      private def apply_add(path : String, body : Array(String)) : String?
+        return if body.empty?
+        return unless body.all?(&.starts_with?('+'))
+
+        content = body.map { |line| line.byte_slice(1) }.join('\n') + '\n'
+        new_file(path, content)
+      end
+
+      private def apply_delete(
+        path : String,
+        body : Array(String),
+      ) : String?
+        return deleted_file(path, "") if body.empty?
+        return unless body.all?(&.starts_with?('-'))
+
+        content = body.map { |line| line.byte_slice(1) }.join('\n') + '\n'
+        deleted_file(path, content)
+      end
+
+      private def apply_update(
+        old_path : String,
+        new_path : String,
+        body : Array(String),
+      ) : String?
+        return if body.empty? && old_path == new_path
+
+        hunks = [] of Array(String)
+        current : Array(String)? = nil
+        body.each do |line|
+          if line.starts_with?("@@")
+            hunks << current if current
+            current = [] of String
+          elsif rows = current
+            return if line.empty?
+            return unless {' ', '+', '-'}.includes?(line[0])
+            rows << line
+          else
+            return
+          end
+        end
+        hunks << current if current
+        return if hunks.empty? && old_path == new_path
+        return if hunks.any?(&.empty?)
+
+        String.build do |io|
+          file_header(io, old_path, new_path)
+          if old_path != new_path
+            io << "rename from " << safe_path(old_path) << '\n'
+            io << "rename to " << safe_path(new_path) << '\n'
+          end
+          unless hunks.empty?
+            io << "--- a/" << safe_path(old_path) << '\n'
+            io << "+++ b/" << safe_path(new_path) << '\n'
+            hunks.each do |hunk|
+              old_count = hunk.count { |line| !line.starts_with?('+') }
+              new_count = hunk.count { |line| !line.starts_with?('-') }
+              old_start = old_count == 0 ? 0 : 1
+              new_start = new_count == 0 ? 0 : 1
+              io << "@@ -" << old_start << ',' << old_count
+              io << " +" << new_start << ',' << new_count << " @@\n"
+              hunk.each { |line| io << line << '\n' }
+            end
+          end
+        end
       end
 
       private def replacement(
@@ -195,6 +358,8 @@ module Xd
       private def file_path(input : Hash(String, JSON::Any)) : String?
         string?(input, "file_path") ||
           string?(input, "filePath") ||
+          string?(input, "notebook_path") ||
+          string?(input, "notebookPath") ||
           string?(input, "path")
       end
 
