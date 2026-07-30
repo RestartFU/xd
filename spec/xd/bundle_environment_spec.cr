@@ -62,6 +62,7 @@ describe Xd::BundleEnvironment do
     schemas = File.join(root, "share", "glib-2.0", "schemas")
     fonts = File.join(root, "etc", "fonts")
     certificates = File.join(root, "git", "ssl", "certs")
+    openssl_config = File.join(root, "etc", "ssl", "openssl.cnf")
     [bin, git_bin, git_exec, templates, modules, schemas, fonts, certificates]
       .each { |path| Dir.mkdir_p(path) }
     codex = File.join(root, "libexec", "codex-package", "bin", "codex")
@@ -77,6 +78,8 @@ describe Xd::BundleEnvironment do
       "<dir>@BUNDLE@/share/fonts</dir>\n"
     )
     File.write(File.join(certificates, "ca-bundle.crt"), "test certificate")
+    Dir.mkdir_p(File.dirname(openssl_config))
+    File.write(openssl_config, "openssl_conf = default_conf")
 
     begin
       preserving_environment do
@@ -100,6 +103,7 @@ describe Xd::BundleEnvironment do
           "GIT_SSL_CAINFO",
           "SSL_CERT_FILE",
           "XD_OPENSSL",
+          "OPENSSL_CONF",
           "XD_HOST_GTK_PATH",
         }.each { |name| ENV.delete(name) }
 
@@ -134,6 +138,7 @@ describe Xd::BundleEnvironment do
         ENV["XD_OPENSSL"].should eq(
           File.join(root, "libexec", "openssl")
         )
+        ENV["OPENSSL_CONF"].should eq(openssl_config)
 
         pixbuf = ENV["GDK_PIXBUF_MODULE_FILE"]
         fonts_file = ENV["FONTCONFIG_FILE"]

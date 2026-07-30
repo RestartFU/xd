@@ -31,6 +31,13 @@ module Xd
       if openssl = executable("openssl", root)
         ENV["XD_OPENSSL"] ||= openssl
       end
+      if openssl_config = first_file(
+           File.join(root, "etc", "ssl", "openssl.cnf"),
+           File.join(root, "git", "ssl", "openssl.cnf"),
+           File.join(root, "git", "mingw64", "ssl", "openssl.cnf")
+         )
+        ENV["OPENSSL_CONF"] ||= openssl_config
+      end
     end
 
     def executable(name : String, root : String? = locate) : String?

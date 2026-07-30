@@ -91,6 +91,10 @@ module Xd
         requirement("Claude", "#{resources}/libexec/claude"),
         requirement("whisper.cpp", "#{resources}/libexec/whisper"),
         requirement("OpenSSL", "#{resources}/libexec/openssl"),
+        requirement(
+          "OpenSSL configuration",
+          "#{resources}/etc/ssl/openssl.cnf"
+        ),
       ]
     end
 

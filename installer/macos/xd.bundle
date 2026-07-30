@@ -35,6 +35,9 @@
   <data dest="${bundle}/Contents/Resources/libexec">
     ${prefix:app}/libexec
   </data>
+  <data dest="${bundle}/Contents/Resources/etc">
+    ${prefix:app}/etc
+  </data>
   <data dest="${bundle}/Contents/Resources/git">
     ${prefix:app}/git
   </data>
