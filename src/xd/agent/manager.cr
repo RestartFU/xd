@@ -12,6 +12,7 @@ require "./executable"
 require "./git_diff_tracker"
 require "./ask"
 require "./secrets"
+require "./workflow_run"
 require "./workspace_block"
 
 module Xd
@@ -466,6 +467,7 @@ module Xd
             close_segment(turn)
             text = event.text || "Used a tool"
             text = turn.diff_tracker.try(&.capture(text)) || text
+            text = WorkflowRun.capture(text, turn.workdir)
             @store.append_message(turn.chat_id, "tool", text)
             event_name = "tool"
             fields = {

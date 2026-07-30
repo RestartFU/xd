@@ -42,6 +42,16 @@ module Xd
         font-family: "JetBrains Mono", monospace;
         font-size: 0.9em;
       }
+      .xd-workflow, .xd-subagent {
+        background: alpha(#ffffff, 0.045);
+        border: 1px solid alpha(#ffffff, 0.09);
+        border-radius: 12px;
+        margin: 0 14px;
+        padding: 12px 14px;
+      }
+      .xd-workflow link {
+        padding: 2px 0;
+      }
       .xd-message-error {
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;

@@ -1,7 +1,10 @@
 require "base64"
 require "gtk4"
+require "set"
 require "../agent/ask"
 require "../agent/git_diff_tracker"
+require "../agent/subagent_tool"
+require "../agent/workflow_run"
 require "../agent/workspace_block"
 require "../daemon/client"
 require "./chat_controls"
@@ -16,6 +19,7 @@ module Xd
       @active_chat : String?
       @stream_label : Gtk::Label?
       @working = false
+      @workflow_ids = Set(String).new
 
       def initialize(
         application : Gtk::Application,
@@ -184,6 +188,7 @@ module Xd
         @tool_panel.chat = nil
         @tool_panel.widget.visible = false
         clear(@transcript)
+        @workflow_ids.clear
         clear(@queue_box)
         @queue_box.visible = false
         @status.text = ""
@@ -200,6 +205,7 @@ module Xd
         return unless response
 
         clear(@transcript)
+        @workflow_ids.clear
         messages = response["messages"].as_a
         messages.each_with_index do |message, index|
           add_message(
@@ -228,6 +234,13 @@ module Xd
           if patch = Agent::GitDiffTracker.patch(content)
             return add_diff_message(patch)
           end
+          if workflow = Agent::WorkflowRun.parse(content)
+            return add_workflow_message(workflow)
+          end
+          if subagent = Agent::SubagentTool.parse(content)
+            return add_subagent_message(subagent[0], subagent[1])
+          end
+          content = "Files changed" if Agent::GitDiffTracker.file_change?(content)
         end
 
         workspace = role == "assistant" ? Agent::WorkspaceBlock.parse(content) : nil
@@ -268,6 +281,59 @@ module Xd
         row.add_css_class("xd-message-diff")
         @transcript.append(row)
         row
+      end
+
+      private def add_workflow_message(
+        workflow : Agent::WorkflowRun::Run,
+      ) : Gtk::Label?
+        return if @workflow_ids.includes?(workflow.id)
+        @workflow_ids << workflow.id
+
+        title = Gtk::Label.new(
+          "GitHub Actions · Run ##{workflow.id}"
+        )
+        title.xalign = 0_f32
+        title.add_css_class("title")
+
+        status = Gtk::Label.new(workflow.repository)
+        status.xalign = 0_f32
+        status.add_css_class("dim-label")
+
+        link = Gtk::LinkButton.new_with_label(
+          workflow.url,
+          "Open live status and logs"
+        )
+        link.halign = :start
+
+        card = Gtk::Box.new(:vertical, 5)
+        card.add_css_class("xd-workflow")
+        card.append(title)
+        card.append(status)
+        card.append(link)
+        @transcript.append(card)
+        title
+      end
+
+      private def add_subagent_message(
+        identity : String,
+        task : String,
+      ) : Gtk::Label
+        title = Gtk::Label.new("Subagent · #{identity}")
+        title.xalign = 0_f32
+        title.add_css_class("title")
+
+        detail = Gtk::Label.new(task)
+        detail.xalign = 0_f32
+        detail.wrap = true
+        detail.wrap_mode = :word_char
+        detail.selectable = true
+
+        card = Gtk::Box.new(:vertical, 6)
+        card.add_css_class("xd-subagent")
+        card.append(title)
+        card.append(detail)
+        @transcript.append(card)
+        title
       end
 
       private def reply_answerable?(
