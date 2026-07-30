@@ -71,7 +71,9 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   match all 18 C Markdown test cases. Basic `AdwBin`/card/body hierarchy,
   user-only bubbles, literal streaming, source tooltips, and host link opening
   are integrated. Fenced code, unfinished fences, diff fences, and tables use
-  the C card split and geometry; diff syntax and image cards remain.
+  the C card split and geometry. Populated installed-bundle rows are
+  screenshot-verified at 1100x720 with fatal GTK criticals; diff syntax and
+  image cards remain.
 - `[ ]` Port transcript pagination, four-page cache, and 100-message page size.
 - `[ ]` Match bottom pinning, history loading, scroll restoration, and hidden
   scrollbar behavior.
