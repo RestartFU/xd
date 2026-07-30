@@ -371,7 +371,8 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` The desktop local endpoint also reconnects across Unix-socket or
   authenticated Windows-loopback client replacement while retaining the same
-  UI event subscribers.
+  UI event subscribers. Its reconnect spec runs in both the default Unix
+  suite and the authenticated-loopback transport build.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
   and terminal operations share the same protocol.
 - `[x]` Actual Unix-socket and paired TLS clients pass one normalized stateful

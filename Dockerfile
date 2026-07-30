@@ -97,6 +97,7 @@ RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec \
         spec/xd/daemon/local_ipc_spec.cr \
+        spec/xd/daemon/local_connection_spec.cr \
         spec/xd/daemon/transport_parity_spec.cr \
         -Dxd_loopback_local --error-trace \
  && mkdir -p /crystal-build \
