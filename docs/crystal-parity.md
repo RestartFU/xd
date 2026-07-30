@@ -190,8 +190,16 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   status pages all match. Pane errors no longer leak into the chat footer.
   Cancellable nonblocking reads and paired-TLS latency/cancellation proof
   remain.
-- `[~]` Working/branch diff RPC works, but C diff list, expansion, syntax,
-  actions, and layout are not yet matched.
+- `[~]` Working and branch scopes use the C header, linked toggles, refresh,
+  summary/empty/error states, and virtual `GtkListView` file sections.
+  Per-file expansion, collapsed-path memory, 80-row chunks, scroll restoration,
+  syntax gutters, full-row backgrounds, untracked patches, and summary totals
+  are ported. An exact-commit installed bundle is verified at 1100x720 with
+  fatal GTK criticals across multi-file working changes, branch-vs-main,
+  refresh after collapse, clean/error states, and a 180-line patch; the
+  80→81 chunk boundary has no visual seam and collapsing preserves its header
+  position. Cancellable nonblocking reads, paired-TLS latency/cancellation,
+  and live Git-head refresh proof remain.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map; restart/UI verification remains.
 - `[ ]` Refresh repository panes after agent turns and terminal activity.
