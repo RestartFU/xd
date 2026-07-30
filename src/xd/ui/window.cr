@@ -324,6 +324,15 @@ module Xd
 
         subscribe(@local_client)
         subscribe(@remote)
+        @remote.on_state do |snapshot|
+          GLib.idle_add do
+            @tool_panel.remote_connection_changed(
+              snapshot.state.connected?,
+              snapshot.error
+            )
+            false
+          end
+        end
 
         @sidebar.reload
       end

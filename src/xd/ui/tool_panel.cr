@@ -93,6 +93,13 @@ module Xd
         end
       end
 
+      def remote_connection_changed(
+        connected : Bool,
+        error : String?,
+      ) : Nil
+        @terminal_panel.remote_connection_changed(connected, error)
+      end
+
       private def build_files : Gtk::Widget
         @file_path.text = "/"
         @file_path.xalign = 0_f32

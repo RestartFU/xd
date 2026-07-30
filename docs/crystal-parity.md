@@ -100,7 +100,8 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 - `[~]` Daemon-backed multi-session tabs, centered single-session title,
   add/kill controls, close request, focus, replay, resize, and per-chat view
   retention work. C palette/font, copy/paste, URL handling, and daemon-terminal
-  Backspace behavior are ported; disconnected status and retry behavior remain.
+  Backspace behavior are ported. Offline status, reconnect reconciliation, and
+  pending-kill retry are implemented; paired reconnect UI verification remains.
 - `[~]` File list/read/write RPC works, but C pane layout and behavior are not
   yet matched.
 - `[~]` Working/branch diff RPC works, but C diff list, expansion, syntax,

@@ -44,9 +44,14 @@ module Xd
       private class View
         getter tabs : Adw::TabView
         getter sessions = {} of String => Session
+        getter pending_kills = Set(String).new
         property loaded = false
+        property status : Adw::StatusPage?
+        property status_page : Adw::TabPage?
 
         def initialize(@tabs : Adw::TabView)
+          @status = nil
+          @status_page = nil
         end
       end
 
@@ -167,7 +172,9 @@ module Xd
         view = @current
         return unless chat_id && view
 
-        load_sessions(view) unless view.loaded
+        retry_kills(view)
+        return unless view.loaded || load_sessions(view)
+
         if view.sessions.empty?
           @focus_next = focus
           open_terminal(true)
@@ -208,9 +215,34 @@ module Xd
           session.rows = rows
           session.terminal.set_size(columns, rows)
         when "terminal-closed"
+          view.pending_kills.delete(id)
           remove_session(view, id)
         end
       rescue Base64::Error
+      end
+
+      def remote_connection_changed(
+        connected : Bool,
+        error : String?,
+      ) : Nil
+        @views.each do |key, view|
+          view.loaded = false if key.starts_with?("remote/")
+        end
+
+        view = @current
+        key = @view_key
+        return unless view && key && key.starts_with?("remote/")
+
+        if connected
+          retry_kills(view)
+          activate(false) if @widget.visible?
+        elsif view.sessions.empty? && @widget.visible?
+          show_status(
+            view,
+            "Remote Terminal Offline",
+            error || "Waiting for the remote daemon to reconnect…"
+          )
+        end
       end
 
       private def ensure_view(key : String) : View
@@ -235,15 +267,22 @@ module Xd
         end
       end
 
-      private def load_sessions(view : View) : Nil
+      private def load_sessions(view : View) : Bool
         chat_id = @chat_id
-        return unless chat_id
+        return false unless chat_id
 
         response = @call.call({
           "op"   => JSON::Any.new("terminal-list"),
           "chat" => JSON::Any.new(chat_id),
         })
-        return unless response
+        unless response
+          show_status(
+            view,
+            "Terminal Unavailable",
+            "The daemon is not connected. xd will retry automatically."
+          ) if view.sessions.empty?
+          return false
+        end
 
         seen = Set(String).new
         response["terminals"].as_a.each do |terminal|
@@ -263,7 +302,9 @@ module Xd
           remove_session(view, id) unless seen.includes?(id)
         end
         view.loaded = true
+        clear_status(view) unless view.sessions.empty?
         update_title
+        true
       end
 
       private def add_session(
@@ -283,6 +324,7 @@ module Xd
             feed_replay(session, replay)
           end
           session.terminal.set_size(columns, rows)
+          clear_status(view)
           return session
         end
 
@@ -291,10 +333,14 @@ module Xd
         terminal.set_size(columns, rows)
         page = view.tabs.append(terminal)
         page.title = title
+        page.notify_signal["title"].connect do |_property|
+          update_title if @current.same?(view)
+        end
         session = Session.new(id, terminal, page, columns, rows)
         view.sessions[id] = session
         feed_replay(session, replay) if replay
         terminal.set_size(columns, rows)
+        clear_status(view)
         update_title
         session
       end
@@ -424,6 +470,13 @@ module Xd
         view = @current
         return unless chat_id && view
 
+        if view.sessions.empty?
+          show_status(
+            view,
+            "Opening Terminal…",
+            "Waiting for the daemon"
+          )
+        end
         response = @call.call({
           "op"      => JSON::Any.new("terminal-open"),
           "chat"    => JSON::Any.new(chat_id),
@@ -431,7 +484,15 @@ module Xd
           "rows"    => JSON::Any.new(24_i64),
           "reuse"   => JSON::Any.new(reuse),
         })
-        return unless response
+        unless response
+          @focus_next = false
+          show_status(
+            view,
+            "Could Not Open Terminal",
+            "The daemon did not answer. xd will retry after reconnecting."
+          )
+          return
+        end
 
         view.loaded = false
         load_sessions(view)
@@ -456,16 +517,24 @@ module Xd
       ) : Bool
         session = session_for_page(view, page)
         if session && !session.removing
-          @call.call({
+          view.pending_kills << session.id
+          response = @call.call({
             "op"       => JSON::Any.new("terminal-kill"),
             "terminal" => JSON::Any.new(session.id),
           })
+          view.pending_kills.delete(session.id) if response
         end
         @on_empty.call if @current.same?(view) && view.tabs.n_pages == 1
         false
       end
 
       private def detached(view : View, page : Adw::TabPage) : Nil
+        if status_page = view.status_page
+          if status_page.to_unsafe == page.to_unsafe
+            view.status = nil
+            view.status_page = nil
+          end
+        end
         if session = session_for_page(view, page)
           view.sessions.delete(session.id)
         end
@@ -476,6 +545,48 @@ module Xd
         session = view.sessions[id]? || return
         session.removing = true
         view.tabs.close_page(session.page)
+      end
+
+      private def retry_kills(view : View) : Nil
+        view.pending_kills.to_a.each do |id|
+          response = @call.call({
+            "op"       => JSON::Any.new("terminal-kill"),
+            "terminal" => JSON::Any.new(id),
+          })
+          view.pending_kills.delete(id) if response
+        end
+      end
+
+      private def show_status(
+        view : View,
+        title : String,
+        description : String,
+      ) : Nil
+        status = view.status
+        unless status
+          status = Adw::StatusPage.new(
+            icon_name: "utilities-terminal-symbolic",
+            title: title,
+            description: description
+          )
+          page = view.tabs.append(status)
+          page.title = "Terminal"
+          view.status = status
+          view.status_page = page
+          view.tabs.selected_page = page
+        end
+        status.title = title
+        status.description = description
+        update_title
+      end
+
+      private def clear_status(view : View) : Nil
+        page = view.status_page
+        return unless page
+
+        view.status = nil
+        view.status_page = nil
+        view.tabs.close_page(page)
       end
 
       private def session_for_page(
