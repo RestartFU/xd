@@ -38,6 +38,37 @@ module Xd
         )
       end
 
+      # The daemon owns this description so Unix and TLS clients show the
+      # same checkout identity instead of independently probing Git.
+      def describe(
+        workdir : String?,
+        home : String = Path.home.to_s,
+      ) : String
+        return "No working directory" unless workdir
+
+        shown = if workdir.starts_with?(home)
+                  "~#{workdir[home.size..]}"
+                else
+                  workdir
+                end
+        items = list(workdir)
+        current = items.find(&.current) || items.first?
+        return "#{shown} — not a repository" unless current
+
+        parts = [] of String
+        if branch = current.branch
+          prefix = current.detached ? "detached at" : "⎇"
+          parts << "#{prefix} #{branch}"
+        end
+        name = File.basename(current.path)
+        name += " (worktree)" unless current.main
+        parts << name
+        parts << shown
+        parts.join(" · ")
+      rescue Error
+        "#{shown} — not a repository"
+      end
+
       def resolve(chat : Storage::Chat) : String
         workdir = @workspaces.resolve_workdir(
           chat.folder_id,

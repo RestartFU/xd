@@ -522,7 +522,9 @@ module Xd
               "chat"    => JSON::Any.new(turn.chat_id),
               "text"    => JSON::Any.new(text),
               "workdir" => JSON::Any.new(turn.workdir),
-              "context" => JSON::Any.new(turn.workdir),
+              "context" => JSON::Any.new(
+                @worktree_service.describe(turn.workdir)
+              ),
             }
           when EventType::Usage
             turn.context_used = event.context_used

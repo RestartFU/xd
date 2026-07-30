@@ -37,6 +37,9 @@ describe Xd::Workspace::Worktrees do
 
     begin
       service = Xd::Workspace::Worktrees.new(store, workspaces)
+      service.describe(repository, home: directory).should eq(
+        "⎇ main · Project · ~/Workspaces/Project"
+      )
       first_id = store.create_chat(folder_id, "Chat", "claude")
       store.set_new_worktree(first_id, true)
       first = store.get_chat(first_id)
@@ -52,6 +55,9 @@ describe Xd::Workspace::Worktrees do
       state = service.state(stored)
       state.linked.should be_true
       state.worktrees.size.should eq(2)
+      service.describe(created, home: directory).should contain(
+        " · Project (worktree) · ~/Workspaces/worktrees/Project/fix-parser"
+      )
       named = state.worktrees.map(&.branch).compact.any? do |branch|
         branch.starts_with?("xd/fix-parser-")
       end
@@ -63,6 +69,9 @@ describe Xd::Workspace::Worktrees do
       store.get_chat(second_id).workdir.should eq(created)
       service.registered_path(repository, created).should eq(created)
       service.registered_path(repository, directory).should be_nil
+      service.describe(directory, home: directory).should eq(
+        "~ — not a repository"
+      )
 
       worktree_git(repository, "worktree", "remove", "--force", created)
       service.resolve(store.get_chat(first_id)).should eq(repository)

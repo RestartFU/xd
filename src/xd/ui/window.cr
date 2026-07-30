@@ -145,7 +145,6 @@ module Xd
 
         @status = Gtk::Label.new("")
         @status.xalign = 0_f32
-        @status.hexpand = true
         @status.add_css_class("dim-label")
 
         @sidebar = Sidebar.new(
@@ -328,7 +327,15 @@ module Xd
         composer_frame.margin_start = 12
         composer_frame.margin_end = 12
 
+        @context_label = Gtk::Label.new("")
+        @context_label.xalign = 0_f32
+        @context_label.hexpand = true
+        @context_label.ellipsize = :middle
+        @context_label.add_css_class("dim-label")
+        @context_label.add_css_class("caption")
+
         context = Gtk::Box.new(:horizontal, 8)
+        context.append(@context_label)
         context.append(@status)
         context.add_css_class("xd-context")
         context.add_css_class("dim-label")
@@ -897,6 +904,8 @@ module Xd
         @commands.clear
         refresh_command_suggestions
         clear_attachments
+        @context_label.text = ""
+        @context_label.tooltip_text = nil
         @status.text = ""
       end
 
@@ -1770,6 +1779,10 @@ module Xd
         return unless state
 
         @controls.update(state)
+        if context = state["context"]?.try(&.as_s?)
+          @context_label.text = context
+          @context_label.tooltip_text = context
+        end
         @commands = (
           state["commands"]?.try(&.as_a?) || [] of JSON::Any
         ).compact_map do |node|
@@ -2009,6 +2022,10 @@ module Xd
         when "tool"
           return unless active_event?(endpoint, event)
           finish_stream_segment
+          if context = event["context"]?.try(&.as_s?)
+            @context_label.text = context
+            @context_label.tooltip_text = context
+          end
           add_message("tool", event["text"]?.try(&.as_s?) || "Used a tool")
           keep_working_last
           scroll_to_bottom

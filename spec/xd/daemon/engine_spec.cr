@@ -551,6 +551,9 @@ describe Xd::Daemon::Engine do
       }.to_json)
       first_state["linked_worktree"].as_bool.should be_true
       first_state["worktrees"].as_a.size.should eq(2)
+      first_state["context"].as_s.should contain(
+        " · Repository (worktree) · "
+      )
 
       second = engine.dispatch(local, {
         "op"     => "new-chat",
@@ -566,7 +569,12 @@ describe Xd::Daemon::Engine do
       engine.dispatch(local, {
         "op"   => "chat",
         "chat" => second,
-      }.to_json)["workdir"].as_s.should eq(created)
+      }.to_json).tap do |state|
+        state["workdir"].as_s.should eq(created)
+        state["context"].as_s.should contain(
+          " · Repository (worktree) · "
+        )
+      end
     end
   end
 

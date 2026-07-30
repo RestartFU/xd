@@ -699,20 +699,24 @@ module Xd
         fields["has_messages"] = JSON::Any.new(
           @store.last_message_id(stored.id) > 0
         )
+        resolved_workdir : String? = nil
         begin
           state = @git_worktrees.state(stored)
+          resolved_workdir = state.workdir
           fields["workdir"] = JSON::Any.new(state.workdir)
           fields["linked_worktree"] = JSON::Any.new(state.linked)
           fields["worktrees"] = worktrees_json(state.worktrees)
         rescue Workspace::Error | Workspace::Worktrees::Error
           # Orphaned chats remain readable even when their folder disappeared.
           begin
-            fields["workdir"] = JSON::Any.new(
-              @git_worktrees.resolve(stored)
-            )
+            resolved_workdir = @git_worktrees.resolve(stored)
+            fields["workdir"] = JSON::Any.new(resolved_workdir.not_nil!)
           rescue Workspace::Error
           end
         end
+        context = @git_worktrees.describe(resolved_workdir)
+        context = "New worktree from #{context}" if stored.new_worktree
+        fields["context"] = JSON::Any.new(context)
 
         Protocol::Response.ok(fields)
       end

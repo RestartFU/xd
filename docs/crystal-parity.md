@@ -128,7 +128,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   installed GTK verification remains.
 - `[ ]` Port worktree chooser and new-worktree behavior exactly.
 - `[ ]` Port optional voice recording/download/transcription behavior.
-- `[ ]` Match context/branch/worktree line below composer.
+- `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
+  tooltip, and geometry. The daemon computes it once for Unix and TLS clients;
+  installed GTK and live branch-change verification remain.
 
 C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 `src/chat/option-picker.c`, `src/chat/voice-input.c`.
@@ -192,6 +194,8 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
   and terminal operations share the same protocol.
+- `[x]` Checkout context and worktree identity are daemon-owned protocol state;
+  local and paired clients do not probe Git through separate UI logic.
 - `[~]` Crystal storage and agent behavior have broad specs, but every old C
   test/edge case still needs a mapped Crystal assertion.
 - `[~]` Active chat and per-device pane state restore through the same endpoint
