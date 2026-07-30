@@ -93,6 +93,10 @@ module Xd
       @bottom_jump_upper = -1.0
       @bottom_jump_page_size = -1.0
       @bottom_jump_stable_frames = 0
+      @history_restore_tick = 0_u32
+      @history_restore_upper = -1.0
+      @history_restore_page_size = -1.0
+      @history_restore_stable_frames = 0
 
       def initialize(
         application : Gtk::Application,
@@ -914,6 +918,7 @@ module Xd
           adjustment.upper - adjustment.value
         page.paging.load_earlier
         load_messages(force: true)
+        queue_history_restore
       end
 
       private def add_message(
@@ -1629,24 +1634,71 @@ module Xd
 
         if @follow_bottom
           queue_bottom_pin
-        elsif adjustment.value >= bottom - 1.0
-          @follow_bottom = true
-          @history_bottom_distance = -1.0
         elsif @history_bottom_distance >= 0
           value = Math.max(
             adjustment.lower,
             adjustment.upper - @history_bottom_distance
           )
           adjustment.value = value if adjustment.value != value
+        elsif adjustment.value >= bottom - 1.0
+          @follow_bottom = true
         end
       end
 
       private def on_transcript_scrolled(dy : Float64) : Nil
         adjustment = @transcript_scroll.vadjustment
+        cancel_history_restore if dy != 0
         if dy < 0 && adjustment.value > adjustment.lower
           @follow_bottom = false
-          @history_bottom_distance = -1.0
         end
+      end
+
+      private def queue_history_restore : Nil
+        @history_restore_upper = -1.0
+        @history_restore_page_size = -1.0
+        @history_restore_stable_frames = 0
+        return unless @history_restore_tick == 0
+
+        callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
+          adjustment = @transcript_scroll.vadjustment
+          distance = @history_bottom_distance
+          if @follow_bottom || distance < 0
+            @history_restore_tick = 0_u32
+            false
+          else
+            upper = adjustment.upper
+            page_size = adjustment.page_size
+            value = Math.max(adjustment.lower, upper - distance)
+            adjustment.value = value if adjustment.value != value
+
+            if upper == @history_restore_upper &&
+               page_size == @history_restore_page_size
+              @history_restore_stable_frames += 1
+            else
+              @history_restore_stable_frames = 0
+            end
+            @history_restore_upper = upper
+            @history_restore_page_size = page_size
+
+            if @history_restore_stable_frames >= 2
+              @history_restore_tick = 0_u32
+              @history_bottom_distance = -1.0
+              false
+            else
+              true
+            end
+          end
+        }
+        @history_restore_tick =
+          @transcript_scroll.add_tick_callback(callback)
+      end
+
+      private def cancel_history_restore : Nil
+        @history_bottom_distance = -1.0
+        return if @history_restore_tick == 0
+
+        @transcript_scroll.remove_tick_callback(@history_restore_tick)
+        @history_restore_tick = 0_u32
       end
 
       private def scroll_to_bottom : Nil
