@@ -339,6 +339,10 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   daemon-owned structured auth state, including queued and remote callers, so
   a signed-out turn never reaches the provider or stores a false user row.
   Unix and authenticated TLS rejection are covered before the fake launcher.
+  Chat state exposes the selected backend's auth state. The composer disables
+  turn input while unsigned and offers a direct Sign In action that opens the
+  same clean account panel against the selected local or remote endpoint;
+  daemon auth events re-enable it without reopening the chat.
   One real bundled OAuth completion remains.
 - `[~]` Claude status, browser login, pasted-code input, cancellation, and
   logout use the same structured service and panel. Local UI and an actual

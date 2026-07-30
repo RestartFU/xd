@@ -11,6 +11,7 @@ require "../daemon/endpoint"
 require "../remote/connection"
 require "../version"
 require "./adw"
+require "./auth_dialog"
 require "./chat_controls"
 require "./command_suggestions"
 require "./dots"
@@ -71,6 +72,8 @@ module Xd
       getter widget : Adw::ApplicationWindow
 
       @active_chat : String?
+      @chat_backend = "claude"
+      @auth_state = "unknown"
       @stream_row : MessageRow?
       @working = false
       @workflow_ids = Set(String).new
@@ -152,6 +155,14 @@ module Xd
         @status = Gtk::Label.new("")
         @status.xalign = 0_f32
         @status.add_css_class("dim-label")
+
+        @auth_status = Gtk::Label.new("")
+        @auth_status.xalign = 0_f32
+        @auth_status.add_css_class("dim-label")
+        @auth_button = Gtk::Button.new_with_label("Sign In")
+        @auth_button.add_css_class("flat")
+        @auth_button.visible = false
+        @auth_button.clicked_signal.connect { show_auth_dialog }
 
         @sidebar = Sidebar.new(
           @widget,
@@ -357,6 +368,8 @@ module Xd
         context = Gtk::Box.new(:horizontal, 8)
         context.append(@context_label)
         context.append(@status)
+        context.append(@auth_status)
+        context.append(@auth_button)
         context.add_css_class("xd-context")
         context.add_css_class("dim-label")
         context.margin_start = 26
@@ -870,6 +883,7 @@ module Xd
         clear_attachments
         @client = endpoint
         @active_chat = id
+        @auth_state = "unknown"
         if changed
           @voice.select(
             endpoint,
@@ -884,9 +898,7 @@ module Xd
         @chat_title.title = title
         @chat_stack.visible_child_name = "chat"
         @composer.visible = true
-        @entry.sensitive = true
-        @attach.sensitive = true
-        @send.sensitive = true
+        update_auth_controls
         @controls.sensitive = true
         @terminal_button.sensitive = true
         @file_button.sensitive = true
@@ -926,6 +938,7 @@ module Xd
         @settings.set_string("active-chat", "")
         @stream_row = nil
         @working = false
+        @auth_state = "unknown"
         @chat_title.title = "xd"
         @chat_stack.visible_child_name = "empty"
         @composer.visible = false
@@ -950,6 +963,8 @@ module Xd
         @context_label.text = ""
         @context_label.tooltip_text = nil
         @status.text = ""
+        @auth_status.text = ""
+        @auth_button.visible = false
       end
 
       private def restore_active_chat : Nil
@@ -1298,6 +1313,7 @@ module Xd
       private def send_message(explicit_text : String? = nil) : Nil
         chat_id = @active_chat
         return unless chat_id
+        return unless @auth_state == "signed-in"
         text = (explicit_text || @entry.buffer.text).strip
         attachments = explicit_text ? [] of Attachment : @attachments
         if !explicit_text && text.empty? && attachments.empty? && !@queue.empty?
@@ -1772,6 +1788,9 @@ module Xd
         return unless state
 
         @controls.update(state)
+        @chat_backend = state["backend"]?.try(&.as_s?) || "claude"
+        @auth_state = state["auth_state"]?.try(&.as_s?) || "unknown"
+        update_auth_controls(state["auth_detail"]?.try(&.as_s?))
         if context = state["context"]?.try(&.as_s?)
           @context_label.text = context
           @context_label.tooltip_text = context
@@ -1809,6 +1828,37 @@ module Xd
           @send.remove_css_class("destructive-action")
           @send.add_css_class("suggested-action")
         end
+        @send.sensitive = @working || @auth_state == "signed-in"
+      end
+
+      private def update_auth_controls(detail : String? = nil) : Nil
+        signed_in = @auth_state == "signed-in"
+        @entry.sensitive = signed_in
+        @attach.sensitive = signed_in
+        @voice.button.sensitive = signed_in
+        @auth_button.visible = !signed_in && !!@active_chat
+        @auth_status.text = case @auth_state
+                            when "signed-in"
+                              ""
+                            when "checking", "unknown"
+                              "Checking sign-in…"
+                            when "signing-in"
+                              "Finish signing in"
+                            when "signing-out"
+                              "Signing out…"
+                            when "signed-out"
+                              "Sign in to use this assistant"
+                            else
+                              detail || "Cannot verify sign-in"
+                            end
+        update_send_button
+      end
+
+      private def show_auth_dialog : Nil
+        machine = unless @client.same?(@local_client)
+                    @remote.snapshot.host
+                  end
+        AuthDialog.new(@widget, @client, machine).present
       end
 
       private def refresh_command_suggestions : Nil
@@ -2076,6 +2126,10 @@ module Xd
           return unless active_event?(endpoint, event)
           queue = event["queue"]?.try(&.as_a?)
           @status.text = queue && !queue.empty? ? "Message queued" : ""
+          load_chat_state(recover_turn: false)
+        when "agent-auth-changed"
+          return unless @client.same?(endpoint)
+          return unless event["provider"]?.try(&.as_s?) == @chat_backend
           load_chat_state(recover_turn: false)
         end
       end
