@@ -189,6 +189,111 @@ describe Xd::Agent::Manager do
     end
   end
 
+  it "retries one stale resumed session without duplicating the user row" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      store.set_session_id(chat_id, "claude", "stale-session")
+
+      manager.send(chat_id, "continue")
+      launcher.specs[0].resume_session_id.should eq("stale-session")
+
+      launcher.finish(0, false, "Session no longer exists")
+
+      launcher.specs.size.should eq(2)
+      launcher.specs[1].resume_session_id.should be_nil
+      launcher.specs[1].prompt.should eq("continue")
+      store.list_messages(chat_id).map(&.role).should eq(["user"])
+      store.list_messages(chat_id).map(&.content).should eq(["continue"])
+      events.count(&.[0].==("turn-started")).should eq(2)
+      events.count(&.[0].==("turn-finished")).should eq(0)
+
+      launcher.emit(1, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "Recovered."
+      ))
+      launcher.finish(1, true)
+
+      store.list_messages(chat_id).map(&.role).should eq([
+        "user",
+        "assistant",
+        "duration",
+      ])
+      store.list_messages(chat_id).map(&.content).first(2).should eq([
+        "continue",
+        "Recovered.",
+      ])
+      events.count(&.[0].==("turn-finished")).should eq(1)
+    end
+  end
+
+  it "does not retry the stale-session fallback more than once" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      store.set_session_id(chat_id, "claude", "stale-session")
+
+      manager.send(chat_id, "continue")
+      launcher.finish(0, false, "First failure")
+      launcher.finish(1, false)
+
+      launcher.specs.size.should eq(2)
+      store.get_session_id(chat_id, "claude").should be_nil
+      store.get_last_seen(chat_id, "claude").should eq(0)
+      store.list_messages(chat_id).map(&.role).should eq([
+        "user",
+        "duration",
+        "error",
+      ])
+      store.list_messages(chat_id).last.content.should eq(
+        "The backend stopped unexpectedly."
+      )
+      finished = events.select(&.[0].==("turn-finished"))
+      finished.size.should eq(1)
+      finished.first[1]["error"].as_s.should eq(
+        "The backend stopped unexpectedly."
+      )
+    end
+  end
+
+  it "stores a labeled no-reply row when a successful turn is silent" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+
+      manager.send(chat_id, "hello?")
+      launcher.finish(0, true)
+
+      messages = store.list_messages(chat_id)
+      messages.map(&.role).should eq([
+        "user",
+        "assistant",
+        "duration",
+      ])
+      messages[1].content.should eq("(no reply)")
+      messages[1].label.not_nil!.should start_with("Claude Opus 5 · ")
+      store.get_last_seen(chat_id, "claude").should eq(messages.last.id)
+    end
+  end
+
+  it "keeps last-seen at the previous success after an output failure" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      store.append_message(chat_id, "user", "old question")
+      previous = store.append_message(chat_id, "assistant", "old answer")
+      store.set_session_id(chat_id, "claude", "live-session")
+      store.set_last_seen(chat_id, "claude", previous)
+
+      manager.send(chat_id, "continue")
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: "Partial."
+      ))
+      launcher.finish(0, false, "Connection lost")
+
+      launcher.specs.size.should eq(1)
+      store.get_last_seen(chat_id, "claude").should eq(previous)
+      store.list_messages(chat_id).last.content.should eq("Connection lost")
+    end
+  end
+
   it "hides an ask block while streaming and reports waiting" do
     with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
       chat_id = store.create_chat(folder_id, "Chat", "claude")

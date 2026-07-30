@@ -108,7 +108,11 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 - `[~]` Context-window meter uses the C 108-pixel progress bar, compact token
   formatting, raw-count tooltip, and 75/90-percent warning states; installed
   GTK verification remains.
-- `[ ]` Match handover, retry, cancellation, and queued-turn timeline behavior.
+- `[~]` Handover keeps the C 12,000-byte role-filtered boundary. The unified
+  manager retries a silent stale resumed session exactly once without
+  duplicating the user row, stores the C `(no reply)` fallback, advances
+  backend `last_seen` only after success, and runs Stop/Steer through the same
+  durable queue finish path. Installed GTK timeline verification remains.
 
 C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
 `src/util/markdown.c`, `src/util/syntax.c`, `src/ui/dots.c`,
@@ -255,7 +259,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (212 examples).
+- `[x]` Crystal specs pass in Docker (217 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

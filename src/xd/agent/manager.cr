@@ -114,6 +114,9 @@ module Xd
         getter backend : Backend
         getter model : String
         getter effort : Effort
+        getter prompt : String
+        getter resumed : Bool
+        getter retry_attempt : Bool
         getter label : String
         property workdir : String
         getter transcript_message_id : Int64
@@ -128,12 +131,17 @@ module Xd
         property diff_tracker : GitDiffTracker?
         property context_used = 0_u64
         property context_window = 0_u64
+        property had_text = false
+        property had_tool = false
 
         def initialize(
           @chat_id,
           @backend,
           @model,
           @effort,
+          @prompt,
+          @resumed,
+          @retry_attempt,
           @label,
           @workdir,
           @transcript_message_id,
@@ -309,8 +317,13 @@ module Xd
         @launcher.close
       end
 
-      private def start_turn(chat_id : String, text : String) : Nil
-        user_stored : Bool = false
+      private def start_turn(
+        chat_id : String,
+        text : String,
+        user_submitted : Bool = true,
+        retry_attempt : Bool = false,
+      ) : Nil
+        input_stored = !user_submitted
         begin
           chat = @store.get_chat(chat_id)
           backend = Catalog.lookup(chat.backend)
@@ -329,10 +342,14 @@ module Xd
             chat,
             Conversation.title(text)
           )
-          @store.append_message(chat_id, "user", text)
-          user_stored = true
+          if user_submitted
+            @store.append_message(chat_id, "user", text)
+            input_stored = true
+          end
           transcript_message_id = @store.last_message_id(chat_id)
           last_seen = @store.get_last_seen(chat_id, backend.id)
+          resume_session_id =
+            @store.get_session_id(chat_id, backend.id)
           prompt = Conversation.join(
             Conversation.handover(@store, chat_id, last_seen),
             text
@@ -355,7 +372,7 @@ module Xd
             prompt,
             model: model,
             system_prompt: system_prompt,
-            resume_session_id: @store.get_session_id(chat_id, backend.id),
+            resume_session_id: resume_session_id,
             workdir: workdir,
             folder_ids: folder_ids,
             effort: effort,
@@ -366,6 +383,9 @@ module Xd
             backend,
             model,
             effort,
+            text,
+            !resume_session_id.nil?,
+            retry_attempt,
             "#{backend.model_label(model)} · #{effort.label}",
             workdir,
             transcript_message_id,
@@ -413,24 +433,24 @@ module Xd
             "label" => JSON::Any.new(turn.label),
           })
         rescue error : Error
-          cleanup_failed_start(chat_id, user_stored, error.message)
+          cleanup_failed_start(chat_id, input_stored, error.message)
           raise error
         rescue error
-          cleanup_failed_start(chat_id, user_stored, error.message)
+          cleanup_failed_start(chat_id, input_stored, error.message)
           raise Error.new(error.message || "Cannot start the agent")
         end
       end
 
       private def cleanup_failed_start(
         chat_id : String,
-        user_stored : Bool,
+        input_stored : Bool,
         message : String?,
       ) : Nil
         @mutex.synchronize do
           @starting.delete(chat_id)
           @turns.delete(chat_id)
         end
-        if user_stored && message
+        if input_stored && message
           @store.append_message(chat_id, "error", message)
           publish("changed", {"chat" => JSON::Any.new(chat_id)})
         end
@@ -477,6 +497,7 @@ module Xd
             text = event.text || ""
             return if text.empty?
 
+            turn.had_text = true
             turn.segment += text
             visible_bytes = Math.min(
               Ask.visible_bytes(turn.segment),
@@ -512,6 +533,7 @@ module Xd
               }
             end
           when EventType::ToolUse
+            turn.had_tool = true
             close_segment(turn)
             text = event.text || "Used a tool"
             text = turn.diff_tracker.try(&.capture(text)) || text
@@ -551,8 +573,21 @@ module Xd
         end
         return unless accepted
 
+        if stale_resume?(turn, success)
+          retry_stale(turn)
+          return
+        end
+
         asked = Ask.parse(turn.segment).try(&.ask)
         close_segment(turn)
+        if success && !turn.had_text && !turn.had_tool
+          @store.append_message(
+            turn.chat_id,
+            "assistant",
+            "(no reply)",
+            label: turn.label
+          )
+        end
         elapsed = Math.max(
           (@clock.call - turn.started_at).total_seconds.to_i64,
           0_i64
@@ -567,14 +602,22 @@ module Xd
             turn.context_window
           )
         end
-        if !success && message
-          @store.append_message(turn.chat_id, "error", message)
+        error_text : String? = nil
+        unless success
+          error_text = if message.nil? || message.empty?
+                         "The backend stopped unexpectedly."
+                       else
+                         message
+                       end
+          @store.append_message(turn.chat_id, "error", error_text)
         end
-        @store.set_last_seen(
-          turn.chat_id,
-          turn.backend.id,
-          @store.last_message_id(turn.chat_id)
-        )
+        if success
+          @store.set_last_seen(
+            turn.chat_id,
+            turn.backend.id,
+            @store.last_message_id(turn.chat_id)
+          )
+        end
 
         next_text : String? = nil
         @mutex.synchronize do
@@ -591,7 +634,7 @@ module Xd
           "ok"      => JSON::Any.new(success),
           "waiting" => JSON::Any.new(!asked.nil?),
         }
-        fields["error"] = JSON::Any.new(message) if message
+        fields["error"] = JSON::Any.new(error_text) if error_text
         publish("turn-finished", fields)
 
         if text = next_text
@@ -606,6 +649,47 @@ module Xd
         end
       rescue error : Storage::Error
         STDERR.puts "xd: cannot finish agent turn: #{error.message}"
+      end
+
+      private def stale_resume?(
+        turn : ActiveTurn,
+        success : Bool,
+      ) : Bool
+        !success &&
+          turn.resumed &&
+          !turn.retry_attempt &&
+          !turn.had_text &&
+          !turn.had_tool
+      end
+
+      private def retry_stale(turn : ActiveTurn) : Nil
+        @store.set_session_id(turn.chat_id, turn.backend.id, nil)
+
+        retrying = @mutex.synchronize do
+          current = @turns[turn.chat_id]?
+          next false unless current.same?(turn)
+
+          @turns.delete(turn.chat_id)
+          @starting << turn.chat_id
+          true
+        end
+        return unless retrying
+
+        start_turn(
+          turn.chat_id,
+          turn.prompt,
+          user_submitted: false,
+          retry_attempt: true
+        )
+      rescue error : Error
+        text = error.message || "Cannot restart the agent"
+        STDERR.puts "xd: cannot retry stale session: #{text}"
+        publish("turn-finished", {
+          "chat"    => JSON::Any.new(turn.chat_id),
+          "ok"      => JSON::Any.new(false),
+          "waiting" => JSON::Any.new(false),
+          "error"   => JSON::Any.new(text),
+        })
       end
 
       private def close_segment(turn : ActiveTurn) : Nil
