@@ -12,6 +12,7 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./chat_controls"
+require "./command_suggestions"
 require "./dots"
 require "./message_row"
 require "./pair_dialog"
@@ -111,6 +112,9 @@ module Xd
       @stream_render_timer = 0_u32
       @live_turn_key : String?
       @clock_origin : Time::Instant
+      @commands = [] of String
+      @commands_bar : Gtk::ScrolledWindow
+      @commands_flow : Gtk::FlowBox
 
       def initialize(
         application : Gtk::Application,
@@ -240,6 +244,27 @@ module Xd
           end
         end
         @entry.add_controller(paste_keys)
+        @entry.buffer.changed_signal.connect do
+          refresh_command_suggestions
+        end
+
+        @commands_flow = Gtk::FlowBox.new
+        @commands_flow.selection_mode = :none
+        @commands_flow.min_children_per_line = 1_u32
+        @commands_flow.max_children_per_line = 4_u32
+        @commands_flow.column_spacing = 4_u32
+        @commands_flow.row_spacing = 4_u32
+        @commands_flow.halign = :fill
+
+        @commands_bar = Gtk::ScrolledWindow.new
+        @commands_bar.set_policy(:never, :automatic)
+        @commands_bar.max_content_height = 144
+        @commands_bar.propagate_natural_height = true
+        @commands_bar.child = @commands_flow
+        @commands_bar.visible = false
+        @commands_bar.margin_top = 6
+        @commands_bar.margin_start = 10
+        @commands_bar.margin_end = 10
 
         @attach = Gtk::Button.new_from_icon_name(
           "mail-attachment-symbolic"
@@ -286,6 +311,7 @@ module Xd
         composer_column = Gtk::Box.new(:vertical, 0)
         composer_column.append(@queue_box)
         composer_column.append(@attachments_bar)
+        composer_column.append(@commands_bar)
         composer_column.append(entry_scroll)
         composer_column.append(@controls.widget)
         composer_frame = Gtk::Frame.new
@@ -857,6 +883,8 @@ module Xd
         @tool_panel.select_chat(nil, nil)
         clear(@queue_box)
         @queue_box.visible = false
+        @commands.clear
+        refresh_command_suggestions
         clear_attachments
         @status.text = ""
       end
@@ -1711,6 +1739,13 @@ module Xd
         return unless state
 
         @controls.update(state)
+        @commands = (
+          state["commands"]?.try(&.as_a?) || [] of JSON::Any
+        ).compact_map do |node|
+          command = node.as_s?.try(&.lchop("/"))
+          command unless command.nil? || command.empty?
+        end
+        refresh_command_suggestions
         working = state["working"]?.try(&.as_bool?) || false
         if working
           recover_active_turn(state)
@@ -1730,6 +1765,31 @@ module Xd
         end
         queue = state["queue"]?.try(&.as_a?) || [] of JSON::Any
         render_queue(queue)
+      end
+
+      private def refresh_command_suggestions : Nil
+        while child = @commands_flow.first_child
+          @commands_flow.remove(child)
+        end
+
+        matches = CommandSuggestions.matches(
+          @commands,
+          @entry.buffer.text
+        )
+        matches.each do |command|
+          selected = command
+          button = Gtk::Button.new_with_label("/#{selected}")
+          button.add_css_class("flat")
+          button.halign = :fill
+          button.clicked_signal.connect do
+            @entry.buffer.text = "/#{selected} "
+            @entry.buffer.place_cursor(@entry.buffer.end_iter)
+            @entry.cursor_visible = true
+            @entry.grab_focus
+          end
+          @commands_flow.append(button)
+        end
+        @commands_bar.visible = !matches.empty?
       end
 
       private def render_queue(queue : Array(JSON::Any)) : Nil
@@ -1902,6 +1962,15 @@ module Xd
         case name
         when "tree"
           @sidebar.reload(endpoint)
+        when "commands"
+          return unless active_event?(endpoint, event)
+          @commands = (
+            event["commands"]?.try(&.as_a?) || [] of JSON::Any
+          ).compact_map do |node|
+            command = node.as_s?.try(&.lchop("/"))
+            command unless command.nil? || command.empty?
+          end
+          refresh_command_suggestions
         when "text"
           return unless active_event?(endpoint, event)
           text = event["text"]?.try(&.as_s?) || return
