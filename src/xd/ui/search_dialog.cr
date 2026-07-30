@@ -1,5 +1,7 @@
 require "json"
 require "gtk4"
+require "../daemon/client"
+require "../daemon/endpoint"
 require "./adw"
 
 module Xd
@@ -7,14 +9,13 @@ module Xd
     class SearchDialog
       def initialize(
         @parent : Gtk::Window,
-        @call : Proc(
-          Hash(String, JSON::Any),
-          Hash(String, JSON::Any)?,
-        ),
+        @endpoint : Daemon::Endpoint,
         @on_chat : Proc(String, String, Nil),
         @on_close : Proc(Nil),
       )
         @rows = {} of UInt64 => Tuple(String, String)
+        @generation = 0_i64
+        @closed = false
 
         @dialog = Adw::Dialog.new
         @dialog.title = "Search"
@@ -61,7 +62,10 @@ module Xd
         toolbar.add_top_bar(header)
         toolbar.content = @stack
         @dialog.child = toolbar
-        @dialog.closed_signal.connect { @on_close.call }
+        @dialog.closed_signal.connect do
+          @closed = true
+          @on_close.call
+        end
       end
 
       def present : Nil
@@ -71,6 +75,8 @@ module Xd
 
       private def run_search : Nil
         clear_results
+        @generation += 1
+        generation = @generation
         query = @entry.text.strip
         if query.empty?
           show_placeholder(
@@ -80,10 +86,27 @@ module Xd
           return
         end
 
-        response = @call.call({
-          "op"    => JSON::Any.new("search"),
-          "query" => JSON::Any.new(query),
-        })
+        show_placeholder("Searching…", "Looking through conversations.")
+        spawn do
+          response : Hash(String, JSON::Any)? = nil
+          begin
+            response = @endpoint.call({
+              "op"    => JSON::Any.new("search"),
+              "query" => JSON::Any.new(query),
+            })
+          rescue Daemon::Client::Error
+          end
+          GLib.idle_add do
+            apply_search(response) if !@closed &&
+                                      generation == @generation
+            false
+          end
+        end
+      end
+
+      private def apply_search(
+        response : Hash(String, JSON::Any)?,
+      ) : Nil
         unless response
           show_placeholder(
             "Search Failed",

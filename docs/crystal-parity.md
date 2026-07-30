@@ -71,6 +71,10 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 ## Chat transcript
 
 - `[~]` Local and remote chats use one active endpoint path.
+- `[x]` Chat open/state/history/search/send/cancel/model/options/queue calls
+  leave GTK callbacks immediately and finish through main-loop idles. Request
+  generations discard stale remote replies after chat or endpoint switches,
+  and one pending Send cannot duplicate a turn while network latency is high.
 - `[~]` Stored messages, streamed text, tool rows, images, ask blocks,
   subagent/workflow/workspace cards, and inline diffs render.
 - `[~]` Port the exact `XdMessageRow` hierarchy, typography, selectable text,

@@ -124,6 +124,10 @@ module Xd
       @commands_bar : Gtk::ScrolledWindow
       @commands_flow : Gtk::FlowBox
       @choices_bar : Gtk::Box
+      @messages_request = 0_i64
+      @state_request = 0_i64
+      @send_pending = false
+      @closed = false
 
       def initialize(
         application : Gtk::Application,
@@ -464,6 +468,7 @@ module Xd
         @header_sizes.add_widget(header_spacer)
 
         @widget.close_request_signal.connect do
+          @closed = true
           @voice.close
           persist_window_layout
           false
@@ -530,9 +535,7 @@ module Xd
         endpoint = @client
         dialog = SearchDialog.new(
           @widget,
-          ->(request : Hash(String, JSON::Any)) {
-            call_on(endpoint, request)
-          },
+          endpoint,
           ->(id : String, title : String) {
             open_chat(endpoint, id, title)
           },
@@ -758,10 +761,6 @@ module Xd
         keys.each { |key| remove_transcript_page(key) }
       end
 
-      private def call(fields : Hash(String, JSON::Any))
-        call_on(@client, fields)
-      end
-
       private def panel_call(
         fields : Hash(String, JSON::Any),
       ) : PanelCallResult
@@ -771,15 +770,24 @@ module Xd
         PanelCallResult.new(nil, message)
       end
 
-      private def call_on(
+      private def call_async(
         endpoint : Daemon::Endpoint,
         fields : Hash(String, JSON::Any),
-      ) : Hash(String, JSON::Any)?
-        @status.text = ""
-        endpoint.call(fields)
-      rescue error : Daemon::Client::Error
-        @status.text = error.message || "Daemon request failed."
-        nil
+        &complete : Hash(String, JSON::Any)?, String? -> Nil
+      ) : Nil
+        spawn do
+          body : Hash(String, JSON::Any)? = nil
+          message : String? = nil
+          begin
+            body = endpoint.call(fields)
+          rescue error : Daemon::Client::Error
+            message = error.message || "Daemon request failed."
+          end
+          GLib.idle_add do
+            complete.call(body, message) unless @closed
+            false
+          end
+        end
       end
 
       private def new_transcript : Gtk::Box
@@ -983,15 +991,32 @@ module Xd
         return unless chat_id
         page = @transcript_page
         return unless page
+        endpoint = @client
+        @messages_request += 1
+        request = @messages_request
 
-        response = call({
+        call_async(endpoint, {
           "op"    => JSON::Any.new("messages"),
           "chat"  => JSON::Any.new(chat_id),
           "limit" => JSON::Any.new(page.paging.query_limit.to_i64),
-        })
-        return unless response
-        return unless @transcript_page.same?(page)
+        }) do |response, error|
+          next unless request == @messages_request &&
+                      @client.same?(endpoint) &&
+                      @active_chat == chat_id &&
+                      @transcript_page.same?(page)
+          if error
+            @status.text = error
+            next
+          end
+          apply_messages(response.not_nil!, page, force)
+        end
+      end
 
+      private def apply_messages(
+        response : Hash(String, JSON::Any),
+        page : TranscriptPage,
+        force : Bool,
+      ) : Nil
         revision = response["last_message_id"]?.try(&.as_i64?) || 0_i64
         return if !force && page.revision == revision
 
@@ -1314,6 +1339,8 @@ module Xd
         chat_id = @active_chat
         return unless chat_id
         return unless @auth_state == "signed-in"
+        return if @send_pending
+        endpoint = @client
         text = (explicit_text || @entry.buffer.text).strip
         attachments = explicit_text ? [] of Attachment : @attachments
         if !explicit_text && text.empty? && attachments.empty? && !@queue.empty?
@@ -1340,18 +1367,31 @@ module Xd
         end
 
         begin_bottom_jump
-        response = call(request)
-        if response
-          retire_open_questions
-          unless explicit_text
-            @entry.buffer.text = ""
-            clear_attachments
+        @send_pending = true
+        update_send_button
+        call_async(endpoint, request) do |response, error|
+          @send_pending = false
+          update_send_button
+          unless @client.same?(endpoint) && @active_chat == chat_id
+            next
           end
-          if response["queued"]?.try(&.as_bool?) == true
-            @status.text = "Message queued"
+          if error
+            @status.text = error
+            next
           end
-          load_messages
-          load_chat_state
+          if response
+            @status.text = ""
+            retire_open_questions
+            unless explicit_text
+              @entry.buffer.text = ""
+              clear_attachments
+            end
+            if response["queued"]?.try(&.as_bool?) == true
+              @status.text = "Message queued"
+            end
+            load_messages
+            load_chat_state
+          end
         end
       end
 
@@ -1523,11 +1563,16 @@ module Xd
       private def cancel_turn : Nil
         chat_id = @active_chat
         return unless chat_id
+        endpoint = @client
 
-        call({
+        call_async(endpoint, {
           "op"   => JSON::Any.new("cancel"),
           "chat" => JSON::Any.new(chat_id),
-        })
+        }) do |_response, error|
+          @status.text = error if error &&
+                                  @client.same?(endpoint) &&
+                                  @active_chat == chat_id
+        end
       end
 
       private def set_option(option : String, value : String?) : Nil
@@ -1540,20 +1585,36 @@ module Xd
           "option" => JSON::Any.new(option),
         }
         request["value"] = JSON::Any.new(value) if value
-        load_chat_state if call(request)
+        endpoint = @client
+        call_async(endpoint, request) do |response, error|
+          if error
+            @status.text = error if @client.same?(endpoint)
+          elsif response && @client.same?(endpoint) &&
+                @active_chat == chat_id
+            load_chat_state
+          end
+        end
       end
 
       private def set_model(backend : String, model : String) : Nil
         chat_id = @active_chat
         return unless chat_id
 
-        load_chat_state if call({
-                             "op"      => JSON::Any.new("set-option"),
-                             "chat"    => JSON::Any.new(chat_id),
-                             "option"  => JSON::Any.new("model"),
-                             "backend" => JSON::Any.new(backend),
-                             "value"   => JSON::Any.new(model),
-                           })
+        endpoint = @client
+        call_async(endpoint, {
+          "op"      => JSON::Any.new("set-option"),
+          "chat"    => JSON::Any.new(chat_id),
+          "option"  => JSON::Any.new("model"),
+          "backend" => JSON::Any.new(backend),
+          "value"   => JSON::Any.new(model),
+        }) do |response, error|
+          if error
+            @status.text = error if @client.same?(endpoint)
+          elsif response && @client.same?(endpoint) &&
+                @active_chat == chat_id
+            load_chat_state
+          end
+        end
       end
 
       private def monotonic_microseconds : Int64
@@ -1780,13 +1841,28 @@ module Xd
       private def load_chat_state(recover_turn : Bool = true) : Nil
         chat_id = @active_chat
         return unless chat_id
-
-        state = call({
+        endpoint = @client
+        @state_request += 1
+        request = @state_request
+        call_async(endpoint, {
           "op"   => JSON::Any.new("chat"),
           "chat" => JSON::Any.new(chat_id),
-        })
-        return unless state
+        }) do |state, error|
+          next unless request == @state_request &&
+                      @client.same?(endpoint) &&
+                      @active_chat == chat_id
+          if error
+            @status.text = error
+            next
+          end
+          apply_chat_state(state.not_nil!, recover_turn)
+        end
+      end
 
+      private def apply_chat_state(
+        state : Hash(String, JSON::Any),
+        recover_turn : Bool,
+      ) : Nil
         @controls.update(state)
         @chat_backend = state["backend"]?.try(&.as_s?) || "claude"
         @auth_state = state["auth_state"]?.try(&.as_s?) || "unknown"
@@ -1828,7 +1904,8 @@ module Xd
           @send.remove_css_class("destructive-action")
           @send.add_css_class("suggested-action")
         end
-        @send.sensitive = @working || @auth_state == "signed-in"
+        @send.sensitive = @working ||
+                          (@auth_state == "signed-in" && !@send_pending)
       end
 
       private def update_auth_controls(detail : String? = nil) : Nil
@@ -2017,22 +2094,33 @@ module Xd
       private def steer_queue(index : Int, text : String) : Nil
         chat_id = @active_chat
         return unless chat_id
-        call({
+        endpoint = @client
+        call_async(endpoint, {
           "op"    => JSON::Any.new("steer-queue"),
           "chat"  => JSON::Any.new(chat_id),
           "index" => JSON::Any.new(index.to_i64),
           "text"  => JSON::Any.new(text),
-        })
+        }) do |_response, error|
+          @status.text = error if error && @client.same?(endpoint)
+        end
       end
 
       private def drop_queue(index : Int) : Nil
         chat_id = @active_chat
         return unless chat_id
-        call({
+        endpoint = @client
+        call_async(endpoint, {
           "op"    => JSON::Any.new("drop-queue"),
           "chat"  => JSON::Any.new(chat_id),
           "index" => JSON::Any.new(index.to_i64),
-        })
+        }) do |response, error|
+          if error
+            @status.text = error if @client.same?(endpoint)
+          elsif response && @client.same?(endpoint) &&
+                @active_chat == chat_id
+            load_chat_state(recover_turn: false)
+          end
+        end
       end
 
       private def edit_queue(
@@ -2042,13 +2130,21 @@ module Xd
       ) : Nil
         chat_id = @active_chat
         return unless chat_id
-        call({
+        endpoint = @client
+        call_async(endpoint, {
           "op"       => JSON::Any.new("edit-queue"),
           "chat"     => JSON::Any.new(chat_id),
           "index"    => JSON::Any.new(index.to_i64),
           "old-text" => JSON::Any.new(old_text),
           "text"     => JSON::Any.new(text),
-        })
+        }) do |response, error|
+          if error
+            @status.text = error if @client.same?(endpoint)
+          elsif response && @client.same?(endpoint) &&
+                @active_chat == chat_id
+            load_chat_state(recover_turn: false)
+          end
+        end
       end
 
       private def handle_event(
