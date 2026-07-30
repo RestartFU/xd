@@ -106,10 +106,10 @@ module Xd
         @spinner.visible = false
         footer.append(@spinner)
 
-        close = Gtk::Button.new_with_label("Close")
-        close.add_css_class("flat")
-        close.clicked_signal.connect { close }
-        footer.append(close)
+        close_button = Gtk::Button.new_with_label("Close")
+        close_button.add_css_class("flat")
+        close_button.clicked_signal.connect { dismiss }
+        footer.append(close_button)
 
         @action = Gtk::Button.new_with_label("Build and Install")
         @action.add_css_class("xd-panel-action")
@@ -131,7 +131,7 @@ module Xd
         keys.propagation_phase = :capture
         keys.key_pressed_signal.connect do |keyval, _keycode, _state|
           if keyval == Gdk::KEY_Escape
-            close
+            dismiss
             true
           else
             false
@@ -147,7 +147,7 @@ module Xd
             # re-entrant in Mutter: GTK is still dispatching against widgets
             # that cleanup would release. Close on the next main-loop turn.
             GLib.idle_add do
-              close unless @closed
+              dismiss unless @closed
               false
             end
           end
@@ -161,7 +161,7 @@ module Xd
           GLib.idle_add do
             unless @closed
               show_state
-              close if installed
+              dismiss if installed
             end
             false
           end
@@ -242,7 +242,7 @@ module Xd
         row
       end
 
-      private def close : Nil
+      private def dismiss : Nil
         return if @closed
 
         save_source

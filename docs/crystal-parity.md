@@ -277,14 +277,18 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   screenshot-verified through row selection, Right descent, and Ctrl+Enter
   choice with fatal GTK warnings enabled. Back/Escape/error-state matrix
   remains.
-- `[~]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
+- `[x]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
   bounded live output, stop, persistence, and dialog-independent run lifecycle
   match C. Panel is screenshot-verified from an installed-path nightly bundle
   with zero GTK stderr. A deliberately infinite noisy build proves GTK
-  scheduler responsiveness and bounded Stop; close destruction is deferred
-  outside Mutter focus notification. In-app replacement now uses an atomic
-  old/new bundle swap with rollback, while direct installers reject active
-  bundles. Real branch installation remains.
+  scheduler responsiveness and bounded Stop. Close, Escape, focus loss, and
+  successful-install dismissal all use deferred cleanup outside Mutter focus
+  notification; installed-bundle runtime checks close the panel in 8–110 ms
+  while leaving the main window responsive. A clean isolated home fetched the
+  latest branch commit, built the complete 1014 MiB bundle, installed and
+  launched it, then ran the panel's exact generated command over that live
+  install. In-app replacement uses an atomic old/new bundle swap with rollback,
+  while direct installers reject active bundles.
 - `[x]` File save/guard failures use the C `AdwToastOverlay` placement and
   messages. Startup and database failures keep the normal 1100×720 app surface
   behind one modal `AdwAlertDialog`; database failures use the exact C heading
