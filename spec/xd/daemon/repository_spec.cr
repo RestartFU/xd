@@ -137,4 +137,21 @@ describe Xd::Daemon::Repository do
       end
     end
   end
+
+  it "tracks both branch and commit HEAD changes" do
+    with_repository do |repository, folder, chat_id|
+      main = repository.head_signature(chat_id)
+      main.should contain("# branch.head main")
+
+      git(folder, "checkout", "-q", "-b", "feature")
+      feature = repository.head_signature(chat_id)
+      feature.should contain("# branch.head feature")
+      feature.should_not eq(main)
+
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+      git(folder, "add", "tracked.txt")
+      git(folder, "commit", "-q", "-m", "feature change")
+      repository.head_signature(chat_id).should_not eq(feature)
+    end
+  end
 end

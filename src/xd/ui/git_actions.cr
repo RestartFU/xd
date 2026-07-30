@@ -93,7 +93,7 @@ module Xd
               event["error"]?.try(&.as_s?) || "Git refused the request."
             )
           end
-        when "turn-finished", "changed"
+        when "turn-finished", "changed", "repository-changed"
           refresh
         end
       end

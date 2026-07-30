@@ -89,6 +89,7 @@ module Xd
         @terminal_panel.handle_event(event)
         name = event["event"]?.try(&.as_s?)
         repository_changed = name == "turn-finished" ||
+                             name == "repository-changed" ||
                              (name == "git-action-finished" &&
                               event["success"]?.try(&.as_bool?) == true)
         if repository_changed

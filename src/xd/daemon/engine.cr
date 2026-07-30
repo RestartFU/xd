@@ -12,6 +12,7 @@ require "./event_bus"
 require "./filesystem"
 require "./images"
 require "./repository"
+require "./repository_monitor"
 require "./search"
 require "./terminals"
 
@@ -54,6 +55,14 @@ module Xd
         @search = Search.new(@store)
         @git_worktrees = Workspace::Worktrees.new(@store, @workspaces)
         @repository = Repository.new(@store, @workspaces, @filesystem)
+        @repository_monitor = RepositoryMonitor.new(
+          ->(chat_id : String) { @repository.head_signature(chat_id) },
+          ->(chat_id : String) {
+            publish_async_event("repository-changed", {
+              "chat" => JSON::Any.new(chat_id),
+            })
+          }
+        )
         @terminals = Terminals.new(
           @filesystem,
           ->(name : String, fields : Hash(String, JSON::Any)) {
@@ -138,6 +147,7 @@ module Xd
       end
 
       def close : Nil
+        @repository_monitor.close
         @terminals.close
         @agents.close
       end
@@ -843,6 +853,7 @@ module Xd
         chat_id = request.string("chat", "git-state needs a chat id.")
         refresh_id = request.string?("request")
         @store.get_chat(chat_id)
+        @repository_monitor.watch(chat_id)
         @after_write = -> {
           spawn do
             fields = repository_state_fields(
@@ -890,6 +901,7 @@ module Xd
                 action,
                 commit_message
               )
+              @repository_monitor.reset(chat_id)
               repository_state_fields(
                 chat_id,
                 result.state

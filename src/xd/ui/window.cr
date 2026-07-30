@@ -2058,6 +2058,8 @@ module Xd
             load_messages
             load_chat_state
           end
+        when "repository-changed"
+          load_chat_state(recover_turn: false) if active_event?(endpoint, event)
         when "queued"
           return unless active_event?(endpoint, event)
           queue = event["queue"]?.try(&.as_a?)

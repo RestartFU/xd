@@ -48,6 +48,26 @@ module Xd
         state_at(@filesystem.workdir(chat_id))
       end
 
+      def head_signature(chat_id : String) : String
+        workdir = @filesystem.workdir(chat_id)
+        output, status, _error = run(
+          workdir,
+          ["status", "--porcelain=v2", "--branch", "--untracked-files=no"]
+        )
+        return "" unless status.success?
+
+        String.build do |io|
+          output.each_line do |line|
+            if line.starts_with?("# branch.oid ") ||
+               line.starts_with?("# branch.head ")
+              io << line
+            end
+          end
+        end
+      rescue Error | Filesystem::Error
+        ""
+      end
+
       def perform(
         chat_id : String,
         action : String,
