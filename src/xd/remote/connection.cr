@@ -14,6 +14,7 @@ module Xd
     record ConnectionSnapshot,
       state : ConnectionState,
       host : String?,
+      port : Int32?,
       error : String?
 
     # One durable remote endpoint.
@@ -371,6 +372,7 @@ module Xd
         ConnectionSnapshot.new(
           @state,
           @credentials.try(&.host),
+          @credentials.try(&.port),
           @error
         )
       end

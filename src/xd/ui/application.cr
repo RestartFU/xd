@@ -23,7 +23,11 @@ module Xd
             Adw::ColorScheme::ForceDark
           install_style
           runtime ||= Runtime.new
-          window ||= Window.new(application, runtime.not_nil!.client)
+          window ||= Window.new(
+            application,
+            runtime.not_nil!.client,
+            runtime.not_nil!.remote
+          )
           window.not_nil!.present
         rescue error
           show_startup_error(application, error)

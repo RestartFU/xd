@@ -8,8 +8,10 @@ require "../agent/subagent_tool"
 require "../agent/workflow_run"
 require "../agent/workspace_block"
 require "../daemon/endpoint"
+require "../remote/connection"
 require "./adw"
 require "./chat_controls"
+require "./pair_dialog"
 require "./sidebar"
 require "./tool_panel"
 
@@ -42,22 +44,40 @@ module Xd
       @working = false
       @workflow_ids = Set(String).new
       @attachments = [] of Attachment
+      @client : Daemon::Endpoint
+      @local_client : Daemon::Endpoint
 
       def initialize(
         application : Gtk::Application,
-        @client : Daemon::Endpoint,
+        local_client : Daemon::Endpoint,
+        @remote : Remote::Connection,
       )
+        @local_client = local_client
+        @client = local_client
         @active_chat = nil
         @stream_label = nil
         @widget = Adw::ApplicationWindow.new(application: application)
         @widget.title = "xd"
         @widget.set_default_size(1100, 720)
 
+        @status = Gtk::Label.new("")
+        @status.xalign = 0_f32
+        @status.hexpand = true
+        @status.add_css_class("dim-label")
+
         @sidebar = Sidebar.new(
           @widget,
-          ->(request : Hash(String, JSON::Any)) { call(request) },
-          ->(id : String, title : String) { open_chat(id, title) },
-          ->(id : String) { chat_deleted(id) }
+          @local_client,
+          @remote,
+          ->(endpoint : Daemon::Endpoint, id : String, title : String) {
+            open_chat(endpoint, id, title)
+          },
+          ->(endpoint : Daemon::Endpoint, id : String) {
+            chat_deleted(endpoint, id)
+          },
+          -> { show_pair_dialog },
+          -> { remote_forgot },
+          ->(message : String) { @status.text = message }
         )
         @tool_panel = ToolPanel.new(
           ->(request : Hash(String, JSON::Any)) { call(request) }
@@ -175,11 +195,6 @@ module Xd
         entry_scroll.propagate_natural_height = true
         entry_scroll.child = @entry
 
-        @status = Gtk::Label.new("")
-        @status.xalign = 0_f32
-        @status.hexpand = true
-        @status.add_css_class("dim-label")
-
         composer_column = Gtk::Box.new(:vertical, 0)
         composer_column.append(@queue_box)
         composer_column.append(@attachments_bar)
@@ -253,18 +268,41 @@ module Xd
         headers.add_widget(@sidebar.header)
         headers.add_widget(chat_header)
 
-        @client.subscribe do |event|
-          GLib.idle_add do
-            handle_event(event)
-            false
-          end
-        end
+        subscribe(@local_client)
+        subscribe(@remote)
 
         @sidebar.reload
       end
 
       def present : Nil
         @widget.present
+      end
+
+      private def subscribe(endpoint : Daemon::Endpoint) : Nil
+        endpoint.subscribe do |event|
+          GLib.idle_add do
+            handle_event(endpoint, event)
+            false
+          end
+        end
+      end
+
+      private def show_pair_dialog : Nil
+        PairDialog.new(
+          @widget,
+          @remote,
+          -> {
+            @status.text = "Connected to #{@remote.snapshot.host}"
+            @sidebar.reload
+          }
+        ).present
+      end
+
+      private def remote_forgot : Nil
+        return unless @client.same?(@remote)
+
+        @client = @local_client
+        clear_active_chat
       end
 
       private def call(fields : Hash(String, JSON::Any))
@@ -275,8 +313,13 @@ module Xd
         nil
       end
 
-      private def open_chat(id : String, title : String) : Nil
+      private def open_chat(
+        endpoint : Daemon::Endpoint,
+        id : String,
+        title : String,
+      ) : Nil
         clear_attachments
+        @client = endpoint
         @active_chat = id
         @stream_label = nil
         @chat_title.title = title
@@ -292,9 +335,16 @@ module Xd
         @entry.grab_focus
       end
 
-      private def chat_deleted(id : String) : Nil
-        return unless @active_chat == id
+      private def chat_deleted(
+        endpoint : Daemon::Endpoint,
+        id : String,
+      ) : Nil
+        return unless @client.same?(endpoint) && @active_chat == id
 
+        clear_active_chat
+      end
+
+      private def clear_active_chat : Nil
         @active_chat = nil
         @stream_label = nil
         @working = false
@@ -902,14 +952,19 @@ module Xd
         })
       end
 
-      private def handle_event(event : Hash(String, JSON::Any)) : Nil
-        @tool_panel.handle_event(event)
+      private def handle_event(
+        endpoint : Daemon::Endpoint,
+        event : Hash(String, JSON::Any),
+      ) : Nil
+        if @client.same?(endpoint)
+          @tool_panel.handle_event(event)
+        end
         name = event["event"]?.try(&.as_s?) || return
         case name
         when "tree"
-          @sidebar.reload
+          @sidebar.reload(endpoint)
         when "text"
-          return unless active_event?(event)
+          return unless active_event?(endpoint, event)
           text = event["text"]?.try(&.as_s?) || return
           label = @stream_label
           unless label
@@ -923,17 +978,17 @@ module Xd
           end
           scroll_to_bottom
         when "tool"
-          return unless active_event?(event)
+          return unless active_event?(endpoint, event)
           add_message("tool", event["text"]?.try(&.as_s?) || "Used a tool")
           @stream_label = nil
           scroll_to_bottom
         when "turn-started"
-          return unless active_event?(event)
+          return unless active_event?(endpoint, event)
           @status.text = "Working…"
           @stream_label = nil
           load_chat_state
         when "turn-finished"
-          if active_event?(event)
+          if active_event?(endpoint, event)
             load_messages
             load_chat_state
             if event["waiting"]?.try(&.as_bool?) == true
@@ -941,20 +996,24 @@ module Xd
             end
           end
         when "changed"
-          if active_event?(event)
+          if active_event?(endpoint, event)
             load_messages
             load_chat_state
           end
         when "queued"
-          return unless active_event?(event)
+          return unless active_event?(endpoint, event)
           queue = event["queue"]?.try(&.as_a?)
           @status.text = queue && !queue.empty? ? "Message queued" : ""
           load_chat_state
         end
       end
 
-      private def active_event?(event : Hash(String, JSON::Any)) : Bool
-        event["chat"]?.try(&.as_s?) == @active_chat
+      private def active_event?(
+        endpoint : Daemon::Endpoint,
+        event : Hash(String, JSON::Any),
+      ) : Bool
+        @client.same?(endpoint) &&
+          event["chat"]?.try(&.as_s?) == @active_chat
       end
 
       private def clear(box : Gtk::Box) : Nil

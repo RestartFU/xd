@@ -2,6 +2,7 @@ require "../app_paths"
 require "../daemon/client"
 require "../daemon/engine"
 require "../daemon/server"
+require "../remote/connection"
 require "../storage/store"
 require "../workspace/service"
 
@@ -13,6 +14,7 @@ module Xd
     # Server used by `xd serve`, then talks to it through Unix IPC.
     class Runtime
       getter client : Daemon::Client
+      getter remote : Remote::Connection
 
       @store : Storage::Store?
       @engine : Daemon::Engine?
@@ -23,9 +25,11 @@ module Xd
         @engine = nil
         @server = nil
         @client = connect
+        @remote = Remote::Connection.new
       end
 
       def close : Nil
+        @remote.close
         @client.close
         @server.try(&.close)
         @engine.try(&.close)

@@ -121,6 +121,8 @@ describe Xd::Remote::Connection do
           "laptop"
         )
         connection.connected?.should be_true
+        connection.snapshot.host.should eq("remote.example")
+        connection.snapshot.port.should eq(4242)
         Xd::Remote::CredentialsFile.new(path)
           .load.not_nil!.token.should eq("paired-token")
 

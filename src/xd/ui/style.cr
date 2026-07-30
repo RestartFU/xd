@@ -472,6 +472,35 @@ module Xd
         padding: 7px;
       }
       .xd-message-images { margin: 0 14px; }
+      .xd-panel {
+        background: #0b0b0b;
+        border-radius: 14px;
+        border: 1px solid alpha(#ffffff, 0.07);
+        box-shadow: 0 24px 64px alpha(#000000, 0.65);
+      }
+      .xd-panel-bar { padding: 13px 16px; }
+      .xd-panel-head {
+        border-bottom: 1px solid alpha(#ffffff, 0.06);
+      }
+      .xd-panel-foot {
+        border-top: 1px solid alpha(#ffffff, 0.06);
+      }
+      .xd-panel-action {
+        background: alpha(#ffffff, 0.10);
+        border: 1px solid alpha(#ffffff, 0.08);
+        border-radius: 9px;
+        padding: 5px 14px;
+        box-shadow: none;
+      }
+      .xd-panel-action:hover {
+        background: alpha(#ffffff, 0.16);
+      }
+      .xd-key {
+        font-size: 85%;
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: alpha(#ffffff, 0.09);
+      }
       CSS
   end
 end
