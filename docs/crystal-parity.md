@@ -243,8 +243,10 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   `634879f` bundle is screenshot-verified and persists a browser-chosen path
   on close with fatal GTK warnings enabled. Agent Context now matches the C
   undecorated 620×500 panel, editor frame, status, footer, async load/save,
-  busy state, Escape, and Ctrl+Enter behavior through the same endpoint.
-  Installed GTK proof remains; Agent Secrets is still provisional.
+  busy state, Escape, and Ctrl+Enter behavior through the same endpoint. Agent
+  Secrets now matches the C 700×500 local/remote/folder panel, copy, row
+  lifecycle, inline validation, busy state, shortcuts, and value-withholding
+  protocol. Installed GTK proof remains for both panels.
 - `[~]` C directory-browser hierarchy, row factory, navigation keys, dismissal
   semantics, and styling are ported. Both Unix and TLS sources list only
   through the daemon `list-dir` operation, and new-chat creation waits for its

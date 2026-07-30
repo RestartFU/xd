@@ -1,34 +1,19 @@
 require "json"
 require "gtk4"
-require "../agent/catalog"
 require "./adw"
 require "./context_dialog"
 require "./directory_browser"
-require "./dialogs"
 require "./panel_call"
+require "./secrets_dialog"
 
 module Xd
   module UI
     class FolderDialogs
-      private class SecretRow
-        getter box : Gtk::Box
-        getter name_entry : Gtk::Entry
-        getter value_entry : Gtk::PasswordEntry
-        getter existing : Bool
-
-        def initialize(
-          @box,
-          @name_entry,
-          @value_entry,
-          @existing,
-        )
-        end
-      end
-
       def initialize(
         @parent : Gtk::Window,
         @request : PanelCall,
         @on_error : Proc(String, Nil),
+        @remote : Bool,
       )
       end
 
@@ -236,117 +221,15 @@ module Xd
 
       def secrets(
         folder_id : String? = nil,
-        title : String = "Agent Secrets",
+        folder_name : String? = nil,
       ) : Nil
-        request = {"op" => JSON::Any.new("agent-secrets")}
-        request["folder"] = JSON::Any.new(folder_id) if folder_id
-        response = call(request)
-        return unless response
-
-        window, content, actions = Dialogs.shell(@parent, title)
-        window.resizable = true
-        window.set_default_size(680, 420)
-
-        description = Gtk::Label.new(
-          "Values enter agent process environment. Existing values never " \
-          "cross daemon connection; leave them blank to keep unchanged."
-        )
-        description.xalign = 0_f32
-        description.wrap = true
-        content.append(description)
-
-        rows = [] of SecretRow
-        rows_box = Gtk::Box.new(:vertical, 8)
-        response["names"].as_a.each do |node|
-          append_secret_row(rows_box, rows, node.as_s, true)
-        end
-
-        scroll = Gtk::ScrolledWindow.new
-        scroll.vexpand = true
-        scroll.min_content_height = 220
-        scroll.child = rows_box
-        content.append(scroll)
-
-        cancel = Gtk::Button.new_with_label("Cancel")
-        cancel.clicked_signal.connect { window.destroy }
-        add = Gtk::Button.new_with_label("Add")
-        add.clicked_signal.connect do
-          row = append_secret_row(rows_box, rows, "", false)
-          row.name_entry.grab_focus
-        end
-        save = Gtk::Button.new_with_label("Save")
-        save.add_css_class("suggested-action")
-        save.clicked_signal.connect do
-          entries = rows.map do |row|
-            fields = {
-              "name" => JSON::Any.new(row.name_entry.text.strip),
-            }
-            value = row.value_entry.text
-            fields["value"] = JSON::Any.new(value) unless value.empty?
-            JSON::Any.new(fields)
-          end
-          save_request = {
-            "op"      => JSON::Any.new("set-agent-secrets"),
-            "entries" => JSON::Any.new(entries),
-          }
-          if folder_id
-            save_request["folder"] = JSON::Any.new(folder_id)
-          end
-          window.destroy if call(save_request)
-        end
-        actions.append(cancel)
-        actions.append(add)
-        actions.append(save)
-        window.present
-      end
-
-      private def field(
-        label_text : String,
-        input : Gtk::Widget,
-      ) : Gtk::Box
-        label = Gtk::Label.new(label_text)
-        label.xalign = 0_f32
-        label.width_chars = 18
-        row = Gtk::Box.new(:horizontal, 10)
-        input.hexpand = true
-        row.append(label)
-        row.append(input)
-        row
-      end
-
-      private def append_secret_row(
-        container : Gtk::Box,
-        rows : Array(SecretRow),
-        name : String,
-        existing : Bool,
-      ) : SecretRow
-        name_entry = Gtk::Entry.new
-        name_entry.text = name
-        name_entry.placeholder_text = "ENVIRONMENT_VARIABLE"
-        name_entry.editable = !existing
-        name_entry.hexpand = true
-
-        value_entry = Gtk::PasswordEntry.new
-        value_entry.placeholder_text = existing ? "Unchanged" : "Secret value"
-        value_entry.show_peek_icon = true
-        value_entry.hexpand = true
-
-        remove = Gtk::Button.new_from_icon_name("user-trash-symbolic")
-        remove.add_css_class("flat")
-        remove.tooltip_text = "Remove secret"
-
-        box = Gtk::Box.new(:horizontal, 8)
-        box.append(name_entry)
-        box.append(value_entry)
-        box.append(remove)
-        row = SecretRow.new(box, name_entry, value_entry, existing)
-        remove.clicked_signal.connect do
-          container.remove(box)
-          rows.delete(row)
-        end
-        rows << row
-        container.append(box)
-        row
+        SecretsDialog.new(
+          @parent,
+          @request,
+          @remote,
+          folder_id,
+          folder_name
+        ).present
       end
 
       private def clean(value : String) : String?

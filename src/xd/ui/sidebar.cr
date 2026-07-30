@@ -1202,7 +1202,7 @@ module Xd
         add_choice(choices, popover, "Agent Secrets…") do
           dialogs(source).secrets(
             folder_id,
-            "#{source.folder_names[folder_id]} Agent Secrets"
+            source.folder_names[folder_id]
           )
         end
 
@@ -1493,7 +1493,8 @@ module Xd
         FolderDialogs.new(
           @parent,
           panel_call(source),
-          @on_error
+          @on_error,
+          source.remote
         )
       end
 
