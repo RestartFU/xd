@@ -1,6 +1,12 @@
 require "../spec_helper"
 require "../../src/xd/unified_diff"
 
+private def valid_diff_markup?(markup : String) : Bool
+  Pango.parse_markup(markup, -1, '\0')
+rescue Pango::PangoError
+  false
+end
+
 describe Xd::UnifiedDiff do
   it "parses display rows, line numbers, and totals" do
     patch = <<-DIFF
@@ -75,5 +81,115 @@ describe Xd::UnifiedDiff do
     Xd::DiffLineKind::Added.background.should eq("#183522")
     Xd::DiffLineKind::Removed.background.should eq("#3a1d1b")
     Xd::DiffLineKind::Context.background.should be_nil
+  end
+
+  it "formats one safe layout with totals, gutters, and a limit footer" do
+    patch = <<-DIFF
+      diff --git a/src/a.c b/src/a.c
+      @@ -1,2 +1,2 @@
+      -old <value>
+      +new & value
+       same
+      DIFF
+    lines = Xd::UnifiedDiff.parse(patch).lines
+    result = Xd::UnifiedDiff.markup(lines, true, 3)
+
+    valid_diff_markup?(result.markup).should be_true
+    result.markup.should contain(
+      %(foreground="#ffbe6f" weight="bold">src/a.c</span>)
+    )
+    result.markup.should contain("+1</span>")
+    result.markup.should contain("−1</span>")
+    result.markup.should contain("old &lt;value&gt;")
+    result.markup.should contain("Showing first 3 of 5 rows")
+    result.markup.should_not contain("background=")
+    result.row_kinds.should eq([
+      Xd::DiffLineKind::File,
+      Xd::DiffLineKind::Hunk,
+      Xd::DiffLineKind::Removed,
+      Xd::DiffLineKind::Meta,
+    ])
+  end
+
+  it "uses full-line change colours only for unknown languages" do
+    patch = <<-DIFF
+      diff --git a/notes.txt b/notes.txt
+      @@ -1 +1 @@
+      -removed line
+      +added line
+      DIFF
+    result = Xd::UnifiedDiff.markup(
+      Xd::UnifiedDiff.parse(patch).lines,
+      true
+    )
+
+    result.markup.should contain(
+      %(foreground="#f66151">removed line</span>)
+    )
+    result.markup.should contain(
+      %(foreground="#57e389">added line</span>)
+    )
+    result.row_kinds.should eq([
+      Xd::DiffLineKind::File,
+      Xd::DiffLineKind::Hunk,
+      Xd::DiffLineKind::Removed,
+      Xd::DiffLineKind::Added,
+    ])
+  end
+
+  it "colours known code while keeping old and new lexer states separate" do
+    patch = <<-DIFF
+      diff --git a/src/a.c b/src/a.c
+      @@ -1,3 +1,3 @@
+      -  x = 1; /* opened
+      +  return 2;
+       };
+      DIFF
+    result = Xd::UnifiedDiff.markup(
+      Xd::UnifiedDiff.parse(patch).lines,
+      true
+    )
+
+    result.markup.should contain(
+      %(foreground="#dc8add">return</span>)
+    )
+    result.markup.should contain(
+      %(foreground="#ffbe6f">2</span>)
+    )
+    result.markup.should_not contain(
+      %(foreground="#57e389">  return 2;</span>)
+    )
+  end
+
+  it "primes independent slices from their file and hunk state" do
+    patch = <<-DIFF
+      diff --git a/src/a.c b/src/a.c
+      @@ -1,4 +1,4 @@
+       /* a comment that
+      -   runs past int
+      +   runs past int too
+       */
+      DIFF
+    lines = Xd::UnifiedDiff.parse(patch).lines
+    result = Xd::UnifiedDiff.markup_slice(lines, true, 3, 5)
+
+    valid_diff_markup?(result.markup).should be_true
+    result.markup.should contain(%(foreground="#8b8e8f"))
+    result.markup.should_not contain(
+      %(foreground="#dc8add">int</span>)
+    )
+    result.markup.should_not contain("Showing first")
+    result.row_kinds.should eq([
+      Xd::DiffLineKind::Removed,
+      Xd::DiffLineKind::Added,
+    ])
+  end
+
+  it "truncates display text on a valid UTF-8 boundary" do
+    text = "a" * 1023 + "é" + "tail"
+    shown = Xd::UnifiedDiff.display_text(text)
+
+    shown.valid_encoding?.should be_true
+    shown.should eq("a" * 1023 + "…")
   end
 end
