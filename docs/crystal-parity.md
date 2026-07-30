@@ -334,6 +334,11 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
   and terminal operations share the same protocol.
+- `[x]` Actual Unix-socket and paired TLS clients pass one normalized stateful
+  matrix against separate Engine instances: workspace/context/settings,
+  daemon-owned secrets, directory and file operations, Git diff, atomic model
+  selection, effort/access/Plan, queue edits, send/cancel, transcript/search,
+  terminal open/resize/kill, voice-model ownership, events, and deletion.
 - `[x]` Checkout context and worktree identity are daemon-owned protocol state;
   local and paired clients do not probe Git through separate UI logic.
 - `[~]` Crystal storage and agent behavior have broad specs, but every old C
@@ -388,8 +393,9 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   visible `Switched to …` transcript event for Unix and TLS clients without
   duplicating unchanged selections. Manager specs verify exact selected
   backend/model/effort, Plan's temporary access override, and restoration of
-  the stored access mode. Full bundled-protocol and installed GTK matrices
-  remain.
+  the stored access mode. The shared Unix/TLS protocol matrix also verifies
+  exact model, effort, stored access, temporary Plan access, prompt, daemon
+  secret environment, send, and cancel. Installed GTK matrix remains.
 - `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
   removed; Claude Code and Codex are the only backends.
 
@@ -414,13 +420,13 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (257 examples).
+- `[x]` Crystal specs pass in Docker (260 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
 - `[ ]` 1100x720 screenshots match the C app for empty, populated, active turn,
   question, terminal, files, diff, search, settings, secrets, and pairing
   states.
-- `[ ]` Local and paired clients pass the same protocol behavior suite.
+- `[x]` Local and paired clients pass the same protocol behavior suite.
 - `[ ]` Codex and Claude authentication and one real turn each succeed from the
   shipped bundle.
