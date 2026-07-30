@@ -126,7 +126,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   installed GTK verification remains.
 - `[~]` Slash-command discovery, filtering, layout, and insertion match C;
   installed GTK verification remains.
-- `[ ]` Port worktree chooser and new-worktree behavior exactly.
+- `[~]` Worktree chooser uses the C descriptive popover, current/new/existing
+  checkout rows, detached labels, locking rule, and daemon-owned selection.
+  Effort and access use the same picker widget; installed GTK verification
+  remains.
 - `[ ]` Port optional voice recording/download/transcription behavior.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
   tooltip, and geometry. The daemon computes it once for Unix and TLS clients;

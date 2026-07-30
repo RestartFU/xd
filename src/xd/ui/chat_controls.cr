@@ -2,6 +2,7 @@ require "gtk4"
 require "../agent/catalog"
 require "./adw"
 require "./context_usage"
+require "./option_picker"
 
 module Xd
   module UI
@@ -30,11 +31,12 @@ module Xd
       @updating = false
       @backend_button : Gtk::Button
       @model_button : Gtk::Button
-      @effort_button : Gtk::Button
-      @access_button : Gtk::Button
+      @effort_picker : OptionPicker
+      @access_picker : OptionPicker
       @build_button : Gtk::ToggleButton
       @plan_button : Gtk::ToggleButton
-      @workspace_button : Gtk::MenuButton
+      @workspace_picker : OptionPicker
+      @workspace_values = [] of Tuple(String, String?)
       @context_meter : Gtk::ProgressBar
 
       def initialize(
@@ -54,13 +56,43 @@ module Xd
         @model_button.tooltip_text = "Model"
         @model_button.clicked_signal.connect { cycle_model }
 
-        @effort_button = control_button("High")
-        @effort_button.tooltip_text = "Reasoning effort"
-        @effort_button.clicked_signal.connect { cycle_effort }
+        @effort_picker = OptionPicker.new(
+          EFFORTS.map_with_index do |effort, index|
+            OptionPicker::Option.new(
+              effort.label,
+              [
+                "Quick answers, little deliberation.",
+                "Balanced speed and depth.",
+                "Thinks longer before answering.",
+                "Extended reasoning for hard problems.",
+                "Everything the model has.",
+              ][index]
+            )
+          end,
+          ->(index : Int32) {
+            @on_option.call("effort", EFFORTS[index].wire_name)
+          }
+        )
+        @effort_picker.widget.tooltip_text =
+          "How hard the model is asked to think"
 
-        @access_button = control_button("Read only")
-        @access_button.tooltip_text = "Filesystem access"
-        @access_button.clicked_signal.connect { cycle_access }
+        @access_picker = OptionPicker.new(
+          ACCESS.map_with_index do |access, index|
+            OptionPicker::Option.new(
+              access.label,
+              [
+                "Look at anything, change nothing.",
+                "Edit the working tree; ask before commands.",
+                "Run commands and edit without asking.",
+              ][index]
+            )
+          end,
+          ->(index : Int32) {
+            @on_option.call("access", ACCESS[index].wire_name)
+          }
+        )
+        @access_picker.widget.tooltip_text =
+          "What the assistant may do in the working directory"
 
         @build_button = Gtk::ToggleButton.new
         @build_button.child = Adw::ButtonContent.new(
@@ -80,7 +112,7 @@ module Xd
         @build_button.active = true
         @plan_button.toggled_signal.connect do
           unless @updating
-            @access_button.sensitive = !@plan_button.active?
+            @access_picker.widget.sensitive = !@plan_button.active?
             @on_option.call(
               "plan",
               @plan_button.active? ? "true" : "false"
@@ -88,10 +120,21 @@ module Xd
           end
         end
 
-        @workspace_button = Gtk::MenuButton.new
-        @workspace_button.label = "Workspace"
-        @workspace_button.add_css_class("flat")
-        @workspace_button.tooltip_text = "Working directory"
+        @workspace_picker = OptionPicker.new(
+          [
+            OptionPicker::Option.new(
+              "Current checkout",
+              "Use the checkout this chat currently points at."
+            ),
+            OptionPicker::Option.new(
+              "New worktree",
+              "Create an isolated branch and checkout for this chat."
+            ),
+          ],
+          ->(index : Int32) { select_workspace(index) }
+        )
+        @workspace_picker.widget.tooltip_text =
+          "Where this chat works; locked after the first message"
 
         @context_meter = Gtk::ProgressBar.new
         @context_meter.show_text = true
@@ -100,12 +143,12 @@ module Xd
         @context_meter.visible = false
         @context_meter.add_css_class("xd-context-meter")
 
-        @identity.append(@workspace_button)
+        @identity.append(@workspace_picker.widget)
         @identity.append(@backend_button)
         @identity.append(@model_button)
         @identity.append(@context_meter)
-        @run.append(@effort_button)
-        @run.append(@access_button)
+        @run.append(@effort_picker.widget)
+        @run.append(@access_picker.widget)
         modes = Gtk::Box.new(:horizontal, 0)
         modes.add_css_class("linked")
         modes.append(@build_button)
@@ -119,11 +162,12 @@ module Xd
       def sensitive=(enabled : Bool) : Bool
         @backend_button.sensitive = enabled
         @model_button.sensitive = enabled
-        @effort_button.sensitive = enabled
-        @access_button.sensitive = enabled && !@plan_button.active?
+        @effort_picker.widget.sensitive = enabled
+        @access_picker.widget.sensitive =
+          enabled && !@plan_button.active?
         @build_button.sensitive = enabled
         @plan_button.sensitive = enabled
-        @workspace_button.sensitive = enabled
+        @workspace_picker.widget.sensitive = enabled
         enabled
       end
 
@@ -141,27 +185,19 @@ module Xd
 
         @backend_button.label = backend.display_name
         @model_button.label = backend.model_label(@model)
-        @effort_button.label = @effort.label
-        @access_button.label = @access.label
+        @effort_picker.selected = EFFORTS.index(@effort) || 0
+        @access_picker.selected = ACCESS.index(@access) || 0
         plan = state["plan"]?.try(&.as_bool?) || false
         (plan ? @plan_button : @build_button).active = true
-        @access_button.sensitive = !plan
+        @access_picker.widget.sensitive = !plan
         update_context_meter(state)
 
-        workdir = state["workdir"]?.try(&.as_s?)
         new_worktree = state["new_worktree"]?.try(&.as_bool?) || false
-        linked = state["linked_worktree"]?.try(&.as_bool?) || false
-        @workspace_button.label = if new_worktree
-                                    "New worktree"
-                                  elsif workdir
-                                    linked ? "#{File.basename(workdir)} · worktree" : File.basename(workdir)
-                                  else
-                                    "Workspace"
-                                  end
         build_workspace_menu(state)
+        @workspace_picker.selected = new_worktree ? 1 : 0
         has_messages = state["has_messages"]?.try(&.as_bool?) || false
         self.sensitive = true
-        @workspace_button.sensitive = !has_messages
+        @workspace_picker.widget.sensitive = !has_messages
       ensure
         @updating = false
       end
@@ -215,70 +251,53 @@ module Xd
         @on_option.call("model", selected.id)
       end
 
-      private def cycle_effort : Nil
-        index = EFFORTS.index(@effort) || 0
-        selected = EFFORTS[(index + 1) % EFFORTS.size]
-        @on_option.call("effort", selected.wire_name)
-      end
-
-      private def cycle_access : Nil
-        index = ACCESS.index(@access) || 0
-        selected = ACCESS[(index + 1) % ACCESS.size]
-        @on_option.call("access", selected.wire_name)
-      end
-
       private def build_workspace_menu(
         state : Hash(String, JSON::Any),
       ) : Nil
-        popover = Gtk::Popover.new
-        choices = Gtk::Box.new(:vertical, 2)
-        choices.margin_top = 6
-        choices.margin_bottom = 6
-        choices.margin_start = 6
-        choices.margin_end = 6
-
-        add_workspace_choice(
-          choices,
-          popover,
-          "New worktree",
-          "new-worktree",
-          "true"
-        )
+        workdir = state["workdir"]?.try(&.as_s?)
+        linked = state["linked_worktree"]?.try(&.as_bool?) || false
+        options = [
+          OptionPicker::Option.new(
+            linked ? "Current worktree" : "Current checkout",
+            "Keep using this chat's current checkout."
+          ),
+          OptionPicker::Option.new(
+            "New worktree",
+            "Create an isolated branch and checkout for this chat."
+          ),
+        ]
+        @workspace_values = [
+          {"new-worktree", "false"},
+          {"new-worktree", "true"},
+        ] of Tuple(String, String?)
         state["worktrees"]?.try(&.as_a?).try do |worktrees|
           worktrees.each do |node|
             path = node["path"].as_s
+            next if node["current"]?.try(&.as_bool?) == true
+            next if workdir == path
+
             branch = node["branch"]?.try(&.as_s?)
-            label = branch || File.basename(path)
-            label += " · main" if node["main"]?.try(&.as_bool?) == true
-            label += " · current" if node["current"]?.try(&.as_bool?) == true
-            add_workspace_choice(
-              choices,
-              popover,
-              label,
-              "workspace",
-              path
-            )
+            detached = node["detached"]?.try(&.as_bool?) || false
+            label = if branch
+                      detached ? "Detached at #{branch}" : branch
+                    else
+                      File.basename(path)
+                    end
+            options << OptionPicker::Option.new(label, path)
+            @workspace_values << {"workspace", path}
           end
         end
-        popover.child = choices
-        @workspace_button.popover = popover
+        @workspace_picker.options = options
       end
 
-      private def add_workspace_choice(
-        choices : Gtk::Box,
-        popover : Gtk::Popover,
-        label : String,
-        option : String,
-        value : String,
-      ) : Nil
-        button = Gtk::Button.new_with_label(label)
-        button.add_css_class("flat")
-        button.halign = :fill
-        button.clicked_signal.connect do
-          popover.popdown
-          @on_option.call(option, value)
-        end
-        choices.append(button)
+      private def select_workspace(index : Int32) : Nil
+        return if @updating
+        return unless selected = @workspace_values[index]?
+
+        @on_option.call(
+          selected[0],
+          selected[1]
+        )
       end
     end
   end
