@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a relocatable Windows payload from a Meson install tree.
+# Assemble a relocatable Windows payload from a Crystal native stage.
 #
 #   bundle-windows.sh <staging-dir> <out-dir>
 #
@@ -21,6 +21,11 @@ fi
 # Meson canonicalizes /ucrt64 to its native drive path before DESTDIR is
 # applied, so the staged prefix is not necessarily "$STAGE$MINGW_PREFIX".
 STAGED_PREFIX="${STAGED_EXE%/bin/xd.exe}"
+
+[ "$("$STAGED_EXE" --bundle-runtime)" = crystal ] || {
+  echo "bundle-windows: refusing legacy C binary" >&2
+  exit 1
+}
 
 mkdir -p "$OUT"/{bin,etc,lib,share}
 

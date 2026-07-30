@@ -36,6 +36,13 @@ module Xd
         return 0
       end
 
+      # Native packagers use this private probe to reject the legacy C binary.
+      # Keep it machine-readable; it is a bundle contract, not user-facing UI.
+      if arguments == ["--bundle-runtime"]
+        @output.puts "crystal"
+        return 0
+      end
+
       if arguments.first? == "serve"
         return serve(parse_serve(arguments.skip(1)))
       end

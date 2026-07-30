@@ -87,6 +87,8 @@ COPY src/xd.cr ./src/xd.cr
 COPY src/xd ./src/xd
 COPY spec ./spec
 COPY tests/fixtures ./tests/fixtures
+COPY scripts/stage-native.sh ./scripts/stage-native.sh
+COPY data ./data
 
 RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \

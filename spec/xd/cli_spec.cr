@@ -4,6 +4,13 @@ require "random/secure"
 require "../../src/xd/cli"
 
 describe Xd::CLI do
+  it "identifies Crystal builds to native packagers" do
+    output = IO::Memory.new
+
+    Xd::CLI.new(output).run(["--bundle-runtime"]).should eq(0)
+    output.to_s.should eq("crystal\n")
+  end
+
   it "parses daemon paths, bind address, ephemeral port, and pairing" do
     directory = File.join(
       Dir.tempdir,
