@@ -51,7 +51,8 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
 - `[~]` Chat working/waiting/done and remote-root offline transitions match C
   state rules, including animated dots and tooltips; screenshot/event matrix
   remains.
-- `[ ]` Restore updater row and branch-build entry point.
+- `[~]` Updater row, release-channel checks/install/restart, and branch-build
+  entry point are ported; installed-bundle UI/build verification remains.
 
 C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 `src/tree/xd-node.c`, `src/remote/remote-tree.c`, `src/ui/updater.c`.
@@ -133,8 +134,9 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 - `[ ]` Replace provisional GTK dialogs with the exact Adwaita dialog types,
   response appearance, focus, shortcuts, validation, and copy.
 - `[ ]` Port directory browser.
-- `[~]` Branch/PR parsing and shell-safe fetch/build/install command match C;
-  panel UI and long-running build lifecycle remain.
+- `[~]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
+  bounded live output, stop, persistence, and dialog-independent run lifecycle
+  match C; real branch installation verification remains.
 - `[ ]` Match toasts and startup/database error presentation.
 
 C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,

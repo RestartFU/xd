@@ -10,6 +10,7 @@ require "./dialogs"
 require "./dots"
 require "./folder_dialogs"
 require "./sidebar_state"
+require "./updater"
 
 module Xd
   module UI
@@ -300,6 +301,8 @@ module Xd
         @widget.add_css_class("xd-sidebar")
         @widget.add_top_bar(@header)
         @widget.content = scroll
+        @updater = Updater.new(@parent)
+        @widget.add_bottom_bar(@updater.widget)
 
         @remote_state_subscription = @remote.on_state do |_snapshot|
           GLib.idle_add do
@@ -389,6 +392,7 @@ module Xd
 
       def close : Nil
         @remote.unsubscribe(@remote_state_subscription)
+        @updater.close
       end
 
       private def rebuild_tree : Nil
