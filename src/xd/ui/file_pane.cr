@@ -20,6 +20,7 @@ module Xd
       @file_path : String?
       @showing_preview = false
       @saving = false
+      @sequence = 0_i64
       @entries_data = [] of Entry
       @tags = {} of SyntaxToken => Gtk::TextTag
 
@@ -136,6 +137,7 @@ module Xd
         return if @chat_id == chat_id
 
         @chat_id = chat_id
+        @sequence += 1
         @workdir = nil
         @path = ""
         @file_path = nil
@@ -158,36 +160,43 @@ module Xd
           return
         end
 
-        state = call({
+        token = next_token
+        show_status("Loading…", nil)
+        request_async({
           "op"   => JSON::Any.new("chat"),
           "chat" => JSON::Any.new(chat_id),
-        })
-        return unless state
-
-        workdir = state["workdir"]?.try(&.as_s?)
-        unless workdir
-          @workdir = nil
-          show_status(
-            "No Working Directory",
-            "This chat has no files to browse."
-          )
-          return
-        end
-        if @workdir != workdir
-          @workdir = workdir
-          @path = ""
-          @file_path = nil
-          @showing_preview = false
-        end
-
-        if @showing_preview
-          if @preview.modified
-            show_toast("Save or undo changes before reloading.")
-            return
+        }) do |result|
+          next unless active?(token, chat_id)
+          unless state = result.body
+            show_call_error(result)
+            next
           end
-          show_file(@file_path)
-        else
-          show_directory(@path)
+
+          workdir = state["workdir"]?.try(&.as_s?)
+          unless workdir
+            @workdir = nil
+            show_status(
+              "No Working Directory",
+              "This chat has no files to browse."
+            )
+            next
+          end
+          if @workdir != workdir
+            @workdir = workdir
+            @path = ""
+            @file_path = nil
+            @showing_preview = false
+          end
+
+          if @showing_preview
+            if @preview.modified
+              show_toast("Save or undo changes before reloading.")
+              next
+            end
+            show_file(@file_path)
+          else
+            show_directory(@path)
+          end
         end
       end
 
@@ -200,29 +209,35 @@ module Xd
         @path = path
         set_header_path(path)
         show_status("Loading…", nil)
+        token = next_token
 
-        response = call({
+        request_async({
           "op"     => JSON::Any.new("file-browse"),
           "chat"   => JSON::Any.new(chat_id),
           "action" => JSON::Any.new("list"),
           "path"   => JSON::Any.new(path),
-        })
-        return unless response
-
-        entries = response["entries"]?.try(&.as_a?).try do |nodes|
-          nodes.compact_map do |node|
-            value = node.as_h?
-            next unless value
-            name = value["name"]?.try(&.as_s?)
-            next unless name
-            Entry.new(
-              name,
-              value["directory"]?.try(&.as_bool?) || false
-            )
+        }) do |result|
+          next unless active?(token, chat_id)
+          unless response = result.body
+            show_call_error(result)
+            next
           end
-        end || [] of Entry
 
-        fill_entries(path, entries)
+          entries = response["entries"]?.try(&.as_a?).try do |nodes|
+            nodes.compact_map do |node|
+              value = node.as_h?
+              next unless value
+              name = value["name"]?.try(&.as_s?)
+              next unless name
+              Entry.new(
+                name,
+                value["directory"]?.try(&.as_bool?) || false
+              )
+            end
+          end || [] of Entry
+
+          fill_entries(path, entries)
+        end
       end
 
       private def fill_entries(
@@ -302,27 +317,30 @@ module Xd
         @file_path = path
         set_header_path(path)
         show_status("Loading…", nil)
+        token = next_token
 
-        result = @request.call({
+        request_async({
           "op"     => JSON::Any.new("file-browse"),
           "chat"   => JSON::Any.new(chat_id),
           "action" => JSON::Any.new("read"),
           "path"   => JSON::Any.new(path),
-        })
-        unless response = result.body
-          show_read_error(result.error)
-          return
-        end
+        }) do |result|
+          next unless active?(token, chat_id)
+          unless response = result.body
+            show_read_error(result.error)
+            next
+          end
 
-        content = response["content"]?.try(&.as_s?)
-        unless content
-          show_status(
-            "Could Not Open File",
-            "The daemon returned an invalid file."
-          )
-          return
+          content = response["content"]?.try(&.as_s?)
+          unless content
+            show_status(
+              "Could Not Open File",
+              "The daemon returned an invalid file."
+            )
+            next
+          end
+          show_preview_text(path, content)
         end
-        show_preview_text(path, content)
       end
 
       private def show_preview_text(path : String, text : String) : Nil
@@ -350,21 +368,24 @@ module Xd
 
         @saving = true
         update_actions
-        result = @request.call({
+        request_async({
           "op"      => JSON::Any.new("file-browse"),
           "chat"    => JSON::Any.new(chat_id),
           "action"  => JSON::Any.new("write"),
           "path"    => JSON::Any.new(path),
           "content" => JSON::Any.new(content),
-        })
-        @saving = false
-        if result.body
-          @preview.modified = false
-          show_toast("File saved")
-        elsif message = result.error
-          show_toast(message)
+        }) do |result|
+          next unless @chat_id == chat_id && @file_path == path
+
+          @saving = false
+          if result.body
+            @preview.modified = false
+            show_toast("File saved")
+          elsif message = result.error
+            show_toast(message)
+          end
+          update_actions
         end
-        update_actions
       end
 
       private def go_back : Nil
@@ -413,17 +434,32 @@ module Xd
         end
       end
 
-      private def call(
-        request : Hash(String, JSON::Any),
-      ) : Hash(String, JSON::Any)?
-        result = @request.call(request)
-        return result.body if result.body
-
+      private def show_call_error(result : PanelCallResult) : Nil
         show_status(
           "Could Not Open Files",
           result.error || "The directory could not be read."
         )
-        nil
+      end
+
+      private def request_async(
+        fields : Hash(String, JSON::Any),
+        &complete : PanelCallResult -> Nil
+      ) : Nil
+        spawn do
+          result = @request.call(fields)
+          GLib.idle_add do
+            complete.call(result)
+            false
+          end
+        end
+      end
+
+      private def active?(token : Int64, chat_id : String) : Bool
+        token == @sequence && @chat_id == chat_id
+      end
+
+      private def next_token : Int64
+        @sequence += 1
       end
 
       private def show_toast(message : String) : Nil

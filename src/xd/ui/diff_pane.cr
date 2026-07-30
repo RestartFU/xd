@@ -12,6 +12,7 @@ module Xd
       @chat_id : String?
       @branch_mode = false
       @base : String?
+      @sequence = 0_i64
       @summary : Gtk::Label
       @stack : Gtk::Stack
       @sections : DiffFileSections
@@ -83,6 +84,7 @@ module Xd
         return if @chat_id == chat_id
 
         @chat_id = chat_id
+        @sequence += 1
         @base = nil
         clear
       end
@@ -94,34 +96,51 @@ module Xd
           return
         end
 
-        state = call({
+        token = next_token
+        show_empty("Loading changes…")
+        request_async({
           "op"   => JSON::Any.new("chat"),
           "chat" => JSON::Any.new(chat_id),
-        })
-        return unless state
-        unless state["workdir"]?.try(&.as_s?)
-          show_empty("No working directory")
-          return
+        }) do |result|
+          next unless active?(token, chat_id)
+          unless state = result.body
+            show_call_error(result)
+            next
+          end
+          unless state["workdir"]?.try(&.as_s?)
+            show_empty("No working directory")
+            next
+          end
+
+          if @branch_mode
+            read_base(chat_id, token)
+          else
+            read_diff(chat_id, token)
+          end
         end
+      end
 
-        if @branch_mode
-          base = call({
-            "op"   => JSON::Any.new("diff-read"),
-            "chat" => JSON::Any.new(chat_id),
-            "read" => JSON::Any.new("base"),
-          })
-          return unless base
-
+      private def read_base(chat_id : String, token : Int64) : Nil
+        request_async({
+          "op"   => JSON::Any.new("diff-read"),
+          "chat" => JSON::Any.new(chat_id),
+          "read" => JSON::Any.new("base"),
+        }) do |result|
+          next unless active?(token, chat_id)
+          unless base = result.body
+            show_call_error(result)
+            next
+          end
           @base = base["output"]?.try(&.as_s?).try(&.strip)
           unless @base.presence
             show_empty("No branch to compare against")
-            return
+            next
           end
+          read_diff(chat_id, token)
         end
-        read_diff(chat_id)
       end
 
-      private def read_diff(chat_id : String) : Nil
+      private def read_diff(chat_id : String, token : Int64) : Nil
         request = {
           "op"   => JSON::Any.new("diff-read"),
           "chat" => JSON::Any.new(chat_id),
@@ -132,37 +151,57 @@ module Xd
         if @branch_mode
           request["base"] = JSON::Any.new(@base.not_nil!)
         end
-        response = call(request)
-        return unless response
+        request_async(request) do |result|
+          next unless active?(token, chat_id)
+          unless response = result.body
+            show_call_error(result)
+            next
+          end
 
-        output = response["output"]?.try(&.as_s?) || ""
-        if output.empty?
-          clear
-          show_empty("No changes")
-          return
+          output = response["output"]?.try(&.as_s?) || ""
+          if output.empty?
+            clear
+            show_empty("No changes")
+            next
+          end
+
+          parsed = @sections.fill(output)
+          changed = @sections.sections.size
+          noun = changed == 1 ? "file" : "files"
+          @summary.text =
+            "#{changed} #{noun} changed  ·  " \
+            "+#{parsed.additions}  −#{parsed.deletions}"
+          @summary.tooltip_text = nil
+          @stack.visible_child_name = "changes"
         end
-
-        parsed = @sections.fill(output)
-        changed = @sections.sections.size
-        noun = changed == 1 ? "file" : "files"
-        @summary.text =
-          "#{changed} #{noun} changed  ·  " \
-          "+#{parsed.additions}  −#{parsed.deletions}"
-        @summary.tooltip_text = nil
-        @stack.visible_child_name = "changes"
       end
 
-      private def call(
-        request : Hash(String, JSON::Any),
-      ) : Hash(String, JSON::Any)?
-        result = @request.call(request)
-        return result.body if result.body
-
+      private def show_call_error(result : PanelCallResult) : Nil
         show_empty(
           "Could not read changes",
           result.error
         )
-        nil
+      end
+
+      private def request_async(
+        fields : Hash(String, JSON::Any),
+        &complete : PanelCallResult -> Nil
+      ) : Nil
+        spawn do
+          result = @request.call(fields)
+          GLib.idle_add do
+            complete.call(result)
+            false
+          end
+        end
+      end
+
+      private def active?(token : Int64, chat_id : String) : Bool
+        token == @sequence && @chat_id == chat_id
+      end
+
+      private def next_token : Int64
+        @sequence += 1
       end
 
       private def clear : Nil
