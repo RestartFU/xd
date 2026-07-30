@@ -4,6 +4,7 @@ require "gtk4"
 require "set"
 require "./adw"
 require "./host_launch"
+require "./panel_call"
 require "./vte"
 
 module Xd
@@ -13,7 +14,7 @@ module Xd
     # Local and remote terminals use the same RPC contract. AdwTabView state
     # remains device-local, while daemon replay makes reconnects authoritative.
     class TerminalPanel
-      URL_PATTERN = %q((?i)\b(?:https?|ftp)://[^[:space:]<>"']*[-[:alnum:]_~/#?&=%+])
+      URL_PATTERN     = %q((?i)\b(?:https?|ftp)://[^[:space:]<>"']*[-[:alnum:]_~/#?&=%+])
       REGEX_MULTILINE = 0x00000400_u32
 
       PALETTE = {
@@ -46,6 +47,8 @@ module Xd
         getter sessions = {} of String => Session
         getter pending_kills = Set(String).new
         property loaded = false
+        property loading = false
+        property opening = false
         property status : Adw::StatusPage?
         property status_page : Adw::TabPage?
 
@@ -68,10 +71,7 @@ module Xd
       @focus_next = false
 
       def initialize(
-        @call : Proc(
-          Hash(String, JSON::Any),
-          Hash(String, JSON::Any)?,
-        ),
+        @request : PanelCall,
         @on_empty : Proc(Nil),
       )
         @chat_id = nil
@@ -173,7 +173,11 @@ module Xd
         return unless chat_id && view
 
         retry_kills(view)
-        return unless view.loaded || load_sessions(view)
+        unless view.loaded
+          @focus_next = true if focus
+          load_sessions(view, true)
+          return
+        end
 
         if view.sessions.empty?
           @focus_next = focus
@@ -267,44 +271,66 @@ module Xd
         end
       end
 
-      private def load_sessions(view : View) : Bool
+      private def load_sessions(
+        view : View,
+        open_if_empty : Bool = false,
+        select_id : String? = nil,
+      ) : Nil
         chat_id = @chat_id
-        return false unless chat_id
+        return unless chat_id
+        return if view.loading
 
-        response = @call.call({
+        view.loading = true
+        request_async({
           "op"   => JSON::Any.new("terminal-list"),
           "chat" => JSON::Any.new(chat_id),
-        })
-        unless response
-          show_status(
-            view,
-            "Terminal Unavailable",
-            "The daemon is not connected. xd will retry automatically."
-          ) if view.sessions.empty?
-          return false
-        end
+        }) do |result|
+          view.loading = false
+          next unless @current.same?(view) && @chat_id == chat_id
 
-        seen = Set(String).new
-        response["terminals"].as_a.each do |terminal|
-          id = terminal["id"].as_s
-          seen << id
-          add_session(
-            view,
-            id,
-            terminal["title"]?.try(&.as_s?) || "shell",
-            terminal["columns"]?.try(&.as_i64?) || 80_i64,
-            terminal["rows"]?.try(&.as_i64?) || 24_i64,
-            terminal["replay"]?.try(&.as_a?)
-          )
-        end
+          unless response = result.body
+            show_status(
+              view,
+              "Terminal Unavailable",
+              result.error ||
+              "The daemon is not connected. xd will retry automatically."
+            ) if view.sessions.empty?
+            next
+          end
 
-        view.sessions.keys.each do |id|
-          remove_session(view, id) unless seen.includes?(id)
+          seen = Set(String).new
+          response["terminals"].as_a.each do |terminal|
+            id = terminal["id"].as_s
+            seen << id
+            add_session(
+              view,
+              id,
+              terminal["title"]?.try(&.as_s?) || "shell",
+              terminal["columns"]?.try(&.as_i64?) || 80_i64,
+              terminal["rows"]?.try(&.as_i64?) || 24_i64,
+              terminal["replay"]?.try(&.as_a?)
+            )
+          end
+
+          view.sessions.keys.each do |id|
+            remove_session(view, id) unless seen.includes?(id)
+          end
+          view.loaded = true
+          clear_status(view) unless view.sessions.empty?
+          update_title
+
+          if id = select_id
+            if session = view.sessions[id]?
+              view.tabs.selected_page = session.page
+            end
+          end
+          if view.sessions.empty? && open_if_empty
+            open_terminal(true)
+          elsif @focus_next
+            @focus_next = false
+            selected_terminal(view).try(&.grab_focus)
+          end
         end
-        view.loaded = true
-        clear_status(view) unless view.sessions.empty?
-        update_title
-        true
       end
 
       private def add_session(
@@ -469,6 +495,8 @@ module Xd
         chat_id = @chat_id
         view = @current
         return unless chat_id && view
+        return if view.opening
+        view.opening = true
 
         if view.sessions.empty?
           show_status(
@@ -477,31 +505,29 @@ module Xd
             "Waiting for the daemon"
           )
         end
-        response = @call.call({
+        request_async({
           "op"      => JSON::Any.new("terminal-open"),
           "chat"    => JSON::Any.new(chat_id),
           "columns" => JSON::Any.new(80_i64),
           "rows"    => JSON::Any.new(24_i64),
           "reuse"   => JSON::Any.new(reuse),
-        })
-        unless response
-          @focus_next = false
-          show_status(
-            view,
-            "Could Not Open Terminal",
-            "The daemon did not answer. xd will retry after reconnecting."
-          )
-          return
-        end
+        }) do |result|
+          view.opening = false
+          next unless @current.same?(view) && @chat_id == chat_id
 
-        view.loaded = false
-        load_sessions(view)
-        if session = view.sessions[response["id"].as_s]?
-          view.tabs.selected_page = session.page
-          if @focus_next
+          unless response = result.body
             @focus_next = false
-            session.terminal.grab_focus
+            show_status(
+              view,
+              "Could Not Open Terminal",
+              result.error ||
+              "The daemon did not answer. xd will retry after reconnecting."
+            )
+            next
           end
+
+          view.loaded = false
+          load_sessions(view, false, response["id"].as_s)
         end
       end
 
@@ -518,11 +544,12 @@ module Xd
         session = session_for_page(view, page)
         if session && !session.removing
           view.pending_kills << session.id
-          response = @call.call({
+          request_async({
             "op"       => JSON::Any.new("terminal-kill"),
             "terminal" => JSON::Any.new(session.id),
-          })
-          view.pending_kills.delete(session.id) if response
+          }) do |result|
+            view.pending_kills.delete(session.id) if result.body
+          end
         end
         @on_empty.call if @current.same?(view) && view.tabs.n_pages == 1
         false
@@ -549,11 +576,12 @@ module Xd
 
       private def retry_kills(view : View) : Nil
         view.pending_kills.to_a.each do |id|
-          response = @call.call({
+          request_async({
             "op"       => JSON::Any.new("terminal-kill"),
             "terminal" => JSON::Any.new(id),
-          })
-          view.pending_kills.delete(id) if response
+          }) do |result|
+            view.pending_kills.delete(id) if result.body
+          end
         end
       end
 
@@ -609,11 +637,12 @@ module Xd
       end
 
       private def send_input(id : String, data : Bytes) : Nil
-        @call.call({
+        encoded = Base64.strict_encode(data)
+        request_async({
           "op"       => JSON::Any.new("terminal-input"),
           "terminal" => JSON::Any.new(id),
-          "data"     => JSON::Any.new(Base64.strict_encode(data)),
-        })
+          "data"     => JSON::Any.new(encoded),
+        }) { |_result| }
       end
 
       private def sync_size : Nil
@@ -627,12 +656,25 @@ module Xd
 
         session.columns = columns
         session.rows = rows
-        @call.call({
+        request_async({
           "op"       => JSON::Any.new("terminal-resize"),
           "terminal" => JSON::Any.new(session.id),
           "columns"  => JSON::Any.new(columns),
           "rows"     => JSON::Any.new(rows),
-        })
+        }) { |_result| }
+      end
+
+      private def request_async(
+        fields : Hash(String, JSON::Any),
+        &complete : PanelCallResult -> Nil
+      ) : Nil
+        spawn do
+          result = @request.call(fields)
+          GLib.idle_add do
+            complete.call(result)
+            false
+          end
+        end
       end
 
       private def update_title : Nil

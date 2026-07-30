@@ -16,10 +16,6 @@ module Xd
       @view_key : String?
       @repository_page : String?
 
-      @call : Proc(
-        Hash(String, JSON::Any),
-        Hash(String, JSON::Any)?,
-      )
       @diff_pane : DiffPane
       @file_pane : FilePane
       @terminal_panel : TerminalPanel
@@ -31,9 +27,6 @@ module Xd
         @chat_id = nil
         @view_key = nil
         @repository_page = nil
-        @call = ->(request : Hash(String, JSON::Any)) {
-          @request.call(request).body
-        }
         @diff_pane = DiffPane.new(@request)
         @file_pane = FilePane.new(@request)
 
@@ -46,7 +39,7 @@ module Xd
         @repository_widget.add_css_class("xd-divider-left")
         @repository_widget.visible = false
 
-        @terminal_panel = TerminalPanel.new(@call, on_terminal_empty)
+        @terminal_panel = TerminalPanel.new(@request, on_terminal_empty)
         @terminal_widget = @terminal_panel.widget
         @terminal_widget.add_css_class("xd-tool-panel")
         @terminal_widget.add_css_class("xd-divider-top")
