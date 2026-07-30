@@ -330,7 +330,11 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
   The panel exposes the browser action and one-time code without showing raw
   CLI output. Local UI and an actual paired TLS client cover status, start,
   cancellation, process cleanup, logout, and stale-instruction retirement.
-  One real bundled OAuth completion remains.
+  Authentication pipe reads explicitly yield to GTK and publish only changed
+  structured instructions. A million-line synthetic CLI login leaves Escape
+  responsive in 21 ms and the visible Close button responsive in 110 ms while
+  cancellation cleans up the process. One real bundled OAuth completion
+  remains.
 - `[~]` Claude status, browser login, pasted-code input, cancellation, and
   logout use the same structured service and panel. Local UI and an actual
   paired TLS client cover clean code entry, signed-in state, sign-out, and

@@ -347,6 +347,10 @@ module Xd
           text = String.new(buffer[0, count])
           collected << text
           append_output(provider, serial, text) if command.login?
+          # Pipes can remain continuously readable while a CLI draws a
+          # spinner. Crystal fibers are cooperative, so yield even when the
+          # descriptor never reaches EAGAIN or the desktop main loop starves.
+          Fiber.yield
         end
       rescue IO::Error
       ensure
@@ -367,7 +371,21 @@ module Xd
             start = entry.output.bytesize - OUTPUT_LIMIT
             entry.output = entry.output.byte_slice(start, OUTPUT_LIMIT)
           end
+          previous = {
+            entry.login_url,
+            entry.device_code,
+            entry.needs_input,
+          }
           parse_instructions(entry)
+          current = {
+            entry.login_url,
+            entry.device_code,
+            entry.needs_input,
+          }
+          # Raw CLI output is deliberately absent from the product UI. Emit
+          # only when structured instructions change; otherwise animated CLI
+          # output can enqueue thousands of redundant GTK updates.
+          next nil if current == previous
           entry.snapshot
         end
         publish_state(snapshot) if snapshot

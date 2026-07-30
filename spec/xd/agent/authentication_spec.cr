@@ -20,6 +20,7 @@ private def await_auth_state(
 end
 
 private def with_authentication_fixture(
+  noisy : Bool = false,
   & : Xd::Agent::Authentication, Array(String) ->
 ) : Nil
   directory = File.join(
@@ -29,56 +30,11 @@ private def with_authentication_fixture(
   state = File.join(directory, "state")
   executable = File.join(directory, "agent-auth")
   Dir.mkdir_p(state)
-  File.write(executable, <<-'SH')
-    #!/bin/sh
-    set -eu
-
-    case "$*" in
-      "login status")
-        if test -f "$AUTH_STATE/codex"; then
-          echo "Logged in using ChatGPT" >&2
-          exit 0
-        fi
-        echo "Not logged in" >&2
-        exit 1
-        ;;
-      "auth status --json")
-        if test -f "$AUTH_STATE/claude"; then
-          printf '%s\n' '{"loggedIn":true,"authMethod":"claudeAi","apiProvider":"firstParty"}'
-          exit 0
-        fi
-        printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
-        exit 1
-        ;;
-      "login --device-auth")
-        printf '\033[90mFollow these steps to sign in:\033[0m\n'
-        printf '1. Open this link in your browser\n'
-        printf ' https://auth.openai.com/codex/device\n'
-        printf '2. Enter this one-time code (expires in 15 minutes)\n'
-        printf ' \033[94mABCD-EFGH\033[0m\n'
-        IFS= read -r _
-        touch "$AUTH_STATE/codex"
-        ;;
-      "auth login")
-        printf 'Opening browser to sign in…\n'
-        printf '%s\n' "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=test"
-        printf 'Paste code here if prompted > '
-        IFS= read -r code
-        test "$code" = "CLAUDE-1234"
-        touch "$AUTH_STATE/claude"
-        ;;
-      "logout")
-        rm -f "$AUTH_STATE/codex"
-        ;;
-      "auth logout")
-        rm -f "$AUTH_STATE/claude"
-        ;;
-      *)
-        echo "unexpected arguments: $*" >&2
-        exit 2
-        ;;
-    esac
-    SH
+  fixture = File.expand_path(
+    "../../../tests/fixtures/agent-auth.sh",
+    __DIR__
+  )
+  FileUtils.cp(fixture, executable)
   File.chmod(executable, 0o700)
 
   events = [] of String
@@ -88,7 +44,10 @@ private def with_authentication_fixture(
       events_mutex.synchronize { events << name }
     },
     resolver: ->(_provider : String) { executable },
-    environment: {"AUTH_STATE" => state}
+    environment: {
+      "AUTH_STATE" => state,
+      "AUTH_NOISY" => noisy ? "1" : "0",
+    }
   )
 
   begin
@@ -200,6 +159,35 @@ describe Xd::Agent::Authentication do
       ) do
         authentication.cancel("codex")
       end
+    end
+  end
+
+  it "keeps noisy login output scheduler-friendly and coalesces events" do
+    with_authentication_fixture(noisy: true) do |authentication, events|
+      authentication.login("codex")
+      heartbeat = 0
+      running = true
+      spawn do
+        while running
+          heartbeat += 1
+          Fiber.yield
+        end
+      end
+
+      deadline = Time.instant + 3.seconds
+      until authentication.snapshots.any? do |snapshot|
+              snapshot.provider == "codex" &&
+              snapshot.login_url &&
+              snapshot.device_code
+            end
+        fail "Codex noisy login never returned structured data" if Time.instant >= deadline
+        sleep 5.milliseconds
+      end
+      running = false
+
+      heartbeat.should be > 10
+      events.count("agent-auth-changed").should be <= 4
+      authentication.cancel("codex")
     end
   end
 end
