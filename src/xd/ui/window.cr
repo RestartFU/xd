@@ -58,6 +58,7 @@ module Xd
       @diff_button : Gtk::ToggleButton
       @header_sizes : Gtk::SizeGroup
       @syncing_panes = false
+      @search_dialog : SearchDialog?
 
       def initialize(
         application : Gtk::Application,
@@ -68,6 +69,7 @@ module Xd
         @client = local_client
         @active_chat = nil
         @stream_label = nil
+        @search_dialog = nil
         @settings = Gio::Settings.new(APP_ID)
         @widget = Adw::ApplicationWindow.new(application: application)
         @widget.title = "xd"
@@ -374,16 +376,26 @@ module Xd
       end
 
       private def show_search_dialog : Nil
+        if dialog = @search_dialog
+          dialog.present
+          return
+        end
+
         endpoint = @client
-        SearchDialog.new(
+        dialog = SearchDialog.new(
           @widget,
           ->(request : Hash(String, JSON::Any)) {
             call_on(endpoint, request)
           },
           ->(id : String, title : String) {
             open_chat(endpoint, id, title)
+          },
+          -> {
+            @search_dialog = nil
           }
-        ).present
+        )
+        @search_dialog = dialog
+        dialog.present
       end
 
       private def pane_button(

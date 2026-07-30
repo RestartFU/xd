@@ -12,6 +12,7 @@ module Xd
           Hash(String, JSON::Any)?,
         ),
         @on_chat : Proc(String, String, Nil),
+        @on_close : Proc(Nil),
       )
         @rows = {} of UInt64 => Tuple(String, String)
 
@@ -60,6 +61,7 @@ module Xd
         toolbar.add_top_bar(header)
         toolbar.content = @stack
         @dialog.child = toolbar
+        @dialog.closed_signal.connect { @on_close.call }
       end
 
       def present : Nil
