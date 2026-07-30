@@ -248,7 +248,7 @@ module Xd
           if left.directory != right.directory
             left.directory ? -1 : 1
           else
-            left.name <=> right.name
+            LibGLib.g_utf8_collate(left.name, right.name)
           end
         end
       end
