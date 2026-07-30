@@ -59,6 +59,7 @@ module Xd
             ensure
               outcome.after_write.try(&.call)
             end
+            Fiber.yield
           end
         ensure
           if id = subscription

@@ -79,4 +79,36 @@ describe Xd::Agent::ExecSession do
     session.cancel
     await_finish(finished).should eq({true, nil})
   end
+
+  it "yields while a CLI continuously writes process output" do
+    finished = Channel(Tuple(Bool, String?)).new(1)
+    session = Xd::Agent::ExecSession.new(
+      Xd::Agent::Catalog::CLAUDE,
+      Xd::Agent::RunSpec.new("unused"),
+      ENV.to_h,
+      ->(_event : Xd::Agent::Event) { },
+      ->(ok : Bool, message : String?) { finished.send({ok, message}) },
+      arguments: [
+        "/bin/sh",
+        "-c",
+        "i=0; while [ $i -lt 100000 ]; do " \
+        "printf 'continuous output %s\\n' \"$i\" >&2; " \
+        "i=$((i + 1)); done",
+      ]
+    )
+
+    session.start
+    heartbeat = Channel(Time::Instant).new(1)
+    started = Time.instant
+    spawn { heartbeat.send(Time.instant) }
+    select
+    when tick = heartbeat.receive
+      (tick - started).should be < 250.milliseconds
+    when timeout(250.milliseconds)
+      fail "continuous CLI output starved the scheduler"
+    end
+    await_finish(finished).should eq({true, nil})
+  ensure
+    session.try(&.cancel)
+  end
 end

@@ -93,6 +93,7 @@ module Xd
           @parser.feed_line(line.chomp).each do |event|
             handle_event(event)
           end
+          Fiber.yield
         end
       rescue IO::Error
       ensure
@@ -114,6 +115,7 @@ module Xd
               @stderr_text = @stderr_text.byte_slice(start, STDERR_LIMIT)
             end
           end
+          Fiber.yield
         end
       rescue IO::Error
       ensure

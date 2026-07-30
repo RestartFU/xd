@@ -76,6 +76,59 @@ private def await_cli_event(
 end
 
 describe Xd::Daemon::Client do
+  it "yields while a daemon continuously streams events" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-burst-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    server = UNIXServer.new(path)
+    start = Channel(Nil).new
+    total = 20_000
+    spawn do
+      socket = server.accept
+      start.receive
+      total.times do |index|
+        socket << {
+          "event" => "burst",
+          "id"    => index,
+        }.to_json << '\n'
+      end
+      socket.flush
+    ensure
+      socket.try(&.close)
+    end
+
+    client = Xd::Daemon::Client.local(path)
+    finished = Channel(Nil).new(1)
+    count = 0
+    client.subscribe do |_event|
+      count += 1
+      finished.send(nil) if count == total
+    end
+
+    start.send(nil)
+    heartbeat = Channel(Time::Instant).new(1)
+    started = Time.instant
+    spawn { heartbeat.send(Time.instant) }
+    select
+    when tick = heartbeat.receive
+      (tick - started).should be < 250.milliseconds
+    when timeout(250.milliseconds)
+      fail "continuous daemon events starved the scheduler"
+    end
+    select
+    when finished.receive
+    when timeout(3.seconds)
+      fail "daemon event burst did not finish"
+    end
+  ensure
+    client.try(&.close)
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
   it "uses ordered calls and events over local IPC" do
     with_client_server do |server, _engine, _store, directory|
       path = File.join(directory, "daemon.sock")

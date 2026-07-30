@@ -290,6 +290,7 @@ module Xd
           end
           break if count == 0
           break unless record_output(buffer[0, count.to_i].dup)
+          Fiber.yield
         end
       ensure
         natural_exit unless @lock.synchronize { @closing }
@@ -327,6 +328,7 @@ module Xd
             @lock.synchronize do
               @pending_bytes -= data.size
             end
+            Fiber.yield
           end
         end
       rescue Channel::ClosedError

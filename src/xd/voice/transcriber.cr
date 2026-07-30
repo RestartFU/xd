@@ -147,6 +147,7 @@ module Xd
           break if count == 0
           remaining = OUTPUT_LIMIT - target.size
           target.write(buffer[0, Math.min(count, remaining)]) if remaining > 0
+          Fiber.yield
         end
       rescue IO::Error
       ensure

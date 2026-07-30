@@ -136,6 +136,7 @@ module Xd
               (total * 100 // @expected_size).to_i
             )
             set_progress(percent, on_progress)
+            Fiber.yield
           end
         end
         check_cancelled

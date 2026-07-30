@@ -305,6 +305,11 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 ## Daemon, storage, and remote behavior
 
 - `[x]` Local Unix IPC and remote TLS dispatch through one `Daemon::Engine`.
+- `[x]` Continuously readable Codex/Claude pipes, client/server sockets,
+  terminal PTYs, updater/auth streams, and voice streams yield cooperatively
+  after bounded chunks. Regression bursts of 100,000 CLI lines and 20,000
+  daemon events keep scheduler heartbeats below 250 milliseconds instead of
+  starving GTK.
 - `[x]` Remote pairing uses a short-lived code, token, and pinned certificate.
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
@@ -387,7 +392,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (248 examples).
+- `[x]` Crystal specs pass in Docker (250 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

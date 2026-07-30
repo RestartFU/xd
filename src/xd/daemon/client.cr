@@ -215,6 +215,7 @@ module Xd
               answer.send(ClientAnswer.new(nil, message))
             end
           end
+          Fiber.yield
         end
         disconnect("Daemon closed the connection.")
       rescue error : JSON::ParseException

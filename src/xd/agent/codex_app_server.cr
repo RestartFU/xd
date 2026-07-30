@@ -125,6 +125,7 @@ module Xd
       ) : Nil
         while line = output.gets
           @protocol.receive_line(line.chomp)
+          Fiber.yield
         end
       rescue IO::Error
       ensure
@@ -146,6 +147,7 @@ module Xd
               @stderr_text = @stderr_text.byte_slice(start, STDERR_LIMIT)
             end
           end
+          Fiber.yield
         end
       rescue IO::Error
       ensure
