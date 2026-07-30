@@ -180,11 +180,13 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   storage and transcription run through the selected chat's daemon, so paired
   chats install and execute Whisper on the remote machine. Targeted daemon
   events keep transcripts private to the requesting Unix/TLS connection. The
-  relocatable bundle carries the PulseAudio runtime and CPU-dispatched
-  whisper.cpp build. Installed-bundle GTK proof verifies the idle microphone
-  control; the current inline first-use prompt, progress bar, and responsive
-  Cancel path pass fatal-warning GTK smoke. Actual paired TLS specs verify
-  remote execution and event isolation.
+  relocatable Linux bundle carries the PulseAudio runtime and CPU-dispatched
+  whisper.cpp build. macOS and Windows select PortAudio behind the same
+  recorder contract; the Docker build compiles and links that backend without
+  touching microphone hardware. Installed-bundle GTK proof verifies the idle
+  microphone control; the current inline first-use prompt, progress bar, and
+  responsive Cancel path pass fatal-warning GTK smoke. Actual paired TLS specs
+  verify remote execution and event isolation.
 - `[~]` Context/branch/worktree line below composer uses the C copy, ellipsis,
   tooltip, and geometry. The daemon computes it once for Unix and TLS clients;
   installed GTK geometry is verified; live branch-change verification remains.
@@ -418,7 +420,8 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
   discovery now handles both flat payloads and macOS `Contents/Resources`,
   prepares relocatable GTK/GIO/font caches in-process, resolves bundled tools
   and portable Git, and removes the Git pane's POSIX-shell dependency. Native
-  build/bundle jobs plus platform terminal, voice capture, and local IPC remain.
+  build/bundle jobs plus platform terminal, local IPC, and PortAudio delivery
+  remain.
 - `[x]` README and CI use the Crystal Docker workflow; no active workflow builds
   or publishes Meson/C artifacts.
 - `[ ]` Remove Odin experiment and old C implementation only after every C
@@ -428,7 +431,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (275 examples).
+- `[x]` Crystal specs pass in Docker (276 examples).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.

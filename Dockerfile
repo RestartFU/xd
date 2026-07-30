@@ -66,6 +66,7 @@ RUN apt-get update \
       libgirepository1.0-dev \
       libgtk-4-dev \
       libadwaita-1-dev \
+      portaudio19-dev \
       libpulse-dev \
       libsqlite3-dev \
       libvte-2.91-gtk4-dev \
@@ -90,6 +91,9 @@ COPY tests/fixtures ./tests/fixtures
 RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec --error-trace \
+ && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+      crystal spec spec/xd/voice/recorder_spec.cr \
+        -Dxd_portaudio_backend --error-trace \
  && mkdir -p /crystal-build \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal build src/xd.cr --release --no-debug -o /crystal-build/xd \
