@@ -41,7 +41,9 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
 - `[x]` Local and one paired remote root share one sidebar.
 - `[x]` Paired remote retains cached rows while offline and reconnects.
 - `[~]` Folder/chat create, rename, move, delete, context, and settings actions
-  route through one daemon endpoint interface.
+  route through one daemon endpoint interface. Tree loads and every mutation
+  leave GTK immediately; generation checks discard stale reloads after a newer
+  local/remote state request.
 - `[~]` C `GtkTreeListModel`/`GtkListView` rows, indentation, expanders,
   selection, activation, expansion persistence, and state dots are ported and
   populated-tree startup is screenshot-verified. Inline create/rename is
@@ -205,8 +207,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   becomes `Nothing Changed` after commit, the button advances to `Push`, and a
   refused push opens `Git Refused` without leaking into the chat footer.
 - `[~]` Terminal RPC, PTY output, input, resize, replay, and kill operations use
-  the shared daemon. An installed local client verifies each operation across
-  UI disconnect/reconnect; paired TLS proof remains.
+  the shared daemon. List/open/kill/input/resize requests never wait in GTK,
+  and duplicate asynchronous opens are suppressed. An installed local client
+  verifies each operation across UI disconnect/reconnect; paired TLS proof
+  remains.
 - `[~]` Daemon-backed multi-session tabs, centered single-session title,
   add/kill controls, close request, focus, replay, resize, and per-chat view
   retention work. C palette/font, copy/paste, URL handling, and daemon-terminal
@@ -223,8 +227,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   criticals: root/nested navigation, row geometry, Crystal colours, modified
   sensitivity, guard/save toasts, persisted edits, and binary/large-file
   status pages all match. Pane errors no longer leak into the chat footer.
-  Cancellable nonblocking reads and paired-TLS latency/cancellation proof
-  remain.
+  Reads/writes are asynchronous and generation-scoped so stale remote replies
+  cannot replace a newly selected chat. Explicit cancellation and paired-TLS
+  latency proof remain.
 - `[~]` Working and branch scopes use the C header, linked toggles, refresh,
   summary/empty/error states, and virtual `GtkListView` file sections.
   Per-file expansion, collapsed-path memory, 80-row chunks, scroll restoration,
@@ -233,8 +238,9 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   fatal GTK criticals across multi-file working changes, branch-vs-main,
   refresh after collapse, clean/error states, and a 180-line patch; the
   80→81 chunk boundary has no visual seam and collapsing preserves its header
-  position. Cancellable nonblocking reads, paired-TLS latency/cancellation,
-  and live Git-head refresh proof remain.
+  position. Diff state/base/patch requests are asynchronous and
+  generation-scoped. Explicit cancellation, paired-TLS latency, and live
+  Git-head refresh proof remain.
 - `[~]` Pane visibility persists per local/remote chat in the same typed
   `a{su}` device map. Local restart/UI restoration is verified; multi-chat and
   paired restart matrices remain.
@@ -263,7 +269,8 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   fatal GTK criticals.
 - `[~]` Folder settings now uses the C `AdwPreferencesDialog`, groups, combo,
   entry and path rows, inherited subtitles, suffix controls, and save-on-close
-  lifecycle. Path browsing stays daemon-backed for both transports. The exact
+  lifecycle. Initial state and saving are asynchronous; path browsing stays
+  daemon-backed for both transports. The exact
   `634879f` bundle is screenshot-verified and persists a browser-chosen path
   on close with fatal GTK warnings enabled. Agent Context now matches the C
   undecorated 620×500 panel, editor frame, status, footer, async load/save,
@@ -313,7 +320,9 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   terminal PTYs, updater/auth streams, and voice streams yield cooperatively
   after bounded chunks. Regression bursts of 100,000 CLI lines and 20,000
   daemon events keep scheduler heartbeats below 250 milliseconds instead of
-  starving GTK.
+  starving GTK. The client UI additionally coalesces adjacent text deltas and
+  drains one event source in 32-event batches, preventing fast agent output
+  from flooding GLib's idle queue; ordering/bounds/rescheduling have specs.
 - `[x]` Remote pairing uses a short-lived code, token, and pinned certificate.
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
