@@ -294,8 +294,13 @@ module Xd
         border-radius: 5px;
       }
       tabbar { background: none; box-shadow: none; }
-      tabbar tabbox { background: none; margin: 0 -12px; padding: 0; }
-      tabbar tabbox > tabboxchild { margin: 0 -4px; }
+      tabbar tabbox {
+        background: none;
+        margin: 0 -12px;
+        padding: 0;
+        min-width: 24px;
+      }
+      tabbar tabbox > tabboxchild { margin: 0 -4px; min-width: 8px; }
       tabbar tabbox > separator {
         min-width: 0;
         min-height: 0;
