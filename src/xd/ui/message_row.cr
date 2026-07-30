@@ -2,6 +2,7 @@ require "gtk4"
 require "../markdown"
 require "./adw"
 require "./host_launch"
+require "./message_content"
 
 module Xd
   module UI
@@ -112,13 +113,62 @@ module Xd
         clear_body
         return if @text.empty?
 
+        unless @kind.assistant?
+          append_prose(Markdown.urls_to_pango(@text))
+          return
+        end
+
+        MessageContent.parse(@text).each do |part|
+          case part.kind
+          when MessagePartKind::Prose
+            append_prose(Markdown.to_pango(part.text))
+          when MessagePartKind::Code
+            @body.append(make_code_card(part.text, false, true))
+          when MessagePartKind::Diff
+            @body.append(make_code_card(part.text, true, false))
+          when MessagePartKind::Table
+            @body.append(make_code_card(part.text, false, false))
+          end
+        end
+      end
+
+      private def append_prose(markup : String) : Nil
+        return if markup.empty?
+
         label = make_text_label
-        label.markup = if @kind.assistant?
-                         Markdown.to_pango(@text)
-                       else
-                         Markdown.urls_to_pango(@text)
-                       end
+        label.markup = markup
         @body.append(label)
+      end
+
+      private def make_code_card(
+        code : String,
+        diff : Bool,
+        wrap : Bool,
+      ) : Gtk::Box
+        label = Gtk::Label.new(code)
+        label.wrap = wrap
+        label.wrap_mode = :word_char
+        label.xalign = 0_f32
+        label.selectable = true
+        label.add_css_class("xd-body")
+
+        content : Gtk::Widget
+        if wrap
+          content = label
+        else
+          scroller = Gtk::ScrolledWindow.new
+          scroller.set_policy(:automatic, :never)
+          scroller.propagate_natural_height = true
+          scroller.child = label
+          content = scroller
+        end
+        content.hexpand = true
+
+        card = Gtk::Box.new(:vertical, 0)
+        card.add_css_class("xd-code")
+        card.add_css_class("xd-inline-diff") if diff
+        card.append(content)
+        card
       end
 
       private def make_text_label : Gtk::Label

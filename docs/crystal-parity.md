@@ -70,7 +70,8 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   safe links, streaming fragments, lists, tables, and Pango validation now
   match all 18 C Markdown test cases. Basic `AdwBin`/card/body hierarchy,
   user-only bubbles, literal streaming, source tooltips, and host link opening
-  are integrated; structured code/diff/image cards remain.
+  are integrated. Fenced code, unfinished fences, diff fences, and tables use
+  the C card split and geometry; diff syntax and image cards remain.
 - `[ ]` Port transcript pagination, four-page cache, and 100-message page size.
 - `[ ]` Match bottom pinning, history loading, scroll restoration, and hidden
   scrollbar behavior.
@@ -200,7 +201,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (159 examples).
+- `[x]` Crystal specs pass in Docker (165 examples).
 - `[ ]` Release bundle builds from a clean checkout in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
