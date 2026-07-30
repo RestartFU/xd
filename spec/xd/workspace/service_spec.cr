@@ -60,6 +60,21 @@ describe Xd::Workspace::Service do
     end
   end
 
+  it "changes its tree signature after managed folders disappear" do
+    with_workspace do |service, _store, root|
+      parent = File.join(root, "Workspace")
+      child = File.join(parent, "Managed")
+      Dir.mkdir_p(child)
+      Xd::Workspace::SettingsFile.ensure(parent)
+      Xd::Workspace::SettingsFile.ensure(child)
+      before = service.tree_signature
+
+      FileUtils.rm_r(child)
+
+      service.tree_signature.should_not eq(before)
+    end
+  end
+
   it "treats repositories as leaves" do
     with_workspace do |service, _store, root|
       repository = File.join(root, "Repo")

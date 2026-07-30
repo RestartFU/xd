@@ -55,7 +55,10 @@ module Xd
           end
         end
 
-        def update(response : Hash(String, JSON::Any)) : Nil
+        def update(response : Hash(String, JSON::Any)) : Array(String)
+          previous_chats = @chats.values.flatten.map do |chat|
+            chat["id"].as_s
+          end
           @folder_ids.clear
           @folder_names.clear
           @folder_parents.clear
@@ -79,6 +82,10 @@ module Xd
             @selected_folder = @children[ROOT].first?
           end
           @loaded = true
+          current_chats = @chats.values.flatten.map do |chat|
+            chat["id"].as_s
+          end
+          previous_chats - current_chats
         end
 
         def clear : Nil
@@ -375,12 +382,18 @@ module Xd
           GLib.idle_add do
             unless @closed || generation != @reload_generation
               if response = local.body
-                @local_source.update(response)
+                removed = @local_source.update(response)
+                removed.each do |id|
+                  @on_chat_deleted.call(@local_source.endpoint, id)
+                end
               elsif message = local.error
                 @on_error.call(message)
               end
               if response = remote.try(&.body)
-                @remote_source.update(response)
+                removed = @remote_source.update(response)
+                removed.each do |id|
+                  @on_chat_deleted.call(@remote_source.endpoint, id)
+                end
               end
               rebuild_tree
             end

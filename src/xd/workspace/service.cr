@@ -1,4 +1,5 @@
 require "file_utils"
+require "digest/sha256"
 require "../storage/workflow_state"
 require "./settings"
 
@@ -38,6 +39,15 @@ module Xd
         end
 
         TreeSnapshot.new(folders, chats)
+      end
+
+      # Filesystem-only identity used by the daemon's external-change monitor.
+      # Include settings contents because replacing an id changes every client
+      # node even when the directory name stays the same.
+      def tree_signature : String
+        digest = Digest::SHA256.new
+        append_tree_signature(digest, @root, root: true)
+        digest.final.hexstring
       end
 
       def find_folder(folder_id : String) : String
@@ -328,6 +338,30 @@ module Xd
             info = File.info?(child, follow_symlinks: false)
             child if info && info.type.directory?
           end
+      rescue error : File::Error
+        raise Error.new("Cannot scan #{path}: #{error.message}")
+      end
+
+      private def append_tree_signature(
+        digest : Digest::SHA256,
+        path : String,
+        root : Bool,
+      ) : Nil
+        directory_children(path).each do |child|
+          next unless root || SettingsFile.managed?(child)
+
+          digest.update(child.byte_slice(@root.bytesize, child.bytesize - @root.bytesize))
+          digest.update(Bytes[0_u8])
+          settings_path = SettingsFile.path_for(child)
+          digest.update(File.read(settings_path)) if File.file?(settings_path)
+          digest.update(Bytes[0_u8])
+
+          if File.exists?(File.join(child, ".git"))
+            digest.update("repository")
+          else
+            append_tree_signature(digest, child, root: false)
+          end
+        end
       rescue error : File::Error
         raise Error.new("Cannot scan #{path}: #{error.message}")
       end

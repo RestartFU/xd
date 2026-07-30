@@ -18,6 +18,7 @@ require "./repository_monitor"
 require "./search"
 require "./terminals"
 require "./voice_jobs"
+require "./workspace_monitor"
 
 module Xd
   module Daemon
@@ -52,6 +53,7 @@ module Xd
         agent_authorizer : Agent::Manager::Authorizer? = nil,
         cli_version_resolver : Agent::CliVersions::Resolver? = nil,
         cli_version_environment : Hash(String, String)? = nil,
+        workspace_monitor_interval : Time::Span = WorkspaceMonitor::INTERVAL,
         voice_model_factory : VoiceJobs::ModelFactory? = nil,
         voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
       )
@@ -60,6 +62,16 @@ module Xd
           @store
         )
         @events = EventBus.new
+        @workspace_monitor = WorkspaceMonitor.new(
+          -> { @workspaces.tree_signature },
+          -> {
+            publish_async_event(
+              "tree",
+              {} of String => JSON::Any
+            )
+          },
+          workspace_monitor_interval
+        )
         @filesystem = Filesystem.new(@store, @workspaces)
         @images = Images.new
         @search = Search.new(@store)
@@ -235,6 +247,7 @@ module Xd
       end
 
       def close : Nil
+        @workspace_monitor.close
         @repository_monitor.close
         @terminals.close
         @voice.close
@@ -553,6 +566,7 @@ module Xd
 
       private def tree : Protocol::Response
         snapshot = @workspaces.snapshot
+        @workspace_monitor.acknowledge
 
         folders = snapshot.folders.map do |folder|
           fields = {
@@ -1404,6 +1418,7 @@ module Xd
              Protocol::Operation::NewChat,
              Protocol::Operation::RenameChat,
              Protocol::Operation::DeleteChat
+          @workspace_monitor.acknowledge
           [protocol_event("tree")]
         when Protocol::Operation::SetOption
           fields = {} of String => JSON::Any

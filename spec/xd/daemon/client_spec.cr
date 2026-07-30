@@ -6,6 +6,7 @@ require "../../../src/xd/daemon/client"
 require "../../../src/xd/daemon/server"
 
 private def with_client_server(
+  workspace_monitor_interval = Xd::Daemon::WorkspaceMonitor::INTERVAL,
   & : Xd::Daemon::Server, Xd::Daemon::Engine, Xd::Storage::Store, String ->
 ) : Nil
   directory = File.join(
@@ -15,7 +16,8 @@ private def with_client_server(
   store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
   engine = Xd::Daemon::Engine.new(
     store,
-    token_generator: -> { "client-token" }
+    token_generator: -> { "client-token" },
+    workspace_monitor_interval: workspace_monitor_interval
   )
   server = Xd::Daemon::Server.new(engine)
 
@@ -76,6 +78,44 @@ private def await_cli_event(
 end
 
 describe Xd::Daemon::Client do
+  it "publishes tree changes after a managed folder is deleted externally" do
+    with_client_server(10.milliseconds) do |server, _engine, _store, directory|
+      path = File.join(directory, "daemon.sock")
+      server.listen_local(path)
+      client = Xd::Daemon::Client.local(path)
+      events = Channel(Hash(String, JSON::Any)).new(4)
+      client.subscribe { |event| events.send(event) }
+
+      client.call({
+        "op"   => JSON::Any.new("new-folder"),
+        "name" => JSON::Any.new("Manual deletion"),
+      })
+      select
+      when event = events.receive
+        event["event"].as_s.should eq("tree")
+      when timeout(1.second)
+        fail "folder creation did not publish its tree event"
+      end
+
+      folder = File.join(directory, "Workspaces", "Manual deletion")
+      File.exists?(
+        File.join(folder, Xd::Workspace::SETTINGS_FILE)
+      ).should be_true
+      FileUtils.rm_r(folder)
+
+      select
+      when event = events.receive
+        event["event"].as_s.should eq("tree")
+      when timeout(1.second)
+        fail "external folder deletion did not publish a tree event"
+      end
+      client.call({
+        "op" => JSON::Any.new("tree"),
+      })["folders"].as_a.should be_empty
+      client.close
+    end
+  end
+
   it "matches out-of-order replies by request id" do
     directory = File.join(
       Dir.tempdir,
