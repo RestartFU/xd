@@ -1,6 +1,7 @@
 require "json"
 require "openssl"
 require "socket"
+require "./endpoint"
 
 module Xd
   module Daemon
@@ -17,7 +18,7 @@ module Xd
     #
     # Wire replies have no request id, so calls and replies remain FIFO while
     # unsolicited event objects bypass that queue.
-    class Client
+    class Client < Endpoint
       class Error < Exception
       end
 
@@ -27,6 +28,7 @@ module Xd
       @next_subscriber = 0_i64
       @lock = Mutex.new
       @closed = false
+      @disconnect_message : String?
 
       getter fingerprint : String?
 
@@ -125,11 +127,19 @@ module Xd
       end
 
       def on_disconnect(&subscriber : String ->) : Int64
-        @lock.synchronize do
+        message : String? = nil
+        id = @lock.synchronize do
           @next_subscriber += 1
-          @disconnect_subscribers[@next_subscriber] = subscriber
+          if @closed
+            message = @disconnect_message ||
+                      "Daemon connection is closed."
+          else
+            @disconnect_subscribers[@next_subscriber] = subscriber
+          end
           @next_subscriber
         end
+        subscriber.call(message.not_nil!) if message
+        id
       end
 
       def closed? : Bool
@@ -224,6 +234,7 @@ module Xd
         should_close = @lock.synchronize do
           unless @closed
             @closed = true
+            @disconnect_message = message
             pending = @pending.to_a
             @pending.clear
             subscribers = @disconnect_subscribers.values.dup
