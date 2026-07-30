@@ -399,8 +399,10 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
   from reactivating a stale GtkApplication after an update.
 - `[x]` Linux bundle carries GTK, libadwaita, VTE, GL, fonts, icons, MIME, TLS,
   OpenSSL, Codex, and Claude.
-- `[~]` macOS and Windows bundle scripts exist but need end-to-end verification.
-- `[ ]` Replace stale Meson/C instructions and CI with Crystal Docker workflow.
+- `[ ]` Replace paused legacy macOS and Windows packaging with Crystal-native
+  builds; do not publish old C artifacts under Crystal releases.
+- `[x]` README and CI use the Crystal Docker workflow; no active workflow builds
+  or publishes Meson/C artifacts.
 - `[ ]` Remove Odin experiment and old C implementation only after every C
   behavior above has a verified Crystal replacement.
 - `[ ]` Run clean-host installer, local daemon, paired daemon, reconnect,

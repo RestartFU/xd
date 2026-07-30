@@ -63,34 +63,9 @@ given is remembered, so trying the next commit on the same branch is opening it
 and pressing the one button. Docker and git are what it needs, and Linux is
 where it runs; the update button is the way back to master's nightly.
 
-Windows, x86_64:
-
-```powershell
-irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
-```
-
-That downloads the latest nightly MSI, verifies its SHA256 checksum, and opens
-the Windows installer. Approve the Windows elevation prompt. The MSI carries
-GTK and the rest of its runtime; MSYS2 is not required on the installed
-machine. It can also be downloaded directly from the
-[nightly release](https://github.com/RestartFU/xd/releases/tag/nightly).
-
-This first Windows client supports local chats and connecting to a paired Linux
-daemon. Embedded terminals and hosting the daemon on Windows are not available
-yet. The terminal button is omitted instead of exposing a control that cannot
-work.
-
-macOS 14 or newer, Apple Silicon:
-
-```sh
-curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
-```
-
-macOS needs its own native Mach-O build; the Linux ELF/glibc bundle cannot run
-there. The installer verifies the download and puts the self-contained app in
-`~/Applications/xd-nightly.app`. This first macOS build supports local chats,
-the embedded terminal, and connecting to a paired Linux daemon. Hosting the
-daemon on macOS is not available yet.
+Crystal builds currently target Linux x86_64. Windows and macOS installers are
+paused until they build this same Crystal client and daemon; old C artifacts
+are not published under the new version.
 
 ## Build
 
@@ -112,10 +87,12 @@ system GTK such as NixOS.
 ./dist/xd.sh
 ```
 
-The app itself is deliberately *not* run inside Docker: it spawns the host's
-agent CLI, which needs the host's own credentials and PATH. The launcher
-invokes the bundled loader with `--library-path` rather than exporting
-`LD_LIBRARY_PATH`, so child processes still use host libraries.
+The app itself is deliberately *not* run inside Docker. Its daemon starts the
+bundled Codex and Claude CLIs and uses credentials stored on the daemon host.
+For a paired chat, authentication, CLI updates, and speech-model downloads all
+happen on that remote host. The launcher invokes the bundled loader with
+`--library-path` rather than exporting `LD_LIBRARY_PATH`, so ordinary child
+processes still use host libraries.
 
 ### Known wart
 
@@ -146,14 +123,17 @@ noise is cosmetic.
 
 ## Layout
 
-| Path            | What lives there                                     |
-| --------------- | ---------------------------------------------------- |
-| `src/tree/`     | Workspace tree: nodes, disk scanner, sidebar          |
-| `src/chat/`     | Chat view, message rows, subprocess session           |
-| `src/backend/`  | Agent CLI argv building and JSONL parsing             |
-| `src/settings/` | Per-folder `.xd.json` settings and inheritance        |
-| `src/storage/`  | SQLite: chats, messages, full-text search             |
-| `tests/`        | Headless tests, no GTK required                       |
+| Path               | What lives there                                      |
+| ------------------ | ----------------------------------------------------- |
+| `src/xd/daemon/`   | Shared Engine, Unix/TLS transports, filesystem, PTY    |
+| `src/xd/agent/`    | Bundled CLI lifecycle, protocols, auth, turn handling |
+| `src/xd/ui/`       | GTK4/libadwaita client                                |
+| `src/xd/storage/`  | SQLite chats, messages, sessions, workflow state      |
+| `src/xd/workspace/` | Workspace tree, inherited settings, worktrees        |
+| `spec/`            | Crystal behavior and protocol specs                   |
+
+Legacy C source remains temporarily as parity reference. Docker, CI, bundles,
+and installers build only `src/xd.cr`.
 
 Workspace folders are real directories (default `~/Workspaces`), so they can be
 browsed, moved and synced with ordinary tools. Chat messages live in SQLite at
