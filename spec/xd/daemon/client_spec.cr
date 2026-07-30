@@ -29,6 +29,29 @@ private def with_client_server(
   end
 end
 
+private def await_auth_event(
+  events : Array(Hash(String, JSON::Any)),
+  mutex : Mutex,
+  provider : String,
+  &ready : Hash(String, JSON::Any) -> Bool
+) : Hash(String, JSON::Any)
+  deadline = Time.instant + 3.seconds
+  last_event : Hash(String, JSON::Any)? = nil
+  loop do
+    last_event = mutex.synchronize do
+      events.reverse.find do |event|
+        event["event"]?.try(&.as_s?) == "agent-auth-changed" &&
+          event["provider"]?.try(&.as_s?) == provider
+      end
+    end
+    return last_event if last_event && ready.call(last_event)
+    if Time.instant >= deadline
+      fail "#{provider} remote authentication did not settle: #{last_event}"
+    end
+    sleep 5.milliseconds
+  end
+end
+
 describe Xd::Daemon::Client do
   it "uses ordered calls and events over local IPC" do
     with_client_server do |server, _engine, _store, directory|
@@ -87,6 +110,165 @@ describe Xd::Daemon::Client do
           "00" * 32
         )
       end
+    end
+  end
+
+  it "manages structured assistant accounts over paired TLS" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-auth-#{Random::Secure.hex(12)}"
+    )
+    state = File.join(directory, "auth-state")
+    executable = File.join(directory, "agent-auth")
+    Dir.mkdir_p(state)
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      set -eu
+
+      case "$*" in
+        "login status")
+          if test -f "$AUTH_STATE/codex"; then
+            echo "Logged in using ChatGPT" >&2
+            exit 0
+          fi
+          echo "Not logged in" >&2
+          exit 1
+          ;;
+        "auth status --json")
+          if test -f "$AUTH_STATE/claude"; then
+            printf '%s\n' '{"loggedIn":true,"authMethod":"claudeAi"}'
+            exit 0
+          fi
+          printf '%s\n' '{"loggedIn":false,"authMethod":"none"}'
+          exit 1
+          ;;
+        "login --device-auth")
+          printf 'Open https://auth.openai.com/codex/device\n'
+          printf 'Enter this one-time code\nREMOTE-CODE\n'
+          while ! test -f "$AUTH_STATE/codex-authorized"; do
+            /bin/sleep 0.01
+          done
+          : > "$AUTH_STATE/codex"
+          ;;
+        "auth login")
+          printf 'Visit https://claude.com/cai/oauth/authorize?state=remote\n'
+          printf 'Paste code here if prompted > '
+          IFS= read -r code
+          test "$code" = "REMOTE-CLAUDE"
+          : > "$AUTH_STATE/claude"
+          ;;
+        "logout")
+          /bin/rm -f "$AUTH_STATE/codex"
+          ;;
+        "auth logout")
+          /bin/rm -f "$AUTH_STATE/claude"
+          ;;
+        *)
+          exit 2
+          ;;
+      esac
+      SH
+    File.chmod(executable, 0o700)
+
+    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+    engine = Xd::Daemon::Engine.new(
+      store,
+      token_generator: -> { "auth-token" },
+      authentication_resolver: ->(_provider : String) { executable },
+      authentication_environment: {"AUTH_STATE" => state}
+    )
+    server = Xd::Daemon::Server.new(engine)
+    client : Xd::Daemon::Client? = nil
+
+    begin
+      certificate = File.join(directory, "certificate.pem")
+      private_key = File.join(directory, "private-key.pem")
+      Xd::Daemon::Certificate.ensure_pair(certificate, private_key)
+      port = server.listen_remote(
+        "127.0.0.1",
+        0,
+        certificate,
+        private_key
+      )
+      code = engine.arm_pairing(1.minute)
+      paired = Xd::Daemon::Client.pair_remote(
+        "127.0.0.1",
+        port,
+        code,
+        "account-manager"
+      )
+      client = paired.client
+      events = [] of Hash(String, JSON::Any)
+      events_mutex = Mutex.new
+      client.subscribe do |event|
+        events_mutex.synchronize { events << event }
+      end
+
+      client.call({"op" => JSON::Any.new("agent-auth")})
+      ["codex", "claude"].each do |provider|
+        await_auth_event(events, events_mutex, provider) do |event|
+          event["state"].as_s == "signed-out"
+        end
+      end
+
+      client.call({
+        "op"       => JSON::Any.new("agent-auth-start"),
+        "provider" => JSON::Any.new("codex"),
+      })
+      prompt = await_auth_event(events, events_mutex, "codex") do |event|
+        event["device_code"]?.try(&.as_s?) == "REMOTE-CODE"
+      end
+      prompt["login_url"].as_s.should eq(
+        "https://auth.openai.com/codex/device"
+      )
+      prompt.has_key?("output").should be_false
+      File.touch(File.join(state, "codex-authorized"))
+      await_auth_event(events, events_mutex, "codex") do |event|
+        event["state"].as_s == "signed-in"
+      end
+
+      client.call({
+        "op"       => JSON::Any.new("agent-auth-start"),
+        "provider" => JSON::Any.new("claude"),
+      })
+      claude = await_auth_event(events, events_mutex, "claude") do |event|
+        event["needs_input"].as_bool
+      end
+      claude["login_url"].as_s.should start_with(
+        "https://claude.com/cai/oauth/authorize?"
+      )
+      client.call({
+        "op"       => JSON::Any.new("agent-auth-input"),
+        "provider" => JSON::Any.new("claude"),
+        "input"    => JSON::Any.new("REMOTE-CLAUDE"),
+      })
+      await_auth_event(events, events_mutex, "claude") do |event|
+        event["state"].as_s == "signed-in"
+      end
+
+      ["codex", "claude"].each do |provider|
+        client.call({
+          "op"       => JSON::Any.new("agent-auth-logout"),
+          "provider" => JSON::Any.new(provider),
+        })
+        await_auth_event(events, events_mutex, provider) do |event|
+          event["state"].as_s == "signed-out"
+        end
+      end
+
+      event = events_mutex.synchronize do
+        events.find do |candidate|
+          candidate["event"]?.try(&.as_s?) == "agent-auth-changed"
+        end
+      end
+      event.should_not be_nil
+      event.not_nil!.has_key?("output").should be_false
+    ensure
+      client.try(&.close)
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
 
