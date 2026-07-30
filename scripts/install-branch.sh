@@ -32,10 +32,11 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 
 API_BRANCH=$(printf '%s' "$BRANCH" | sed 's|/|%2F|g')
 METADATA=$(curl -fsSL --proto '=https' --tlsv1.2 \
-  "https://api.github.com/repos/$REPO/commits?sha=$API_BRANCH&per_page=1") \
+  -H 'Cache-Control: no-cache' \
+  "https://api.github.com/repos/$REPO/git/ref/heads/$API_BRANCH?cachebust=$(date +%s)") \
   || die "cannot resolve latest $BRANCH commit."
 COMMIT=$(printf '%s\n' "$METADATA" \
-  | sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)",$/\1/p' \
+  | sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)".*$/\1/p' \
   | head -n 1)
 case "$COMMIT" in
   [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
