@@ -84,6 +84,20 @@ module Xd
         min-height: 24px;
         padding: 2px 7px;
       }
+      .xd-attachment {
+        background: alpha(#ffffff, 0.05);
+        border: 1px solid alpha(#ffffff, 0.10);
+        border-radius: 10px;
+        padding: 7px;
+      }
+      .xd-attachment picture {
+        border-radius: 7px;
+      }
+      .xd-attachments button.circular {
+        min-width: 24px;
+        min-height: 24px;
+        padding: 0;
+      }
       .xd-composer entry {
         border-radius: 12px;
         padding: 10px 12px;

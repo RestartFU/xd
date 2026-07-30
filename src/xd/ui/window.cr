@@ -14,12 +14,32 @@ require "./tool_panel"
 module Xd
   module UI
     class Window
+      class Attachment
+        getter name : String
+        getter data : String
+        getter bytesize : Int32
+        getter texture : Gdk::Texture
+
+        def initialize(
+          @name : String,
+          @data : String,
+          @bytesize : Int32,
+          @texture : Gdk::Texture,
+        )
+        end
+      end
+
+      MAX_IMAGES      = 4
+      MAX_IMAGE_BYTES = 10 * 1024 * 1024
+      MAX_TOTAL_BYTES = 20 * 1024 * 1024
+
       getter widget : Gtk::ApplicationWindow
 
       @active_chat : String?
       @stream_label : Gtk::Label?
       @working = false
       @workflow_ids = Set(String).new
+      @attachments = [] of Attachment
 
       def initialize(
         application : Gtk::Application,
@@ -88,6 +108,24 @@ module Xd
         @entry.placeholder_text = "Ask Codex or Claude…"
         @entry.sensitive = false
         @entry.activate_signal.connect { send_message }
+        paste_keys = Gtk::EventControllerKey.new
+        paste_keys.key_pressed_signal.connect do |keyval, _keycode, state|
+          if keyval == Gdk::KEY_v &&
+             state.includes?(Gdk::ModifierType::ControlMask)
+            paste_image
+          else
+            false
+          end
+        end
+        @entry.add_controller(paste_keys)
+
+        @attach = Gtk::Button.new_from_icon_name(
+          "mail-attachment-symbolic"
+        )
+        @attach.sensitive = false
+        @attach.tooltip_text = "Attach images"
+        @attach.add_css_class("flat")
+        @attach.clicked_signal.connect { choose_images }
 
         @send = Gtk::Button.new_with_label("Send")
         @send.sensitive = false
@@ -102,12 +140,20 @@ module Xd
         @queue_box.add_css_class("xd-queue")
         @queue_box.visible = false
 
+        @attachments_bar = Gtk::Box.new(:horizontal, 6)
+        @attachments_bar.margin_start = 18
+        @attachments_bar.margin_end = 18
+        @attachments_bar.margin_top = 8
+        @attachments_bar.add_css_class("xd-attachments")
+        @attachments_bar.visible = false
+
         composer = Gtk::Box.new(:horizontal, 8)
         composer.margin_top = 10
         composer.margin_bottom = 14
         composer.margin_start = 18
         composer.margin_end = 18
         composer.add_css_class("xd-composer")
+        composer.append(@attach)
         composer.append(@entry)
         composer.append(@send)
 
@@ -126,6 +172,7 @@ module Xd
         chat.append(@transcript_scroll)
         chat.append(@queue_box)
         chat.append(@status)
+        chat.append(@attachments_bar)
         chat.append(composer)
 
         root = Gtk::Box.new(:horizontal, 0)
@@ -159,10 +206,12 @@ module Xd
       end
 
       private def open_chat(id : String, title : String) : Nil
+        clear_attachments
         @active_chat = id
         @stream_label = nil
         @chat_title.text = title
         @entry.sensitive = true
+        @attach.sensitive = true
         @send.sensitive = true
         @controls.sensitive = true
         @tool_panel.chat = id
@@ -180,6 +229,7 @@ module Xd
         @chat_title.text = "Select a chat"
         @entry.text = ""
         @entry.sensitive = false
+        @attach.sensitive = false
         @send.label = "Send"
         @send.sensitive = false
         @send.remove_css_class("destructive-action")
@@ -191,6 +241,7 @@ module Xd
         @workflow_ids.clear
         clear(@queue_box)
         @queue_box.visible = false
+        clear_attachments
         @status.text = ""
       end
 
@@ -392,21 +443,182 @@ module Xd
         chat_id = @active_chat
         return unless chat_id
         text = @entry.text.strip
-        return if text.empty?
+        return if text.empty? && @attachments.empty?
 
-        @entry.text = ""
-        response = call({
+        request = {
           "op"   => JSON::Any.new("send"),
           "chat" => JSON::Any.new(chat_id),
           "text" => JSON::Any.new(text),
-        })
+        }
+        unless @attachments.empty?
+          attachments = @attachments.map do |attachment|
+            JSON::Any.new({
+              "name" => JSON::Any.new(attachment.name),
+              "mime" => JSON::Any.new("image/png"),
+              "data" => JSON::Any.new(attachment.data),
+            })
+          end
+          request["attachments"] = JSON::Any.new(attachments)
+        end
+
+        response = call(request)
         if response
+          @entry.text = ""
+          clear_attachments
           if response["queued"]?.try(&.as_bool?) == true
             @status.text = "Message queued"
           end
           load_messages
           load_chat_state
         end
+      end
+
+      private def choose_images : Nil
+        return unless @active_chat
+
+        filter = Gtk::FileFilter.new
+        filter.name = "Images"
+        filter.add_mime_type("image/*")
+        dialog = Gtk::FileDialog.new(
+          title: "Attach images",
+          modal: true,
+          default_filter: filter
+        )
+        dialog.open_multiple(@widget, nil) do |source, result|
+          begin
+            files = source.as(Gtk::FileDialog)
+              .open_multiple_finish(result)
+            if files
+              files.n_items.times do |index|
+                object = files.item(index)
+                add_file_attachment(object.as(Gio::File)) if object
+              end
+            end
+          rescue Gio::IOErrorEnum::Cancelled
+          rescue error
+            @status.text = error.message || "Cannot attach that image."
+          end
+        end
+      end
+
+      private def add_file_attachment(file : Gio::File) : Nil
+        path = file.path
+        unless path
+          @status.text = "Only local image files can be attached."
+          return
+        end
+        info = File.info(path)
+        if info.size > MAX_IMAGE_BYTES
+          @status.text = "Each source image must be 10 MiB or smaller."
+          return
+        end
+
+        texture = Gdk::Texture.new_from_file(file)
+        add_attachment(
+          file.basename.try(&.to_s) || "image.png",
+          texture
+        )
+      rescue error
+        @status.text = error.message || "Cannot attach that image."
+      end
+
+      private def paste_image : Bool
+        clipboard = @entry.clipboard
+        formats = clipboard.formats
+        return false unless formats.contain_gtype(Gdk::Texture.g_type)
+
+        clipboard.read_texture_async(nil) do |source, result|
+          begin
+            texture = source.as(Gdk::Clipboard)
+              .read_texture_finish(result)
+            if texture
+              add_attachment(
+                "paste-#{Time.utc.to_unix_ms}.png",
+                texture
+              )
+            end
+          rescue error
+            @status.text = error.message || "Cannot paste that image."
+          end
+        end
+        true
+      end
+
+      private def add_attachment(
+        name : String,
+        texture : Gdk::Texture,
+      ) : Nil
+        if @attachments.size >= MAX_IMAGES
+          @status.text = "A message can contain at most 4 images."
+          return
+        end
+
+        data = texture.save_to_png_bytes.data
+        unless data
+          @status.text = "Cannot encode that image as PNG."
+          return
+        end
+        total = @attachments.sum(&.bytesize)
+        if data.size > MAX_IMAGE_BYTES ||
+           total > MAX_TOTAL_BYTES - data.size
+          @status.text = "Attached images must stay under 20 MiB total."
+          return
+        end
+
+        attachment = Attachment.new(
+          File.basename(name),
+          Base64.strict_encode(data),
+          data.size,
+          texture
+        )
+        @attachments << attachment
+        append_attachment_chip(attachment)
+        @status.text = ""
+      end
+
+      private def append_attachment_chip(
+        attachment : Attachment,
+      ) : Nil
+        picture = Gtk::Picture.new_for_paintable(attachment.texture)
+        picture.content_fit = :contain
+        picture.can_shrink = true
+        picture.set_size_request(168, 96)
+
+        label = Gtk::Label.new(attachment.name)
+        label.ellipsize = :middle
+        label.max_width_chars = 18
+        label.add_css_class("dim-label")
+
+        card = Gtk::Box.new(:vertical, 4)
+        card.append(picture)
+        card.append(label)
+        card.add_css_class("xd-attachment")
+
+        remove = Gtk::Button.new_from_icon_name(
+          "window-close-symbolic"
+        )
+        remove.tooltip_text = "Remove"
+        remove.halign = :end
+        remove.valign = :start
+        remove.add_css_class("circular")
+
+        chip = Gtk::Overlay.new
+        chip.child = card
+        chip.add_overlay(remove)
+        remove.clicked_signal.connect do
+          @attachments.delete(attachment)
+          @attachments_bar.remove(chip)
+          @attachments_bar.visible = !@attachments.empty?
+        end
+
+        @attachments_bar.append(chip)
+        @attachments_bar.visible = true
+      end
+
+      private def clear_attachments : Nil
+        @attachments.clear
+        clear(@attachments_bar)
+        @attachments_bar.visible = false
       end
 
       private def cancel_turn : Nil
