@@ -334,6 +334,7 @@ module Xd
         return if @closed
 
         @busy = busy
+        @save.grab_focus if busy
         @rows_box.sensitive = !busy
         @add.sensitive = !busy
         @save.sensitive = !busy
