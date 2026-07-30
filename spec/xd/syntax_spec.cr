@@ -229,6 +229,150 @@ describe Xd::Syntax do
       .should be_true
   end
 
+  it "classifies Dockerfile instructions without treating URLs as comments" do
+    instruction = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Dockerfile,
+      "from \"debian:bookworm\" AS build",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(instruction, Xd::SyntaxToken::Keyword, "from")
+      .should be_true
+    syntax_has?(instruction, Xd::SyntaxToken::String, "\"debian:bookworm\"")
+      .should be_true
+    syntax_has?(instruction, Xd::SyntaxToken::Keyword, "AS").should be_true
+
+    comment = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Dockerfile,
+      "  # syntax=docker/dockerfile:1",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(
+      comment,
+      Xd::SyntaxToken::Comment,
+      "# syntax=docker/dockerfile:1"
+    ).should be_true
+
+    url = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Dockerfile,
+      "RUN curl https://example.test/archive",
+      Xd::SyntaxState.new
+    )
+    url.none? { |piece| piece.token == Xd::SyntaxToken::Comment }
+      .should be_true
+  end
+
+  it "classifies Make variables and escaped comments" do
+    recipe = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Makefile,
+      "\t$(CC) -o \"$@\" $(call output,$(objects)) # link",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(recipe, Xd::SyntaxToken::Preprocessor, "$(CC)")
+      .should be_true
+    syntax_has?(
+      recipe,
+      Xd::SyntaxToken::Preprocessor,
+      "$(call output,$(objects))"
+    ).should be_true
+    syntax_has?(recipe, Xd::SyntaxToken::String, "\"$@\"").should be_true
+    syntax_has?(recipe, Xd::SyntaxToken::Comment, "# link").should be_true
+
+    escaped = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Makefile,
+      "HASH := \\#literal",
+      Xd::SyntaxState.new
+    )
+    escaped.none? { |piece| piece.token == Xd::SyntaxToken::Comment }
+      .should be_true
+  end
+
+  it "classifies JSON quoted keys" do
+    pieces = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::JSON,
+      "{\"name\": \"xd\", \"enabled\": true, \"retries\": 3, \"empty\": null}",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(pieces, Xd::SyntaxToken::Type, "\"name\"").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::String, "\"xd\"").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Number, "true").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Number, "3").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Number, "null").should be_true
+  end
+
+  it "classifies YAML keys, references, constants, and spaced comments" do
+    setting = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::YAML,
+      "service-name: true # enabled",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(setting, Xd::SyntaxToken::Type, "service-name")
+      .should be_true
+    syntax_has?(setting, Xd::SyntaxToken::Number, "true").should be_true
+    syntax_has?(setting, Xd::SyntaxToken::Comment, "# enabled")
+      .should be_true
+
+    url = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::YAML,
+      "- endpoint: https://example.test/a#fragment",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(url, Xd::SyntaxToken::Type, "endpoint").should be_true
+    url.none? { |piece| piece.token == Xd::SyntaxToken::Comment }
+      .should be_true
+
+    anchor = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::YAML,
+      "defaults: &base",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(anchor, Xd::SyntaxToken::Preprocessor, "&base")
+      .should be_true
+  end
+
+  it "classifies TOML keys, tables, comments, and multiline strings" do
+    table = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::TOML,
+      "[server.database]",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(table, Xd::SyntaxToken::Preprocessor, "[server.database]")
+      .should be_true
+
+    setting = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::TOML,
+      "listen-address = \"127.0.0.1\" # local",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(setting, Xd::SyntaxToken::Type, "listen-address")
+      .should be_true
+    syntax_has?(setting, Xd::SyntaxToken::String, "\"127.0.0.1\"")
+      .should be_true
+    syntax_has?(setting, Xd::SyntaxToken::Comment, "# local").should be_true
+
+    state = Xd::SyntaxState.new
+    Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::TOML,
+      "description = '''first",
+      state
+    )
+    state.in_triple_string.should be_true
+    state.triple_quote.should eq('\'')
+    inside = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::TOML,
+      "# still string",
+      state
+    )
+    inside.none? { |piece| piece.token == Xd::SyntaxToken::Comment }
+      .should be_true
+    closed = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::TOML,
+      "last''' # comment",
+      state
+    )
+    state.in_triple_string.should be_false
+    syntax_has?(closed, Xd::SyntaxToken::Comment, "# comment").should be_true
+  end
+
   it "classifies Rust and carries raw strings and nested comments" do
     declaration = Xd::Syntax.scan_line(
       Xd::SyntaxLanguage::Rust,

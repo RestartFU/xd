@@ -349,6 +349,29 @@ module Xd
         elsif slash_comments?(language) && bytes_at?(line, at, "//")
           emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
           return pieces
+        elsif shebangs?(language) && at == 0 && bytes_at?(line, at, "#!")
+          emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+          return pieces
+        elsif hash_comments?(language) &&
+              byte(line, at) == byte_of('#') &&
+              starts_line?(line, at)
+          emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+          return pieces
+        elsif inline_hash_comments?(language) &&
+              byte(line, at) == byte_of('#') &&
+              !escaped?(line, at)
+          emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+          return pieces
+        elsif spaced_hash_comments?(language) &&
+              byte(line, at) == byte_of('#') &&
+              (at == 0 || byte(line, at - 1) == byte_of(' ') ||
+              byte(line, at - 1) == byte_of('\t'))
+          emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
+          return pieces
+        elsif table_headers?(language) &&
+              byte(line, at) == byte_of('[') &&
+              starts_line?(line, at)
+          at = scan_table_header(pieces, line, at)
         elsif triple_strings?(language) &&
               (bytes_at?(line, at, "\"\"\"") ||
               (single_triple_strings?(language) &&
@@ -388,9 +411,16 @@ module Xd
           else
             at = scan_quoted(pieces, line, at, byte_of('\''))
           end
+        elsif quoted_keys?(language) &&
+              (byte(line, at) == byte_of('"') ||
+              byte(line, at) == byte_of('\'')) &&
+              quoted_key?(line, at, byte(line, at), key_delimiter(language))
+          at = scan_quoted_key(pieces, line, at, byte(line, at))
         elsif byte(line, at) == byte_of('"') ||
               byte(line, at) == byte_of('\'')
           at = scan_quoted(pieces, line, at, byte(line, at))
+        elsif make_variables?(language) && byte(line, at) == byte_of('$')
+          at = scan_make_variable(pieces, line, at)
         elsif raw_strings?(language) && byte(line, at) == byte_of('`')
           close = line.index('`', at + 1)
           unless close
@@ -406,6 +436,43 @@ module Xd
               byte(line, at) == byte_of('#') &&
               starts_line?(line, at)
           at = scan_directive(pieces, line, at)
+        elsif yaml_references?(language) &&
+              (byte(line, at) == byte_of('&') ||
+              byte(line, at) == byte_of('*') ||
+              byte(line, at) == byte_of('!'))
+          after = scan_yaml_reference(pieces, line, at)
+          if after
+            at = after
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
+        elsif tilde_constant?(language) && byte(line, at) == byte_of('~')
+          emit(pieces, SyntaxToken::Number, line, at, at + 1)
+          at += 1
+        elsif bare_keys?(language) &&
+              (word_byte?(byte(line, at)) ||
+              byte(line, at) == byte_of('-') ||
+              byte(line, at) == byte_of('.'))
+          after = scan_bare_key(
+            pieces,
+            line,
+            at,
+            key_delimiter(language)
+          )
+          if after
+            at = after
+          elsif ascii_digit?(byte(line, at)) ||
+                (byte(line, at) == byte_of('.') &&
+                ascii_digit?(byte(line, at + 1)))
+            at = scan_number(pieces, line, at)
+          elsif ascii_alpha?(byte(line, at)) ||
+                byte(line, at) == byte_of('_')
+            at = scan_word(pieces, language, line, at)
+          else
+            emit(pieces, SyntaxToken::Text, line, at, at + 1)
+            at += 1
+          end
         elsif ascii_digit?(byte(line, at)) ||
               (byte(line, at) == byte_of('.') &&
               ascii_digit?(byte(line, at + 1)))
@@ -495,6 +562,171 @@ module Xd
 
       emit(pieces, SyntaxToken::Comment, line, at, scan)
       scan
+    end
+
+    private def quoted_key?(
+      line : String,
+      at : Int32,
+      quote : UInt8,
+      delimiter : UInt8,
+    ) : Bool
+      scan = at + 1
+      while scan < line.bytesize && byte(line, scan) != quote
+        scan += byte(line, scan) == byte_of('\\') &&
+                scan + 1 < line.bytesize ? 2 : 1
+      end
+      return false if scan >= line.bytesize
+
+      scan = skip_space(line, scan + 1)
+      byte(line, scan) == delimiter
+    end
+
+    private def scan_quoted_key(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      quote : UInt8,
+    ) : Int32
+      scan = at + 1
+      while scan < line.bytesize && byte(line, scan) != quote
+        scan += byte(line, scan) == byte_of('\\') &&
+                scan + 1 < line.bytesize ? 2 : 1
+      end
+      scan += 1 if scan < line.bytesize
+      emit(pieces, SyntaxToken::Type, line, at, scan)
+      scan
+    end
+
+    private def scan_make_variable(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at + 1
+      current = byte(line, scan)
+      if current == byte_of('(') || current == byte_of('{')
+        open = current
+        close = open == byte_of('(') ? byte_of(')') : byte_of('}')
+        depth = 1
+        scan += 1
+        while scan < line.bytesize && depth > 0
+          if byte(line, scan) == byte_of('$') &&
+             byte(line, scan + 1) == open
+            depth += 1
+            scan += 2
+          elsif byte(line, scan) == close
+            depth -= 1
+            scan += 1
+          else
+            scan += 1
+          end
+        end
+      elsif scan < line.bytesize
+        scan += 1
+      end
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_table_header(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      close = line.index(']', at + 1)
+      finish =
+        if close
+          close += 1
+          close += 1 if byte(line, close) == byte_of(']')
+          close
+        else
+          line.bytesize
+        end
+      emit(pieces, SyntaxToken::Preprocessor, line, at, finish)
+      finish
+    end
+
+    private def scan_yaml_reference(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32?
+      scan = at + 1
+      scan += 1 if byte(line, scan) == byte_of('!')
+      while word_byte?(byte(line, scan)) ||
+            byte(line, scan) == byte_of('-') ||
+            byte(line, scan) == byte_of('.') ||
+            byte(line, scan) == byte_of('/') ||
+            byte(line, scan) == byte_of(':')
+        scan += 1
+      end
+      return nil if scan == at + 1
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_bare_key(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      delimiter : UInt8,
+    ) : Int32?
+      return nil unless starts_bare_key?(line, at, delimiter)
+
+      scan = at
+      while scan < line.bytesize &&
+            byte(line, scan) != delimiter &&
+            byte(line, scan) != byte_of('#')
+        scan += 1
+      end
+      return nil unless byte(line, scan) == delimiter
+      if delimiter == byte_of(':') &&
+         byte(line, scan + 1) != 0_u8 &&
+         byte(line, scan + 1) != byte_of(' ') &&
+         byte(line, scan + 1) != byte_of('\t') &&
+         byte(line, scan + 1) != byte_of('[') &&
+         byte(line, scan + 1) != byte_of('{')
+        return nil
+      end
+
+      finish = scan
+      while finish > at &&
+            (byte(line, finish - 1) == byte_of(' ') ||
+            byte(line, finish - 1) == byte_of('\t'))
+        finish -= 1
+      end
+      return nil if finish == at
+
+      emit(pieces, SyntaxToken::Type, line, at, finish)
+      emit(pieces, SyntaxToken::Text, line, finish, scan)
+      scan
+    end
+
+    private def starts_bare_key?(
+      line : String,
+      at : Int32,
+      delimiter : UInt8,
+    ) : Bool
+      scan = skip_space(line, 0)
+      if delimiter == byte_of(':') &&
+         byte(line, scan) == byte_of('-') &&
+         (byte(line, scan + 1) == byte_of(' ') ||
+         byte(line, scan + 1) == byte_of('\t'))
+        scan = skip_space(line, scan + 1)
+      end
+      scan == at
+    end
+
+    private def escaped?(line : String, at : Int32) : Bool
+      scan = at
+      backslashes = 0
+      while scan > 0 && byte(line, scan - 1) == byte_of('\\')
+        backslashes += 1
+        scan -= 1
+      end
+      backslashes.odd?
     end
 
     private def scan_quoted(
@@ -854,6 +1086,23 @@ module Xd
       language.c? || language.c_sharp? || language.v?
     end
 
+    private def shebangs?(language : SyntaxLanguage) : Bool
+      language.v? || language.ruby? || language.crystal?
+    end
+
+    private def hash_comments?(language : SyntaxLanguage) : Bool
+      language.dockerfile?
+    end
+
+    private def inline_hash_comments?(language : SyntaxLanguage) : Bool
+      language.makefile? || language.toml? ||
+        language.ruby? || language.crystal?
+    end
+
+    private def spaced_hash_comments?(language : SyntaxLanguage) : Bool
+      language.yaml?
+    end
+
     private def slash_comments?(language : SyntaxLanguage) : Bool
       language.c? || language.c_sharp? || language.go? ||
         language.kotlin? || language.rust? || language.v? ||
@@ -870,6 +1119,10 @@ module Xd
 
     private def raw_strings?(language : SyntaxLanguage) : Bool
       language.go? || language.odin?
+    end
+
+    private def make_variables?(language : SyntaxLanguage) : Bool
+      language.makefile?
     end
 
     private def triple_strings?(language : SyntaxLanguage) : Bool
@@ -908,6 +1161,30 @@ module Xd
 
     private def case_insensitive?(language : SyntaxLanguage) : Bool
       language.dockerfile? || language.yaml?
+    end
+
+    private def quoted_keys?(language : SyntaxLanguage) : Bool
+      language.json? || language.yaml? || language.toml?
+    end
+
+    private def bare_keys?(language : SyntaxLanguage) : Bool
+      language.yaml? || language.toml?
+    end
+
+    private def table_headers?(language : SyntaxLanguage) : Bool
+      language.toml?
+    end
+
+    private def yaml_references?(language : SyntaxLanguage) : Bool
+      language.yaml?
+    end
+
+    private def tilde_constant?(language : SyntaxLanguage) : Bool
+      language.yaml?
+    end
+
+    private def key_delimiter(language : SyntaxLanguage) : UInt8
+      language.toml? ? byte_of('=') : byte_of(':')
     end
   end
 end
