@@ -65,7 +65,7 @@ module Xd
               commands = commands.compact_map do |command|
                 stripped = command.starts_with?('/') ? command[1..] : command
                 stripped unless stripped.empty?
-              end
+              end.first(Event::MAX_COMMANDS)
               unless commands.empty?
                 events << Event.new(
                   EventType::Commands,

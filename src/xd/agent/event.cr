@@ -11,6 +11,8 @@ module Xd
     end
 
     class Event
+      MAX_COMMANDS = 200
+
       getter type : EventType
       getter text : String?
       getter session_id : String?

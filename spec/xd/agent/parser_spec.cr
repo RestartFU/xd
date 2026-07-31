@@ -25,6 +25,22 @@ private def event_text(
 end
 
 describe Xd::Agent::Parser do
+  it "bounds Claude slash commands before publishing them" do
+    parser = Xd::Agent::Parser.new(Xd::Agent::Catalog::CLAUDE)
+    commands = 250.times.map { |index| JSON::Any.new("/command-#{index}") }
+      .to_a
+    line = {
+      "type"           => JSON::Any.new("system"),
+      "subtype"        => JSON::Any.new("init"),
+      "session_id"     => JSON::Any.new("bounded-commands"),
+      "slash_commands" => JSON::Any.new(commands),
+    }.to_json
+
+    event = parser.feed_line(line).find(&.type.commands?).not_nil!
+    event.commands.not_nil!.size.should eq(Xd::Agent::Event::MAX_COMMANDS)
+    event.commands.not_nil!.last.should eq("command-199")
+  end
+
   it "streams Claude text once and reports session, commands, and usage" do
     events = replay_agent_fixture(
       Xd::Agent::Catalog::CLAUDE,
@@ -132,8 +148,8 @@ describe Xd::Agent::Parser do
       {
         type:  "stream_event",
         event: {
-          type: "content_block_start",
-          index: 0,
+          type:          "content_block_start",
+          index:         0,
           content_block: {
             type:  "tool_use",
             name:  "Read",
@@ -190,8 +206,8 @@ describe Xd::Agent::Parser do
       {
         type:  "stream_event",
         event: {
-          type: "content_block_start",
-          index: 0,
+          type:          "content_block_start",
+          index:         0,
           content_block: {
             type:  "tool_use",
             id:    "toolu_edit",
@@ -241,8 +257,8 @@ describe Xd::Agent::Parser do
       {
         type:  "stream_event",
         event: {
-          type: "content_block_start",
-          index: 0,
+          type:          "content_block_start",
+          index:         0,
           content_block: {
             type:  "tool_use",
             id:    "toolu_inline_edit",
@@ -257,9 +273,9 @@ describe Xd::Agent::Parser do
           type:  "content_block_delta",
           index: 0,
           delta: {
-            type: "input_json_delta",
+            type:         "input_json_delta",
             partial_json: {
-              file_path: "src/main.c",
+              file_path:  "src/main.c",
               old_string: "puts(\"old\")\n",
               new_string: "puts(\"new\")\n",
             }.to_json,

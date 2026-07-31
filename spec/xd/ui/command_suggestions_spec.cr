@@ -26,4 +26,15 @@ describe Xd::UI::CommandSuggestions do
     Xd::UI::CommandSuggestions.matches(commands, "/review\nnow")
       .should be_empty
   end
+
+  it "bounds untrusted command payloads and visible matches" do
+    nodes = 250.times.map do |index|
+      JSON::Any.new("/command-#{index}")
+    end.to_a
+    commands = Xd::UI::CommandSuggestions.normalize(nodes)
+
+    commands.size.should eq(Xd::UI::CommandSuggestions::MAX_COMMANDS)
+    Xd::UI::CommandSuggestions.matches(commands, "/").size
+      .should eq(Xd::UI::CommandSuggestions::MAX_MATCHES)
+  end
 end

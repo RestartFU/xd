@@ -526,7 +526,8 @@ module Xd
 
           case event.type
           when EventType::Commands
-            commands = event.commands || [] of String
+            commands = (event.commands || [] of String)
+              .first(Event::MAX_COMMANDS)
             turn.commands = commands.dup
             @command_sets[turn.backend.id] = commands.dup
             event_name = "commands"

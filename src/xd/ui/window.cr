@@ -2320,12 +2320,9 @@ module Xd
           @context_label.text = context
           @context_label.tooltip_text = context
         end
-        @commands = (
+        @commands = CommandSuggestions.normalize(
           state["commands"]?.try(&.as_a?) || [] of JSON::Any
-        ).compact_map do |node|
-          command = node.as_s?.try(&.lchop("/"))
-          command unless command.nil? || command.empty?
-        end
+        )
         refresh_command_suggestions
         working = state["working"]?.try(&.as_bool?) || false
         if working
@@ -2696,12 +2693,9 @@ module Xd
           @sidebar.reload(endpoint)
         when "commands"
           return unless active_event?(endpoint, event)
-          @commands = (
+          @commands = CommandSuggestions.normalize(
             event["commands"]?.try(&.as_a?) || [] of JSON::Any
-          ).compact_map do |node|
-            command = node.as_s?.try(&.lchop("/"))
-            command unless command.nil? || command.empty?
-          end
+          )
           refresh_command_suggestions
         when "text"
           return unless active_event?(endpoint, event)

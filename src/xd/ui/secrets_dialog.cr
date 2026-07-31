@@ -7,6 +7,8 @@ require "./panel_call"
 module Xd
   module UI
     class SecretsDialog
+      ROW_RENDER_BATCH = 16
+
       private class Row
         getter box : Gtk::Box
         getter name : Gtk::Entry
@@ -200,7 +202,7 @@ module Xd
                   values.compact_map(&.as_s?)
                 end
                 if names
-                  show_names(names)
+                  show_names(names, token)
                 else
                   show_status("Daemon returned no secret names.", true)
                 end
@@ -213,16 +215,30 @@ module Xd
         end
       end
 
-      private def show_names(names : Array(String)) : Nil
-        names.each { |name| append_row(name, true) }
-        if @rows.empty?
-          row = append_row("", false)
-          row.name.grab_focus
+      private def show_names(names : Array(String), token : Int64) : Nil
+        index = 0
+        GLib.idle_add do
+          next false unless active?(token)
+
+          finish = Math.min(index + ROW_RENDER_BATCH, names.size)
+          while index < finish
+            append_row(names[index], true)
+            index += 1
+          end
+          unless index >= names.size
+            next true
+          end
+
+          if @rows.empty?
+            row = append_row("", false)
+            row.name.grab_focus
+          end
+          @rows_box.sensitive = true
+          @add.sensitive = true
+          @save.sensitive = true
+          show_status(nil, false)
+          false
         end
-        @rows_box.sensitive = true
-        @add.sensitive = true
-        @save.sensitive = true
-        show_status(nil, false)
       end
 
       private def append_row(name : String, existing : Bool) : Row

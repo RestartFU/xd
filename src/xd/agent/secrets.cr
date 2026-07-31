@@ -6,6 +6,8 @@ require "../app_paths"
 module Xd
   module Agent
     class Secrets
+      MAX_ENTRIES = 256
+
       class Error < Exception
       end
 
@@ -34,6 +36,11 @@ module Xd
         values = root["secrets"]?.try(&.as_h?)
         unless values
           raise Error.new("#{path} has no secrets object")
+        end
+        if values.size > MAX_ENTRIES
+          raise Error.new(
+            "#{path} contains more than #{MAX_ENTRIES} secrets"
+          )
         end
 
         values.each do |name, node|
@@ -67,6 +74,12 @@ module Xd
         folder_ids.each do |folder_id|
           scoped = for_folder(folder_id, global_path)
           scoped.@values.each do |name, value|
+            if !merged.@values.has_key?(name) &&
+               merged.@values.size >= MAX_ENTRIES
+              raise Error.new(
+                "Effective secret set exceeds #{MAX_ENTRIES} entries."
+              )
+            end
             merged.@values[name] = value
           end
         end
@@ -102,6 +115,9 @@ module Xd
         end
         if value.empty?
           raise Error.new("A new secret needs a value.")
+        end
+        if !@values.has_key?(name) && @values.size >= MAX_ENTRIES
+          raise Error.new("At most #{MAX_ENTRIES} secrets can be stored.")
         end
         @values[name] = value
       end

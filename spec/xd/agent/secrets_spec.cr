@@ -61,6 +61,24 @@ describe Xd::Agent::Secrets do
     end
   end
 
+  it "rejects an unbounded secret store" do
+    with_secret_path do |path, directory|
+      values = {} of String => JSON::Any
+      (Xd::Agent::Secrets::MAX_ENTRIES + 1).times do |index|
+        values["TOKEN_#{index}"] = JSON::Any.new("hidden")
+      end
+
+      Dir.mkdir_p(directory)
+      File.write(path, {
+        "version" => JSON::Any.new(1_i64),
+        "secrets" => JSON::Any.new(values),
+      }.to_json)
+      expect_raises(Xd::Agent::Secrets::Error, /more than/) do
+        Xd::Agent::Secrets.load(path)
+      end
+    end
+  end
+
   it "overlays global and folder scopes from outermost to innermost" do
     with_secret_path do |path, _directory|
       global = Xd::Agent::Secrets.load(path)
