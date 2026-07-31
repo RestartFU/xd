@@ -51,8 +51,11 @@ printf '%s  %s\n' "$GIT_SHA256" "$WORK/$GIT_ASSET" |
 destination=$(cygpath -w "$STAGE/git")
 MSYS2_ARG_CONV_EXCL=-o 7z x -y "-o$destination" "$WORK/$GIT_ASSET" \
   >/dev/null
-"$STAGE/git/git-bash.exe" \
-  --no-needs-console --hide --no-cd --command=post-install.bat
+(
+  cd "$STAGE/git"
+  ./git-bash.exe \
+    --no-needs-console --hide --no-cd --command=post-install.bat
+)
 
 "$STAGE/git/cmd/git.exe" --version | grep -F "git version 2.55.0.windows.3"
 [ -x "$STAGE/git/mingw64/libexec/git-core/git-remote-https.exe" ]
