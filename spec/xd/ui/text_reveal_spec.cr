@@ -8,13 +8,13 @@ describe Xd::UI::TextReveal do
 
     frame = reveal.advance("abcdefghij", 50_000_i64)
     frame.shown.should eq(0)
-    frame.settled.should be_false
+    frame.caught_up.should be_false
 
     frame = reveal.advance("abcdefghij", 90_000_i64)
     frame.shown.should be > 0
-    frame.settled.should be_false
+    frame.caught_up.should be_false
 
-    until frame.settled
+    until frame.caught_up
       frame = reveal.advance("abcdefghij", 150_000_i64)
     end
     reveal.shown.should eq(10)
@@ -27,11 +27,11 @@ describe Xd::UI::TextReveal do
     9.times { frame = reveal.advance("abcdef", 90_000_i64) }
 
     frame.shown.should eq(4)
-    frame.settled.should be_false
+    frame.caught_up.should be_false
 
     frame = reveal.advance("abcdef", 120_000_i64)
     frame.shown.should eq(6)
-    frame.settled.should be_true
+    frame.caught_up.should be_true
   end
 
   it "keeps UTF-8 prefixes whole" do
@@ -42,7 +42,7 @@ describe Xd::UI::TextReveal do
     reveal = Xd::UI::TextReveal.new
     reveal.note_append(1_000_i64)
     frame = reveal.advance("done", 120_000_i64)
-    until frame.settled
+    until frame.caught_up
       frame = reveal.advance("done", 120_000_i64)
     end
 
@@ -50,7 +50,7 @@ describe Xd::UI::TextReveal do
     frame = reveal.advance("done next", 140_000_i64)
     frame.shown.should be > 4
     frame.shown.should be < 9
-    frame.settled.should be_false
+    frame.caught_up.should be_false
   end
 
   it "can synchronize and reset cached live text" do

@@ -1942,8 +1942,10 @@ module Xd
           scroll_to_bottom
         end
 
-        if frame.settled
-          @stream_row.try(&.set_text(@stream_buffer))
+        if frame.caught_up
+          # A token pause is not the end of the response. Keep one plain label
+          # alive so the next delta never tears down a Markdown widget tree.
+          @stream_row.try(&.set_stream_text(@stream_buffer))
           @stream_render_timer = 0_u32
           false
         else
@@ -2109,8 +2111,11 @@ module Xd
           unless segment.empty?
             @stream_buffer = segment
             @stream_reveal.sync(segment)
-            @stream_row = add_message("assistant", segment)
-            @stream_row.try { |message| message.source = @stream_source }
+            @stream_row = add_message("assistant", "")
+            @stream_row.try do |message|
+              message.source = @stream_source
+              message.set_stream_text(segment)
+            end
           end
 
           keep_working_last

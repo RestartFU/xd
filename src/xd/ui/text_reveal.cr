@@ -6,7 +6,9 @@ module Xd
       TAIL_DELAY_USEC    = 100_000_i64
       TRAILING_CHARS     =           2
 
-      record Frame, shown : Int32, settled : Bool
+      # Caught up means the current buffer has gone quiet. It is not a final
+      # boundary: another agent delta can still extend the same segment.
+      record Frame, shown : Int32, caught_up : Bool
 
       getter shown = 0
 
