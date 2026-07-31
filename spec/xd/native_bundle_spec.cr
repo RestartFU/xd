@@ -54,9 +54,13 @@ describe Xd::NativeBundle do
 
     begin
       materialize_bundle(directory, Xd::NativeBundle::Platform::Windows)
-      synthetic = Dir.glob(
-        File.join(directory, "lib/gdk-pixbuf-2.0/*/loaders/*svg*.dll")
-      ).first
+      svg_requirement = Xd::NativeBundle
+        .requirements(Xd::NativeBundle::Platform::Windows)
+        .find! { |requirement| requirement.label == "SVG pixbuf loader" }
+      synthetic = File.join(
+        directory,
+        svg_requirement.alternatives.first.gsub('*', "proof")
+      ).gsub('\\', '/')
       File.delete(synthetic)
       File.write(
         File.join(File.dirname(synthetic), "pixbufloader_svg.dll"),

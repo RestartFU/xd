@@ -66,8 +66,11 @@ printf '%s  %s\n' \
   shasum -a 256 --check
 
 "$STAGE/git/bin/git" --version | grep -F "git version $GIT_VERSION"
-test "$("$STAGE/git/bin/git" --exec-path)" = \
-  "$STAGE/git/libexec/git-core"
+actual_exec_path=$("$STAGE/git/bin/git" --exec-path)
+test -d "$actual_exec_path"
+actual_exec_path=$(cd "$actual_exec_path" && pwd -P)
+expected_exec_path=$(cd "$STAGE/git/libexec/git-core" && pwd -P)
+test "$actual_exec_path" = "$expected_exec_path"
 [ -x "$STAGE/git/libexec/git-core/git-remote-https" ]
 [ -d "$STAGE/git/share/git-core/templates" ]
 
