@@ -3,6 +3,7 @@ require "json"
 require "gtk4"
 require "set"
 require "./adw"
+require "./background_work"
 require "./host_launch"
 require "./panel_call"
 require "./terminal_replay"
@@ -34,6 +35,7 @@ module Xd
         property removing = false
         property replay : TerminalReplay?
         property replay_token = 0_i64
+        property replay_decoding_token : Int64?
 
         def initialize(
           @id : String,
@@ -43,6 +45,7 @@ module Xd
           @rows : Int64,
         )
           @replay = nil
+          @replay_decoding_token = nil
         end
       end
 
@@ -214,11 +217,7 @@ module Xd
         when "terminal-output"
           session = view.sessions[id]? || return
           encoded = event["data"]?.try(&.as_s?) || return
-          if replay = session.replay
-            replay.append_data(encoded)
-          else
-            feed_output(session.terminal, encoded)
-          end
+          append_output(session, encoded)
         when "terminal-resized"
           session = view.sessions[id]? || return
           columns = event["columns"]?.try(&.as_i64?) || session.columns
@@ -502,20 +501,64 @@ module Xd
           session.columns,
           session.rows
         )
-        GLib.idle_add do
-          feed_replay_batch(session, token)
-          false
-        end
+        schedule_replay_batch(session, token)
       end
 
-      private def feed_replay_batch(
+      private def append_output(session : Session, encoded : String) : Nil
+        unless replay = session.replay
+          session.replay_token &+= 1
+          replay = TerminalReplay.new(
+            [] of JSON::Any,
+            session.columns,
+            session.rows
+          )
+          session.replay = replay
+        end
+        replay.append_data(encoded)
+        schedule_replay_batch(session, session.replay_token)
+      end
+
+      private def schedule_replay_batch(
         session : Session,
         token : Int64,
       ) : Nil
         return unless session.replay_token == token
         replay = session.replay || return
+        return if session.replay_decoding_token == token
 
-        replay.next_batch.each do |action|
+        session.replay_decoding_token = token
+        queued = BackgroundWork.submit do
+          actions = begin
+            replay.next_batch
+          rescue
+            [TerminalReplay::INVALID_REPLAY_NOTICE.to_slice] of TerminalReplayAction
+          end
+          GLib.idle_add do
+            finish_replay_batch(session, replay, token, actions)
+            false
+          end
+          nil
+        end
+        return if queued
+
+        session.replay_decoding_token = nil if session.replay_decoding_token == token
+        GLib.timeout(25.milliseconds) do
+          schedule_replay_batch(session, token)
+          false
+        end
+      end
+
+      private def finish_replay_batch(
+        session : Session,
+        replay : TerminalReplay,
+        token : Int64,
+        actions : Array(TerminalReplayAction),
+      ) : Nil
+        session.replay_decoding_token = nil if session.replay_decoding_token == token
+        return unless session.replay_token == token
+        return unless session.replay.same?(replay)
+
+        actions.each do |action|
           if action.is_a?(Bytes)
             session.terminal.feed(action)
           else
@@ -527,29 +570,14 @@ module Xd
           session.replay = nil
           session.terminal.set_size(session.columns, session.rows)
         else
-          GLib.idle_add do
-            feed_replay_batch(session, token)
-            false
-          end
+          schedule_replay_batch(session, token)
         end
-      end
-
-      private def feed_output(
-        terminal : Vte::Terminal,
-        encoded : String,
-      ) : Nil
-        if encoded.bytesize > TerminalReplay::MAX_ENCODED_ITEM
-          terminal.feed(TerminalReplay::INVALID_REPLAY_NOTICE.to_slice)
-          return
-        end
-        terminal.feed(Base64.decode(encoded))
-      rescue Base64::Error
-        terminal.feed(TerminalReplay::INVALID_REPLAY_NOTICE.to_slice)
       end
 
       private def cancel_replay(session : Session) : Nil
         session.replay_token &+= 1
         session.replay = nil
+        session.replay_decoding_token = nil
       end
 
       private def open_terminal(reuse : Bool) : Nil

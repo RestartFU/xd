@@ -49,7 +49,10 @@ describe Xd::UI::TerminalReplay do
       24_i64
     )
 
-    actions = replay.next_batch
+    actions = [] of Xd::UI::TerminalReplayAction
+    until replay.done?
+      actions.concat(replay.next_batch)
+    end
 
     actions.size.should eq(2)
     actions.each do |action|
@@ -57,5 +60,30 @@ describe Xd::UI::TerminalReplay do
         Xd::UI::TerminalReplay::INVALID_REPLAY_NOTICE
       )
     end
+  end
+
+  it "splits a single large item across the GTK feed budget" do
+    payload = Bytes.new(
+      Xd::UI::TerminalReplay::BATCH_DECODED_BYTES * 2 + 7,
+      65_u8
+    )
+    replay = Xd::UI::TerminalReplay.new(
+      [replay_data(Base64.strict_encode(payload))],
+      80_i64,
+      24_i64
+    )
+
+    batches = [] of Array(Xd::UI::TerminalReplayAction)
+    until replay.done?
+      batches << replay.next_batch
+    end
+
+    batches.size.should eq(3)
+    batches.each do |batch|
+      batch.sum { |action| action.as(Bytes).size }
+        .should be <= Xd::UI::TerminalReplay::BATCH_DECODED_BYTES
+    end
+    batches.flatten.sum { |action| action.as(Bytes).size }
+      .should eq(payload.size)
   end
 end

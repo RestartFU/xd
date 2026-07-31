@@ -8,14 +8,14 @@ module Xd
       rows : Int64
 
     alias TerminalReplayAction = Bytes | TerminalReplayGeometry
-    alias TerminalReplayPending = String | TerminalReplayGeometry
+    alias TerminalReplayPending = String | Bytes | TerminalReplayGeometry
 
     # Lazily decodes terminal history in bounded batches. Keeping JSON parsing,
     # Base64 work and VTE feeds below one batch budget lets GTK process input
     # between chunks even when a daemon returns its full 16 MiB history.
     class TerminalReplay
-      BATCH_ITEMS           =  64
-      BATCH_DECODED_BYTES   = 128 * 1024
+      BATCH_ITEMS           = 64
+      BATCH_DECODED_BYTES   = 32 * 1024
       MAX_ENCODED_ITEM      = 128 * 1024
       INVALID_REPLAY_NOTICE =
         "\r\n[xd: skipped invalid terminal replay data]\r\n"
@@ -23,6 +23,7 @@ module Xd
       @position = 0
       @pending = Deque(TerminalReplayPending).new
       @deferred : JSON::Any | TerminalReplayPending | Nil = nil
+      @mutex = Mutex.new
 
       def initialize(
         @items : Array(JSON::Any),
@@ -32,38 +33,51 @@ module Xd
       end
 
       def append_data(encoded : String) : Nil
-        @pending << encoded
+        @mutex.synchronize { @pending << encoded }
       end
 
       def append_geometry(columns : Int64, rows : Int64) : Nil
-        @pending << TerminalReplayGeometry.new(columns, rows)
+        @mutex.synchronize do
+          @pending << TerminalReplayGeometry.new(columns, rows)
+        end
       end
 
       def next_batch : Array(TerminalReplayAction)
-        actions = [] of TerminalReplayAction
-        decoded_bytes = 0
-        BATCH_ITEMS.times do
-          input = next_input
-          break unless input
+        @mutex.synchronize do
+          actions = [] of TerminalReplayAction
+          decoded_bytes = 0
+          BATCH_ITEMS.times do
+            input = next_input
+            break unless input
 
-          estimate = estimated_decoded_bytes(input)
-          if !actions.empty? &&
-             decoded_bytes + estimate > BATCH_DECODED_BYTES
-            @deferred = input
-            break
+            estimate = estimated_decoded_bytes(input)
+            if !actions.empty? &&
+               decoded_bytes + estimate > BATCH_DECODED_BYTES
+              @deferred = input
+              break
+            end
+            action = decode(input)
+            if action.is_a?(Bytes) &&
+               action.size > BATCH_DECODED_BYTES - decoded_bytes
+              available = BATCH_DECODED_BYTES - decoded_bytes
+              actions << action[0, available]
+              @deferred = action[available, action.size - available]
+              break
+            end
+            actions << action
+            decoded_bytes += action.size if action.is_a?(Bytes)
+            break if decoded_bytes >= BATCH_DECODED_BYTES
           end
-          action = decode(input)
-          actions << action
-          decoded_bytes += action.size if action.is_a?(Bytes)
-          break if decoded_bytes >= BATCH_DECODED_BYTES
+          actions
         end
-        actions
       end
 
       def done? : Bool
-        @deferred.nil? &&
-          @position >= @items.size &&
-          @pending.empty?
+        @mutex.synchronize do
+          @deferred.nil? &&
+            @position >= @items.size &&
+            @pending.empty?
+        end
       end
 
       private def next_input : JSON::Any | TerminalReplayPending | Nil
@@ -85,6 +99,8 @@ module Xd
       ) : Int32
         encoded = if input.is_a?(String)
                     input
+                  elsif input.is_a?(Bytes)
+                    return input.size
                   elsif input.is_a?(TerminalReplayGeometry)
                     return 0
                   else
@@ -102,6 +118,8 @@ module Xd
       ) : TerminalReplayAction
         if input.is_a?(String)
           return decode_data(input)
+        elsif input.is_a?(Bytes)
+          return input
         elsif input.is_a?(TerminalReplayGeometry)
           return input
         end
