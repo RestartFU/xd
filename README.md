@@ -1,62 +1,16 @@
 # xd
 
-Workspace-organized AI conversations. A GTK4 desktop app written in Crystal
-around one daemon protocol for both local and paired clients.
-
-Chats do not live in a flat list; they live in a tree of workspaces and folders,
-and each chat inherits its parent chain's context — backend, model, working
-directory, repository and project instructions.
-
-```
-Lunar
-├── Proxy
-│   ├── Implement rate limiting
-│   └── Fix websocket reconnect
-└── Dashboard
-    └── UI Rewrite
-Personal
-└── Dotfiles
-```
-
-The app does not talk to AI APIs itself. Its bundle ships pinned native Codex
-and Claude Code CLIs plus Git, runs them as subprocesses, and uses their normal
-authentication/config directories.
-
-## Test a branch build
-
-Linux x86_64, with Docker running:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/refs/heads/rewrite/crystal-unified-daemon/scripts/install-branch.sh | sh
-```
-
-That resolves the branch's latest commit, builds its self-contained bundle
-inside Docker, and installs it as `xd-nightly`. No host Crystal compiler, GTK
-SDK, Codex, or Claude installation is needed. Existing nightly chats and
-workspaces are preserved. Quit a running `xd-nightly` before updating; the
-installer refuses to replace an active bundle so GNOME cannot reopen stale
-code.
+xd is a GTK4 desktop client for workspace-organized Codex and Claude Code
+conversations. Chats inherit their folder's working directory, repository,
+backend, model, and project instructions.
 
 ## Install
 
-Linux, x86_64:
+Linux x86_64:
 
 ```sh
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 ```
-
-That fetches the latest nightly, puts it in `~/.local/opt/xd-nightly`, adds the
-command `xd-nightly` and an entry in the app menu. No root, no package manager,
-and nothing compiled: the bundle carries its own GTK, Git, and everything under
-them, so it runs anywhere with glibc.
-
-Chats and workspaces live in `~/.local/share/xd-nightly`, which is the nightly's
-own — it installs beside a release rather than over it, and neither edits the
-other's work. `sh -s -- --uninstall` takes it away again and leaves that
-directory alone.
-
-xd has no in-app updater. Installers replace a fully built bundle only while xd
-is stopped; rerun the installer when you want a newer nightly.
 
 macOS Apple Silicon:
 
@@ -70,91 +24,49 @@ Windows x86_64 (PowerShell):
 irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 ```
 
-All three platforms ship the same Crystal client and daemon protocol plus
-platform-native GTK, Git, agent, speech, TLS, and IPC dependencies. No system
-Git, Codex, Claude, Crystal, GTK, or package-manager install is required.
+The Linux and macOS installers require no root access; Windows uses the
+standard MSI installer and may request UAC approval. Every platform receives a
+self-contained app with GTK, Git, Codex, Claude Code, speech support, and native
+runtime libraries. No system package-manager installation is required. xd has
+no in-app updater; quit it and rerun the installer to update.
 
-## Build
-
-Linux bundle builds and tests require Docker only. Nothing is installed on the
-host.
-
-```sh
-./scripts/build.sh     # -> ./dist, a self-contained bundle
-./scripts/test.sh      # headless test suite
-```
-
-`build.sh` produces a relocatable directory containing the binary, its whole
-library closure (including the dynamic loader), GTK's support data and a
-launcher. It runs on any glibc x86_64 host, including distributions with no
-system GTK such as NixOS.
-
-Native release builders use the same pinned source and dependencies:
-
-```sh
-./scripts/build-macos.sh ./macos-dist nightly
-./scripts/build-windows.sh ./windows-dist nightly  # MSYS2 UCRT64 shell
-```
-
-The macOS builder requires Apple Silicon and Homebrew build dependencies. The
-Windows builder requires an x86_64 MSYS2 UCRT64 build environment. Their output
-is self-contained; those build dependencies are not user runtime requirements.
-
-## Run
-
-```sh
-./dist/xd.sh
-```
-
-The app itself is deliberately *not* run inside Docker. Its daemon starts the
-bundled Codex, Claude, and Git CLIs and uses credentials stored on the daemon
-host. For a paired chat, authentication, CLI version checks, repository
-operations, and speech-model downloads all happen on that remote host. The
-launcher invokes the bundled loader with `--library-path` rather than exporting
-`LD_LIBRARY_PATH`, so ordinary child processes still use host libraries.
-
-### Known wart
-
-On non-Debian hosts, fontconfig prints parse warnings on startup for files under
-`/usr/share/fontconfig/conf.avail`: that path is compiled into the bundled
-library and the host's copy is a newer format. Fonts resolve correctly; the
-noise is cosmetic.
+Nightly data lives in `~/.local/share/xd-nightly` on Linux and the equivalent
+platform data directory on macOS and Windows. Uninstalling the app does not
+delete chats or workspaces.
 
 ## What it does
 
-- Workspaces and folders are real directories under `~/Workspaces`, nested to
-  any depth. Each carries a `.xd.json` with a UUID, so a folder can be renamed
-  or moved without its chats losing track of it.
-- A folder *refers* to a repository rather than containing one. Working
-  directory, repository, backend, model and project instructions are set per
-  folder and inherited by everything below; instructions accumulate from the
-  root down, everything else is overridden by the nearest folder that sets it.
-- New chats pick their own working directory and can stay in that checkout,
-  reuse any worktree already registered with its repository, or create an
-  isolated, request-named worktree under
-  `../worktrees/<repository>/<worktree-name>/<repository>/` before the first
-  message. Branches use the readable name plus a short stable suffix.
-- The composer shows which assistant will answer and which branch, worktree and
-  remote it is looking at.
-- Replies stream in and are rendered as Markdown. Stopping sends SIGINT first,
-  so the CLI's own session survives and the chat can still be resumed.
-- `Ctrl+K` searches every message.
+- Organizes chats in real workspace folders that can be nested, moved, or
+  renamed without losing their conversations.
+- Inherits folder settings and instructions down the workspace tree.
+- Runs bundled Codex and Claude Code CLIs with their normal authentication and
+  configuration.
+- Supports existing checkouts and isolated Git worktrees.
+- Streams Markdown responses, tool calls, inline file diffs, images, and voice
+  messages.
+- Supports local use and paired clients over the same daemon protocol.
+- Searches all stored messages with `Ctrl+K`.
 
-## Layout
+## Build and test
 
-| Path               | What lives there                                      |
-| ------------------ | ----------------------------------------------------- |
-| `src/xd/daemon/`   | Shared Engine, local/TLS transports, filesystem, PTY   |
-| `src/xd/agent/`    | Bundled CLI lifecycle, protocols, auth, turn handling |
-| `src/xd/ui/`       | GTK4/libadwaita client                                |
-| `src/xd/storage/`  | SQLite chats, messages, sessions, workflow state      |
-| `src/xd/workspace/` | Workspace tree, inherited settings, worktrees        |
-| `spec/`            | Crystal behavior and protocol specs                   |
+Linux builds require Docker only and do not install dependencies on the host:
 
-Docker, native CI, bundles, and installers build only `src/xd.cr`. Historical C
-sources remain available in Git history as migration reference.
+```sh
+./scripts/build.sh     # self-contained bundle in ./dist
+./scripts/test.sh      # complete headless test suite
+./dist/xd.sh           # run the built app
+```
 
-Workspace folders are real directories (default `~/Workspaces`), so they can be
-browsed, moved and synced with ordinary tools. Chat messages live in SQLite at
-`~/.local/share/xd/chats.db`, keyed by a stable folder UUID so renaming or
-moving a folder never breaks its chats.
+Native release builders:
+
+```sh
+./scripts/build-macos.sh ./macos-dist nightly
+./scripts/build-windows.sh ./windows-dist nightly
+```
+
+The macOS builder requires Apple Silicon and its Homebrew build dependencies.
+The Windows builder runs in an x86_64 MSYS2 UCRT64 shell. Their outputs are
+self-contained; end users do not need those build dependencies.
+
+xd is written in Crystal. The client and daemon are built from `src/xd.cr`;
+behavior and protocol specs live under `spec/`.
