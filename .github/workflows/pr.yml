@@ -25,7 +25,7 @@ permissions:
   contents: read
 
 jobs:
-  crystal:
+  linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -40,3 +40,57 @@ jobs:
 
       - name: Build the bundle
         run: ./scripts/build.sh --build-arg PROFILE=nightly
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            unzip
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gobject-introspection
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-portaudio
+
+      - name: Build the complete Windows payload
+        shell: msys2 {0}
+        run: ./scripts/build-windows.sh "$PWD/windows-dist" nightly
+
+  macos:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install native build dependencies
+        run: >-
+          brew install
+          crystal
+          pkgconf
+          gtk4
+          libadwaita
+          vte3
+          portaudio
+          sqlite
+          glib-networking
+          librsvg
+          cmake
+
+      - name: Build the complete macOS app
+        run: ./scripts/build-macos.sh "$PWD/macos-dist" nightly

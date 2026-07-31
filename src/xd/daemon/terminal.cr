@@ -109,8 +109,10 @@ module Xd
         end
         return unless start_now
 
-        spawn read_output
-        spawn write_input
+        {% unless flag?(:win32) %}
+          spawn read_output
+          spawn write_input
+        {% end %}
       end
 
       def write(data : Bytes) : Nil
@@ -204,8 +206,12 @@ module Xd
           io.try(&.close)
         rescue IO::Error
         end
-        signal_session(LibC::SIGHUP) unless @pid == 0
-        spawn finish_shutdown
+        {% if flag?(:win32) %}
+          finish
+        {% else %}
+          signal_session(LibC::SIGHUP) unless @pid == 0
+          spawn finish_shutdown
+        {% end %}
       end
 
       private def clamp_geometry(value : Int, fallback : Int32) : Int32

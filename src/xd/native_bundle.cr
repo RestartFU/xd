@@ -169,7 +169,6 @@ module Xd
           "etc/gdk-pixbuf-loaders.cache.in",
           "lib/gdk-pixbuf-2.0/*/loaders.cache"
         ),
-        requirement("VTE runtime", "bin/libvte*.dll"),
         requirement("PortAudio runtime", "bin/libportaudio*.dll"),
         requirement("SQLite runtime", "bin/libsqlite3*.dll"),
         requirement(

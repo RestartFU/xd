@@ -81,7 +81,7 @@ WORKDIR /src
 COPY shard.yml shard.lock ./
 RUN shards install --production --frozen
 COPY bindings ./bindings
-RUN ./bin/gi-crystal
+RUN ./bin/gi-crystal bindings/vte/binding-unix.yml
 
 COPY src/xd.cr ./src/xd.cr
 COPY src/xd ./src/xd

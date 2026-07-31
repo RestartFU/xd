@@ -18,8 +18,8 @@ if [ -z "$STAGED_EXE" ]; then
   exit 1
 fi
 
-# Meson canonicalizes /ucrt64 to its native drive path before DESTDIR is
-# applied, so the staged prefix is not necessarily "$STAGE$MINGW_PREFIX".
+# Native staging may use a drive-normalized path, so derive the prefix from the
+# staged Crystal executable instead of assuming "$STAGE$MINGW_PREFIX".
 STAGED_PREFIX="${STAGED_EXE%/bin/xd.exe}"
 
 [ "$("$STAGED_EXE" --bundle-runtime)" = crystal ] || {
@@ -68,7 +68,7 @@ mkdir -p "$OUT/lib/gio/modules"
 cp -a "$PREFIX/lib/gio/modules/"*.dll "$OUT/lib/gio/modules/" \
   2>/dev/null || true
 
-# Image loaders are also dynamic. Store a relocatable cache template; main.c
+# Image loaders are also dynamic. Store a relocatable cache template; Crystal
 # expands @BUNDLE@ to the actual MSI installation directory before GTK starts.
 PIXBUF_LOADERS="$(pkg-config --variable=gdk_pixbuf_moduledir gdk-pixbuf-2.0)"
 QUERY_LOADERS="$(pkg-config --variable=gdk_pixbuf_query_loaders gdk-pixbuf-2.0)"

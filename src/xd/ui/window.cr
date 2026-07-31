@@ -246,6 +246,9 @@ module Xd
         @terminal_button.toggled_signal.connect { terminal_toggled }
         @file_button.toggled_signal.connect { file_toggled }
         @diff_button.toggled_signal.connect { diff_toggled }
+        {% if flag?(:win32) %}
+          @terminal_button.visible = false
+        {% end %}
         chat_header.pack_end(@terminal_button)
         chat_header.pack_end(@file_button)
         chat_header.pack_end(@diff_button)
@@ -595,6 +598,11 @@ module Xd
       end
 
       private def terminal_toggled : Nil
+        {% if flag?(:win32) %}
+          @terminal_button.active = false if @terminal_button.active?
+          return
+        {% end %}
+
         shown = @terminal_button.active?
         unless shown
           remember_terminal_height
@@ -738,6 +746,9 @@ module Xd
       end
 
       private def apply_panes(state : UInt32) : Nil
+        {% if flag?(:win32) %}
+          state &= ~PaneState::Terminal
+        {% end %}
         if (state & PaneState::Files) != 0
           state &= ~PaneState::Diff
         end
@@ -954,7 +965,7 @@ module Xd
         @composer.visible = true
         update_auth_controls
         @controls.sensitive = true
-        @terminal_button.sensitive = true
+        @terminal_button.sensitive = {{ !flag?(:win32) }}
         @file_button.sensitive = true
         @diff_button.sensitive = true
         @tool_panel.select_chat(id, pane_key)

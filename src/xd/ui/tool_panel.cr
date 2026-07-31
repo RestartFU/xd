@@ -3,7 +3,11 @@ require "gtk4"
 require "./diff_pane"
 require "./file_pane"
 require "./panel_call"
-require "./terminal_panel"
+{% if flag?(:win32) %}
+  require "./terminal_panel_windows"
+{% else %}
+  require "./terminal_panel"
+{% end %}
 
 module Xd
   module UI

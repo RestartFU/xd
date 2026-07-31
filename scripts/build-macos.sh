@@ -64,7 +64,7 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 
 cd "$ROOT"
 shards install --production --frozen
-./bin/gi-crystal
+./bin/gi-crystal bindings/vte/binding-unix.yml
 
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
 XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
