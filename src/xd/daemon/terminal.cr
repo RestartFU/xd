@@ -209,7 +209,9 @@ module Xd
         {% if flag?(:win32) %}
           finish
         {% else %}
-          signal_session(LibC::SIGHUP) unless @pid == 0
+          # Closing the PTY master asks the kernel to hang up its foreground
+          # session. An extra process-group SIGHUP can escape the PTY boundary
+          # on Darwin while the child is still establishing job control.
           spawn finish_shutdown
         {% end %}
       end
