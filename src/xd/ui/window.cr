@@ -8,6 +8,7 @@ require "../agent/subagent_tool"
 require "../agent/workflow_run"
 require "../agent/workspace_block"
 require "../daemon/endpoint"
+require "../integrations/discord_presence"
 require "../remote/connection"
 require "../version"
 require "./adw"
@@ -90,6 +91,7 @@ module Xd
       @auth_state = "unknown"
       @stream_row : MessageRow?
       @working = false
+      @waiting_for_input = false
       @workflow_ids = Set(String).new
       @attachments = [] of Attachment
       @client : Daemon::Endpoint
@@ -168,6 +170,7 @@ module Xd
         @working_label = nil
         @working_dots = nil
         @working_started_at = nil
+        @presence = DiscordPresence.new
         @stream_source = nil
         @event_inbox = EventInbox(Daemon::Endpoint).new
         @live_turn_key = nil
@@ -508,6 +511,7 @@ module Xd
           @closed = true
           @event_inbox.clear
           @voice.close
+          @presence.close
           persist_window_layout
           false
         end
@@ -523,6 +527,7 @@ module Xd
             )
             if @client.same?(@remote)
               @git_actions.connection_changed(snapshot.state.connected?)
+              update_presence
             end
             false
           end
@@ -948,6 +953,7 @@ module Xd
         clear_attachments
         @client = endpoint
         @active_chat = id
+        @waiting_for_input = false
         @auth_state = "unknown"
         if changed
           @voice.select(
@@ -978,6 +984,7 @@ module Xd
         load_messages
         load_chat_state
         @entry.grab_focus
+        update_presence
       end
 
       private def chat_deleted(
@@ -999,6 +1006,7 @@ module Xd
         retire_open_questions
         leave_current_transcript(false)
         @active_chat = nil
+        @waiting_for_input = false
         @sidebar.clear_active_chat
         @settings.set_string("active-chat", "")
         @stream_row = nil
@@ -1019,6 +1027,7 @@ module Xd
         @terminal_button.sensitive = false
         @file_button.sensitive = false
         @diff_button.sensitive = false
+        update_presence
         @tool_panel.select_chat(nil, nil)
         @git_actions.select_chat(nil)
         clear_queue
@@ -1030,6 +1039,21 @@ module Xd
         @status.text = ""
         @auth_status.text = ""
         @auth_button.visible = false
+      end
+
+      private def update_presence : Nil
+        state = if @active_chat.nil?
+                  "Browsing workspaces"
+                elsif @client.same?(@remote) && !@remote.connected?
+                  "Remote unavailable"
+                elsif @waiting_for_input
+                  "Waiting for input"
+                elsif @working
+                  "Agent working"
+                else
+                  "Reviewing a conversation"
+                end
+        @presence.state = state
       end
 
       private def restore_active_chat : Nil
@@ -1489,6 +1513,8 @@ module Xd
 
       private def append_ask(ask : Agent::Ask) : Nil
         retire_open_questions
+        @waiting_for_input = true
+        update_presence
         if page = @transcript_page
           page.choices_visible = true
         end
@@ -1537,6 +1563,8 @@ module Xd
         text = answer.strip
         return if text.empty?
 
+        @waiting_for_input = false
+        update_presence
         @entry.grab_focus
         send_message(text)
       end
@@ -2017,8 +2045,10 @@ module Xd
 
       private def set_working(working : Bool) : Nil
         @working = working
+        @waiting_for_input = false if working
         @cancel_pending = false unless working
         update_send_button
+        update_presence
         unless working
           remove_working_row
           return
@@ -2070,7 +2100,9 @@ module Xd
         finish_stream_segment
         remove_working_row
         @working = false
+        @waiting_for_input = false
         update_send_button
+        update_presence
         @stream_source = nil
         @live_turn_key = nil
       end
@@ -2611,6 +2643,8 @@ module Xd
           @stream_source = event["label"]?.try(&.as_s?)
           @working_started_at = Time.instant
           @working = true
+          @waiting_for_input = false
+          update_presence
           load_messages
           # This event attaches us to a new turn before its ordered deltas.
           # The state call below may already see those deltas in the daemon;
