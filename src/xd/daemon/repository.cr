@@ -433,7 +433,7 @@ module Xd
           raise Error.new("That diff path is outside the repository.")
         end
 
-        candidate = File.expand_path(path, workdir)
+        candidate = File.expand_path(path, File.realpath(workdir))
         unless candidate == root ||
                candidate.starts_with?(root + File::SEPARATOR)
           raise Error.new("That diff path is outside the repository.")
