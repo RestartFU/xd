@@ -141,6 +141,8 @@ module Xd
       @send_pending = false
       @cancel_pending = false
       @closed = false
+      @retired_transcripts = Deque(Gtk::Box).new
+      @transcript_retirement_scheduled = false
 
       def initialize(
         application : Gtk::Application,
@@ -873,6 +875,7 @@ module Xd
 
         @transcript_lru.delete(key)
         @transcript_stack.remove(page.transcript)
+        retire_transcript(page.transcript)
       end
 
       private def current_transcript_cacheable? : Bool
@@ -1185,17 +1188,32 @@ module Xd
         )
         @transcript_stack.visible_child = replacement
 
+        retire_transcript(retired)
+      end
+
+      private def retire_transcript(transcript : Gtk::Box) : Nil
+        return unless transcript.first_child
+
+        @retired_transcripts << transcript
+        return if @transcript_retirement_scheduled
+
+        @transcript_retirement_scheduled = true
         GLib.idle_add do
           4.times do
-            child = retired.first_child || break
-            retired.remove(child)
+            retired = @retired_transcripts.first?
+            break unless retired
+
+            if child = retired.first_child
+              retired.remove(child)
+            end
+            unless retired.first_child
+              @transcript_stack.remove(retired) if retired.parent
+              @retired_transcripts.shift
+            end
           end
-          if retired.first_child
-            true
-          else
-            @transcript_stack.remove(retired) if retired.parent
-            false
-          end
+          more = !@retired_transcripts.empty?
+          @transcript_retirement_scheduled = more
+          more
         end
       end
 
