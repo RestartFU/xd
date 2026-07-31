@@ -103,7 +103,7 @@ shards install --production --frozen
 ./bin/gi-crystal bindings/vte/binding-unix.yml
 
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
-XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+SPEC_VERBOSE=1 XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
   crystal spec --error-trace
 XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
   crystal build src/xd.cr --release --no-debug -o "$WORK/xd"
