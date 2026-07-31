@@ -196,6 +196,7 @@ module Xd
         ),
         requirement(
           "Git certificate authorities",
+          "git/mingw64/etc/ssl/certs/ca-bundle.crt",
           "git/mingw64/ssl/certs/ca-bundle.crt",
           "git/ssl/certs/ca-bundle.crt"
         ),

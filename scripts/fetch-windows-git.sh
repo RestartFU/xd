@@ -60,7 +60,7 @@ MSYS2_ARG_CONV_EXCL=-o 7z x -y "-o$destination" "$WORK/$GIT_ASSET" \
 
 "$STAGE/git/cmd/git.exe" --version | grep -F "git version 2.55.0.windows.3"
 [ -x "$STAGE/git/mingw64/libexec/git-core/git-remote-https.exe" ]
-[ -f "$STAGE/git/mingw64/ssl/certs/ca-bundle.crt" ]
+[ -f "$STAGE/git/mingw64/etc/ssl/certs/ca-bundle.crt" ]
 [ -x "$STAGE/git/mingw64/bin/openssl.exe" ]
 
 printf 'Windows PortableGit: %s\n' "$GIT_VERSION"

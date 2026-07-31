@@ -154,4 +154,48 @@ describe Xd::BundleEnvironment do
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
+
+  it "uses the current PortableGit TLS layout" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-portable-git-environment-#{Random::Secure.hex(12)}"
+    )
+    root = File.join(directory, "bundle")
+    certificates = File.join(
+      root,
+      "git",
+      "mingw64",
+      "etc",
+      "ssl",
+      "certs",
+      "ca-bundle.crt"
+    )
+    openssl_config = File.join(
+      root,
+      "git",
+      "mingw64",
+      "etc",
+      "ssl",
+      "openssl.cnf"
+    )
+    Dir.mkdir_p(File.dirname(certificates))
+    File.write(certificates, "portable certificate")
+    File.write(openssl_config, "openssl_conf = portable")
+
+    begin
+      preserving_environment do
+        ENV.delete("GIT_SSL_CAINFO")
+        ENV.delete("SSL_CERT_FILE")
+        ENV.delete("OPENSSL_CONF")
+
+        Xd::BundleEnvironment.prepare(root)
+
+        ENV["GIT_SSL_CAINFO"].should eq(certificates)
+        ENV["SSL_CERT_FILE"].should eq(certificates)
+        ENV["OPENSSL_CONF"].should eq(openssl_config)
+      end
+    ensure
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
 end

@@ -34,6 +34,7 @@ module Xd
       if openssl_config = first_file(
            File.join(root, "etc", "ssl", "openssl.cnf"),
            File.join(root, "git", "ssl", "openssl.cnf"),
+           File.join(root, "git", "mingw64", "etc", "ssl", "openssl.cnf"),
            File.join(root, "git", "mingw64", "ssl", "openssl.cnf")
          )
         ENV["OPENSSL_CONF"] ||= openssl_config
@@ -230,6 +231,14 @@ module Xd
       certificates = first_file(
         File.join(root, "etc", "ssl", "certs", "ca-certificates.crt"),
         File.join(portable, "ssl", "certs", "ca-bundle.crt"),
+        File.join(
+          portable,
+          "mingw64",
+          "etc",
+          "ssl",
+          "certs",
+          "ca-bundle.crt"
+        ),
         File.join(
           portable,
           "mingw64",
