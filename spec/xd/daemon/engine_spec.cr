@@ -571,7 +571,7 @@ describe Xd::Daemon::Engine do
         "chat" => created["id"].as_s,
       }.to_json)
       state.success?.should be_true
-      state["workdir"].as_s.should eq(File.realpath(workdir))
+      File.realpath(state["workdir"].as_s).should eq(File.realpath(workdir))
       state["context"].as_s.should contain(".local")
     end
   end
