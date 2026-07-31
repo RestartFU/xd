@@ -125,6 +125,7 @@ module Xd
           kind_node = change["kind"]?
           kind = kind_node.try(&.as_s?)
           kind_object = kind_node.try(&.as_h?)
+          kind ||= kind_object.try { |object| string?(object, "type") }
           kind ||= kind_object.try(&.keys.first?)
           kind = kind.try(&.downcase) || "update"
 

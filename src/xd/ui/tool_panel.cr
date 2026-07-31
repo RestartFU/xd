@@ -1,5 +1,6 @@
 require "json"
 require "gtk4"
+require "../agent/git_diff_tracker"
 require "./diff_pane"
 require "./file_pane"
 require "./panel_call"
@@ -84,15 +85,25 @@ module Xd
         return unless event["chat"]?.try(&.as_s?) == @chat_id
 
         @terminal_panel.handle_event(event)
+        return unless self.class.repository_changed?(event)
+        return unless @repository_widget.visible?
+
+        refresh_repository(@repository_page)
+      end
+
+      def self.repository_changed?(
+        event : Hash(String, JSON::Any),
+      ) : Bool
         name = event["event"]?.try(&.as_s?)
-        repository_changed = name == "turn-finished" ||
-                             name == "repository-changed" ||
-                             (name == "git-action-finished" &&
-                              event["success"]?.try(&.as_bool?) == true)
-        if repository_changed
-          @diff_pane.refresh if @repository_widget.visible? &&
-                                @repository_page == "diff"
+        return true if name == "turn-finished" ||
+                       name == "repository-changed"
+        if name == "git-action-finished"
+          return event["success"]?.try(&.as_bool?) == true
         end
+
+        name == "tool" && Agent::GitDiffTracker.file_change?(
+          event["text"]?.try(&.as_s?)
+        )
       end
 
       def remote_connection_changed(

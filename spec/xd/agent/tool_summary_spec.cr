@@ -1,5 +1,6 @@
 require "../../spec_helper"
 require "../../../src/xd/agent/tool_summary"
+require "../../../src/xd/unified_diff"
 
 private def summary_input(
   values : Hash(String, String),
@@ -97,12 +98,12 @@ describe Xd::Agent::ToolSummary do
       "changes" => [
         {
           "path" => "src/new.cr",
-          "kind" => "add",
+          "kind" => {"type" => "add"},
           "diff" => "puts :hello\n",
         },
         {
           "path" => "src/old.cr",
-          "kind" => "update",
+          "kind" => {"type" => "update", "move_path" => nil},
           "diff" => "@@ -1 +1 @@\n-old\n+new\n",
         },
       ],
@@ -113,6 +114,13 @@ describe Xd::Agent::ToolSummary do
     summary.should contain("+++ b/src/new.cr")
     summary.should contain("+puts :hello")
     summary.should contain("@@ -1 +1 @@")
+
+    patch = summary.byte_slice(Xd::Agent::ToolDiff::PREFIX.bytesize)
+    parsed = Xd::UnifiedDiff.parse(patch)
+    parsed.additions.should eq(2)
+    parsed.deletions.should eq(1)
+    parsed.lines.select(&.kind.added?).map(&.text)
+      .should eq(["puts :hello", "new"])
   end
 
   it "builds Claude edit and write diffs from tool arguments" do
