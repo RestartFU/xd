@@ -31,6 +31,10 @@ command -v cygpath >/dev/null 2>&1 || {
   echo "fetch-windows-git: cygpath is required" >&2
   exit 1
 }
+command -v 7z >/dev/null 2>&1 || {
+  echo "fetch-windows-git: 7z is required" >&2
+  exit 1
+}
 [ ! -e "$STAGE/git" ] || {
   echo "fetch-windows-git: destination already exists" >&2
   exit 1
@@ -45,7 +49,10 @@ printf '%s  %s\n' "$GIT_SHA256" "$WORK/$GIT_ASSET" |
   sha256sum --check
 
 destination=$(cygpath -w "$STAGE/git")
-"$WORK/$GIT_ASSET" -y -gm2 -o "$destination"
+MSYS2_ARG_CONV_EXCL=-o 7z x -y "-o$destination" "$WORK/$GIT_ASSET" \
+  >/dev/null
+"$STAGE/git/git-bash.exe" \
+  --no-needs-console --hide --no-cd --command=post-install.bat
 
 "$STAGE/git/cmd/git.exe" --version | grep -F "git version 2.55.0.windows.3"
 [ -x "$STAGE/git/mingw64/libexec/git-core/git-remote-https.exe" ]
