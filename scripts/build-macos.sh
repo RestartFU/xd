@@ -53,12 +53,23 @@ for command in curl ditto pkg-config shards shasum tar; do
     exit 1
   }
 done
-for package in gtk4 libadwaita-1 vte-2.91-gtk4 portaudio-2.0 sqlite3; do
+for package in \
+  gobject-introspection-1.0 \
+  gtk4 \
+  libadwaita-1 \
+  vte-2.91-gtk4 \
+  portaudio-2.0 \
+  sqlite3; do
   pkg-config --exists "$package" || {
     echo "build-macos: pkg-config package missing: $package" >&2
     exit 1
   }
 done
+
+# gi-crystal links this library by name instead of through pkg-config.
+# Homebrew's Cellar is not a compiler-default library directory.
+GI_LIBDIR="$(pkg-config --variable=libdir gobject-introspection-1.0)"
+export LIBRARY_PATH="$GI_LIBDIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"

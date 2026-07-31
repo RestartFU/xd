@@ -44,7 +44,7 @@ for command in cmake curl glib-compile-schemas pkg-config unzip; do
     exit 1
   }
 done
-for package in gtk4 libadwaita-1 portaudio-2.0 sqlite3; do
+for package in bdw-gc gtk4 libadwaita-1 portaudio-2.0 sqlite3; do
   pkg-config --exists "$package" || {
     echo "build-windows: pkg-config package missing: $package" >&2
     exit 1
