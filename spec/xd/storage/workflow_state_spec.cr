@@ -70,6 +70,37 @@ describe Xd::Storage::Store do
     end
   end
 
+  it "serializes queue mutations from agent and command workers" do
+    with_workflow_store do |store|
+      chat_id = store.create_chat("folder", "Concurrent", "claude")
+      finished = Channel(Exception?).new(2)
+
+      2.times do |worker|
+        Fiber::ExecutionContext::Isolated.new(
+          "queue mutation spec #{worker}"
+        ) do
+          begin
+            50.times do |index|
+              store.queue_append(chat_id, "#{worker}:#{index}")
+            end
+            finished.send(nil)
+          rescue error
+            finished.send(error)
+          end
+        end
+      end
+
+      2.times do
+        if error = finished.receive
+          raise error
+        end
+      end
+      queue = store.get_chat(chat_id).queue
+      queue.size.should eq(100)
+      queue.to_set.size.should eq(100)
+    end
+  end
+
   it "locks workspace selection after the first message" do
     with_workflow_store do |store|
       chat_id = store.create_chat("folder", "Chat", "claude")

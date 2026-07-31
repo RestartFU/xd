@@ -130,28 +130,31 @@ module Xd
       end
 
       def set_queue(chat_id : String, messages : Array(String)) : Nil
-        update_chat_column(
-          "queued",
-          Storage.queue_to_column(messages),
-          chat_id,
-          "Cannot update the queue"
-        )
+        replacement = messages.dup
+        mutate_queue(chat_id) do |current|
+          current.replace(replacement)
+          true
+        end
       end
 
       def queue_append(chat_id : String, text : String) : Nil
         raise ArgumentError.new("queued text cannot be empty") if text.empty?
 
-        messages = load_queue(chat_id)
-        messages << text
-        set_queue(chat_id, messages)
+        mutate_queue(chat_id) do |messages|
+          messages << text
+          true
+        end
       end
 
       def queue_remove(chat_id : String, position : Int) : Nil
-        messages = load_queue(chat_id)
-        return unless position >= 0 && position < messages.size
-
-        messages.delete_at(position)
-        set_queue(chat_id, messages)
+        mutate_queue(chat_id) do |messages|
+          if position >= 0 && position < messages.size
+            messages.delete_at(position)
+            true
+          else
+            false
+          end
+        end
       end
 
       def queue_replace(
@@ -162,38 +165,82 @@ module Xd
       ) : Nil
         raise ArgumentError.new("queued text cannot be empty") if new_text.empty?
 
-        messages = load_queue(chat_id)
-        if position < 0 ||
-           position >= messages.size ||
-           messages[position] != old_text
-          raise ConflictError.new("That queued message changed; try again.")
-        end
+        mutate_queue(chat_id) do |messages|
+          if position < 0 ||
+             position >= messages.size ||
+             messages[position] != old_text
+            raise ConflictError.new("That queued message changed; try again.")
+          end
 
-        messages[position] = new_text
-        set_queue(chat_id, messages)
+          messages[position] = new_text
+          true
+        end
       end
 
       def queue_promote(chat_id : String, position : Int) : Nil
-        messages = load_queue(chat_id)
-        if position < 0 || position >= messages.size
-          raise ConflictError.new(
-            "That queued message no longer exists."
-          )
-        end
-        return if position == 0
+        mutate_queue(chat_id) do |messages|
+          if position < 0 || position >= messages.size
+            raise ConflictError.new(
+              "That queued message no longer exists."
+            )
+          end
+          next false if position == 0
 
-        selected = messages.delete_at(position)
-        messages.unshift(selected)
-        set_queue(chat_id, messages)
+          selected = messages.delete_at(position)
+          messages.unshift(selected)
+          true
+        end
       end
 
       def queue_take_first(chat_id : String) : String?
-        messages = load_queue(chat_id)
-        return nil if messages.empty?
-
-        first = messages.shift
-        set_queue(chat_id, messages)
+        first : String? = nil
+        mutate_queue(chat_id) do |messages|
+          if messages.empty?
+            false
+          else
+            first = messages.shift
+            true
+          end
+        end
         first
+      end
+
+      private def mutate_queue(
+        chat_id : String,
+        & : Array(String) -> Bool
+      ) : Nil
+        @queue_mutex.synchronize do
+          database_error("Cannot update the queue") do
+            @database.transaction do |transaction|
+              connection = transaction.connection
+              stored = connection.query_one?(
+                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                chat_id,
+                as: String
+              )
+              unless stored
+                raise NotFoundError.new("No chat #{chat_id}")
+              end
+
+              messages = Storage.queue_from_column(stored)
+              if yield messages
+                result = connection.exec(
+                  <<-SQL,
+                    UPDATE chats
+                       SET queued = ?, updated_at = ?
+                     WHERE id = ?
+                    SQL
+                  Storage.queue_to_column(messages),
+                  now_seconds,
+                  chat_id
+                )
+                unless result.rows_affected == 1
+                  raise NotFoundError.new("No chat #{chat_id}")
+                end
+              end
+            end
+          end
+        end
       end
 
       def mark_resumes(chat_ids : Array(String)) : Nil
@@ -239,10 +286,6 @@ module Xd
             chat_ids
           end.not_nil!
         end
-      end
-
-      private def load_queue(chat_id : String) : Array(String)
-        get_chat(chat_id).queue.dup
       end
 
       private def validate_workdirs(

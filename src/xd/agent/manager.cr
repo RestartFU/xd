@@ -700,6 +700,7 @@ module Xd
           )
           fields["accepts_input"] = JSON::Any.new(ask.accepts_input)
         end
+        @store.set_daemon_working(turn.chat_id, false) unless next_text
         publish("turn-finished", fields)
 
         if text = next_text
@@ -709,8 +710,6 @@ module Xd
           rescue error : Error
             STDERR.puts "xd: cannot start queued turn: #{error.message}"
           end
-        else
-          @store.set_daemon_working(turn.chat_id, false)
         end
       rescue error : Storage::Error
         STDERR.puts "xd: cannot finish agent turn: #{error.message}"

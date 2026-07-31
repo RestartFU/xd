@@ -40,6 +40,29 @@ describe Xd::Workspace::SettingsFile do
       ).should be_false
     end
   end
+
+  it "atomically replaces folder identity metadata" do
+    with_workspace do |_service, _store, root|
+      folder = File.join(root, "Atomic")
+      Dir.mkdir(folder)
+      settings = Xd::Workspace::Settings.new(
+        id: "stable",
+        instructions: "before"
+      )
+      Xd::Workspace::SettingsFile.save(settings, folder)
+
+      settings.instructions = "after"
+      Xd::Workspace::SettingsFile.save(settings, folder)
+
+      loaded = Xd::Workspace::SettingsFile.load(folder)
+      loaded.id.should eq("stable")
+      loaded.instructions.should eq("after")
+      Dir.children(folder).should eq([Xd::Workspace::SETTINGS_FILE])
+      File.info(
+        File.join(folder, Xd::Workspace::SETTINGS_FILE)
+      ).permissions.value.should eq(0o600)
+    end
+  end
 end
 
 describe Xd::Workspace::Service do

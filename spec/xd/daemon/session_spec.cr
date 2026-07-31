@@ -65,4 +65,21 @@ describe Xd::Daemon::Session do
       responses.each(&.["ok"].as_bool.should(be_true))
     end
   end
+
+  it "bounds remote frames before authentication" do
+    with_session_engine do |engine, _store|
+      oversized = "x" * (Xd::Protocol::AUTH_FRAME_LIMIT + 1)
+      input = IO::Memory.new(oversized)
+      output = IO::Memory.new
+
+      Xd::Daemon::Session.new(engine).run(
+        input,
+        output,
+        Xd::Daemon::Transport::Remote
+      )
+
+      input.pos.should eq(Xd::Protocol::AUTH_FRAME_LIMIT + 1)
+      output.to_s.should be_empty
+    end
+  end
 end

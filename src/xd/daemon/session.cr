@@ -1,5 +1,6 @@
 require "./engine"
 require "./event_bus"
+require "../protocol/frame"
 
 module Xd
   module Daemon
@@ -101,7 +102,12 @@ module Xd
         end
 
         begin
-          while line = input.gets
+          while line = Protocol.read_frame(
+                  input,
+                  connection.authenticated ?
+                    Protocol::FRAME_LIMIT :
+                    Protocol::AUTH_FRAME_LIMIT
+                )
             next if line.empty?
 
             if request_id = request_id(line)

@@ -265,6 +265,41 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "returns the selected backend's configured default effort" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-engine-effort-#{Random::Secure.hex(12)}"
+    )
+    previous_home = ENV["HOME"]?
+
+    begin
+      Dir.mkdir_p(File.join(directory, ".claude"))
+      File.write(
+        File.join(directory, ".claude", "settings.json"),
+        %({"effortLevel":"low"})
+      )
+      ENV["HOME"] = directory
+
+      with_daemon_engine do |store, engine|
+        chat_id = store.create_chat("folder", "Chat", "claude")
+        local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+        state = engine.dispatch(local, {
+          "op"   => "chat",
+          "chat" => chat_id,
+        }.to_json)
+
+        state["effort"].as_s.should eq("low")
+      end
+    ensure
+      if previous_home
+        ENV["HOME"] = previous_home
+      else
+        ENV.delete("HOME")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
   it "blocks signed-out local and remote turns before the launcher" do
     directory = File.join(
       Dir.tempdir,

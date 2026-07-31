@@ -70,6 +70,7 @@ end
 
 private def with_agent_manager(
   authorizer : Xd::Agent::Manager::Authorizer = ->(_provider : String) : String? { nil },
+  event_observer : Proc(String, Hash(String, JSON::Any), Nil)? = nil,
   & : Xd::Agent::Manager, Xd::Storage::Store, Xd::Workspace::Service, String, FakeLauncher, Array(Tuple(String, Hash(String, JSON::Any))) ->
 ) : Nil
   directory = File.join(
@@ -92,6 +93,7 @@ private def with_agent_manager(
     launcher,
     ->(name : String, fields : Hash(String, JSON::Any)) {
       events << {name, fields}
+      event_observer.try(&.call(name, fields))
       nil
     },
     authorizer: authorizer
@@ -195,6 +197,28 @@ describe Xd::Agent::Manager do
       events.map(&.[0]).should contain("tool")
       events.map(&.[0]).should contain("turn-finished")
       manager.commands(chat_id).should eq(["review"])
+    end
+  end
+
+  it "clears durable working state before the final event" do
+    observed_working : Bool? = nil
+    store_ref : Xd::Storage::Store? = nil
+    chat_ref : String? = nil
+    observer = ->(name : String, _fields : Hash(String, JSON::Any)) {
+      if name == "turn-finished"
+        observed_working = store_ref.not_nil!
+          .get_chat(chat_ref.not_nil!).daemon_working
+      end
+    }
+
+    with_agent_manager(event_observer: observer) do |manager, store, _workspaces, folder_id, launcher, _events|
+      store_ref = store
+      chat_ref = store.create_chat(folder_id, "Chat", "claude")
+      manager.send(chat_ref.not_nil!, "finish")
+
+      launcher.finish(0, true)
+
+      observed_working.should be_false
     end
   end
 

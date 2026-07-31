@@ -16,6 +16,7 @@ module Xd
       getter path : String
 
       @database : DB::Database
+      @queue_mutex = Mutex.new
 
       def initialize(
         @path : String,

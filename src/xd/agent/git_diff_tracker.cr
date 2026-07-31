@@ -10,8 +10,14 @@ module Xd
     class GitDiffTracker
       FILE_CHANGE_PREFIX = ToolDiff::PREFIX
       DIFF_LIMIT         = ToolDiff::LIMIT
+      COMMAND_TIMEOUT     = 5.seconds
+      OUTPUT_LIMIT        = DIFF_LIMIT + 1
+      ERROR_LIMIT         = 8 * 1024
+      READ_BUFFER         = 8 * 1024
 
       getter root : String
+
+      private record StreamCapture, text : String
 
       @previous_tree : String
 
@@ -144,26 +150,79 @@ module Xd
         workdir : String,
         arguments : Array(String),
         index_path : String? = nil,
+        timeout : Time::Span = COMMAND_TIMEOUT,
+        executable : String = "git",
       ) : String?
-        output = IO::Memory.new
-        error = IO::Memory.new
         environment = {"GIT_LITERAL_PATHSPECS" => "1"}
         if index_path
           environment["GIT_INDEX_FILE"] = GitPath.environment(index_path)
         end
-        status = Process.run(
-          "git",
+
+        process = Process.new(
+          executable,
           arguments,
           env: environment,
           chdir: workdir,
-          output: output,
-          error: error
+          input: Process::Redirect::Close,
+          output: Process::Redirect::Pipe,
+          error: Process::Redirect::Pipe
         )
-        return unless status.success?
-        text = output.to_s
+        output_done = Channel(StreamCapture).new(1)
+        error_done = Channel(StreamCapture).new(1)
+        status_done = Channel(Process::Status).new(1)
+        spawn capture_stream(process.output, OUTPUT_LIMIT, output_done)
+        spawn capture_stream(process.error, ERROR_LIMIT, error_done)
+        spawn { status_done.send(process.wait) }
+
+        status : Process::Status? = nil
+        timed_out = false
+        select
+        when result = status_done.receive
+          status = result
+        when timeout(timeout)
+          timed_out = true
+          process.terminate(graceful: false)
+          select
+          when result = status_done.receive
+            status = result
+          when timeout(1.second)
+            process.output.close unless process.output.closed?
+            process.error.close unless process.error.closed?
+          end
+        end
+
+        output = output_done.receive
+        error_done.receive
+        return if timed_out || !status.try(&.success?)
+        text = output.text
         text if text.valid_encoding?
       rescue File::Error | IO::Error
         nil
+      end
+
+      private def self.capture_stream(
+        stream : IO,
+        limit : Int32,
+        done : Channel(StreamCapture),
+      ) : Nil
+        output = IO::Memory.new
+        buffer = Bytes.new(READ_BUFFER)
+
+        begin
+          loop do
+            count = stream.read(buffer)
+            break if count == 0
+
+            remaining = Math.max(limit - output.size, 0)
+            kept = Math.min(count, remaining)
+            output.write(buffer[0, kept]) if kept > 0
+            Fiber.yield
+          end
+        rescue IO::Error
+        ensure
+          stream.close unless stream.closed?
+          done.send(StreamCapture.new(output.to_s))
+        end
       end
     end
   end

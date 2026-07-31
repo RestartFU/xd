@@ -64,9 +64,23 @@ module Xd
         raise Error.new("Folder settings need an id") unless settings.id
 
         path = path_for(folder_path)
-        File.write(path, settings.to_pretty_json + "\n")
-        File.chmod(path, 0o600)
-      rescue error : File::Error
+        temporary = File.tempfile(".xd-settings-", dir: folder_path)
+        temporary_path : String? = temporary.path
+        begin
+          File.chmod(temporary.path, 0o600)
+          temporary << settings.to_pretty_json << '\n'
+          temporary.flush
+          temporary.fsync
+          temporary.close
+          File.rename(temporary.path, path)
+          temporary_path = nil
+        ensure
+          temporary.close unless temporary.closed?
+          if pending = temporary_path
+            File.delete?(pending)
+          end
+        end
+      rescue error : File::Error | IO::Error
         raise Error.new("Cannot save folder settings: #{error.message}")
       end
 

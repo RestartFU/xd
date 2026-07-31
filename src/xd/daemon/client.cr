@@ -2,6 +2,7 @@ require "json"
 require "openssl"
 require "set"
 require "socket"
+require "../protocol/frame"
 require "../protocol/message"
 require "./endpoint"
 require "./local_ipc"
@@ -236,7 +237,7 @@ module Xd
       end
 
       private def read_loop : Nil
-        while line = @io.gets
+        while line = Protocol.read_frame(@io)
           next if line.empty?
 
           root = JSON.parse(line).as_h?
@@ -275,6 +276,8 @@ module Xd
           Fiber.yield
         end
         disconnect("Daemon closed the connection.")
+      rescue Protocol::FrameTooLarge
+        disconnect("Daemon sent an oversized response.")
       rescue error : JSON::ParseException
         disconnect("Daemon sent invalid JSON.")
       rescue error : IO::Error

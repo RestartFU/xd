@@ -103,6 +103,10 @@ module Xd
         @body[name]
       end
 
+      def assign_id(id : Int64) : Nil
+        @body["id"] = JSON::Any.new(id)
+      end
+
       def to_json(io : IO) : Nil
         @body.to_json(io)
       end

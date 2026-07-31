@@ -16,6 +16,21 @@ private def tracker_git(workdir : String, *arguments : String) : String
   output.to_s
 end
 
+private class TestGitDiffTracker < Xd::Agent::GitDiffTracker
+  def self.run_git(
+    workdir : String,
+    executable : String,
+    timeout : Time::Span,
+  ) : String?
+    git(
+      workdir,
+      [] of String,
+      timeout: timeout,
+      executable: executable
+    )
+  end
+end
+
 describe Xd::Agent::GitDiffTracker do
   it "captures only changes since the previous tool event" do
     directory = File.join(
@@ -52,6 +67,42 @@ describe Xd::Agent::GitDiffTracker do
       tracker_git(directory, "diff", "--cached").should eq(cached_before)
       tracker.capture("file_change").should eq("file_change")
       tracker.capture("$ git status").should eq("$ git status")
+    ensure
+      FileUtils.rm_r(directory)
+    end
+  end
+
+  it "bounds snapshot subprocess time and output" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-diff-command-#{Random::Secure.hex(12)}"
+    )
+    Dir.mkdir_p(directory)
+    slow = File.join(directory, "slow")
+    noisy = File.join(directory, "noisy")
+    File.write(slow, "#!/bin/sh\nsleep 5\n")
+    File.write(
+      noisy,
+      "#!/bin/sh\nhead -c 1048576 /dev/zero | tr '\\0' x\n"
+    )
+    File.chmod(slow, 0o700)
+    File.chmod(noisy, 0o700)
+
+    begin
+      started = Time.instant
+      TestGitDiffTracker.run_git(
+        directory,
+        slow,
+        50.milliseconds
+      ).should be_nil
+      (Time.instant - started).should be < 2.seconds
+
+      output = TestGitDiffTracker.run_git(
+        directory,
+        noisy,
+        2.seconds
+      ).not_nil!
+      output.bytesize.should eq(Xd::Agent::GitDiffTracker::OUTPUT_LIMIT)
     ensure
       FileUtils.rm_r(directory)
     end

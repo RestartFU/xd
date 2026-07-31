@@ -37,8 +37,6 @@ module Xd
 
       @pairing : Pairing?
       @command_mutex = Mutex.new
-      @event_mutex = Mutex.new
-      @next_event_id = 0_i64
       @command_events = [] of Protocol::Event
       @after_write : Proc(Nil)?
 
@@ -913,7 +911,14 @@ module Xd
           end)
         end
         fields["model"] = JSON::Any.new(stored.model) if stored.model
-        fields["effort"] = JSON::Any.new(stored.effort) if stored.effort
+        effective_effort = stored.effort
+        unless effective_effort
+          effective_effort = Agent::Catalog.lookup(stored.backend)
+            .try { |backend| backend.default_effort.wire_name }
+        end
+        fields["effort"] = JSON::Any.new(
+          effective_effort || Agent::Effort::High.wire_name
+        )
         fields["access"] = JSON::Any.new(stored.access) if stored.access
 
         if usage = @store.get_context_usage(
@@ -1452,10 +1457,7 @@ module Xd
         fields = {} of String => JSON::Any,
         audience : UInt64? = nil,
       ) : Protocol::Event
-        @event_mutex.synchronize do
-          @next_event_id += 1
-          Protocol::Event.new(name, @next_event_id, fields, audience)
-        end
+        Protocol::Event.new(name, 0_i64, fields, audience)
       end
 
       private def publish_async_event(
