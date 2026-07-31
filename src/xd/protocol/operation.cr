@@ -44,6 +44,7 @@ module Xd
       Cancel
       DiffRead
       GitState
+      GitDraft
       GitAction
       TerminalList
       TerminalOpen
@@ -95,6 +96,7 @@ module Xd
         when Cancel             then "cancel"
         when DiffRead           then "diff-read"
         when GitState           then "git-state"
+        when GitDraft           then "git-draft"
         when GitAction          then "git-action"
         when TerminalList       then "terminal-list"
         when TerminalOpen       then "terminal-open"
@@ -149,6 +151,7 @@ module Xd
         when "cancel"               then Cancel
         when "diff-read"            then DiffRead
         when "git-state"            then GitState
+        when "git-draft"            then GitDraft
         when "git-action"           then GitAction
         when "terminal-list"        then TerminalList
         when "terminal-open"        then TerminalOpen

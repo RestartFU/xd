@@ -333,6 +333,8 @@ module Xd
           diff_read(request)
         when Protocol::Operation::GitState
           git_state(request)
+        when Protocol::Operation::GitDraft
+          git_draft(request)
         when Protocol::Operation::GitAction
           git_action(request)
         when Protocol::Operation::TerminalList
@@ -1109,8 +1111,13 @@ module Xd
           raise Protocol::Error.new("No such Git action.")
         end
         commit_message = request.string?("message")
+        pull_request_title = request.string?("title")
+        pull_request_body = request.string?("body")
         if action == "commit" && commit_message.try(&.strip).to_s.empty?
           raise Protocol::Error.new("Write a commit message first.")
+        end
+        if action == "create-pr" && pull_request_title.try(&.strip).to_s.empty?
+          raise Protocol::Error.new("Write a pull request title first.")
         end
         @store.get_chat(chat_id)
 
@@ -1128,7 +1135,9 @@ module Xd
               result = @repository.perform(
                 chat_id,
                 action,
-                commit_message
+                commit_message,
+                pull_request_title,
+                pull_request_body
               )
               @repository_monitor.reset(chat_id)
               repository_state_fields(
@@ -1149,6 +1158,94 @@ module Xd
           nil
         }
         Protocol::Response.ok
+      end
+
+      private def git_draft(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        message = "git-draft needs a chat id and kind."
+        chat_id = request.string("chat", message)
+        kind = request.string("kind", message)
+        unless {"commit", "pull-request"}.includes?(kind)
+          raise Protocol::Error.new("No such Git draft kind.")
+        end
+        backend = request.string?("backend")
+        model = request.string?("model")
+        request_id = request.string?("request")
+        @store.get_chat(chat_id)
+
+        @after_write = -> {
+          spawn do
+            begin
+              context = @repository.draft_context(chat_id, kind)
+              prompt = Agent::GitDrafts.prompt(kind, context)
+              @agents.generate(
+                chat_id,
+                backend,
+                model,
+                prompt,
+                Agent::GitDrafts::SYSTEM_PROMPT
+              ) do |success, text, error|
+                if success
+                  begin
+                    draft = Agent::GitDrafts.parse(text || "")
+                    publish_git_draft(
+                      chat_id,
+                      kind,
+                      request_id,
+                      draft: draft
+                    )
+                  rescue parse_error : Agent::GitDrafts::Error
+                    publish_git_draft(
+                      chat_id,
+                      kind,
+                      request_id,
+                      error: parse_error.message
+                    )
+                  end
+                else
+                  publish_git_draft(
+                    chat_id,
+                    kind,
+                    request_id,
+                    error: error || "Assistant could not write a Git draft."
+                  )
+                end
+              end
+            rescue error
+              publish_git_draft(
+                chat_id,
+                kind,
+                request_id,
+                error: error.message || "Cannot prepare a Git draft."
+              )
+            end
+          end
+          nil
+        }
+        Protocol::Response.ok
+      end
+
+      private def publish_git_draft(
+        chat_id : String,
+        kind : String,
+        request_id : String?,
+        draft : Agent::GitDraft? = nil,
+        error : String? = nil,
+      ) : Nil
+        fields = {
+          "chat"    => JSON::Any.new(chat_id),
+          "kind"    => JSON::Any.new(kind),
+          "success" => JSON::Any.new(!draft.nil?),
+        }
+        fields["request"] = JSON::Any.new(request_id) if request_id
+        if value = draft
+          fields["title"] = JSON::Any.new(value.title)
+          fields["body"] = JSON::Any.new(value.body)
+        elsif message = error
+          fields["error"] = JSON::Any.new(message)
+        end
+        publish_async_event("git-draft-finished", fields)
       end
 
       private def repository_state_fields(

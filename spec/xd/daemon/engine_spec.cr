@@ -52,6 +52,10 @@ private class EngineLauncher < Xd::Agent::Launcher
   def emit(index : Int, event : Xd::Agent::Event) : Nil
     @event_callbacks[index].call(event)
   end
+
+  def finish(index : Int, ok : Bool, message : String? = nil) : Nil
+    @finish_callbacks[index].call(ok, message)
+  end
 end
 
 private def with_daemon_engine(
@@ -1042,6 +1046,69 @@ describe Xd::Daemon::Engine do
       )
       status.success?.should be_true
       output.to_s.should eq("Commit over TLS\n")
+    end
+  end
+
+  it "drafts editable Git metadata through the selected assistant" do
+    launcher = EngineLauncher.new
+    with_daemon_engine(launcher: launcher) do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Git Draft",
+      }.to_json)["id"].as_s
+      folder = File.join(Path[store.path].dirname, "Workspaces", "Git Draft")
+      engine_git(folder, "init", "-q", "-b", "main")
+      engine_git(folder, "config", "user.email", "test@example.com")
+      engine_git(folder, "config", "user.name", "Test")
+      File.write(File.join(folder, "tracked.txt"), "before\n")
+      engine_git(folder, "add", "tracked.txt")
+      engine_git(folder, "commit", "-q", "-m", "initial")
+      chat_id = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder_id,
+      }.to_json)["id"].as_s
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+
+      seen = [] of Xd::Protocol::Event
+      subscription = engine.events.subscribe { |event| seen << event }
+      outcome = engine.process(local, {
+        "op"      => "git-draft",
+        "chat"    => chat_id,
+        "kind"    => "commit",
+        "backend" => "codex",
+        "model"   => "gpt-5.6-terra",
+        "request" => "draft-1",
+      }.to_json)
+      outcome.response.success?.should be_true
+      outcome.after_write.not_nil!.call
+
+      deadline = Time.instant + 3.seconds
+      until launcher.specs.size == 1
+        fail "Git draft agent did not start" if Time.instant >= deadline
+        sleep 10.milliseconds
+      end
+      spec = launcher.specs.first
+      spec.model.should eq("gpt-5.6-terra")
+      spec.access.should eq(Xd::Agent::Access::ReadOnly)
+      spec.prompt.should contain("Working tree diff:")
+      spec.prompt.should contain("+after")
+
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: %({"title":"fix: update tracked text","body":"Keeps state current."})
+      ))
+      launcher.finish(0, true)
+
+      event = seen.find { |item|
+        item["event"].as_s == "git-draft-finished" &&
+          item["request"].as_s == "draft-1"
+      }.not_nil!
+      event["success"].as_bool.should be_true
+      event["title"].as_s.should eq("fix: update tracked text")
+      event["body"].as_s.should eq("Keeps state current.")
+      store.list_messages(chat_id).should be_empty
+      engine.events.unsubscribe(subscription)
     end
   end
 

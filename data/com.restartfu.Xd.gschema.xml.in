@@ -36,6 +36,24 @@
       </description>
     </key>
 
+    <key name="git-writing-backend" type="s">
+      <default>''</default>
+      <summary>Assistant used for Git writing</summary>
+      <description>
+        Backend used to draft commit and pull request text. Empty uses the
+        active chat's assistant.
+      </description>
+    </key>
+
+    <key name="git-writing-model" type="s">
+      <default>''</default>
+      <summary>Model used for Git writing</summary>
+      <description>
+        Model used to draft commit and pull request text. Empty uses the
+        active chat's model.
+      </description>
+    </key>
+
     <key name="expanded-folders" type="as">
       <default>[]</default>
       <summary>Folders left open in the sidebar</summary>

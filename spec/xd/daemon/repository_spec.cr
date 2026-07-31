@@ -81,6 +81,30 @@ describe Xd::Daemon::Repository do
     end
   end
 
+  it "builds commit and pull request evidence for Git writing" do
+    with_repository do |repository, folder, chat_id|
+      File.write(File.join(folder, "tracked.txt"), "after\n")
+      commit_context = repository.draft_context(chat_id, "commit")
+      commit_context.should start_with("Working tree diff:")
+      commit_context.should contain("+after")
+
+      git(folder, "add", "tracked.txt")
+      git(folder, "commit", "-q", "-m", "Update tracked text")
+      git(folder, "checkout", "-q", "-b", "feature")
+      File.write(File.join(folder, "feature.txt"), "feature\n")
+      git(folder, "add", "feature.txt")
+      git(folder, "commit", "-q", "-m", "Add feature")
+
+      pull_request_context = repository.draft_context(
+        chat_id,
+        "pull-request"
+      )
+      pull_request_context.should contain("Base branch: main")
+      pull_request_context.should contain("Add feature")
+      pull_request_context.should contain("+feature")
+    end
+  end
+
   it "reads staged, unstaged, and untracked files before the first commit" do
     with_repository(commit: false) do |repository, folder, chat_id|
       File.write(File.join(folder, "tracked.txt"), "after\n")

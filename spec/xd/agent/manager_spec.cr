@@ -114,6 +114,42 @@ private def with_agent_manager(
 end
 
 describe Xd::Agent::Manager do
+  it "generates isolated read-only text with a selected Git writing model" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      completed : Tuple(Bool, String?, String?)? = nil
+
+      manager.generate(
+        chat_id,
+        "codex",
+        "gpt-5.6-terra",
+        "write metadata",
+        "return JSON"
+      ) do |success, text, error|
+        completed = {success, text, error}
+      end
+
+      launcher.backends.should eq(["codex"])
+      spec = launcher.specs.first
+      spec.prompt.should eq("write metadata")
+      spec.system_prompt.should eq("return JSON")
+      spec.model.should eq("gpt-5.6-terra")
+      spec.effort.should eq(Xd::Agent::Effort::Low)
+      spec.access.should eq(Xd::Agent::Access::ReadOnly)
+      spec.resume_session_id.should be_nil
+
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: %({"title":"fix: pane","body":""})
+      ))
+      launcher.finish(0, true)
+
+      completed.should eq({true, %({"title":"fix: pane","body":""}), nil})
+      store.list_messages(chat_id).should be_empty
+      store.get_chat(chat_id).daemon_working.should be_false
+    end
+  end
+
   it "rejects unsigned assistants before storing or launching a turn" do
     checked = [] of String
     authorizer = ->(provider : String) : String? {

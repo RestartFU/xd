@@ -13,6 +13,7 @@ require "./directory_browser"
 require "./dots"
 require "./folder_dialogs"
 require "./idle_queue"
+require "./git_writing_settings"
 require "./sidebar_state"
 
 module Xd
@@ -279,6 +280,7 @@ module Xd
         @local_source = Source.new(local, false)
         @remote_source = Source.new(@remote, true)
         @settings = Gio::Settings.new(APP_ID)
+        @git_writing_settings = GitWritingSettings.new(@parent)
         @expanded = Set(String).new(@settings.strv("expanded-folders"))
         @nodes = {} of String => Node
         @row_widgets = {} of UInt64 => RowWidgets
@@ -415,6 +417,22 @@ module Xd
         @widget.add_css_class("xd-sidebar")
         @widget.add_top_bar(@header)
         @widget.content = scroll
+
+        settings_button = Gtk::Button.new_from_icon_name(
+          "preferences-system-symbolic"
+        )
+        settings_button.add_css_class("flat")
+        settings_button.tooltip_text = "Settings"
+        settings_button.clicked_signal.connect do
+          @git_writing_settings.present
+        end
+        settings_bar = Gtk::Box.new(:horizontal, 0)
+        settings_bar.margin_start = 6
+        settings_bar.margin_end = 6
+        settings_bar.margin_top = 3
+        settings_bar.margin_bottom = 6
+        settings_bar.append(settings_button)
+        @widget.add_bottom_bar(settings_bar)
 
         @remote_state_subscription = @remote.on_state do |_snapshot|
           GLib.idle_add do

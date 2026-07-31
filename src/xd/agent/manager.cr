@@ -10,6 +10,7 @@ require "./environment"
 require "./exec_session"
 require "./executable"
 require "./git_diff_tracker"
+require "./git_draft"
 require "./ask"
 require "./secrets"
 require "./workflow_run"
@@ -112,6 +113,9 @@ module Xd
       items : Array(TurnItem)
 
     class Manager
+      MAX_GENERATIONS    = 4
+      GENERATION_TIMEOUT = 90.seconds
+
       class Error < Exception
       end
 
@@ -161,12 +165,26 @@ module Xd
         end
       end
 
+      private class Generation
+        getter id : Int64
+        property handle : SessionHandle?
+        property text = ""
+        property finished = false
+        property cancel_requested = false
+
+        def initialize(@id : Int64)
+          @handle = nil
+        end
+      end
+
       @turns = {} of String => ActiveTurn
       @starting = Set(String).new
       @starting_cancellations = Set(String).new
       @command_sets = {} of String => Array(String)
       @mutex = Mutex.new
       @next_turn_id = 0_i64
+      @next_generation_id = 0_i64
+      @generations = {} of Int64 => Generation
       @closed = false
       @worktree_service : Workspace::Worktrees
 
@@ -309,6 +327,98 @@ module Xd
         end
       end
 
+      def generate(
+        chat_id : String,
+        backend_id : String?,
+        model_id : String?,
+        prompt : String,
+        system_prompt : String,
+        &complete : Bool, String?, String? -> Nil
+      ) : Nil
+        chat = @store.get_chat(chat_id)
+        requested_backend = backend_id.try(&.presence)
+        backend = Catalog.lookup(requested_backend || chat.backend)
+        unless backend
+          raise Error.new("Unknown Git writing assistant.")
+        end
+        if message = @authorizer.call(backend.id)
+          raise Error.new(message)
+        end
+
+        settings = @workspaces.resolve(chat.folder_id, chat.backend)
+        requested_model = model_id.try(&.presence)
+        model = requested_model || if backend.id == chat.backend
+          chat.model || settings.model ||
+          backend.default_model
+        else
+          backend.default_model
+        end
+        unless backend.models.any?(&.id.==(model))
+          raise Error.new("Unknown model \"#{model}\" for #{backend.display_name}.")
+        end
+
+        folder_ids = @workspaces.folder_ids(chat.folder_id)
+        secrets = Secrets.effective(folder_ids)
+        environment = secrets.environment(Environment.host)
+        environment["DISABLE_AUTOUPDATER"] = "1" if backend.id == "claude"
+        workdir = @workspaces.resolve_workdir(chat.folder_id, chat.workdir)
+        spec = RunSpec.new(
+          prompt,
+          model: model,
+          system_prompt: system_prompt,
+          workdir: workdir,
+          folder_ids: folder_ids,
+          effort: Effort::Low,
+          access: Access::ReadOnly
+        )
+
+        generation = @mutex.synchronize do
+          raise Error.new("The daemon is stopping.") if @closed
+          if @generations.size >= MAX_GENERATIONS
+            raise Error.new("Too many Git drafts are already being written.")
+          end
+          @next_generation_id += 1
+          item = Generation.new(@next_generation_id)
+          @generations[item.id] = item
+          item
+        end
+
+        begin
+          handle = @launcher.start(
+            backend,
+            spec,
+            environment,
+            secrets.names,
+            ->(event : Event) { receive_generation(generation, event) },
+            ->(ok : Bool, message : String?) {
+              finish_generation(generation, ok, message, complete)
+            }
+          )
+          cancel, active = @mutex.synchronize do
+            current = @generations[generation.id]?
+            if current.same?(generation)
+              generation.handle = handle
+              {generation.cancel_requested, true}
+            else
+              {generation.cancel_requested, false}
+            end
+          end
+          handle.cancel if cancel
+          if active
+            spawn do
+              sleep GENERATION_TIMEOUT
+              timeout_generation(generation, complete)
+            end
+          end
+        rescue error
+          @mutex.synchronize do
+            @generations.delete(generation.id)
+            generation.finished = true
+          end
+          raise Error.new(error.message || "Cannot start Git writing assistant.")
+        end
+      end
+
       # Detach a chat before its database row is deleted. Agent completion may
       # arrive later; removing ownership first makes that callback a no-op.
       def forget(chat_id : String) : Nil
@@ -325,14 +435,17 @@ module Xd
       end
 
       def close : Nil
-        turns = @mutex.synchronize do
+        turns, generations = @mutex.synchronize do
           return if @closed
           @closed = true
           current = @turns.values.dup
+          drafts = @generations.values.dup
           @turns.clear
+          @generations.clear
           @starting.clear
           @starting_cancellations.clear
-          current
+          drafts.each { |generation| generation.cancel_requested = true }
+          {current, drafts}
         end
 
         turns.each do |turn|
@@ -344,7 +457,89 @@ module Xd
             "xd: cannot stop agent during shutdown: #{error.message}"
           )
         end
+        generations.each do |generation|
+          generation.handle.try(&.cancel)
+        rescue error
+          STDERR.puts(
+            "xd: cannot stop Git writing assistant: #{error.message}"
+          )
+        end
         @launcher.close
+      end
+
+      private def receive_generation(
+        generation : Generation,
+        event : Event,
+      ) : Nil
+        return unless event.type.text_delta?
+        text = event.text || ""
+        return if text.empty?
+
+        @mutex.synchronize do
+          current = @generations[generation.id]?
+          return unless current.same?(generation) && !generation.finished
+
+          remaining = 64 * 1024 - generation.text.bytesize
+          return if remaining <= 0
+          part = text.bytesize <= remaining ? text : text.byte_slice(0, remaining)
+          until part.valid_encoding?
+            part = part.byte_slice(0, part.bytesize - 1)
+          end
+          generation.text += part
+        end
+      end
+
+      private def finish_generation(
+        generation : Generation,
+        success : Bool,
+        message : String?,
+        complete : Proc(Bool, String?, String?, Nil),
+      ) : Nil
+        text : String? = nil
+        accepted = @mutex.synchronize do
+          current = @generations[generation.id]?
+          next false unless current.same?(generation) && !generation.finished
+
+          generation.finished = true
+          @generations.delete(generation.id)
+          text = generation.text
+          true
+        end
+        return unless accepted
+
+        complete.call(success, text, message)
+      rescue error
+        STDERR.puts "xd: Git draft callback failed: #{error.message}"
+      end
+
+      private def timeout_generation(
+        generation : Generation,
+        complete : Proc(Bool, String?, String?, Nil),
+      ) : Nil
+        handle : SessionHandle? = nil
+        accepted = @mutex.synchronize do
+          current = @generations[generation.id]?
+          next false unless current.same?(generation) && !generation.finished
+
+          generation.finished = true
+          @generations.delete(generation.id)
+          handle = generation.handle
+          true
+        end
+        return unless accepted
+
+        begin
+          handle.try(&.cancel)
+        rescue error
+          STDERR.puts "xd: cannot cancel timed-out Git writer: #{error.message}"
+        end
+        complete.call(
+          false,
+          nil,
+          "Git writing assistant timed out. Write the draft manually."
+        )
+      rescue error
+        STDERR.puts "xd: Git draft timeout callback failed: #{error.message}"
       end
 
       private def start_turn(

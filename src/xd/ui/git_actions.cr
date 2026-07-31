@@ -3,6 +3,7 @@ require "gtk4"
 require "./adw"
 require "./host_launch"
 require "./panel_call"
+require "../version"
 
 module Xd
   module UI
@@ -17,6 +18,7 @@ module Xd
       @chat_id : String?
       @state_token : String?
       @action_token : String?
+      @draft_token : String?
 
       def initialize(
         @parent : Gtk::Widget,
@@ -25,10 +27,13 @@ module Xd
         @chat_id = nil
         @state_token = nil
         @action_token = nil
+        @draft_token = nil
         @sequence = 0_i64
         @suggested = "none"
+        @state_label = "Up to date"
         @enabled = false
         @busy = false
+        @settings = Gio::Settings.new(APP_ID)
 
         @button = Gtk::Button.new_with_label("Up to date")
         @button.add_css_class("flat")
@@ -42,6 +47,7 @@ module Xd
         @chat_id = chat_id
         @state_token = nil
         @action_token = nil
+        @draft_token = nil
         @busy = false
         @widget.visible = false
         refresh if chat_id
@@ -93,6 +99,27 @@ module Xd
               event["error"]?.try(&.as_s?) || "Git refused the request."
             )
           end
+        when "git-draft-finished"
+          return unless event["request"]?.try(&.as_s?) == @draft_token
+
+          @draft_token = nil
+          set_busy(false)
+          action = event["kind"]?.try(&.as_s?) == "pull-request" ? "create-pr" : "commit"
+          if event["success"]?.try(&.as_bool?) == true
+            present_review(
+              action,
+              event["title"]?.try(&.as_s?) || "",
+              event["body"]?.try(&.as_s?) || ""
+            )
+          else
+            present_review(
+              action,
+              "",
+              "",
+              event["error"]?.try(&.as_s?) ||
+              "Assistant could not write this draft."
+            )
+          end
         when "turn-finished", "changed", "repository-changed"
           refresh
         end
@@ -103,6 +130,7 @@ module Xd
 
         @state_token = nil
         @action_token = nil
+        @draft_token = nil
         set_busy(false)
         if connected
           refresh
@@ -114,34 +142,122 @@ module Xd
       private def clicked : Nil
         return if @busy || !@enabled
 
-        if @suggested == "commit"
-          present_commit
+        if {"commit", "create-pr"}.includes?(@suggested)
+          request_draft(@suggested)
         else
-          perform(@suggested, nil)
+          perform(@suggested)
         end
       end
 
-      private def present_commit : Nil
+      private def request_draft(action : String) : Nil
+        chat_id = @chat_id
+        return unless chat_id
+
+        token = next_token("draft")
+        @draft_token = token
+        set_busy(true)
+        request = {
+          "op"   => JSON::Any.new("git-draft"),
+          "chat" => JSON::Any.new(chat_id),
+          "kind" => JSON::Any.new(
+            action == "create-pr" ? "pull-request" : "commit"
+          ),
+          "request" => JSON::Any.new(token),
+        }
+        backend = @settings.string("git-writing-backend")
+        model = @settings.string("git-writing-model")
+        request["backend"] = JSON::Any.new(backend) unless backend.empty?
+        request["model"] = JSON::Any.new(model) unless model.empty?
+
+        spawn do
+          result = @request.call(request)
+          GLib.idle_add do
+            if @draft_token == token && (error = result.error)
+              @draft_token = nil
+              set_busy(false)
+              present_review(action, "", "", error)
+            end
+            false
+          end
+        end
+      end
+
+      private def present_review(
+        action : String,
+        title : String,
+        body : String,
+        warning : String? = nil,
+      ) : Nil
+        pull_request = action == "create-pr"
         dialog = Adw::AlertDialog.new(
-          heading: "Commit Everything Changed"
+          heading: pull_request ? "Review Pull Request" : "Review Commit",
+          body: warning || "Review and edit the assistant's draft."
         )
         group = Adw::PreferencesGroup.new
-        row = Adw::EntryRow.new(title: "Message")
-        group.add(row)
-        dialog.extra_child = group
+        title_row = Adw::EntryRow.new(title: "Title")
+        title_row.text = title
+        group.add(title_row)
+
+        body_label = Gtk::Label.new(
+          pull_request ? "Description" : "Details (optional)"
+        )
+        body_label.halign = :start
+        body_label.add_css_class("dim-label")
+        body_view = Gtk::TextView.new
+        body_view.wrap_mode = :word_char
+        body_view.buffer.text = body
+        body_view.left_margin = 8
+        body_view.right_margin = 8
+        body_view.top_margin = 8
+        body_view.bottom_margin = 8
+        body_scroll = Gtk::ScrolledWindow.new
+        body_scroll.min_content_height = 150
+        body_scroll.max_content_height = 240
+        body_scroll.set_policy(:never, :automatic)
+        body_scroll.child = body_view
+        body_scroll.add_css_class("card")
+
+        content = Gtk::Box.new(:vertical, 8)
+        content.append(group)
+        content.append(body_label)
+        content.append(body_scroll)
+        dialog.extra_child = content
         dialog.add_response("cancel", "Cancel")
-        dialog.add_response("commit", "Commit")
-        dialog.set_response_appearance("commit", :suggested)
-        dialog.default_response = "commit"
+        confirm = pull_request ? "create" : "commit"
+        dialog.add_response(
+          confirm,
+          pull_request ? "Create Pull Request" : "Commit"
+        )
+        dialog.set_response_appearance(confirm, :suggested)
+        dialog.default_response = confirm
         dialog.close_response = "cancel"
         dialog.choose(@parent, nil) do |_source, result|
           response = dialog.choose_finish(result)
-          text = row.text.strip
-          perform("commit", text) if response == "commit" && !text.empty?
+          next unless response == confirm
+
+          clean_title = title_row.text.strip
+          if clean_title.empty?
+            show_error(
+              pull_request ? "Write a pull request title first." : "Write a commit title first."
+            )
+            next
+          end
+          clean_body = body_view.buffer.text.strip
+          if pull_request
+            perform("create-pr", title: clean_title, body: clean_body)
+          else
+            message = clean_body.empty? ? clean_title : "#{clean_title}\n\n#{clean_body}"
+            perform("commit", message: message)
+          end
         end
       end
 
-      private def perform(action : String, message : String?) : Nil
+      private def perform(
+        action : String,
+        message : String? = nil,
+        title : String? = nil,
+        body : String? = nil,
+      ) : Nil
         chat_id = @chat_id
         return unless chat_id
 
@@ -156,6 +272,12 @@ module Xd
         }
         if text = message
           request["message"] = JSON::Any.new(text)
+        end
+        if text = title
+          request["title"] = JSON::Any.new(text)
+        end
+        if text = body
+          request["body"] = JSON::Any.new(text)
         end
 
         spawn do
@@ -174,13 +296,15 @@ module Xd
       private def apply_state(event : Hash(String, JSON::Any)) : Nil
         @suggested = event["action"]?.try(&.as_s?) || "none"
         @enabled = event["enabled"]?.try(&.as_bool?) || false
-        @button.label = event["label"]?.try(&.as_s?) || "Up to date"
+        @state_label = event["label"]?.try(&.as_s?) || "Up to date"
+        @button.label = @busy ? "Writing…" : @state_label
         @button.sensitive = @enabled && !@busy
         @widget.visible = event["visible"]?.try(&.as_bool?) || false
       end
 
       private def set_busy(busy : Bool) : Nil
         @busy = busy
+        @button.label = busy ? "Writing…" : @state_label
         @button.sensitive = @enabled && !busy
       end
 

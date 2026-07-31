@@ -10,6 +10,7 @@ module Xd
     class Repository
       MAX_OUTPUT_BYTES  = 8 * 1024 * 1024
       MAX_ERROR_BYTES   = 64 * 1024
+      MAX_DRAFT_BYTES   = 256 * 1024
       READ_BUFFER_BYTES = 16 * 1024
       BASE_PATTERN      = /\A[A-Za-z0-9_\.\/-]{1,256}\z/
       URL_PATTERN       = /https:\/\/[^\s]+/
@@ -70,6 +71,8 @@ module Xd
         chat_id : String,
         action : String,
         message : String?,
+        title : String? = nil,
+        body : String? = nil,
       ) : ActionResult
         @action_mutex.synchronize do
           workdir = @filesystem.workdir(chat_id)
@@ -91,13 +94,18 @@ module Xd
                   checked(workdir, "git", ["push", "-u", "origin", "HEAD"])
                   nil
                 when "create-pr"
-                  environment = Agent::Environment.host
-                  environment["GH_BROWSER"] = "echo"
+                  pull_request_title = title.try(&.strip) || ""
+                  if pull_request_title.empty?
+                    raise Error.new("Write a pull request title first.")
+                  end
                   output = checked(
                     workdir,
                     "gh",
-                    ["pr", "create", "--web"],
-                    environment
+                    [
+                      "pr", "create",
+                      "--title", pull_request_title,
+                      "--body", body.try(&.strip) || "",
+                    ]
                   )
                   web_url(output) || raise Error.new(
                     "GitHub CLI did not return a pull request URL."
@@ -112,6 +120,44 @@ module Xd
 
           ActionResult.new(state_at(workdir), url)
         end
+      end
+
+      def draft_context(chat_id : String, kind : String) : String
+        workdir = @filesystem.workdir(chat_id)
+        repository_root(workdir)
+
+        context = case kind
+                  when "commit"
+                    diff = working_all(workdir)
+                    if diff.strip.empty?
+                      raise Error.new("There are no changes to describe.")
+                    end
+                    "Working tree diff:\n#{diff}"
+                  when "pull-request"
+                    base = find_base(workdir).strip
+                    if base.empty?
+                      raise Error.new("Git could not find a base branch.")
+                    end
+                    commits = capture(
+                      workdir,
+                      ["--no-pager", "log", "--format=%h %s", "#{base}..HEAD"]
+                    )
+                    diff = capture(
+                      workdir,
+                      ["--no-pager", "diff", "--no-ext-diff", "--no-color", "#{base}...HEAD"]
+                    )
+                    if commits.strip.empty? && diff.strip.empty?
+                      raise Error.new("There are no branch changes to describe.")
+                    end
+                    "Base branch: #{base}\n\nCommits:\n#{commits}\n\nBranch diff:\n#{diff}"
+                  else
+                    raise Error.new("No such Git draft kind.")
+                  end
+        truncate_draft_context(context)
+      rescue error : Error
+        raise error
+      rescue error : File::Error | IO::Error
+        raise Error.new(error.message || "Cannot read the repository")
       end
 
       def read(
@@ -326,6 +372,16 @@ module Xd
 
       private def web_url(output : String) : String?
         output.match(URL_PATTERN).try(&.[0].rstrip(".,);"))
+      end
+
+      private def truncate_draft_context(context : String) : String
+        return context if context.bytesize <= MAX_DRAFT_BYTES
+
+        text = context.byte_slice(0, MAX_DRAFT_BYTES)
+        until text.valid_encoding?
+          text = text.byte_slice(0, text.bytesize - 1)
+        end
+        "#{text}\n\n… repository evidence truncated by XD …"
       end
 
       private def working_all(workdir : String) : String
