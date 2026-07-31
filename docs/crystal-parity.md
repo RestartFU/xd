@@ -400,6 +400,11 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 ## Daemon, storage, and remote behavior
 
 - `[x]` Platform-local IPC and remote TLS dispatch through one `Daemon::Engine`.
+- `[x]` Desktop-owned Engine, Server, workspace/repository monitors, SQLite,
+  Git, filesystem, and agent fibers live on a dedicated two-worker execution
+  context instead of GTK's single-threaded default scheduler. A deliberately
+  non-yielding daemon task cannot block the default context; the second worker
+  preserves Cancel and Ping while one command is blocked.
 - `[x]` Continuously readable Codex/Claude pipes, client/server sockets,
   terminal PTYs, auth streams, and voice streams yield cooperatively
   after bounded chunks. Regression bursts of 100,000 CLI lines and 20,000
@@ -522,7 +527,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (329 default and 5 authenticated-loopback
+- `[x]` Crystal specs pass in Docker (330 default and 5 authenticated-loopback
   examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
