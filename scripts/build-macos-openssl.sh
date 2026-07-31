@@ -54,6 +54,7 @@ tar -xzf "$WORK/openssl.tar.gz" \
   jobs=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')
   make -j"$jobs" build_sw
   make DESTDIR="$WORK/install" install_sw
+  make DESTDIR="$WORK/install" install_ssldirs
 )
 
 mkdir -p "$STAGE/libexec" "$STAGE/etc/ssl"
