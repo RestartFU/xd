@@ -32,31 +32,64 @@ describe Xd::Agent::ToolSummary do
     Xd::Agent::ToolSummary.build("Think", nil).should eq("Think")
   end
 
-  it "round trips compact subagent records" do
+  it "builds useful Claude subagent cards" do
     message = Xd::Agent::ToolSummary.build(
       "Agent",
       summary_input({
         "subagent_type" => "Explore\nagent",
         "description"   => "Inspect   parser\ncarefully",
+        "prompt"        => "Trace every parser path",
+        "model"         => "haiku",
       })
     )
     Xd::Agent::SubagentTool.parse(message).should eq({
-      "Explore agent",
-      "Inspect parser carefully",
+      "Claude · Explore agent · haiku",
+      "Inspect parser carefully · Trace every parser path",
     })
+  end
 
+  it "builds useful Codex subagent cards from app-server state" do
+    input = JSON.parse({
+      "tool"              => "spawnAgent",
+      "status"            => "completed",
+      "receiverThreadIds" => ["thread-agent-123456789"],
+      "prompt"            => "Review diff",
+      "model"             => "gpt-5.6-sol",
+      "reasoningEffort"   => "high",
+      "agentsStates"      => {
+        "thread-agent-123456789" => {
+          "status"  => "running",
+          "message" => "Checking native builds",
+        },
+      },
+    }.to_json).as_h
     collab = Xd::Agent::ToolSummary.build(
-      "collab_tool_call",
-      summary_input({
-        "tool"   => "spawnAgent",
-        "model"  => "gpt-5",
-        "prompt" => "Review diff",
-      })
+      "collab_agent_tool_call",
+      input
     )
     Xd::Agent::SubagentTool.parse(collab).should eq({
-      "gpt-5",
-      "Review diff",
+      "Codex · gpt-5.6-sol · high",
+      "Running · Review diff · Agent thread-agent… · Checking native builds",
     })
+  end
+
+  it "keeps old subagent records readable and bounds new ones" do
+    old = "subagent\nExplore\nInspect parser"
+    Xd::Agent::SubagentTool.parse(old).should eq({
+      "Explore",
+      "Inspect parser",
+    })
+
+    message = Xd::Agent::ToolSummary.build(
+      "Task",
+      summary_input({
+        "description" => "d" * 400,
+        "prompt"      => "p" * 400,
+      })
+    )
+    parsed = Xd::Agent::SubagentTool.parse(message).not_nil!
+    parsed[0].size.should be <= 81
+    parsed[1].size.should be <= 321
   end
 
   it "builds Codex file diffs without a Git repository" do

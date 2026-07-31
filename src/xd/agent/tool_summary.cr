@@ -31,21 +31,13 @@ module Xd
         end
 
         if tool == "Task" || tool == "Agent"
-          return SubagentTool.build(
-            string?(input, "subagent_type"),
-            string?(input, "description") || string?(input, "prompt")
-          )
+          return claude_subagent(input)
         end
 
         if tool == "collab_tool_call" || tool == "collab_agent_tool_call"
           action = string?(input, "tool")
           if action == "spawn_agent" || action == "spawnAgent"
-            return SubagentTool.build(
-              string?(input, "task_name") ||
-                string?(input, "model") ||
-                "Codex",
-              string?(input, "prompt")
-            )
+            return codex_subagent(input)
           end
         end
 
@@ -68,6 +60,114 @@ module Xd
         text = truncate(text)
 
         command ? "$ #{text}" : "#{stable_name}  #{text}"
+      end
+
+      private def claude_subagent(
+        input : Hash(String, JSON::Any)?,
+      ) : String
+        identity = ["Claude"] of String
+        append_unique(identity, string?(input, "subagent_type"))
+        append_unique(identity, string?(input, "model"))
+
+        description = string?(input, "description")
+        prompt = string?(input, "prompt")
+        detail = join_distinct(description, prompt)
+        SubagentTool.build(identity.join(" · "), detail)
+      end
+
+      private def codex_subagent(
+        input : Hash(String, JSON::Any)?,
+      ) : String
+        identity = ["Codex"] of String
+        append_unique(identity, string?(input, "model"))
+        append_unique(identity, string?(input, "reasoningEffort"))
+
+        receivers = string_array(input, "receiverThreadIds")
+        status, state_message = codex_agent_state(input, receivers)
+        detail = [status] of String
+        append_unique(detail, string?(input, "prompt"))
+        unless receivers.empty?
+          append_unique(detail, "Agent #{short_id(receivers.first)}")
+        end
+        append_unique(detail, state_message)
+
+        SubagentTool.build(identity.join(" · "), detail.join(" · "))
+      end
+
+      private def codex_agent_state(
+        input : Hash(String, JSON::Any)?,
+        receivers : Array(String),
+      ) : Tuple(String, String?)
+        states = input.try(&.["agentsStates"]?.try(&.as_h?))
+        agent = nil
+        receivers.each do |thread_id|
+          if value = states.try(&.[thread_id]?.try(&.as_h?))
+            agent = value
+            break
+          end
+        end
+        agent ||= states.try(&.each_value.find(&.as_h?).try(&.as_h?))
+
+        if agent
+          status = human_agent_status(string?(agent, "status"))
+          return {status, string?(agent, "message")}
+        end
+
+        case string?(input, "status")
+        when "failed"     then {"Spawn failed", nil}
+        when "inProgress" then {"Starting", nil}
+        when "completed"  then {"Started", nil}
+        else                    {"Delegated", nil}
+        end
+      end
+
+      private def human_agent_status(status : String?) : String
+        case status
+        when "pendingInit"  then "Starting"
+        when "running"      then "Running"
+        when "interrupted"  then "Interrupted"
+        when "completed"    then "Completed"
+        when "errored"      then "Failed"
+        when "shutdown"     then "Stopped"
+        when "notFound"     then "Not found"
+        else                      "Delegated"
+        end
+      end
+
+      private def string_array(
+        input : Hash(String, JSON::Any)?,
+        key : String,
+      ) : Array(String)
+        values = [] of String
+        input.try(&.[key]?.try(&.as_a?)).try do |items|
+          items.each do |item|
+            if value = item.as_s?
+              values << value
+            end
+          end
+        end
+        values
+      end
+
+      private def join_distinct(first : String?, second : String?) : String?
+        parts = [] of String
+        append_unique(parts, first)
+        append_unique(parts, second)
+        return nil if parts.empty?
+        parts.join(" · ")
+      end
+
+      private def append_unique(parts : Array(String), value : String?) : Nil
+        return unless value
+        normalized = value.split.join(" ")
+        return if normalized.empty?
+        return if parts.any? { |part| part.downcase == normalized.downcase }
+        parts << normalized
+      end
+
+      private def short_id(value : String) : String
+        return value if value.size <= 12
+        value[0, 12] + "…"
       end
 
       private def string?(
