@@ -62,7 +62,8 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   Reloads coalesce while a build is active, live chat state updates both
   visible and pending models, and replaced node maps retire 64 entries per
   idle instead of rebuilding or releasing a whole workspace tree in one
-  callback.
+  callback. Local/remote folder-picker responses prepare on the bounded worker
+  pool, swap their virtual string model, and append 80 entries per idle.
 - `[~]` C `GtkTreeListModel`/`GtkListView` rows, indentation, expanders,
   selection, activation, expansion persistence, and state dots are ported and
   populated-tree startup is screenshot-verified. Inline create/rename is
@@ -527,7 +528,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (330 default and 5 authenticated-loopback
+- `[x]` Crystal specs pass in Docker (332 default and 5 authenticated-loopback
   examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and

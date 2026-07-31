@@ -1,5 +1,6 @@
 require "json"
 require "gtk4"
+require "./background_work"
 require "./panel_call"
 
 module Xd
@@ -9,6 +10,10 @@ module Xd
     # Local Unix and remote TLS sources both enter through the same list-dir
     # operation. The widget never reads the client filesystem itself.
     class DirectoryBrowser
+      ENTRY_BATCH = 80
+
+      @entries : Gtk::StringList
+
       def self.present(
         parent : Gtk::Window,
         request : PanelCall,
@@ -125,44 +130,95 @@ module Xd
 
         spawn do
           result = @request.call(fields)
-          listed_path : String? = nil
-          entries = [] of String
-          trouble = result.error
-          begin
-            if body = result.body
-              listed_path = body["path"]?.try(&.as_s?)
-              if values = body["entries"]?.try(&.as_a?)
-                entries = values.compact_map(&.as_s?)
-              else
-                trouble ||= "Daemon returned no directory entries."
-              end
-              trouble ||= "Daemon returned no directory path." unless listed_path
-            end
-          rescue error : TypeCastError
-            trouble = error.message || "Daemon returned an invalid directory."
+          queued = BackgroundWork.submit do
+            prepare_directory(result, sequence)
           end
-
-          GLib.idle_add do
-            if !@closed && sequence == @sequence
-              if listed_path && trouble.nil?
-                fill(listed_path.not_nil!, entries)
-              else
+          unless queued
+            GLib.idle_add do
+              if !@closed && sequence == @sequence
                 show_trouble(
-                  trouble || "Cannot read that directory."
+                  "Too many folders are being prepared. Try again shortly."
                 )
               end
+              false
             end
-            false
           end
+        end
+      end
+
+      def self.prepare_entries(values : Array(JSON::Any)) : Array(String)
+        values.compact_map(&.as_s?)
+      end
+
+      def self.entry_batch_finish(start : Int, total : Int) : Int32
+        Math.min(start.to_i64 + ENTRY_BATCH, total.to_i64).to_i32
+      end
+
+      private def prepare_directory(
+        result : PanelCallResult,
+        sequence : Int64,
+      ) : Nil
+        listed_path : String? = nil
+        entries = [] of String
+        trouble = result.error
+        begin
+          if body = result.body
+            listed_path = body["path"]?.try(&.as_s?)
+            if values = body["entries"]?.try(&.as_a?)
+              entries = self.class.prepare_entries(values)
+            else
+              trouble ||= "Daemon returned no directory entries."
+            end
+            trouble ||= "Daemon returned no directory path." unless listed_path
+          end
+        rescue error : TypeCastError
+          trouble = error.message || "Daemon returned an invalid directory."
+        end
+
+        GLib.idle_add do
+          if !@closed && sequence == @sequence
+            if listed_path && trouble.nil?
+              fill(listed_path.not_nil!, entries)
+            else
+              show_trouble(
+                trouble || "Cannot read that directory."
+              )
+            end
+          end
+          false
         end
       end
 
       private def fill(path : String, entries : Array(String)) : Nil
         @trouble.visible = false
-        @entries.splice(0_u32, @entries.n_items, entries)
+        @entries = Gtk::StringList.new([] of String)
+        @selection.model = @entries
         @path = path
         @path_label.label = path
-        @selection.selected = 0_u32 unless entries.empty?
+        append_entries(entries, 0, @sequence)
+      end
+
+      private def append_entries(
+        entries : Array(String),
+        start : Int32,
+        sequence : Int64,
+      ) : Nil
+        return if @closed || sequence != @sequence
+
+        finish = self.class.entry_batch_finish(start, entries.size)
+        @entries.splice(
+          @entries.n_items,
+          0_u32,
+          entries[start...finish]
+        )
+        if finish < entries.size
+          GLib.idle_add do
+            append_entries(entries, finish, sequence)
+            false
+          end
+        elsif !entries.empty?
+          @selection.selected = 0_u32
+        end
       end
 
       private def show_trouble(message : String) : Nil
