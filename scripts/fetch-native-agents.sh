@@ -52,7 +52,7 @@ checksum()
   expected=$1
   path=$2
   if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s  %s\n' "$expected" "$path" | sha256sum --check
+    printf '%s  %s\n' "$expected" "$path" | sha256sum -c
   else
     printf '%s  %s\n' "$expected" "$path" | shasum -a 256 --check
   fi
