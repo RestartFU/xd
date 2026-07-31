@@ -11,6 +11,8 @@ module Xd
       FILE_LIMIT      = 1024 * 1024
       HIGHLIGHT_BATCH = 256
       ENTRY_BATCH     =  80
+      PREVIEW_BATCH   = 32 * 1024
+      PREVIEW_CLEAR   = 8 * 1024
 
       record Entry, name : String, directory : Bool
 
@@ -21,6 +23,7 @@ module Xd
       @path = ""
       @file_path : String?
       @showing_preview = false
+      @loading_preview = false
       @saving = false
       @sequence = 0_i64
       @entries_data = [] of Entry
@@ -107,7 +110,7 @@ module Xd
         @editor.add_css_class("xd-file-preview")
         @preview = @editor.buffer
         @preview.modified_changed_signal.connect do
-          @sequence += 1 if @preview.modified
+          @sequence += 1 if @preview.modified && !@loading_preview
           update_actions
         end
         build_syntax_tags
@@ -147,12 +150,20 @@ module Xd
         @path = ""
         @file_path = nil
         @showing_preview = false
+        @loading_preview = false
         @saving = false
         @entries_data.clear
         @entries.remove_all
-        @preview.text = ""
         @preview.modified = false
         set_header_path("")
+        if chat_id
+          show_status("Loading…", nil)
+        else
+          show_status(
+            "No Working Directory",
+            "This chat has no files to browse."
+          )
+        end
       end
 
       def refresh : Nil
@@ -210,6 +221,7 @@ module Xd
         return unless chat_id
 
         @showing_preview = false
+        @loading_preview = false
         @file_path = nil
         @path = path
         set_header_path(path)
@@ -255,6 +267,17 @@ module Xd
 
       def self.entry_batch_finish(start : Int, total : Int) : Int32
         Math.min(start.to_i64 + ENTRY_BATCH, total.to_i64).to_i32
+      end
+
+      def self.preview_chunk(text : String, start : Int) : String
+        return "" if start >= text.bytesize
+
+        finish = Math.min(start + PREVIEW_BATCH, text.bytesize)
+        while finish < text.bytesize &&
+              (text.byte_at(finish) & 0xc0) == 0x80
+          finish -= 1
+        end
+        text.byte_slice(start, finish - start)
       end
 
       private def prepare_entries(
@@ -394,9 +417,11 @@ module Xd
         return unless chat_id && path
 
         @showing_preview = true
+        @loading_preview = true
         @file_path = path
         set_header_path(path)
         show_status("Loading…", nil)
+        update_actions
         token = next_token
 
         request_async({
@@ -407,42 +432,102 @@ module Xd
         }) do |result|
           next unless active?(token, chat_id)
           unless response = result.body
+            @loading_preview = false
             show_read_error(result.error)
             next
           end
 
           content = response["content"]?.try(&.as_s?)
           unless content
+            @loading_preview = false
             show_status(
               "Could Not Open File",
               "The daemon returned an invalid file."
             )
+            update_actions
             next
           end
-          show_preview_text(path, content)
+          start_preview_text(path, content, chat_id, token)
         end
       end
 
-      private def show_preview_text(path : String, text : String) : Nil
-        @preview.text = text
-        @preview.remove_all_tags(
-          @preview.start_iter,
-          @preview.end_iter
-        )
+      private def start_preview_text(
+        path : String,
+        text : String,
+        chat_id : String,
+        token : Int64,
+      ) : Nil
+        clear_preview_batch(path, text, chat_id, token)
+      end
+
+      private def clear_preview_batch(
+        path : String,
+        text : String,
+        chat_id : String,
+        token : Int64,
+      ) : Nil
+        return unless active?(token, chat_id) && @file_path == path
+
+        count = @preview.char_count
+        if count > 0
+          finish = Math.min(PREVIEW_CLEAR, count)
+          @preview.delete(
+            @preview.start_iter,
+            @preview.iter_at_offset(finish)
+          )
+          GLib.idle_add do
+            clear_preview_batch(path, text, chat_id, token)
+            false
+          end
+          return
+        end
+        insert_preview_batch(path, text, chat_id, token, 0)
+      end
+
+      private def insert_preview_batch(
+        path : String,
+        text : String,
+        chat_id : String,
+        token : Int64,
+        start : Int,
+      ) : Nil
+        return unless active?(token, chat_id) && @file_path == path
+
+        chunk = self.class.preview_chunk(text, start)
+        unless chunk.empty?
+          @preview.insert(@preview.end_iter, chunk, chunk.bytesize)
+          GLib.idle_add do
+            insert_preview_batch(
+              path,
+              text,
+              chat_id,
+              token,
+              start + chunk.bytesize
+            )
+            false
+          end
+          return
+        end
+
         @preview.modified = false
+        @loading_preview = false
         @file_path = path
         @showing_preview = true
         set_header_path(path)
         @stack.visible_child_name = "preview"
         @editor.grab_focus
-        highlight_preview(path, text, next_token)
+        update_actions
+        highlight_preview(path, text, token)
       end
 
       private def save_file : Nil
         chat_id = @chat_id
         path = @file_path
         return unless chat_id && path
-        return unless @showing_preview && !@saving && @preview.modified
+        return unless @showing_preview &&
+                      !@loading_preview &&
+                      !@saving &&
+                      @preview.modified
 
         content = @preview.text
         if content.bytesize > FILE_LIMIT
@@ -499,6 +584,7 @@ module Xd
       end
 
       private def show_read_error(message : String?) : Nil
+        @loading_preview = false
         case message
         when "Files larger than 1 MB are not previewed."
           show_status(
@@ -516,6 +602,7 @@ module Xd
             message || "The file could not be read."
           )
         end
+        update_actions
       end
 
       private def show_call_error(result : PanelCallResult) : Nil
@@ -565,11 +652,15 @@ module Xd
       private def update_actions : Nil
         modified = @preview.modified
         @save.visible = @showing_preview
-        @save.sensitive = @showing_preview && modified && !@saving
-        @editor.sensitive = !@saving
-        @back.sensitive = !@saving &&
+        @save.sensitive = @showing_preview &&
+                          modified &&
+                          !@loading_preview &&
+                          !@saving
+        @editor.sensitive = !@loading_preview && !@saving
+        @back.sensitive = !@loading_preview &&
+                          !@saving &&
                           (@showing_preview || !@path.empty?)
-        @refresh.sensitive = !@saving
+        @refresh.sensitive = !@loading_preview && !@saving
       end
 
       private def build_syntax_tags : Nil

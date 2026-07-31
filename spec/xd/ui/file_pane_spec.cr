@@ -25,4 +25,23 @@ describe Xd::UI::FilePane do
     Xd::UI::FilePane.entry_batch_finish(80, 205).should eq(160)
     Xd::UI::FilePane.entry_batch_finish(160, 205).should eq(205)
   end
+
+  it "splits preview text into UTF-8-safe GTK batches" do
+    prefix = "a" * (Xd::UI::FilePane::PREVIEW_BATCH - 1)
+    text = prefix + "🪨" + ("b" * Xd::UI::FilePane::PREVIEW_BATCH)
+    chunks = [] of String
+    offset = 0
+
+    while offset < text.bytesize
+      chunk = Xd::UI::FilePane.preview_chunk(text, offset)
+      chunks << chunk
+      offset += chunk.bytesize
+    end
+
+    chunks.join.should eq(text)
+    chunks.each(&.valid_encoding?.should(be_true))
+    chunks.each do |chunk|
+      chunk.bytesize.should be <= Xd::UI::FilePane::PREVIEW_BATCH
+    end
+  end
 end
