@@ -4,8 +4,8 @@
 #
 # Everything the app needs is loaded out of this directory. The bundled loader
 # is invoked with --library-path rather than exporting LD_LIBRARY_PATH on
-# purpose: xd spawns the host's `claude` and `codex` binaries, and those must
-# keep using the host's own libraries.
+# purpose: host tools spawned by terminal sessions must keep using host
+# libraries. Bundled Claude and OpenSSL use their own small loader wrappers.
 
 set -e
 
@@ -31,16 +31,40 @@ sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/egl_vendor.json.in" > "$RUNTIME/egl_vendor.j
 
 # Anything xd launches for the user -- a terminal, an editor -- must run in the
 # host's environment, not the bundle's. Remember the values before they are
-# overridden so they can be handed back; see src/util/host-launch.c.
+# overridden so they can be handed back to terminals, agents, and host tools.
+export XD_HOST_PATH="${PATH-}"
 export XD_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
 export XD_HOST_LANG="${LANG-}"
 export XD_HOST_LC_ALL="${LC_ALL-}"
 export XD_HOST_LOCPATH="${LOCPATH-}"
 export XD_HOST_LOCALE_ARCHIVE="${LOCALE_ARCHIVE-}"
 export XD_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
+export XD_HOST_GIO_MODULE_DIR="${GIO_MODULE_DIR-}"
+export XD_HOST_GSETTINGS_SCHEMA_DIR="${GSETTINGS_SCHEMA_DIR-}"
+export XD_HOST_GSETTINGS_BACKEND="${GSETTINGS_BACKEND-}"
+export XD_HOST_GDK_PIXBUF_MODULE_FILE="${GDK_PIXBUF_MODULE_FILE-}"
 export XD_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
+export XD_HOST_GTK_IM_MODULE_FILE="${GTK_IM_MODULE_FILE-}"
+export XD_HOST_GTK_MODULES="${GTK_MODULES-}"
 export XD_HOST_GTK_PATH="${GTK_PATH-}"
 export XD_HOST_GTK_THEME="${GTK_THEME-}"
+export XD_HOST_GTK_DATA_PREFIX="${GTK_DATA_PREFIX-}"
+export XD_HOST_GTK_EXE_PREFIX="${GTK_EXE_PREFIX-}"
+export XD_HOST_GSK_RENDERER="${GSK_RENDERER-}"
+export XD_HOST_XCURSOR_PATH="${XCURSOR_PATH-}"
+export XD_HOST_FONTCONFIG_FILE="${FONTCONFIG_FILE-}"
+export XD_HOST_FONTCONFIG_PATH="${FONTCONFIG_PATH-}"
+export XD_HOST_XKB_CONFIG_ROOT="${XKB_CONFIG_ROOT-}"
+export XD_HOST_XLOCALEDIR="${XLOCALEDIR-}"
+export XD_HOST_SSL_CERT_FILE="${SSL_CERT_FILE-}"
+export XD_HOST_OPENSSL_CONF="${OPENSSL_CONF-}"
+export XD_HOST_OPENSSL_MODULES="${OPENSSL_MODULES-}"
+export XD_HOST_GIT_EXEC_PATH="${GIT_EXEC_PATH-}"
+export XD_HOST_GIT_TEMPLATE_DIR="${GIT_TEMPLATE_DIR-}"
+export XD_HOST_GIT_SSL_CAINFO="${GIT_SSL_CAINFO-}"
+export XD_HOST___EGL_VENDOR_LIBRARY_FILENAMES="${__EGL_VENDOR_LIBRARY_FILENAMES-}"
+export XD_HOST_LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH-}"
+export XD_HOST_LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE-}"
 
 # GNOME sessions export these to point GTK/GIO at host plugins (ibus, dconf,
 # gvfs). Those .so files are built against the host's glib and GTK; dlopening
@@ -49,13 +73,8 @@ export XD_HOST_GTK_THEME="${GTK_THEME-}"
 unset GIO_EXTRA_MODULES GTK_PATH GTK_MODULES GTK_IM_MODULE_FILE
 unset GTK_EXE_PREFIX GTK_DATA_PREFIX LOCALE_ARCHIVE
 
-# GTK_THEME is a desktop saying which theme its applications wear, and xd is
-# not wearing one: libadwaita stands down when that variable is set, taking
-# with it the stylesheet everything here is written against -- black surfaces
-# become grey, a dialog's panel is painted by nobody, and the app arrives
-# looking like a different program. The value is handed back to anything xd
-# launches for the user; see src/util/host-launch.c. The same is done in the
-# program itself, for the builds that start without this launcher.
+# xd owns its GTK styling. Preserve host theme for child tools, but do not let
+# it override the app stylesheet.
 unset GTK_THEME
 export GIO_MODULE_DIR="$HERE/lib/gio/modules"
 export GTK_IM_MODULE=gtk-im-context-simple
@@ -84,10 +103,17 @@ export GDK_PIXBUF_MODULE_FILE="$RUNTIME/loaders.cache"
 export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"
 export XDG_DATA_DIRS="$HERE/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/icons}"
+export PATH="$HERE/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 
 # The keyfile backend keeps settings in $XDG_CONFIG_HOME/glib-2.0/settings and
 # is built into GIO, so the bundle needs no dconf module or D-Bus round trip.
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
+export SSL_CERT_FILE="$HERE/etc/ssl/certs/ca-certificates.crt"
+export OPENSSL_CONF="$HERE/etc/ssl/openssl.cnf"
+export OPENSSL_MODULES="$HERE/lib/ossl-modules"
+export GIT_EXEC_PATH="$HERE/libexec/git-core"
+export GIT_TEMPLATE_DIR="$HERE/share/git-core/templates"
+export GIT_SSL_CAINFO="$HERE/etc/ssl/certs/ca-certificates.crt"
 
 # GL is the host's own stack end to end: the bundle carries no Mesa, so
 # libepoxy dlopens the host's libGL -- the same one the desktop runs on.

@@ -52,6 +52,40 @@ jobs:
             xd-linux-x86_64.tar.gz.sha256
             scripts/install.sh
 
+  macos:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install native build dependencies
+        run: >-
+          brew install
+          crystal
+          pkgconf
+          gobject-introspection
+          gtk4
+          libadwaita
+          vte3
+          portaudio
+          sqlite
+          glib-networking
+          librsvg
+          cmake
+
+      - name: Build the complete macOS app
+        run: ./scripts/build-macos.sh "$PWD/macos-dist" release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            macos-dist/xd-macos-arm64.zip
+            macos-dist/xd-macos-arm64.zip.sha256
+            scripts/install-macos.sh
+
   windows:
     runs-on: windows-latest
 
@@ -66,120 +100,41 @@ jobs:
           update: true
           install: >-
             git
+            unzip
             mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-meson
-            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-gc
+            mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gobject-introspection
             mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-json-glib
             mingw-w64-ucrt-x86_64-sqlite3
             mingw-w64-ucrt-x86_64-glib-networking
             mingw-w64-ucrt-x86_64-librsvg
-            mingw-w64-ucrt-x86_64-cmark
+            mingw-w64-ucrt-x86_64-portaudio
 
-      - name: Build and test the Windows client
+      - name: Build the complete Windows payload
         shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          meson setup build-windows \
-            --prefix="$MINGW_PREFIX" \
-            --buildtype=release \
-            -Dcommit="${GITHUB_SHA:0:7}"
-          meson compile -C build-windows
-          meson test -C build-windows --print-errorlogs
-          DESTDIR="$PWD/stage-windows" \
-            meson install -C build-windows --no-rebuild
-          bash scripts/bundle-windows.sh \
-            "$PWD/stage-windows" "$PWD/windows-dist"
-          ./windows-dist/bin/xd.exe --version
+        run: ./scripts/build-windows.sh "$PWD/windows-dist" release
 
       - name: Build the MSI
         shell: pwsh
-        run: |
-          dotnet tool install --global wix --version 6.0.2
-          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          $payload = (Resolve-Path windows-dist).Path
-          wix build installer/windows/xd.wxs `
-            -arch x64 `
-            -d "Payload=$payload" `
-            -d "Version=0.1.0" `
-            -d "ProductName=xd" `
-            -d "InstallName=xd" `
-            -d "UpgradeCode=CDE5479B-9093-4E3C-8144-FCE8C86BEA18" `
-            -d "ShortcutGuid=4E2C6D60-BBC8-4E6F-B230-C9824E0D1715" `
-            -o xd-windows-x86_64.msi
-          $hash = (Get-FileHash xd-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
-          "$hash  xd-windows-x86_64.msi" |
-            Set-Content xd-windows-x86_64.msi.sha256
-
-      - name: Test the PowerShell installer
-        shell: pwsh
-        run: |
-          & ./scripts/install.ps1 `
-            -Release `
-            -MsiPath ./xd-windows-x86_64.msi `
-            -ChecksumPath ./xd-windows-x86_64.msi.sha256 `
-            -Quiet
-          & "$env:ProgramFiles\RestartFU\xd\bin\xd.exe" --version
+        run: >-
+          ./scripts/package-windows.ps1
+          -Payload windows-dist
+          -OutputDirectory windows-artifacts
+          -Profile release
+          -Version 0.1.0
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
-            xd-windows-x86_64.msi
-            xd-windows-x86_64.msi.sha256
+            windows-artifacts/xd-windows-x86_64.msi
+            windows-artifacts/xd-windows-x86_64.msi.sha256
             scripts/install.ps1
 
-  macos:
-    runs-on: macos-15
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Install native dependencies
-        run: >-
-          brew install
-          meson
-          ninja
-          pkgconf
-          gtk4
-          libadwaita
-          json-glib
-          sqlite
-          vte3
-          glib-networking
-          librsvg
-          cmark
-
-      - name: Build and test the Apple Silicon app
-        run: |
-          set -euo pipefail
-          meson setup build-macos \
-            --prefix="$PWD/macos-prefix" \
-            --buildtype=release \
-            -Dcommit="${GITHUB_SHA:0:7}"
-          meson compile -C build-macos
-          meson test -C build-macos --print-errorlogs
-          meson install -C build-macos --no-rebuild
-          ./scripts/bundle-macos.sh \
-            "$PWD/macos-prefix" "$PWD" release
-          ditto -c -k --sequesterRsrc --keepParent \
-            xd.app xd-macos-arm64.zip
-          shasum -a 256 xd-macos-arm64.zip \
-            > xd-macos-arm64.zip.sha256
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: |
-            xd-macos-arm64.zip
-            xd-macos-arm64.zip.sha256
-            scripts/install-macos.sh
-
   publish:
-    needs: [linux, windows, macos]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -208,26 +163,21 @@ jobs:
           ./xd/xd.sh
           \`\`\`
 
-          Windows x86_64: download and run \`xd-windows-x86_64.msi\`, or run:
+          macOS Apple Silicon:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -- --release
+          \`\`\`
+
+          Windows x86_64:
 
           \`\`\`powershell
           & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
           \`\`\`
 
-          This first Windows build omits the embedded terminal and Windows
-          daemon hosting.
-
-          macOS 14+, Apple Silicon:
-
-          \`\`\`
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
-          \`\`\`
-
-          The macOS app is a separate native Mach-O build. It includes the
-          embedded terminal; daemon hosting is not available there yet.
-
-          All downloads are self-contained. On Linux, the daemon is the same
-          binary — \`./xd/bin/xd serve --pair\`.
+          Every artifact is self-contained. On Linux and macOS, the daemon is
+          the same bundled binary and can pair another device with
+          \`xd serve --pair\`.
           EOF
           )
 
@@ -237,20 +187,22 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
-              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
-              xd-macos-arm64.zip xd-macos-arm64.zip.sha256 \
-              scripts/install.sh scripts/install.ps1 scripts/install-macos.sh
+              macos-dist/xd-macos-arm64.zip \
+              macos-dist/xd-macos-arm64.zip.sha256 \
+              windows-artifacts/xd-windows-x86_64.msi \
+              windows-artifacts/xd-windows-x86_64.msi.sha256 \
+              scripts/install.sh scripts/install-macos.sh scripts/install.ps1
           else
             gh release create "$tag" \
               --title "$tag" \
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
               xd-linux-x86_64.tar.gz.sha256 \
-              xd-windows-x86_64.msi \
-              xd-windows-x86_64.msi.sha256 \
-              xd-macos-arm64.zip \
-              xd-macos-arm64.zip.sha256 \
+              macos-dist/xd-macos-arm64.zip \
+              macos-dist/xd-macos-arm64.zip.sha256 \
+              windows-artifacts/xd-windows-x86_64.msi \
+              windows-artifacts/xd-windows-x86_64.msi.sha256 \
               scripts/install.sh \
-              scripts/install.ps1 \
-              scripts/install-macos.sh
+              scripts/install-macos.sh \
+              scripts/install.ps1
           fi

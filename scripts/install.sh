@@ -18,9 +18,9 @@
 # most recent nightly.
 #
 # Nothing is compiled and nothing is needed on the machine: the bundle carries
-# its own GTK, glib and everything under them, so it runs on any glibc x86_64
-# system. It goes in the home directory -- no root, no package manager, and
-# nothing outside these three paths:
+# its own GTK, glib, Git and everything under them, so it runs on any glibc
+# x86_64 system. It goes in the home directory -- no root, no package manager,
+# and nothing outside these paths:
 #
 #   ~/.local/opt/xd-nightly           the program
 #   ~/.local/bin/xd-nightly           the command
@@ -96,6 +96,19 @@ case "$(uname -m)" in
   *) die "only x86_64 is published so far; found $(uname -m)." ;;
 esac
 
+# Replacing a running bundle leaves its old GtkApplication registered with the
+# desktop. A later launch then activates stale code instead of the new binary.
+# Refusing is safer than killing a session that may contain unsent input.
+#
+for process_exe in /proc/[0-9]*/exe; do
+  executable=$(readlink "$process_exe" 2>/dev/null || true)
+  case "$executable" in
+    "$OPT"/*)
+      die "$NAME is running. Quit it completely, then rerun this installer."
+      ;;
+  esac
+done
+
 # --- the bundle -------------------------------------------------------------
 
 WORK=$(mktemp -d)
@@ -143,9 +156,20 @@ fi
 mkdir -p "$(dirname "$OPT")" "$(dirname "$BIN")" "$(dirname "$DESKTOP")"
 
 # Replaced whole rather than merged: an upgrade that left a stale library
-# behind would be a bundle that no longer matches itself.
-rm -rf "$OPT"
-mv "$WORK/$NAME" "$OPT"
+# behind would be a bundle that no longer matches itself. Rename first so a
+# running updater never watches its own files disappear one by one, and restore
+# the old bundle if placing the new one fails.
+OLD="$OPT.previous.$$"
+rm -rf "$OLD"
+if [ -e "$OPT" ]; then
+  mv "$OPT" "$OLD"
+fi
+if mv "$WORK/$NAME" "$OPT"; then
+  rm -rf "$OLD"
+else
+  [ ! -e "$OLD" ] || mv "$OLD" "$OPT"
+  die "cannot replace $OPT."
+fi
 
 ln -sfn "$OPT/xd.sh" "$BIN"
 

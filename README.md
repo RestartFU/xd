@@ -1,6 +1,7 @@
 # xd
 
-Workspace-organized AI conversations. A GTK4/libadwaita desktop app in C.
+Workspace-organized AI conversations. A GTK4 desktop app written in Crystal
+around one daemon protocol for both local and paired clients.
 
 Chats do not live in a flat list; they live in a tree of workspaces and folders,
 and each chat inherits its parent chain's context — backend, model, working
@@ -17,14 +18,24 @@ Personal
 └── Dotfiles
 ```
 
-The app does not talk to any AI API itself. It drives the coding-agent CLIs
-already installed and authenticated on your machine — `claude`, `codex`, and
-`opencode` for Cerebras — as subprocesses, streaming their JSONL output into
-the UI.
+The app does not talk to AI APIs itself. Its bundle ships pinned native Codex
+and Claude Code CLIs plus Git, runs them as subprocesses, and uses their normal
+authentication/config directories.
 
-For Cerebras, install [OpenCode](https://opencode.ai/docs/) and either export
-`CEREBRAS_API_KEY` before starting xd or run `opencode auth login`, choose
-Cerebras, and enter your API key. xd never stores the key.
+## Test a branch build
+
+Linux x86_64, with Docker running:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RestartFU/xd/refs/heads/rewrite/crystal-unified-daemon/scripts/install-branch.sh | sh
+```
+
+That resolves the branch's latest commit, builds its self-contained bundle
+inside Docker, and installs it as `xd-nightly`. No host Crystal compiler, GTK
+SDK, Codex, or Claude installation is needed. Existing nightly chats and
+workspaces are preserved. Quit a running `xd-nightly` before updating; the
+installer refuses to replace an active bundle so GNOME cannot reopen stale
+code.
 
 ## Install
 
@@ -36,54 +47,37 @@ curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh 
 
 That fetches the latest nightly, puts it in `~/.local/opt/xd-nightly`, adds the
 command `xd-nightly` and an entry in the app menu. No root, no package manager,
-and nothing compiled: the bundle carries its own GTK and everything under it, so
-it runs anywhere with glibc.
+and nothing compiled: the bundle carries its own GTK, Git, and everything under
+them, so it runs anywhere with glibc.
 
 Chats and workspaces live in `~/.local/share/xd-nightly`, which is the nightly's
 own — it installs beside a release rather than over it, and neither edits the
 other's work. `sh -s -- --uninstall` takes it away again and leaves that
 directory alone.
 
-To try a pull request or a branch, the nightly builds it. The button beside the
-update button in the sidebar takes a pull request link, a branch link, a number
-or a branch name; it fetches that code, builds the bundle the way the nightly is
-built and installs the result over itself, then offers the restart. What it is
-given is remembered, so trying the next commit on the same branch is opening it
-and pressing the one button. Docker and git are what it needs, and Linux is
-where it runs; the update button is the way back to master's nightly.
+xd has no in-app updater. Installers replace a fully built bundle only while xd
+is stopped; rerun the installer when you want a newer nightly.
 
-Windows, x86_64:
-
-```powershell
-irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
-```
-
-That downloads the latest nightly MSI, verifies its SHA256 checksum, and opens
-the Windows installer. Approve the Windows elevation prompt. The MSI carries
-GTK and the rest of its runtime; MSYS2 is not required on the installed
-machine. It can also be downloaded directly from the
-[nightly release](https://github.com/RestartFU/xd/releases/tag/nightly).
-
-This first Windows client supports local chats and connecting to a paired Linux
-daemon. Embedded terminals and hosting the daemon on Windows are not available
-yet. The terminal button is omitted instead of exposing a control that cannot
-work.
-
-macOS 14 or newer, Apple Silicon:
+macOS Apple Silicon:
 
 ```sh
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
 ```
 
-macOS needs its own native Mach-O build; the Linux ELF/glibc bundle cannot run
-there. The installer verifies the download and puts the self-contained app in
-`~/Applications/xd-nightly.app`. This first macOS build supports local chats,
-the embedded terminal, and connecting to a paired Linux daemon. Hosting the
-daemon on macOS is not available yet.
+Windows x86_64 (PowerShell):
+
+```powershell
+irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
+```
+
+All three platforms ship the same Crystal client and daemon protocol plus
+platform-native GTK, Git, agent, speech, TLS, and IPC dependencies. No system
+Git, Codex, Claude, Crystal, GTK, or package-manager install is required.
 
 ## Build
 
-Docker is the only requirement. Nothing is installed on the host.
+Linux bundle builds and tests require Docker only. Nothing is installed on the
+host.
 
 ```sh
 ./scripts/build.sh     # -> ./dist, a self-contained bundle
@@ -95,16 +89,29 @@ library closure (including the dynamic loader), GTK's support data and a
 launcher. It runs on any glibc x86_64 host, including distributions with no
 system GTK such as NixOS.
 
+Native release builders use the same pinned source and dependencies:
+
+```sh
+./scripts/build-macos.sh ./macos-dist nightly
+./scripts/build-windows.sh ./windows-dist nightly  # MSYS2 UCRT64 shell
+```
+
+The macOS builder requires Apple Silicon and Homebrew build dependencies. The
+Windows builder requires an x86_64 MSYS2 UCRT64 build environment. Their output
+is self-contained; those build dependencies are not user runtime requirements.
+
 ## Run
 
 ```sh
 ./dist/xd.sh
 ```
 
-The app itself is deliberately *not* run inside Docker: it spawns the host's
-agent CLI, which needs the host's own credentials and PATH. The launcher
-invokes the bundled loader with `--library-path` rather than exporting
-`LD_LIBRARY_PATH`, so child processes still use host libraries.
+The app itself is deliberately *not* run inside Docker. Its daemon starts the
+bundled Codex, Claude, and Git CLIs and uses credentials stored on the daemon
+host. For a paired chat, authentication, CLI version checks, repository
+operations, and speech-model downloads all happen on that remote host. The
+launcher invokes the bundled loader with `--library-path` rather than exporting
+`LD_LIBRARY_PATH`, so ordinary child processes still use host libraries.
 
 ### Known wart
 
@@ -135,14 +142,17 @@ noise is cosmetic.
 
 ## Layout
 
-| Path            | What lives there                                     |
-| --------------- | ---------------------------------------------------- |
-| `src/tree/`     | Workspace tree: nodes, disk scanner, sidebar          |
-| `src/chat/`     | Chat view, message rows, subprocess session           |
-| `src/backend/`  | Agent CLI argv building and JSONL parsing             |
-| `src/settings/` | Per-folder `.xd.json` settings and inheritance        |
-| `src/storage/`  | SQLite: chats, messages, full-text search             |
-| `tests/`        | Headless tests, no GTK required                       |
+| Path               | What lives there                                      |
+| ------------------ | ----------------------------------------------------- |
+| `src/xd/daemon/`   | Shared Engine, local/TLS transports, filesystem, PTY   |
+| `src/xd/agent/`    | Bundled CLI lifecycle, protocols, auth, turn handling |
+| `src/xd/ui/`       | GTK4/libadwaita client                                |
+| `src/xd/storage/`  | SQLite chats, messages, sessions, workflow state      |
+| `src/xd/workspace/` | Workspace tree, inherited settings, worktrees        |
+| `spec/`            | Crystal behavior and protocol specs                   |
+
+Docker, native CI, bundles, and installers build only `src/xd.cr`. Historical C
+sources remain available in Git history as migration reference.
 
 Workspace folders are real directories (default `~/Workspaces`), so they can be
 browsed, moved and synced with ordinary tools. Chat messages live in SQLite at

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a relocatable bundle from a `meson install` staging tree.
+# Assemble a relocatable bundle from an install staging tree.
 #
 #   bundle.sh <staging-dir> <out-dir> <launcher-template>
 #
@@ -19,21 +19,39 @@ LAUNCHER="${3:?launcher template}"
 ARCH_DIR=/usr/lib/x86_64-linux-gnu
 PIXBUF_LOADERS="$ARCH_DIR/gdk-pixbuf-2.0/2.10.0/loaders"
 
-mkdir -p "$OUT"/{bin,lib,share,etc}
+mkdir -p "$OUT"/{bin,lib,libexec,share,etc}
 
 # Deliberately empty: GIO_MODULE_DIR points here so the app cannot pick up the
 # host's GIO modules. See scripts/xd.sh.
 mkdir -p "$OUT/lib/gio/modules"
+mkdir -p "$OUT/lib/ossl-modules"
+cp -a "$ARCH_DIR"/ossl-modules/*.so "$OUT/lib/ossl-modules/" 2>/dev/null || true
 
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
+install -Dm755 "$STAGE/usr/bin/git" "$OUT/bin/git"
+cp -a "$STAGE/usr/libexec/." "$OUT/libexec/"
+if [ -d "$STAGE/usr/lib" ]; then
+  cp -a "$STAGE/usr/lib/." "$OUT/lib/"
+fi
+if [ -d "$STAGE/usr/share/git-core" ]; then
+  mkdir -p "$OUT/share/git-core"
+  cp -a "$STAGE/usr/share/git-core/." "$OUT/share/git-core/"
+fi
 
-# Whisper installs outside Debian's dynamic linker cache, and ggml discovers
-# its best CPU backend at runtime. Carry both the linked core and every backend
-# variant; the loader picks one matching the machine's AVX level.
-cp -a /usr/local/lib/libwhisper.so* "$OUT/lib/"
-cp -a /usr/local/lib/libggml.so* "$OUT/lib/"
-cp -a /usr/local/lib/libggml-base.so* "$OUT/lib/"
-cp -a /usr/local/lib/libggml-cpu*.so* "$OUT/lib/"
+# Git's compiled exec path points into Debian's /usr/lib. Rebuild that path
+# inside the bundle. Scripts stay scripts; ELF helpers become symlinks to one
+# loader wrapper, which preserves each helper's argv[0] before dispatch.
+mkdir -p "$OUT/libexec/git-core"
+for helper in "$OUT/libexec/git-core-real/"*; do
+  name=$(basename "$helper")
+  if [ -d "$helper" ]; then
+    cp -a "$helper" "$OUT/libexec/git-core/$name"
+  elif file -Lb "$(readlink -f "$helper")" | grep -q '^ELF '; then
+    ln -s ../git-helper "$OUT/libexec/git-core/$name"
+  else
+    cp -aL "$helper" "$OUT/libexec/git-core/$name"
+  fi
+done
 
 # --- gdk-pixbuf loaders (dlopened, so they are extra closure roots) ---------
 mkdir -p "$OUT/lib/gdk-pixbuf-2.0/loaders"
@@ -52,17 +70,20 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 # enough. NSS modules are added by hand: they are opened by name, never linked.
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
-  "$OUT/lib"/libwhisper.so* \
-  "$OUT/lib"/libggml.so* \
-  "$OUT/lib"/libggml-base.so* \
-  "$OUT/lib"/libggml-cpu*.so* \
+  "$OUT/libexec/claude-bin" \
+  "$OUT/libexec/git-bin" \
+  "$OUT/libexec/git-core-real"/* \
+  "$OUT/libexec/openssl-bin" \
+  "$OUT/libexec/whisper-bin" \
+  "$OUT/lib/ossl-modules"/*.so \
   "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \
   "$ARCH_DIR"/libnss_dns.so.2)
 
 for root in "${roots[@]}"; do
   [ -e "$root" ] || continue
-  LD_LIBRARY_PATH="$OUT/lib:/usr/local/lib" \
+  file -Lb "$root" | grep -q '^ELF ' || continue
+  LD_LIBRARY_PATH="$OUT/lib" \
     ldd "$root" 2>/dev/null | awk '/=> \//{print $3}'
 done | sort -u | while read -r lib; do
   cp -Ln "$lib" "$OUT/lib/" 2>/dev/null || true
@@ -75,7 +96,7 @@ done
 # The dynamic loader itself: the host may not have one at the usual path.
 cp -L "$ARCH_DIR/ld-linux-x86-64.so.2" "$OUT/lib/ld-linux-x86-64.so.2"
 
-# --- GSettings schemas (ours + GTK's + libadwaita's) ------------------------
+# --- GSettings schemas (ours + GTK's) --------------------------------------
 mkdir -p "$OUT/share/glib-2.0/schemas"
 cp -a /usr/share/glib-2.0/schemas/*.xml "$OUT/share/glib-2.0/schemas/" 2>/dev/null || true
 cp -a "$STAGE/usr/share/glib-2.0/schemas/"*.xml "$OUT/share/glib-2.0/schemas/"
@@ -87,6 +108,11 @@ cp -a /usr/share/icons/Adwaita "$OUT/share/icons/"
 cp -a /usr/share/icons/hicolor "$OUT/share/icons/"
 cp -a "$STAGE/usr/share/icons/hicolor/." "$OUT/share/icons/hicolor/"
 gtk4-update-icon-cache -q -t -f "$OUT/share/icons/hicolor" 2>/dev/null || true
+
+# --- MIME database ---------------------------------------------------------
+# GdkPixbuf finds the SVG loader through its cache, but GIO must first classify
+# the icon as image/svg+xml. Minimal hosts do not carry a shared MIME database.
+cp -a /usr/share/mime "$OUT/share/mime"
 
 # --- keyboard data ----------------------------------------------------------
 # libxkbcommon compiles the keymap the compositor hands over against these
@@ -152,14 +178,10 @@ for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu 
            /usr/share/fonts/truetype/noto; do
   [ -d "$dir" ] && cp -a "$dir" "$OUT/share/fonts/"
 done
+cp -a "$STAGE/usr/share/fonts/." "$OUT/share/fonts/"
 
 # conf.d entries are symlinks into conf.avail; -L flattens them so the bundle
 # stays self-contained.
-# The face the interface is set in; vendored because Debian does not package
-# it, licence alongside.
-mkdir -p "$OUT/share/fonts/dmsans"
-cp /src/data/fonts/* "$OUT/share/fonts/dmsans/"
-
 mkdir -p "$OUT/etc/fonts"
 cp -rL /etc/fonts/conf.d "$OUT/etc/fonts/conf.d"
 
@@ -172,6 +194,11 @@ cat > "$OUT/etc/fonts.conf.in" <<'EOF'
   <include ignore_missing="yes">@BUNDLE@/etc/fonts/conf.d</include>
 </fontconfig>
 EOF
+
+# --- certificate authorities -----------------------------------------------
+mkdir -p "$OUT/etc/ssl/certs"
+cp /etc/ssl/certs/ca-certificates.crt "$OUT/etc/ssl/certs/"
+cp /etc/ssl/openssl.cnf "$OUT/etc/ssl/openssl.cnf"
 
 # --- desktop metadata + launcher -------------------------------------------
 mkdir -p "$OUT/share/applications"

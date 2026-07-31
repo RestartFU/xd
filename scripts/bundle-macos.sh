@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Assemble a relocatable Apple Silicon .app from a Meson install prefix.
+# Assemble a relocatable Apple Silicon .app from a Crystal native stage.
 #
-#   bundle-macos.sh <installed-prefix> <output-directory> [nightly|release]
+#   bundle-macos.sh <staging-directory> <output-directory> [nightly|release]
 
 set -euo pipefail
 
-PREFIX="${1:?installed prefix}"
+PREFIX="${1:?Crystal staging directory}"
 OUT="${2:?output directory}"
 PROFILE="${3:-nightly}"
 BUNDLER_COMMIT=fbc6ffd1590cec6fef6e17ec19b6aa00ce01ca6d
@@ -34,6 +34,14 @@ case "$PROFILE" in
 esac
 
 PREFIX="$(cd "$PREFIX" && pwd)"
+[ -x "$PREFIX/bin/xd" ] || {
+  echo "bundle-macos: staged Crystal binary was not found" >&2
+  exit 1
+}
+[ "$("$PREFIX/bin/xd" --bundle-runtime)" = crystal ] || {
+  echo "bundle-macos: refusing non-Crystal binary" >&2
+  exit 1
+}
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 HOMEBREW_PREFIX="$(brew --prefix)"
@@ -134,5 +142,7 @@ gio-querymodules "$RESOURCES/lib/gio/modules"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 "$APP/Contents/MacOS/xd" --version
+"$APP/Contents/MacOS/xd" \
+  --validate-native-bundle macos "$APP"
 
 printf 'macOS bundle: %s\n' "$(du -sh "$APP" | cut -f1)"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a relocatable Windows payload from a Meson install tree.
+# Assemble a relocatable Windows payload from a Crystal native stage.
 #
 #   bundle-windows.sh <staging-dir> <out-dir>
 #
@@ -18,14 +18,21 @@ if [ -z "$STAGED_EXE" ]; then
   exit 1
 fi
 
-# Meson canonicalizes /ucrt64 to its native drive path before DESTDIR is
-# applied, so the staged prefix is not necessarily "$STAGE$MINGW_PREFIX".
+# Native staging may use a drive-normalized path, so derive the prefix from the
+# staged Crystal executable instead of assuming "$STAGE$MINGW_PREFIX".
 STAGED_PREFIX="${STAGED_EXE%/bin/xd.exe}"
 
-mkdir -p "$OUT"/{bin,etc,lib,share}
+[ "$("$STAGED_EXE" --bundle-runtime)" = crystal ] || {
+  echo "bundle-windows: refusing non-Crystal binary" >&2
+  exit 1
+}
+
+mkdir -p "$OUT"/{bin,etc,lib,libexec,share}
 
 install -Dm755 "$STAGED_EXE" "$OUT/bin/xd.exe"
 cp -a "$STAGED_PREFIX/share/." "$OUT/share/"
+cp -a "$STAGED_PREFIX/libexec/." "$OUT/libexec/"
+cp -a "$STAGED_PREFIX/git" "$OUT/git"
 
 # GSettings schemas used by GTK/libadwaita plus xd's installed schema.
 mkdir -p "$OUT/share/glib-2.0/schemas"
@@ -61,7 +68,7 @@ mkdir -p "$OUT/lib/gio/modules"
 cp -a "$PREFIX/lib/gio/modules/"*.dll "$OUT/lib/gio/modules/" \
   2>/dev/null || true
 
-# Image loaders are also dynamic. Store a relocatable cache template; main.c
+# Image loaders are also dynamic. Store a relocatable cache template; Crystal
 # expands @BUNDLE@ to the actual MSI installation directory before GTK starts.
 PIXBUF_LOADERS="$(pkg-config --variable=gdk_pixbuf_moduledir gdk-pixbuf-2.0)"
 QUERY_LOADERS="$(pkg-config --variable=gdk_pixbuf_query_loaders gdk-pixbuf-2.0)"
@@ -82,12 +89,18 @@ GDK_PIXBUF_MODULEDIR="$OUT_LOADERS" "$QUERY_LOADERS" |
   for module in "$OUT_LOADERS/"*.dll "$OUT/lib/gio/modules/"*.dll; do
     [ -e "$module" ] && ldd "$module" 2>/dev/null || true
   done
+  for tool in "$OUT/libexec/"*.exe \
+    "$OUT/libexec/codex-package/bin/"*.exe; do
+    [ -e "$tool" ] && ldd "$tool" 2>/dev/null || true
+  done
 } |
   awk -v prefix="$PREFIX/bin/" '$3 ~ ("^" prefix) { print $3 }' |
   sort -u |
   while read -r dll; do
     cp -a "$dll" "$OUT/bin/"
   done
+
+"$OUT/bin/xd.exe" --validate-native-bundle windows "$OUT"
 
 printf 'windows bundle: %s DLLs, %s\n' \
   "$(find "$OUT/bin" -maxdepth 1 -name '*.dll' | wc -l)" \
