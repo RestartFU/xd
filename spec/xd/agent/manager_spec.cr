@@ -364,7 +364,7 @@ describe Xd::Agent::Manager do
   end
 
   it "snapshots a running turn for clients that join late" do
-    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, events|
       chat_id = store.create_chat(folder_id, "Chat", "claude")
       manager.send(chat_id, "inspect")
 
@@ -382,6 +382,8 @@ describe Xd::Agent::Manager do
       ))
 
       snapshot = manager.active_turn(chat_id).not_nil!
+      snapshot.id.should be > 0
+      snapshot.sequence.should eq(3)
       snapshot.label.should start_with("Claude Opus 5 · ")
       snapshot.working_for.should be >= 0
       snapshot.items.should eq([
@@ -389,6 +391,13 @@ describe Xd::Agent::Manager do
         Xd::Agent::TurnItem.new("Read src/main.cr", true),
       ])
       snapshot.segment.should eq("After.")
+      streamed = events.select do |name, _fields|
+        name == "text" || name == "tool"
+      end
+      streamed.map { |_name, fields| fields["turn_id"].as_i64 }
+        .should eq([snapshot.id, snapshot.id, snapshot.id])
+      streamed.map { |_name, fields| fields["turn_sequence"].as_i64 }
+        .should eq([1_i64, 2_i64, 3_i64])
 
       launcher.finish(0, true)
       manager.active_turn(chat_id).should be_nil

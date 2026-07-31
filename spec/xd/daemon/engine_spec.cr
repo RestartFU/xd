@@ -606,6 +606,8 @@ describe Xd::Daemon::Engine do
           "chat" => chat,
         }.to_json)
         state["working"].as_bool.should be_true
+        state["turn_id"].as_i64.should be > 0
+        state["turn_sequence"].as_i64.should eq(3)
         state["label"].as_s.should start_with("Claude Opus 5 · ")
         state["working_for"].as_i64.should be >= 0
         state["segment"].as_s.should eq("After.")

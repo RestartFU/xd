@@ -901,6 +901,8 @@ module Xd
         )
         if turn = active_turn
           fields["label"] = JSON::Any.new(turn.label)
+          fields["turn_id"] = JSON::Any.new(turn.id)
+          fields["turn_sequence"] = JSON::Any.new(turn.sequence)
           fields["working_for"] = JSON::Any.new(turn.working_for)
           fields["segment"] = JSON::Any.new(turn.segment)
           fields["items"] = JSON::Any.new(turn.items.map do |item|

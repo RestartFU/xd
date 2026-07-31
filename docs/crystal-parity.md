@@ -136,7 +136,12 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   old tree four rows per idle instead of synchronously destroying every GTK
   descendant. Chat deletion, external folder removal, remote disconnect, and
   LRU eviction use the same retirement queue; compatibility stop/change
-  refreshes cannot freeze teardown.
+  refreshes cannot freeze teardown. Rejoining an active turn waits for history,
+  then restores four snapshot rows per idle. Turn IDs and visible-event
+  watermarks remove covered queued deltas—including prefixes inside coalesced
+  text—before later and next-turn events replay in 32-event idle batches.
+  Active remote transcripts are not cached across chat switches, preventing
+  snapshot rows from being restored twice.
   Remote history scroll restoration now starts only after the final batch
   instead of racing the daemon reply. A 245-row
   installed-bundle transcript verifies the 100/45 history pills; five-chat GTK
@@ -517,7 +522,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (326 default and 5 authenticated-loopback
+- `[x]` Crystal specs pass in Docker (329 default and 5 authenticated-loopback
   examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and

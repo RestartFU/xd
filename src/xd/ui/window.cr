@@ -29,6 +29,7 @@ require "./text_reveal"
 require "./tool_call_group"
 require "./tool_panel"
 require "./transcript_paging"
+require "./turn_recovery"
 require "./turn_timing"
 require "./voice_input"
 
@@ -77,9 +78,10 @@ module Xd
         bytesize : Int32,
         preview : ImageAttachment::Pixels
 
-      MAX_IMAGES      = 4
-      MAX_IMAGE_BYTES = 10 * 1024 * 1024
-      MAX_TOTAL_BYTES = 20 * 1024 * 1024
+      MAX_IMAGES                = 4
+      MAX_IMAGE_BYTES           = 10 * 1024 * 1024
+      MAX_TOTAL_BYTES           = 20 * 1024 * 1024
+      TURN_RECOVERY_EVENT_BATCH = 32
 
       getter widget : Adw::ApplicationWindow
 
@@ -137,7 +139,16 @@ module Xd
       @commands_flow : Gtk::FlowBox
       @choices_bar : Gtk::Box
       @messages_request = 0_i64
+      @history_request : Int64?
       @state_request = 0_i64
+      @turn_recovery_request : Int64?
+      @pending_turn_recovery : Hash(String, JSON::Any)?
+      @pending_turn_recovery_finish : {Int64?, Int64?}?
+      @turn_recovery_watermark : {Int64?, Int64?}?
+      @state_reload_after_recovery = false
+      @transcript_reload_after_recovery = false
+      @turn_recovery_events =
+        Deque({Daemon::Endpoint, Hash(String, JSON::Any)}).new
       @send_pending = false
       @cancel_pending = false
       @closed = false
@@ -160,6 +171,13 @@ module Xd
         @stream_source = nil
         @event_inbox = EventInbox(Daemon::Endpoint).new
         @live_turn_key = nil
+        @history_request = nil
+        @turn_recovery_request = nil
+        @pending_turn_recovery = nil
+        @pending_turn_recovery_finish = nil
+        @turn_recovery_watermark = nil
+        @state_reload_after_recovery = false
+        @transcript_reload_after_recovery = false
         @clock_origin = Time.instant
         @search_dialog = nil
         @settings = Gio::Settings.new(APP_ID)
@@ -881,9 +899,10 @@ module Xd
       private def current_transcript_cacheable? : Bool
         page = @transcript_page
         return false unless page
+        return false if @working
         return true unless @client.same?(@local_client)
 
-        !@working && !page.choices_visible
+        !page.choices_visible
       end
 
       private def leave_current_transcript(keep : Bool) : Nil
@@ -1021,6 +1040,7 @@ module Xd
         endpoint = @client
         @messages_request += 1
         request = @messages_request
+        @history_request = request
 
         call_async(endpoint, {
           "op"    => JSON::Any.new("messages"),
@@ -1033,6 +1053,7 @@ module Xd
                       @transcript_page.same?(page)
           if error
             @status.text = error
+            finish_history_request(request)
             next
           end
           apply_messages(response.not_nil!, page, force, request)
@@ -1046,7 +1067,10 @@ module Xd
         request : Int64,
       ) : Nil
         revision = response["last_message_id"]?.try(&.as_i64?) || 0_i64
-        return if !force && page.revision == revision
+        if !force && page.revision == revision
+          finish_history_request(request)
+          return
+        end
 
         if @follow_bottom
           begin_bottom_jump
@@ -1094,6 +1118,7 @@ module Xd
                  @history_bottom_distance >= 0
                 queue_history_restore
               end
+              finish_history_request(request)
               false
             else
               true
@@ -1102,6 +1127,13 @@ module Xd
             false
           end
         end
+      end
+
+      private def finish_history_request(request : Int64) : Nil
+        return unless @history_request == request
+
+        @history_request = nil
+        resume_turn_recovery
       end
 
       private def turn_duration(
@@ -2021,6 +2053,7 @@ module Xd
       end
 
       private def reset_live_turn_ui : Nil
+        cancel_turn_recovery
         finish_stream_segment
         remove_working_row
         @working = false
@@ -2031,6 +2064,7 @@ module Xd
 
       private def recover_active_turn(
         state : Hash(String, JSON::Any),
+        request : Int64,
       ) : Nil
         page = @transcript_page
         return unless page
@@ -2041,36 +2075,168 @@ module Xd
         @working_started_at = Time.instant - Math.max(elapsed, 0_i64).seconds
 
         items = state["items"]?.try(&.as_a?) || [] of JSON::Any
-        items.each do |node|
-          item = node.as_h
-          text = item["text"]?.try(&.as_s?) || ""
-          if item["tool"]?.try(&.as_bool?) == true
-            add_message("tool", text)
-          elsif !text.empty?
-            row = add_message("assistant", text)
-            row.try { |message| message.source = @stream_source }
+        @live_turn_key = page.key
+        turn_id = state["turn_id"]?.try(&.as_i64?)
+        sequence = state["turn_sequence"]?.try(&.as_i64?)
+        batch = TranscriptBatch(JSON::Any).new(items)
+        GLib.idle_add do
+          active = !@closed &&
+                   @turn_recovery_request == request &&
+                   @transcript_page.same?(page) &&
+                   @client.same?(page.endpoint) &&
+                   @active_chat == page.chat_id
+          unless active
+            next false
+          end
+
+          batch.next_batch.each do |_index, node|
+            item = node.as_h
+            text = item["text"]?.try(&.as_s?) || ""
+            if item["tool"]?.try(&.as_bool?) == true
+              add_message("tool", text)
+            elsif !text.empty?
+              row = add_message("assistant", text)
+              row.try { |message| message.source = @stream_source }
+            end
+          end
+          keep_working_last
+
+          unless batch.done?
+            next true
+          end
+
+          segment = state["segment"]?.try(&.as_s?) || ""
+          unless segment.empty?
+            @stream_buffer = segment
+            @stream_reveal.sync(segment)
+            @stream_row = add_message("assistant", segment)
+            @stream_row.try { |message| message.source = @stream_source }
+          end
+
+          keep_working_last
+          scroll_to_bottom
+          finish_turn_recovery(request, turn_id, sequence)
+          false
+        end
+      end
+
+      private def queue_turn_recovery(
+        state : Hash(String, JSON::Any),
+        request : Int64,
+      ) : Nil
+        return unless @turn_recovery_request == request
+
+        @pending_turn_recovery = state
+        @pending_turn_recovery_finish = nil
+        resume_turn_recovery
+      end
+
+      private def resume_turn_recovery : Nil
+        return if @history_request
+        request = @turn_recovery_request || return
+        if finished = @pending_turn_recovery_finish
+          @pending_turn_recovery_finish = nil
+          drain_turn_recovery_events(request, finished[0], finished[1])
+          return
+        end
+        if watermark = @turn_recovery_watermark
+          drain_turn_recovery_events(request, watermark[0], watermark[1])
+          return
+        end
+        state = @pending_turn_recovery || return
+
+        @pending_turn_recovery = nil
+        recover_active_turn(state, request)
+      end
+
+      private def finish_turn_recovery(
+        request : Int64,
+        turn_id : Int64? = nil,
+        sequence : Int64? = nil,
+      ) : Nil
+        return unless @turn_recovery_request == request
+
+        @pending_turn_recovery = nil
+        if @history_request
+          @pending_turn_recovery_finish = {turn_id, sequence}
+          return
+        end
+        @turn_recovery_watermark = {turn_id, sequence}
+        drain_turn_recovery_events(request, turn_id, sequence)
+      end
+
+      private def drain_turn_recovery_events(
+        request : Int64,
+        turn_id : Int64?,
+        sequence : Int64?,
+      ) : Nil
+        GLib.idle_add do
+          next false unless @turn_recovery_request == request
+
+          TURN_RECOVERY_EVENT_BATCH.times do
+            pending = @turn_recovery_events.shift?
+            break unless pending
+
+            endpoint, event = pending
+            next if event["event"]?.try(&.as_s?) == "changed"
+            if replay = TurnRecovery.replay(event, turn_id, sequence)
+              handle_event(endpoint, replay, bypass_recovery: true)
+            end
+            break if @history_request
+          end
+
+          if @history_request
+            next false
+          end
+
+          if @turn_recovery_events.empty?
+            reload_transcript = @transcript_reload_after_recovery
+            reload_state = @state_reload_after_recovery
+            @turn_recovery_request = nil
+            @turn_recovery_watermark = nil
+            @transcript_reload_after_recovery = false
+            @state_reload_after_recovery = false
+            if reload_transcript
+              load_messages
+              load_chat_state
+            elsif reload_state
+              load_chat_state(recover_turn: false)
+            end
+            false
+          else
+            true
           end
         end
+      end
 
-        segment = state["segment"]?.try(&.as_s?) || ""
-        unless segment.empty?
-          @stream_buffer = segment
-          @stream_reveal.sync(segment)
-          @stream_row = add_message("assistant", segment)
-          @stream_row.try { |message| message.source = @stream_source }
-        end
-
-        @live_turn_key = page.key
-        keep_working_last
-        scroll_to_bottom
+      private def cancel_turn_recovery : Nil
+        @turn_recovery_request = nil
+        @pending_turn_recovery = nil
+        @pending_turn_recovery_finish = nil
+        @turn_recovery_watermark = nil
+        @state_reload_after_recovery = false
+        @transcript_reload_after_recovery = false
+        @turn_recovery_events.clear
       end
 
       private def load_chat_state(recover_turn : Bool = true) : Nil
+        if @turn_recovery_request
+          @state_reload_after_recovery = true
+          return
+        end
         chat_id = @active_chat
         return unless chat_id
         endpoint = @client
         @state_request += 1
         request = @state_request
+        if recover_turn && !@turn_recovery_request &&
+           @transcript_page &&
+           @live_turn_key != @transcript_page.try(&.key)
+          @turn_recovery_request = request
+          @pending_turn_recovery = nil
+          @pending_turn_recovery_finish = nil
+          @turn_recovery_watermark = nil
+        end
         call_async(endpoint, {
           "op"   => JSON::Any.new("chat"),
           "chat" => JSON::Any.new(chat_id),
@@ -2080,15 +2246,17 @@ module Xd
                       @active_chat == chat_id
           if error
             @status.text = error
+            finish_turn_recovery(request) if recover_turn
             next
           end
-          apply_chat_state(state.not_nil!, recover_turn)
+          apply_chat_state(state.not_nil!, recover_turn, request)
         end
       end
 
       private def apply_chat_state(
         state : Hash(String, JSON::Any),
         recover_turn : Bool,
+        request : Int64,
       ) : Nil
         @controls.update(state)
         @chat_backend = state["backend"]?.try(&.as_s?) || "claude"
@@ -2107,12 +2275,13 @@ module Xd
         refresh_command_suggestions
         working = state["working"]?.try(&.as_bool?) || false
         if working
-          recover_active_turn(state) if recover_turn
+          queue_turn_recovery(state, request) if recover_turn
           set_working(true)
           keep_working_last
         else
           @live_turn_key = nil
           set_working(false)
+          finish_turn_recovery(request) if recover_turn
         end
         update_send_button
         queue = state["queue"]?.try(&.as_a?) || [] of JSON::Any
@@ -2377,6 +2546,7 @@ module Xd
       private def handle_event(
         endpoint : Daemon::Endpoint,
         event : Hash(String, JSON::Any),
+        bypass_recovery : Bool = false,
       ) : Nil
         if @client.same?(endpoint)
           @tool_panel.handle_event(event)
@@ -2384,6 +2554,12 @@ module Xd
         end
         name = event["event"]?.try(&.as_s?) || return
         @sidebar.handle_event(endpoint, event)
+        if !bypass_recovery &&
+           defer_turn_recovery_event?(endpoint, event, name)
+          @transcript_reload_after_recovery = true if name == "changed"
+          @turn_recovery_events << {endpoint, event}
+          return
+        end
         case name
         when "tree"
           @sidebar.reload(endpoint)
@@ -2488,6 +2664,22 @@ module Xd
           return unless @client.same?(endpoint)
           return unless event["provider"]?.try(&.as_s?) == @chat_backend
           load_chat_state(recover_turn: false)
+        end
+      end
+
+      private def defer_turn_recovery_event?(
+        endpoint : Daemon::Endpoint,
+        event : Hash(String, JSON::Any),
+        name : String,
+      ) : Bool
+        return false unless @turn_recovery_request
+        return false unless active_event?(endpoint, event)
+
+        case name
+        when "turn-started", "text", "tool", "turn-finished", "changed"
+          true
+        else
+          false
         end
       end
 

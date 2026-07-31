@@ -10,7 +10,7 @@ module Xd
     # GTK paints it. Keep one source active, merge replaceable events, and let
     # GTK regain control between bounded batches.
     class EventInbox(T)
-      BATCH_SIZE         = 32
+      BATCH_SIZE          = 32
       TEXT_COALESCE_LIMIT = 16 * 1024
 
       @items = Deque({T, Hash(String, JSON::Any)}).new
@@ -65,17 +65,46 @@ module Xd
         return false unless before["event"]?.try(&.as_s?) == "text"
         return false unless before["chat"]?.try(&.as_s?) ==
                               event["chat"]?.try(&.as_s?)
+        before_turn = before["turn_id"]?.try(&.as_i64?)
+        event_turn = event["turn_id"]?.try(&.as_i64?)
+        before_sequence = before["turn_sequence"]?.try(&.as_i64?)
+        event_sequence = event["turn_sequence"]?.try(&.as_i64?)
+        return false if before_turn != event_turn
 
         old_text = before["text"]?.try(&.as_s?) || ""
         new_text = event["text"]?.try(&.as_s?) || ""
         return false if old_text.bytesize + new_text.bytesize >
-                        TEXT_COALESCE_LIMIT
+                          TEXT_COALESCE_LIMIT
 
         merged = before.dup
         merged["text"] = JSON::Any.new(old_text + new_text)
+        if turn_id = event["turn_id"]?
+          merged["turn_id"] = turn_id
+        end
+        if sequence = event["turn_sequence"]?
+          merged["turn_sequence"] = sequence
+        end
+        if before_turn && before_sequence && event_sequence
+          parts = before["turn_parts"]?.try(&.as_a?).try(&.dup) ||
+                  [turn_part(before, old_text)]
+          parts << turn_part(event, new_text)
+          merged["turn_parts"] = JSON::Any.new(parts)
+        end
         @items.pop
         @items << {target, merged}
         true
+      end
+
+      private def turn_part(
+        event : Hash(String, JSON::Any),
+        text : String,
+      ) : JSON::Any
+        JSON::Any.new({
+          "sequence" => JSON::Any.new(
+            event["turn_sequence"].as_i64
+          ),
+          "text" => JSON::Any.new(text),
+        })
       end
 
       private def coalesce_voice_progress(

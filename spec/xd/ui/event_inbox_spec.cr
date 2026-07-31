@@ -31,14 +31,24 @@ describe Xd::UI::EventInbox do
     inbox = Xd::UI::EventInbox(String).new
 
     original = ui_event("text", "hel")
+    original["turn_id"] = JSON::Any.new(7_i64)
+    original["turn_sequence"] = JSON::Any.new(1_i64)
+    continuation = ui_event("text", "lo")
+    continuation["turn_id"] = JSON::Any.new(7_i64)
+    continuation["turn_sequence"] = JSON::Any.new(2_i64)
     inbox.push("local", original).should be_true
-    inbox.push("local", ui_event("text", "lo")).should be_false
+    inbox.push("local", continuation).should be_false
     inbox.push("local", ui_event("tool", "done")).should be_false
 
     batch, more = inbox.drain
     more.should be_false
     batch.size.should eq(2)
     batch[0][1]["text"].as_s.should eq("hello")
+    batch[0][1]["turn_id"].as_i64.should eq(7_i64)
+    batch[0][1]["turn_sequence"].as_i64.should eq(2_i64)
+    batch[0][1]["turn_parts"].as_a.map do |part|
+      {part["sequence"].as_i64, part["text"].as_s}
+    end.should eq([{1_i64, "hel"}, {2_i64, "lo"}])
     original["text"].as_s.should eq("hel")
     batch[1][1]["event"].as_s.should eq("tool")
   end

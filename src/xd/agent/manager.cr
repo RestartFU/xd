@@ -104,6 +104,8 @@ module Xd
     record TurnItem, text : String, tool : Bool
 
     record TurnSnapshot,
+      id : Int64,
+      sequence : Int64,
       label : String,
       working_for : Int64,
       segment : String,
@@ -139,6 +141,8 @@ module Xd
         property context_window = 0_u64
         property had_text = false
         property had_tool = false
+        property id = 0_i64
+        property sequence = 0_i64
 
         def initialize(
           @chat_id,
@@ -162,6 +166,7 @@ module Xd
       @starting_cancellations = Set(String).new
       @command_sets = {} of String => Array(String)
       @mutex = Mutex.new
+      @next_turn_id = 0_i64
       @closed = false
       @worktree_service : Workspace::Worktrees
 
@@ -286,7 +291,14 @@ module Xd
             (@clock.call - turn.started_at).total_seconds.to_i64,
             0_i64
           )
-          TurnSnapshot.new(turn.label, elapsed, segment, items)
+          TurnSnapshot.new(
+            turn.id,
+            turn.sequence,
+            turn.label,
+            elapsed,
+            segment,
+            items
+          )
         end
       end
 
@@ -416,6 +428,8 @@ module Xd
           @mutex.synchronize do
             raise Error.new("The daemon is stopping.") if @closed
             @starting.delete(chat_id)
+            @next_turn_id += 1
+            turn.id = @next_turn_id
             turn.cancel_requested =
               @starting_cancellations.delete(chat_id)
             @turns[chat_id] = turn
@@ -452,8 +466,10 @@ module Xd
 
           @store.set_daemon_working(chat_id, true)
           publish("turn-started", {
-            "chat"  => JSON::Any.new(chat_id),
-            "label" => JSON::Any.new(turn.label),
+            "chat"          => JSON::Any.new(chat_id),
+            "label"         => JSON::Any.new(turn.label),
+            "turn_id"       => JSON::Any.new(turn.id),
+            "turn_sequence" => JSON::Any.new(turn.sequence),
           })
         rescue error : Error
           cleanup_failed_start(chat_id, input_stored, error.message)
@@ -493,6 +509,7 @@ module Xd
 
       private def receive(turn : ActiveTurn, event : Event) : Nil
         event_name : String? = nil
+        sequenced = false
         fields = {} of String => JSON::Any
 
         @mutex.synchronize do
@@ -552,6 +569,7 @@ module Xd
             end
             unless visible_text.empty?
               event_name = "text"
+              sequenced = true
               fields = {
                 "chat" => JSON::Any.new(turn.chat_id),
                 "text" => JSON::Any.new(visible_text),
@@ -565,6 +583,7 @@ module Xd
             text = WorkflowRun.capture(text, turn.workdir)
             @store.append_message(turn.chat_id, "tool", text)
             event_name = "tool"
+            sequenced = true
             fields = {
               "chat"    => JSON::Any.new(turn.chat_id),
               "text"    => JSON::Any.new(text),
@@ -577,6 +596,11 @@ module Xd
             turn.context_used = event.context_used
             turn.context_window = event.context_window
           else
+          end
+          if sequenced
+            turn.sequence += 1
+            fields["turn_id"] = JSON::Any.new(turn.id)
+            fields["turn_sequence"] = JSON::Any.new(turn.sequence)
           end
         end
 
@@ -656,10 +680,12 @@ module Xd
         end
 
         fields = {
-          "chat"    => JSON::Any.new(turn.chat_id),
-          "ok"      => JSON::Any.new(success),
-          "waiting" => JSON::Any.new(!asked.nil?),
-          "silent"  => JSON::Any.new(
+          "chat"          => JSON::Any.new(turn.chat_id),
+          "turn_id"       => JSON::Any.new(turn.id),
+          "turn_sequence" => JSON::Any.new(turn.sequence),
+          "ok"            => JSON::Any.new(success),
+          "waiting"       => JSON::Any.new(!asked.nil?),
+          "silent"        => JSON::Any.new(
             success && !turn.had_text && !turn.had_tool
           ),
           "duration"        => JSON::Any.new(elapsed),
@@ -723,10 +749,12 @@ module Xd
         text = error.message || "Cannot restart the agent"
         STDERR.puts "xd: cannot retry stale session: #{text}"
         publish("turn-finished", {
-          "chat"    => JSON::Any.new(turn.chat_id),
-          "ok"      => JSON::Any.new(false),
-          "waiting" => JSON::Any.new(false),
-          "error"   => JSON::Any.new(text),
+          "chat"          => JSON::Any.new(turn.chat_id),
+          "turn_id"       => JSON::Any.new(turn.id),
+          "turn_sequence" => JSON::Any.new(turn.sequence),
+          "ok"            => JSON::Any.new(false),
+          "waiting"       => JSON::Any.new(false),
+          "error"         => JSON::Any.new(text),
         })
       end
 
