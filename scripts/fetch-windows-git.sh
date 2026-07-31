@@ -45,7 +45,7 @@ printf '%s  %s\n' "$GIT_SHA256" "$WORK/$GIT_ASSET" |
   sha256sum --check
 
 destination=$(cygpath -w "$STAGE/git")
-"$WORK/$GIT_ASSET" -y -gm2 "-o$destination"
+"$WORK/$GIT_ASSET" -y -gm2 -o "$destination"
 
 "$STAGE/git/cmd/git.exe" --version | grep -F "git version 2.55.0.windows.3"
 [ -x "$STAGE/git/mingw64/libexec/git-core/git-remote-https.exe" ]
