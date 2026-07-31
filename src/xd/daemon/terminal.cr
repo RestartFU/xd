@@ -426,7 +426,11 @@ module Xd
           end
           found
         {% else %}
-          LibC.kill(-@pid, 0) == 0
+          if group = isolated_process_group
+            LibC.kill(-group, 0) == 0
+          else
+            LibC.kill(@pid, 0) == 0
+          end
         {% end %}
       end
 
@@ -444,10 +448,22 @@ module Xd
           end
           LibC.kill(-@pid, signal) unless signaled
         {% else %}
-          LibC.kill(-@pid, signal)
+          if group = isolated_process_group
+            LibC.kill(-group, signal)
+          end
         {% end %}
         LibC.kill(@pid, signal)
       end
+
+      {% unless flag?(:linux) || flag?(:win32) %}
+        private def isolated_process_group : Int32?
+          group = LibC.getpgid(@pid)
+          parent_group = LibC.getpgid(0)
+          return if group <= 0 || group == parent_group
+
+          group
+        end
+      {% end %}
 
       private def process_session(name : String) : Int32?
         stat = File.read(File.join("/proc", name, "stat"))
