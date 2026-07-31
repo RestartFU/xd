@@ -422,11 +422,6 @@ module Xd
         background-color: alpha(#ffffff, 0.55);
       }
       .xd-status-done { background-color: @success_color; }
-      .xd-update image { color: #ffffff; }
-      .xd-update:disabled image { color: alpha(#ffffff, 0.35); }
-      .xd-update-fade image {
-        animation: xd-pulse 1.4s ease-in-out infinite alternate;
-      }
       .xd-offline { color: @error_color; }
       .xd-sidebar listview { padding-top: 0.5em; }
       .xd-inline-entry { min-height: 0; padding: 0 4px; }

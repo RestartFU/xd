@@ -77,9 +77,9 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   client keeps its cached child when the daemon stops, draws the root offline,
   then reconnects without pairing again and returns the root to idle. Chat
   state screenshot/event matrix remains.
-- `[~]` Updater row, release-channel checks/install/restart, and branch-build
-  entry point are ported. Nightly installed-path row and branch panel are
-  screenshot-verified with fatal GTK criticals; real update/install remains.
+- `[x]` Update/install and branch-build UI are intentionally removed. Releases
+  ship one pinned app, agent, Git, and speech-tool bundle; client performs no
+  background release polling and starts no installer subprocess.
 
 C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 `src/tree/xd-node.c`, `src/remote/remote-tree.c`, `src/ui/updater.c`.
