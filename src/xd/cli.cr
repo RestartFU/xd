@@ -36,7 +36,7 @@ module Xd
         return 0
       end
 
-      # Native packagers use this private probe to reject the legacy C binary.
+      # Native packagers use this private probe to reject non-Crystal binaries.
       # Keep it machine-readable; it is a bundle contract, not user-facing UI.
       if arguments == ["--bundle-runtime"]
         @output.puts "crystal"

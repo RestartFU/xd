@@ -23,7 +23,7 @@ fi
 STAGED_PREFIX="${STAGED_EXE%/bin/xd.exe}"
 
 [ "$("$STAGED_EXE" --bundle-runtime)" = crystal ] || {
-  echo "bundle-windows: refusing legacy C binary" >&2
+  echo "bundle-windows: refusing non-Crystal binary" >&2
   exit 1
 }
 

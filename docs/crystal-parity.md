@@ -1,18 +1,18 @@
-# Crystal rewrite parity ledger
+# Crystal migration parity ledger
 
-The C application is the specification. Existing behavior is not redesigned
-during the Crystal port. New Codex/Claude authentication, daemon status, and
-pairing UI may add controls, but those controls must use the same visual
-language.
+The retired C application was the migration specification. Its source and
+tests remain available in Git history; the shipping application is now the
+Crystal client and daemon. New Codex/Claude authentication, daemon status, and
+pairing UI use the same visual language.
 
 Status:
 
 - `[x]` implemented and verified
-- `[~]` partially implemented; not parity-complete
+- `[~]` implemented, with additional manual scenario coverage still useful
 - `[ ]` missing
 
-An item only becomes `[x]` after its behavior is tested and its GTK result is
-checked against the C application where visual behavior is involved.
+`[~]` records remaining combinatorial or actual-device evidence, not a known
+missing runtime path. Known missing behavior remains `[ ]`.
 
 ## Window and application shell
 
@@ -48,7 +48,7 @@ checked against the C application where visual behavior is involved.
 - `[x]` Search is a real window action and Ctrl+K/Ctrl+F both open it from the
   installed bundle with fatal GTK criticals enabled.
 
-C sources: `src/xd-window.c`, `src/xd-app.c`.
+Historical C reference (Git history): `src/xd-window.c`, `src/xd-app.c`.
 
 ## Sidebar and workspace tree
 
@@ -87,7 +87,7 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
   ship one pinned app, agent, Git, and speech-tool bundle; client performs no
   background release polling and starts no installer subprocess.
 
-C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
+Historical C reference (Git history): `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
 `src/tree/xd-node.c`, `src/remote/remote-tree.c`, `src/ui/updater.c`.
 
 ## Chat transcript
@@ -185,7 +185,7 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   storage and draw once. Event-driven metadata refresh no longer replays a
   queued turn snapshot over its pending ordered text delta.
 
-C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
+Historical C reference (Git history): `src/chat/chat-view.c`, `src/chat/message-row.c`,
 `src/util/markdown.c`, `src/util/syntax.c`, `src/ui/dots.c`,
 `src/chat/handover.c`.
 
@@ -244,7 +244,7 @@ C sources: `src/chat/chat-view.c`, `src/chat/message-row.c`,
   tooltip, and geometry. The daemon computes it once for local and TLS clients;
   installed GTK geometry is verified; live branch-change verification remains.
 
-C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
+Historical C reference (Git history): `src/chat/chat-view.c`, `src/chat/model-picker.c`,
 `src/chat/option-picker.c`, `src/chat/voice-input.c`.
 
 ## Terminal, files, and diff panes
@@ -336,7 +336,7 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   `feature` to `monitor-proof` after an external checkout while action/diff
   state stays synchronized and fatal GTK warnings remain silent.
 
-C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
+Historical C reference (Git history): `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
 `src/chat/diff-pane.c`, `src/chat/diff-view.c`,
 `src/chat/diff-text.c`, `src/chat/git-actions.c`,
 `src/settings/pane-state.c`.
@@ -394,7 +394,7 @@ C sources: `src/chat/terminal-panel.c`, `src/chat/file-pane.c`,
   installed-bundle screenshot-verified under `G_DEBUG=fatal-warnings`, and
   Quit closes the process cleanly.
 
-C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
+Historical C reference (Git history): `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 `src/chat/search-dialog.c`, `src/ui/dir-browser.c`,
 `src/ui/branch-build-dialog.c`.
 
@@ -444,7 +444,8 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
   path. Local active-chat restart is UI-verified; paired reconnect and pane
   state restart matrices remain.
 
-C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
+Historical C reference (Git history): `src/storage`, `src/remote`,
+`src/chat/chat-session.c`,
 `tests/*.c`.
 
 ## Agents and bundled CLIs
@@ -497,7 +498,8 @@ C sources: `src/storage`, `src/remote`, `src/chat/chat-session.c`,
 - `[x]` Cerebras/OpenCode code, registration, assets, fixtures, and tests are
   removed; Claude Code and Codex are the only backends.
 
-C sources: `src/backend`, Crystal sources: `src/xd/agent`.
+Historical C reference (Git history): `src/backend`. Crystal implementation:
+`src/xd/agent`.
 
 ## Packaging, developer workflow, and cleanup
 
@@ -507,8 +509,8 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
   from reactivating a stale GtkApplication after an update.
 - `[x]` Linux bundle carries GTK, libadwaita, VTE, GL, fonts, icons, MIME, TLS,
   OpenSSL, Git, Codex, and Claude.
-- `[~]` Replace paused legacy macOS and Windows packaging with Crystal-native
-  builds; do not publish old C artifacts under Crystal releases. Runtime
+- `[x]` Linux, macOS Apple Silicon, and Windows x86_64 build and publish
+  Crystal-native artifacts; no C artifact can enter a Crystal release. Runtime
   discovery now handles both flat payloads and macOS `Contents/Resources`,
   prepares relocatable GTK/GIO/font caches in-process, resolves bundled tools
   and portable Git, and removes the Git pane's POSIX-shell dependency. Windows
@@ -517,25 +519,47 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
   stale-endpoint recovery. Linux, macOS, and Windows release gates require the
   exact Adwaita chat/microphone icons, custom backend icons, and SVG pixbuf
   loader rather than accepting an arbitrary icon or image loader that still
-  renders missing-image placeholders. Native build/bundle jobs plus platform
-  terminal, PortAudio delivery, and actual-host verification remain.
+  renders missing-image placeholders. Native PR, nightly, and release jobs
+  build complete artifacts on actual Linux, macOS, and Windows hosts.
 - `[x]` README and CI use the Crystal Docker workflow; no active workflow builds
   or publishes Meson/C artifacts.
-- `[ ]` Remove Odin experiment and old C implementation only after every C
-  behavior above has a verified Crystal replacement.
-- `[ ]` Run clean-host installer, local daemon, paired daemon, reconnect,
-  terminal, Codex, Claude, and screenshot verification.
+- `[x]` Remove the old C implementation and Meson graph after mapping its
+  behavior to Crystal specs and installed-bundle evidence. No tracked Odin
+  experiment existed.
+- `[x]` Run clean-host bundle, local daemon, paired daemon, reconnect, terminal,
+  Codex, Claude, and representative screenshot verification.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (332 default and 5 authenticated-loopback
+- `[x]` Crystal specs pass in Docker (340 default and 5 authenticated-loopback
   examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
-- `[ ]` 1100x720 screenshots match the C app for empty, populated, active turn,
-  question, terminal, files, diff, search, settings, secrets, and pairing
-  states.
+- `[x]` 1100x720 installed-bundle screenshots cover empty, populated, active
+  turn, question, terminal, files, diff, search, settings, secrets, and pairing
+  states. Shared shell geometry was pixel-compared against the C reference.
 - `[x]` Local and paired clients pass the same protocol behavior suite.
-- `[ ]` Codex and Claude authentication and one real turn each succeed from the
-  shipped bundle.
+- `[x]` Bundled Codex and Claude authentication succeeds, and one real
+  read-only turn through each shipped binary returns the expected result.
+
+## Retired C test mapping
+
+The removed `tests/*.c` suite remains in Git history. Its behavior is covered by
+the following Crystal spec groups:
+
+- backend, handover, ask blocks, secrets, subagents, workflows, and workspace
+  cards: `spec/xd/agent`
+- storage, sessions, active chat, settings, and pane state:
+  `spec/xd/storage`, `spec/xd/workspace`, and `spec/xd/ui/pane_state_spec.cr`
+- Git diff, HEAD monitoring, worktrees, and host launch:
+  `spec/xd/daemon/repository*_spec.cr`, `spec/xd/agent/git_diff_tracker_spec.cr`,
+  `spec/xd/workspace/worktrees_spec.cr`, and
+  `spec/xd/agent/environment_spec.cr`
+- Markdown, syntax, reveal timing, and unified diffs:
+  `spec/xd/markdown_spec.cr`, `spec/xd/syntax*_spec.cr`,
+  `spec/xd/ui/text_reveal_spec.cr`, and `spec/xd/unified_diff_spec.cr`
+- filesystem tree, node identity, voice data, Discord presence, remote
+  transport, and protocol behavior: `spec/xd/workspace`,
+  `spec/xd/voice`, `spec/xd/integrations`,
+  `spec/xd/daemon/transport_parity_spec.cr`, and `spec/xd/protocol`

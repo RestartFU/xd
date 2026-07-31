@@ -1,7 +1,7 @@
 # xd
 
-Workspace-organized AI conversations. A plain GTK4 desktop app being rewritten
-in Crystal around one daemon protocol for both local and paired clients.
+Workspace-organized AI conversations. A GTK4 desktop app written in Crystal
+around one daemon protocol for both local and paired clients.
 
 Chats do not live in a flat list; they live in a tree of workspaces and folders,
 and each chat inherits its parent chain's context — backend, model, working
@@ -22,7 +22,7 @@ The app does not talk to AI APIs itself. Its bundle ships pinned native Codex
 and Claude Code CLIs plus Git, runs them as subprocesses, and uses their normal
 authentication/config directories.
 
-## Test the Crystal rewrite
+## Test a branch build
 
 Linux x86_64, with Docker running:
 
@@ -58,13 +58,26 @@ directory alone.
 xd has no in-app updater. Installers replace a fully built bundle only while xd
 is stopped; rerun the installer when you want a newer nightly.
 
-Crystal builds currently target Linux x86_64. Windows and macOS installers are
-paused until they build this same Crystal client and daemon; old C artifacts
-are not published under the new version.
+macOS Apple Silicon:
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
+```
+
+Windows x86_64 (PowerShell):
+
+```powershell
+irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
+```
+
+All three platforms ship the same Crystal client and daemon protocol plus
+platform-native GTK, Git, agent, speech, TLS, and IPC dependencies. No system
+Git, Codex, Claude, Crystal, GTK, or package-manager install is required.
 
 ## Build
 
-Docker is the only requirement. Nothing is installed on the host.
+Linux bundle builds and tests require Docker only. Nothing is installed on the
+host.
 
 ```sh
 ./scripts/build.sh     # -> ./dist, a self-contained bundle
@@ -75,6 +88,17 @@ Docker is the only requirement. Nothing is installed on the host.
 library closure (including the dynamic loader), GTK's support data and a
 launcher. It runs on any glibc x86_64 host, including distributions with no
 system GTK such as NixOS.
+
+Native release builders use the same pinned source and dependencies:
+
+```sh
+./scripts/build-macos.sh ./macos-dist nightly
+./scripts/build-windows.sh ./windows-dist nightly  # MSYS2 UCRT64 shell
+```
+
+The macOS builder requires Apple Silicon and Homebrew build dependencies. The
+Windows builder requires an x86_64 MSYS2 UCRT64 build environment. Their output
+is self-contained; those build dependencies are not user runtime requirements.
 
 ## Run
 
@@ -127,8 +151,8 @@ noise is cosmetic.
 | `src/xd/workspace/` | Workspace tree, inherited settings, worktrees        |
 | `spec/`            | Crystal behavior and protocol specs                   |
 
-Legacy C source remains temporarily as parity reference. Docker, CI, bundles,
-and installers build only `src/xd.cr`.
+Docker, native CI, bundles, and installers build only `src/xd.cr`. Historical C
+sources remain available in Git history as migration reference.
 
 Workspace folders are real directories (default `~/Workspaces`), so they can be
 browsed, moved and synced with ordinary tools. Chat messages live in SQLite at

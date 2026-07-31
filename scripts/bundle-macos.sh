@@ -39,7 +39,7 @@ PREFIX="$(cd "$PREFIX" && pwd)"
   exit 1
 }
 [ "$("$PREFIX/bin/xd" --bundle-runtime)" = crystal ] || {
-  echo "bundle-macos: refusing legacy C binary" >&2
+  echo "bundle-macos: refusing non-Crystal binary" >&2
   exit 1
 }
 mkdir -p "$OUT"

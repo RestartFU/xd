@@ -5,7 +5,7 @@
 #   stage-native.sh <crystal-xd-binary> <staging-directory> [nightly|release]
 #
 # The destination must be empty. Native bundle scripts add shared libraries,
-# platform tools, and installer metadata without depending on Meson/C output.
+# platform tools, and installer metadata from one Crystal build output.
 
 set -eu
 

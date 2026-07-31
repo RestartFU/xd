@@ -1,7 +1,6 @@
 module Xd
   module UI
-    # Kept in lockstep with the C application's stylesheet while the widgets
-    # move to Crystal. Visual parity is a compatibility requirement.
+    # Preserve the established visual language across the Crystal widgets.
     STYLE = <<-CSS
       :root {
         --window-bg-color: #000000;

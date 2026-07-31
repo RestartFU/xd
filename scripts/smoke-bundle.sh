@@ -6,6 +6,7 @@
 set -eu
 
 BUNDLE=${1:?bundle directory}
+BUNDLE=$(CDPATH= cd -- "$BUNDLE" && pwd)
 GIT="$BUNDLE/bin/git"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM

@@ -4,8 +4,8 @@ require "./panel_call"
 
 module Xd
   module UI
-    # Windows matches the legacy client: terminal control remains absent until
-    # a native ConPTY-backed terminal widget can replace VTE.
+    # Windows omits terminal control until a native ConPTY-backed terminal
+    # widget can provide the same lifecycle guarantees as VTE.
     class TerminalPanel
       getter widget : Gtk::Box
 
