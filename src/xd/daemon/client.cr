@@ -56,7 +56,7 @@ module Xd
         path : String,
         request_timeout : Time::Span = REQUEST_TIMEOUT,
       ) : self
-        {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+        {% if flag?(:win32) || flag?(:darwin) || flag?(:xd_loopback_local) %}
           new(LocalIPC.connect(path), request_timeout: request_timeout)
         {% else %}
           new(UNIXSocket.new(path), request_timeout: request_timeout)

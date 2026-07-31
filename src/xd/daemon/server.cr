@@ -9,7 +9,7 @@ module Xd
       getter remote_port : Int32?
       getter local_path : String?
 
-      {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+      {% if flag?(:win32) || flag?(:darwin) || flag?(:xd_loopback_local) %}
         alias LocalListener = TCPServer
       {% else %}
         alias LocalListener = UNIXServer
@@ -30,7 +30,7 @@ module Xd
       end
 
       def listen_local(path : String) : Nil
-        {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+        {% if flag?(:win32) || flag?(:darwin) || flag?(:xd_loopback_local) %}
           listen_local_loopback(path)
         {% else %}
           if info = File.info?(path, follow_symlinks: false)
@@ -139,7 +139,7 @@ module Xd
           end
         end
         if path = local_path
-          {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+          {% if flag?(:win32) || flag?(:darwin) || flag?(:xd_loopback_local) %}
             if token = local_token
               LocalIPC.remove_if_owned(path, token)
             end
@@ -151,7 +151,7 @@ module Xd
         LocalIPC.release(local_lock_path.not_nil!) if local_lock_path
       end
 
-      {% if flag?(:win32) || flag?(:xd_loopback_local) %}
+      {% if flag?(:win32) || flag?(:darwin) || flag?(:xd_loopback_local) %}
         private def listen_local_loopback(path : String) : Nil
           lock_path = LocalIPC.claim(path)
           token = Random::Secure.hex(LocalIPC::TOKEN_BYTES)

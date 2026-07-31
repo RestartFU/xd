@@ -36,9 +36,10 @@ require "socket"
 
 module Xd
   module Daemon
-    # Windows local IPC uses an authenticated loopback socket because Crystal
-    # does not expose named pipes as IO. The endpoint file lives under the
-    # user's private data directory and contains an unguessable session token.
+    # Platforms using loopback local IPC authenticate every connection with an
+    # unguessable token from an endpoint file in the private app data directory.
+    # Windows needs this because Crystal has no named-pipe IO; macOS uses it to
+    # avoid the kernel's short Unix-domain socket path limit.
     module LocalIPC
       extend self
 

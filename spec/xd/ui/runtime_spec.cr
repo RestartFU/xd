@@ -14,12 +14,30 @@ describe Xd::UI::Runtime do
     ENV["XDG_DATA_HOME"] = directory
     ENV["XD_DATA_NAME"] = "readiness"
     socket_path = Xd::AppPaths.local_socket
-    listener = UNIXServer.new(socket_path)
-    clients = [] of UNIXSocket
+    token = ""
+    listener : TCPServer | UNIXServer | Nil = nil
+    clients = [] of IO
+    {% if flag?(:darwin) || flag?(:win32) || flag?(:xd_loopback_local) %}
+      token = Random::Secure.hex(Xd::Daemon::LocalIPC::TOKEN_BYTES)
+      tcp_listener = TCPServer.new("127.0.0.1", 0)
+      listener = tcp_listener
+      port = tcp_listener.local_address.as(Socket::IPAddress).port
+      Xd::Daemon::LocalIPC.publish(socket_path, port, token)
+    {% else %}
+      listener = UNIXServer.new(socket_path)
+    {% end %}
     lock = Mutex.new
     spawn do
-      while client = listener.accept?
-        lock.synchronize { clients << client }
+      while client = listener.not_nil!.accept?
+        {% if flag?(:darwin) || flag?(:win32) || flag?(:xd_loopback_local) %}
+          if Xd::Daemon::LocalIPC.authenticate(client.as(TCPSocket), token)
+            lock.synchronize { clients << client }
+          else
+            client.close
+          end
+        {% else %}
+          lock.synchronize { clients << client }
+        {% end %}
       end
     rescue IO::Error
     end

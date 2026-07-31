@@ -47,12 +47,18 @@ module Xd
       ) : String
         return "No working directory" unless workdir
 
-        shown = if workdir.starts_with?(home)
-                  "~#{workdir[home.size..]}"
+        normalized_workdir = normalize(workdir)
+        normalized_home = normalize(home)
+        shown = if normalized_workdir == normalized_home
+                  "~"
+                elsif normalized_workdir.starts_with?(
+                        normalized_home + File::SEPARATOR
+                      )
+                  "~#{normalized_workdir[normalized_home.size..]}"
                 else
-                  workdir
+                  normalized_workdir
                 end
-        items = list(workdir)
+        items = list(normalized_workdir)
         current = items.find(&.current) || items.first?
         return "#{shown} — not a repository" unless current
 

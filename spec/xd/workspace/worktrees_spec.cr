@@ -27,6 +27,8 @@ describe Xd::Workspace::Worktrees do
     )
     folder_id = workspaces.create_folder(nil, "Project")
     repository = workspaces.find_folder(folder_id)
+    home_alias = "#{directory}-home"
+    File.symlink(directory, home_alias)
 
     worktree_git(repository, "init", "-q", "-b", "main")
     worktree_git(repository, "config", "user.email", "test@example.com")
@@ -37,7 +39,7 @@ describe Xd::Workspace::Worktrees do
 
     begin
       service = Xd::Workspace::Worktrees.new(store, workspaces)
-      service.describe(repository, home: directory).should eq(
+      service.describe(repository, home: home_alias).should eq(
         "⎇ main · Project · ~/Workspaces/Project"
       )
       first_id = store.create_chat(folder_id, "Chat", "claude")
@@ -55,7 +57,7 @@ describe Xd::Workspace::Worktrees do
       state = service.state(stored)
       state.linked.should be_true
       state.worktrees.size.should eq(2)
-      service.describe(created, home: directory).should contain(
+      service.describe(created, home: home_alias).should contain(
         " · Project (worktree) · ~/Workspaces/worktrees/Project/fix-parser"
       )
       named = state.worktrees.map(&.branch).compact.any? do |branch|
@@ -69,7 +71,7 @@ describe Xd::Workspace::Worktrees do
       store.get_chat(second_id).workdir.should eq(created)
       service.registered_path(repository, created).should eq(created)
       service.registered_path(repository, directory).should be_nil
-      service.describe(directory, home: directory).should eq(
+      service.describe(directory, home: home_alias).should eq(
         "~ — not a repository"
       )
 
@@ -79,6 +81,7 @@ describe Xd::Workspace::Worktrees do
       store.get_chat(first_id).original_workdir.should be_nil
     ensure
       store.close
+      File.delete?(home_alias)
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
