@@ -375,18 +375,6 @@ Historical C reference (Git history): `src/chat/terminal-panel.c`, `src/chat/fil
   “use folder defaults” callback. The footer has the exact C hints and no
   added Cancel action. Daemon specs cover hidden/file filtering and missing or
   non-directory errors.
-- `[x]` Branch/PR parsing, shell-safe fetch/build/install command, exact panel,
-  bounded live output, stop, persistence, and dialog-independent run lifecycle
-  match C. Panel is screenshot-verified from an installed-path nightly bundle
-  with zero GTK stderr. A deliberately infinite noisy build proves GTK
-  scheduler responsiveness and bounded Stop. Close, Escape, focus loss, and
-  successful-install dismissal all use deferred cleanup outside Mutter focus
-  notification; installed-bundle runtime checks close the panel in 8–110 ms
-  while leaving the main window responsive. A clean isolated home fetched the
-  latest branch commit, built the complete 1014 MiB bundle, installed and
-  launched it, then ran the panel's exact generated command over that live
-  install. In-app replacement uses an atomic old/new bundle swap with rollback,
-  while direct installers reject active bundles.
 - `[x]` File save/guard failures use the C `AdwToastOverlay` placement and
   messages. Startup and database failures keep the normal 1100×720 app surface
   behind one modal `AdwAlertDialog`; database failures use the exact C heading
@@ -396,7 +384,7 @@ Historical C reference (Git history): `src/chat/terminal-panel.c`, `src/chat/fil
 
 Historical C reference (Git history): `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 `src/chat/search-dialog.c`, `src/ui/dir-browser.c`,
-`src/ui/branch-build-dialog.c`.
+and the removed `src/ui/branch-build-dialog.c`.
 
 ## Daemon, storage, and remote behavior
 
@@ -425,9 +413,9 @@ Historical C reference (Git history): `src/remote/pair-dialog.c`, `src/settings/
 - `[x]` Remote pairing uses a short-lived code, token, and pinned certificate.
 - `[x]` Stored remote reconnects while retaining endpoint subscribers.
 - `[x]` The desktop local endpoint also reconnects across Unix-socket or
-  authenticated Windows-loopback client replacement while retaining the same
-  UI event subscribers. Its reconnect spec runs in both the default Unix
-  suite and the authenticated-loopback transport build.
+  authenticated-loopback client replacement while retaining the same UI event
+  subscribers. Its reconnect and runtime-readiness specs run in both the
+  default Unix suite and the authenticated-loopback transport build.
 - `[x]` Folder, chat, settings, message, send/cancel, file, diff, image, search,
   and terminal operations share the same protocol.
 - `[x]` Actual Unix-socket and paired TLS clients pass one normalized stateful
@@ -435,7 +423,8 @@ Historical C reference (Git history): `src/remote/pair-dialog.c`, `src/settings/
   daemon-owned secrets, directory and file operations, Git diff, atomic model
   selection, effort/access/Plan, queue edits, send/cancel, transcript/search,
   terminal open/resize/kill, voice-model ownership, events, and deletion. The
-  authenticated Windows-loopback build passes that same matrix in Docker.
+  authenticated-loopback build used by macOS and Windows passes that same
+  matrix in Docker.
 - `[x]` Checkout context and worktree identity are daemon-owned protocol state;
   local and paired clients do not probe Git through separate UI logic.
 - `[~]` Crystal storage and agent behavior have broad specs, but every old C
@@ -513,9 +502,10 @@ Historical C reference (Git history): `src/backend`. Crystal implementation:
   Crystal-native artifacts; no C artifact can enter a Crystal release. Runtime
   discovery now handles both flat payloads and macOS `Contents/Resources`,
   prepares relocatable GTK/GIO/font caches in-process, resolves bundled tools
-  and portable Git, and removes the Git pane's POSIX-shell dependency. Windows
-  local IPC uses authenticated loopback with a 256-bit endpoint token protected
-  to the current user by DPAPI, bounded handshakes, startup locking, and
+  and portable Git, and removes the Git pane's POSIX-shell dependency. macOS
+  uses authenticated loopback local IPC to avoid its Unix-socket path limit.
+  Windows uses the same protocol with the 256-bit endpoint token protected to
+  the current user by DPAPI. Both use bounded handshakes, startup locking, and
   stale-endpoint recovery. Linux, macOS, and Windows release gates require the
   exact Adwaita chat/microphone icons, custom backend icons, and SVG pixbuf
   loader rather than accepting an arbitrary icon or image loader that still
@@ -531,7 +521,7 @@ Historical C reference (Git history): `src/backend`. Crystal implementation:
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (340 default and 5 authenticated-loopback
+- `[x]` Crystal specs pass in Docker (353 default and 6 authenticated-loopback
   examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
