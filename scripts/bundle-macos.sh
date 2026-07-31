@@ -120,7 +120,9 @@ while IFS= read -r binary; do
       echo "bundle-macos: ICU data library was not found: $source" >&2
       exit 1
     }
-    cp -L "$source" "${binary%/*}/$name"
+    target="${binary%/*}/$name"
+    cp -L "$source" "$target"
+    install_name_tool -id "@loader_path/$name" "$target"
     if [ "$dependency" != "@loader_path/$name" ]; then
       install_name_tool \
         -change "$dependency" "@loader_path/$name" "$binary"
