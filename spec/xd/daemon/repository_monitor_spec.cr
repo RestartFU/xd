@@ -4,11 +4,16 @@ require "../../../src/xd/daemon/repository_monitor"
 describe Xd::Daemon::RepositoryMonitor do
   it "publishes settled signature changes and resets its baseline" do
     signatures = {"chat" => "main:a"}
-    changed = [] of String
+    sampled = Channel(String).new(8)
+    changed = Channel(String).new(4)
     monitor = Xd::Daemon::RepositoryMonitor.new(
-      ->(chat : String) { signatures[chat]? || "" },
       ->(chat : String) {
-        changed << chat
+        signature = signatures[chat]? || ""
+        sampled.send(signature)
+        signature
+      },
+      ->(chat : String) {
+        changed.send(chat)
         nil
       },
       10.milliseconds
@@ -16,20 +21,31 @@ describe Xd::Daemon::RepositoryMonitor do
 
     begin
       monitor.watch("chat")
-      sleep 30.milliseconds
-      changed.should be_empty
+      sampled.receive.should eq("main:a")
+      select
+      when chat = changed.receive
+        fail "initial repository signature published for #{chat}"
+      when timeout(20.milliseconds)
+      end
 
       signatures["chat"] = "main:b"
-      deadline = Time.instant + 1.second
-      until changed == ["chat"]
-        fail "repository change did not arrive" if Time.instant >= deadline
-        sleep 5.milliseconds
+      select
+      when chat = changed.receive
+        chat.should eq("chat")
+      when timeout(1.second)
+        fail "repository change did not arrive"
       end
 
       monitor.reset("chat")
       signatures["chat"] = "feature:c"
-      sleep 30.milliseconds
-      changed.should eq(["chat"])
+      loop do
+        break if sampled.receive == "feature:c"
+      end
+      select
+      when chat = changed.receive
+        fail "reset repository signature published for #{chat}"
+      when timeout(20.milliseconds)
+      end
     ensure
       monitor.close
     end
