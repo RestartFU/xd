@@ -9,6 +9,7 @@ module Xd
     class DiffFileSections
       CHUNK_ROWS        =    80
       MAX_RENDERED_ROWS = 4_000
+      RETIRE_BATCH      =     4
 
       record RenderPlan,
         finish : Int32,
@@ -44,6 +45,8 @@ module Xd
       @render_jobs = {} of UInt64 => Int64
       @render_sequence = 0_i64
       @prepared_bodies = {} of Int32 => PreparedBody
+      @retired_bodies = Deque(Gtk::Box).new
+      @retire_scheduled = false
 
       def initialize
         factory = Gtk::SignalListItemFactory.new
@@ -176,10 +179,10 @@ module Xd
         widgets.expander.expanded = expanded
         @binding.delete(key)
         if expanded
-          fill_body(key, widgets.body, section)
+          fill_body(key, widgets, section)
         else
           cancel_body(key)
-          clear(widgets.body)
+          replace_body(key, widgets)
         end
       end
 
@@ -189,7 +192,7 @@ module Xd
         cancel_body(key)
         @bound_sections.delete(key)
         if widgets = @row_widgets[key]?
-          clear(widgets.body)
+          replace_body(key, widgets)
           widgets.path.text = ""
           widgets.counts.text = ""
         end
@@ -201,7 +204,9 @@ module Xd
         cancel_body(key)
         @binding.delete(key)
         @bound_sections.delete(key)
-        @row_widgets.delete(key)
+        if widgets = @row_widgets.delete(key)
+          retire_body(widgets.body)
+        end
       end
 
       private def expanded_changed(key : UInt64) : Nil
@@ -211,22 +216,22 @@ module Xd
 
         if widgets.expander.expanded?
           @collapsed.delete(section.path)
-          fill_body(key, widgets.body, section)
+          fill_body(key, widgets, section)
         else
           keep_scroll_position(widgets.expander)
           @collapsed << section.path
           cancel_body(key)
-          clear(widgets.body)
+          replace_body(key, widgets)
         end
       end
 
       private def fill_body(
         key : UInt64,
-        body : Gtk::Box,
+        widgets : RowWidgets,
         section : DiffFileSection,
       ) : Nil
         cancel_body(key)
-        clear(body)
+        body = replace_body(key, widgets)
         prepared = @prepared_bodies[section.start]? || return
         @render_sequence += 1
         token = @render_sequence
@@ -334,10 +339,47 @@ module Xd
         scroller.add_tick_callback(callback)
       end
 
-      private def clear(box : Gtk::Box) : Nil
-        while child = box.first_child
-          box.remove(child)
+      private def replace_body(
+        key : UInt64,
+        widgets : RowWidgets,
+      ) : Gtk::Box
+        replacement = Gtk::Box.new(:vertical, 0)
+        widgets.expander.child = replacement
+        @row_widgets[key] = RowWidgets.new(
+          widgets.expander,
+          widgets.path,
+          widgets.counts,
+          replacement
+        )
+        retire_body(widgets.body)
+        replacement
+      end
+
+      private def retire_body(body : Gtk::Box) : Nil
+        return unless body.first_child
+
+        @retired_bodies << body
+        return if @retire_scheduled
+
+        @retire_scheduled = true
+        GLib.idle_add do
+          drain_retired_bodies
         end
+      end
+
+      private def drain_retired_bodies : Bool
+        RETIRE_BATCH.times do
+          body = @retired_bodies.first?
+          break unless body
+
+          if child = body.first_child
+            body.remove(child)
+          end
+          @retired_bodies.shift unless body.first_child
+        end
+        more = !@retired_bodies.empty?
+        @retire_scheduled = more
+        more
       end
 
       private def list_item(object : GObject::Object) : Gtk::ListItem
