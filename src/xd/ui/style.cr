@@ -51,10 +51,9 @@ module Xd
         background: transparent;
         box-shadow: none;
         border: none;
-        border-bottom: 1px solid #2a2a2d;
       }
       .xd-header-divider {
-        min-height: 1px;
+        min-height: 2px;
         background: #2a2a2d;
       }
       headerbar button, headerbar menubutton > button {
