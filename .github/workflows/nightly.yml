@@ -72,6 +72,7 @@ jobs:
           gobject-introspection
           gtk4
           libadwaita
+          adwaita-icon-theme
           vte3
           portaudio
           sqlite

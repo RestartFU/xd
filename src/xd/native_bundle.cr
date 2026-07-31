@@ -96,9 +96,21 @@ module Xd
           "#{resources}/etc/gdk-pixbuf-loaders.cache.in",
           "#{resources}/lib/gdk-pixbuf-2.0/*/loaders.cache"
         ),
-        requirement("VTE runtime", "#{resources}/lib/libvte*.dylib"),
-        requirement("PortAudio runtime", "#{resources}/lib/libportaudio*.dylib"),
-        requirement("SQLite runtime", "#{resources}/lib/libsqlite3*.dylib"),
+        requirement(
+          "VTE runtime",
+          "#{resources}/lib/libvte*.dylib",
+          "#{resources}/**/libvte*.dylib"
+        ),
+        requirement(
+          "PortAudio runtime",
+          "#{resources}/lib/libportaudio*.dylib",
+          "#{resources}/**/libportaudio*.dylib"
+        ),
+        requirement(
+          "SQLite runtime",
+          "#{resources}/lib/libsqlite3*.dylib",
+          "#{resources}/**/libsqlite3*.dylib"
+        ),
         requirement(
           "bundled Git",
           "#{resources}/git/bin/git",

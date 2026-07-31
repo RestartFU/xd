@@ -106,7 +106,9 @@ COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
 SPEC_VERBOSE=1 XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
   crystal spec --error-trace
 XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
-  crystal build src/xd.cr --release --no-debug -o "$WORK/xd"
+  crystal build src/xd.cr --release --no-debug \
+    --link-flags "-Wl,-headerpad_max_install_names" \
+    -o "$WORK/xd"
 "$WORK/xd" --bundle-runtime | grep -Fx crystal
 
 scripts/stage-native.sh "$WORK/xd" "$WORK/stage" "$PROFILE"

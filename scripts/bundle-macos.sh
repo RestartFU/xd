@@ -45,6 +45,7 @@ PREFIX="$(cd "$PREFIX" && pwd)"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 HOMEBREW_PREFIX="$(brew --prefix)"
+ADWAITA_PREFIX="$(brew --prefix adwaita-icon-theme)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/xd-macos.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
@@ -129,6 +130,14 @@ for directory in gtk-4.0 libadwaita-1 themes; do
   fi
 done
 
+[ -d "$ADWAITA_PREFIX/share/icons/Adwaita" ] || {
+  echo "bundle-macos: Adwaita icon theme was not found" >&2
+  exit 1
+}
+mkdir -p "$RESOURCES/share/icons"
+cp -a "$ADWAITA_PREFIX/share/icons/Adwaita" \
+  "$RESOURCES/share/icons/"
+
 mkdir -p "$RESOURCES/share/fonts/xd" "$RESOURCES/etc/fonts"
 cp -a data/fonts/. "$RESOURCES/share/fonts/xd/"
 cp -RL "$HOMEBREW_PREFIX/etc/fonts/conf.d" "$RESOURCES/etc/fonts/"
@@ -136,6 +145,24 @@ cp installer/macos/fonts.conf.in "$RESOURCES/etc/fonts.conf.in"
 
 glib-compile-schemas "$RESOURCES/share/glib-2.0/schemas"
 gio-querymodules "$RESOURCES/lib/gio/modules"
+
+# gtk-mac-bundler reports install_name_tool failures but keeps going. Never
+# ship a bundle whose Mach-O files still load Homebrew from the host.
+external_links="$WORK/external-links"
+: > "$external_links"
+while IFS= read -r binary; do
+  otool -L "$binary" 2>/dev/null |
+    grep -E '/opt/homebrew|/usr/local/(Cellar|opt)/' \
+      >> "$external_links" || true
+done < <(
+  find "$APP/Contents/MacOS" "$RESOURCES" -type f \
+    \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print
+)
+if [ -s "$external_links" ]; then
+  echo "bundle-macos: host Homebrew dependencies remain:" >&2
+  cat "$external_links" >&2
+  exit 1
+fi
 
 # Ad-hoc signing catches malformed bundles and keeps every nested Mach-O under
 # one consistent identity. Release notarization can replace this later.

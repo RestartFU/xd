@@ -75,4 +75,36 @@ describe Xd::NativeBundle do
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
+
+  it "accepts gtk-mac-bundler's nested runtime libraries" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-native-bundle-#{Random::Secure.hex(12)}"
+    )
+    platform = Xd::NativeBundle::Platform::MacOS
+
+    begin
+      materialize_bundle(directory, platform)
+      {"VTE runtime", "PortAudio runtime", "SQLite runtime"}.each do |label|
+        requirement = Xd::NativeBundle.requirements(platform)
+          .find! { |candidate| candidate.label == label }
+        flat = File.join(
+          directory,
+          requirement.alternatives.first.gsub('*', "proof")
+        ).gsub('\\', '/')
+        File.delete(flat)
+        nested = File.join(
+          directory,
+          "Contents/Resources/opt/proof/lib",
+          File.basename(flat)
+        )
+        Dir.mkdir_p(File.dirname(nested))
+        File.write(nested, label)
+      end
+
+      Xd::NativeBundle.validate(directory, platform).should be_empty
+    ensure
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
 end
