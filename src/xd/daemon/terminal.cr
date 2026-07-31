@@ -1,5 +1,6 @@
 require "base64"
 require "uuid"
+require "../agent/environment"
 
 {% unless flag?(:win32) %}
   @[Link("util")]
@@ -230,7 +231,24 @@ module Xd
             size = LibXdPty::WinSize.new
             size.ws_col = @columns.to_u16
             size.ws_row = @rows.to_u16
-            shell = ENV["SHELL"]?.presence || "/bin/sh"
+            environment = Agent::Environment.host
+            shell_name = environment["SHELL"]?.presence || "/bin/sh"
+            shell = Process.find_executable(
+              shell_name,
+              environment["PATH"]?,
+              workdir
+            ) || shell_name
+            environment["TERM"] = "xterm-256color"
+            environment["COLORTERM"] = "truecolor"
+            environment_entries = environment.map do |name, value|
+              "#{name}=#{value}"
+            end
+            environment_pointers = environment_entries.map(&.to_unsafe)
+            environment_pointers << Pointer(UInt8).null
+            arguments = [
+              shell.to_unsafe,
+              Pointer(UInt8).null,
+            ]
             pid = LibXdPty.forkpty(
               pointerof(master),
               Pointer(UInt8).null,
@@ -245,13 +263,11 @@ module Xd
 
             if pid == 0
               LibC.chdir(workdir)
-              LibC.setenv("TERM", "xterm-256color", 1)
-              LibC.setenv("COLORTERM", "truecolor", 1)
-              arguments = StaticArray(Pointer(UInt8), 2).new(
-                Pointer(UInt8).null
+              LibC.execve(
+                shell.to_unsafe,
+                arguments.to_unsafe,
+                environment_pointers.to_unsafe
               )
-              arguments[0] = shell.to_unsafe
-              LibC.execvp(shell, arguments.to_unsafe)
               LibC._exit(127)
             end
 
@@ -272,26 +288,17 @@ module Xd
       {% end %}
 
       private def read_output : Nil
-        master = @lock.synchronize { @master }
-        return if master < 0
+        io = @lock.synchronize { @io }
+        return unless io
 
         buffer = Bytes.new(8192)
         loop do
-          count = LibC.read(master, buffer.to_unsafe, buffer.size)
-          if count < 0
-            error = Errno.value
-            if error == Errno::EINTR
-              next
-            elsif error == Errno::EAGAIN || error == Errno::EWOULDBLOCK
-              sleep 5.milliseconds
-              next
-            end
-            break
-          end
+          count = io.read(buffer)
           break if count == 0
-          break unless record_output(buffer[0, count.to_i].dup)
+          break unless record_output(buffer[0, count].dup)
           Fiber.yield
         end
+      rescue IO::Error
       ensure
         natural_exit unless @lock.synchronize { @closing }
       end

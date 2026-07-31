@@ -31,16 +31,40 @@ sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/egl_vendor.json.in" > "$RUNTIME/egl_vendor.j
 
 # Anything xd launches for the user -- a terminal, an editor -- must run in the
 # host's environment, not the bundle's. Remember the values before they are
-# overridden so they can be handed back; see src/util/host-launch.c.
+# overridden so they can be handed back to terminals, agents, and host tools.
+export XD_HOST_PATH="${PATH-}"
 export XD_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
 export XD_HOST_LANG="${LANG-}"
 export XD_HOST_LC_ALL="${LC_ALL-}"
 export XD_HOST_LOCPATH="${LOCPATH-}"
 export XD_HOST_LOCALE_ARCHIVE="${LOCALE_ARCHIVE-}"
 export XD_HOST_GIO_EXTRA_MODULES="${GIO_EXTRA_MODULES-}"
+export XD_HOST_GIO_MODULE_DIR="${GIO_MODULE_DIR-}"
+export XD_HOST_GSETTINGS_SCHEMA_DIR="${GSETTINGS_SCHEMA_DIR-}"
+export XD_HOST_GSETTINGS_BACKEND="${GSETTINGS_BACKEND-}"
+export XD_HOST_GDK_PIXBUF_MODULE_FILE="${GDK_PIXBUF_MODULE_FILE-}"
 export XD_HOST_GTK_IM_MODULE="${GTK_IM_MODULE-}"
+export XD_HOST_GTK_IM_MODULE_FILE="${GTK_IM_MODULE_FILE-}"
+export XD_HOST_GTK_MODULES="${GTK_MODULES-}"
 export XD_HOST_GTK_PATH="${GTK_PATH-}"
 export XD_HOST_GTK_THEME="${GTK_THEME-}"
+export XD_HOST_GTK_DATA_PREFIX="${GTK_DATA_PREFIX-}"
+export XD_HOST_GTK_EXE_PREFIX="${GTK_EXE_PREFIX-}"
+export XD_HOST_GSK_RENDERER="${GSK_RENDERER-}"
+export XD_HOST_XCURSOR_PATH="${XCURSOR_PATH-}"
+export XD_HOST_FONTCONFIG_FILE="${FONTCONFIG_FILE-}"
+export XD_HOST_FONTCONFIG_PATH="${FONTCONFIG_PATH-}"
+export XD_HOST_XKB_CONFIG_ROOT="${XKB_CONFIG_ROOT-}"
+export XD_HOST_XLOCALEDIR="${XLOCALEDIR-}"
+export XD_HOST_SSL_CERT_FILE="${SSL_CERT_FILE-}"
+export XD_HOST_OPENSSL_CONF="${OPENSSL_CONF-}"
+export XD_HOST_OPENSSL_MODULES="${OPENSSL_MODULES-}"
+export XD_HOST_GIT_EXEC_PATH="${GIT_EXEC_PATH-}"
+export XD_HOST_GIT_TEMPLATE_DIR="${GIT_TEMPLATE_DIR-}"
+export XD_HOST_GIT_SSL_CAINFO="${GIT_SSL_CAINFO-}"
+export XD_HOST___EGL_VENDOR_LIBRARY_FILENAMES="${__EGL_VENDOR_LIBRARY_FILENAMES-}"
+export XD_HOST_LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH-}"
+export XD_HOST_LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE-}"
 
 # GNOME sessions export these to point GTK/GIO at host plugins (ibus, dconf,
 # gvfs). Those .so files are built against the host's glib and GTK; dlopening

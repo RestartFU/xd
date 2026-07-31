@@ -6,30 +6,42 @@ module Xd
       extend self
 
       REWRITTEN = {
+        "PATH",
         "XDG_DATA_DIRS",
         "LANG",
         "LC_ALL",
         "LOCPATH",
         "LOCALE_ARCHIVE",
         "GIO_EXTRA_MODULES",
-        "GTK_IM_MODULE",
-        "GTK_PATH",
-        "GTK_THEME",
-      }
-
-      BUNDLE_ONLY = {
+        "GIO_MODULE_DIR",
         "GSETTINGS_SCHEMA_DIR",
         "GSETTINGS_BACKEND",
         "GDK_PIXBUF_MODULE_FILE",
-        "GIO_MODULE_DIR",
+        "GTK_IM_MODULE",
+        "GTK_IM_MODULE_FILE",
+        "GTK_MODULES",
+        "GTK_PATH",
+        "GTK_THEME",
+        "GTK_DATA_PREFIX",
+        "GTK_EXE_PREFIX",
         "GSK_RENDERER",
         "XCURSOR_PATH",
         "FONTCONFIG_FILE",
         "FONTCONFIG_PATH",
         "XKB_CONFIG_ROOT",
         "XLOCALEDIR",
-        "GTK_DATA_PREFIX",
-        "GTK_EXE_PREFIX",
+        "SSL_CERT_FILE",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "GIT_EXEC_PATH",
+        "GIT_TEMPLATE_DIR",
+        "GIT_SSL_CAINFO",
+        "__EGL_VENDOR_LIBRARY_FILENAMES",
+        "LIBGL_DRIVERS_PATH",
+        "LIBGL_ALWAYS_SOFTWARE",
+      }
+
+      BUNDLE_ONLY = {
         "XD_AGENT_SECRETS_FILE",
       }
 
