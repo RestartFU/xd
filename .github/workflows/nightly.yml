@@ -104,7 +104,7 @@ jobs:
             git
             unzip
             mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-gc
+            mingw-w64-ucrt-x86_64-crystal
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-gobject-introspection

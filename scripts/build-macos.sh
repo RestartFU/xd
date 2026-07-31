@@ -53,6 +53,7 @@ for command in curl ditto pkg-config shards shasum tar; do
     exit 1
   }
 done
+BUILD_LIBRARY_PATH=
 for package in \
   gobject-introspection-1.0 \
   gtk4 \
@@ -64,12 +65,20 @@ for package in \
     echo "build-macos: pkg-config package missing: $package" >&2
     exit 1
   }
+  package_libdir="$(pkg-config --variable=libdir "$package")"
+  if [ -n "$package_libdir" ]; then
+    case ":$BUILD_LIBRARY_PATH:" in
+      *":$package_libdir:"*) ;;
+      *)
+        BUILD_LIBRARY_PATH="${BUILD_LIBRARY_PATH:+$BUILD_LIBRARY_PATH:}$package_libdir"
+        ;;
+    esac
+  fi
 done
 
-# gi-crystal links this library by name instead of through pkg-config.
-# Homebrew's Cellar is not a compiler-default library directory.
-GI_LIBDIR="$(pkg-config --variable=libdir gobject-introspection-1.0)"
-export LIBRARY_PATH="$GI_LIBDIR${LIBRARY_PATH:+:$LIBRARY_PATH}"
+# Crystal link annotations name native libraries directly. Homebrew keeps
+# several of them in versioned Cellar paths outside clang's default search.
+export LIBRARY_PATH="$BUILD_LIBRARY_PATH${LIBRARY_PATH:+:$LIBRARY_PATH}"
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
