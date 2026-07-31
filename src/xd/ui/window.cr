@@ -710,7 +710,7 @@ module Xd
         @settings.set_int("sidebar-width", @root_split.position)
         @settings.set_boolean(
           "window-maximized",
-          {% if flag?(:win32) %}
+          {% if flag?(:win32) || flag?(:darwin) %}
             @widget.is_maximized?
           {% else %}
             @widget.is_maximized
