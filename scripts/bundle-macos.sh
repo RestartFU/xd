@@ -98,7 +98,6 @@ RESOURCES="$APP/Contents/Resources"
 
 # gtk-mac-bundler cannot map ICU's separately loaded data library. Put the
 # matching file beside every Mach-O that references it and use @loader_path.
-ICU_SOURCE_DIR="$(pkg-config --variable=libdir icu-uc)"
 find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print -quit |
   grep -q . || {
   echo "bundle-macos: bundled libicuuc was not found" >&2
@@ -108,7 +107,7 @@ while IFS= read -r binary; do
   while IFS= read -r dependency; do
     [ -n "$dependency" ] || continue
     name="${dependency##*/}"
-    source="$ICU_SOURCE_DIR/$name"
+    source="$dependency"
     [ -f "$source" ] || {
       echo "bundle-macos: ICU data library was not found: $source" >&2
       exit 1
@@ -118,7 +117,7 @@ while IFS= read -r binary; do
       -change "$dependency" "@loader_path/$name" "$binary"
   done < <(
     otool -L "$binary" 2>/dev/null |
-      awk '$1 ~ /\/libicudata[^/]*\.dylib$/ { print $1 }'
+      awk '$1 ~ /^\/.*\/libicudata[^/]*\.dylib$/ { print $1 }'
   )
 done < <(
   find "$APP/Contents/MacOS" "$RESOURCES" -type f \
