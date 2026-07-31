@@ -55,12 +55,17 @@ for command in curl ditto pkg-config shards shasum tar; do
 done
 BUILD_LIBRARY_PATH=
 for package in \
+  gdk-pixbuf-2.0 \
+  gio-2.0 \
+  glib-2.0 \
   gobject-introspection-1.0 \
+  gobject-2.0 \
   gtk4 \
   libadwaita-1 \
-  vte-2.91-gtk4 \
+  pango \
   portaudio-2.0 \
-  sqlite3; do
+  sqlite3 \
+  vte-2.91-gtk4; do
   pkg-config --exists "$package" || {
     echo "build-macos: pkg-config package missing: $package" >&2
     exit 1

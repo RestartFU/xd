@@ -24,7 +24,9 @@ module Xd
     def validate(root : String, platform : Platform) : Array(String)
       requirements(platform).compact_map do |requirement|
         requirement.label unless requirement.alternatives.any? do |pattern|
-                                   matches_file?(File.join(root, pattern))
+                                   path = File.join(root, pattern)
+                                     .gsub('\\', '/')
+                                   matches_file?(path)
                                  end
       end
     end

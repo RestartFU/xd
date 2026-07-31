@@ -38,6 +38,8 @@ describe Xd::NativeBundle do
 
         materialize_bundle(directory, platform)
         Xd::NativeBundle.validate(directory, platform).should be_empty
+        windows_root = directory.gsub('/', '\\')
+        Xd::NativeBundle.validate(windows_root, platform).should be_empty
       ensure
         FileUtils.rm_r(directory) if Dir.exists?(directory)
       end
