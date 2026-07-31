@@ -127,8 +127,11 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   row; per-chat expanded limits and four-entry LRU widget-tree cache are
   ported. History rows materialize in four-message GTK idle batches, preserving
   order while input and redraws run between batches; stale chat switches stop
-  the remaining work. Remote history scroll restoration now starts only after
-  the final batch instead of racing the daemon reply. A 245-row
+  the remaining work. Reloads swap one transcript root, then retire the hidden
+  old tree four rows per idle instead of synchronously destroying every GTK
+  descendant; compatibility stop/change refreshes cannot freeze teardown.
+  Remote history scroll restoration now starts only after the final batch
+  instead of racing the daemon reply. A 245-row
   installed-bundle transcript verifies the 100/45 history pills; five-chat GTK
   eviction verification remains.
 - `[~]` Hidden scrollbar, bottom pinning, user-scroll opt-out, history loading,

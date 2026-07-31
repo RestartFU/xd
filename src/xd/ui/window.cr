@@ -38,7 +38,7 @@ module Xd
         getter key : String
         getter chat_id : String
         getter endpoint : Daemon::Endpoint
-        getter transcript : Gtk::Box
+        property transcript : Gtk::Box
         getter paging = TranscriptPaging.new
         getter workflow_ids = Set(String).new
         property revision = -1_i64
@@ -1051,7 +1051,7 @@ module Xd
         @live_turn_key = nil
         reset_stream_segment
         remove_working_row(reset_started_at: false)
-        clear(@transcript)
+        replace_transcript(page, request)
         @workflow_ids.clear
         messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
         total = response["total_messages"]?.try(&.as_i64?) ||
@@ -1164,6 +1164,38 @@ module Xd
         button.add_css_class("pill")
         button.clicked_signal.connect { load_earlier_messages(page) }
         @transcript.append(button)
+      end
+
+      # Swapping one stack child is bounded. Keep the old tree parented and
+      # hidden while its rows are retired in small idle batches; dropping a
+      # large transcript subtree in one callback can stall or crash GTK.
+      private def replace_transcript(
+        page : TranscriptPage,
+        request : Int64,
+      ) : Nil
+        retired = page.transcript
+        replacement = new_transcript
+        page.transcript = replacement
+        page.tool_group = nil
+        @transcript = replacement
+        @transcript_stack.add_named(
+          replacement,
+          "#{page.key}:reload:#{request}"
+        )
+        @transcript_stack.visible_child = replacement
+
+        GLib.idle_add do
+          4.times do
+            child = retired.first_child || break
+            retired.remove(child)
+          end
+          if retired.first_child
+            true
+          else
+            @transcript_stack.remove(retired) if retired.parent
+            false
+          end
+        end
       end
 
       private def load_earlier_messages(page : TranscriptPage) : Nil
