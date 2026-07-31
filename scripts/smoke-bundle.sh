@@ -25,6 +25,8 @@ require_file \
 require_file \
   share/icons/Adwaita/symbolic/devices/audio-input-microphone-symbolic.svg
 require_file \
+  share/icons/Adwaita/symbolic/legacy/system-users-symbolic.svg
+require_file \
   share/icons/hicolor/scalable/apps/xd-backend-claude.svg
 require_file \
   share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg

@@ -33,6 +33,7 @@ describe Xd::NativeBundle do
         missing.should contain("Adwaita icon theme")
         missing.should contain("chat symbolic icon")
         missing.should contain("microphone symbolic icon")
+        missing.should contain("accounts symbolic icon")
         missing.should contain("SVG pixbuf loader")
 
         materialize_bundle(directory, platform)

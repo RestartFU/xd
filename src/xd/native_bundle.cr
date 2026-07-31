@@ -67,6 +67,11 @@ module Xd
           "#{resources}/share/icons/Adwaita/symbolic/devices/audio-input-microphone-symbolic.svg"
         ),
         requirement(
+          "accounts symbolic icon",
+          "#{resources}/share/icons/Adwaita/symbolic/legacy/system-users-symbolic.svg",
+          "#{resources}/share/icons/Adwaita/symbolic/apps/system-users-symbolic.svg"
+        ),
+        requirement(
           "Claude icon",
           "#{resources}/share/icons/hicolor/scalable/apps/xd-backend-claude.svg"
         ),
@@ -145,6 +150,11 @@ module Xd
         requirement(
           "microphone symbolic icon",
           "share/icons/Adwaita/symbolic/devices/audio-input-microphone-symbolic.svg"
+        ),
+        requirement(
+          "accounts symbolic icon",
+          "share/icons/Adwaita/symbolic/legacy/system-users-symbolic.svg",
+          "share/icons/Adwaita/symbolic/apps/system-users-symbolic.svg"
         ),
         requirement(
           "Claude icon",

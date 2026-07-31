@@ -406,6 +406,11 @@ module Xd
         @header.show_end_title_buttons = false
         @header.pack_start(add)
 
+        accounts = Gtk::Button.new_from_icon_name("system-users-symbolic")
+        accounts.tooltip_text = "Assistant Accounts"
+        accounts.clicked_signal.connect { auth(@local_source) }
+        @header.pack_end(accounts)
+
         @widget = Adw::ToolbarView.new
         @widget.add_css_class("xd-sidebar")
         @widget.add_top_bar(@header)
