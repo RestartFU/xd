@@ -14,19 +14,19 @@ module Xd
                     ["xdg-open", uri]
                   {% end %}
 
-        process = Process.new(
-          command,
-          env: Agent::Environment.host,
-          clear_env: true,
-          input: Process::Redirect::Close,
-          output: Process::Redirect::Close,
-          error: Process::Redirect::Close
-        )
-        spawn do
+        Fiber::ExecutionContext::Isolated.new("xd host launch") do
+          process = Process.new(
+            command,
+            env: Agent::Environment.host,
+            clear_env: true,
+            input: Process::Redirect::Close,
+            output: Process::Redirect::Close,
+            error: Process::Redirect::Close
+          )
           process.wait
-        rescue RuntimeError
+        rescue File::Error | IO::Error | RuntimeError
         end
-      rescue File::Error | IO::Error | GLib::Error
+      rescue RuntimeError
       end
     end
   end
