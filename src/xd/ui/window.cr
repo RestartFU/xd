@@ -24,6 +24,7 @@ require "./image_presenter"
 require "./message_row"
 require "./pair_dialog"
 require "./pane_state"
+require "./queue_presentation"
 require "./search_dialog"
 require "./sidebar"
 require "./text_reveal"
@@ -82,6 +83,8 @@ module Xd
       MAX_IMAGES                = 4
       MAX_IMAGE_BYTES           = 10 * 1024 * 1024
       MAX_TOTAL_BYTES           = 20 * 1024 * 1024
+      QUEUE_RENDER_BATCH        =  8
+      QUEUE_RETIRE_BATCH        =  8
       TURN_RECOVERY_EVENT_BATCH = 32
 
       getter widget : Adw::ApplicationWindow
@@ -137,8 +140,13 @@ module Xd
       @clock_origin : Time::Instant
       @commands = [] of String
       @queue = [] of String
+      @queue_generation = 0_i64
+      @retired_queue_boxes = Deque(Gtk::Box).new
+      @queue_retirement_scheduled = false
       @commands_bar : Gtk::ScrolledWindow
       @commands_flow : Gtk::FlowBox
+      @queue_host : Gtk::Box
+      @queue_box : Gtk::Box
       @choices_bar : Gtk::Box
       @messages_request = 0_i64
       @history_request : Int64?
@@ -357,11 +365,9 @@ module Xd
         end
         @voice = VoiceInput.new(@widget, @entry)
 
-        @queue_box = Gtk::Box.new(:vertical, 2)
-        @queue_box.margin_top = 6
-        @queue_box.margin_start = 10
-        @queue_box.margin_end = 6
-        @queue_box.visible = false
+        @queue_box = new_queue_box
+        @queue_host = Gtk::Box.new(:vertical, 0)
+        @queue_host.append(@queue_box)
 
         @choices_bar = Gtk::Box.new(:vertical, 6)
         @choices_bar.margin_top = 6
@@ -390,7 +396,7 @@ module Xd
         entry_scroll.child = @entry
 
         composer_column = Gtk::Box.new(:vertical, 0)
-        composer_column.append(@queue_box)
+        composer_column.append(@queue_host)
         composer_column.append(@choices_bar)
         composer_column.append(@attachments_bar)
         composer_column.append(@commands_bar)
@@ -2408,58 +2414,135 @@ module Xd
       end
 
       private def render_queue(queue : Array(JSON::Any)) : Nil
-        @queue = queue.map(&.as_s)
-        clear(@queue_box)
-        @queue_box.visible = !queue.empty?
+        plan = QueuePresentation.prepare(queue)
+        @queue = plan.rows
+        @queue_generation &+= 1
+        generation = @queue_generation
+        box = replace_queue_box(!plan.rows.empty? || plan.hidden > 0)
+        index = 0
 
-        queue.each_with_index do |node, index|
-          text = node.as_s
-          icon = Gtk::Image.new_from_icon_name("document-send-symbolic")
-          label = Gtk::Label.new(text)
-          label.xalign = 0_f32
-          label.hexpand = true
-          label.ellipsize = :end
-          label.add_css_class("dim-label")
-
-          edit = Gtk::Button.new_from_icon_name(
-            "document-edit-symbolic"
-          )
-          edit.add_css_class("flat")
-          edit.tooltip_text = "Edit queued message"
-
-          steer = Gtk::Button.new_from_icon_name(
-            "media-skip-forward-symbolic"
-          )
-          steer.add_css_class("flat")
-          steer.tooltip_text = "Send this now, interrupting the agent"
-          steer.clicked_signal.connect do
-            steer_queue(index, text)
+        GLib.idle_add do
+          unless !@closed &&
+                 generation == @queue_generation &&
+                 @queue_box.same?(box)
+            next false
           end
 
-          remove = Gtk::Button.new_from_icon_name(
-            "window-close-symbolic"
-          )
-          remove.add_css_class("flat")
-          remove.tooltip_text = "Discard"
-          remove.clicked_signal.connect { drop_queue(index) }
-
-          row = Gtk::Box.new(:horizontal, 6)
-          edit.clicked_signal.connect do
-            show_queue_editor(row, index, text)
+          finish = Math.min(index + QUEUE_RENDER_BATCH, plan.rows.size)
+          while index < finish
+            box.append(queue_row(index, plan.rows[index]))
+            index += 1
           end
-          row.append(icon)
-          row.append(label)
-          row.append(edit)
-          row.append(steer)
-          row.append(remove)
-          @queue_box.append(row)
+          next true unless index >= plan.rows.size
+
+          if plan.hidden > 0
+            label = Gtk::Label.new(
+              "#{plan.hidden} more queued messages"
+            )
+            label.xalign = 0_f32
+            label.margin_start = 30
+            label.add_css_class("caption")
+            label.add_css_class("dim-label")
+            box.append(label)
+          end
+          false
         end
       end
 
       private def clear_queue : Nil
+        @queue_generation &+= 1
         @queue.clear
-        clear(@queue_box)
-        @queue_box.visible = false
+        replace_queue_box(false)
+      end
+
+      private def new_queue_box : Gtk::Box
+        box = Gtk::Box.new(:vertical, 2)
+        box.margin_top = 6
+        box.margin_start = 10
+        box.margin_end = 6
+        box.visible = false
+        box
+      end
+
+      private def replace_queue_box(visible : Bool) : Gtk::Box
+        previous = @queue_box
+        box = new_queue_box
+        box.visible = visible
+        @queue_box = box
+        @queue_host.remove(previous)
+        @queue_host.append(box)
+        retire_queue_box(previous)
+        box
+      end
+
+      private def retire_queue_box(box : Gtk::Box) : Nil
+        return unless box.first_child
+
+        @retired_queue_boxes << box
+        return if @queue_retirement_scheduled
+
+        @queue_retirement_scheduled = true
+        GLib.idle_add do
+          QUEUE_RETIRE_BATCH.times do
+            retired = @retired_queue_boxes.first?
+            break unless retired
+
+            if child = retired.first_child
+              retired.remove(child)
+            else
+              @retired_queue_boxes.shift
+            end
+          end
+          while retired = @retired_queue_boxes.first?
+            break if retired.first_child
+            @retired_queue_boxes.shift
+          end
+          more = !@retired_queue_boxes.empty? && !@closed
+          @queue_retirement_scheduled = more
+          more
+        end
+      end
+
+      private def queue_row(index : Int, text : String) : Gtk::Box
+        icon = Gtk::Image.new_from_icon_name("document-send-symbolic")
+        label = Gtk::Label.new(text)
+        label.xalign = 0_f32
+        label.hexpand = true
+        label.ellipsize = :end
+        label.add_css_class("dim-label")
+
+        edit = Gtk::Button.new_from_icon_name(
+          "document-edit-symbolic"
+        )
+        edit.add_css_class("flat")
+        edit.tooltip_text = "Edit queued message"
+
+        steer = Gtk::Button.new_from_icon_name(
+          "media-skip-forward-symbolic"
+        )
+        steer.add_css_class("flat")
+        steer.tooltip_text = "Send this now, interrupting the agent"
+        steer.clicked_signal.connect do
+          steer_queue(index, text)
+        end
+
+        remove = Gtk::Button.new_from_icon_name(
+          "window-close-symbolic"
+        )
+        remove.add_css_class("flat")
+        remove.tooltip_text = "Discard"
+        remove.clicked_signal.connect { drop_queue(index) }
+
+        row = Gtk::Box.new(:horizontal, 6)
+        edit.clicked_signal.connect do
+          show_queue_editor(row, index, text)
+        end
+        row.append(icon)
+        row.append(label)
+        row.append(edit)
+        row.append(steer)
+        row.append(remove)
+        row
       end
 
       private def show_queue_editor(
