@@ -98,27 +98,34 @@ RESOURCES="$APP/Contents/Resources"
 
 # gtk-mac-bundler cannot map ICU's separately loaded data library. Put the
 # matching file beside every Mach-O that references it and use @loader_path.
-find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print -quit |
-  grep -q . || {
+ICU_BUNDLE_LIBRARY="$(
+  find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print -quit
+)"
+[ -n "$ICU_BUNDLE_LIBRARY" ] || {
   echo "bundle-macos: bundled libicuuc was not found" >&2
   exit 1
 }
+ICU_BUNDLE_DIR="${ICU_BUNDLE_LIBRARY%/*}"
+ICU_RELATIVE_DIR="${ICU_BUNDLE_DIR#"$RESOURCES"/}"
+ICU_SOURCE_DIR="$HOMEBREW_PREFIX/$ICU_RELATIVE_DIR"
 while IFS= read -r binary; do
-  while IFS= read -r dependency; do
-    [ -n "$dependency" ] || continue
+  while read -r dependency _; do
+    case "$dependency" in
+      */libicudata*.dylib) ;;
+      *) continue ;;
+    esac
     name="${dependency##*/}"
-    source="$dependency"
+    source="$ICU_SOURCE_DIR/$name"
     [ -f "$source" ] || {
       echo "bundle-macos: ICU data library was not found: $source" >&2
       exit 1
     }
     cp -L "$source" "${binary%/*}/$name"
-    install_name_tool \
-      -change "$dependency" "@loader_path/$name" "$binary"
-  done < <(
-    otool -L "$binary" 2>/dev/null |
-      awk '$1 ~ /^\/.*\/libicudata[^/]*\.dylib$/ { print $1 }'
-  )
+    if [ "$dependency" != "@loader_path/$name" ]; then
+      install_name_tool \
+        -change "$dependency" "@loader_path/$name" "$binary"
+    fi
+  done < <(otool -L "$binary" 2>/dev/null || true)
 done < <(
   find "$APP/Contents/MacOS" "$RESOURCES" -type f \
     \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print
