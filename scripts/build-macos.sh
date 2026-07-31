@@ -47,7 +47,7 @@ if [ -d "$OUT" ] && [ -n "$(find "$OUT" -mindepth 1 -print -quit)" ]; then
   exit 1
 fi
 
-for command in curl ditto pkg-config shards shasum tar; do
+for command in curl ditto otool pkg-config shards shasum tar; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "build-macos: $command is required" >&2
     exit 1
@@ -84,6 +84,7 @@ done
 # Crystal link annotations name native libraries directly. Homebrew keeps
 # several of them in versioned Cellar paths outside clang's default search.
 export LIBRARY_PATH="$BUILD_LIBRARY_PATH${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export CRYSTAL_LIBRARY_PATH="$BUILD_LIBRARY_PATH${CRYSTAL_LIBRARY_PATH:+:$CRYSTAL_LIBRARY_PATH}"
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
@@ -109,6 +110,8 @@ XD_BUILD_PROFILE="$CRYSTAL_PROFILE" XD_BUILD_COMMIT="$COMMIT" \
   crystal build src/xd.cr --release --no-debug \
     --link-flags "-Wl,-headerpad_max_install_names" \
     -o "$WORK/xd"
+otool -L "$WORK/xd" |
+  grep -E '/(opt|Cellar)/sqlite[^/]*/.*libsqlite3'
 "$WORK/xd" --bundle-runtime | grep -Fx crystal
 
 scripts/stage-native.sh "$WORK/xd" "$WORK/stage" "$PROFILE"
