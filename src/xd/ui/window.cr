@@ -18,6 +18,7 @@ require "./command_suggestions"
 require "./dots"
 require "./event_inbox"
 require "./git_actions"
+require "./image_attachment"
 require "./image_presenter"
 require "./message_row"
 require "./pair_dialog"
@@ -74,7 +75,7 @@ module Xd
         name : String,
         data : String,
         bytesize : Int32,
-        preview : GdkPixbuf::Pixbuf
+        preview : ImageAttachment::Pixels
 
       MAX_IMAGES      = 4
       MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -1602,40 +1603,13 @@ module Xd
           prepared : PreparedAttachment? = nil
           message : String? = nil
           begin
-            info = File.info(path)
-            if info.size > MAX_IMAGE_BYTES
-              message = "Each source image must be 10 MiB or smaller."
-            else
-              pixbuf = GdkPixbuf::Pixbuf.new_from_file_at_scale(
-                path,
-                1920,
-                1920,
-                true
-              )
-              unless pixbuf
-                raise IO::Error.new("Image decoder returned no pixels.")
-              end
-              stream = Gio::MemoryOutputStream.new_resizable
-              pixbuf.save_to_streamv(stream, "png", nil, nil, nil)
-              stream.close(nil)
-              bytes = stream.steal_as_bytes.data ||
-                      raise IO::Error.new("Image encoder returned no data.")
-              if bytes.size > MAX_IMAGE_BYTES
-                message = "Encoded image must be 10 MiB or smaller."
-              else
-                preview = ImagePresenter.pixbuf_from_png(
-                  bytes,
-                  ImagePresenter::INLINE_MAX_WIDTH,
-                  ImagePresenter::INLINE_MAX_HEIGHT
-                ) || pixbuf
-                prepared = PreparedAttachment.new(
-                  File.basename(path),
-                  Base64.strict_encode(bytes),
-                  bytes.size,
-                  preview
-                )
-              end
-            end
+            image = ImageAttachment.prepare_file(path)
+            prepared = PreparedAttachment.new(
+              File.basename(path),
+              Base64.strict_encode(image.png),
+              image.png.size,
+              image.preview
+            )
           rescue error
             message = error.message || "Cannot attach that image."
           end
@@ -1674,7 +1648,7 @@ module Xd
           prepared.name,
           prepared.data,
           prepared.bytesize,
-          Gdk::Texture.new_for_pixbuf(prepared.preview)
+          ImageAttachment.texture(prepared.preview)
         )
         @attachments << attachment
         append_attachment_chip(attachment)
