@@ -96,30 +96,34 @@ RESOURCES="$APP/Contents/Resources"
   exit 1
 }
 
-# ICU loads its data library through @loader_path. gtk-mac-bundler does not
-# discover that dependency, so put the matching Homebrew library beside
-# libicuuc wherever the bundler chose to relocate it.
-ICU_BUNDLE_DIR=
-while IFS= read -r library; do
-  ICU_BUNDLE_DIR="${library%/*}"
-  break
-done < <(find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print)
-[ -n "$ICU_BUNDLE_DIR" ] || {
+# gtk-mac-bundler cannot map ICU's separately loaded data library. Put the
+# matching file beside every Mach-O that references it and use @loader_path.
+ICU_SOURCE_DIR="$(pkg-config --variable=libdir icu-uc)"
+find "$RESOURCES" -type f -name 'libicuuc*.dylib' -print -quit |
+  grep -q . || {
   echo "bundle-macos: bundled libicuuc was not found" >&2
   exit 1
 }
-ICU_RELATIVE_DIR="${ICU_BUNDLE_DIR#"$RESOURCES"/}"
-ICU_LIBDIR="$HOMEBREW_PREFIX/$ICU_RELATIVE_DIR"
-copied_icu_data=false
-for library in "$ICU_LIBDIR"/libicudata*.dylib; do
-  [ -e "$library" ] || continue
-  cp -L "$library" "$ICU_BUNDLE_DIR/"
-  copied_icu_data=true
-done
-[ "$copied_icu_data" = true ] || {
-  echo "bundle-macos: ICU data libraries were not found in $ICU_LIBDIR" >&2
-  exit 1
-}
+while IFS= read -r binary; do
+  while IFS= read -r dependency; do
+    [ -n "$dependency" ] || continue
+    name="${dependency##*/}"
+    source="$ICU_SOURCE_DIR/$name"
+    [ -f "$source" ] || {
+      echo "bundle-macos: ICU data library was not found: $source" >&2
+      exit 1
+    }
+    cp -L "$source" "${binary%/*}/$name"
+    install_name_tool \
+      -change "$dependency" "@loader_path/$name" "$binary"
+  done < <(
+    otool -L "$binary" 2>/dev/null |
+      awk '$1 ~ /\/libicudata[^/]*\.dylib$/ { print $1 }'
+  )
+done < <(
+  find "$APP/Contents/MacOS" "$RESOURCES" -type f \
+    \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print
+)
 
 # Data not modeled by gtk-mac-bundler itself.
 for directory in gtk-4.0 libadwaita-1 themes; do
@@ -151,9 +155,13 @@ gio-querymodules "$RESOURCES/lib/gio/modules"
 external_links="$WORK/external-links"
 : > "$external_links"
 while IFS= read -r binary; do
-  otool -L "$binary" 2>/dev/null |
-    grep -E '/opt/homebrew|/usr/local/(Cellar|opt)/' \
-      >> "$external_links" || true
+  links="$(
+    otool -L "$binary" 2>/dev/null |
+      grep -E '/opt/homebrew|/usr/local/(Cellar|opt)/' || true
+  )"
+  if [ -n "$links" ]; then
+    printf '%s:\n%s\n' "$binary" "$links" >> "$external_links"
+  fi
 done < <(
   find "$APP/Contents/MacOS" "$RESOURCES" -type f \
     \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print
