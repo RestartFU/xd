@@ -52,8 +52,87 @@ jobs:
             xd-linux-x86_64.tar.gz.sha256
             scripts/install.sh
 
+  macos:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install native build dependencies
+        run: >-
+          brew install
+          crystal
+          pkgconf
+          gtk4
+          libadwaita
+          vte3
+          portaudio
+          sqlite
+          glib-networking
+          librsvg
+          cmake
+
+      - name: Build the complete macOS app
+        run: ./scripts/build-macos.sh "$PWD/macos-dist" release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            macos-dist/xd-macos-arm64.zip
+            macos-dist/xd-macos-arm64.zip.sha256
+            scripts/install-macos.sh
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            unzip
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gobject-introspection
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-portaudio
+
+      - name: Build the complete Windows payload
+        shell: msys2 {0}
+        run: ./scripts/build-windows.sh "$PWD/windows-dist" release
+
+      - name: Build the MSI
+        shell: pwsh
+        run: >-
+          ./scripts/package-windows.ps1
+          -Payload windows-dist
+          -OutputDirectory windows-artifacts
+          -Profile release
+          -Version 0.1.0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            windows-artifacts/xd-windows-x86_64.msi
+            windows-artifacts/xd-windows-x86_64.msi.sha256
+            scripts/install.ps1
+
   publish:
-    needs: linux
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -82,9 +161,21 @@ jobs:
           ./xd/xd.sh
           \`\`\`
 
-          Linux x86_64 only while the Crystal port is being verified. The
-          bundle is self-contained. The daemon is the same binary —
-          \`./xd/bin/xd serve --pair\`.
+          macOS Apple Silicon:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -- --release
+          \`\`\`
+
+          Windows x86_64:
+
+          \`\`\`powershell
+          & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
+          \`\`\`
+
+          Every artifact is self-contained. On Linux and macOS, the daemon is
+          the same bundled binary and can pair another device with
+          \`xd serve --pair\`.
           EOF
           )
 
@@ -94,12 +185,22 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
-              scripts/install.sh
+              macos-dist/xd-macos-arm64.zip \
+              macos-dist/xd-macos-arm64.zip.sha256 \
+              windows-artifacts/xd-windows-x86_64.msi \
+              windows-artifacts/xd-windows-x86_64.msi.sha256 \
+              scripts/install.sh scripts/install-macos.sh scripts/install.ps1
           else
             gh release create "$tag" \
               --title "$tag" \
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
               xd-linux-x86_64.tar.gz.sha256 \
-              scripts/install.sh
+              macos-dist/xd-macos-arm64.zip \
+              macos-dist/xd-macos-arm64.zip.sha256 \
+              windows-artifacts/xd-windows-x86_64.msi \
+              windows-artifacts/xd-windows-x86_64.msi.sha256 \
+              scripts/install.sh \
+              scripts/install-macos.sh \
+              scripts/install.ps1
           fi

@@ -70,6 +70,15 @@ jobs:
         shell: msys2 {0}
         run: ./scripts/build-windows.sh "$PWD/windows-dist" nightly
 
+      - name: Build the MSI
+        shell: pwsh
+        run: >-
+          ./scripts/package-windows.ps1
+          -Payload windows-dist
+          -OutputDirectory windows-artifacts
+          -Profile nightly
+          -Version 0.1.0
+
   macos:
     runs-on: macos-15
 

@@ -1,15 +1,6 @@
-# A runnable xd for every commit on master.
-#
-# The bundle is the same one scripts/build.sh produces locally: a binary with
-# its whole library closure beside it, so it runs on any glibc x86_64 host
-# without a GTK stack of its own. Published under a rolling "nightly" tag, so
-# the download link never changes:
-#
-#   https://github.com/<owner>/<repo>/releases/download/nightly/xd-nightly-linux-x86_64.tar.gz
-#
-# The installer is published beside it, from the same commit, so the script and
-# the bundle it installs can never be from different builds. (Not /latest/: that
-# resolves to the newest full release, and a nightly is a prerelease.)
+# A runnable xd for every commit on master. Linux, macOS, and Windows artifacts
+# are built from the same commit and published under one rolling nightly tag.
+# Every artifact carries its own app, agent, Git, speech, and native runtime.
 #
 # Built as the nightly profile, which gives it its own application id, settings,
 # data directory and workspaces -- so installing it does not disturb a release
@@ -67,8 +58,83 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256
             scripts/install.sh
 
+  macos:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install native build dependencies
+        run: >-
+          brew install
+          crystal
+          pkgconf
+          gtk4
+          libadwaita
+          vte3
+          portaudio
+          sqlite
+          glib-networking
+          librsvg
+          cmake
+
+      - name: Build the complete macOS app
+        run: ./scripts/build-macos.sh "$PWD/macos-dist" nightly
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            macos-dist/xd-nightly-macos-arm64.zip
+            macos-dist/xd-nightly-macos-arm64.zip.sha256
+            scripts/install-macos.sh
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            unzip
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gobject-introspection
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-glib-networking
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-portaudio
+
+      - name: Build the complete Windows payload
+        shell: msys2 {0}
+        run: ./scripts/build-windows.sh "$PWD/windows-dist" nightly
+
+      - name: Build the MSI
+        shell: pwsh
+        run: >-
+          ./scripts/package-windows.ps1
+          -Payload windows-dist
+          -OutputDirectory windows-artifacts
+          -Profile nightly
+          -Version 0.1.0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            windows-artifacts/xd-nightly-windows-x86_64.msi
+            windows-artifacts/xd-nightly-windows-x86_64.msi.sha256
+            scripts/install.ps1
+
   publish:
-    needs: linux
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -102,10 +168,21 @@ jobs:
           ./xd-nightly/xd.sh
           \`\`\`
 
-          Linux x86_64 only while the Crystal port is being verified.
-          The bundle is self-contained and installs beside a release rather
-          than over it. The daemon is the same binary —
-          \`./xd-nightly/bin/xd serve --pair\`.
+          macOS Apple Silicon:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install-macos.sh | sh
+          \`\`\`
+
+          Windows x86_64:
+
+          \`\`\`powershell
+          irm https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.ps1 | iex
+          \`\`\`
+
+          Every artifact is self-contained and installs beside a release.
+          On Linux and macOS, the daemon is the same bundled binary and can
+          pair another device with \`xd serve --pair\`.
           EOF
           )
 
@@ -121,4 +198,10 @@ jobs:
             --notes "$notes" \
             xd-nightly-linux-x86_64.tar.gz \
             xd-nightly-linux-x86_64.tar.gz.sha256 \
-            scripts/install.sh
+            macos-dist/xd-nightly-macos-arm64.zip \
+            macos-dist/xd-nightly-macos-arm64.zip.sha256 \
+            windows-artifacts/xd-nightly-windows-x86_64.msi \
+            windows-artifacts/xd-nightly-windows-x86_64.msi.sha256 \
+            scripts/install.sh \
+            scripts/install-macos.sh \
+            scripts/install.ps1

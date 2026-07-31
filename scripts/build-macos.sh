@@ -12,6 +12,10 @@ set -euo pipefail
 OUT="${1:?empty output directory}"
 PROFILE="${2:-nightly}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CRYSTAL_VERSION=1.21.0
+CRYSTAL_ASSET=crystal-1.21.0-1-darwin-universal.tar.gz
+CRYSTAL_SHA256=7fc4af56b0cb5c7ea5703f744c6629bb19ff36ba3abbf232d50e40c39a20ee16
+CRYSTAL_URL="https://github.com/crystal-lang/crystal/releases/download/$CRYSTAL_VERSION/$CRYSTAL_ASSET"
 
 [ "$(uname -s)" = Darwin ] || {
   echo "build-macos: macOS is required" >&2
@@ -43,13 +47,12 @@ if [ -d "$OUT" ] && [ -n "$(find "$OUT" -mindepth 1 -print -quit)" ]; then
   exit 1
 fi
 
-for command in crystal ditto pkg-config shards; do
+for command in curl ditto pkg-config shards shasum tar; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "build-macos: $command is required" >&2
     exit 1
   }
 done
-crystal --version | grep -F 'Crystal 1.21.0'
 for package in gtk4 libadwaita-1 vte-2.91-gtk4 portaudio-2.0 sqlite3; do
   pkg-config --exists "$package" || {
     echo "build-macos: pkg-config package missing: $package" >&2
@@ -61,6 +64,14 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-build.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT INT TERM
+
+curl --fail --location --silent --show-error \
+  "$CRYSTAL_URL" --output "$WORK/$CRYSTAL_ASSET"
+printf '%s  %s\n' "$CRYSTAL_SHA256" "$WORK/$CRYSTAL_ASSET" |
+  shasum -a 256 --check
+tar -xzf "$WORK/$CRYSTAL_ASSET" -C "$WORK"
+export PATH="$WORK/crystal-1.21.0-1/bin:$PATH"
+crystal --version | grep -F "Crystal $CRYSTAL_VERSION"
 
 cd "$ROOT"
 shards install --production --frozen
