@@ -5,9 +5,10 @@ require "random/secure"
 require "socket"
 require "../../../src/xd/daemon/certificate"
 require "../../../src/xd/daemon/server"
+require "../../support/local_endpoint"
 
 describe Xd::Daemon::Server do
-  it "serves the shared engine over private Unix IPC" do
+  it "serves the shared engine over private local IPC" do
     directory = File.join(
       Dir.tempdir,
       "xd-server-#{Random::Secure.hex(12)}"
@@ -21,9 +22,12 @@ describe Xd::Daemon::Server do
       server.listen_local(socket_path)
       File.info(socket_path).permissions.to_i.should eq(0o600)
 
-      UNIXSocket.open(socket_path) do |client|
+      client = XdSpec::LocalEndpoint.connect(socket_path)
+      begin
         client.puts %({"op":"ping"})
         JSON.parse(client.gets.not_nil!)["ok"].as_bool.should be_true
+      ensure
+        client.close
       end
     ensure
       server.close
@@ -78,13 +82,15 @@ describe Xd::Daemon::Server do
       first.close
       File.exists?(socket_path).should be_false
 
-      # A crashed daemon leaves only the socket inode.
-      stale = UNIXServer.new(socket_path)
-      stale.close
+      # A crashed daemon leaves only its endpoint metadata.
+      XdSpec::LocalEndpoint.leave_stale(socket_path)
       second.listen_local(socket_path)
-      UNIXSocket.open(socket_path) do |client|
+      client = XdSpec::LocalEndpoint.connect(socket_path)
+      begin
         client.puts %({"op":"ping"})
         JSON.parse(client.gets.not_nil!)["ok"].as_bool.should be_true
+      ensure
+        client.close
       end
     ensure
       first.close
@@ -107,8 +113,10 @@ describe Xd::Daemon::Server do
 
     begin
       server.listen_local(socket_path)
-      UNIXSocket.open(socket_path) do |first|
-        UNIXSocket.open(socket_path) do |second|
+      first = XdSpec::LocalEndpoint.connect(socket_path)
+      begin
+        second = XdSpec::LocalEndpoint.connect(socket_path)
+        begin
           first.read_timeout = 2.seconds
           second.read_timeout = 2.seconds
 
@@ -126,7 +134,11 @@ describe Xd::Daemon::Server do
           first_event["event"].as_s.should eq("tree")
           second_event.should eq(first_event)
           first_event["id"].as_i64.should eq(1)
+        ensure
+          second.close
         end
+      ensure
+        first.close
       end
     ensure
       server.close
@@ -145,12 +157,12 @@ describe Xd::Daemon::Server do
     store = Xd::Storage::Store.new(database_path)
     engine = Xd::Daemon::Engine.new(store)
     server = Xd::Daemon::Server.new(engine)
-    slow : UNIXSocket? = nil
+    slow : XdSpec::LocalEndpoint::Connection? = nil
     fast : Xd::Daemon::Client? = nil
 
     begin
       server.listen_local(socket_path)
-      slow = UNIXSocket.new(socket_path)
+      slow = XdSpec::LocalEndpoint.connect(socket_path)
       slow.read_timeout = 2.seconds
       slow.puts %({"op":"ping"})
       JSON.parse(slow.gets.not_nil!)["ok"].as_bool.should be_true

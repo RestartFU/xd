@@ -4,6 +4,7 @@ require "random/secure"
 require "../../../src/xd/daemon/certificate"
 require "../../../src/xd/daemon/client"
 require "../../../src/xd/daemon/server"
+require "../../support/local_endpoint"
 
 private def with_client_server(
   workspace_monitor_interval = Xd::Daemon::WorkspaceMonitor::INTERVAL,
@@ -123,7 +124,7 @@ describe Xd::Daemon::Client do
     )
     path = File.join(directory, "daemon.sock")
     Dir.mkdir_p(directory)
-    server = UNIXServer.new(path)
+    server = XdSpec::LocalEndpoint::Server.new(path)
     spawn do
       socket = server.accept
       first = JSON.parse(socket.gets.not_nil!).as_h
@@ -169,7 +170,7 @@ describe Xd::Daemon::Client do
     )
     path = File.join(directory, "daemon.sock")
     Dir.mkdir_p(directory)
-    server = UNIXServer.new(path)
+    server = XdSpec::LocalEndpoint::Server.new(path)
     start = Channel(Nil).new
     spawn do
       socket = server.accept
@@ -220,8 +221,9 @@ describe Xd::Daemon::Client do
     )
     path = File.join(directory, "daemon.sock")
     Dir.mkdir_p(directory)
-    server = UNIXServer.new(path)
+    server = XdSpec::LocalEndpoint::Server.new(path)
     release = Channel(Nil).new(1)
+    late_sent = Channel(Nil).new(1)
     spawn do
       socket = server.accept
       first = JSON.parse(socket.gets.not_nil!).as_h
@@ -232,6 +234,7 @@ describe Xd::Daemon::Client do
         "value"                  => "late",
       }.to_json << '\n'
       socket.flush
+      late_sent.send(nil)
 
       second = JSON.parse(socket.gets.not_nil!).as_h
       socket << {
@@ -246,7 +249,7 @@ describe Xd::Daemon::Client do
 
     client = Xd::Daemon::Client.local(
       path,
-      request_timeout: 20.milliseconds
+      request_timeout: 200.milliseconds
     )
     expect_raises(
       Xd::Daemon::Client::Error,
@@ -256,6 +259,7 @@ describe Xd::Daemon::Client do
     end
 
     release.send(nil)
+    late_sent.receive
     response = client.call({"op" => JSON::Any.new("ping")})
     response["value"].as_s.should eq("current")
     client.closed?.should be_false
@@ -295,7 +299,7 @@ describe Xd::Daemon::Client do
     )
     path = File.join(directory, "daemon.sock")
     Dir.mkdir_p(directory)
-    server = UNIXServer.new(path)
+    server = XdSpec::LocalEndpoint::Server.new(path)
     start = Channel(Nil).new
     total = 20_000
     spawn do
