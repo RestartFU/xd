@@ -36,6 +36,20 @@ test -n "$svg_loader" || {
   exit 1
 }
 
+# Exercise the public entrypoint with only the host's base utilities visible.
+# Preserve PATH because NixOS does not place those utilities in /usr/bin.
+# This catches broken relocation/cache setup before an archive is published;
+# the Git checks below separately prove no host Git can be selected.
+mkdir -p "$WORK/launcher-home" "$WORK/launcher-runtime"
+env -i \
+  HOME="$WORK/launcher-home" \
+  PATH="${PATH:-/usr/bin:/bin}" \
+  XDG_RUNTIME_DIR="$WORK/launcher-runtime" \
+  XDG_DATA_HOME="$WORK/launcher-home/data" \
+  XDG_CACHE_HOME="$WORK/launcher-home/cache" \
+  XDG_CONFIG_HOME="$WORK/launcher-home/config" \
+  "$BUNDLE/xd.sh" --version | grep -E '^xd [0-9]'
+
 git_clean()
 {
   env -i \

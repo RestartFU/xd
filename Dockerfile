@@ -50,11 +50,11 @@ RUN set -eux; \
     find /voice -type f -exec strip --strip-unneeded {} +; \
     rm -rf /build /source /tmp/whisper.tar.gz
 
-# --- Crystal migration toolchain -------------------------------------------
+# --- Crystal toolchain -----------------------------------------------------
 #
 # Pin the multi-platform manifest, not only the tag. Developers need Docker,
-# never a host Crystal compiler. This stage remains separate while the
-# behavior-parity suite is moved module by module from C.
+# never a host Crystal compiler. Keep compilation and bundle assembly separate
+# so the test target does not download or stage release payloads.
 FROM crystallang/crystal:1.21.0@sha256:32b7b908a8c3625ebd629053daf48b6f469deaf74aeb71ad101895096b1665fa AS crystal-toolchain
 
 RUN apt-get update \
