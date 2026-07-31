@@ -47,12 +47,18 @@ if [ -d "$OUT" ] && [ -n "$(find "$OUT" -mindepth 1 -print -quit)" ]; then
   exit 1
 fi
 
-for command in curl ditto otool pkg-config shards shasum tar; do
+for command in brew curl ditto otool pkg-config shards shasum tar; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "build-macos: $command is required" >&2
     exit 1
   }
 done
+
+# Homebrew keeps SQLite keg-only because macOS ships an older system copy.
+# Put its metadata first so Crystal links the runtime that can enter the app.
+SQLITE_PREFIX="$(brew --prefix sqlite)"
+export PKG_CONFIG_PATH="$SQLITE_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
 BUILD_LIBRARY_PATH=
 for package in \
   gdk-pixbuf-2.0 \
