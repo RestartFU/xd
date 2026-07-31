@@ -55,6 +55,12 @@ describe Xd::CLI do
       Xd::CLI.new.parse_serve(["--port", "70000"])
     end
   end
+
+  it "does not expose the removed daemon updater" do
+    expect_raises(Xd::CLI::UsageError, /Invalid option: --auto-update/) do
+      Xd::CLI.new.parse_serve(["--auto-update"])
+    end
+  end
 end
 
 describe Xd::Daemon::Certificate do

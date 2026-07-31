@@ -100,19 +100,14 @@ esac
 # desktop. A later launch then activates stale code instead of the new binary.
 # Refusing is safer than killing a session that may contain unsent input.
 #
-# xd's own updater is the one exception: it deliberately keeps the mapped old
-# process alive long enough to report success and offer Restart. That path sets
-# this private implementation flag on the installer process itself.
-if [ "${XD_ALLOW_RUNNING_INSTALL-}" != 1 ]; then
-  for process_exe in /proc/[0-9]*/exe; do
-    executable=$(readlink "$process_exe" 2>/dev/null || true)
-    case "$executable" in
-      "$OPT"/*)
-        die "$NAME is running. Quit it completely, then rerun this installer."
-        ;;
-    esac
-  done
-fi
+for process_exe in /proc/[0-9]*/exe; do
+  executable=$(readlink "$process_exe" 2>/dev/null || true)
+  case "$executable" in
+    "$OPT"/*)
+      die "$NAME is running. Quit it completely, then rerun this installer."
+      ;;
+  esac
+done
 
 # --- the bundle -------------------------------------------------------------
 

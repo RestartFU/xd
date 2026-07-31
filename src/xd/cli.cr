@@ -19,7 +19,6 @@ module Xd
       property socket = AppPaths.local_socket
       property certificate = AppPaths.certificate
       property private_key = AppPaths.private_key
-      property auto_update = false
     end
 
     def initialize(
@@ -106,9 +105,6 @@ module Xd
         command.on("--private-key FILE", "TLS private key") do |value|
           options.private_key = File.expand_path(value)
         end
-        command.on("--auto-update", "update an installed daemon") do
-          options.auto_update = true
-        end
         command.on("-h", "--help", "show this help") do
           raise UsageError.new(command.to_s)
         end
@@ -120,12 +116,6 @@ module Xd
     end
 
     private def serve(options : ServeOptions) : Int32
-      if options.auto_update
-        raise UsageError.new(
-          "xd serve: --auto-update is not migrated yet"
-        )
-      end
-
       store = Storage::Store.new(options.database)
       workspaces = Workspace::Service.new(options.root, store)
       engine = Daemon::Engine.new(store, workspaces)
