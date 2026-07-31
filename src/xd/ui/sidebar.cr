@@ -7,6 +7,7 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./auth_dialog"
+require "./background_work"
 require "./dialogs"
 require "./directory_browser"
 require "./dots"
@@ -438,48 +439,70 @@ module Xd
                      )
                    end
 
-          local_data : Source::TreeData? = nil
-          local_error = local.error
-          if response = local.body
-            begin
-              local_data = Source.prepare(response)
-            rescue error : KeyError | TypeCastError
-              local_error = error.message || "Daemon returned an invalid workspace tree."
-            end
+          queued = BackgroundWork.submit do
+            prepare_tree_reload(local, remote, generation)
           end
-
-          remote_data : Source::TreeData? = nil
-          remote_error : String? = nil
-          if response = remote.try(&.body)
-            begin
-              remote_data = Source.prepare(response)
-            rescue error : KeyError | TypeCastError
-              remote_error = error.message || "Remote returned an invalid workspace tree."
-            end
-          end
-
-          GLib.idle_add do
-            unless @closed || generation != @reload_generation
-              if data = local_data
-                removed = @local_source.update(data)
-                removed.each do |id|
-                  @on_chat_deleted.call(@local_source.endpoint, id)
-                end
-              elsif message = local_error
-                @on_error.call(message)
+          unless queued
+            GLib.idle_add do
+              unless @closed || generation != @reload_generation
+                @on_error.call(
+                  "Workspace refresh is busy. Try again in a moment."
+                )
               end
-              if data = remote_data
-                removed = @remote_source.update(data)
-                removed.each do |id|
-                  @on_chat_deleted.call(@remote_source.endpoint, id)
-                end
-              elsif message = remote_error
-                @on_error.call(message)
-              end
-              rebuild_tree
+              false
             end
-            false
           end
+        end
+      end
+
+      private def prepare_tree_reload(
+        local : PanelCallResult,
+        remote : PanelCallResult?,
+        generation : Int64,
+      ) : Nil
+        local_data : Source::TreeData? = nil
+        local_error = local.error
+        if response = local.body
+          begin
+            local_data = Source.prepare(response)
+          rescue error : KeyError | TypeCastError
+            local_error =
+              error.message || "Daemon returned an invalid workspace tree."
+          end
+        end
+
+        remote_data : Source::TreeData? = nil
+        remote_error : String? = nil
+        if response = remote.try(&.body)
+          begin
+            remote_data = Source.prepare(response)
+          rescue error : KeyError | TypeCastError
+            remote_error =
+              error.message || "Remote returned an invalid workspace tree."
+          end
+        end
+
+        GLib.idle_add do
+          unless @closed || generation != @reload_generation
+            if data = local_data
+              removed = @local_source.update(data)
+              removed.each do |id|
+                @on_chat_deleted.call(@local_source.endpoint, id)
+              end
+            elsif message = local_error
+              @on_error.call(message)
+            end
+            if data = remote_data
+              removed = @remote_source.update(data)
+              removed.each do |id|
+                @on_chat_deleted.call(@remote_source.endpoint, id)
+              end
+            elsif message = remote_error
+              @on_error.call(message)
+            end
+            rebuild_tree
+          end
+          false
         end
       end
 
