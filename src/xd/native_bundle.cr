@@ -173,7 +173,7 @@ module Xd
         ),
         requirement(
           "SVG pixbuf loader",
-          "lib/gdk-pixbuf-2.0/*/loaders/libpixbufloader*svg*.dll"
+          "lib/gdk-pixbuf-2.0/*/loaders/*pixbufloader*svg*.dll"
         ),
         requirement(
           "pixbuf loader cache",

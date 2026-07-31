@@ -79,7 +79,7 @@ cp -a "$PIXBUF_LOADERS/"*.dll "$OUT_LOADERS/"
 
 GDK_PIXBUF_MODULEDIR="$OUT_LOADERS" "$QUERY_LOADERS" |
   sed -E \
-    's|^".*[/\\](libpixbufloader-[^/\\"]+\.dll)"$|"@BUNDLE@/lib/gdk-pixbuf-2.0/2.10.0/loaders/\1"|' \
+    's|^".*[/\\]([^/\\"]*pixbufloader[^/\\"]+\.dll)"$|"@BUNDLE@/lib/gdk-pixbuf-2.0/2.10.0/loaders/\1"|' \
   > "$OUT/etc/gdk-pixbuf-loaders.cache.in"
 
 # Linked DLL closure. ldd resolves transitively; dynamic module roots are added

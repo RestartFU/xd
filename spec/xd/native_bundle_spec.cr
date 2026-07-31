@@ -45,4 +45,30 @@ describe Xd::NativeBundle do
       end
     end
   {% end %}
+
+  it "accepts the current MSYS2 SVG loader name" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-native-bundle-#{Random::Secure.hex(12)}"
+    )
+
+    begin
+      materialize_bundle(directory, Xd::NativeBundle::Platform::Windows)
+      synthetic = Dir.glob(
+        File.join(directory, "lib/gdk-pixbuf-2.0/*/loaders/*svg*.dll")
+      ).first
+      File.delete(synthetic)
+      File.write(
+        File.join(File.dirname(synthetic), "pixbufloader_svg.dll"),
+        "SVG pixbuf loader"
+      )
+
+      Xd::NativeBundle.validate(
+        directory,
+        Xd::NativeBundle::Platform::Windows
+      ).should be_empty
+    ensure
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
 end

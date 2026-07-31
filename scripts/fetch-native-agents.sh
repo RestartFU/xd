@@ -51,10 +51,12 @@ checksum()
 {
   expected=$1
   path=$2
-  if command -v sha256sum >/dev/null 2>&1; then
+  if [ "$(uname -s)" = Darwin ]; then
+    printf '%s  %s\n' "$expected" "$path" | shasum -a 256 -c
+  elif command -v sha256sum >/dev/null 2>&1; then
     printf '%s  %s\n' "$expected" "$path" | sha256sum -c
   else
-    printf '%s  %s\n' "$expected" "$path" | shasum -a 256 --check
+    printf '%s  %s\n' "$expected" "$path" | shasum -a 256 -c
   fi
 }
 
