@@ -55,13 +55,8 @@ own — it installs beside a release rather than over it, and neither edits the
 other's work. `sh -s -- --uninstall` takes it away again and leaves that
 directory alone.
 
-To try a pull request or a branch, the nightly builds it. The button beside the
-update button in the sidebar takes a pull request link, a branch link, a number
-or a branch name; it fetches that code, builds the bundle the way the nightly is
-built and installs the result over itself, then offers the restart. What it is
-given is remembered, so trying the next commit on the same branch is opening it
-and pressing the one button. Docker is what it needs; Git comes with xd. Linux
-is where it runs, and the update button is the way back to master's nightly.
+xd has no in-app updater. Installers replace a fully built bundle only while xd
+is stopped; rerun the installer when you want a newer nightly.
 
 Crystal builds currently target Linux x86_64. Windows and macOS installers are
 paused until they build this same Crystal client and daemon; old C artifacts

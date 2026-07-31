@@ -129,7 +129,9 @@ C sources: `src/tree/sidebar.c`, `src/tree/fs-tree.c`,
   order while input and redraws run between batches; stale chat switches stop
   the remaining work. Reloads swap one transcript root, then retire the hidden
   old tree four rows per idle instead of synchronously destroying every GTK
-  descendant; compatibility stop/change refreshes cannot freeze teardown.
+  descendant. Chat deletion, external folder removal, remote disconnect, and
+  LRU eviction use the same retirement queue; compatibility stop/change
+  refreshes cannot freeze teardown.
   Remote history scroll restoration now starts only after the final batch
   instead of racing the daemon reply. A 245-row
   installed-bundle transcript verifies the 100/45 history pills; five-chat GTK
@@ -257,9 +259,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   the shared daemon. List/open/kill/input/resize requests never wait in GTK,
   and duplicate asynchronous opens are suppressed. An installed local client
   verifies each operation across UI disconnect/reconnect. Full 16 MiB history
-  replay is decoded and fed in bounded idle batches; output and geometry
-  arriving during replay stay ordered, and detached sessions cancel stale
-  batches. Paired TLS proof remains.
+  and live output use one token-scoped worker per session: Base64 decoding
+  stays off GTK, VTE receives at most 32 KiB per main-loop turn, output and
+  geometry arriving during replay stay ordered, and detached sessions cancel
+  stale batches. Paired TLS proof remains.
 - `[~]` Daemon-backed multi-session tabs, centered single-session title,
   add/kill controls, close request, focus, replay, resize, and per-chat view
   retention work. C palette/font, copy/paste, URL handling, and daemon-terminal
@@ -281,8 +284,10 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   worker thread and applies at most 256 coloured spans per GTK idle turn,
   cancelling stale work after edits or navigation. Directory JSON preparation
   also runs off-thread and rows apply in 80-entry idle batches, so generated
-  dependency trees do not block GTK. Explicit request cancellation and
-  paired-TLS latency proof remain.
+  dependency trees do not block GTK. Text previews clear in 8,192-character
+  slices and insert in UTF-8-safe 32-KiB slices, keeping 1 MiB replacements
+  responsive. Explicit request cancellation and paired-TLS latency proof
+  remain.
 - `[~]` Working and branch scopes use the C header, linked toggles, refresh,
   summary/empty/error states, and virtual `GtkListView` file sections.
   Per-file expansion, collapsed-path memory, 80-row chunks, scroll restoration,
@@ -297,8 +302,11 @@ C sources: `src/chat/chat-view.c`, `src/chat/model-picker.c`,
   generation-scoped; pure patch parsing and file-section calculation run on a
   worker thread before GTK receives the virtual model. Syntax scanning and
   markup generation also finish there in bounded 80-row chunks; GTK only
-  materializes one prepared chunk per idle. Explicit cancellation,
-  paired-TLS latency, and live Git-head refresh proof remain. Agent-native edit,
+  materializes one prepared chunk per idle. Collapsed, refreshed, and recycled
+  sections swap their body immediately, then retire old Pango-heavy chunks four
+  per idle instead of destroying a complete large diff in one callback.
+  Explicit cancellation, paired-TLS latency, and live Git-head refresh proof
+  remain. Agent-native edit,
   write, multi-edit, NotebookEdit, apply-patch, and file-change payloads also
   produce inline unified diffs without a Git repository or Git executable.
   Patch construction, multi-change aggregation, line counting, and apply-patch
@@ -504,8 +512,8 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (329 default, 2 PortAudio, and 5
-  authenticated-loopback examples).
+- `[x]` Crystal specs pass in Docker (323 default and 5 authenticated-loopback
+  examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
   `XDG_DATA_DIRS=/nonexistent`.
