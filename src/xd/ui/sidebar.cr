@@ -869,7 +869,9 @@ module Xd
         end
         delete.clicked_signal.connect do
           if node = @bound_nodes[pointer_key(box)]?
-            delete_chat(node.source, node.id) if node.chat? && !node.placeholder?
+            if node.chat? && !node.placeholder?
+              confirm_delete_chat(node.source, node.id, node.name)
+            end
           end
         end
 
@@ -1601,7 +1603,7 @@ module Xd
         add_menu_action(
           section, actions, popover, "Delete Chat", "delete"
         ) do
-          delete_chat(source, chat_id)
+          confirm_delete_chat(source, chat_id, node.name)
         end
         popover
       end
@@ -1855,6 +1857,22 @@ module Xd
 
           @on_chat_deleted.call(source.endpoint, chat_id)
           reload
+        end
+      end
+
+      private def confirm_delete_chat(
+        source : Source,
+        chat_id : String,
+        name : String,
+      ) : Nil
+        Dialogs.confirm(
+          @parent,
+          "Delete Chat?",
+          "“#{name}” and all its messages will be permanently deleted. " \
+          "This cannot be undone.",
+          "Delete"
+        ) do
+          delete_chat(source, chat_id)
         end
       end
 
