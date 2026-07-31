@@ -35,6 +35,24 @@ module Xd
         max_bytes : Int32 = MAX_IMAGE_BYTES,
       ) : Prepared
         source = read_bounded(path, max_bytes)
+        prepare(source, max_bytes)
+      rescue error : Error
+        raise error
+      rescue error : File::Error | IO::Error | GLib::Error
+        raise Error.new(error.message || "Cannot attach that image.")
+      end
+
+      def prepare(
+        source : Bytes,
+        max_bytes : Int32 = MAX_IMAGE_BYTES,
+      ) : Prepared
+        raise Error.new("Image file is empty.") if source.empty?
+        if source.size > max_bytes
+          raise Error.new(
+            "Each source image must be 10 MiB or smaller."
+          )
+        end
+
         pixbuf = decode(source, MAX_WIDTH, MAX_HEIGHT)
         oriented = pixbuf.apply_embedded_orientation || pixbuf
         png = encode_png(oriented)
@@ -64,7 +82,7 @@ module Xd
         Prepared.new(png, copy_pixels(preview))
       rescue error : Error
         raise error
-      rescue error : File::Error | IO::Error | GLib::Error
+      rescue error : IO::Error | GLib::Error
         raise Error.new(error.message || "Cannot attach that image.")
       end
 

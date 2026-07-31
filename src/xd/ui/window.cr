@@ -1556,7 +1556,7 @@ module Xd
             texture = source.as(Gdk::Clipboard)
               .read_texture_finish(result)
             if texture
-              add_attachment(
+              prepare_texture_attachment(
                 "paste-#{Time.utc.to_unix_ms}.png",
                 texture
               )
@@ -1655,7 +1655,7 @@ module Xd
         @status.text = ""
       end
 
-      private def add_attachment(
+      private def prepare_texture_attachment(
         name : String,
         texture : Gdk::Texture,
       ) : Nil
@@ -1664,31 +1664,44 @@ module Xd
           return
         end
 
-        data = texture.save_to_png_bytes.data
-        unless data
-          @status.text = "Cannot encode that image as PNG."
-          return
+        chat_id = @active_chat || return
+        endpoint = @client
+        @status.text = "Preparing image…"
+        queued = BackgroundWork.submit do
+          prepared : PreparedAttachment? = nil
+          message : String? = nil
+          begin
+            encoded = texture.save_to_png_bytes
+            data = encoded.data.try(&.dup) ||
+                   raise IO::Error.new(
+                     "Cannot encode that image as PNG."
+                   )
+            image = ImageAttachment.prepare(data)
+            prepared = PreparedAttachment.new(
+              File.basename(name),
+              Base64.strict_encode(image.png),
+              image.png.size,
+              image.preview
+            )
+          rescue error
+            message = error.message || "Cannot attach that image."
+          end
+          GLib.idle_add do
+            if @client.same?(endpoint) && @active_chat == chat_id
+              if attachment = prepared
+                finish_file_attachment(attachment)
+              else
+                @status.text = message || "Cannot attach that image."
+              end
+            end
+            false
+          end
+          nil
         end
-        total = @attachments.sum(&.bytesize)
-        if data.size > MAX_IMAGE_BYTES ||
-           total > MAX_TOTAL_BYTES - data.size
-          @status.text = "Attached images must stay under 20 MiB total."
-          return
+        unless queued
+          @status.text =
+            "Image workers are busy. Try again shortly."
         end
-
-        attachment = Attachment.new(
-          File.basename(name),
-          Base64.strict_encode(data),
-          data.size,
-          ImagePresenter.texture_from_png(
-            data,
-            ImagePresenter::INLINE_MAX_WIDTH,
-            ImagePresenter::INLINE_MAX_HEIGHT
-          ) || texture
-        )
-        @attachments << attachment
-        append_attachment_chip(attachment)
-        @status.text = ""
       end
 
       private def append_attachment_chip(

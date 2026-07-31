@@ -37,6 +37,8 @@ describe Xd::UI::ImageAttachment do
       texture.width.should eq(1)
       texture.height.should eq(1)
     end
+
+    Xd::UI::ImageAttachment.prepare(png).preview.width.should eq(1)
   end
 
   it "stops reading once source byte budget is exceeded" do
