@@ -100,6 +100,33 @@ module Xd
         )
       end
 
+      def pixels(
+        source : Bytes,
+        max_width : Int32,
+        max_height : Int32,
+        image_type : String? = nil,
+      ) : Pixels
+        raise Error.new("Image file is empty.") if source.empty?
+        if source.size > MAX_IMAGE_BYTES
+          raise Error.new(
+            "Each source image must be 10 MiB or smaller."
+          )
+        end
+
+        pixbuf = decode(
+          source,
+          max_width,
+          max_height,
+          image_type
+        )
+        oriented = pixbuf.apply_embedded_orientation || pixbuf
+        copy_pixels(oriented)
+      rescue error : Error
+        raise error
+      rescue error : IO::Error | GLib::Error
+        raise Error.new(error.message || "Cannot decode that image.")
+      end
+
       private def read_bounded(
         path : String,
         max_bytes : Int32,
@@ -129,9 +156,14 @@ module Xd
         source : Bytes,
         max_width : Int32,
         max_height : Int32,
+        image_type : String? = nil,
       ) : GdkPixbuf::Pixbuf
         invalid_dimensions = false
-        loader = GdkPixbuf::PixbufLoader.new
+        loader = if type = image_type
+                   GdkPixbuf::PixbufLoader.new_with_type(type)
+                 else
+                   GdkPixbuf::PixbufLoader.new
+                 end
         loader.size_prepared_signal.connect do |width, height|
           if invalid_size?(width, height)
             invalid_dimensions = true

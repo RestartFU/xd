@@ -3,6 +3,7 @@ require "gtk4"
 require "../daemon/endpoint"
 require "./adw"
 require "./background_work"
+require "./image_attachment"
 
 module Xd
   module UI
@@ -98,49 +99,38 @@ module Xd
         max_width : Int32,
         max_height : Int32,
       ) : Gdk::Texture?
-        pixbuf = pixbuf_from_png(data, max_width, max_height)
-        pixbuf ? Gdk::Texture.new_for_pixbuf(pixbuf) : nil
+        pixels = pixels_from_png(data, max_width, max_height)
+        pixels ? ImageAttachment.texture(pixels) : nil
       end
 
-      def self.pixbuf_from_png(
+      def self.pixels_from_png(
         data : Bytes,
         max_width : Int32,
         max_height : Int32,
-      ) : GdkPixbuf::Pixbuf?
+      ) : ImageAttachment::Pixels?
         return if data.empty? || data.size > MAX_IMAGE_BYTES
 
-        loader = GdkPixbuf::PixbufLoader.new_with_type("png")
-        loader.size_prepared_signal.connect do |width, height|
-          next if width <= 0 || height <= 0
-
-          scale = {
-            1.0,
-            max_width.to_f64 / width,
-            max_height.to_f64 / height,
-          }.min
-          loader.set_size(
-            Math.max(1, (width * scale).to_i),
-            Math.max(1, (height * scale).to_i)
-          )
-        end
-        loader.write(data)
-        loader.close
-        loader.pixbuf
-      rescue GLib::Error
+        ImageAttachment.pixels(
+          data,
+          max_width,
+          max_height,
+          "png"
+        )
+      rescue ImageAttachment::Error
         nil
       end
 
-      def self.pixbuf_from(
+      def self.pixels_from(
         body : Hash(String, JSON::Any),
         max_width : Int32,
         max_height : Int32,
-      ) : GdkPixbuf::Pixbuf?
+      ) : ImageAttachment::Pixels?
         return unless body["mime"]?.try(&.as_s?) == "image/png"
         encoded = body["data"]?.try(&.as_s?) || return
         encoded_limit = ((MAX_IMAGE_BYTES + 2) // 3) * 4
         return if encoded.bytesize > encoded_limit
 
-        pixbuf_from_png(
+        pixels_from_png(
           Base64.decode(encoded),
           max_width,
           max_height
@@ -252,12 +242,12 @@ module Xd
           rescue
           end
           queued = BackgroundWork.submit do
-            pixbuf = response.try do |body|
-              self.class.pixbuf_from(body, max_width, max_height)
+            pixels = response.try do |body|
+              self.class.pixels_from(body, max_width, max_height)
             end
             GLib.idle_add do
-              texture = pixbuf.try do |decoded|
-                Gdk::Texture.new_for_pixbuf(decoded)
+              texture = pixels.try do |decoded|
+                ImageAttachment.texture(decoded)
               end
               callback.call(texture)
               false

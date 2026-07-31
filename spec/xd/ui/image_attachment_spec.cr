@@ -39,6 +39,12 @@ describe Xd::UI::ImageAttachment do
     end
 
     Xd::UI::ImageAttachment.prepare(png).preview.width.should eq(1)
+    Xd::UI::ImageAttachment.pixels(
+      png,
+      168,
+      96,
+      "png"
+    ).height.should eq(1)
   end
 
   it "stops reading once source byte budget is exceeded" do
