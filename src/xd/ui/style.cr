@@ -425,6 +425,11 @@ module Xd
       .xd-offline { color: @error_color; }
       .xd-sidebar listview { padding-top: 0.5em; }
       .xd-inline-entry { min-height: 0; padding: 0 4px; }
+      .xd-sidebar-row-action {
+        min-width: 20px;
+        min-height: 20px;
+        padding: 2px;
+      }
 
       /* Temporary adapters for Crystal rows while their C widgets are ported. */
       .xd-tool-panel, .xd-terminal { background: #0a0a0c; }

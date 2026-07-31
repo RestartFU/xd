@@ -255,6 +255,7 @@ module Xd
         working : Dots,
         label : Gtk::Label,
         entry : Gtk::Entry,
+        actions : Gtk::Box,
         drag_source : Gtk::DragSource,
         drop_target : Gtk::DropTarget
 
@@ -801,6 +802,9 @@ module Xd
         working = Dots.new
         label = Gtk::Label.new("")
         entry = Gtk::Entry.new
+        actions = Gtk::Box.new(:horizontal, 0)
+        rename = Gtk::Button.new_from_icon_name("document-edit-symbolic")
+        delete = Gtk::Button.new_from_icon_name("user-trash-symbolic")
         drag_source = Gtk::DragSource.new
         drop_target = build_drop_target(box)
 
@@ -842,6 +846,40 @@ module Xd
         end
         entry.add_controller(editor_focus)
 
+        actions.visible = false
+        actions.valign = :center
+        rename.add_css_class("flat")
+        rename.add_css_class("xd-sidebar-row-action")
+        rename.tooltip_text = "Rename Chat"
+        delete.add_css_class("flat")
+        delete.add_css_class("xd-sidebar-row-action")
+        delete.tooltip_text = "Delete Chat"
+        actions.append(rename)
+        actions.append(delete)
+
+        rename.clicked_signal.connect do
+          if node = @bound_nodes[pointer_key(box)]?
+            begin_renaming(node) if node.chat? && !node.placeholder?
+          end
+        end
+        delete.clicked_signal.connect do
+          if node = @bound_nodes[pointer_key(box)]?
+            delete_chat(node.source, node.id) if node.chat? && !node.placeholder?
+          end
+        end
+
+        hover = Gtk::EventControllerMotion.new
+        hover.enter_signal.connect do |_x, _y|
+          node = @bound_nodes[pointer_key(box)]?
+          actions.visible =
+            !!node &&
+              node.chat? &&
+              !node.placeholder? &&
+              @editing_key != node.key
+        end
+        hover.leave_signal.connect { actions.visible = false }
+        box.add_controller(hover)
+
         working.visible = false
         working.widget.add_css_class("dim-label")
 
@@ -857,6 +895,7 @@ module Xd
         box.append(working.widget)
         box.append(label)
         box.append(entry)
+        box.append(actions)
 
         gesture = Gtk::GestureClick.new
         gesture.button = Gdk::BUTTON_SECONDARY.to_u32
@@ -884,6 +923,7 @@ module Xd
           working,
           label,
           entry,
+          actions,
           drag_source,
           drop_target
         )
@@ -905,6 +945,7 @@ module Xd
         widgets.expander.list_row = row
         widgets.icon.icon_name = node.icon_name
         widgets.label.text = node.name
+        widgets.actions.visible = false
         show_state(widgets, node)
 
         @bound_nodes[pointer_key(widgets.box)] = node
@@ -936,6 +977,7 @@ module Xd
         @expand_connections.delete(key).try(&.disconnect)
         if widgets = @row_widgets[key]?
           @bound_nodes.delete(pointer_key(widgets.box))
+          widgets.actions.visible = false
           widgets.drag_source.actions = Gdk::DragAction.new(0_u32)
           widgets.drag_source.content = nil
           widgets.expander.list_row = nil
@@ -1032,6 +1074,7 @@ module Xd
       ) : Nil
         widgets.label.visible = !editing
         widgets.entry.visible = editing
+        widgets.actions.visible = false if editing
         return unless editing
 
         widgets.entry.text = node.name
