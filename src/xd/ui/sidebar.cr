@@ -11,6 +11,7 @@ require "./dialogs"
 require "./directory_browser"
 require "./dots"
 require "./folder_dialogs"
+require "./idle_queue"
 require "./sidebar_state"
 
 module Xd
@@ -28,9 +29,23 @@ module Xd
       @restore_chat_id : String?
       @active_chat_key : String?
       @reload_generation : Int64
+      @root_model : Gio::ListStore
+      @tree_model : Gtk::TreeListModel
+      @tree_build : TreeBuild?
+      @tree_rebuild_pending : Bool
+      @retired_node_maps : Deque(Hash(String, Node))
+      @node_retirement_scheduled : Bool
       @closed : Bool
 
       private class Source
+        record TreeData,
+          folder_ids : Array(String),
+          folder_names : Hash(String, String),
+          folder_parents : Hash(String, String?),
+          children : Hash(String, Array(String)),
+          chats : Hash(String, Array(JSON::Any)),
+          chat_ids : Set(String)
+
         getter endpoint : Daemon::Endpoint
         getter remote : Bool
         getter folder_ids = [] of String
@@ -52,39 +67,73 @@ module Xd
           @chats = Hash(String, Array(JSON::Any)).new do |hash, key|
             hash[key] = [] of JSON::Any
           end
+          @chat_ids = Set(String).new
         end
 
-        def update(response : Hash(String, JSON::Any)) : Array(String)
-          previous_chats = @chats.values.flatten.map do |chat|
-            chat["id"].as_s
+        def self.prepare(response : Hash(String, JSON::Any)) : TreeData
+          folder_ids = [] of String
+          folder_names = {} of String => String
+          folder_parents = {} of String => String?
+          children = Hash(String, Array(String)).new do |hash, key|
+            hash[key] = [] of String
           end
-          @folder_ids.clear
-          @folder_names.clear
-          @folder_parents.clear
-          @children.clear
-          @chats.clear
+          chats = Hash(String, Array(JSON::Any)).new do |hash, key|
+            hash[key] = [] of JSON::Any
+          end
+          chat_ids = Set(String).new
 
           response["folders"].as_a.each do |folder|
             id = folder["id"].as_s
             parent = folder["parent"]?.try(&.as_s?)
-            @folder_ids << id
-            @folder_names[id] = folder["name"].as_s
-            @folder_parents[id] = parent
-            @children[parent || ROOT] << id
+            folder_ids << id
+            folder_names[id] = folder["name"].as_s
+            folder_parents[id] = parent
+            children[parent || ROOT] << id
           end
           response["chats"].as_a.each do |chat|
-            @chats[chat["folder"].as_s] << chat
+            chats[chat["folder"].as_s] << chat
+            chat_ids << chat["id"].as_s
           end
+
+          TreeData.new(
+            folder_ids,
+            folder_names,
+            folder_parents,
+            children,
+            chats,
+            chat_ids
+          )
+        end
+
+        def update(data : TreeData) : Array(String)
+          removed = [] of String
+          @chat_ids.each do |id|
+            removed << id unless data.chat_ids.includes?(id)
+          end
+          @folder_ids = data.folder_ids
+          @folder_names = data.folder_names
+          @folder_parents = data.folder_parents
+          @children = data.children
+          @chats = data.chats
+          @chat_ids = data.chat_ids
 
           selected = @selected_folder
           unless selected && @folder_names.has_key?(selected)
             @selected_folder = @children[ROOT].first?
           end
           @loaded = true
-          current_chats = @chats.values.flatten.map do |chat|
-            chat["id"].as_s
-          end
-          previous_chats - current_chats
+          removed
+        end
+
+        def tree_data : TreeData
+          TreeData.new(
+            @folder_ids,
+            @folder_names,
+            @folder_parents,
+            @children,
+            @chats,
+            @chat_ids
+          )
         end
 
         def clear : Nil
@@ -93,6 +142,7 @@ module Xd
           @folder_parents.clear
           @children.clear
           @chats.clear
+          @chat_ids.clear
           @selected_folder = nil
           @loaded = false
         end
@@ -152,6 +202,49 @@ module Xd
         end
       end
 
+      private class TreeBuildJob
+        getter source : Source
+        getter data : Source::TreeData
+        getter model : Gio::ListStore
+
+        def initialize(
+          @source : Source,
+          @data : Source::TreeData,
+          @model : Gio::ListStore,
+          @folder_ids : Array(String),
+          @chats : Array(JSON::Any),
+        )
+          @folder_index = 0
+          @chat_index = 0
+        end
+
+        def next_folder : String?
+          id = @folder_ids[@folder_index]?
+          @folder_index += 1 if id
+          id
+        end
+
+        def next_chat : JSON::Any?
+          chat = @chats[@chat_index]?
+          @chat_index += 1 if chat
+          chat
+        end
+
+        def more? : Bool
+          @folder_index < @folder_ids.size || @chat_index < @chats.size
+        end
+      end
+
+      private class TreeBuild
+        getter root_model = Gio::ListStore.new(Gtk::StringObject.g_type)
+        getter nodes = {} of String => Node
+        getter jobs = IdleQueue(TreeBuildJob).new
+        getter chat_states : Hash(String, SidebarState)
+
+        def initialize(@chat_states : Hash(String, SidebarState))
+        end
+      end
+
       private record RowWidgets,
         expander : Gtk::TreeExpander,
         box : Gtk::Box,
@@ -167,7 +260,9 @@ module Xd
       getter widget : Adw::ToolbarView
       getter header : Adw::HeaderBar
 
-      ROOT = ""
+      ROOT                  = ""
+      TREE_BUILD_BATCH      = 64
+      NODE_RETIREMENT_BATCH = 64
 
       def initialize(
         @parent : Gtk::Window,
@@ -211,47 +306,14 @@ module Xd
         @closing = {} of UInt64 => {Gtk::TreeListRow, String}
         @save_expanded_queued = false
         @reload_generation = 0_i64
+        @tree_build = nil
+        @tree_rebuild_pending = false
+        @retired_node_maps = Deque(Hash(String, Node)).new
+        @node_retirement_scheduled = false
         @closed = false
 
         @root_model = Gio::ListStore.new(Gtk::StringObject.g_type)
-        child_model_for_item = ->(item : Pointer(Void)) : Pointer(Void) {
-          string = Gtk::StringObject.new(item, GICrystal::Transfer::None)
-          node = @nodes[string.string]?
-
-          if node && node.folder?
-            model = node.children
-            LibGObject.g_object_ref(model.to_unsafe)
-            model.to_unsafe
-          else
-            Pointer(Void).null
-          end
-        }
-        child_model_data = GICrystal::ClosureDataManager.register(
-          ::Box.box(child_model_for_item)
-        )
-        create_children = ->(item : Pointer(Void), user_data : Pointer(Void)) : Pointer(Void) {
-          ::Box(Proc(Pointer(Void), Pointer(Void)))
-            .unbox(user_data)
-            .call(item)
-        }
-        destroy_children = ->GICrystal::ClosureDataManager.deregister(Pointer(Void))
-
-        # gi-crystal's generated wrapper returns the Crystal ListModel wrapper
-        # itself from this callback instead of its GObject pointer. Use the raw
-        # constructor until that callback ABI is fixed upstream.
-        GICrystal.ref(@root_model)
-        tree_model = LibGtk.gtk_tree_list_model_new(
-          @root_model.to_unsafe,
-          0,
-          0,
-          create_children.pointer,
-          child_model_data,
-          destroy_children.pointer
-        )
-        @tree_model = Gtk::TreeListModel.new(
-          tree_model,
-          GICrystal::Transfer::Full
-        )
+        @tree_model = create_tree_model(@root_model)
         @selection = Gtk::SingleSelection.new(@tree_model)
         @selection.autoselect = false
         @selection.can_unselect = true
@@ -376,21 +438,43 @@ module Xd
                      )
                    end
 
+          local_data : Source::TreeData? = nil
+          local_error = local.error
+          if response = local.body
+            begin
+              local_data = Source.prepare(response)
+            rescue error : KeyError | TypeCastError
+              local_error = error.message || "Daemon returned an invalid workspace tree."
+            end
+          end
+
+          remote_data : Source::TreeData? = nil
+          remote_error : String? = nil
+          if response = remote.try(&.body)
+            begin
+              remote_data = Source.prepare(response)
+            rescue error : KeyError | TypeCastError
+              remote_error = error.message || "Remote returned an invalid workspace tree."
+            end
+          end
+
           GLib.idle_add do
             unless @closed || generation != @reload_generation
-              if response = local.body
-                removed = @local_source.update(response)
+              if data = local_data
+                removed = @local_source.update(data)
                 removed.each do |id|
                   @on_chat_deleted.call(@local_source.endpoint, id)
                 end
-              elsif message = local.error
+              elsif message = local_error
                 @on_error.call(message)
               end
-              if response = remote.try(&.body)
-                removed = @remote_source.update(response)
+              if data = remote_data
+                removed = @remote_source.update(data)
                 removed.each do |id|
                   @on_chat_deleted.call(@remote_source.endpoint, id)
                 end
+              elsif message = remote_error
+                @on_error.call(message)
               end
               rebuild_tree
             end
@@ -458,10 +542,13 @@ module Xd
       end
 
       private def rebuild_tree : Nil
-        @root_model.remove_all
-        @nodes.clear
+        if @tree_build
+          @tree_rebuild_pending = true
+          return
+        end
 
-        add_source_roots(@local_source, @root_model)
+        build = TreeBuild.new(@chat_states.dup)
+        add_source_build_job(build, @local_source)
         if @remote.configured?
           snapshot = @remote.snapshot
           host = snapshot.host || "Remote"
@@ -474,47 +561,81 @@ module Xd
             @remote_source,
             state: snapshot.state.connected? ? SidebarState::Idle : SidebarState::Offline
           )
-          append_node(@root_model, root)
-          add_source_roots(@remote_source, root.children)
+          append_build_node(build, build.root_model, root)
+          add_source_build_job(build, @remote_source, root.children)
         end
-        @chat_states.select! { |key, _state| @nodes.has_key?(key) }
-        queue_restore
+        @tree_build = build
+        process_tree_build(build)
       end
 
-      private def add_source_roots(
+      private def add_source_build_job(
+        build : TreeBuild,
         source : Source,
-        model : Gio::ListStore,
+        model : Gio::ListStore = build.root_model,
       ) : Nil
-        source.children[ROOT].each do |folder_id|
-          add_folder_node(source, folder_id, model)
-        end
-      end
-
-      private def add_folder_node(
-        source : Source,
-        folder_id : String,
-        model : Gio::ListStore,
-      ) : Nil
-        prefix = source.remote ? "remote" : "local"
-        node = Node.new(
-          "#{prefix}/folder/#{folder_id}",
-          folder_id,
-          source.folder_names[folder_id],
-          NodeKind::Folder,
+        data = source.tree_data
+        job = TreeBuildJob.new(
           source,
-          folder_id: folder_id
+          data,
+          model,
+          data.children[ROOT],
+          [] of JSON::Any
         )
-        append_node(model, node)
+        build.jobs << job if job.more?
+      end
 
-        source.children[folder_id].each do |child_id|
-          add_folder_node(source, child_id, node.children)
+      private def process_tree_build(build : TreeBuild) : Nil
+        return unless @tree_build.same?(build)
+
+        build.jobs.drain(TREE_BUILD_BATCH) do |job|
+          process_tree_build_job(build, job)
         end
-        source.chats[folder_id].each do |chat|
-          add_chat_node(source, chat, node.children)
+
+        if build.jobs.empty?
+          finish_tree_build(build)
+        else
+          GLib.idle_add do
+            process_tree_build(build) unless @closed
+            false
+          end
         end
       end
 
-      private def add_chat_node(
+      private def process_tree_build_job(
+        build : TreeBuild,
+        job : TreeBuildJob,
+      ) : Nil
+        if folder_id = job.next_folder
+          prefix = job.source.remote ? "remote" : "local"
+          node = Node.new(
+            "#{prefix}/folder/#{folder_id}",
+            folder_id,
+            job.data.folder_names[folder_id],
+            NodeKind::Folder,
+            job.source,
+            folder_id: folder_id
+          )
+          append_build_node(build, job.model, node)
+          build.jobs << job if job.more?
+
+          children = TreeBuildJob.new(
+            job.source,
+            job.data,
+            node.children,
+            job.data.children[folder_id],
+            job.data.chats[folder_id]
+          )
+          build.jobs << children if children.more?
+          return
+        end
+
+        chat = job.next_chat || return
+        add_build_chat_node(build, job.source, chat, job.model)
+        build.jobs << job if job.more?
+      end
+
+      private def add_build_chat_node(
+        build : TreeBuild,
         source : Source,
         chat : JSON::Any,
         model : Gio::ListStore,
@@ -525,14 +646,15 @@ module Xd
         title = "New Chat" if title.empty?
         prefix = source.remote ? "remote" : "local"
         key = "#{prefix}/chat/#{id}"
-        current = chat_state(key)
+        current = build.chat_states[key]? || SidebarState::Idle
         state = current.reconcile_tree(
           chat["working"]?.try(&.as_bool?) == true,
           @active_chat_key == key,
           source.remote
         )
-        @chat_states[key] = state
-        append_node(
+        build.chat_states[key] = state
+        append_build_node(
+          build,
           model,
           Node.new(
             key,
@@ -547,9 +669,100 @@ module Xd
         )
       end
 
-      private def append_node(model : Gio::ListStore, node : Node) : Nil
-        @nodes[node.key] = node
+      private def append_build_node(
+        build : TreeBuild,
+        model : Gio::ListStore,
+        node : Node,
+      ) : Nil
+        build.nodes[node.key] = node
         model.append(Gtk::StringObject.new(node.key))
+      end
+
+      private def finish_tree_build(build : TreeBuild) : Nil
+        return unless @tree_build.same?(build)
+
+        @tree_build = nil
+        if @closed
+          retire_node_map(build.nodes)
+          return
+        end
+        if @tree_rebuild_pending
+          @tree_rebuild_pending = false
+          retire_node_map(build.nodes)
+          rebuild_tree
+          return
+        end
+
+        old_nodes = @nodes
+        @nodes = build.nodes
+        @chat_states = build.chat_states
+        @chat_states.select! { |key, _state| @nodes.has_key?(key) }
+        @root_model = build.root_model
+        @tree_model = create_tree_model(@root_model)
+        @selection.model = @tree_model
+        retire_node_map(old_nodes)
+        queue_restore
+      end
+
+      private def retire_node_map(nodes : Hash(String, Node)) : Nil
+        return if nodes.empty?
+
+        @retired_node_maps << nodes
+        return if @node_retirement_scheduled
+
+        @node_retirement_scheduled = true
+        GLib.idle_add do
+          NODE_RETIREMENT_BATCH.times do
+            retired = @retired_node_maps.first?
+            break unless retired
+
+            retired.shift?
+            @retired_node_maps.shift if retired.empty?
+          end
+          more = !@retired_node_maps.empty?
+          @node_retirement_scheduled = more
+          more
+        end
+      end
+
+      private def create_tree_model(
+        root_model : Gio::ListStore,
+      ) : Gtk::TreeListModel
+        child_model_for_item = ->(item : Pointer(Void)) : Pointer(Void) {
+          string = Gtk::StringObject.new(item, GICrystal::Transfer::None)
+          node = @nodes[string.string]?
+
+          if node && node.folder?
+            model = node.children
+            LibGObject.g_object_ref(model.to_unsafe)
+            model.to_unsafe
+          else
+            Pointer(Void).null
+          end
+        }
+        child_model_data = GICrystal::ClosureDataManager.register(
+          ::Box.box(child_model_for_item)
+        )
+        create_children = ->(item : Pointer(Void), user_data : Pointer(Void)) : Pointer(Void) {
+          ::Box(Proc(Pointer(Void), Pointer(Void)))
+            .unbox(user_data)
+            .call(item)
+        }
+        destroy_children = ->GICrystal::ClosureDataManager.deregister(Pointer(Void))
+
+        # gi-crystal's generated wrapper returns the Crystal ListModel wrapper
+        # itself from this callback instead of its GObject pointer. Use the raw
+        # constructor until that callback ABI is fixed upstream.
+        GICrystal.ref(root_model)
+        tree_model = LibGtk.gtk_tree_list_model_new(
+          root_model.to_unsafe,
+          0,
+          0,
+          create_children.pointer,
+          child_model_data,
+          destroy_children.pointer
+        )
+        Gtk::TreeListModel.new(tree_model, GICrystal::Transfer::Full)
       end
 
       private def setup_item(object : GObject::Object) : Nil
@@ -776,6 +989,10 @@ module Xd
       ) : Nil
         key = chat_key(source, id)
         @chat_states[key] = state
+        if build = @tree_build
+          build.chat_states[key] = state
+          build.nodes[key]?.try { |pending| pending.state = state }
+        end
         node = @nodes[key]?
         return unless node
 

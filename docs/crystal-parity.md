@@ -57,7 +57,12 @@ C sources: `src/xd-window.c`, `src/xd-app.c`.
 - `[~]` Folder/chat create, rename, move, delete, context, and settings actions
   route through one daemon endpoint interface. Tree loads and every mutation
   leave GTK immediately; generation checks discard stale reloads after a newer
-  local/remote state request.
+  local/remote state request. Tree JSON preparation stays off GTK; detached
+  Gio node models materialize in 64-item idle batches, then swap atomically.
+  Reloads coalesce while a build is active, live chat state updates both
+  visible and pending models, and replaced node maps retire 64 entries per
+  idle instead of rebuilding or releasing a whole workspace tree in one
+  callback.
 - `[~]` C `GtkTreeListModel`/`GtkListView` rows, indentation, expanders,
   selection, activation, expansion persistence, and state dots are ported and
   populated-tree startup is screenshot-verified. Inline create/rename is
@@ -391,7 +396,7 @@ C sources: `src/remote/pair-dialog.c`, `src/settings/*-dialog.c`,
 
 - `[x]` Platform-local IPC and remote TLS dispatch through one `Daemon::Engine`.
 - `[x]` Continuously readable Codex/Claude pipes, client/server sockets,
-  terminal PTYs, updater/auth streams, and voice streams yield cooperatively
+  terminal PTYs, auth streams, and voice streams yield cooperatively
   after bounded chunks. Regression bursts of 100,000 CLI lines and 20,000
   daemon events keep scheduler heartbeats below 250 milliseconds instead of
   starving GTK. The client UI additionally coalesces adjacent text deltas and
@@ -512,7 +517,7 @@ C sources: `src/backend`, Crystal sources: `src/xd/agent`.
 
 ## Required release evidence
 
-- `[x]` Crystal specs pass in Docker (323 default and 5 authenticated-loopback
+- `[x]` Crystal specs pass in Docker (326 default and 5 authenticated-loopback
   examples; PortAudio coverage is part of the default suite).
 - `[x]` Crystal release binary builds in Docker.
 - `[x]` Bundle launches with isolated `HOME`, `XDG_DATA_HOME`, and
