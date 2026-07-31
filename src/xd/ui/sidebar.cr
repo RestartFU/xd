@@ -1739,8 +1739,9 @@ module Xd
           next unless created
 
           source.selected_folder = folder_id
+          @restore_chat_id = created["id"].as_s
+          @restore_chat_remote = source.remote
           reload
-          @on_chat.call(source.endpoint, created["id"].as_s, title)
         end
       end
 

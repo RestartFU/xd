@@ -548,6 +548,34 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "opens a new chat in a hidden non-Git working directory" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Hidden Local",
+      }.to_json)["id"].as_s
+      workdir = File.join(Path[store.path].dirname, ".local")
+      Dir.mkdir(workdir)
+
+      created = engine.dispatch(local, {
+        "op"      => "new-chat",
+        "folder"  => folder_id,
+        "title"   => "Dot directory",
+        "workdir" => workdir,
+      }.to_json)
+      created.success?.should be_true
+
+      state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => created["id"].as_s,
+      }.to_json)
+      state.success?.should be_true
+      state["workdir"].as_s.should eq(File.realpath(workdir))
+      state["context"].as_s.should contain(".local")
+    end
+  end
+
   it "manages secret names without returning their values" do
     old_path = ENV["XD_AGENT_SECRETS_FILE"]?
     directory = File.join(

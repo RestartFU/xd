@@ -277,8 +277,8 @@ module Xd
         return if @answered
 
         @answered = true
-        @chosen.call(path)
         @window.destroy unless @closed
+        defer_chosen(path)
       end
 
       private def closed : Nil
@@ -288,7 +288,17 @@ module Xd
         @sequence += 1
         unless @answered
           @answered = true
-          @chosen.call(nil)
+          defer_chosen(nil)
+        end
+      end
+
+      private def defer_chosen(path : String?) : Nil
+        # Destroying or replacing the parent UI from a picker signal can
+        # re-enter GTK while its modal window is still dispatching that signal.
+        # Let destruction finish before the selected directory starts work.
+        GLib.idle_add do
+          @chosen.call(path)
+          false
         end
       end
 
