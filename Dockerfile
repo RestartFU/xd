@@ -94,9 +94,6 @@ RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec --error-trace \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
-      crystal spec spec/xd/voice/recorder_spec.cr \
-        -Dxd_portaudio_backend --error-trace \
- && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec \
         spec/xd/daemon/local_ipc_spec.cr \
         spec/xd/daemon/local_connection_spec.cr \
@@ -169,6 +166,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1-mesa-dri \
       libadwaita-1-dev \
       libgtk-4-dev \
+      libportaudio2 \
       libpulse-dev \
       libsqlite3-dev \
       libssl-dev \

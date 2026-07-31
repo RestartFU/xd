@@ -7,8 +7,8 @@ describe Xd::Voice::Transcriber do
   it "leaves CPU headroom for the desktop" do
     Xd::Voice::Transcriber.thread_count(1).should eq(1)
     Xd::Voice::Transcriber.thread_count(2).should eq(1)
-    Xd::Voice::Transcriber.thread_count(4).should eq(3)
-    Xd::Voice::Transcriber.thread_count(64).should eq(6)
+    Xd::Voice::Transcriber.thread_count(4).should eq(2)
+    Xd::Voice::Transcriber.thread_count(64).should eq(4)
   end
 
   it "runs the bundled speech CLI with the C transcription settings" do

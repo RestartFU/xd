@@ -11,7 +11,7 @@ module Xd
 
     class Transcriber
       OUTPUT_LIMIT = 1024 * 1024
-      MAX_THREADS  = 6
+      MAX_THREADS  = 4
       PROMPT       =
         "Software engineering, source code, commands, file paths, APIs, " \
         "libraries, acronyms, capitalization, and punctuation."
@@ -61,7 +61,7 @@ module Xd
       end
 
       def self.thread_count(cpu_count : Int32 = System.cpu_count) : Int32
-        Math.min(Math.max(cpu_count - 1, 1), MAX_THREADS)
+        Math.min(Math.max(cpu_count // 2, 1), MAX_THREADS)
       end
 
       private def run(
