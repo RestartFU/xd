@@ -15,4 +15,18 @@ describe Xd::UI::DiffFileSections do
     plan.finish.should eq(103)
     plan.omitted.should eq(0)
   end
+
+  it "prepares syntax chunks before GTK rendering" do
+    rows = (1..161).map { |line| "+puts #{line}" }.join('\n')
+    patch = "diff --git a/main.cr b/main.cr\n" \
+            "@@ -0,0 +1,161 @@\n#{rows}\n"
+
+    prepared = Xd::UI::DiffFileSections.prepare(patch)
+    body = prepared.bodies[prepared.sections.first.start]
+
+    body.chunks.size.should eq(3)
+    body.chunks.map(&.row_kinds.size).should eq([80, 80, 2])
+    body.chunks.first.markup.should contain("puts")
+    body.omitted.should eq(0)
+  end
 end

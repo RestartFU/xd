@@ -10,13 +10,18 @@ module Xd
       CHUNK_ROWS        =    80
       MAX_RENDERED_ROWS = 4_000
 
-      record Prepared,
-        parsed : ParsedDiff,
-        sections : Array(DiffFileSection)
-
       record RenderPlan,
         finish : Int32,
         omitted : Int32
+
+      record PreparedBody,
+        chunks : Array(DiffMarkup),
+        omitted : Int32
+
+      record Prepared,
+        parsed : ParsedDiff,
+        sections : Array(DiffFileSection),
+        bodies : Hash(Int32, PreparedBody)
 
       record RowWidgets,
         expander : Gtk::Expander,
@@ -38,6 +43,7 @@ module Xd
       @binding = Set(UInt64).new
       @render_jobs = {} of UInt64 => Int64
       @render_sequence = 0_i64
+      @prepared_bodies = {} of Int32 => PreparedBody
 
       def initialize
         factory = Gtk::SignalListItemFactory.new
@@ -57,9 +63,15 @@ module Xd
 
       def self.prepare(patch : String) : Prepared
         parsed = UnifiedDiff.parse(patch)
+        sections = UnifiedDiff.file_sections(parsed.lines)
+        bodies = {} of Int32 => PreparedBody
+        sections.each do |section|
+          bodies[section.start] = prepare_body(parsed, section)
+        end
         Prepared.new(
           parsed,
-          UnifiedDiff.file_sections(parsed.lines)
+          sections,
+          bodies
         )
       end
 
@@ -68,6 +80,7 @@ module Xd
         @widget.model = nil
         @parsed = prepared.parsed
         @sections = prepared.sections
+        @prepared_bodies = prepared.bodies
 
         descriptors = Gtk::StringList.new(
           @sections.each_index.map(&.to_s).to_a
@@ -82,6 +95,29 @@ module Xd
           visible_finish,
           Math.max(finish - visible_finish, 0)
         )
+      end
+
+      private def self.prepare_body(
+        parsed : ParsedDiff,
+        section : DiffFileSection,
+      ) : PreparedBody
+        start = section.start
+        if parsed.lines[start]?.try(&.kind.file?)
+          start += 1
+        end
+        plan = render_plan(start, section.finish)
+        chunks = [] of DiffMarkup
+        while start < plan.finish
+          finish = Math.min(start + CHUNK_ROWS, plan.finish)
+          chunks << UnifiedDiff.markup_slice(
+            parsed.lines,
+            false,
+            start,
+            finish
+          )
+          start = finish
+        end
+        PreparedBody.new(chunks, plan.omitted)
       end
 
       private def setup_item(object : GObject::Object) : Nil
@@ -191,12 +227,7 @@ module Xd
       ) : Nil
         cancel_body(key)
         clear(body)
-        start = section.start
-        if @parsed.lines[start]?.try(&.kind.file?)
-          start += 1
-        end
-
-        plan = self.class.render_plan(start, section.finish)
+        prepared = @prepared_bodies[section.start]? || return
         @render_sequence += 1
         token = @render_sequence
         @render_jobs[key] = token
@@ -204,8 +235,8 @@ module Xd
           key,
           body,
           section,
-          start,
-          plan,
+          prepared,
+          0,
           token
         )
       end
@@ -214,20 +245,13 @@ module Xd
         key : UInt64,
         body : Gtk::Box,
         section : DiffFileSection,
-        start : Int32,
-        plan : RenderPlan,
+        prepared : PreparedBody,
+        chunk : Int32,
         token : Int64,
       ) : Nil
         return unless body_job_active?(key, body, section, token)
 
-        if start < plan.finish
-          finish = Math.min(start + CHUNK_ROWS, plan.finish)
-          rendered = UnifiedDiff.markup_slice(
-            @parsed.lines,
-            false,
-            start,
-            finish
-          )
+        if rendered = prepared.chunks[chunk]?
           text = DiffText.new(
             rendered.markup,
             rendered.row_kinds,
@@ -236,14 +260,14 @@ module Xd
           text.widget.hexpand = true
           body.append(text.widget)
 
-          if finish < plan.finish
+          if chunk + 1 < prepared.chunks.size
             GLib.idle_add do
               append_body_chunk(
                 key,
                 body,
                 section,
-                finish,
-                plan,
+                prepared,
+                chunk + 1,
                 token
               )
               false
@@ -252,7 +276,9 @@ module Xd
           end
         end
 
-        append_omitted_notice(body, plan.omitted) if plan.omitted > 0
+        if prepared.omitted > 0
+          append_omitted_notice(body, prepared.omitted)
+        end
         @render_jobs.delete(key) if @render_jobs[key]? == token
       end
 
