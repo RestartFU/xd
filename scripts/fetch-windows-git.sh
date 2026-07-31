@@ -54,7 +54,8 @@ MSYS2_ARG_CONV_EXCL=-o 7z x -y "-o$destination" "$WORK/$GIT_ASSET" \
 (
   cd "$STAGE/git"
   ./git-bash.exe \
-    --no-needs-console --hide --no-cd --command=post-install.bat
+    --no-needs-console --hide --no-cd --command=post-install.bat || \
+    [ ! -e post-install.bat ]
 )
 
 "$STAGE/git/cmd/git.exe" --version | grep -F "git version 2.55.0.windows.3"
