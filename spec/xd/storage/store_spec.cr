@@ -93,4 +93,37 @@ describe Xd::Storage::Store do
       remove_database(path)
     end
   end
+
+  it "repairs version 17 when daemon working already exists" do
+    path = database_path
+
+    begin
+      store = Xd::Storage::Store.new(path)
+      store.close
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        database.exec(
+          "UPDATE meta SET value = '17' WHERE key = 'schema_version'"
+        )
+      end
+
+      repaired = Xd::Storage::Store.new(path)
+      repaired.schema_version.should eq(Xd::Storage::SCHEMA_VERSION)
+      repaired.close
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        columns = database.query_all(
+          <<-SQL,
+            SELECT name
+              FROM pragma_table_info('chats')
+             WHERE name = 'daemon_working'
+            SQL
+          as: String
+        )
+        columns.should eq(["daemon_working"])
+      end
+    ensure
+      remove_database(path)
+    end
+  end
 end

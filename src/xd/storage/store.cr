@@ -225,10 +225,18 @@ module Xd
               SQL
           end
 
-          connection.exec(
-            "ALTER TABLE chats " \
-            "ADD COLUMN daemon_working INTEGER NOT NULL DEFAULT 0"
-          ) if version < 18
+          if version < 18
+            chat_columns = connection.query_all(
+              "SELECT name FROM pragma_table_info('chats')",
+              as: String
+            )
+            unless chat_columns.includes?("daemon_working")
+              connection.exec(
+                "ALTER TABLE chats " \
+                "ADD COLUMN daemon_working INTEGER NOT NULL DEFAULT 0"
+              )
+            end
+          end
 
           connection.exec(
             <<-SQL,
