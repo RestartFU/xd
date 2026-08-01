@@ -207,6 +207,7 @@ module Xd
 
         @auth_status = Gtk::Label.new("")
         @auth_status.xalign = 0_f32
+        @auth_status.ellipsize = :end
         @auth_status.add_css_class("dim-label")
         @auth_button = Gtk::Button.new_with_label("Sign In")
         @auth_button.add_css_class("flat")
@@ -415,11 +416,19 @@ module Xd
         @context_label.add_css_class("dim-label")
         @context_label.add_css_class("caption")
 
-        context = Gtk::Box.new(:horizontal, 8)
-        context.append(@context_label)
-        context.append(@status)
-        context.append(@auth_status)
-        context.append(@auth_button)
+        context_line = Gtk::Box.new(:horizontal, 8)
+        context_line.append(@context_label)
+        context_line.append(@status)
+
+        auth_controls = Gtk::Box.new(:horizontal, 8)
+        auth_controls.append(@auth_status)
+        auth_controls.append(@auth_button)
+        auth_controls.halign = :end
+        auth_controls.add_css_class("xd-auth-controls")
+
+        context = Gtk::Overlay.new
+        context.child = context_line
+        context.add_overlay(auth_controls)
         context.add_css_class("xd-context")
         context.add_css_class("dim-label")
         context.margin_start = 26

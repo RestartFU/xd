@@ -39,6 +39,10 @@ module Xd
         padding: 4px 12px;
       }
       .xd-context label { font-size: 0.85em; }
+      .xd-auth-controls {
+        background-color: #101013;
+        padding-left: 8px;
+      }
       window {
         font-family: "DM Sans", "Inter", "Cantarell", sans-serif;
         font-size: 0.95em;
