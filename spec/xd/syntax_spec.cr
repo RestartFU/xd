@@ -42,6 +42,10 @@ describe Xd::Syntax do
       "src/server.cr"             => Xd::SyntaxLanguage::Crystal,
       "src/Program.cs"            => Xd::SyntaxLanguage::CSharp,
       "scripts/setup.csx"         => Xd::SyntaxLanguage::CSharp,
+      "scripts/install.sh"        => Xd::SyntaxLanguage::Bash,
+      "tests/release.bats"        => Xd::SyntaxLanguage::Bash,
+      ".bashrc"                   => Xd::SyntaxLanguage::Bash,
+      "PKGBUILD"                  => Xd::SyntaxLanguage::Bash,
     }
 
     paths.each do |path, language|
@@ -284,6 +288,74 @@ describe Xd::Syntax do
     )
     escaped.none? { |piece| piece.token == Xd::SyntaxToken::Comment }
       .should be_true
+  end
+
+  it "classifies Bash commands, variables, strings, and comments" do
+    line = "if [[ -n $HOME ]]; then git status; printf '%s' $USER; fi # done"
+    pieces = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Bash,
+      line,
+      Xd::SyntaxState.new
+    )
+
+    pieces.map(&.text).join.should eq(line)
+    syntax_has?(pieces, Xd::SyntaxToken::Keyword, "if").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Keyword, "then").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Function, "git").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Function, "printf").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Preprocessor, "$HOME").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Preprocessor, "$USER").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::String, "'%s'").should be_true
+    syntax_has?(pieces, Xd::SyntaxToken::Comment, "# done").should be_true
+
+    assignment = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Bash,
+      "target=${1:-main}",
+      Xd::SyntaxState.new
+    )
+    syntax_has?(assignment, Xd::SyntaxToken::Preprocessor, "target")
+      .should be_true
+    syntax_has?(assignment, Xd::SyntaxToken::Preprocessor, "${1:-main}")
+      .should be_true
+
+    literal_hash = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Bash,
+      "echo foo#bar",
+      Xd::SyntaxState.new
+    )
+    literal_hash.none? { |piece| piece.token == Xd::SyntaxToken::Comment }
+      .should be_true
+  end
+
+  it "carries Bash heredocs and multiline quotes" do
+    heredoc = Xd::SyntaxState.new
+    opened = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Bash,
+      "cat <<-EOF",
+      heredoc
+    )
+    heredoc.in_heredoc.should be_true
+    syntax_has?(opened, Xd::SyntaxToken::Function, "cat").should be_true
+    syntax_has?(opened, Xd::SyntaxToken::String, "<<-EOF").should be_true
+    body = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Bash,
+      "hello $USER",
+      heredoc
+    )
+    syntax_has?(body, Xd::SyntaxToken::String, "hello $USER").should be_true
+    Xd::Syntax.scan_line(Xd::SyntaxLanguage::Bash, "  EOF", heredoc)
+    heredoc.in_heredoc.should be_false
+
+    quoted = Xd::SyntaxState.new
+    Xd::Syntax.scan_line(Xd::SyntaxLanguage::Bash, "printf '%s", quoted)
+    quoted.bash_quote.should eq('\'')
+    closed = Xd::Syntax.scan_line(
+      Xd::SyntaxLanguage::Bash,
+      "value' tail",
+      quoted
+    )
+    quoted.bash_quote.should eq('\0')
+    syntax_has?(closed, Xd::SyntaxToken::String, "value'").should be_true
   end
 
   it "classifies JSON quoted keys" do

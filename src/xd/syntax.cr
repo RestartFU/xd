@@ -17,6 +17,7 @@ module Xd
     Ruby
     Crystal
     CSharp
+    Bash
   end
 
   enum SyntaxToken
@@ -60,6 +61,7 @@ module Xd
     property crystal_macro_close = '\0'
     property in_csharp_verbatim_string = false
     property csharp_raw_quotes = 0
+    property bash_quote = '\0'
   end
 
   module Syntax
@@ -253,7 +255,26 @@ module Xd
       "spawn",
     }
     CRYSTAL_DEFINITION_KEYWORDS = Set{"def", "fun", "macro"}
-    NO_WORDS                    = Set(String).new
+    BASH_KEYWORDS               = Set{
+      "break", "case", "continue", "coproc", "do", "done", "elif",
+      "else", "esac", "fi", "for", "function", "if", "in", "return",
+      "select", "then", "time", "until", "while",
+    }
+    BASH_FUNCTIONS = Set{
+      "alias", "bg", "bind", "builtin", "caller", "cd", "command",
+      "compgen", "complete", "compopt", "declare", "dirs", "disown",
+      "echo", "enable", "eval", "exec", "exit", "export", "fc", "fg",
+      "getopts", "hash", "help", "history", "jobs", "kill", "let",
+      "local", "logout", "mapfile", "popd", "printf", "pushd", "pwd",
+      "read", "readarray", "readonly", "set", "shift", "shopt", "source",
+      "suspend", "test", "times", "trap", "type", "typeset", "ulimit",
+      "umask", "unalias", "unset", "wait",
+    }
+    BASH_DEFINITION_KEYWORDS = Set{"function"}
+    BASH_COMMAND_CONTEXTS    = Set{
+      "do", "elif", "else", "if", "then", "until", "while",
+    }
+    NO_WORDS = Set(String).new
 
     def language_for_path(path : String?) : SyntaxLanguage
       return SyntaxLanguage::None unless path
@@ -274,6 +295,12 @@ module Xd
       end
       if {"Gemfile", "Rakefile", "Vagrantfile"}.includes?(name)
         return SyntaxLanguage::Ruby
+      end
+      if {
+           ".bashrc", ".bash_profile", ".bash_login", ".bash_logout",
+           ".profile", "bashrc", "bash_profile", "PKGBUILD", "APKBUILD",
+         }.includes?(name)
+        return SyntaxLanguage::Bash
       end
 
       dot = name.rindex('.')
@@ -296,6 +323,8 @@ module Xd
            ".gemspec" then SyntaxLanguage::Ruby
       when ".cr"         then SyntaxLanguage::Crystal
       when ".cs", ".csx" then SyntaxLanguage::CSharp
+      when ".sh", ".bash",
+           ".bats" then SyntaxLanguage::Bash
       else
         extension.downcase == ".dockerfile" ? SyntaxLanguage::Dockerfile : SyntaxLanguage::None
       end
@@ -367,6 +396,9 @@ module Xd
           state.heredoc_delimiter = ""
         end
         return pieces
+      elsif state.bash_quote != '\0'
+        at = scan_bash_quoted(pieces, line, 0, state)
+        return pieces if state.bash_quote != '\0'
       end
 
       while at < line.bytesize
@@ -391,7 +423,8 @@ module Xd
           return pieces
         elsif inline_hash_comments?(language) &&
               byte(line, at) == byte_of('#') &&
-              !escaped?(line, at)
+              !escaped?(line, at) &&
+              (!language.bash? || bash_comment_start?(line, at))
           emit(pieces, SyntaxToken::Comment, line, at, line.bytesize)
           return pieces
         elsif spaced_hash_comments?(language) &&
@@ -579,12 +612,20 @@ module Xd
               byte(line, at) == byte_of('\'')) &&
               quoted_key?(line, at, byte(line, at), key_delimiter(language))
           at = scan_quoted_key(pieces, line, at, byte(line, at))
+        elsif language.bash? &&
+              (byte(line, at) == byte_of('"') ||
+              byte(line, at) == byte_of('\'') ||
+              byte(line, at) == byte_of('`'))
+          at = scan_bash_quoted(pieces, line, at, state)
+          return pieces if state.bash_quote != '\0'
         elsif byte(line, at) == byte_of('"') ||
               byte(line, at) == byte_of('\'')
           at = scan_quoted(pieces, line, at, byte(line, at))
         elsif backtick_literals?(language) &&
               byte(line, at) == byte_of('`')
           at = scan_quoted(pieces, line, at, byte_of('`'))
+        elsif language.bash? && byte(line, at) == byte_of('$')
+          at = scan_bash_expansion(pieces, line, at)
         elsif make_variables?(language) && byte(line, at) == byte_of('$')
           at = scan_make_variable(pieces, line, at)
         elsif raw_strings?(language) && byte(line, at) == byte_of('`')
@@ -661,6 +702,11 @@ module Xd
             emit(pieces, SyntaxToken::Text, line, at, at + 1)
             at += 1
           end
+        elsif language.bash? &&
+              (ascii_alpha?(byte(line, at)) ||
+              byte(line, at) == byte_of('_')) &&
+              bash_assignment?(line, at)
+          at = scan_bash_assignment(pieces, line, at)
         elsif ascii_digit?(byte(line, at)) ||
               (byte(line, at) == byte_of('.') &&
               ascii_digit?(byte(line, at + 1)))
@@ -1093,6 +1139,7 @@ module Xd
       crystal = language.crystal?
       scan = at + 2
       return nil if crystal && byte(line, scan) != byte_of('-')
+      return nil if language.bash? && byte(line, scan) == byte_of('<')
 
       if byte(line, scan) == byte_of('-') ||
          (!crystal && byte(line, scan) == byte_of('~'))
@@ -1303,6 +1350,111 @@ module Xd
       scan
     end
 
+    private def scan_bash_expansion(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at + 1
+      current = byte(line, scan)
+      if current == byte_of('{') || current == byte_of('(')
+        open = current
+        close = open == byte_of('{') ? byte_of('}') : byte_of(')')
+        depth = 1
+        scan += 1
+        while scan < line.bytesize && depth > 0
+          value = byte(line, scan)
+          if value == byte_of('\\') && scan + 1 < line.bytesize
+            scan += 2
+          elsif value == byte_of('\'') || value == byte_of('"')
+            quote = value
+            scan += 1
+            while scan < line.bytesize && byte(line, scan) != quote
+              scan += byte(line, scan) == byte_of('\\') &&
+                      scan + 1 < line.bytesize ? 2 : 1
+            end
+            scan += 1 if scan < line.bytesize
+          elsif value == open
+            depth += 1
+            scan += 1
+          elsif value == close
+            depth -= 1
+            scan += 1
+          else
+            scan += 1
+          end
+        end
+      elsif ascii_alpha?(current) || current == byte_of('_')
+        scan += 1
+        while word_byte?(byte(line, scan))
+          scan += 1
+        end
+      elsif ascii_digit?(current) || "@*#?$!-".includes?(current.chr)
+        scan += 1
+      else
+        emit(pieces, SyntaxToken::Text, line, at, at + 1)
+        return at + 1
+      end
+
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def scan_bash_quoted(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+      state : SyntaxState,
+    ) : Int32
+      quote = state.bash_quote == '\0' ? byte(line, at) : state.bash_quote.ord.to_u8
+      scan = state.bash_quote == '\0' ? at + 1 : at
+      closed = false
+      while scan < line.bytesize
+        current = byte(line, scan)
+        if current == quote
+          scan += 1
+          closed = true
+          break
+        elsif quote != byte_of('\'') &&
+              current == byte_of('\\') && scan + 1 < line.bytesize
+          scan += 2
+        else
+          scan += 1
+        end
+      end
+      state.bash_quote = closed ? '\0' : quote.chr
+      emit(pieces, SyntaxToken::String, line, at, scan)
+      scan
+    end
+
+    private def bash_assignment?(line : String, at : Int32) : Bool
+      scan = at
+      while word_byte?(byte(line, scan))
+        scan += 1
+      end
+      byte(line, scan) == byte_of('=')
+    end
+
+    private def scan_bash_assignment(
+      pieces : Array(SyntaxPiece),
+      line : String,
+      at : Int32,
+    ) : Int32
+      scan = at
+      while word_byte?(byte(line, scan))
+        scan += 1
+      end
+      emit(pieces, SyntaxToken::Preprocessor, line, at, scan)
+      scan
+    end
+
+    private def bash_comment_start?(line : String, at : Int32) : Bool
+      return true if at == 0
+      previous = byte(line, at - 1)
+      previous == byte_of(' ') || previous == byte_of('\t') ||
+        ";|&()".includes?(previous.chr)
+    end
+
     private def scan_table_header(
       pieces : Array(SyntaxPiece),
       line : String,
@@ -1477,6 +1629,8 @@ module Xd
                 is_definition?(line, at, definitions)
               end
           SyntaxToken::Function
+        elsif language.bash? && bash_command_position?(line, at)
+          SyntaxToken::Function
         elsif type_context_keywords(language).try do |contexts|
                 is_definition?(line, at, contexts)
               end
@@ -1496,6 +1650,23 @@ module Xd
 
       emit(pieces, token, line, at, scan)
       scan
+    end
+
+    private def bash_command_position?(line : String, at : Int32) : Bool
+      scan = at
+      while scan > 0 &&
+            (byte(line, scan - 1) == byte_of(' ') ||
+            byte(line, scan - 1) == byte_of('\t'))
+        scan -= 1
+      end
+      return true if scan == 0
+      return true if ";|&(".includes?(byte(line, scan - 1).chr)
+
+      finish = scan
+      while scan > 0 && word_byte?(byte(line, scan - 1))
+        scan -= 1
+      end
+      BASH_COMMAND_CONTEXTS.includes?(byte_slice(line, scan, finish))
     end
 
     private def is_definition?(
@@ -1727,6 +1898,7 @@ module Xd
       when .odin?       then ODIN_KEYWORDS
       when .ruby?       then RUBY_KEYWORDS
       when .crystal?    then CRYSTAL_KEYWORDS
+      when .bash?       then BASH_KEYWORDS
       else                   NO_WORDS
       end
     end
@@ -1767,6 +1939,7 @@ module Xd
       case language
       when .ruby?    then RUBY_FUNCTIONS
       when .crystal? then CRYSTAL_FUNCTIONS
+      when .bash?    then BASH_FUNCTIONS
       else                NO_WORDS
       end
     end
@@ -1777,6 +1950,7 @@ module Xd
       case language
       when .ruby?    then RUBY_DEFINITION_KEYWORDS
       when .crystal? then CRYSTAL_DEFINITION_KEYWORDS
+      when .bash?    then BASH_DEFINITION_KEYWORDS
       else                nil
       end
     end
@@ -1878,7 +2052,7 @@ module Xd
     end
 
     private def shebangs?(language : SyntaxLanguage) : Bool
-      language.v? || language.ruby? || language.crystal?
+      language.v? || language.ruby? || language.crystal? || language.bash?
     end
 
     private def hash_comments?(language : SyntaxLanguage) : Bool
@@ -1887,7 +2061,7 @@ module Xd
 
     private def inline_hash_comments?(language : SyntaxLanguage) : Bool
       language.makefile? || language.toml? ||
-        language.ruby? || language.crystal?
+        language.ruby? || language.crystal? || language.bash?
     end
 
     private def spaced_hash_comments?(language : SyntaxLanguage) : Bool
@@ -1921,7 +2095,7 @@ module Xd
     end
 
     private def backtick_literals?(language : SyntaxLanguage) : Bool
-      language.v? || language.crystal?
+      language.v? || language.crystal? || language.bash?
     end
 
     private def at_attributes?(language : SyntaxLanguage) : Bool
@@ -1949,7 +2123,7 @@ module Xd
     end
 
     private def heredocs?(language : SyntaxLanguage) : Bool
-      language.ruby? || language.crystal?
+      language.ruby? || language.crystal? || language.bash?
     end
 
     private def colon_symbols?(language : SyntaxLanguage) : Bool
