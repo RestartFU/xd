@@ -91,15 +91,36 @@ module Xd
                 AppPaths.certificate,
                 AppPaths.private_key
               )
-              server.not_nil!.listen_remote(
+              actual_port = server.not_nil!.listen_remote(
                 bind,
                 port,
                 AppPaths.certificate,
                 AppPaths.private_key
               )
+              store.not_nil!.save_remote_listener(bind, actual_port)
+              actual_port
             }
             store.clear_daemon_working
             server.listen_local(AppPaths.local_socket)
+            if listener = store.remote_listener
+              bind, port = listener
+              begin
+                Daemon::Certificate.ensure_pair(
+                  AppPaths.certificate,
+                  AppPaths.private_key
+                )
+                server.listen_remote(
+                  bind,
+                  port,
+                  AppPaths.certificate,
+                  AppPaths.private_key
+                )
+              rescue error
+                STDERR.puts(
+                  "xd: cannot restore remote listener: #{error.message}"
+                )
+              end
+            end
             started.send({store, engine, server, nil})
           rescue error
             server.try(&.close)

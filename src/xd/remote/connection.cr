@@ -75,7 +75,7 @@ module Xd
 
         if @credentials
           generation = next_generation
-          spawn connect_loop(generation)
+          start_connect_loop(generation)
         end
       end
 
@@ -191,7 +191,7 @@ module Xd
           snapshot = snapshot_locked
         end
         publish_state(snapshot.not_nil!)
-        spawn connect_loop(generation.not_nil!)
+        start_connect_loop(generation.not_nil!)
       end
 
       def forget : Nil
@@ -345,8 +345,16 @@ module Xd
 
         publish_state(snapshot.not_nil!)
         if retry = retry_generation
-          spawn connect_loop(retry)
+          start_connect_loop(retry)
         end
+      end
+
+      private def start_connect_loop(generation : Int64) : Nil
+        Fiber::ExecutionContext::Isolated.new("xd remote reconnect") do
+          connect_loop(generation)
+        end
+      rescue error : RuntimeError
+        STDERR.puts "xd: cannot start remote reconnect: #{error.message}"
       end
 
       private def publish_event(

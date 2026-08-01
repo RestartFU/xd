@@ -128,12 +128,14 @@ module Xd
           options.certificate,
           options.private_key
         )
-        server.listen_remote(
+        actual_port = server.listen_remote(
           bind,
           port,
           options.certificate,
           options.private_key
         )
+        store.save_remote_listener(bind, actual_port)
+        actual_port
       }
 
       begin
@@ -149,6 +151,7 @@ module Xd
           options.certificate,
           options.private_key
         )
+        store.save_remote_listener(options.bind, port)
 
         @output.puts(
           "xd serve: #{Xd.version_string}, listening on #{port}, " \

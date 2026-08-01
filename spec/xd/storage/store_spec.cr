@@ -26,12 +26,15 @@ describe Xd::Storage::Store do
       store = Xd::Storage::Store.new(path, clock)
       store.schema_version.should eq(Xd::Storage::SCHEMA_VERSION)
       store.add_device("token-hash", "workstation")
+      store.remote_listener.should be_nil
+      store.save_remote_listener("127.0.0.1", 43123)
       store.close
 
       now = 200_000_000_i64
       reopened = Xd::Storage::Store.new(path, clock)
       reopened.device_name("token-hash").should eq("workstation")
       reopened.device_name("missing").should be_nil
+      reopened.remote_listener.should eq({"127.0.0.1", 43123})
       reopened.close
 
       DB.open("sqlite3://#{URI.encode_path(path)}") do |database|

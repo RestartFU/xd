@@ -67,6 +67,7 @@ private def with_daemon_engine(
   agent_authorizer : Xd::Agent::Manager::Authorizer? = ->(_provider : String) : String? { nil },
   voice_model_factory : Xd::Daemon::VoiceJobs::ModelFactory? = nil,
   voice_transcriber_factory : Xd::Daemon::VoiceJobs::TranscriberFactory? = nil,
+  peer_host : Proc(String) = -> { "192.168.1.20" },
   & : Xd::Storage::Store, Xd::Daemon::Engine ->
 ) : Nil
   path = File.join(
@@ -84,7 +85,8 @@ private def with_daemon_engine(
     authentication_environment: authentication_environment,
     agent_authorizer: agent_authorizer,
     voice_model_factory: voice_model_factory,
-    voice_transcriber_factory: voice_transcriber_factory
+    voice_transcriber_factory: voice_transcriber_factory,
+    peer_host: peer_host
   )
 
   begin
@@ -221,7 +223,7 @@ describe Xd::Daemon::Engine do
 
       response.success?.should be_true
       listened.should eq({"127.0.0.1", 0})
-      response["host"].as_s.should eq(System.hostname)
+      response["host"].as_s.should eq("192.168.1.20")
       response["port"].as_i64.should eq(43210)
       response["expires_in"].as_i64.should eq(300)
 

@@ -1,4 +1,5 @@
 require "db"
+require "json"
 require "sqlite3"
 require "uri"
 require "../daemon/device_store"
@@ -78,6 +79,45 @@ module Xd
       rescue error : DB::Error
         raise Error.new(
           "Cannot authenticate the device: #{error.message}"
+        )
+      end
+
+      def remote_listener : {String, Int32}?
+        value = @database.query_one?(
+          "SELECT value FROM meta WHERE key = 'remote_listener'",
+          as: String
+        )
+        return unless value
+
+        parsed = JSON.parse(value)
+        bind = parsed["bind"].as_s
+        port = parsed["port"].as_i
+        unless 0 <= port <= UInt16::MAX
+          raise Error.new("Saved remote listener port is invalid.")
+        end
+        {bind, port.to_i32}
+      rescue error : DB::Error | JSON::ParseException | TypeCastError | KeyError
+        raise Error.new(
+          "Cannot read remote listener settings: #{error.message}"
+        )
+      end
+
+      def save_remote_listener(bind : String, port : Int32) : Nil
+        value = {
+          "bind" => bind,
+          "port" => port,
+        }.to_json
+        @database.exec(
+          <<-SQL,
+            INSERT INTO meta (key, value)
+            VALUES ('remote_listener', ?)
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value
+            SQL
+          value
+        )
+      rescue error : DB::Error
+        raise Error.new(
+          "Cannot save remote listener settings: #{error.message}"
         )
       end
 

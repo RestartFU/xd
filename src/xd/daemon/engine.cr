@@ -13,6 +13,7 @@ require "./connection"
 require "./event_bus"
 require "./filesystem"
 require "./images"
+require "./network_address"
 require "./repository"
 require "./repository_monitor"
 require "./search"
@@ -57,6 +58,7 @@ module Xd
         workspace_monitor_interval : Time::Span = WorkspaceMonitor::INTERVAL,
         voice_model_factory : VoiceJobs::ModelFactory? = nil,
         voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
+        @peer_host : Proc(String) = -> { NetworkAddress.local },
       )
         @workspaces = workspaces || Workspace::Service.new(
           File.join(Path[@store.path].dirname, "Workspaces"),
@@ -429,7 +431,7 @@ module Xd
         code = arm_pairing_unlocked(5.minutes)
         Protocol::Response.ok({
           "code"       => JSON::Any.new(code),
-          "host"       => JSON::Any.new(System.hostname),
+          "host"       => JSON::Any.new(@peer_host.call),
           "port"       => JSON::Any.new(port.to_i64),
           "expires_in" => JSON::Any.new(300_i64),
         })

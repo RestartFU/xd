@@ -37,6 +37,40 @@ private def await_remote_state(
 end
 
 describe Xd::Remote::Connection do
+  it "runs automatic connection attempts outside the caller thread" do
+    with_remote_connection do |_socket, path, _store, _engine|
+      credentials = Xd::Remote::Credentials.new(
+        "test-host",
+        4001,
+        "test-token",
+        "ab" * 32
+      )
+      Xd::Remote::CredentialsFile.new(path).save(credentials)
+      caller = Thread.current
+      attempted = Channel(Thread).new(1)
+      connector = ->(_stored : Xd::Remote::Credentials) {
+        attempted.send(Thread.current)
+        raise IO::Error.new("offline")
+      }
+      connection = Xd::Remote::Connection.new(
+        Xd::Remote::CredentialsFile.new(path),
+        10.milliseconds,
+        connector
+      )
+
+      begin
+        select
+        when thread = attempted.receive
+          thread.should_not eq(caller)
+        when timeout(2.seconds)
+          fail "remote connection attempt never started"
+        end
+      ensure
+        connection.close
+      end
+    end
+  end
+
   it "isolates state subscriber failures" do
     with_remote_connection do |_socket, path, _store, _engine|
       connection = Xd::Remote::Connection.new(

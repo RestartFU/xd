@@ -91,7 +91,7 @@ module Xd
         help.wrap = true
         help.add_css_class("dim-label")
         @details.append(help)
-        @details.visible = false
+        @details.visible = true
 
         body = Gtk::Box.new(:vertical, 16)
         body.margin_top = 22
@@ -107,10 +107,10 @@ module Xd
         spacer.hexpand = true
         footer.append(spacer)
 
-        close = Gtk::Button.new_with_label("Close")
-        close.add_css_class("flat")
-        close.clicked_signal.connect { close }
-        footer.append(close)
+        close_button = Gtk::Button.new_with_label("Close")
+        close_button.add_css_class("flat")
+        close_button.clicked_signal.connect { dismiss }
+        footer.append(close_button)
 
         @refresh = Gtk::Button.new_with_label("New Code")
         @refresh.add_css_class("xd-panel-action")
@@ -128,7 +128,7 @@ module Xd
         keys = Gtk::EventControllerKey.new
         keys.key_pressed_signal.connect do |keyval, _keycode, _state|
           if keyval == Gdk::KEY_Escape
-            close
+            dismiss
             true
           else
             false
@@ -137,7 +137,7 @@ module Xd
         @window.add_controller(keys)
         @window.destroy_signal.connect { @closed = true }
         @window.close_request_signal.connect do
-          close
+          dismiss
           true
         end
       end
@@ -194,7 +194,6 @@ module Xd
                 @port.text = response["port"].as_i64.to_s
                 @code.text = response["code"].as_s
                 @status.text = "Ready for one device."
-                @details.visible = true
                 set_busy(false)
               end
               false
@@ -205,7 +204,9 @@ module Xd
               unless @closed
                 @status.text = message
                 @status.add_css_class("error")
-                @details.visible = false
+                @host.text = ""
+                @port.text = ""
+                @code.text = ""
                 set_busy(false)
               end
               false
@@ -220,7 +221,7 @@ module Xd
         @refresh.label = busy ? "Opening…" : "New Code"
       end
 
-      private def close : Nil
+      private def dismiss : Nil
         return if @closed
 
         @closed = true
