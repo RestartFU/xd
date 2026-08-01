@@ -31,6 +31,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -54,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,6 +65,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
+import com.restartfu.xd.mobile.R
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.AskBlock
 import com.restartfu.xd.model.ToolGrouping
@@ -180,10 +183,11 @@ internal fun ChatScreen(
                                     modifier = Modifier.widthIn(max = 110.dp),
                                 )
                             }
-                            TextButton(onClick = { choosingOptions = true }) {
-                                // Plan is the one worth seeing without opening
-                                // anything: it changes what a turn will do.
-                                Text(if (state.plan) "Plan" else "Build")
+                            IconButton(onClick = { choosingOptions = true }) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_settings),
+                                    contentDescription = "Chat settings",
+                                )
                             }
                         }
                     },
