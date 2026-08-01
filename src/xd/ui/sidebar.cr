@@ -884,6 +884,8 @@ module Xd
         entry.add_controller(editor_focus)
 
         actions.visible = false
+        actions.opacity = 0.0
+        actions.can_target = false
         actions.valign = :center
         rename.add_css_class("flat")
         rename.add_css_class("xd-sidebar-row-action")
@@ -909,14 +911,11 @@ module Xd
 
         hover = Gtk::EventControllerMotion.new
         hover.enter_signal.connect do |_x, _y|
-          node = @bound_nodes[pointer_key(box)]?
-          actions.visible =
-            !!node &&
-              node.chat? &&
-              !node.placeholder? &&
-              @editing_key != node.key
+          reveal_row_actions(box, actions, true)
         end
-        hover.leave_signal.connect { actions.visible = false }
+        hover.leave_signal.connect do
+          reveal_row_actions(box, actions, false)
+        end
         box.add_controller(hover)
 
         working.visible = false
@@ -984,10 +983,10 @@ module Xd
         widgets.expander.list_row = row
         widgets.icon.icon_name = node.icon_name
         widgets.label.text = node.name
-        widgets.actions.visible = false
         show_state(widgets, node)
 
         @bound_nodes[pointer_key(widgets.box)] = node
+        reveal_row_actions(widgets.box, widgets.actions, false)
         if node.kind.folder? && !node.placeholder?
           widgets.drag_source.actions = Gdk::DragAction::Move
           widgets.drag_source.content = Gdk::ContentProvider.new_for_value(
@@ -1015,6 +1014,7 @@ module Xd
         key = pointer_key(item)
         @expand_connections.delete(key).try(&.disconnect)
         if widgets = @row_widgets[key]?
+          reveal_row_actions(widgets.box, widgets.actions, false)
           @bound_nodes.delete(pointer_key(widgets.box))
           widgets.actions.visible = false
           widgets.drag_source.actions = Gdk::DragAction.new(0_u32)
@@ -1113,7 +1113,7 @@ module Xd
       ) : Nil
         widgets.label.visible = !editing
         widgets.entry.visible = editing
-        widgets.actions.visible = false if editing
+        reveal_row_actions(widgets.box, widgets.actions, false)
         return unless editing
 
         widgets.entry.text = node.name
@@ -1133,6 +1133,19 @@ module Xd
           end
           false
         end
+      end
+
+      private def reveal_row_actions(
+        box : Gtk::Box,
+        actions : Gtk::Box,
+        reveal : Bool,
+      ) : Nil
+        node = @bound_nodes[pointer_key(box)]?
+        eligible = !!node && node.chat? && !node.placeholder?
+        actions.visible = eligible
+        active = eligible && reveal && @editing_key != node.try(&.key)
+        actions.opacity = active ? 1.0 : 0.0
+        actions.can_target = active
       end
 
       private def begin_renaming(node : Node) : Nil
