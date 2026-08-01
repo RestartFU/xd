@@ -16,12 +16,16 @@ import com.restartfu.xd.store.TreeStore
 import com.restartfu.xd.time.currentEpochMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonPrimitive
+import com.restartfu.xd.terminal.TerminalEvent
+import com.restartfu.xd.terminal.TerminalWire
 
 public class XdClient(
     socketFactory: PlatformSocketFactory,
@@ -37,6 +41,13 @@ public class XdClient(
     public val hasCredentials: StateFlow<Boolean> = actor.hasCredentials
     public val credentialsReady: StateFlow<Boolean> = actor.credentialsReady
     public val tree: StateFlow<TreeSnapshot> = treeStore.state
+
+    /**
+     * Terminal traffic, which the chat stores do not model: a pty's output is
+     * not transcript state, so it is delivered decoded and on its own.
+     */
+    public val terminalEvents: Flow<TerminalEvent> =
+        actor.events.mapNotNull { TerminalWire.event(it.value) }
 
     init {
         scope.launch {

@@ -50,6 +50,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
+import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
@@ -163,11 +164,18 @@ internal fun ChatScreen(
                             factory = FilesViewModel.Factory(model.session),
                         ),
                     )
-                    Pane.TERMINAL -> Centered {
-                        Text(
-                            "Terminal is not available yet.",
-                            color = MaterialTheme.colorScheme.outline,
+                    Pane.TERMINAL -> {
+                        val terminal: TerminalViewModel = viewModel(
+                            key = "terminal-${state.chatId}",
+                            factory = TerminalViewModel.Factory(
+                                model.session,
+                                state.chatId,
+                            ),
                         )
+                        LaunchedEffect(terminal) {
+                            model.client.terminalEvents.collect(terminal::onEvent)
+                        }
+                        TerminalPaneContent(terminal)
                     }
                     else -> Unit
                 }

@@ -2,6 +2,7 @@ package com.restartfu.xd.protocol
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 
 @Serializable
 public data class PairReply(
@@ -141,12 +142,19 @@ public data class BrowseReadReply(
     val content: String = "",
 )
 
+/**
+ * [replay] is the daemon's bounded output history: `{"data": base64}` frames
+ * with `{"columns","rows"}` resize frames between them. It is kept as raw JSON
+ * because the order of the two kinds is the point -- a late device has to
+ * interpret older output at the geometry that produced it.
+ */
 @Serializable
 public data class TerminalReply(
     val id: String,
     val title: String = "",
     val columns: Int,
     val rows: Int,
+    val replay: JsonArray = JsonArray(emptyList()),
 )
 
 @Serializable

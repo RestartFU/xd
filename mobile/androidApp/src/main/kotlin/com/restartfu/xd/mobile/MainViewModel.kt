@@ -93,7 +93,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 class ChatViewModel(
-    client: XdClient,
+    val client: XdClient,
     chatId: String,
 ) : ViewModel() {
     val session: ChatSession = client.openChat(chatId)

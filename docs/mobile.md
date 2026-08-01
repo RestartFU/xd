@@ -165,3 +165,34 @@ expansion and quoting state, Crystal macro delimiters, TOML table headers, and
 YAML anchors. Those constructs render as plain text. That is a deliberate
 trade: uncoloured reads fine, mis-coloured does not, and the desktop remains
 the place to read a large diff closely.
+
+## Panes
+
+The desktop shows the conversation, terminal, files and diff side by side. A
+phone has room for one at a time, so they are tabs over the same chat.
+
+**Diff** reads whole patches with `working-all` and `branch-all` rather than
+the desktop's per-file sections, because a phone shows one scrollable patch.
+`branch-all` needs the branch point, so switching to it costs a `base` read
+first.
+
+**Files** lists and previews through `file-browse`, syntax colouring the
+preview by path. It is read-only: the daemon supports `write`, but editing
+code on a phone is not what this is for. Paths stay relative to the working
+directory because the daemon refuses anything else.
+
+**Terminal** attaches to the shared pty. The session lives on the daemon and
+every attached device sees the same screen, so opening reuses an existing
+terminal rather than starting a second one; replay rebuilds the scrollback,
+resize frames included and in order, before live output is applied.
+
+Because the daemon broadcasts raw pty bytes, the client has to interpret them.
+`shared/.../terminal` holds a VT100/xterm subset: cursor movement, erase,
+scrolling and SGR colour, including bright and 256-colour. Unsupported escapes
+are consumed rather than printed, so they cost formatting instead of turning
+the screen into noise.
+
+Two limits worth knowing. A full-screen application will not render
+faithfully -- the desktop keeps VTE for that. And input is sent a line at a
+time, since a phone keyboard has no key events to forward, so anything needing
+raw keys will not work from here.
