@@ -90,21 +90,30 @@ the debug APK to `dist/mobile/xd-mobile-debug.apk`.
 The APK build also runs that suite, signs the debug APK, and verifies its
 alignment and signature before exporting it.
 
-Docker keeps the generated debug signing key in the
-`xd-mobile-debug-signing` BuildKit cache. Rebuilding can update an installed
-debug APK without losing pairing credentials. Deleting that cache rotates the
-key; Android then requires uninstalling the old debug app.
+Every build is signed with the checked-in key described under Nightly APK, so
+a rebuild installs over the last one and keeps its pairing credentials.
 
 ## Nightly APK
 
 The rolling nightly release publishes `xd-nightly-android.apk` beside the
 Linux, macOS, and Windows artifacts. It is the same APK `make mobile-android`
-produces: a test build, signed with the generated debug key, requiring no
-secrets or other setup.
+produces: a test build requiring no secrets or other setup.
 
-Because a CI runner starts with a cold signing cache, that key differs from
-one build to the next. Android refuses an update signed by a different key, so
-uninstall the previous app before installing a newer APK.
+It is signed with `mobile/androidApp/debug.p12`, a fixed key checked into the
+repository on purpose. Gradle otherwise generates one per machine and a CI
+runner starts empty, so every nightly would carry a different signature and
+Android would refuse to install over the last one -- "App not installed as
+package conflicts with an existing package". One key for every build, local
+and CI, means updates install in place.
+
+That key is not a secret and must never be treated as one. It is the same idea
+as Android's own debug keystore, whose password is public: it proves nothing
+about who built the APK. Publishing this app properly would need a real key
+kept out of the repository, and the nightly would then have to be signed with
+it consistently.
+
+If you already have an xd build installed that predates this, uninstall it
+once; from then on updates apply normally.
 
 ## Try it on a phone
 

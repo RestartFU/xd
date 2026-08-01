@@ -41,7 +41,6 @@ RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
 FROM source AS verify
 
 RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
-    --mount=type=cache,id=xd-mobile-debug-signing,target=/root/.android,sharing=locked \
     ./gradlew --no-daemon :shared:allTests :androidApp:assembleDebug \
  && "${ANDROID_HOME}/build-tools/34.0.0/apksigner" verify \
       androidApp/build/outputs/apk/debug/androidApp-debug.apk \

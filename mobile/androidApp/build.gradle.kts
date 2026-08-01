@@ -19,6 +19,26 @@ android {
         resValue("string", "app_name", "xd")
     }
 
+    // A fixed key, checked in on purpose.
+    //
+    // Gradle otherwise generates one per machine, and a CI runner starts
+    // empty, so every nightly would be signed differently and Android would
+    // refuse to update an installed build: "package conflicts with an existing
+    // package". Signing every build with the same key makes updates work.
+    //
+    // This is not a secret and must never be treated as one. It is the same
+    // idea as Android's own debug keystore, whose password is public: it
+    // proves nothing about who built the APK. A published release would need
+    // a real key kept out of the repository.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.p12")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildFeatures {
         compose = true
     }
