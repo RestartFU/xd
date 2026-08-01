@@ -236,10 +236,19 @@ scrolling and SGR colour, including bright and 256-colour. Unsupported escapes
 are consumed rather than printed, so they cost formatting instead of turning
 the screen into noise.
 
-Two limits worth knowing. A full-screen application will not render
-faithfully -- the desktop keeps VTE for that. And input is sent a line at a
-time, since a phone keyboard has no key events to forward, so anything needing
-raw keys will not work from here.
+Input goes straight to the pty as it is typed, with no submit step, so tab
+completion, Ctrl-C and a live prompt behave as they should. Tapping the screen
+raises the keyboard, and the cursor is drawn as a block where the next
+character will land.
+
+Android delivers typed characters as text edits rather than key events, so the
+keyboard is driven through a one-pixel field the reader never sees; its value
+is padded because a backspace on an already-empty field is otherwise
+unobservable. A key bar supplies what a soft keyboard cannot send at all --
+Esc, Tab, arrows, and a sticky Ctrl that applies to the next character.
+
+One limit worth knowing: a full-screen application will not render faithfully.
+The desktop keeps VTE for that.
 
 ## Images in the transcript
 

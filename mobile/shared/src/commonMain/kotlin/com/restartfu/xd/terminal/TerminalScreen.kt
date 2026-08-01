@@ -39,6 +39,10 @@ public class TerminalScreen(
     private var parser = Parser.GROUND
     private val sequence = StringBuilder()
 
+    /** Where the next character lands, so a client can draw the caret. */
+    public val cursorRow: Int get() = cursorY
+    public val cursorColumn: Int get() = cursorX
+
     /** Rows top to bottom, each already [columns] cells wide. */
     public fun snapshot(): List<List<Cell>> = grid.map { it.toList() }
 

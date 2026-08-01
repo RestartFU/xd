@@ -87,8 +87,8 @@ public object TerminalWire {
             if (columns != null && rows != null) ReplayFrame.Resize(columns, rows) else null
         }
 
-    public fun encodeInput(text: String): String =
-        Base64.Default.encode(text.encodeToByteArray())
+    /** The pty takes bytes, and the wire takes base64. */
+    public fun encode(bytes: ByteArray): String = Base64.Default.encode(bytes)
 
     private fun JsonObject.text(name: String): String? =
         (this[name] as? JsonPrimitive)?.contentOrNull

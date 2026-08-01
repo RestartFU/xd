@@ -7,6 +7,8 @@ import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.terminal.Cell
 import com.restartfu.xd.terminal.ReplayFrame
 import com.restartfu.xd.terminal.TerminalEvent
+import com.restartfu.xd.terminal.TerminalKey
+import com.restartfu.xd.terminal.TerminalKeys
 import com.restartfu.xd.terminal.TerminalScreen
 import com.restartfu.xd.terminal.TerminalWire
 import kotlinx.coroutines.CancellationException
@@ -18,6 +20,8 @@ import kotlinx.coroutines.launch
 public data class TerminalPane(
     val id: String? = null,
     val rows: List<List<Cell>> = emptyList(),
+    val cursorRow: Int = 0,
+    val cursorColumn: Int = 0,
     val connecting: Boolean = false,
     val closed: Boolean = false,
     val error: String? = null,
@@ -62,7 +66,12 @@ class TerminalViewModel(
                     }
                     screen.resize(COLUMNS, ROWS)
                 }
-                _state.value = TerminalPane(id = id, rows = screen.snapshot())
+                _state.value = TerminalPane(
+                    id = id,
+                    rows = screen.snapshot(),
+                    cursorRow = screen.cursorRow,
+                    cursorColumn = screen.cursorColumn,
+                )
                 session.resizeTerminal(id, COLUMNS, ROWS)
             } catch (error: CancellationException) {
                 throw error
@@ -79,17 +88,35 @@ class TerminalViewModel(
         when (event) {
             is TerminalEvent.Output -> {
                 screen.write(event.data)
-                _state.value = _state.value.copy(rows = screen.snapshot())
+                _state.value = _state.value.copy(
+                    rows = screen.snapshot(),
+                    cursorRow = screen.cursorRow,
+                    cursorColumn = screen.cursorColumn,
+                )
             }
             is TerminalEvent.Closed -> _state.value = _state.value.copy(closed = true)
         }
     }
 
-    fun send(text: String) {
+    /**
+     * Writes straight to the pty, as a terminal does.
+     *
+     * There is no submit step: the shell sees each keystroke as it happens,
+     * which is what makes tab completion, Ctrl-C and a live prompt work at all.
+     */
+    fun send(bytes: ByteArray) {
         val id = _state.value.id ?: return
         viewModelScope.launch {
-            runCatching { session.sendTerminalInput(id, TerminalWire.encodeInput(text)) }
+            runCatching { session.sendTerminalInput(id, TerminalWire.encode(bytes)) }
         }
+    }
+
+    fun type(text: String): Unit = send(TerminalKeys.text(text))
+
+    fun press(key: TerminalKey): Unit = send(TerminalKeys.bytes(key))
+
+    fun control(letter: Char) {
+        TerminalKeys.control(letter)?.let(::send)
     }
 
     fun kill() {
