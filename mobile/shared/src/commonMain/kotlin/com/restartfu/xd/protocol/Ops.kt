@@ -144,6 +144,14 @@ public object Ops {
      */
     public fun deleteChat(chatId: String): JsonObject = withChat("delete-chat", chatId)
 
+    /** Renames a chat. The daemon refuses a blank title rather than clearing it. */
+    public fun renameChat(chatId: String, title: String): JsonObject = buildJsonObject {
+        require(title.isNotBlank()) { "A chat needs a title" }
+        put("op", "rename-chat")
+        put("chat", chatId)
+        put("title", title)
+    }
+
     public fun newChat(
         folderId: String,
         title: String? = null,

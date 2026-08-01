@@ -172,6 +172,20 @@ public class XdClient(
         requestTreeRefresh()
     }
 
+    /**
+     * Renames a chat. Tree-level alongside [deleteChat]: a title is how the
+     * tree names a chat, not something the conversation holds.
+     */
+    public suspend fun renameChat(chatId: String, title: String) {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        actor.call(Ops.renameChat(chatId, title))
+        requestTreeRefresh()
+        // Renaming broadcasts `tree` and nothing else, so a chat already open
+        // would keep showing its old title in the header until something else
+        // reloaded it.
+        sessions.value[chatId]?.core?.requestReload()
+    }
+
     public suspend fun createChat(
         folderId: String,
         title: String?,

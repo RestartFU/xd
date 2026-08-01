@@ -28,6 +28,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _creatingChat = MutableStateFlow(false)
     private val _createdChat = MutableStateFlow<String?>(null)
     private val _deletingChat = MutableStateFlow(false)
+    private val _renamingChat = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
 
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
@@ -113,6 +114,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not delete the chat"
             } finally {
                 _deletingChat.value = false
+            }
+        }
+    }
+
+    fun renameChat(chatId: String, title: String) {
+        if (_renamingChat.value) return
+        _renamingChat.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.renameChat(chatId, title)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not rename the chat"
+            } finally {
+                _renamingChat.value = false
             }
         }
     }

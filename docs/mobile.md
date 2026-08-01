@@ -264,6 +264,20 @@ Esc, Tab, arrows, and a sticky Ctrl that applies to the next character.
 One limit worth knowing: a full-screen application will not render faithfully.
 The desktop keeps VTE for that.
 
+## The tree
+
+A long press on a chat offers Rename and Delete. Long press rather than
+visible buttons: both are rare, the row is already a tap target for the thing
+you usually want, and a delete affordance beside it invites exactly the mis-tap
+you do not want. Deleting is irreversible — the daemon forgets the agent
+session, kills the chat's terminals and removes the transcript — so it keeps a
+confirmation that names the chat.
+
+Both refresh the tree rather than waiting for the daemon's `tree` broadcast, so
+the row has already changed by the time the dialog closes. Renaming also
+reloads an open session: it broadcasts `tree` and nothing else, so a chat
+already open would otherwise keep its old title in the header.
+
 ## Reading a transcript
 
 Only the reader's own messages get a bubble, as on the desktop, and it is

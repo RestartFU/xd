@@ -21,6 +21,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,6 +59,8 @@ internal fun TreeScreen(
     val foldersById = tree.folders.associateBy(Folder::id)
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
     var updatingDaemon by rememberSaveable { mutableStateOf(false) }
+    var acting by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    var renaming by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var deleting by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var confirmingForget by rememberSaveable { mutableStateOf(false) }
 
@@ -118,12 +121,36 @@ internal fun TreeScreen(
                                 }
                             },
                             openChat = openChat,
-                            deleteChat = { chat -> deleting = chat.id to chat.title },
+                            actOnChat = { chat -> acting = chat.id to chat.title },
                         )
                     }
                 }
             }
         }
+    }
+    acting?.let { (chatId, title) ->
+        ChatActionsDialog(
+            title = title,
+            onDismiss = { acting = null },
+            onRename = {
+                acting = null
+                renaming = chatId to title
+            },
+            onDelete = {
+                acting = null
+                deleting = chatId to title
+            },
+        )
+    }
+    renaming?.let { (chatId, title) ->
+        RenameChatDialog(
+            title = title,
+            onDismiss = { renaming = null },
+            onRename = { name ->
+                renaming = null
+                if (name != title) model.renameChat(chatId, name)
+            },
+        )
     }
     deleting?.let { (chatId, title) ->
         AlertDialog(
@@ -206,6 +233,90 @@ internal fun TreeScreen(
     }
 }
 
+/**
+ * What a long press on a chat offers.
+ *
+ * A list rather than dialog buttons: these are two things to do, not a
+ * question with a yes and a no, and a destructive action does not belong where
+ * a thumb expects Confirm.
+ */
+@Composable
+private fun ChatActionsDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                title.ifBlank { "This chat" },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "Rename",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onRename)
+                        .padding(vertical = 12.dp),
+                )
+                Text(
+                    "Delete",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onDelete)
+                        .padding(vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun RenameChatDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit,
+) {
+    // Keyed on the title so reopening on a different chat starts from its own
+    // name rather than the last one edited.
+    var name by rememberSaveable(title) { mutableStateOf(title) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename chat") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Title") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                // The daemon refuses a blank title rather than clearing it, so
+                // there is nothing to send.
+                onClick = { onRename(name.trim()) },
+                enabled = name.isNotBlank(),
+            ) { Text("Rename") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
 @Composable
 private fun ConnectionBanner(
     link: Link,
@@ -258,7 +369,7 @@ private fun LazyListScope.folderRows(
     expanded: Set<String>,
     toggle: (String) -> Unit,
     openChat: (String) -> Unit,
-    deleteChat: (ChatSummary) -> Unit,
+    actOnChat: (ChatSummary) -> Unit,
 ) {
     item(key = "folder-${folder.id}") {
         Row(
@@ -283,11 +394,12 @@ private fun LazyListScope.folderRows(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        // Long press rather than a visible button: deleting is
-                        // rare and irreversible, and a row is a tap target.
+                        // Long press rather than visible buttons: renaming and
+                        // deleting are both rare, and the row is already a tap
+                        // target for the thing you usually want.
                         .combinedClickable(
                             onClick = { openChat(chat.id) },
-                            onLongClick = { deleteChat(chat) },
+                            onLongClick = { actOnChat(chat) },
                         )
                         .padding(
                             start = (40 + depth * 16).dp,
@@ -311,7 +423,7 @@ private fun LazyListScope.folderRows(
         }
         children[folder.id].orEmpty().forEach { child ->
             folderRows(
-                child, depth + 1, children, chats, expanded, toggle, openChat, deleteChat,
+                child, depth + 1, children, chats, expanded, toggle, openChat, actOnChat,
             )
         }
     }
