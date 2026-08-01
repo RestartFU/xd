@@ -1351,7 +1351,7 @@ module Xd
             return
           end
           if subagent = Agent::SubagentTool.parse(content)
-            activity = @transcript_page.try(&.tool_group).try(&.widget)
+            activity = @transcript_page.try(&.tool_group)
             end_tool_group
             add_subagent_message(subagent[0], subagent[1], activity)
             return
@@ -1440,7 +1440,7 @@ module Xd
       private def add_subagent_message(
         identity : String,
         task : String,
-        activity : Gtk::Expander?,
+        activity : ToolCallGroup?,
       ) : Gtk::Label
         title = Gtk::Label.new("Subagent · #{identity}")
         title.xalign = 0_f32
@@ -1455,8 +1455,10 @@ module Xd
 
         card = Gtk::Box.new(:vertical, 6)
         card.add_css_class("xd-subagent")
-        if activity && (parent = activity.parent.as?(Gtk::Box))
-          parent.remove(activity)
+        if activity && (parent = activity.widget.parent.as?(Gtk::Box))
+          # The subagent's toggle becomes the disclosure for this run.
+          activity.absorb
+          parent.remove(activity.widget)
 
           indicator = Gtk::Image.new_from_icon_name("pan-end-symbolic")
           indicator.valign = :start
@@ -1482,13 +1484,13 @@ module Xd
           toggle.add_css_class("xd-subagent-toggle")
           toggle.bind_property(
             "active",
-            activity,
+            activity.expander,
             "expanded",
             GObject::BindingFlags::SyncCreate
           )
           toggle.bind_property(
             "active",
-            activity,
+            activity.widget,
             "visible",
             GObject::BindingFlags::SyncCreate
           )
@@ -1500,10 +1502,10 @@ module Xd
               expanded ? "Hide subagent activity" : "Show subagent activity"
           end
 
-          activity.margin_start = 12
-          activity.margin_end = 0
+          activity.widget.margin_start = 12
+          activity.widget.margin_end = 0
           card.append(toggle)
-          card.append(activity)
+          card.append(activity.widget)
         else
           card.append(title)
           card.append(detail)

@@ -61,11 +61,13 @@ import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.TerminalViewModel
+import com.restartfu.xd.model.ToolGrouping
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.ImageReference
 import com.restartfu.xd.model.MessagePart
 import com.restartfu.xd.model.TranscriptKind
+import com.restartfu.xd.model.TranscriptRow
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.syntax.CodeBlocks
 
@@ -104,10 +106,13 @@ internal fun ChatScreen(
     }
     val listState = rememberLazyListState()
     val items = state.visibleItems
+
+    // A run of tool calls collapses to one line; a lone one shows its command.
+    val rows = remember(items) { ToolGrouping.rows(items) }
     val leadingItemCount =
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
-    val lastTranscriptIndex = leadingItemCount + items.lastIndex
-    val atBottom by remember(items.size, leadingItemCount) {
+    val lastTranscriptIndex = leadingItemCount + rows.lastIndex
+    val atBottom by remember(rows.size, leadingItemCount) {
         derivedStateOf {
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             last >= lastTranscriptIndex - 1
@@ -252,8 +257,11 @@ internal fun ChatScreen(
             state.error?.let { error ->
                 item { Text(error, color = MaterialTheme.colorScheme.error) }
             }
-            items(items, key = TranscriptItem::id) { item ->
-                TranscriptRow(item, model)
+            items(rows, key = ::rowKey) { row ->
+                when (row) {
+                    is TranscriptRow.Single -> TranscriptRow(row.item, model)
+                    is TranscriptRow.Tools -> ToolGroupRow(row)
+                }
             }
         }
     }
@@ -502,6 +510,51 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
                     TranscriptKind.SYSTEM ->
                         Text(part.text, fontFamily = FontFamily.Monospace)
                     else -> Text(part.text)
+                }
+            }
+        }
+    }
+}
+
+private fun rowKey(row: TranscriptRow): String = when (row) {
+    is TranscriptRow.Single -> row.item.id
+    // Keyed on the run's first call, which is stable as the run grows.
+    is TranscriptRow.Tools -> "tools-${row.items.first().id}"
+}
+
+/**
+ * A run of tool calls behind one line.
+ *
+ * Expanding shows each call's command. Their detail stays behind its own
+ * toggle, so opening a run of ten does not unfold ten command outputs at once.
+ */
+@Composable
+private fun ToolGroupRow(row: TranscriptRow.Tools) {
+    var expanded by rememberSaveable(rowKey(row)) { mutableStateOf(false) }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (expanded) "▾" else "▸")
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    row.label,
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (expanded) {
+                Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    row.items.forEach { ToolRow(it) }
                 }
             }
         }
