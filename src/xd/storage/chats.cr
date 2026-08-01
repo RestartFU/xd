@@ -5,7 +5,7 @@ require "./store"
 module Xd
   module Storage
     CHAT_COLUMNS = <<-SQL
-      id, folder_id, title, backend, workdir, model, effort, access, plan,
+      id, folder_id, title, backend, workdir, model, effort, access, plan, fast,
       created_at, updated_at, terminal_open, diff_open, queued, new_worktree,
       original_workdir, daemon_working
       SQL
@@ -18,15 +18,16 @@ module Xd
         model : String? = nil,
         effort : String? = nil,
         workdir : String? = nil,
+        fast : Bool = false,
       ) : String
         database_error("Cannot create the chat") do
           defaults = @database.query_one?(
             <<-SQL,
-              SELECT backend, model, effort, access, plan
+              SELECT backend, model, effort, access, plan, fast
                 FROM agent_defaults
                WHERE singleton = 1
               SQL
-            as: {String, String?, String?, String?, Bool}
+            as: {String, String?, String?, String?, Bool, Bool}
           )
 
           actual_backend = defaults.try(&.[0]) || backend
@@ -34,16 +35,17 @@ module Xd
           actual_effort = defaults ? defaults[2] : effort
           actual_access = defaults.try(&.[3])
           actual_plan = defaults.try(&.[4]) || false
+          actual_fast = defaults ? defaults[5] : fast
           id = UUID.random.to_s
           now = now_microseconds
 
           @database.exec(
             <<-SQL,
               INSERT INTO chats (
-                id, folder_id, title, backend, model, effort, access, plan,
+                id, folder_id, title, backend, model, effort, access, plan, fast,
                 workdir, created_at, updated_at, last_user_message_at
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               SQL
             id,
             folder_id,
@@ -53,6 +55,7 @@ module Xd
             actual_effort,
             actual_access,
             actual_plan,
+            actual_fast,
             workdir,
             now // 1_000_000,
             now // 1_000_000,
@@ -162,6 +165,17 @@ module Xd
         end
       end
 
+      def set_fast(chat_id : String, fast : Bool) : Nil
+        database_error("Cannot change fast mode") do
+          @database.exec(
+            "UPDATE chats SET fast = ?, updated_at = ? WHERE id = ?",
+            fast,
+            now_seconds,
+            chat_id
+          )
+        end
+      end
+
       def set_panes(
         chat_id : String,
         terminal_open : Bool,
@@ -235,6 +249,7 @@ module Xd
           effort: row.read(String?),
           access: row.read(String?),
           plan: row.read(Bool),
+          fast: row.read(Bool),
           created_at: row.read(Int64),
           updated_at: row.read(Int64),
           terminal_open: row.read(Bool),

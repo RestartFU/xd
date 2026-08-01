@@ -1014,6 +1014,17 @@ describe Xd::Daemon::Engine do
         "op"   => "chat",
         "chat" => chat,
       }.to_json)["effort"].as_s.should eq("ultra")
+      fast = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "fast",
+        "value"  => "true",
+      }.to_json)
+      fast.success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)["fast"].as_bool.should be_true
       switch = engine.dispatch(local, {
         "op"   => "messages",
         "chat" => chat,
@@ -1059,6 +1070,7 @@ describe Xd::Daemon::Engine do
       }.to_json)
       claude.success?.should be_true
       store.get_chat(chat).effort.should be_nil
+      store.get_chat(chat).fast.should be_false
       rejected_ultra = engine.dispatch(local, {
         "op"     => "set-option",
         "chat"   => chat,
@@ -1066,6 +1078,13 @@ describe Xd::Daemon::Engine do
         "value"  => "ultra",
       }.to_json)
       rejected_ultra.success?.should be_false
+      rejected_fast = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "fast",
+        "value"  => "true",
+      }.to_json)
+      rejected_fast.success?.should be_false
     end
   end
 

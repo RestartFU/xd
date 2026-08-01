@@ -26,6 +26,7 @@ module Xd
       @updating = false
       @model_picker : ModelPicker
       @effort_picker : OptionPicker
+      @fast_button : Gtk::ToggleButton
       @access_picker : OptionPicker
       @build_button : Gtk::ToggleButton
       @plan_button : Gtk::ToggleButton
@@ -56,6 +57,19 @@ module Xd
         )
         @effort_picker.widget.tooltip_text =
           "How hard the model is asked to think"
+
+        @fast_button = Gtk::ToggleButton.new_with_label("Fast")
+        @fast_button.tooltip_text =
+          "Use Codex priority service. May consume usage credits faster."
+        @fast_button.visible = false
+        @fast_button.toggled_signal.connect do
+          unless @updating
+            @on_option.call(
+              "fast",
+              @fast_button.active? ? "true" : "false"
+            )
+          end
+        end
 
         @access_picker = OptionPicker.new(
           ACCESS.map_with_index do |access, index|
@@ -128,6 +142,7 @@ module Xd
         @identity.append(@model_picker.widget)
         @identity.append(@context_meter)
         @run.append(@effort_picker.widget)
+        @run.append(@fast_button)
         @run.append(@access_picker.widget)
         modes = Gtk::Box.new(:horizontal, 0)
         modes.add_css_class("linked")
@@ -142,6 +157,7 @@ module Xd
       def sensitive=(enabled : Bool) : Bool
         @model_picker.widget.sensitive = enabled
         @effort_picker.widget.sensitive = enabled
+        @fast_button.sensitive = enabled && @backend == "codex"
         @access_picker.widget.sensitive =
           enabled && !@plan_button.active?
         @build_button.sensitive = enabled
@@ -170,6 +186,10 @@ module Xd
 
         @model_picker.select(backend.id, @model)
         @effort_picker.selected = @efforts.index(@effort) || 0
+        @fast_button.visible = backend.id == "codex"
+        @fast_button.active =
+          backend.id == "codex" &&
+            (state["fast"]?.try(&.as_bool?) || false)
         @access_picker.selected = ACCESS.index(@access) || 0
         plan = state["plan"]?.try(&.as_bool?) || false
         (plan ? @plan_button : @build_button).active = true

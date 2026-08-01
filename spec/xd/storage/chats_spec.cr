@@ -83,6 +83,7 @@ describe Xd::Storage::Store do
       store.set_effort(changed, "xhigh")
       store.set_access(changed, "full")
       store.set_plan(changed, true)
+      store.set_fast(changed, true)
 
       after = store.create_chat(
         "folder-b",
@@ -97,6 +98,7 @@ describe Xd::Storage::Store do
       chat.effort.should eq("xhigh")
       chat.access.should eq("full")
       chat.plan.should be_true
+      chat.fast.should be_true
     end
   end
 

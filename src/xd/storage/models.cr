@@ -15,6 +15,7 @@ module Xd
       getter queue : Array(String)
       getter new_worktree : Bool
       getter plan : Bool
+      getter fast : Bool
       getter terminal_open : Bool
       getter diff_open : Bool
       getter daemon_working : Bool
@@ -33,6 +34,7 @@ module Xd
         @effort : String?,
         @access : String?,
         @plan : Bool,
+        @fast : Bool,
         @created_at : Int64,
         @updated_at : Int64,
         @terminal_open : Bool,

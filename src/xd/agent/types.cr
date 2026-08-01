@@ -113,6 +113,7 @@ module Xd
       getter folder_ids : Array(String)
       getter effort : Effort
       getter access : Access
+      getter fast : Bool
 
       def initialize(
         @prompt : String,
@@ -123,6 +124,7 @@ module Xd
         @folder_ids = [] of String,
         @effort = Effort::High,
         @access = Access::ReadOnly,
+        @fast = false,
       )
       end
     end

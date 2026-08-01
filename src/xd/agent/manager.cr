@@ -605,7 +605,8 @@ module Xd
             workdir: workdir,
             folder_ids: folder_ids,
             effort: effort,
-            access: access
+            access: access,
+            fast: backend.id == "codex" && chat.fast
           )
           turn = ActiveTurn.new(
             chat_id,
@@ -615,7 +616,8 @@ module Xd
             text,
             !resume_session_id.nil?,
             retry_attempt,
-            "#{backend.model_label(model)} · #{effort.label}",
+            "#{backend.model_label(model)} · #{effort.label}" +
+            (backend.id == "codex" && chat.fast ? " · Fast" : ""),
             workdir,
             transcript_message_id,
             @clock.call

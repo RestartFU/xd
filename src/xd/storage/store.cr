@@ -278,6 +278,31 @@ module Xd
             end
           end
 
+          if version < 19
+            chat_columns = connection.query_all(
+              "SELECT name FROM pragma_table_info('chats')",
+              as: String
+            )
+            unless chat_columns.includes?("fast")
+              connection.exec(
+                "ALTER TABLE chats " \
+                "ADD COLUMN fast INTEGER NOT NULL DEFAULT 0"
+              )
+            end
+            default_columns = connection.query_all(
+              "SELECT name FROM pragma_table_info('agent_defaults')",
+              as: String
+            )
+            unless default_columns.includes?("fast")
+              connection.exec(
+                "ALTER TABLE agent_defaults " \
+                "ADD COLUMN fast INTEGER NOT NULL DEFAULT 0"
+              )
+            end
+            connection.exec "DROP TRIGGER IF EXISTS remember_agent_defaults"
+            connection.exec AGENT_DEFAULTS_TRIGGER
+          end
+
           connection.exec(
             <<-SQL,
               INSERT INTO meta (key, value)

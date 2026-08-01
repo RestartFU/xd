@@ -213,6 +213,7 @@ module Xd
         if model = spec.model
           params["model"] = JSON::Any.new(model)
         end
+        params["serviceTier"] = JSON::Any.new("priority") if spec.fast
         if workdir = spec.workdir
           params["cwd"] = JSON::Any.new(workdir)
         end
@@ -280,6 +281,7 @@ module Xd
         if model = spec.model
           params["model"] = JSON::Any.new(model)
         end
+        params["serviceTier"] = JSON::Any.new("priority") if spec.fast
         if workdir = spec.workdir
           params["cwd"] = JSON::Any.new(workdir)
         end

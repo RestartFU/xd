@@ -29,7 +29,8 @@ describe Xd::Agent::CodexProtocol do
         model: "gpt-5.6-sol",
         workdir: "/tmp",
         effort: Xd::Agent::Effort::Ultra,
-        access: Xd::Agent::Access::Edit
+        access: Xd::Agent::Access::Edit,
+        fast: true
       ),
       nil,
       ->(event : Xd::Agent::Event) { events << event },
@@ -47,6 +48,7 @@ describe Xd::Agent::CodexProtocol do
     protocol.ready.should be_true
     sent_json(lines, 1)["method"].as_s.should eq("initialized")
     sent_json(lines, 2)["method"].as_s.should eq("thread/start")
+    sent_json(lines, 2)["params"]["serviceTier"].as_s.should eq("priority")
 
     protocol.receive_line({
       "id"     => 2,
@@ -57,6 +59,7 @@ describe Xd::Agent::CodexProtocol do
     sent_json(lines, 3)["method"].as_s.should eq("turn/start")
     start = sent_json(lines, 3)["params"]
     start["effort"].as_s.should eq("ultra")
+    start["serviceTier"].as_s.should eq("priority")
     start["sandboxPolicy"]["type"].as_s.should eq("workspaceWrite")
     start["sandboxPolicy"]["writableRoots"][0].as_s.should eq("/tmp")
     start["sandboxPolicy"]["networkAccess"].as_bool.should be_false

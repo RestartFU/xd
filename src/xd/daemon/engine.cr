@@ -952,6 +952,9 @@ module Xd
         end
         fields["commands"] = json_any(@agents.commands(chat_id))
         fields["plan"] = JSON::Any.new(stored.plan)
+        fields["fast"] = JSON::Any.new(
+          stored.backend == "codex" && stored.fast
+        )
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?
         fields["queue"] = json_any(stored.queue)
         active_turn = @agents.active_turn(chat_id)
@@ -1050,6 +1053,7 @@ module Xd
                )
               @store.set_effort(chat_id, nil)
             end
+            @store.set_fast(chat_id, false) if previous.fast && backend != "codex"
             if previous.backend != backend || previous.model != model
               @store.append_message(
                 chat_id,
@@ -1078,11 +1082,20 @@ module Xd
           @store.set_access(chat_id, value)
         when "plan"
           @store.set_plan(chat_id, value == "true")
+        when "fast"
+          fast = value == "true"
+          if fast && @store.get_chat(chat_id).backend != "codex"
+            raise Protocol::Error.new(
+              "Fast mode is only available for Codex."
+            )
+          end
+          @store.set_fast(chat_id, fast)
         when "backend"
           backend = value || raise Protocol::Error.new(
             "A backend value is required."
           )
           @store.set_backend(chat_id, backend)
+          @store.set_fast(chat_id, false) unless backend == "codex"
         when "new-worktree"
           @store.set_new_worktree(chat_id, value == "true")
         when "workspace"

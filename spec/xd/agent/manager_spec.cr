@@ -600,14 +600,16 @@ describe Xd::Agent::Manager do
       store.set_effort(chat_id, "ultra")
       store.set_access(chat_id, "full")
       store.set_plan(chat_id, true)
+      store.set_fast(chat_id, true)
 
       manager.send(chat_id, "plan this")
       launcher.backends.first.should eq("codex")
       launcher.specs.first.model.should eq("gpt-5.6-terra")
       launcher.specs.first.effort.should eq(Xd::Agent::Effort::Ultra)
       launcher.specs.first.access.should eq(Xd::Agent::Access::Plan)
+      launcher.specs.first.fast.should be_true
       manager.active_turn(chat_id).not_nil!.label.should eq(
-        "GPT-5.6 Terra · Ultra"
+        "GPT-5.6 Terra · Ultra · Fast"
       )
       launcher.finish(0, true)
 
@@ -616,6 +618,7 @@ describe Xd::Agent::Manager do
       launcher.specs[1].model.should eq("gpt-5.6-terra")
       launcher.specs[1].effort.should eq(Xd::Agent::Effort::Ultra)
       launcher.specs[1].access.should eq(Xd::Agent::Access::Full)
+      launcher.specs[1].fast.should be_true
       launcher.finish(1, true)
     end
   end
