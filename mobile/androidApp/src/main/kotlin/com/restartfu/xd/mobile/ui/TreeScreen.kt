@@ -31,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.MainViewModel
@@ -231,7 +232,12 @@ private fun LazyListScope.folderRows(
         ) {
             Text(if (folder.id in expanded) "▾" else "▸")
             Spacer(Modifier.width(8.dp))
-            Text(folder.name, style = MaterialTheme.typography.titleMedium)
+            Text(
+                folder.name,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
     if (folder.id in expanded) {
@@ -251,7 +257,12 @@ private fun LazyListScope.folderRows(
                 ) {
                     BackendIcon(chat.backend)
                     Spacer(Modifier.width(10.dp))
-                    Text(chat.title, modifier = Modifier.weight(1f))
+                    Text(
+                        chat.title,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     if (chat.working) Text("working", color = MaterialTheme.colorScheme.primary)
                 }
             }

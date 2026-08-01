@@ -96,7 +96,12 @@ internal fun FilesPaneContent(model: FilesViewModel) {
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Text(if (entry.directory) "▸" else " ")
-                        Text(entry.name, modifier = Modifier.weight(1f), maxLines = 1)
+                        Text(
+                            entry.name,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }

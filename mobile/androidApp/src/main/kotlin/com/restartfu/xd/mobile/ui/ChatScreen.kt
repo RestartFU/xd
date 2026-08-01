@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -132,7 +133,11 @@ internal fun ChatScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             BackendIcon(state.backend)
                             if (state.backend.isNotEmpty()) Spacer(Modifier.width(10.dp))
-                            Text(state.title.ifEmpty { "Chat" })
+                            Text(
+                                state.title.ifEmpty { "Chat" },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     },
                     navigationIcon = { TextButton(onClick = goBack) { Text("Back") } },
@@ -329,7 +334,14 @@ private fun Composer(
                         // discarding a queued message on a stray tap, with no
                         // undo, is not a good trade for one less tap.
                         onClick = { editing = index to queued },
-                        label = { Text(queued, maxLines = 1) },
+                        label = {
+                            Text(
+                                queued,
+                                modifier = Modifier.widthIn(max = 220.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
                     )
                 }
             }
