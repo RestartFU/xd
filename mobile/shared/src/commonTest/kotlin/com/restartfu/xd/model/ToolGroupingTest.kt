@@ -43,6 +43,22 @@ class ToolGroupingTest {
     }
 
     @Test
+    fun anInlineDiffGetsItsOwnCollapseRow() {
+        val diff = tool(
+            "file_change\ndiff --git a/src/file.kt b/src/file.kt\n" +
+                "--- a/src/file.kt\n+++ b/src/file.kt\n@@ -1 +1 @@\n-old\n+new",
+        )
+        val rows = ToolGrouping.rows(
+            listOf(tool("one"), tool("two"), diff, tool("three"), tool("four")),
+        )
+
+        assertEquals(3, rows.size)
+        assertEquals("2 tool calls", assertIs<TranscriptRow.Tools>(rows[0]).label)
+        assertEquals(diff, assertIs<TranscriptRow.Single>(rows[1]).item)
+        assertEquals("2 tool calls", assertIs<TranscriptRow.Tools>(rows[2]).label)
+    }
+
+    @Test
     fun nonToolItemsPassThroughInOrder() {
         val items = listOf(message("first"), message("second"))
 

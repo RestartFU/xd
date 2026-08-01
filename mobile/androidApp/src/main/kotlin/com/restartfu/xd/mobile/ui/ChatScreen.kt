@@ -115,7 +115,8 @@ internal fun ChatScreen(
     val listState = rememberLazyListState()
     val items = state.visibleItems
 
-    // A run of tool calls collapses to one line; a lone one shows its command.
+    // A run of ordinary tool calls collapses to one line; inline diffs keep
+    // their own file-change row, and a lone call shows its command.
     val rows = remember(items) { ToolGrouping.rows(items) }
     val leadingItemCount =
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
