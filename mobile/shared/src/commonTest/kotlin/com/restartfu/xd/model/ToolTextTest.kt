@@ -24,8 +24,11 @@ class ToolTextTest {
     @Test
     fun namesOneChangedFileAndCountsSeveral() {
         assertEquals(
-            "src/only.kt",
-            ToolText.summary("file_change\ndiff --git a/src/only.kt b/src/only.kt\n+x"),
+            "only.kt",
+            ToolText.summary(
+                "file_change\ndiff --git a/mobile/shared/src/commonMain/kotlin/only.kt " +
+                    "b/mobile/shared/src/commonMain/kotlin/only.kt\n+x",
+            ),
         )
         assertEquals("2 files changed", ToolText.summary("file_change\n$PATCH"))
     }

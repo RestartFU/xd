@@ -46,7 +46,9 @@ public object ToolText {
             val files = changedFiles(patch)
             return when (files.size) {
                 0 -> "Edited files"
-                1 -> files.single()
+                // Full repo paths rarely fit on a phone. The expanded patch
+                // still carries the path when its directory matters.
+                1 -> files.single().substringAfterLast('/')
                 else -> "${files.size} files changed"
             }
         }
