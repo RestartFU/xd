@@ -51,7 +51,11 @@ RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
 FROM source AS nightly
 
 ARG ANDROID_VERSION_CODE=1
+ARG ANDROID_SIGNING_ALIAS=xd-nightly
 
+# Alias and key password are optional: a PKCS#12 keystore normally uses one
+# password for both the store and the key, so requiring them separately is
+# needless setup friction. Supply them only when your keystore differs.
 RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
     --mount=type=secret,id=android_keystore,target=/run/secrets/android-keystore.p12 \
     --mount=type=secret,id=android_keystore_password \
@@ -60,8 +64,8 @@ RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
     export XD_ANDROID_KEYSTORE=/run/secrets/android-keystore.p12 \
            XD_ANDROID_VERSION_CODE="${ANDROID_VERSION_CODE}" \
            XD_ANDROID_KEYSTORE_PASSWORD="$(cat /run/secrets/android_keystore_password)" \
-           XD_ANDROID_KEY_ALIAS="$(cat /run/secrets/android_key_alias)" \
-           XD_ANDROID_KEY_PASSWORD="$(cat /run/secrets/android_key_password)" \
+           XD_ANDROID_KEY_ALIAS="$(cat /run/secrets/android_key_alias 2>/dev/null || echo "${ANDROID_SIGNING_ALIAS}")" \
+           XD_ANDROID_KEY_PASSWORD="$(cat /run/secrets/android_key_password 2>/dev/null || cat /run/secrets/android_keystore_password)" \
  && ./gradlew --no-daemon :shared:allTests :androidApp:assembleNightly \
  && "${ANDROID_HOME}/build-tools/34.0.0/apksigner" verify --verbose \
       androidApp/build/outputs/apk/nightly/androidApp-nightly.apk \
