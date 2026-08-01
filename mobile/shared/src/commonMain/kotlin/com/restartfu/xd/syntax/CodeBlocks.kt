@@ -26,13 +26,6 @@ public data class DiffLine(
     val language: SyntaxLanguage,
 )
 
-/** A run of prose, or a fenced code block, from an assistant message. */
-public data class Segment(
-    val code: Boolean,
-    val text: String,
-    val language: SyntaxLanguage = SyntaxLanguage.NONE,
-)
-
 public object CodeBlocks {
     private const val META_DIFF = "diff --git "
     private const val META_NEW = "+++ "
@@ -77,46 +70,4 @@ public object CodeBlocks {
         }
     }
 
-    /**
-     * Splits assistant text into prose and fenced code.
-     *
-     * Only fences are recognised. The rest of Markdown is left alone, because
-     * half-rendered Markdown reads worse than none.
-     */
-    public fun segments(text: String): List<Segment> {
-        val segments = mutableListOf<Segment>()
-        val buffer = StringBuilder()
-        var fence: String? = null
-        var language = SyntaxLanguage.NONE
-
-        fun flush(code: Boolean) {
-            if (buffer.isEmpty()) return
-            segments += Segment(code, buffer.toString().removeSuffix("\n"), language)
-            buffer.clear()
-        }
-
-        text.lines().forEach { line ->
-            val trimmed = line.trimStart()
-            val open = fence == null &&
-                (trimmed.startsWith("```") || trimmed.startsWith("~~~"))
-            val close = fence != null && trimmed.startsWith(fence!!)
-
-            when {
-                close -> {
-                    flush(true)
-                    fence = null
-                    language = SyntaxLanguage.NONE
-                }
-                open -> {
-                    flush(false)
-                    fence = trimmed.take(3)
-                    language = Syntax.languageForFence(trimmed.drop(3))
-                }
-                else -> buffer.append(line).append('\n')
-            }
-        }
-        // An unterminated fence still shows as code: that is what it is.
-        flush(fence != null)
-        return segments
-    }
 }

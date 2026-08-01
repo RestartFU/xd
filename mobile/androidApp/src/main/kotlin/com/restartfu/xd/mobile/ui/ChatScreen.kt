@@ -481,36 +481,18 @@ private fun QueuedMessageDialog(
 }
 
 /**
- * Message text, with fenced code blocks lifted into syntax-coloured cards.
+ * Message text as rendered Markdown.
  *
- * Only fences are interpreted; the rest of the Markdown is left as written,
- * because half-rendered Markdown reads worse than none.
+ * A user's own message and system text are shown verbatim: they were typed,
+ * not authored as Markdown, and rendering them would eat characters the sender
+ * meant literally.
  */
 @Composable
 private fun MessageBody(item: TranscriptItem) {
-    val segments = remember(item.text) { CodeBlocks.segments(item.text) }
-    val plain = item.kind == TranscriptKind.SYSTEM
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        segments.forEach { segment ->
-            if (segment.code) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small,
-                ) {
-                    CodeText(
-                        segment.text,
-                        segment.language,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    )
-                }
-            } else {
-                Text(
-                    segment.text,
-                    fontFamily = if (plain) FontFamily.Monospace else FontFamily.Default,
-                )
-            }
-        }
+    when (item.kind) {
+        TranscriptKind.ASSISTANT -> MarkdownText(item.text)
+        TranscriptKind.SYSTEM -> Text(item.text, fontFamily = FontFamily.Monospace)
+        else -> Text(item.text)
     }
 }
 

@@ -140,6 +140,29 @@ For IDE use, the Gradle wrapper remains available from `mobile/`:
 
 Direct wrapper use requires a local JDK 21 and Android SDK 35.
 
+## Markdown
+
+Assistant messages are parsed as CommonMark with GitHub tables and
+strikethrough, using `org.jetbrains:markdown` -- multiplatform down to the
+Apple targets. The desktop uses the `markd` shard for the same job; a correct
+parser is not something to hand-roll on either side.
+
+Parsing produces a document of blocks and spans in `shared/.../markdown`, not
+styled text, so each client draws it natively from one interpretation of the
+source. Compose renders it today; SwiftUI will render the same document.
+
+Only `http`, `https` and `mailto` links survive, matching the desktop's
+`safe_link?`. Anything else keeps its text and loses the link, so a
+`javascript:` or `file:` target can never be handed to the system. Images have
+nowhere to be drawn in a transcript, so they read as their alt text.
+
+A user's own message and system text are shown verbatim. They were typed
+rather than authored as Markdown, and rendering them would eat characters the
+sender meant literally.
+
+Assistant output streams, so the parser is called on half-written documents
+constantly; anything it cannot make sense of falls back to the literal text.
+
 ## Syntax colouring
 
 Code in the transcript is coloured with the desktop's palette and language

@@ -7,6 +7,7 @@ coroutines = "1.10.1"
 lifecycle = "2.8.7"
 navigation = "2.8.6"
 serialization = "1.8.0"
+markdown = "0.7.3"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -21,6 +22,7 @@ androidx-navigation-compose = { module = "androidx.navigation:navigation-compose
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+jetbrains-markdown = { module = "org.jetbrains:markdown", version.ref = "markdown" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

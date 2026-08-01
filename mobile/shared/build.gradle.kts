@@ -34,6 +34,10 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            // CommonMark parsing, multiplatform down to the Apple targets.
+            // The desktop uses the markd shard for the same job; a correct
+            // parser is not something to hand-roll on either side.
+            implementation(libs.jetbrains.markdown)
         }
 
         commonTest.dependencies {

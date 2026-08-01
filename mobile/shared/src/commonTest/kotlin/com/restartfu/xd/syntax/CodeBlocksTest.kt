@@ -2,7 +2,6 @@ package com.restartfu.xd.syntax
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class CodeBlocksTest {
     @Test
@@ -48,44 +47,6 @@ class CodeBlocksTest {
         val lines = CodeBlocks.diffLines("+++ /dev/null\n-gone")
 
         assertEquals(SyntaxLanguage.NONE, lines.last().language)
-    }
-
-    @Test
-    fun splitsFencedCodeFromProse() {
-        val segments = CodeBlocks.segments("before\n```kotlin\nval x = 1\n```\nafter")
-
-        assertEquals(3, segments.size)
-        assertEquals(Segment(false, "before"), segments[0])
-        assertEquals(true, segments[1].code)
-        assertEquals("val x = 1", segments[1].text)
-        assertEquals(SyntaxLanguage.KOTLIN, segments[1].language)
-        assertEquals(Segment(false, "after"), segments[2])
-    }
-
-    @Test
-    fun anUnterminatedFenceStillReadsAsCode() {
-        // Streaming shows a half-written block; it is code either way.
-        val segments = CodeBlocks.segments("intro\n```go\nfunc main() {")
-
-        assertEquals(2, segments.size)
-        assertTrue(segments[1].code)
-        assertEquals(SyntaxLanguage.GO, segments[1].language)
-    }
-
-    @Test
-    fun textWithoutFencesStaysOneProseSegment() {
-        val segments = CodeBlocks.segments("just words\nacross lines")
-
-        assertEquals(listOf(Segment(false, "just words\nacross lines")), segments)
-    }
-
-    @Test
-    fun tildeFencesWork() {
-        val segments = CodeBlocks.segments("~~~sh\nls\n~~~")
-
-        assertEquals(1, segments.size)
-        assertTrue(segments[0].code)
-        assertEquals(SyntaxLanguage.BASH, segments[0].language)
     }
 
     private companion object {
