@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -32,13 +34,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
 
@@ -195,15 +202,61 @@ private fun Composer(
     }
 }
 
+/**
+ * A tool call or an inline diff, collapsed to one line.
+ *
+ * A phone has too little room to spend it on a patch or a wall of command
+ * output nobody asked to see, so both start closed and open on tap. A tool row
+ * with nothing but its summary gets no disclosure control at all.
+ */
+@Composable
+private fun ToolRow(item: TranscriptItem) {
+    val summary = remember(item.text) { ToolText.summary(item.text) }
+    val detail = remember(item.text) { ToolText.detail(item.text) }
+    val isPatch = remember(item.text) { ToolText.patch(item.text) != null }
+    var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .let { if (detail == null) it else it.clickable { expanded = !expanded } }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (detail != null) {
+                    Text(if (expanded) "▾" else "▸")
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    summary,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontFamily = if (isPatch) FontFamily.Monospace else FontFamily.Default,
+                )
+            }
+            if (expanded && detail != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    detail,
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    softWrap = false,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun TranscriptRow(item: TranscriptItem) {
     if (item.kind == TranscriptKind.TOOL) {
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            shape = MaterialTheme.shapes.small,
-        ) {
-            Text(item.text, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
-        }
+        ToolRow(item)
         return
     }
     val user = item.kind == TranscriptKind.USER
