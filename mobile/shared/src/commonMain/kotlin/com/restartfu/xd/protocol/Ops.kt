@@ -145,6 +145,20 @@ public object Ops {
         if (!title.isNullOrBlank()) put("title", title)
     }
 
+    /**
+     * Reads a stored image.
+     *
+     * The daemon only serves paths inside its own remote-paste directory, so
+     * this cannot be pointed at arbitrary files. [preview] asks for a scaled
+     * copy, which is all a transcript needs.
+     */
+    public fun imageRead(path: String, preview: Boolean = true): JsonObject = buildJsonObject {
+        require(path.isNotBlank()) { "An image path is required" }
+        put("op", "image-read")
+        put("path", path)
+        put("preview", preview)
+    }
+
     /** The assistants and models this daemon can run. */
     public fun agentCatalog(): JsonObject = op("agent-catalog")
 

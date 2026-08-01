@@ -63,6 +63,8 @@ import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
+import com.restartfu.xd.model.ImageReference
+import com.restartfu.xd.model.MessagePart
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.syntax.CodeBlocks
@@ -251,7 +253,7 @@ internal fun ChatScreen(
                 item { Text(error, color = MaterialTheme.colorScheme.error) }
             }
             items(items, key = TranscriptItem::id) { item ->
-                TranscriptRow(item)
+                TranscriptRow(item, model)
             }
         }
     }
@@ -488,11 +490,21 @@ private fun QueuedMessageDialog(
  * meant literally.
  */
 @Composable
-private fun MessageBody(item: TranscriptItem) {
-    when (item.kind) {
-        TranscriptKind.ASSISTANT -> MarkdownText(item.text)
-        TranscriptKind.SYSTEM -> Text(item.text, fontFamily = FontFamily.Monospace)
-        else -> Text(item.text)
+private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
+    val parts = remember(item.text) { ImageReference.parts(item.text) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parts.forEach { part ->
+            when (part) {
+                is MessagePart.Image -> MessageImage(model, part.path)
+                is MessagePart.Prose -> when (item.kind) {
+                    TranscriptKind.ASSISTANT -> MarkdownText(part.text)
+                    TranscriptKind.SYSTEM ->
+                        Text(part.text, fontFamily = FontFamily.Monospace)
+                    else -> Text(part.text)
+                }
+            }
+        }
     }
 }
 
@@ -552,7 +564,7 @@ private fun ToolRow(item: TranscriptItem) {
 }
 
 @Composable
-private fun TranscriptRow(item: TranscriptItem) {
+private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
     if (item.kind == TranscriptKind.TOOL) {
         ToolRow(item)
         return
@@ -567,7 +579,7 @@ private fun TranscriptRow(item: TranscriptItem) {
                 item.label?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall)
                 }
-                MessageBody(item)
+                MessageBody(item, model)
             }
         }
     }

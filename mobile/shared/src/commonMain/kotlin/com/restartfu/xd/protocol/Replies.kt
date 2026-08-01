@@ -143,6 +143,13 @@ public data class AgentCatalogReply(
 )
 
 @Serializable
+public data class ImageReply(
+    val ok: Boolean,
+    val mime: String = "",
+    val data: String = "",
+)
+
+@Serializable
 public data class DiffReply(
     val ok: Boolean,
     val output: String = "",

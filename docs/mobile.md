@@ -229,6 +229,25 @@ faithfully -- the desktop keeps VTE for that. And input is sent a line at a
 time, since a phone keyboard has no key events to forward, so anything needing
 raw keys will not work from here.
 
+## Images in the transcript
+
+Sending an attachment stores the PNG on the daemon and leaves
+`[image: /path.png]` on its own line in the message, so a sent image would
+otherwise read as that literal text. The transcript recognises those markers
+and draws the image, keeping prose and images in the order they were written.
+
+The rule matches `Xd::Agent::ImageReference`: the whole line, and nothing else
+on it. A message that merely mentions `[image: ...]` mid-sentence stays prose.
+
+Bytes live on the daemon, so each one is fetched with `image-read`, which
+serves only paths inside its own remote-paste directory. The scaled preview is
+requested rather than the original: a transcript never needs full resolution.
+Previews are bounded in height so a tall screenshot cannot push the rest of a
+turn off screen, and tapping opens the image full screen.
+
+An image sent from another machine, or cleaned up since, reports itself as
+unavailable rather than failing the transcript.
+
 ## Attaching images
 
 The composer can attach up to 4 images, which is the daemon's limit alongside

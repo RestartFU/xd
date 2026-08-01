@@ -11,6 +11,9 @@ import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
+import com.restartfu.xd.protocol.ImageReply
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import com.restartfu.xd.protocol.MessagesReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.PngAttachment
@@ -118,6 +121,13 @@ public class ChatSession internal constructor(
 
     public suspend fun setOption(option: ChatOption, value: String): Unit =
         core.call(Ops.setOption(core.chatId, option, value))
+
+    /** The bytes of a stored image, already decoded from the wire. */
+    @OptIn(ExperimentalEncodingApi::class)
+    public suspend fun readImage(path: String): ByteArray =
+        core.read(Ops.imageRead(path)) {
+            Base64.Default.decode(it.decodeReply<ImageReply>().data)
+        }
 
     /** The assistants and models this daemon can run. */
     public suspend fun catalog(): List<BackendReply> =
