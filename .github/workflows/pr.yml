@@ -58,6 +58,7 @@ jobs:
             unzip
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-crystal
+            mingw-w64-ucrt-x86_64-7zip
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-gobject-introspection
