@@ -9,6 +9,8 @@ module Xd
   module BundleEnvironment
     extend self
 
+    ROOT_VARIABLE = "XD_BUNDLE_ROOT"
+
     HOST_NAMES = {
       "XDG_DATA_DIRS",
       "LANG",
@@ -24,6 +26,11 @@ module Xd
     def prepare(root : String? = locate) : Nil
       return unless root
 
+      # Linux self-update replaces the bundle directory while this process
+      # keeps running from its already-mapped loader. Remember the stable
+      # install path before that loader moves into `.previous`, so later tools
+      # such as whisper resolve from the newly installed bundle.
+      ENV[ROOT_VARIABLE] ||= root
       remember_host_environment
       prepare_runtime(root)
       prepend_path(File.join(root, "bin"))
@@ -59,6 +66,12 @@ module Xd
     end
 
     def locate(executable : String? = Process.executable_path) : String?
+      if configured = ENV[ROOT_VARIABLE]?
+        unless configured.empty?
+          root = File.expand_path(configured)
+          return root if bundle_directory?(root)
+        end
+      end
       return unless executable
 
       directory = File.dirname(File.expand_path(executable))

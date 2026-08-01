@@ -103,6 +103,7 @@ describe Xd::BundleEnvironment do
           "GIT_SSL_CAINFO",
           "SSL_CERT_FILE",
           "XD_OPENSSL",
+          "XD_BUNDLE_ROOT",
           "OPENSSL_CONF",
           "XD_HOST_GTK_PATH",
         }.each { |name| ENV.delete(name) }
@@ -110,6 +111,7 @@ describe Xd::BundleEnvironment do
         Xd::BundleEnvironment.prepare(root)
         Xd::BundleEnvironment.prepare(root)
 
+        ENV["XD_BUNDLE_ROOT"].should eq(root)
         path = ENV["PATH"].split(':')
         path.first.should eq(git_bin)
         path.count(git_bin).should eq(1)
@@ -149,6 +151,32 @@ describe Xd::BundleEnvironment do
           "#{root}/share/fonts"
         )
         ENV["FONTCONFIG_PATH"].should eq(fonts)
+      end
+    ensure
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "keeps resolving tools after a live bundle replacement" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-replaced-bundle-#{Random::Secure.hex(12)}"
+    )
+    root = File.join(directory, "xd-nightly")
+    previous = File.join(directory, "xd-nightly.previous")
+    whisper = File.join(root, "libexec", "whisper")
+    executable_file(File.join(root, "libexec", "initial-tool"))
+
+    begin
+      preserving_environment do
+        ENV.delete("XD_BUNDLE_ROOT")
+        Xd::BundleEnvironment.prepare(root)
+
+        File.rename(root, previous)
+        executable_file(whisper)
+
+        Xd::BundleEnvironment.locate.should eq(root)
+        Xd::BundleEnvironment.executable("whisper").should eq(whisper)
       end
     ensure
       FileUtils.rm_r(directory) if Dir.exists?(directory)

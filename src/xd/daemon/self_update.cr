@@ -43,9 +43,8 @@ module Xd
       # from a source tree has nothing to replace.
       def self.install_directory : String?
         {% if flag?(:linux) && flag?(:x86_64) %}
-          executable = Process.executable_path
-          return unless executable
-          directory = File.dirname(File.dirname(executable))
+          directory = BundleEnvironment.locate
+          return unless directory
           expected = File.join(Path.home, ".local", "opt", DATA_NAME)
           launcher = File.join(directory, "xd.sh")
           directory == expected && File::Info.executable?(launcher) ? directory : nil
