@@ -1,6 +1,8 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -56,6 +58,7 @@ internal fun TreeScreen(
     val foldersById = tree.folders.associateBy(Folder::id)
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
     var updatingDaemon by rememberSaveable { mutableStateOf(false) }
+    var deleting by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var confirmingForget by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(createdChat) {
@@ -115,11 +118,36 @@ internal fun TreeScreen(
                                 }
                             },
                             openChat = openChat,
+                            deleteChat = { chat -> deleting = chat.id to chat.title },
                         )
                     }
                 }
             }
         }
+    }
+    deleting?.let { (chatId, title) ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete this chat?") },
+            text = {
+                val name = title.ifBlank { "This chat" }
+                Text(
+                    name + " and its messages will be removed on the daemon. " +
+                        "This cannot be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleting = null
+                        model.deleteChat(chatId)
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("Cancel") }
+            },
+        )
     }
     if (updatingDaemon) {
         DaemonUpdateDialog(model) { updatingDaemon = false }
@@ -221,6 +249,7 @@ private fun folderPath(
     return names.asReversed().joinToString(" / ")
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 private fun LazyListScope.folderRows(
     folder: Folder,
     depth: Int,
@@ -229,6 +258,7 @@ private fun LazyListScope.folderRows(
     expanded: Set<String>,
     toggle: (String) -> Unit,
     openChat: (String) -> Unit,
+    deleteChat: (ChatSummary) -> Unit,
 ) {
     item(key = "folder-${folder.id}") {
         Row(
@@ -253,7 +283,12 @@ private fun LazyListScope.folderRows(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { openChat(chat.id) }
+                        // Long press rather than a visible button: deleting is
+                        // rare and irreversible, and a row is a tap target.
+                        .combinedClickable(
+                            onClick = { openChat(chat.id) },
+                            onLongClick = { deleteChat(chat) },
+                        )
                         .padding(
                             start = (40 + depth * 16).dp,
                             top = 10.dp,
@@ -275,7 +310,9 @@ private fun LazyListScope.folderRows(
             }
         }
         children[folder.id].orEmpty().forEach { child ->
-            folderRows(child, depth + 1, children, chats, expanded, toggle, openChat)
+            folderRows(
+                child, depth + 1, children, chats, expanded, toggle, openChat, deleteChat,
+            )
         }
     }
 }

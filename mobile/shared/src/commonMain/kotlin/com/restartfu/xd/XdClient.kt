@@ -151,6 +151,18 @@ public class XdClient(
         return actor.decodeReply(value) { it.decodeReply<DaemonUpdateReply>() }
     }
 
+    /**
+     * Deletes a chat. Tree-level rather than session-level: the chat it would
+     * belong to is exactly what stops existing.
+     */
+    public suspend fun deleteChat(chatId: String) {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        actor.call(Ops.deleteChat(chatId))
+        // The daemon broadcasts a tree event, but refreshing here means the
+        // row is gone by the time the confirmation dismisses.
+        requestTreeRefresh()
+    }
+
     public suspend fun createChat(
         folderId: String,
         title: String?,

@@ -26,11 +26,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
     private val _createdChat = MutableStateFlow<String?>(null)
+    private val _deletingChat = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
 
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
+    val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     private val _daemon = MutableStateFlow<DaemonUpdateReply?>(null)
     private val _daemonError = MutableStateFlow<String?>(null)
     private val _updating = MutableStateFlow(false)
@@ -93,6 +95,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not create a chat"
             } finally {
                 _creatingChat.value = false
+            }
+        }
+    }
+
+    fun deleteChat(chatId: String) {
+        if (_deletingChat.value) return
+        _deletingChat.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.deleteChat(chatId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not delete the chat"
+            } finally {
+                _deletingChat.value = false
             }
         }
     }

@@ -135,6 +135,15 @@ public object Ops {
 
     public fun cancel(chatId: String): JsonObject = withChat("cancel", chatId)
 
+    /**
+     * Deletes a chat and everything it owns.
+     *
+     * The daemon forgets the agent session, kills the chat's terminals and
+     * removes the stored transcript. There is no undo, so a client should ask
+     * first.
+     */
+    public fun deleteChat(chatId: String): JsonObject = withChat("delete-chat", chatId)
+
     public fun newChat(
         folderId: String,
         title: String? = null,
