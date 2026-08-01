@@ -1,6 +1,6 @@
 # Everything runs in Docker; the host only needs docker itself.
 
-.PHONY: build test run clean
+.PHONY: build test run clean mobile-test mobile-android
 
 ## build: compile in Docker and export the runnable bundle to ./dist
 build:
@@ -19,3 +19,11 @@ dist/xd.sh:
 
 clean:
 	@rm -rf dist
+
+## mobile-test: run all shared Kotlin tests
+mobile-test:
+	@./scripts/mobile-test.sh
+
+## mobile-android: build the Android debug APK
+mobile-android:
+	@./scripts/mobile-build.sh

@@ -49,7 +49,8 @@ delete chats or workspaces.
 - Supports existing checkouts and isolated Git worktrees.
 - Streams Markdown responses, tool calls, inline file diffs, images, and voice
   messages.
-- Supports local use and paired clients over the same daemon protocol.
+- Supports local use and paired clients over the same daemon protocol,
+  including an Android client that pairs with a running `xd serve`.
 - Searches all stored messages with `Ctrl+K`.
 
 ## Build and test
@@ -60,7 +61,12 @@ Linux builds require Docker only and do not install dependencies on the host:
 ./scripts/build.sh     # self-contained bundle in ./dist
 ./scripts/test.sh      # complete headless test suite
 ./dist/xd.sh           # run the built app
+make mobile-test       # shared Kotlin tests
+make mobile-android    # -> ./dist/mobile/xd-mobile-debug.apk
 ```
+
+Mobile builds use their own Docker image and also require nothing beyond
+Docker. See [mobile development](docs/mobile.md).
 
 Native release builders:
 

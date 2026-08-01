@@ -26,6 +26,10 @@ A remote appears in the sidebar as its own root beside the local workspaces,
 its folders and chats underneath, drawn from the same XdNode model with a
 remote tree implementation in place of the filesystem one.
 
+The Android client pairs the same way and speaks the same protocol; it is
+remote-only by construction. See [mobile development](mobile.md) and the
+normative [wire protocol](protocol.md).
+
 ## Pairing
 
 The daemon prints a code (`4F2K-9QX1`) good for five minutes and one use. A
@@ -53,12 +57,17 @@ at once are therefore ordered by the daemon rather than racing in the
 database, and neither can end up holding a version of the truth the other
 does not have.
 
-Every change is an entry in an append-only event log with a monotonic id:
-messages, folder and chat edits, model and effort changes, turn events. On
-connecting, a client takes a snapshot and the id it was taken at; from then
-on it applies events as they arrive. Reconnecting resumes from the last id it
-saw, so a device that was closed, asleep or off the network catches up on
-exactly what it missed instead of reloading everything or silently drifting.
+Events are live notifications, not a durable log. Each carries a monotonic id,
+but that counter lives in the daemon process only: it does not survive a
+restart, and there is no operation to resume from it. On every connection and
+reconnection a client reloads the tree and every open chat, transcript, and
+terminal list before it continues applying live events. Reloading is the
+recovery path for a device that was closed, asleep, or off the network.
+
+Because replies and events are written by different fibers, a client cannot
+order a snapshot against live output by arrival alone. Live turn events carry
+`turn_id` and `turn_sequence`, and a chat snapshot carries the same pair, so a
+client can tell exactly which deltas its snapshot already contains.
 
 Turn output fans out to every subscriber, not only the device that sent the
 message. Watching a chat from a second machine shows the same reply arriving
