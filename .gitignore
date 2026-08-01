@@ -4,5 +4,11 @@
 *.o
 *.swp
 
+# Mobile builds and local IDE state
+/mobile/.gradle/
+/mobile/**/build/
+/mobile/local.properties
+*.xcuserdatad/
+
 # Syncthing conflict copies
 *.sync-conflict-*

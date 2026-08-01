@@ -1,0 +1,55 @@
+name: mobile
+
+on:
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - 'src/xd/protocol/**'
+      - 'src/xd/daemon/**'
+      - 'docs/protocol.md'
+      - 'scripts/mobile-*.sh'
+      - 'Makefile'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test shared code and build Android app
+        run: >-
+          docker build
+          --target verify
+          --progress plain
+          --file mobile/Dockerfile
+          mobile
+
+  ios:
+    # Apple targets cannot be compiled on Linux, so the Docker job above never
+    # builds iosMain. Without this job the iOS source set would rot silently.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Compile iOS targets and run the shared suite on the simulator
+        working-directory: mobile
+        run: >-
+          ./gradlew --no-daemon
+          :shared:compileKotlinIosArm64
+          :shared:iosSimulatorArm64Test

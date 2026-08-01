@@ -137,8 +137,33 @@ jobs:
             windows-artifacts/xd-nightly-windows-x86_64.msi.sha256
             scripts/install.ps1
 
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # A test build, signed with the generated debug key. The runner starts
+      # with a cold signing cache, so that key differs per run and Android
+      # will refuse to update an installed APK in place -- uninstall first.
+      - name: Build the Android APK
+        run: ./scripts/mobile-build.sh
+
+      - name: Name it for the release
+        run: |
+          set -euo pipefail
+          mv dist/mobile/xd-mobile-debug.apk xd-nightly-android.apk
+          sha256sum xd-nightly-android.apk > xd-nightly-android.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            xd-nightly-android.apk
+            xd-nightly-android.apk.sha256
+
   publish:
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, android]
     runs-on: ubuntu-latest
 
     steps:
@@ -184,6 +209,13 @@ jobs:
           irm https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.ps1 | iex
           \`\`\`
 
+          Android:
+
+          Install \`xd-nightly-android.apk\` on a phone that can reach the
+          machine running the daemon, then pair it with \`xd serve --pair\`.
+          It is a test build signed with a per-build key, so uninstall the
+          previous one before installing a newer APK.
+
           Every artifact is self-contained and installs beside a release.
           On Linux and macOS, the daemon is the same bundled binary and can
           pair another device with \`xd serve --pair\`.
@@ -206,6 +238,8 @@ jobs:
             macos-dist/xd-nightly-macos-arm64.zip.sha256 \
             windows-artifacts/xd-nightly-windows-x86_64.msi \
             windows-artifacts/xd-nightly-windows-x86_64.msi.sha256 \
+            xd-nightly-android.apk \
+            xd-nightly-android.apk.sha256 \
             scripts/install.sh \
             scripts/install-macos.sh \
             scripts/install.ps1
