@@ -143,48 +143,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The secrets context is unavailable in a job-level `if`, so the gate
-      # lives on the steps. Without a keystore the job succeeds having built
-      # nothing, and the release simply carries no APK -- an unsigned APK
-      # cannot be installed, and a rotating key cannot update one in place.
-      - name: Check for signing material
-        id: signing
-        env:
-          KEYSTORE: ${{ secrets.ANDROID_NIGHTLY_KEYSTORE_BASE64 }}
-        run: |
-          set -euo pipefail
-          if [ -n "$KEYSTORE" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No ANDROID_NIGHTLY_KEYSTORE_BASE64 secret; skipping the nightly APK. See docs/mobile.md."
-          fi
+      # A test build, signed with the generated debug key. The runner starts
+      # with a cold signing cache, so that key differs per run and Android
+      # will refuse to update an installed APK in place -- uninstall first.
+      - name: Build the Android APK
+        run: ./scripts/mobile-build.sh
 
-      - name: Build the signed nightly APK
-        if: steps.signing.outputs.enabled == 'true'
-        env:
-          XD_ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_NIGHTLY_KEYSTORE_BASE64 }}
-          XD_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_NIGHTLY_KEYSTORE_PASSWORD }}
-          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_NIGHTLY_KEY_ALIAS }}
-          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_NIGHTLY_KEY_PASSWORD }}
-          # Must increase on every published build or Android refuses the
-          # update. run_number is monotonic for this workflow.
-          XD_ANDROID_VERSION_CODE: ${{ github.run_number }}
+      - name: Name it for the release
         run: |
           set -euo pipefail
-          keystore="$(mktemp -d)/nightly.p12"
-          printf '%s' "$XD_ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
-          export XD_ANDROID_KEYSTORE="$keystore"
-          ./scripts/mobile-nightly.sh
-          rm -f "$keystore"
+          mv dist/mobile/xd-mobile-debug.apk xd-nightly-android.apk
+          sha256sum xd-nightly-android.apk > xd-nightly-android.apk.sha256
 
       - uses: actions/upload-artifact@v4
-        if: steps.signing.outputs.enabled == 'true'
         with:
           name: android
           path: |
-            dist/mobile/xd-nightly-android.apk
-            dist/mobile/xd-nightly-android.apk.sha256
+            xd-nightly-android.apk
+            xd-nightly-android.apk.sha256
 
   publish:
     needs: [linux, macos, windows, android]
@@ -233,38 +209,18 @@ jobs:
           irm https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.ps1 | iex
           \`\`\`
 
+          Android:
+
+          Install \`xd-nightly-android.apk\` on a phone that can reach the
+          machine running the daemon, then pair it with \`xd serve --pair\`.
+          It is a test build signed with a per-build key, so uninstall the
+          previous one before installing a newer APK.
+
           Every artifact is self-contained and installs beside a release.
           On Linux and macOS, the daemon is the same bundled binary and can
           pair another device with \`xd serve --pair\`.
           EOF
           )
-
-          files=(
-            xd-nightly-linux-x86_64.tar.gz
-            xd-nightly-linux-x86_64.tar.gz.sha256
-            macos-dist/xd-nightly-macos-arm64.zip
-            macos-dist/xd-nightly-macos-arm64.zip.sha256
-            windows-artifacts/xd-nightly-windows-x86_64.msi
-            windows-artifacts/xd-nightly-windows-x86_64.msi.sha256
-            scripts/install.sh
-            scripts/install-macos.sh
-            scripts/install.ps1
-          )
-
-          # Both APK files share dist/mobile as their least common ancestor, so
-          # the artifact carries them without that prefix and they land here.
-          #
-          # The APK exists only when signing secrets are configured. Its
-          # absence must not fail a release the other platforms are ready for.
-          if [ -f xd-nightly-android.apk ]; then
-            files+=(
-              xd-nightly-android.apk
-              xd-nightly-android.apk.sha256
-            )
-            notes+=$'\n\n'"Android: download \`xd-nightly-android.apk\` and install it on a phone that can reach your daemon, then pair with \`xd serve --pair\`."
-          else
-            echo "::warning::No nightly APK in this release; Android signing secrets are unset."
-          fi
 
           # Replaced rather than edited: the tag has to move to this commit,
           # and a release whose tag points somewhere else is a lie about what
@@ -276,4 +232,14 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Nightly $(date -u +%Y-%m-%d)" \
             --notes "$notes" \
-            "${files[@]}"
+            xd-nightly-linux-x86_64.tar.gz \
+            xd-nightly-linux-x86_64.tar.gz.sha256 \
+            macos-dist/xd-nightly-macos-arm64.zip \
+            macos-dist/xd-nightly-macos-arm64.zip.sha256 \
+            windows-artifacts/xd-nightly-windows-x86_64.msi \
+            windows-artifacts/xd-nightly-windows-x86_64.msi.sha256 \
+            xd-nightly-android.apk \
+            xd-nightly-android.apk.sha256 \
+            scripts/install.sh \
+            scripts/install-macos.sh \
+            scripts/install.ps1

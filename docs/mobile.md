@@ -97,51 +97,14 @@ key; Android then requires uninstalling the old debug app.
 
 ## Nightly APK
 
-The rolling nightly release publishes a non-debuggable
-`com.restartfu.xd.mobile.nightly` APK as `xd-nightly-android.apk`, beside the
-Linux, macOS, and Windows artifacts. Its `versionCode` is the workflow run
-number, so each build supersedes the last; its application id is distinct from
-the debug build, so both can be installed at once.
+The rolling nightly release publishes `xd-nightly-android.apk` beside the
+Linux, macOS, and Windows artifacts. It is the same APK `make mobile-android`
+produces: a test build, signed with the generated debug key, requiring no
+secrets or other setup.
 
-**The APK is only published once signing secrets exist.** An unsigned APK
-cannot be installed and a rotating key cannot update one in place, so without a
-keystore the nightly job builds nothing, the release omits the APK, and the run
-records a warning. Every other artifact still publishes.
-
-Two secrets are required:
-
-- `ANDROID_NIGHTLY_KEYSTORE_BASE64`: base64-encoded PKCS#12 keystore;
-- `ANDROID_NIGHTLY_KEYSTORE_PASSWORD`.
-
-Two more are optional, for a keystore whose key differs from its store —
-uncommon for PKCS#12, where one password normally covers both:
-
-- `ANDROID_NIGHTLY_KEY_ALIAS`: defaults to `xd-nightly`;
-- `ANDROID_NIGHTLY_KEY_PASSWORD`: defaults to the keystore password.
-
-Generate a keystore and print the secret:
-
-```sh
-keytool -genkeypair -storetype PKCS12 -keystore xd-nightly.p12 \
-  -alias xd-nightly -keyalg RSA -keysize 2048 -validity 10000 \
-  -dname "CN=xd nightly"
-base64 -w0 xd-nightly.p12
-```
-
-Signing material enters the Docker build only through BuildKit secret mounts;
-it is never copied into an image layer.
-
-**Keep that key.** Android rejects an update signed by a different key, so
-losing or rotating it forces every user to uninstall the old nightly app.
-
-To build one locally:
-
-```sh
-XD_ANDROID_KEYSTORE=./xd-nightly.p12 \
-XD_ANDROID_KEYSTORE_PASSWORD=… \
-XD_ANDROID_VERSION_CODE=1 \
-./scripts/mobile-nightly.sh
-```
+Because a CI runner starts with a cold signing cache, that key differs from
+one build to the next. Android refuses an update signed by a different key, so
+uninstall the previous app before installing a newer APK.
 
 ## Try it on a phone
 
