@@ -48,6 +48,7 @@ import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
+import com.restartfu.xd.syntax.CodeBlocks
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -220,6 +221,40 @@ private fun Composer(
 }
 
 /**
+ * Message text, with fenced code blocks lifted into syntax-coloured cards.
+ *
+ * Only fences are interpreted; the rest of the Markdown is left as written,
+ * because half-rendered Markdown reads worse than none.
+ */
+@Composable
+private fun MessageBody(item: TranscriptItem) {
+    val segments = remember(item.text) { CodeBlocks.segments(item.text) }
+    val plain = item.kind == TranscriptKind.SYSTEM
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        segments.forEach { segment ->
+            if (segment.code) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    CodeText(
+                        segment.text,
+                        segment.language,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    )
+                }
+            } else {
+                Text(
+                    segment.text,
+                    fontFamily = if (plain) FontFamily.Monospace else FontFamily.Default,
+                )
+            }
+        }
+    }
+}
+
+/**
  * A tool call or an inline diff, collapsed to one line.
  *
  * A phone has too little room to spend it on a patch or a wall of command
@@ -258,13 +293,17 @@ private fun ToolRow(item: TranscriptItem) {
             }
             if (expanded && detail != null) {
                 Spacer(Modifier.height(8.dp))
-                Text(
-                    detail,
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall,
-                    softWrap = false,
-                )
+                if (isPatch) {
+                    DiffText(detail)
+                } else {
+                    Text(
+                        detail,
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        softWrap = false,
+                    )
+                }
             }
         }
     }
@@ -286,14 +325,7 @@ private fun TranscriptRow(item: TranscriptItem) {
                 item.label?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall)
                 }
-                Text(
-                    item.text,
-                    fontFamily = if (item.kind == TranscriptKind.SYSTEM) {
-                        FontFamily.Monospace
-                    } else {
-                        FontFamily.Default
-                    },
-                )
+                MessageBody(item)
             }
         }
     }

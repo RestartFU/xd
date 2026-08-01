@@ -139,3 +139,29 @@ For IDE use, the Gradle wrapper remains available from `mobile/`:
 ```
 
 Direct wrapper use requires a local JDK 21 and Android SDK 35.
+
+## Syntax colouring
+
+Code in the transcript is coloured with the desktop's palette and language
+list: expanded inline diffs, and fenced code blocks in assistant messages.
+`mobile/shared/.../syntax` holds it, so an iOS client gets it unchanged.
+
+Two things are shared with the desktop by construction rather than by hand:
+the token colours come from `Xd::SyntaxToken#colour`, and the keyword, type
+and constant sets in `Words.kt` are generated from `src/xd/syntax.cr` (899
+words across 40 sets). Regenerate them when that file changes.
+
+`languageForPath` is an exact port, so a file resolves to the same language on
+both clients.
+
+The scanner covers what code spends its time in: comments including nested
+block comments, strings with escapes, Go and Odin raw strings, Rust raw
+strings, Kotlin and TOML triple strings, numbers, keywords, types, constants
+and call sites.
+
+It deliberately does **not** implement the desktop's exotic lexing: heredocs,
+Ruby and Crystal percent literals and regex, C# verbatim and raw strings, Bash
+expansion and quoting state, Crystal macro delimiters, TOML table headers, and
+YAML anchors. Those constructs render as plain text. That is a deliberate
+trade: uncoloured reads fine, mis-coloured does not, and the desktop remains
+the place to read a large diff closely.
