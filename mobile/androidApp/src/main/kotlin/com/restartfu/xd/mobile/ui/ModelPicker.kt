@@ -21,6 +21,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -40,19 +43,61 @@ internal fun ModelPicker(
     model: ChatViewModel,
     currentBackend: String,
     currentModel: String?,
+    currentEffort: String?,
+    claudeMode: Boolean,
     onDismiss: () -> Unit,
 ) {
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val loading by model.catalogLoading.collectAsStateWithLifecycle()
     val error by model.catalogError.collectAsStateWithLifecycle()
+    val busy by model.selectingModel.collectAsStateWithLifecycle()
+    var effortBackendId by remember { mutableStateOf<String?>(null) }
+    var effortModelId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { model.loadCatalog() }
 
+    val effortBackend = catalog.firstOrNull { it.id == effortBackendId }
+    val efforts = effortBackend?.efforts.orEmpty().filterNot {
+        effortBackend?.id == currentBackend && claudeMode && it == "ultra"
+    }
+    val modelReady = effortBackend != null &&
+        currentBackend == effortBackend.id &&
+        (currentModel ?: effortBackend.defaultModel) == effortModelId
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Assistant and model") },
+        title = {
+            Text(if (effortBackendId == null) "Assistant and model" else "Reasoning effort")
+        },
         text = {
             when {
+                effortBackendId != null && !modelReady -> Box(
+                    Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) { CircularProgressIndicator() }
+
+                effortBackend != null -> LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    items(efforts, key = { it }) { effort ->
+                        val selected = effort == currentEffort
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !busy) {
+                                    if (!selected) model.setEffort(effort)
+                                    onDismiss()
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(if (selected) "✓" else " ", Modifier.width(24.dp))
+                            Text(
+                                EFFORT_LABELS[effort] ?: effort,
+                                fontWeight = if (selected) FontWeight.Bold else null,
+                            )
+                        }
+                    }
+                }
+
                 loading && catalog.isEmpty() -> Box(
                     Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center,
@@ -89,10 +134,11 @@ internal fun ModelPicker(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        onDismiss()
                                         if (!selected) {
                                             model.selectModel(backend.id, entry.id)
                                         }
+                                        effortBackendId = backend.id
+                                        effortModelId = entry.id
                                     }
                                     .padding(vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -121,7 +167,19 @@ internal fun ModelPicker(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
+            if (effortBackendId == null) {
+                TextButton(onClick = onDismiss) { Text("Close") }
+            } else {
+                TextButton(
+                    onClick = {
+                        effortBackendId = null
+                        effortModelId = null
+                    },
+                ) { Text("Back") }
+            }
+        },
+        dismissButton = if (effortBackendId == null) null else {
+            { TextButton(onClick = onDismiss) { Text("Cancel") } }
         },
     )
 }

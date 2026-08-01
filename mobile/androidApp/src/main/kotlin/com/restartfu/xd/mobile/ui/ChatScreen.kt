@@ -112,6 +112,8 @@ internal fun ChatScreen(
             model = model,
             currentBackend = state.backend,
             currentModel = state.model,
+            currentEffort = state.effort,
+            claudeMode = state.claudeMode,
             onDismiss = { choosingModel = false },
         )
     }

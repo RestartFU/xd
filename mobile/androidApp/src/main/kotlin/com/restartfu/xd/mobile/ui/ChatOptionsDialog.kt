@@ -32,7 +32,7 @@ private val ACCESS = listOf(
     "full" to "Full access",
 )
 
-private val EFFORT_LABELS = mapOf(
+internal val EFFORT_LABELS = mapOf(
     "low" to "Low",
     "medium" to "Medium",
     "high" to "High",
