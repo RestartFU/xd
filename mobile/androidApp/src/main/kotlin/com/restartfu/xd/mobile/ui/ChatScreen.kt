@@ -115,8 +115,11 @@ internal fun ChatScreen(
     val rows = remember(items) { ToolGrouping.rows(items) }
     val leadingItemCount =
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
-    val lastTranscriptIndex = leadingItemCount + rows.lastIndex
-    val atBottom by remember(rows.size, leadingItemCount) {
+    // The working row sits below the last message, so it is what "the bottom"
+    // means while a turn runs.
+    val trailingItemCount = if (state.working) 1 else 0
+    val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
+    val atBottom by remember(rows.size, leadingItemCount, trailingItemCount) {
         derivedStateOf {
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             last >= lastTranscriptIndex - 1
@@ -140,7 +143,7 @@ internal fun ChatScreen(
         }
     }
 
-    LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount) {
+    LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount, trailingItemCount) {
         if (landed && items.isNotEmpty() && atBottom) {
             listState.animateScrollToItem(lastTranscriptIndex)
         }
@@ -271,6 +274,9 @@ internal fun ChatScreen(
                     is TranscriptRow.Single -> TranscriptRow(row.item, model)
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                 }
+            }
+            if (state.working) {
+                item(key = "working") { WorkingRow(state.startedAtMillis) }
             }
         }
     }

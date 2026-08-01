@@ -210,6 +210,20 @@ YAML anchors. Those constructs render as plain text. That is a deliberate
 trade: uncoloured reads fine, mis-coloured does not, and the desktop remains
 the place to read a large diff closely.
 
+## A running turn
+
+While a turn runs, a row at the foot of the transcript counts how long it has
+been going, with the same moving dots and the same wording as the desktop --
+`TurnTiming` lives in `shared` so the two clients cannot drift apart on
+phrasing. A turn can spend minutes between visible output, thinking or inside a
+tool that prints nothing, and without this the phone looks like it dropped the
+message.
+
+The count comes from a start time, not from counting up. Opening a chat whose
+turn is already running shows its real age: `chat` reports `working_for`, and
+the transcript store turns that into a start time. A phone's clock can disagree
+with the daemon's, so a negative elapsed time is clamped rather than shown.
+
 ## Panes
 
 The desktop shows the conversation, terminal, files and diff side by side. A

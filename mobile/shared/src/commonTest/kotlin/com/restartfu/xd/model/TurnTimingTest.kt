@@ -1,0 +1,23 @@
+package com.restartfu.xd.model
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class TurnTimingTest {
+    @Test
+    fun matchesTheDesktopAtEveryBoundary() {
+        // The same cases spec/xd/ui/turn_timing_spec.cr asserts, so the two
+        // clients cannot drift apart on wording.
+        assertEquals("Working for 0s", TurnTiming.format("Working", 0))
+        assertEquals("Worked for 59s", TurnTiming.format("Worked", 59))
+        assertEquals("Worked for 1m 00s", TurnTiming.format("Worked", 60))
+        assertEquals("Worked for 59m 59s", TurnTiming.format("Worked", 3599))
+        assertEquals("Worked for 1h 00m", TurnTiming.format("Worked", 3600))
+        assertEquals("Worked for 2h 03m", TurnTiming.format("Worked", 7380))
+    }
+
+    @Test
+    fun clampsAClockThatRunsBackwards() {
+        assertEquals("Working for 0s", TurnTiming.format("Working", -3))
+    }
+}
