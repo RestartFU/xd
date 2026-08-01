@@ -122,6 +122,10 @@ public class ChatSession internal constructor(
     public suspend fun setOption(option: ChatOption, value: String): Unit =
         core.call(Ops.setOption(core.chatId, option, value))
 
+    /** The daemon reads `plan` and `new-worktree` as the strings, not JSON. */
+    public suspend fun setBoolOption(option: ChatOption, value: Boolean): Unit =
+        core.call(Ops.setBoolOption(core.chatId, option, value))
+
     /** The bytes of a stored image, already decoded from the wire. */
     @OptIn(ExperimentalEncodingApi::class)
     public suspend fun readImage(path: String): ByteArray =

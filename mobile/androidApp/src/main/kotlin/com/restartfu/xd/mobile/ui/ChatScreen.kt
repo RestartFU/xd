@@ -95,7 +95,11 @@ internal fun ChatScreen(
     // one at a time, so they are tabs over the same chat.
     var pane by rememberSaveable(state.chatId) { mutableStateOf(Pane.CHAT) }
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
+    var choosingOptions by rememberSaveable(state.chatId) { mutableStateOf(false) }
 
+    if (choosingOptions) {
+        ChatOptionsDialog(model, state) { choosingOptions = false }
+    }
     if (choosingModel) {
         ModelPicker(
             model = model,
@@ -165,8 +169,13 @@ internal fun ChatScreen(
                                     state.model?.takeIf { it.isNotBlank() } ?: "Model",
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.widthIn(max = 130.dp),
+                                    modifier = Modifier.widthIn(max = 110.dp),
                                 )
+                            }
+                            TextButton(onClick = { choosingOptions = true }) {
+                                // Plan is the one worth seeing without opening
+                                // anything: it changes what a turn will do.
+                                Text(if (state.plan) "Plan" else "Build")
                             }
                         }
                     },

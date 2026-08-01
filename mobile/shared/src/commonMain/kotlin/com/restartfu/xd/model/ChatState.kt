@@ -22,6 +22,10 @@ public data class ChatState(
     val backend: String = "",
     /** Absent until the chat is loaded; the daemon then reports the selection. */
     val model: String? = null,
+    val effort: String? = null,
+    /** `read-only`, `edit` or `full`. Ignored by the daemon while [plan] is on. */
+    val access: String? = null,
+    val newWorktree: Boolean = false,
     val commands: List<String> = emptyList(),
     val plan: Boolean = false,
     val queue: List<String> = emptyList(),

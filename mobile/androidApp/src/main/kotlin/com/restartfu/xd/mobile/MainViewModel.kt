@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.protocol.BackendReply
+import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.DaemonUpdateReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
@@ -244,6 +245,36 @@ class ChatViewModel(
             } finally {
                 _catalogLoading.value = false
             }
+        }
+    }
+
+    fun setEffort(effort: String) {
+        launchGuarded(_selectingModel) {
+            session.setOption(ChatOption.EFFORT, effort)
+        }
+    }
+
+    fun setAccess(access: String) {
+        launchGuarded(_selectingModel) {
+            session.setOption(ChatOption.ACCESS, access)
+        }
+    }
+
+    /**
+     * Plan and Build are one setting: Build is simply Plan off.
+     *
+     * The daemon overrides access while planning, so the access choice is not
+     * meaningful until this is off again.
+     */
+    fun setPlan(planning: Boolean) {
+        launchGuarded(_selectingModel) {
+            session.setBoolOption(ChatOption.PLAN, planning)
+        }
+    }
+
+    fun setNewWorktree(enabled: Boolean) {
+        launchGuarded(_selectingModel) {
+            session.setBoolOption(ChatOption.NEW_WORKTREE, enabled)
         }
     }
 
