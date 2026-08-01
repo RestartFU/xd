@@ -15,11 +15,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -49,13 +52,41 @@ class MainActivity : ComponentActivity() {
                     lightColorScheme()
                 },
             ) {
-                Surface(Modifier.fillMaxSize()) {
-                    XdMobileApp(model)
+                Compact {
+                    Surface(Modifier.fillMaxSize()) {
+                        XdMobileApp(model)
+                    }
                 }
             }
         }
     }
 }
+
+/**
+ * Draws the app slightly smaller so more of a transcript, tree or diff fits.
+ *
+ * Scaling density rather than the type ramp shrinks padding, icons and row
+ * heights along with the text; making only the text smaller would leave the
+ * whitespace around it and win far less room.
+ *
+ * fontScale is passed through untouched, so someone who has asked the system
+ * for larger text still gets it, just within a tighter layout.
+ */
+@Composable
+private fun Compact(content: @Composable () -> Unit) {
+    val density = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(
+            density = density.density * COMPACT_SCALE,
+            fontScale = density.fontScale,
+        ),
+        content = content,
+    )
+}
+
+// 7/8. Enough to gain about one row in eight, while a 48dp touch target still
+// lands near 42dp, which stays comfortably tappable.
+private const val COMPACT_SCALE = 0.875f
 
 @Composable
 private fun XdMobileApp(model: MainViewModel) {
