@@ -264,6 +264,31 @@ Esc, Tab, arrows, and a sticky Ctrl that applies to the next character.
 One limit worth knowing: a full-screen application will not render faithfully.
 The desktop keeps VTE for that.
 
+## Tagged questions
+
+When the assistant asks something with a short list of answers, it tags the
+block and the client renders buttons. Tapping one sends it as the next message;
+that is all a button does, so anything a button offers can also be typed.
+
+The buttons come from the last stored message rather than from the
+`turn-finished` event that announced the question. The daemon stores the block
+verbatim, so reading it from the message means the buttons survive reopening
+the chat — where an event-only answer would leave the question stranded with no
+way to answer it but retyping. They disappear as soon as a turn starts, a
+message is queued, or anything else is said, because by then the buttons would
+answer the wrong question.
+
+`AskBlock` in `shared` mirrors `src/xd/agent/ask.cr` case for case, against the
+same assertions its Crystal spec makes. Stripping the block is not optional:
+left alone the tags render as literal text in the transcript. The question
+itself stays, in bold, so the conversation still reads in order after the
+buttons are gone.
+
+Options are one per line rather than wrapped into a grid. An option is a whole
+answer, often a sentence, and a row of truncated sentences is not a choice
+anyone can make. A question that only accepts typed text gets no buttons at
+all — the composer is already there.
+
 ## Voice
 
 The microphone button dictates into the composer. Capture is the only part that

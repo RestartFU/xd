@@ -53,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -61,6 +62,7 @@ import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.TerminalViewModel
+import com.restartfu.xd.model.AskBlock
 import com.restartfu.xd.model.ToolGrouping
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
@@ -371,6 +373,9 @@ private fun Composer(
             }
         }
         VoiceStatus(model.voice)
+        remember(state) { AskBlock.pending(state) }?.let { ask ->
+            AskButtons(ask, onAnswer = model::answer, enabled = !sending)
+        }
         if (state.queue.isNotEmpty()) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -523,13 +528,34 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
             when (part) {
                 is MessagePart.Image -> MessageImage(model, part.path)
                 is MessagePart.Prose -> when (item.kind) {
-                    TranscriptKind.ASSISTANT -> MarkdownText(part.text)
+                    TranscriptKind.ASSISTANT -> AssistantProse(part.text)
                     TranscriptKind.SYSTEM ->
                         Text(part.text, fontFamily = FontFamily.Monospace)
                     else -> Text(part.text)
                 }
             }
         }
+    }
+}
+
+/**
+ * Assistant prose with its `<ask>` blocks lifted out.
+ *
+ * The daemon stores a reply verbatim so every client can render the question
+ * its own way; left alone the tags would show up as literal text. The question
+ * stays in the transcript in bold, as it does on the desktop, so the
+ * conversation still reads in order once the buttons are gone.
+ */
+@Composable
+private fun AssistantProse(text: String) {
+    val parsed = remember(text) { AskBlock.parse(text) }
+    if (parsed == null) {
+        MarkdownText(text)
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (parsed.remainder.isNotEmpty()) MarkdownText(parsed.remainder)
+        Text(parsed.ask.question, fontWeight = FontWeight.Bold)
     }
 }
 

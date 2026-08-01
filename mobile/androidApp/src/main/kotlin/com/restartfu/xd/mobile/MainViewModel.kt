@@ -248,6 +248,17 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Answers a tagged question with one of its options.
+     *
+     * Sent as its own message rather than through the draft: the reader may
+     * have typed something they still mean to say, and an answer should not
+     * carry it along or throw it away.
+     */
+    fun answer(option: String) {
+        launchGuarded(_sending) { session.send(option) }
+    }
+
     fun cancel() {
         val before = state.value
         launchGuarded(_cancelling) {

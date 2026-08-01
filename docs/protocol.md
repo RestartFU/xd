@@ -407,6 +407,34 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `voice` | `request`, `state` of `downloading` (with `progress`, `-1` until the size is known), `ready`, `transcribed` (with `text`), `cancelled`, or `error` (with `error`) | Voice job progress, addressed to the connection that asked and naming no chat. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
 
+### Tagged questions
+
+Both bundled assistants run non-interactively, so a question is a block in the
+reply rather than a prompt:
+
+```
+<ask>
+Which implementation?
+- Keep the parser
+- Replace the parser
+<input>
+</ask>
+```
+
+The question is the first line, each option a `- ` or `* ` line (two to six of
+them), and `<input>` means a typed answer is also accepted. `turn-finished`
+reports the parsed form in `question`, `options`, and `accepts_input`.
+
+The block is **also stored with the message, verbatim** — unlike workspace
+blocks, which the daemon strips before storage. That is deliberate: it lets
+every client render its own buttons, and lets a client that reopens a chat find
+the question without having seen the event. A client must therefore strip these
+blocks before rendering, or show raw tags. `src/xd/agent/ask.cr` is the
+reference parser; the mobile client mirrors it in
+`shared/.../model/Ask.kt`.
+
+Answering is an ordinary `send`. There is no separate answer operation.
+
 `text` deltas are already filtered to visible output: ask-blocks and workspace
 blocks are withheld until complete, so a client appends deltas literally.
 
