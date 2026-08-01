@@ -116,6 +116,55 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "publishes the assistant catalog a separate client cannot compile in" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      response = engine.dispatch(local, %({"op":"agent-catalog"}))
+
+      response.success?.should be_true
+      backends = parse_response(response)["backends"].as_a
+      backends.map(&.["id"].as_s).sort!.should eq(["claude", "codex"])
+
+      backends.each do |backend|
+        catalog = Xd::Agent::Catalog.lookup(backend["id"].as_s).not_nil!
+        backend["name"].as_s.should eq(catalog.display_name)
+        backend["default_model"].as_s.should eq(catalog.default_model)
+
+        # set-option validates the model id, so the published ids have to be
+        # exactly the ones it will accept.
+        models = backend["models"].as_a.map(&.["id"].as_s)
+        models.should eq(catalog.models.map(&.id))
+        backend["efforts"].as_a.map(&.as_s)
+          .should eq(catalog.efforts.map(&.wire_name))
+      end
+    end
+  end
+
+  it "accepts every published model for its own backend" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      chat = store.create_chat("folder", "Chat", "claude")
+
+      backends = parse_response(
+        engine.dispatch(local, %({"op":"agent-catalog"}))
+      )["backends"].as_a
+
+      backends.each do |backend|
+        backend["models"].as_a.each do |model|
+          response = engine.dispatch(local, {
+            "op"      => "set-option",
+            "chat"    => chat,
+            "option"  => "model",
+            "backend" => backend["id"].as_s,
+            "value"   => model["id"].as_s,
+          }.to_json)
+          response.success?.should be_true
+        end
+      end
+    end
+  end
+
   it "uses the same dispatcher after transport authentication" do
     with_daemon_engine do |_store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)

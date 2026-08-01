@@ -252,6 +252,7 @@ public object TranscriptMachine {
             state.copy(
                 title = chat.title,
                 backend = chat.backend,
+                model = chat.model,
                 commands = chat.commands,
                 plan = chat.plan,
                 queue = chat.queue,

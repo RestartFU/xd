@@ -119,6 +119,30 @@ public data class DoneReply(
 )
 
 @Serializable
+public data class ModelReply(
+    val id: String,
+    val name: String,
+    @SerialName("context_window")
+    val contextWindow: Long = 0,
+)
+
+@Serializable
+public data class BackendReply(
+    val id: String,
+    val name: String,
+    @SerialName("default_model")
+    val defaultModel: String = "",
+    val models: List<ModelReply> = emptyList(),
+    val efforts: List<String> = emptyList(),
+)
+
+@Serializable
+public data class AgentCatalogReply(
+    val ok: Boolean,
+    val backends: List<BackendReply> = emptyList(),
+)
+
+@Serializable
 public data class DiffReply(
     val ok: Boolean,
     val output: String = "",

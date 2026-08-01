@@ -287,6 +287,8 @@ module Xd
           agent_auth_logout(request)
         when Protocol::Operation::AgentClis
           agent_clis
+        when Protocol::Operation::AgentCatalog
+          agent_catalog
         when Protocol::Operation::Tree
           tree
         when Protocol::Operation::NewFolder
@@ -598,6 +600,37 @@ module Xd
         @cli_versions.refresh
         Protocol::Response.ok({
           "providers" => agent_cli_snapshots,
+        })
+      end
+
+      # The assistants and models this daemon can actually run.
+      #
+      # The desktop reads Agent::Catalog directly because it ships in the same
+      # binary. A separately released client cannot, and hard-coding the list
+      # would drift the moment a model is added or retired -- set-option
+      # validates the id, so a stale client would simply be refused.
+      private def agent_catalog : Protocol::Response
+        backends = Agent::Catalog.all.map do |backend|
+          models = backend.models.map do |model|
+            JSON::Any.new({
+              "id"             => JSON::Any.new(model.id),
+              "name"           => JSON::Any.new(model.display_name),
+              "context_window" => JSON::Any.new(model.context_window.to_i64),
+            })
+          end
+          efforts = backend.efforts.map { |effort| JSON::Any.new(effort.wire_name) }
+
+          JSON::Any.new({
+            "id"            => JSON::Any.new(backend.id),
+            "name"          => JSON::Any.new(backend.display_name),
+            "default_model" => JSON::Any.new(backend.default_model),
+            "models"        => JSON::Any.new(models),
+            "efforts"       => JSON::Any.new(efforts),
+          })
+        end
+
+        Protocol::Response.ok({
+          "backends" => JSON::Any.new(backends),
         })
       end
 

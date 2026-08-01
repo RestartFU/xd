@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.net.PairResult
+import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
@@ -112,6 +113,14 @@ class ChatViewModel(
     val cancelling: StateFlow<Boolean> = _cancelling.asStateFlow()
     val steering: StateFlow<Boolean> = _steering.asStateFlow()
     val queueBusy: StateFlow<Boolean> = _droppingQueued.asStateFlow()
+    private val _catalog = MutableStateFlow(emptyList<BackendReply>())
+    private val _catalogLoading = MutableStateFlow(false)
+    private val _catalogError = MutableStateFlow<String?>(null)
+    private val _selectingModel = MutableStateFlow(false)
+    val catalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
+    val catalogLoading: StateFlow<Boolean> = _catalogLoading.asStateFlow()
+    val catalogError: StateFlow<String?> = _catalogError.asStateFlow()
+    val selectingModel: StateFlow<Boolean> = _selectingModel.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
 
     fun updateDraft(value: String) {
@@ -178,6 +187,39 @@ class ChatViewModel(
             session.enqueue(text)
             if (_draft.value == text) _draft.value = ""
         }
+    }
+
+    /**
+     * Loads the catalog once per chat screen.
+     *
+     * It is daemon state rather than app state: hard-coding the models would
+     * drift the moment one is added or retired, and set-option validates the
+     * id, so a stale client would simply be refused.
+     */
+    fun loadCatalog() {
+        if (_catalog.value.isNotEmpty() || _catalogLoading.value) return
+        _catalogLoading.value = true
+        viewModelScope.launch {
+            try {
+                _catalog.value = session.catalog()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _catalogError.value = error.message ?: "Could not read the model list"
+            } finally {
+                _catalogLoading.value = false
+            }
+        }
+    }
+
+    fun selectModel(backend: String, model: String) {
+        launchGuarded(_selectingModel) {
+            session.selectModel(backend, model)
+        }
+    }
+
+    fun clearCatalogError() {
+        _catalogError.value = null
     }
 
     fun editQueued(index: Int, oldText: String, text: String) {

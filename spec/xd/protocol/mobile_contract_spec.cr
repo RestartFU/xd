@@ -19,8 +19,9 @@ describe "mobile wire contract" do
       "queue"       => Xd::Protocol::Operation::Queue,
       "drop-queue"  => Xd::Protocol::Operation::DropQueue,
       "cancel"      => Xd::Protocol::Operation::Cancel,
-      "set-option"  => Xd::Protocol::Operation::SetOption,
-      "ping"        => Xd::Protocol::Operation::Ping,
+      "set-option"    => Xd::Protocol::Operation::SetOption,
+      "agent-catalog" => Xd::Protocol::Operation::AgentCatalog,
+      "ping"          => Xd::Protocol::Operation::Ping,
     }.each do |wire, operation|
       Xd::Protocol::Operation.from_wire?(wire).should eq(operation)
       operation.wire_name.should eq(wire)

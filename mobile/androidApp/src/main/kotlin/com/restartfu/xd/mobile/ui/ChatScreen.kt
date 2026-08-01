@@ -90,6 +90,16 @@ internal fun ChatScreen(
     // The desktop shows these beside the conversation. A phone has room for
     // one at a time, so they are tabs over the same chat.
     var pane by rememberSaveable(state.chatId) { mutableStateOf(Pane.CHAT) }
+    var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
+
+    if (choosingModel) {
+        ModelPicker(
+            model = model,
+            currentBackend = state.backend,
+            currentModel = state.model,
+            onDismiss = { choosingModel = false },
+        )
+    }
     val listState = rememberLazyListState()
     val items = state.visibleItems
     val leadingItemCount =
@@ -141,6 +151,18 @@ internal fun ChatScreen(
                         }
                     },
                     navigationIcon = { TextButton(onClick = goBack) { Text("Back") } },
+                    actions = {
+                        if (pane == Pane.CHAT) {
+                            TextButton(onClick = { choosingModel = true }) {
+                                Text(
+                                    state.model?.takeIf { it.isNotBlank() } ?: "Model",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 130.dp),
+                                )
+                            }
+                        }
+                    },
                 )
                 TabRow(selectedTabIndex = pane.ordinal) {
                     Pane.entries.forEach { candidate ->

@@ -20,6 +20,8 @@ public data class ChatState(
     val chatId: String,
     val title: String = "",
     val backend: String = "",
+    /** Absent until the chat is loaded; the daemon then reports the selection. */
+    val model: String? = null,
     val commands: List<String> = emptyList(),
     val plan: Boolean = false,
     val queue: List<String> = emptyList(),

@@ -3,6 +3,8 @@ package com.restartfu.xd.store
 import com.restartfu.xd.model.ChatState
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.SequencedEvent
+import com.restartfu.xd.protocol.AgentCatalogReply
+import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.BrowseListReply
 import com.restartfu.xd.protocol.BrowseReadReply
 import com.restartfu.xd.protocol.ChatOption
@@ -116,6 +118,16 @@ public class ChatSession internal constructor(
 
     public suspend fun setOption(option: ChatOption, value: String): Unit =
         core.call(Ops.setOption(core.chatId, option, value))
+
+    /** The assistants and models this daemon can run. */
+    public suspend fun catalog(): List<BackendReply> =
+        core.read(Ops.agentCatalog()) {
+            it.decodeReply<AgentCatalogReply>().backends
+        }
+
+    /** Selects assistant and model together, which is the validated path. */
+    public suspend fun selectModel(backend: String, model: String): Unit =
+        core.call(Ops.selectModel(core.chatId, backend, model))
 
     override fun close() {
         if (closed) return

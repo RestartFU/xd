@@ -262,6 +262,7 @@ boundary, not an event cursor.
 | `file-browse` | `chat`, `action`, optional relative `path` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
 | `agent-clis` | none | bundled assistant versions |
+| `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
 | `search` | `query` | matching stored messages |
 | `diff-read` | `chat` plus one `read` of `base`, `working-status`, or `branch-status` (with `base`) | `output: string`, limited to 8 MiB |
@@ -339,6 +340,11 @@ Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
 both, clears an unsupported effort, and appends a visible `Switched to …`
 transcript event.
+
+`agent-catalog` lists the assistants and models this daemon can run. The
+desktop reads its own compiled-in catalog because it ships with the daemon; a
+separately released client must ask, since `set-option` validates the model id
+and a hard-coded list would be refused as soon as one is added or retired.
 
 ### Folder and chat mutations
 

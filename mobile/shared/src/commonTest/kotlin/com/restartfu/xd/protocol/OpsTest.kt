@@ -53,6 +53,28 @@ class OpsTest {
     }
 
     @Test
+    fun selectingAModelSendsItsAssistantToo() {
+        // Without a backend the daemon stores the string unvalidated and skips
+        // the effort reconciliation and the visible switch event.
+        val request = Ops.selectModel("chat-1", "codex", "gpt-5.5")
+
+        assertEquals("set-option", request.getValue("op").jsonPrimitive.content)
+        assertEquals("model", request.getValue("option").jsonPrimitive.content)
+        assertEquals("codex", request.getValue("backend").jsonPrimitive.content)
+        assertEquals("gpt-5.5", request.getValue("value").jsonPrimitive.content)
+    }
+
+    @Test
+    fun aModelWithoutAnAssistantIsRejected() {
+        assertFailsWith<IllegalArgumentException> {
+            Ops.selectModel("chat-1", "", "gpt-5.5")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Ops.selectModel("chat-1", "codex", " ")
+        }
+    }
+
+    @Test
     fun steerCarriesTheTextTheDaemonMatchesOn() {
         // The daemon refuses a steer whose text is not what is queued, so the
         // guard has to travel with the request.
