@@ -27,6 +27,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -44,11 +46,22 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.mobile.DiffViewModel
+import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.syntax.CodeBlocks
+
+/** The desktop's conversation, diff, files and terminal panes, as tabs. */
+internal enum class Pane(val label: String) {
+    CHAT("Chat"),
+    DIFF("Diff"),
+    FILES("Files"),
+    TERMINAL("Terminal"),
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,6 +73,10 @@ internal fun ChatScreen(
     val sending by model.sending.collectAsStateWithLifecycle()
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
+
+    // The desktop shows these beside the conversation. A phone has room for
+    // one at a time, so they are tabs over the same chat.
+    var pane by rememberSaveable(state.chatId) { mutableStateOf(Pane.CHAT) }
     val listState = rememberLazyListState()
     val items = state.visibleItems
     val leadingItemCount =
@@ -97,27 +114,66 @@ internal fun ChatScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BackendIcon(state.backend)
-                        if (state.backend.isNotEmpty()) Spacer(Modifier.width(10.dp))
-                        Text(state.title.ifEmpty { "Chat" })
+            Column {
+                TopAppBar(
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            BackendIcon(state.backend)
+                            if (state.backend.isNotEmpty()) Spacer(Modifier.width(10.dp))
+                            Text(state.title.ifEmpty { "Chat" })
+                        }
+                    },
+                    navigationIcon = { TextButton(onClick = goBack) { Text("Back") } },
+                )
+                TabRow(selectedTabIndex = pane.ordinal) {
+                    Pane.entries.forEach { candidate ->
+                        Tab(
+                            selected = pane == candidate,
+                            onClick = { pane = candidate },
+                            text = { Text(candidate.label) },
+                        )
                     }
-                },
-                navigationIcon = { TextButton(onClick = goBack) { Text("Back") } },
-            )
+                }
+            }
         },
         bottomBar = {
-            Composer(
-                state = state,
-                composer = composer,
-                sending = sending,
-                cancelling = cancelling,
-                model = model,
-            )
+            if (pane == Pane.CHAT) {
+                Composer(
+                    state = state,
+                    composer = composer,
+                    sending = sending,
+                    cancelling = cancelling,
+                    model = model,
+                )
+            }
         },
     ) { padding ->
+        if (pane != Pane.CHAT) {
+            Box(Modifier.padding(padding)) {
+                when (pane) {
+                    Pane.DIFF -> DiffPaneContent(
+                        viewModel(
+                            key = "diff-${state.chatId}",
+                            factory = DiffViewModel.Factory(model.session),
+                        ),
+                    )
+                    Pane.FILES -> FilesPaneContent(
+                        viewModel(
+                            key = "files-${state.chatId}",
+                            factory = FilesViewModel.Factory(model.session),
+                        ),
+                    )
+                    Pane.TERMINAL -> Centered {
+                        Text(
+                            "Terminal is not available yet.",
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                    else -> Unit
+                }
+            }
+            return@Scaffold
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier

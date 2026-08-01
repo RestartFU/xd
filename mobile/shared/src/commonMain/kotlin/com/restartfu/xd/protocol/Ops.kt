@@ -124,6 +124,79 @@ public object Ops {
         value: Boolean,
     ): JsonObject = setOption(chatId, option, if (value) "true" else "false")
 
+    /**
+     * Reads a whole patch in one call.
+     *
+     * The desktop also asks per file to build its collapsible sections; a
+     * phone shows one scrollable patch, so `working-all` and `branch-all` are
+     * all it needs. `branch-all` wants the base from a prior `base` read.
+     */
+    public fun diffRead(
+        chatId: String,
+        read: String,
+        base: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("op", "diff-read")
+        put("chat", chatId)
+        put("read", read)
+        if (!base.isNullOrBlank()) put("base", base)
+    }
+
+    public fun listDirectory(chatId: String, path: String?): JsonObject = buildJsonObject {
+        put("op", "file-browse")
+        put("chat", chatId)
+        put("action", "list")
+        if (!path.isNullOrEmpty()) put("path", path)
+    }
+
+    public fun readFile(chatId: String, path: String): JsonObject = buildJsonObject {
+        require(path.isNotBlank()) { "A file path is required" }
+        put("op", "file-browse")
+        put("chat", chatId)
+        put("action", "read")
+        put("path", path)
+    }
+
+    public fun terminalList(chatId: String): JsonObject = withChat("terminal-list", chatId)
+
+    public fun terminalOpen(
+        chatId: String,
+        columns: Int,
+        rows: Int,
+        reuse: Boolean,
+    ): JsonObject = buildJsonObject {
+        require(columns > 0 && rows > 0) { "A terminal needs a positive size" }
+        put("op", "terminal-open")
+        put("chat", chatId)
+        put("columns", columns)
+        put("rows", rows)
+        put("reuse", reuse)
+    }
+
+    /** [data] is base64: the pty takes bytes, not text. */
+    public fun terminalInput(terminalId: String, data: String): JsonObject = buildJsonObject {
+        put("op", "terminal-input")
+        put("terminal", terminalId)
+        put("data", data)
+    }
+
+    public fun terminalResize(
+        terminalId: String,
+        columns: Int,
+        rows: Int,
+    ): JsonObject = buildJsonObject {
+        require(columns > 0 && rows > 0) { "A terminal needs a positive size" }
+        put("op", "terminal-resize")
+        put("terminal", terminalId)
+        put("columns", columns)
+        put("rows", rows)
+    }
+
+    public fun terminalKill(terminalId: String): JsonObject = buildJsonObject {
+        put("op", "terminal-kill")
+        put("terminal", terminalId)
+    }
+
     private fun op(name: String): JsonObject = buildJsonObject {
         put("op", name)
     }

@@ -116,3 +116,47 @@ public data class DoneReply(
     val ok: Boolean,
     val id: String? = null,
 )
+
+@Serializable
+public data class DiffReply(
+    val ok: Boolean,
+    val output: String = "",
+)
+
+@Serializable
+public data class FileEntryReply(
+    val name: String,
+    val directory: Boolean,
+)
+
+@Serializable
+public data class BrowseListReply(
+    val ok: Boolean,
+    val entries: List<FileEntryReply> = emptyList(),
+)
+
+@Serializable
+public data class BrowseReadReply(
+    val ok: Boolean,
+    val content: String = "",
+)
+
+@Serializable
+public data class TerminalReply(
+    val id: String,
+    val title: String = "",
+    val columns: Int,
+    val rows: Int,
+)
+
+@Serializable
+public data class TerminalListReply(
+    val ok: Boolean,
+    val terminals: List<TerminalReply> = emptyList(),
+)
+
+@Serializable
+public data class TerminalOpenReply(
+    val ok: Boolean,
+    val id: String,
+)

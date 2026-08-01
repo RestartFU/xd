@@ -3,11 +3,18 @@ package com.restartfu.xd.store
 import com.restartfu.xd.model.ChatState
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.SequencedEvent
+import com.restartfu.xd.protocol.BrowseListReply
+import com.restartfu.xd.protocol.BrowseReadReply
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.ChatReply
+import com.restartfu.xd.protocol.DiffReply
+import com.restartfu.xd.protocol.FileEntryReply
 import com.restartfu.xd.protocol.MessagesReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.PngAttachment
+import com.restartfu.xd.protocol.TerminalListReply
+import com.restartfu.xd.protocol.TerminalOpenReply
+import com.restartfu.xd.protocol.TerminalReply
 import com.restartfu.xd.protocol.decodeReply
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -49,6 +56,53 @@ public class ChatSession internal constructor(
         core.call(Ops.dropQueue(core.chatId, index))
 
     public suspend fun loadOlder(): Unit = core.loadOlder()
+
+    /** The whole patch for [read], one of `working-all` or `branch-all`. */
+    public suspend fun diff(read: String, base: String? = null): String =
+        core.read(Ops.diffRead(core.chatId, read, base)) {
+            it.decodeReply<DiffReply>().output
+        }
+
+    /** The branch point `branch-all` should be read against. */
+    public suspend fun diffBase(): String =
+        core.read(Ops.diffRead(core.chatId, "base")) {
+            it.decodeReply<DiffReply>().output.trim()
+        }
+
+    public suspend fun listDirectory(path: String?): List<FileEntryReply> =
+        core.read(Ops.listDirectory(core.chatId, path)) {
+            it.decodeReply<BrowseListReply>().entries
+        }
+
+    public suspend fun readFile(path: String): String =
+        core.read(Ops.readFile(core.chatId, path)) {
+            it.decodeReply<BrowseReadReply>().content
+        }
+
+    public suspend fun terminals(): List<TerminalReply> =
+        core.read(Ops.terminalList(core.chatId)) {
+            it.decodeReply<TerminalListReply>().terminals
+        }
+
+    public suspend fun openTerminal(
+        columns: Int,
+        rows: Int,
+        reuse: Boolean,
+    ): String = core.read(Ops.terminalOpen(core.chatId, columns, rows, reuse)) {
+        it.decodeReply<TerminalOpenReply>().id
+    }
+
+    public suspend fun sendTerminalInput(terminalId: String, data: String): Unit =
+        core.call(Ops.terminalInput(terminalId, data))
+
+    public suspend fun resizeTerminal(
+        terminalId: String,
+        columns: Int,
+        rows: Int,
+    ): Unit = core.call(Ops.terminalResize(terminalId, columns, rows))
+
+    public suspend fun killTerminal(terminalId: String): Unit =
+        core.call(Ops.terminalKill(terminalId))
 
     public suspend fun setOption(option: ChatOption, value: String): Unit =
         core.call(Ops.setOption(core.chatId, option, value))
@@ -262,6 +316,22 @@ internal class ChatSessionCore(
             )
             throw error
         }
+    }
+
+    /**
+     * A read whose failure belongs to the pane that asked for it.
+     *
+     * Unlike [call], this does not push the error into the transcript: a
+     * failed diff or directory listing is not a chat error and must not
+     * surface as one.
+     */
+    suspend fun <T> read(
+        request: JsonObject,
+        decode: (JsonObject) -> T,
+    ): T {
+        ensureActive()
+        val value = actor.call(request)
+        return actor.decodeReply(value, decode)
     }
 
     suspend fun onEvent(event: SequencedEvent) {
