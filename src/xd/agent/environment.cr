@@ -43,6 +43,7 @@ module Xd
 
       BUNDLE_ONLY = {
         "XD_AGENT_SECRETS_FILE",
+        "XD_RENDER_SAFE_MODE",
       }
 
       def host(source : Hash(String, String) = ENV.to_h) : Hash(String, String)

@@ -8,13 +8,40 @@ module Xd
   module Agent
     class Parser
       private class PendingTool
+        ARGUMENT_LIMIT = 2 * 1024 * 1024
+
         getter id : String?
         getter name : String?
-        property arguments = ""
+        getter overflowed = false
 
         def initialize(@id, @name)
+          @arguments = IO::Memory.new
+        end
+
+        def append(fragment : String) : Nil
+          remaining = ARGUMENT_LIMIT - @arguments.size
+          if remaining <= 0
+            @overflowed = true
+            return
+          end
+
+          kept = Math.min(fragment.bytesize, remaining)
+          part = fragment.byte_slice(0, kept)
+          until part.valid_encoding?
+            part = part.byte_slice(0, part.bytesize - 1)
+          end
+          @arguments << part
+          @overflowed = true if kept < fragment.bytesize
+        end
+
+        def arguments : String?
+          return if @overflowed
+
+          @arguments.to_s
         end
       end
+
+      MAX_PENDING_TOOLS = 64
 
       getter backend : Backend
       getter session_id : String?
@@ -115,7 +142,7 @@ module Xd
             index = int?(event, "index")
             fragment = string?(delta, "partial_json")
             if index && fragment && (pending = @pending_tools[index.to_i])
-              pending.arguments += fragment
+              pending.append(fragment)
             end
           end
         when "content_block_start"
@@ -123,10 +150,13 @@ module Xd
           index = int?(event, "index")
           if block && index && index >= 0 &&
              string?(block, "type") == "tool_use"
-            @pending_tools[index.to_i] = PendingTool.new(
-              string?(block, "id"),
-              string?(block, "name")
-            )
+            if @pending_tools.has_key?(index.to_i) ||
+               @pending_tools.size < MAX_PENDING_TOOLS
+              @pending_tools[index.to_i] = PendingTool.new(
+                string?(block, "id"),
+                string?(block, "name")
+              )
+            end
           end
         when "content_block_stop"
           index = int?(event, "index")
@@ -137,7 +167,7 @@ module Xd
           emit_or_defer_tool(
             pending.name,
             pending.id,
-            parse_arguments(pending.arguments),
+            pending.arguments.try { |arguments| parse_arguments(arguments) },
             events
           )
         end

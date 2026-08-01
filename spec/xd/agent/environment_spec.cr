@@ -19,6 +19,7 @@ describe Xd::Agent::Environment do
       "OPENSSL_MODULES"              => "/bundle/modules",
       "XD_HOST_OPENSSL_MODULES"      => "",
       "XD_AGENT_SECRETS_FILE"        => "/private/secrets.json",
+      "XD_RENDER_SAFE_MODE"          => "1",
       "UNCHANGED"                    => "yes",
     }
 
@@ -33,6 +34,7 @@ describe Xd::Agent::Environment do
     environment.has_key?("XD_HOST_GTK_PATH").should be_false
     environment.has_key?("XD_HOST_SSL_CERT_FILE").should be_false
     environment.has_key?("XD_AGENT_SECRETS_FILE").should be_false
+    environment.has_key?("XD_RENDER_SAFE_MODE").should be_false
     environment["UNCHANGED"].should eq("yes")
   end
 

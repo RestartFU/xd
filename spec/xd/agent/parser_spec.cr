@@ -200,6 +200,49 @@ describe Xd::Agent::Parser do
     event_text(events, Xd::Agent::EventType::TextDelta).should eq("done")
   end
 
+  it "bounds streamed Claude tool arguments before parsing" do
+    parser = Xd::Agent::Parser.new(Xd::Agent::Catalog::CLAUDE)
+    parser.feed_line({
+      type:  "stream_event",
+      event: {
+        type:          "content_block_start",
+        index:         0,
+        content_block: {
+          type: "tool_use",
+          id:   "large-write",
+          name: "Write",
+        },
+      },
+    }.to_json)
+    fragment = "x" * 64 * 1024
+    33.times do
+      parser.feed_line({
+        type:  "stream_event",
+        event: {
+          type:  "content_block_delta",
+          index: 0,
+          delta: {
+            type:         "input_json_delta",
+            partial_json: fragment,
+          },
+        },
+      }.to_json)
+    end
+    parser.feed_line({
+      type:  "stream_event",
+      event: {type: "content_block_stop", index: 0},
+    }.to_json)
+
+    events = parser.feed_line({
+      type:    "user",
+      message: {
+        content: [{type: "tool_result", tool_use_id: "large-write"}],
+      },
+    }.to_json)
+    events.size.should eq(1)
+    events.first.text.should eq("file_change")
+  end
+
   it "defers Claude file changes until their tool result" do
     parser = Xd::Agent::Parser.new(Xd::Agent::Catalog::CLAUDE)
     request = [

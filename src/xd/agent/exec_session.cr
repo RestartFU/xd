@@ -3,7 +3,8 @@ require "./parser"
 module Xd
   module Agent
     class ExecSession
-      STDERR_LIMIT = 8 * 1024
+      STDERR_LIMIT      = 8 * 1024
+      OUTPUT_LINE_LIMIT = 8 * 1024 * 1024
 
       class Error < Exception
       end
@@ -24,6 +25,7 @@ module Xd
         @on_event : Proc(Event, Nil),
         @on_finished : Proc(Bool, String?, Nil),
         @arguments : Array(String)? = nil,
+        @output_line_limit : Int32 = OUTPUT_LINE_LIMIT,
       )
         @parser = Parser.new(@backend)
         @parser.model = @spec.model || @backend.default_model
@@ -91,8 +93,12 @@ module Xd
         output : IO,
         done : Channel(Nil),
       ) : Nil
-        while line = output.gets
-          @parser.feed_line(line.chomp).each do |event|
+        while line = output.gets('\n', @output_line_limit + 1, chomp: true)
+          if line.bytesize > @output_line_limit
+            stop_oversized_output
+            break
+          end
+          @parser.feed_line(line).each do |event|
             handle_event(event)
           end
           Fiber.yield
@@ -100,6 +106,18 @@ module Xd
       rescue IO::Error
       ensure
         done.send(nil)
+      end
+
+      private def stop_oversized_output : Nil
+        process = @mutex.synchronize do
+          unless @stopping
+            @backend_error =
+              "#{@backend.display_name} sent an oversized response."
+          end
+          @process
+        end
+        process.try(&.terminate(graceful: false))
+      rescue RuntimeError
       end
 
       private def read_error(

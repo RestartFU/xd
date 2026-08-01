@@ -12,6 +12,7 @@ module Xd
     class EventInbox(T)
       BATCH_SIZE          = 32
       TEXT_COALESCE_LIMIT = 16 * 1024
+      ITEM_LIMIT          = 512
 
       @items = Deque({T, Hash(String, JSON::Any)}).new
       @scheduled = false
@@ -21,6 +22,9 @@ module Xd
       def push(target : T, event : Hash(String, JSON::Any)) : Bool
         @lock.synchronize do
           @items << {target, event} unless coalesce(target, event)
+          while @items.size > ITEM_LIMIT
+            @items.shift
+          end
           unless @scheduled
             @scheduled = true
             return true

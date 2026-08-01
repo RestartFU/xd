@@ -60,6 +60,28 @@ describe Xd::Agent::ExecSession do
     result[1].should eq("decisive failure")
   end
 
+  it "kills a CLI before parsing an oversized output line" do
+    finished = Channel(Tuple(Bool, String?)).new(1)
+    session = Xd::Agent::ExecSession.new(
+      Xd::Agent::Catalog::CLAUDE,
+      Xd::Agent::RunSpec.new("unused"),
+      ENV.to_h,
+      ->(_event : Xd::Agent::Event) { },
+      ->(ok : Bool, message : String?) { finished.send({ok, message}) },
+      arguments: [
+        "/bin/sh",
+        "-c",
+        "printf '%02048d\\n' 0",
+      ],
+      output_line_limit: 1024
+    )
+
+    session.start
+    result = await_finish(finished)
+    result[0].should be_false
+    result[1].should eq("Claude Code sent an oversized response.")
+  end
+
   it "treats cancellation as a normal finish" do
     finished = Channel(Tuple(Bool, String?)).new(1)
     session = Xd::Agent::ExecSession.new(

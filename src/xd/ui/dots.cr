@@ -18,7 +18,7 @@ module Xd
         @widget.valign = :center
         @at = 0
         @tick_id = 0_u32
-        @animated = true
+        @animated = ENV["XD_RENDER_SAFE_MODE"]? != "1"
         @widget.map_signal.connect { start }
         @widget.unmap_signal.connect { stop }
       end

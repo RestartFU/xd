@@ -115,4 +115,22 @@ describe Xd::UI::EventInbox do
     batch[1][1]["progress"].as_i.should eq(20)
     batch[2][1]["progress"].as_i.should eq(30)
   end
+
+  it "bounds a stalled GTK consumer" do
+    inbox = Xd::UI::EventInbox(String).new
+    total = Xd::UI::EventInbox::ITEM_LIMIT + 40
+
+    total.times do |index|
+      inbox.push("local", ui_event("tool", index.to_s))
+    end
+
+    collected = [] of Hash(String, JSON::Any)
+    loop do
+      batch, more = inbox.drain(Int32::MAX)
+      collected.concat(batch.map(&.[1]))
+      break unless more
+    end
+    collected.size.should eq(Xd::UI::EventInbox::ITEM_LIMIT)
+    collected.first["text"].as_s.should eq("40")
+  end
 end

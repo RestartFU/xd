@@ -113,6 +113,39 @@ describe Xd::Agent::CodexAppServer do
     end
   end
 
+  it "kills app-server before parsing an oversized output line" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-codex-oversized-#{Random::Secure.hex(12)}"
+    )
+    Dir.mkdir_p(directory)
+    script = fake_codex_script(directory, <<-SH)
+      IFS= read -r initialize
+      printf '%02048d\\n' 0
+      SH
+    finished = Channel(Tuple(Bool, String?)).new(1)
+    server = Xd::Agent::CodexAppServer.new(
+      Xd::Agent::Catalog::CODEX,
+      ENV.to_h,
+      "spec",
+      [script],
+      output_line_limit: 1024
+    )
+    server.start_turn(
+      Xd::Agent::RunSpec.new("hello"),
+      nil,
+      ->(_event : Xd::Agent::Event) { },
+      ->(ok : Bool, message : String?) { finished.send({ok, message}) }
+    )
+
+    result = await_codex_finish(finished)
+    result[0].should be_false
+    result[1].should eq("Codex sent an oversized response.")
+  ensure
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
   it "finishes cancellation when app-server ignores interrupt" do
     directory = File.join(
       Dir.tempdir,

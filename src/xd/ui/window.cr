@@ -91,9 +91,11 @@ module Xd
       MAX_IMAGES                = 4
       MAX_IMAGE_BYTES           = 10 * 1024 * 1024
       MAX_TOTAL_BYTES           = 20 * 1024 * 1024
-      QUEUE_RENDER_BATCH        =  8
-      QUEUE_RETIRE_BATCH        =  8
-      TURN_RECOVERY_EVENT_BATCH = 32
+      QUEUE_RENDER_BATCH        =   8
+      QUEUE_RETIRE_BATCH        =   8
+      TURN_RECOVERY_EVENT_BATCH =  32
+      TURN_RECOVERY_EVENT_LIMIT = 512
+      RENDER_SAFE_MODE          = ENV["XD_RENDER_SAFE_MODE"]? == "1"
 
       getter widget : Adw::ApplicationWindow
 
@@ -2023,7 +2025,7 @@ module Xd
 
         if animated
           update_working_label
-          if @working_timer == 0
+          if @working_timer == 0 && !RENDER_SAFE_MODE
             @working_timer = GLib.timeout(1.second) do
               update_working_label
               true
@@ -2034,7 +2036,9 @@ module Xd
           @working_timer = 0_u32
         end
 
-        @working_dots.try { |dots| dots.animated = animated }
+        @working_dots.try do |dots|
+          dots.animated = animated && !RENDER_SAFE_MODE
+        end
       end
 
       private def remove_working_row(reset_started_at = true) : Nil
@@ -2689,6 +2693,7 @@ module Xd
         if !bypass_recovery &&
            defer_turn_recovery_event?(endpoint, event, name)
           @transcript_reload_after_recovery = true if name == "changed"
+          @turn_recovery_events.shift if @turn_recovery_events.size >= TURN_RECOVERY_EVENT_LIMIT
           @turn_recovery_events << {endpoint, event}
           return
         end

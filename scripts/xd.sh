@@ -115,22 +115,36 @@ export GIT_EXEC_PATH="$HERE/libexec/git-core"
 export GIT_TEMPLATE_DIR="$HERE/share/git-core/templates"
 export GIT_SSL_CAINFO="$HERE/etc/ssl/certs/ca-certificates.crt"
 
-# GL is the host's own stack end to end: the bundle carries no Mesa, so
-# libepoxy dlopens the host's libGL -- the same one the desktop runs on.
-# Forcing cairo here was guarding against a mix that cannot happen, and it
-# cost popover transparency and every blurred shadow. GTK falls back to
-# cairo by itself where GL is genuinely absent.
-export GSK_RENDERER="${GSK_RENDERER:-ngl}"
+# Framework AMD laptops can hit kernel DMCUB/flip_done hangs under sustained
+# GTK GL redraws. Use GTK's bounded cairo fallback on AMD unless the user made
+# an explicit renderer choice. Other GPUs keep GTK's native default. This is
+# an app mitigation; it does not rewrite host kernel or boot settings.
+if [ -z "${GSK_RENDERER-}" ] && [ -z "${XD_HARDWARE_RENDERING-}" ]; then
+  for vendor_file in /sys/class/drm/card*/device/vendor; do
+    [ -r "$vendor_file" ] || continue
+    vendor=
+    IFS= read -r vendor < "$vendor_file" || true
+    if [ "$vendor" = "0x1002" ]; then
+      export GSK_RENDERER=cairo
+      export XD_RENDER_SAFE_MODE=1
+      break
+    fi
+  done
+fi
 
 # The bundle's own Mesa, driving the machine's GPU through the kernel's
 # stable DRM interface -- the same arrangement Flatpak uses, so no host GL
 # userland is ever consulted. Where there is no GPU (or an NVIDIA card that
 # only the proprietary driver speaks for), Mesa falls back to its own
 # software rasterizer by itself, and the picture stays identical either way.
-# XD_SOFTWARE_GL=1 forces the software path for comparison.
+# XD_SOFTWARE_GL=1 forces both GTK and Mesa software paths for comparison.
 export __EGL_VENDOR_LIBRARY_FILENAMES="$RUNTIME/egl_vendor.json"
 export LIBGL_DRIVERS_PATH="$HERE/lib/dri"
-if [ -n "${XD_SOFTWARE_GL-}" ]; then export LIBGL_ALWAYS_SOFTWARE=1; fi
+if [ -n "${XD_SOFTWARE_GL-}" ]; then
+  export GSK_RENDERER=cairo
+  export XD_RENDER_SAFE_MODE=1
+  export LIBGL_ALWAYS_SOFTWARE=1
+fi
 
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \

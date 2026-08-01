@@ -5,7 +5,8 @@ require "./executable"
 module Xd
   module Agent
     class CodexAppServer
-      STDERR_LIMIT = 8 * 1024
+      STDERR_LIMIT      = 8 * 1024
+      OUTPUT_LINE_LIMIT = 8 * 1024 * 1024
 
       class Error < Exception
       end
@@ -26,6 +27,7 @@ module Xd
         version : String,
         arguments : Array(String)? = nil,
         @cancel_grace : Time::Span = 5.seconds,
+        @output_line_limit : Int32 = OUTPUT_LINE_LIMIT,
       )
         command = arguments || @backend.build_argv(RunSpec.new(""))
         unless arguments
@@ -131,8 +133,12 @@ module Xd
         output : IO,
         done : Channel(Nil),
       ) : Nil
-        while line = output.gets
-          @protocol.receive_line(line.chomp)
+        while line = output.gets('\n', @output_line_limit + 1, chomp: true)
+          if line.bytesize > @output_line_limit
+            fail_server("Codex sent an oversized response.")
+            break
+          end
+          @protocol.receive_line(line)
           Fiber.yield
         end
       rescue IO::Error
@@ -175,9 +181,7 @@ module Xd
         end
         unless closed
           fail_server(
-            stderr.empty? ?
-              "Codex app-server closed unexpectedly" :
-              stderr
+            stderr.empty? ? "Codex app-server closed unexpectedly" : stderr
           )
         end
       rescue error
