@@ -26,6 +26,8 @@ public data class ChatState(
     /** `read-only`, `edit` or `full`. Ignored by the daemon while [plan] is on. */
     val access: String? = null,
     val newWorktree: Boolean = false,
+    /** True when this chat is in Git and has not locked its checkout yet. */
+    val canCreateWorktree: Boolean = false,
     val commands: List<String> = emptyList(),
     val plan: Boolean = false,
     val queue: List<String> = emptyList(),

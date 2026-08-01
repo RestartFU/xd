@@ -7,8 +7,10 @@ import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.LiveItemReply
 import com.restartfu.xd.protocol.MessageReply
 import com.restartfu.xd.protocol.MessagesReply
+import com.restartfu.xd.protocol.WorktreeReply
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -143,6 +145,43 @@ class TranscriptMachineTest {
             result.messages.map { it.kind },
         )
         assertEquals(listOf(12_000L, 13_000L), result.messages.map { it.atMillis })
+    }
+
+    @Test
+    fun worktreeControlsFollowDaemonCapability() {
+        val worktrees = listOf(
+            WorktreeReply(
+                path = "/repo",
+                branch = "main",
+                detached = false,
+                main = true,
+                current = true,
+            ),
+        )
+        val unavailable = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(chat(), messages(), nowMillis = 0),
+        ).state
+        val available = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(worktrees = worktrees),
+                messages(),
+                nowMillis = 0,
+            ),
+        ).state
+        val locked = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(worktrees = worktrees, hasMessages = true),
+                messages(),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertFalse(unavailable.canCreateWorktree)
+        assertTrue(available.canCreateWorktree)
+        assertFalse(locked.canCreateWorktree)
     }
 
     @Test
@@ -317,6 +356,8 @@ class TranscriptMachineTest {
         workingFor: Long? = null,
         turnId: Long? = null,
         turnSequence: Long? = null,
+        worktrees: List<WorktreeReply> = emptyList(),
+        hasMessages: Boolean = false,
     ): ChatReply = ChatReply(
         ok = true,
         title = "Title",
@@ -329,7 +370,8 @@ class TranscriptMachineTest {
         turnId = turnId,
         turnSequence = turnSequence,
         newWorktree = false,
-        hasMessages = false,
+        hasMessages = hasMessages,
+        worktrees = worktrees,
     )
 
     private fun messages(vararg rows: MessageReply): MessagesReply = MessagesReply(

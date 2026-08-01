@@ -256,6 +256,7 @@ public object TranscriptMachine {
                 effort = chat.effort,
                 access = chat.access,
                 newWorktree = chat.newWorktree,
+                canCreateWorktree = chat.worktrees.isNotEmpty() && !chat.hasMessages,
                 commands = chat.commands,
                 plan = chat.plan,
                 queue = chat.queue,

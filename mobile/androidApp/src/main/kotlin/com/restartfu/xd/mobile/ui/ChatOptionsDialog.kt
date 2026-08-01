@@ -124,24 +124,26 @@ internal fun ChatOptionsDialog(
                     )
                 }
 
-                Section("Worktree")
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("New worktree")
-                        Text(
-                            "Run this chat in its own checkout.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline,
+                if (state.canCreateWorktree) {
+                    Section("Worktree")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("New worktree")
+                            Text(
+                                "Run this chat in its own checkout.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                        Switch(
+                            checked = state.newWorktree,
+                            onCheckedChange = { model.setNewWorktree(it) },
+                            enabled = !busy,
                         )
                     }
-                    Switch(
-                        checked = state.newWorktree,
-                        onCheckedChange = { model.setNewWorktree(it) },
-                        enabled = !busy,
-                    )
                 }
             }
         },
