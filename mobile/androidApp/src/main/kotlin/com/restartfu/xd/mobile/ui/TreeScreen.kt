@@ -249,6 +249,8 @@ private fun LazyListScope.folderRows(
                         ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    BackendIcon(chat.backend)
+                    Spacer(Modifier.width(10.dp))
                     Text(chat.title, modifier = Modifier.weight(1f))
                     if (chat.working) Text("working", color = MaterialTheme.colorScheme.primary)
                 }

@@ -73,7 +73,13 @@ internal fun ChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(state.title.ifEmpty { "Chat" }) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BackendIcon(state.backend)
+                        if (state.backend.isNotEmpty()) Spacer(Modifier.width(10.dp))
+                        Text(state.title.ifEmpty { "Chat" })
+                    }
+                },
                 navigationIcon = { TextButton(onClick = goBack) { Text("Back") } },
             )
         },
