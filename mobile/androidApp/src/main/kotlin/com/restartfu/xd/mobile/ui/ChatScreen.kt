@@ -71,8 +71,25 @@ internal fun ChatScreen(
         }
     }
 
+    // Opening a chat lands on the newest message, not the oldest. This cannot
+    // be inferred from the list state: by the time an effect runs the items
+    // are already laid out, so "nothing measured yet" reads as a full list and
+    // the jump never happens. Track the first load for this chat instead.
+    // Saved, so a rotation does not re-land and throw away the scroll position
+    // rememberLazyListState just restored.
+    var landed by rememberSaveable(state.chatId) { mutableStateOf(false) }
+
+    LaunchedEffect(state.chatId, items.isNotEmpty()) {
+        if (!landed && items.isNotEmpty()) {
+            // Jumped, not animated: scrolling through a loaded history on open
+            // is motion the reader did not ask for.
+            listState.scrollToItem(lastTranscriptIndex)
+            landed = true
+        }
+    }
+
     LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount) {
-        if (items.isNotEmpty() && (atBottom || listState.layoutInfo.totalItemsCount == 0)) {
+        if (landed && items.isNotEmpty() && atBottom) {
             listState.animateScrollToItem(lastTranscriptIndex)
         }
     }
