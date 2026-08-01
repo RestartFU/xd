@@ -31,6 +31,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -401,7 +402,10 @@ private fun Composer(
             }
         }
         Row(verticalAlignment = Alignment.Bottom) {
-            TextButton(
+            // An icon button rather than a text button: a lone glyph in a
+            // label-sized run of text is a small thing to hit, and this one
+            // gets a square touch target and a glyph big enough to aim at.
+            IconButton(
                 onClick = {
                     picker.launch(
                         PickVisualMediaRequest(
@@ -411,7 +415,7 @@ private fun Composer(
                 },
                 enabled = attachments.size < Limits.MAX_IMAGES,
             ) {
-                Text("+")
+                Text("+", style = MaterialTheme.typography.headlineSmall)
             }
             OutlinedTextField(
                 value = composer,

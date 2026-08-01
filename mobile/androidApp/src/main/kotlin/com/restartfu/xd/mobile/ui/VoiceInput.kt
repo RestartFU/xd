@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -57,7 +58,9 @@ internal fun VoiceButton(voice: VoiceSession) {
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
             }
         is VoiceState.Downloading, VoiceState.NeedsModel -> Unit
-        else -> TextButton(
+        // Square and the same size as the attach button beside it: they are
+        // the same kind of thing and should be the same thing to hit.
+        else -> IconButton(
             onClick = {
                 if (context.canRecord()) {
                     voice.start()
@@ -65,7 +68,7 @@ internal fun VoiceButton(voice: VoiceSession) {
                     request.launch(Manifest.permission.RECORD_AUDIO)
                 }
             },
-        ) { Text("🎤") }
+        ) { Text("🎤", style = MaterialTheme.typography.titleMedium) }
     }
 }
 
