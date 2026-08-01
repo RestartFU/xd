@@ -17,6 +17,7 @@ module Xd
         @checkout : String = BranchBuild.checkout_dir,
         @environment : Hash(String, String) = Agent::Environment.host,
         @command_builder : Proc(BranchBuild::Target, String, String) = ->(target : BranchBuild::Target, checkout : String) { BranchBuild.command(target, checkout) },
+        @supported : Proc(Bool) = -> { BranchBuild.supported? },
       )
         @lines = [] of String
         @process = nil.as(Process?)
@@ -25,7 +26,7 @@ module Xd
       end
 
       def start(target : BranchBuild::Target) : Bool
-        return false if @running || !BranchBuild.supported?
+        return false if @running || !@supported.call
         reader, writer = IO.pipe
         process = Process.new(
           ["sh", "-c", @command_builder.call(target, @checkout)],

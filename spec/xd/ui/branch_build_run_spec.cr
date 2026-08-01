@@ -14,7 +14,10 @@ describe Xd::UI::BranchBuildRun do
     command = ->(_target : Xd::UI::BranchBuild::Target, _checkout : String) do
       "i=0; while [ $i -lt 700 ]; do echo line-$i; i=$((i + 1)); done; exit 1"
     end
-    run = Xd::UI::BranchBuildRun.new(command_builder: command)
+    run = Xd::UI::BranchBuildRun.new(
+      command_builder: command,
+      supported: -> { true }
+    )
     target = Xd::UI::BranchBuild.parse("main").not_nil!
 
     run.start(target).should be_true
@@ -29,7 +32,10 @@ describe Xd::UI::BranchBuildRun do
   it "reports a successful install" do
     installed = false
     command = ->(_target : Xd::UI::BranchBuild::Target, _checkout : String) { "echo installed" }
-    run = Xd::UI::BranchBuildRun.new(command_builder: command)
+    run = Xd::UI::BranchBuildRun.new(
+      command_builder: command,
+      supported: -> { true }
+    )
     run.on_installed = -> { installed = true }
 
     run.start(Xd::UI::BranchBuild.parse("main").not_nil!).should be_true
