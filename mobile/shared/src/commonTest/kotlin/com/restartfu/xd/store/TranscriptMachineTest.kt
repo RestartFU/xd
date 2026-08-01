@@ -185,16 +185,17 @@ class TranscriptMachineTest {
     }
 
     @Test
-    fun loadedChatKeepsClaudeMode() {
+    fun loadedChatKeepsCodexModes() {
         val state = reduce(
             ChatState("chat"),
             TranscriptInput.Loaded(
-                chat(claudeMode = true),
+                chat(fast = true, claudeMode = true),
                 messages(),
                 nowMillis = 0,
             ),
         ).state
 
+        assertTrue(state.fast)
         assertTrue(state.claudeMode)
     }
 
@@ -372,12 +373,14 @@ class TranscriptMachineTest {
         turnSequence: Long? = null,
         worktrees: List<WorktreeReply> = emptyList(),
         hasMessages: Boolean = false,
+        fast: Boolean = false,
         claudeMode: Boolean = false,
     ): ChatReply = ChatReply(
         ok = true,
         title = "Title",
         backend = "codex",
         plan = false,
+        fast = fast,
         claudeMode = claudeMode,
         working = working,
         items = items,

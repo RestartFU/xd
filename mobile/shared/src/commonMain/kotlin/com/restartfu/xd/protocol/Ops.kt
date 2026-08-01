@@ -15,6 +15,7 @@ public enum class ChatOption(
     EFFORT("effort"),
     ACCESS("access"),
     PLAN("plan"),
+    FAST("fast"),
     CLAUDE_MODE("claude-mode"),
     BACKEND("backend"),
     NEW_WORKTREE("new-worktree"),

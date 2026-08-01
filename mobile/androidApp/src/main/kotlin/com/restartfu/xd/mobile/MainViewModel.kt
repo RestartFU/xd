@@ -344,6 +344,12 @@ class ChatViewModel(
         }
     }
 
+    fun setFast(enabled: Boolean) {
+        launchGuarded(_selectingModel) {
+            session.setBoolOption(ChatOption.FAST, enabled)
+        }
+    }
+
     fun setClaudeMode(enabled: Boolean) {
         launchGuarded(_selectingModel) {
             session.setBoolOption(ChatOption.CLAUDE_MODE, enabled)

@@ -87,24 +87,21 @@ internal fun ChatOptionsDialog(
 
                 if (state.backend == "codex") {
                     Section("Codex")
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Claude mode")
-                            Text(
-                                "Run Codex through Claude Code's agent harness.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline,
-                            )
-                        }
-                        Switch(
-                            checked = state.claudeMode,
-                            onCheckedChange = { model.setClaudeMode(it) },
-                            enabled = !busy,
-                        )
-                    }
+                    OptionSwitch(
+                        title = "Fast mode",
+                        description = "Use priority service. May consume usage credits faster.",
+                        checked = state.fast,
+                        enabled = !busy,
+                        onCheckedChange = model::setFast,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OptionSwitch(
+                        title = "Claude mode",
+                        description = "Run Codex through Claude Code's agent harness.",
+                        checked = state.claudeMode,
+                        enabled = !busy,
+                        onCheckedChange = model::setClaudeMode,
+                    )
                 }
 
                 if (efforts.isNotEmpty()) {
@@ -176,6 +173,34 @@ internal fun ChatOptionsDialog(
             TextButton(onClick = onDismiss) { Text("Close") }
         },
     )
+}
+
+@Composable
+private fun OptionSwitch(
+    title: String,
+    description: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+        )
+    }
 }
 
 @Composable
