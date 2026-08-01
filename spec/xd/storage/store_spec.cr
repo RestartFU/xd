@@ -92,6 +92,7 @@ describe Xd::Storage::Store do
         columns.should contain("last_user_message_at")
         columns.should contain("original_workdir")
         columns.should contain("fast")
+        columns.should contain("claude_mode")
       end
     ensure
       remove_database(path)
@@ -167,6 +168,42 @@ describe Xd::Storage::Store do
         )
         chat_columns.should eq(["fast"])
         default_columns.should eq(["fast"])
+      end
+    ensure
+      remove_database(path)
+    end
+  end
+
+  it "repairs version 19 when Claude mode already exists" do
+    path = database_path
+
+    begin
+      store = Xd::Storage::Store.new(path)
+      store.close
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        database.exec(
+          "UPDATE meta SET value = '19' WHERE key = 'schema_version'"
+        )
+      end
+
+      repaired = Xd::Storage::Store.new(path)
+      repaired.schema_version.should eq(Xd::Storage::SCHEMA_VERSION)
+      repaired.close
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        chat_columns = database.query_all(
+          "SELECT name FROM pragma_table_info('chats') " \
+          "WHERE name = 'claude_mode'",
+          as: String
+        )
+        default_columns = database.query_all(
+          "SELECT name FROM pragma_table_info('agent_defaults') " \
+          "WHERE name = 'claude_mode'",
+          as: String
+        )
+        chat_columns.should eq(["claude_mode"])
+        default_columns.should eq(["claude_mode"])
       end
     ensure
       remove_database(path)

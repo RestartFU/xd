@@ -123,14 +123,14 @@ module Xd
       )
         @resolver = resolver || ->(name : String) { Executable.resolve(name) }
         @environment = environment || Environment.host
-        @entries = Catalog.all.to_h do |backend|
+        @entries = Catalog.authenticatable.to_h do |backend|
           {backend.id, Entry.new(backend)}
         end
       end
 
       def snapshots : Array(Snapshot)
         @mutex.synchronize do
-          Catalog.all.compact_map do |backend|
+          Catalog.authenticatable.compact_map do |backend|
             @entries[backend.id]?.try(&.snapshot)
           end
         end
@@ -166,7 +166,7 @@ module Xd
       end
 
       def refresh : Nil
-        Catalog.all.each do |backend|
+        Catalog.authenticatable.each do |backend|
           refresh(backend.id)
         end
       end
@@ -500,6 +500,8 @@ module Xd
           apply_claude_status(entry, status, output, errors)
         when "codex"
           apply_codex_status(entry, status, output, errors)
+        when "claude-mode"
+          apply_proxy_status(entry, status, output, errors)
         else
           entry.state = State::Failed
           entry.detail = "Unknown assistant."
@@ -549,6 +551,28 @@ module Xd
         end
       end
 
+      private def apply_proxy_status(
+        entry : Entry,
+        status : Process::Status,
+        output : String,
+        errors : String,
+      ) : Nil
+        text = [output, errors].reject(&.empty?).join("\n")
+        lines = text.lines.map(&.strip).reject(&.empty?)
+        detail = lines.last? || "Could not read Claude mode login status."
+        if detail.downcase.includes?("not authenticated") ||
+           detail.downcase.includes?("not logged in")
+          entry.state = State::SignedOut
+          entry.detail = "Not signed in."
+        elsif status.success?
+          entry.state = State::SignedIn
+          entry.detail = detail
+        else
+          entry.state = State::Failed
+          entry.detail = detail
+        end
+      end
+
       private def command_error(
         output : String,
         errors : String,
@@ -570,7 +594,7 @@ module Xd
         text = clean_output(entry.output)
         entry.login_url = extract_url(text)
         case entry.backend.id
-        when "codex"
+        when "codex", "claude-mode"
           entry.device_code = text.match(DEVICE_CODE).try(&.[0])
           entry.needs_input = false
         when "claude"
@@ -613,6 +637,12 @@ module Xd
           [executable, "auth", "login"]
         when {"claude", Command::Logout}
           [executable, "auth", "logout"]
+        when {"claude-mode", Command::Check}
+          [executable, "codex", "auth", "status"]
+        when {"claude-mode", Command::Login}
+          [executable, "codex", "auth", "device"]
+        when {"claude-mode", Command::Logout}
+          [executable, "codex", "auth", "logout"]
         else
           raise Error.new("Unknown assistant: #{backend.id}")
         end

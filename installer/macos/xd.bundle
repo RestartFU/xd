@@ -32,6 +32,9 @@
   <data dest="${bundle}/Contents/Resources/share/icons">
     ${prefix:app}/share/icons
   </data>
+  <data dest="${bundle}/Contents/Resources/share/licenses">
+    ${prefix:app}/share/licenses
+  </data>
   <data dest="${bundle}/Contents/Resources/libexec">
     ${prefix:app}/libexec
   </data>

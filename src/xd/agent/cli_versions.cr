@@ -84,21 +84,21 @@ module Xd
       )
         @resolver = resolver || ->(name : String) { Executable.resolve(name) }
         @environment = environment || Environment.host
-        @entries = Catalog.all.to_h do |backend|
+        @entries = Catalog.authenticatable.to_h do |backend|
           {backend.id, Entry.new(backend)}
         end
       end
 
       def snapshots : Array(Snapshot)
         @mutex.synchronize do
-          Catalog.all.compact_map do |backend|
+          Catalog.authenticatable.compact_map do |backend|
             @entries[backend.id]?.try(&.snapshot)
           end
         end
       end
 
       def refresh : Nil
-        Catalog.all.each { |backend| begin_check(backend.id) }
+        Catalog.authenticatable.each { |backend| begin_check(backend.id) }
       end
 
       def close : Nil

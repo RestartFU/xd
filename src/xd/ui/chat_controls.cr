@@ -27,6 +27,7 @@ module Xd
       @model_picker : ModelPicker
       @effort_picker : OptionPicker
       @fast_button : Gtk::ToggleButton
+      @claude_mode_button : Gtk::ToggleButton
       @access_picker : OptionPicker
       @build_button : Gtk::ToggleButton
       @plan_button : Gtk::ToggleButton
@@ -67,6 +68,19 @@ module Xd
             @on_option.call(
               "fast",
               @fast_button.active? ? "true" : "false"
+            )
+          end
+        end
+
+        @claude_mode_button = Gtk::ToggleButton.new_with_label("Claude mode")
+        @claude_mode_button.tooltip_text =
+          "Run the selected Codex model through Claude Code's agent harness."
+        @claude_mode_button.visible = false
+        @claude_mode_button.toggled_signal.connect do
+          unless @updating
+            @on_option.call(
+              "claude-mode",
+              @claude_mode_button.active? ? "true" : "false"
             )
           end
         end
@@ -143,6 +157,7 @@ module Xd
         @identity.append(@context_meter)
         @run.append(@effort_picker.widget)
         @run.append(@fast_button)
+        @run.append(@claude_mode_button)
         @run.append(@access_picker.widget)
         modes = Gtk::Box.new(:horizontal, 0)
         modes.add_css_class("linked")
@@ -158,6 +173,7 @@ module Xd
         @model_picker.widget.sensitive = enabled
         @effort_picker.widget.sensitive = enabled
         @fast_button.sensitive = enabled && @backend == "codex"
+        @claude_mode_button.sensitive = enabled && @backend == "codex"
         @access_picker.widget.sensitive =
           enabled && !@plan_button.active?
         @build_button.sensitive = enabled
@@ -170,7 +186,11 @@ module Xd
         @updating = true
         @backend = state["backend"]?.try(&.as_s?) || "claude"
         backend = Agent::Catalog.lookup(@backend) || Agent::Catalog::CLAUDE
-        efforts = backend.efforts
+        claude_mode = backend.id == "codex" &&
+                      (state["claude_mode"]?.try(&.as_bool?) || false)
+        efforts = backend.efforts.reject do |effort|
+          claude_mode && effort.ultra?
+        end
         if @efforts != efforts
           @efforts = efforts
           @effort_picker.options = effort_options(@efforts)
@@ -190,6 +210,8 @@ module Xd
         @fast_button.active =
           backend.id == "codex" &&
             (state["fast"]?.try(&.as_bool?) || false)
+        @claude_mode_button.visible = backend.id == "codex"
+        @claude_mode_button.active = claude_mode
         @access_picker.selected = ACCESS.index(@access) || 0
         plan = state["plan"]?.try(&.as_bool?) || false
         (plan ? @plan_button : @build_button).active = true

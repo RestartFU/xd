@@ -4,6 +4,7 @@ require "../storage/workflow_state"
 require "../workspace/service"
 require "../workspace/worktrees"
 require "./catalog"
+require "./claude_proxy"
 require "./codex_app_server"
 require "./conversation"
 require "./environment"
@@ -48,6 +49,7 @@ module Xd
     class ProcessLauncher < Launcher
       def initialize(version : String)
         @codex = CodexPool.new(version: version)
+        @claude_proxy = ClaudeProxy.new
       end
 
       def start(
@@ -58,6 +60,14 @@ module Xd
         on_event : Proc(Event, Nil),
         on_finished : Proc(Bool, String?, Nil),
       ) : SessionHandle
+        if backend.id == "codex" && spec.claude_mode
+          return start_claude_mode(
+            spec,
+            environment,
+            on_event,
+            on_finished
+          )
+        end
         case backend.transport
         when Transport::Exec
           arguments = backend.build_argv(spec)
@@ -90,10 +100,59 @@ module Xd
 
       def close : Nil
         @codex.close
+        @claude_proxy.close
       end
 
       def reload(provider : String) : Nil
         @codex.close if provider == "codex"
+      end
+
+      private def start_claude_mode(
+        spec : RunSpec,
+        environment : Hash(String, String),
+        on_event : Proc(Event, Nil),
+        on_finished : Proc(Bool, String?, Nil),
+      ) : SessionHandle
+        endpoint = @claude_proxy.endpoint
+        routed_model = spec.model || Catalog::CODEX.default_model
+        routed_model += "-fast" if spec.fast
+        routed_model += "[1m]"
+        effort = spec.effort.ultra? ? Effort::Max : spec.effort
+        proxy_spec = RunSpec.new(
+          spec.prompt,
+          model: routed_model,
+          system_prompt: Catalog::CODEX.developer_instructions(spec),
+          resume_session_id: spec.resume_session_id,
+          workdir: spec.workdir,
+          folder_ids: spec.folder_ids,
+          effort: effort,
+          access: spec.access
+        )
+        proxy_environment = environment.dup
+        proxy_environment["ANTHROPIC_BASE_URL"] = endpoint
+        proxy_environment["ANTHROPIC_AUTH_TOKEN"] = "unused"
+        proxy_environment["ANTHROPIC_MODEL"] = routed_model
+        proxy_environment["ANTHROPIC_SMALL_FAST_MODEL"] =
+          "gpt-5.6-luna[1m]"
+        proxy_environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] =
+          Catalog::CODEX.context_window(spec.model).to_s
+        proxy_environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        proxy_environment["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] = "1"
+        proxy_environment["DISABLE_AUTOUPDATER"] = "1"
+
+        runtime = Catalog::CLAUDE_MODE_RUNTIME
+        arguments = runtime.build_argv(proxy_spec)
+        arguments[0] = Executable.resolve(runtime.program)
+        session = ExecSession.new(
+          runtime,
+          proxy_spec,
+          proxy_environment,
+          on_event,
+          on_finished,
+          arguments
+        )
+        session.start
+        CallbackHandle.new(-> { session.cancel })
       end
     end
 
@@ -130,6 +189,7 @@ module Xd
         getter resumed : Bool
         getter retry_attempt : Bool
         getter label : String
+        getter session_key : String
         property workdir : String
         getter transcript_message_id : Int64
         getter started_at : Time::Instant
@@ -157,6 +217,7 @@ module Xd
           @resumed,
           @retry_attempt,
           @label,
+          @session_key,
           @workdir,
           @transcript_message_id,
           @started_at,
@@ -321,7 +382,8 @@ module Xd
       end
 
       def commands(chat_id : String) : Array(String)
-        backend = @store.get_chat(chat_id).backend
+        chat = @store.get_chat(chat_id)
+        backend = session_key(chat)
         @mutex.synchronize do
           @command_sets[backend]?.try(&.dup) || [] of String
         end
@@ -555,7 +617,13 @@ module Xd
           unless backend
             raise Error.new("Unknown backend \"#{chat.backend}\".")
           end
-          if message = @authorizer.call(backend.id)
+          key = session_key(chat)
+          provider = if backend.id == "codex" && chat.claude_mode
+                       "claude-mode"
+                     else
+                       backend.id
+                     end
+          if message = @authorizer.call(provider)
             raise Error.new(message)
           end
 
@@ -575,9 +643,9 @@ module Xd
             input_stored = true
           end
           transcript_message_id = @store.last_message_id(chat_id)
-          last_seen = @store.get_last_seen(chat_id, backend.id)
+          last_seen = @store.get_last_seen(chat_id, key)
           resume_session_id =
-            @store.get_session_id(chat_id, backend.id)
+            @store.get_session_id(chat_id, key)
           prompt = Conversation.join(
             Conversation.handover(@store, chat_id, last_seen),
             text
@@ -588,6 +656,8 @@ module Xd
           model = chat.model || settings.model || backend.default_model
           effort = chat.effort ? Effort.from_wire(chat.effort) : backend.default_effort
           effort = Effort::High unless backend.supports_effort?(effort)
+          effort = Effort::Max if backend.id == "codex" &&
+                                  chat.claude_mode && effort.ultra?
           access = chat.plan ? Access::Plan : Access.from_wire(chat.access)
           secrets = Secrets.effective(folder_ids)
           system_prompt = [
@@ -606,7 +676,8 @@ module Xd
             folder_ids: folder_ids,
             effort: effort,
             access: access,
-            fast: backend.id == "codex" && chat.fast
+            fast: backend.id == "codex" && chat.fast,
+            claude_mode: backend.id == "codex" && chat.claude_mode
           )
           turn = ActiveTurn.new(
             chat_id,
@@ -617,7 +688,10 @@ module Xd
             !resume_session_id.nil?,
             retry_attempt,
             "#{backend.model_label(model)} · #{effort.label}" +
-            (backend.id == "codex" && chat.fast ? " · Fast" : ""),
+            (backend.id == "codex" && chat.fast ? " · Fast" : "") +
+            (backend.id == "codex" && chat.claude_mode ?
+               " · Claude mode" : ""),
+            key,
             workdir,
             transcript_message_id,
             @clock.call
@@ -717,7 +791,7 @@ module Xd
           if session_id = event.session_id
             @store.set_session_id(
               turn.chat_id,
-              turn.backend.id,
+              turn.session_key,
               session_id
             )
           end
@@ -727,7 +801,7 @@ module Xd
             commands = (event.commands || [] of String)
               .first(Event::MAX_COMMANDS)
             turn.commands = commands.dup
-            @command_sets[turn.backend.id] = commands.dup
+            @command_sets[turn.session_key] = commands.dup
             event_name = "commands"
             fields = {
               "chat"     => JSON::Any.new(turn.chat_id),
@@ -844,7 +918,7 @@ module Xd
         if turn.context_used > 0 && turn.context_window > 0
           @store.set_context_usage(
             turn.chat_id,
-            turn.backend.id,
+            turn.session_key,
             turn.model,
             turn.context_used,
             turn.context_window
@@ -863,7 +937,7 @@ module Xd
         if success
           @store.set_last_seen(
             turn.chat_id,
-            turn.backend.id,
+            turn.session_key,
             last_message_id
           )
         end
@@ -925,7 +999,7 @@ module Xd
       end
 
       private def retry_stale(turn : ActiveTurn) : Nil
-        @store.set_session_id(turn.chat_id, turn.backend.id, nil)
+        @store.set_session_id(turn.chat_id, turn.session_key, nil)
 
         retrying = @mutex.synchronize do
           current = @turns[turn.chat_id]?
@@ -996,6 +1070,14 @@ module Xd
         File.realpath(left) == File.realpath(right)
       rescue File::Error
         File.expand_path(left) == File.expand_path(right)
+      end
+
+      private def session_key(chat : Storage::Chat) : String
+        if chat.backend == "codex" && chat.claude_mode
+          "claude-mode"
+        else
+          chat.backend
+        end
       end
 
       private def publish_queue(chat_id : String) : Nil

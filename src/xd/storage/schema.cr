@@ -1,6 +1,6 @@
 module Xd
   module Storage
-    SCHEMA_VERSION = 19
+    SCHEMA_VERSION = 20
 
     BASE_SCHEMA = [
       <<-SQL,
@@ -75,19 +75,21 @@ module Xd
 
     AGENT_DEFAULTS_TRIGGER = <<-SQL
       CREATE TRIGGER remember_agent_defaults
-      AFTER UPDATE OF backend, model, effort, access, plan, fast ON chats
+      AFTER UPDATE OF backend, model, effort, access, plan, fast, claude_mode
+      ON chats
       WHEN OLD.backend IS NOT NEW.backend
         OR OLD.model IS NOT NEW.model
         OR OLD.effort IS NOT NEW.effort
         OR OLD.access IS NOT NEW.access
         OR OLD.plan IS NOT NEW.plan
         OR OLD.fast IS NOT NEW.fast
+        OR OLD.claude_mode IS NOT NEW.claude_mode
       BEGIN
         INSERT OR REPLACE INTO agent_defaults
-          (singleton, backend, model, effort, access, plan, fast)
+          (singleton, backend, model, effort, access, plan, fast, claude_mode)
         VALUES (
           1, NEW.backend, NEW.model, NEW.effort, NEW.access, NEW.plan,
-          NEW.fast
+          NEW.fast, NEW.claude_mode
         );
       END
       SQL
@@ -101,7 +103,8 @@ module Xd
           effort    TEXT,
           access    TEXT,
           plan      INTEGER NOT NULL,
-          fast      INTEGER NOT NULL DEFAULT 0
+          fast        INTEGER NOT NULL DEFAULT 0,
+          claude_mode INTEGER NOT NULL DEFAULT 0
         )
         SQL
       AGENT_DEFAULTS_TRIGGER,

@@ -72,6 +72,11 @@ describe Xd::Agent::Authentication do
         "claude",
         Xd::Agent::Authentication::State::SignedOut
       )
+      await_auth_state(
+        authentication,
+        "claude-mode",
+        Xd::Agent::Authentication::State::SignedOut
+      )
 
       authentication.login("codex")
       deadline = Time.instant + 3.seconds
@@ -121,8 +126,17 @@ describe Xd::Agent::Authentication do
       )
       claude.detail.should eq("Signed in with claudeAi.")
 
+      authentication.login("claude-mode")
+      proxy = await_auth_state(
+        authentication,
+        "claude-mode",
+        Xd::Agent::Authentication::State::SignedIn
+      )
+      proxy.detail.should eq("Authenticated with Codex")
+
       authentication.logout("codex")
       authentication.logout("claude")
+      authentication.logout("claude-mode")
       await_auth_state(
         authentication,
         "codex",
@@ -131,6 +145,11 @@ describe Xd::Agent::Authentication do
       await_auth_state(
         authentication,
         "claude",
+        Xd::Agent::Authentication::State::SignedOut
+      )
+      await_auth_state(
+        authentication,
+        "claude-mode",
         Xd::Agent::Authentication::State::SignedOut
       )
 

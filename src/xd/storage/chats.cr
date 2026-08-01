@@ -6,8 +6,8 @@ module Xd
   module Storage
     CHAT_COLUMNS = <<-SQL
       id, folder_id, title, backend, workdir, model, effort, access, plan, fast,
-      created_at, updated_at, terminal_open, diff_open, queued, new_worktree,
-      original_workdir, daemon_working
+      claude_mode, created_at, updated_at, terminal_open, diff_open, queued,
+      new_worktree, original_workdir, daemon_working
       SQL
 
     class Store
@@ -19,15 +19,16 @@ module Xd
         effort : String? = nil,
         workdir : String? = nil,
         fast : Bool = false,
+        claude_mode : Bool = false,
       ) : String
         database_error("Cannot create the chat") do
           defaults = @database.query_one?(
             <<-SQL,
-              SELECT backend, model, effort, access, plan, fast
+              SELECT backend, model, effort, access, plan, fast, claude_mode
                 FROM agent_defaults
                WHERE singleton = 1
               SQL
-            as: {String, String?, String?, String?, Bool, Bool}
+            as: {String, String?, String?, String?, Bool, Bool, Bool}
           )
 
           actual_backend = defaults.try(&.[0]) || backend
@@ -36,6 +37,7 @@ module Xd
           actual_access = defaults.try(&.[3])
           actual_plan = defaults.try(&.[4]) || false
           actual_fast = defaults ? defaults[5] : fast
+          actual_claude_mode = defaults ? defaults[6] : claude_mode
           id = UUID.random.to_s
           now = now_microseconds
 
@@ -43,9 +45,10 @@ module Xd
             <<-SQL,
               INSERT INTO chats (
                 id, folder_id, title, backend, model, effort, access, plan, fast,
-                workdir, created_at, updated_at, last_user_message_at
+                claude_mode, workdir, created_at, updated_at,
+                last_user_message_at
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               SQL
             id,
             folder_id,
@@ -56,6 +59,7 @@ module Xd
             actual_access,
             actual_plan,
             actual_fast,
+            actual_claude_mode,
             workdir,
             now // 1_000_000,
             now // 1_000_000,
@@ -176,6 +180,17 @@ module Xd
         end
       end
 
+      def set_claude_mode(chat_id : String, enabled : Bool) : Nil
+        database_error("Cannot change Claude mode") do
+          @database.exec(
+            "UPDATE chats SET claude_mode = ?, updated_at = ? WHERE id = ?",
+            enabled,
+            now_seconds,
+            chat_id
+          )
+        end
+      end
+
       def set_panes(
         chat_id : String,
         terminal_open : Bool,
@@ -250,6 +265,7 @@ module Xd
           access: row.read(String?),
           plan: row.read(Bool),
           fast: row.read(Bool),
+          claude_mode: row.read(Bool),
           created_at: row.read(Int64),
           updated_at: row.read(Int64),
           terminal_open: row.read(Bool),

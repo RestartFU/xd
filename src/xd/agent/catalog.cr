@@ -226,10 +226,43 @@ module Xd
         "gpt-5.6-sol"
       )
 
+      # Authentication entry for the proxy. It stays outside ALL so Claude
+      # mode cannot appear as a third assistant in model pickers.
+      CLAUDE_MODE = Backend.new(
+        "claude-mode",
+        "Claude mode",
+        "claude-code-proxy",
+        "xd-backend-claude",
+        Transport::Exec,
+        CODEX.models,
+        CODEX.default_model
+      )
+
+      # Turns still speak Claude CLI stream-json, while the proxy routes the
+      # selected Codex model. Reusing the Claude id selects the right parser.
+      CLAUDE_MODE_RUNTIME = Backend.new(
+        "claude",
+        "Claude mode",
+        "claude",
+        "xd-backend-claude",
+        Transport::Exec,
+        CODEX.models,
+        CODEX.default_model
+      )
+
       ALL = [CLAUDE, CODEX]
 
       def all : Array(Backend)
         ALL
+      end
+
+      def authenticatable : Array(Backend)
+        [CLAUDE, CODEX, CLAUDE_MODE]
+      end
+
+      def authentication_lookup(id : String?) : Backend?
+        return nil unless id
+        authenticatable.find { |backend| backend.id == id }
       end
 
       def lookup(id : String?) : Backend?

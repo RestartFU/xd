@@ -132,6 +132,14 @@ module Xd
           "#{resources}/libexec/codex-package/bin/codex"
         ),
         requirement("Claude", "#{resources}/libexec/claude"),
+        requirement(
+          "Claude mode proxy",
+          "#{resources}/libexec/claude-code-proxy"
+        ),
+        requirement(
+          "Claude mode proxy license",
+          "#{resources}/share/licenses/xd/claude-code-proxy-LICENSE"
+        ),
         requirement("whisper.cpp", "#{resources}/libexec/whisper"),
         requirement("OpenSSL", "#{resources}/libexec/openssl"),
         requirement(
@@ -218,6 +226,11 @@ module Xd
           "libexec/codex-package/bin/codex.exe"
         ),
         requirement("Claude", "libexec/claude.exe"),
+        requirement("Claude mode proxy", "libexec/claude-code-proxy.exe"),
+        requirement(
+          "Claude mode proxy license",
+          "share/licenses/xd/claude-code-proxy-LICENSE"
+        ),
         requirement("whisper.cpp", "libexec/whisper.exe"),
         requirement(
           "OpenSSL",

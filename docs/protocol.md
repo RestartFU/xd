@@ -182,7 +182,8 @@ must tolerate a child appearing before its parent and treat ids as opaque.
 ```
 
 Success always includes `ok`, `title`, `backend`, `auth_state`, `commands`,
-`plan`, `queue` (oldest first), `working`, `effort`, `new_worktree`, and
+`plan`, `queue` (oldest first), `working`, `effort`, `claude_mode`,
+`new_worktree`, and
 `has_messages`.
 
 Optional members: `auth_detail`, `queued` (compatibility alias for the first
@@ -334,8 +335,10 @@ command is slow.
 {"op":"set-option","chat":"chat-1","option":"effort","value":"high"}
 ```
 
-Options: `model`, `effort`, `access`, `plan`, `backend`, `new-worktree`,
-`workspace`. `plan` and `new-worktree` take `"true"`/`"false"`. An unknown
+Options: `model`, `effort`, `access`, `plan`, `fast`, `claude-mode`, `backend`,
+`new-worktree`, `workspace`. Boolean options take `"true"`/`"false"`.
+`fast` and `claude-mode` are Codex-only; Claude mode routes the selected Codex
+model through Claude Code and does not support `ultra` effort. An unknown
 option is an error.
 
 Selecting a model atomically requires sending `backend` alongside `value`;

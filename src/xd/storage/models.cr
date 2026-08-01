@@ -16,6 +16,7 @@ module Xd
       getter new_worktree : Bool
       getter plan : Bool
       getter fast : Bool
+      getter claude_mode : Bool
       getter terminal_open : Bool
       getter diff_open : Bool
       getter daemon_working : Bool
@@ -35,6 +36,7 @@ module Xd
         @access : String?,
         @plan : Bool,
         @fast : Bool,
+        @claude_mode : Bool,
         @created_at : Int64,
         @updated_at : Int64,
         @terminal_open : Bool,

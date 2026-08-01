@@ -241,7 +241,7 @@ describe Xd::Daemon::Engine do
         response.success?.should be_true
         providers = response["providers"].as_a
         providers.map { |row| row["provider"].as_s }
-          .should eq(["claude", "codex"])
+          .should eq(["claude", "codex", "claude-mode"])
         providers.each do |provider|
           provider["needs_input"].as_bool.should be_false
           provider.as_h.has_key?("output").should be_false
@@ -1120,6 +1120,26 @@ describe Xd::Daemon::Engine do
         "op"   => "chat",
         "chat" => chat,
       }.to_json)["fast"].as_bool.should be_true
+      claude_mode = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "claude-mode",
+        "value"  => "true",
+      }.to_json)
+      claude_mode.success?.should be_true
+      mode_state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)
+      mode_state["claude_mode"].as_bool.should be_true
+      mode_state["effort"].as_s.should eq("max")
+      rejected_mode_ultra = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "effort",
+        "value"  => "ultra",
+      }.to_json)
+      rejected_mode_ultra.success?.should be_false
       switch = engine.dispatch(local, {
         "op"   => "messages",
         "chat" => chat,
@@ -1164,8 +1184,9 @@ describe Xd::Daemon::Engine do
         "value"   => "claude-opus-5",
       }.to_json)
       claude.success?.should be_true
-      store.get_chat(chat).effort.should be_nil
+      store.get_chat(chat).effort.should eq("max")
       store.get_chat(chat).fast.should be_false
+      store.get_chat(chat).claude_mode.should be_false
       rejected_ultra = engine.dispatch(local, {
         "op"     => "set-option",
         "chat"   => chat,

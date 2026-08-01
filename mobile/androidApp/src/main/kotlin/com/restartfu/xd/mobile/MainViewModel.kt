@@ -344,6 +344,12 @@ class ChatViewModel(
         }
     }
 
+    fun setClaudeMode(enabled: Boolean) {
+        launchGuarded(_selectingModel) {
+            session.setBoolOption(ChatOption.CLAUDE_MODE, enabled)
+        }
+    }
+
     fun setNewWorktree(enabled: Boolean) {
         launchGuarded(_selectingModel) {
             session.setBoolOption(ChatOption.NEW_WORKTREE, enabled)

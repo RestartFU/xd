@@ -185,6 +185,20 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun loadedChatKeepsClaudeMode() {
+        val state = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(claudeMode = true),
+                messages(),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertTrue(state.claudeMode)
+    }
+
+    @Test
     fun durationRowsRemainTranscriptMetadata() {
         val result = reduce(
             ChatState("chat"),
@@ -358,11 +372,13 @@ class TranscriptMachineTest {
         turnSequence: Long? = null,
         worktrees: List<WorktreeReply> = emptyList(),
         hasMessages: Boolean = false,
+        claudeMode: Boolean = false,
     ): ChatReply = ChatReply(
         ok = true,
         title = "Title",
         backend = "codex",
         plan = false,
+        claudeMode = claudeMode,
         working = working,
         items = items,
         segment = segment,

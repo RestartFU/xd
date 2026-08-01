@@ -72,6 +72,8 @@ git_clean -C "$WORK/repository" add file.txt
 git_clean -C "$WORK/repository" commit -qm initial
 
 "$BUNDLE/libexec/curl" --version | grep -F 'curl '
+"$BUNDLE/libexec/claude-code-proxy" --version | grep -F '0.1.30'
+test -f "$BUNDLE/share/licenses/xd/claude-code-proxy-LICENSE"
 printf 'after\n' > "$WORK/repository/file.txt"
 git_clean -C "$WORK/repository" diff --check
 git_clean -C "$WORK/repository" worktree add \

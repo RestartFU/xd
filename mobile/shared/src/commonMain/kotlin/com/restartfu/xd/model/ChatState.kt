@@ -30,6 +30,7 @@ public data class ChatState(
     val canCreateWorktree: Boolean = false,
     val commands: List<String> = emptyList(),
     val plan: Boolean = false,
+    val claudeMode: Boolean = false,
     val queue: List<String> = emptyList(),
     val working: Boolean = false,
     val label: String? = null,

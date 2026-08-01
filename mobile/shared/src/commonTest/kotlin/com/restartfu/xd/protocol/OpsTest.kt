@@ -16,6 +16,7 @@ class OpsTest {
 
         assertEquals("true", request.getValue("value").jsonPrimitive.content)
         assertTrue(request.toString().contains("\"value\":\"true\""))
+        assertEquals("claude-mode", ChatOption.CLAUDE_MODE.wire)
     }
 
     @Test

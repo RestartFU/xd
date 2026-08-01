@@ -62,6 +62,8 @@ public data class ChatReply(
     val backend: String,
     val commands: List<String> = emptyList(),
     val plan: Boolean,
+    @SerialName("claude_mode")
+    val claudeMode: Boolean = false,
     val queued: String? = null,
     val queue: List<String> = emptyList(),
     val working: Boolean,

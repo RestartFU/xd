@@ -623,6 +623,47 @@ describe Xd::Agent::Manager do
     end
   end
 
+  it "isolates Claude mode authentication and sessions from native Codex" do
+    checked = [] of String
+    authorizer = ->(provider : String) : String? {
+      checked << provider
+      nil
+    }
+    with_agent_manager(authorizer) do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "codex")
+      store.set_model(chat_id, "gpt-5.6-sol")
+      store.set_effort(chat_id, "ultra")
+      store.set_claude_mode(chat_id, true)
+      store.set_session_id(chat_id, "codex", "native-session")
+      store.set_session_id(chat_id, "claude-mode", "proxy-session")
+
+      manager.send(chat_id, "through Claude")
+      checked.should eq(["claude-mode"])
+      launcher.specs.first.claude_mode.should be_true
+      launcher.specs.first.resume_session_id.should eq("proxy-session")
+      launcher.specs.first.effort.should eq(Xd::Agent::Effort::Max)
+      manager.active_turn(chat_id).not_nil!.label.should eq(
+        "GPT-5.6 Sol · Max · Claude mode"
+      )
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::SessionStarted,
+        session_id: "updated-proxy-session"
+      ))
+      launcher.finish(0, true)
+      store.get_session_id(chat_id, "claude-mode").should eq(
+        "updated-proxy-session"
+      )
+      store.get_session_id(chat_id, "codex").should eq("native-session")
+
+      store.set_claude_mode(chat_id, false)
+      manager.send(chat_id, "native Codex")
+      checked.should eq(["claude-mode", "codex"])
+      launcher.specs[1].claude_mode.should be_false
+      launcher.specs[1].resume_session_id.should eq("native-session")
+      launcher.finish(1, true)
+    end
+  end
+
   it "injects scoped secret values only into the child environment" do
     with_agent_manager do |manager, store, workspaces, folder_id, launcher, _events|
       child_id = workspaces.create_folder(folder_id, "Child")

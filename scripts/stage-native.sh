@@ -57,7 +57,8 @@ mkdir -p \
   "$STAGE/share/fonts/xd" \
   "$STAGE/share/glib-2.0/schemas" \
   "$STAGE/share/icons/hicolor/scalable/apps" \
-  "$STAGE/share/icons/hicolor/symbolic/apps"
+  "$STAGE/share/icons/hicolor/symbolic/apps" \
+  "$STAGE/share/licenses/xd"
 
 install -m0755 "$BINARY" "$STAGE/bin/$EXECUTABLE"
 if [ "$EXECUTABLE" = xd.exe ]; then
@@ -72,6 +73,9 @@ install -m0644 \
 install -m0644 \
   "$ROOT/data/fonts/OFL.txt" \
   "$STAGE/share/fonts/xd/OFL.txt"
+install -m0644 \
+  "$ROOT/data/licenses/claude-code-proxy-LICENSE" \
+  "$STAGE/share/licenses/xd/claude-code-proxy-LICENSE"
 
 sed \
   -e "s|@APP_ID@|$APP_ID|g" \

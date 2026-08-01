@@ -17,7 +17,7 @@ private def await_cli_versions(
 end
 
 describe Xd::Agent::CliVersions do
-  it "reads both bundled CLI versions without invoking an updater" do
+  it "reads all bundled assistant versions without invoking an updater" do
     directory = File.join(
       Dir.tempdir,
       "xd-agent-cli-versions-#{Random::Secure.hex(12)}"
@@ -37,7 +37,7 @@ describe Xd::Agent::CliVersions do
       fi
       printf '%s 1.0.0\n' "${0##*/}"
       SH
-    %w(codex claude).each do |name|
+    %w(codex claude claude-code-proxy).each do |name|
       executable = File.join(directory, name)
       File.write(executable, script)
       File.chmod(executable, 0o700)
@@ -60,6 +60,7 @@ describe Xd::Agent::CliVersions do
       end
       checked.map(&.version).should contain("codex 1.0.0")
       checked.map(&.version).should contain("claude 1.0.0")
+      checked.map(&.version).should contain("claude-code-proxy 1.0.0")
       File.exists?(marker).should be_false
       events.any? do |event|
         event["state"].as_s == "checking"

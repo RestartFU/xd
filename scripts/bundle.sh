@@ -71,6 +71,7 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
   "$OUT/libexec/claude-bin" \
+  "$OUT/libexec/claude-code-proxy" \
   "$OUT/libexec/curl-bin" \
   "$OUT/libexec/git-bin" \
   "$OUT/libexec/git-core-real"/* \
@@ -204,6 +205,8 @@ cp /etc/ssl/openssl.cnf "$OUT/etc/ssl/openssl.cnf"
 # --- desktop metadata + launcher -------------------------------------------
 mkdir -p "$OUT/share/applications"
 cp -a "$STAGE/usr/share/applications/." "$OUT/share/applications/" 2>/dev/null || true
+mkdir -p "$OUT/share/licenses"
+cp -a "$STAGE/usr/share/licenses/." "$OUT/share/licenses/"
 
 install -Dm755 "$LAUNCHER" "$OUT/xd.sh"
 

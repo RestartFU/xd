@@ -75,8 +75,8 @@ module Xd
         accounts = Adw::PreferencesGroup.new
         accounts.title = "Bundled assistants"
         accounts.description =
-          "Sign-in happens in the official Codex and Claude Code CLIs."
-        Agent::Catalog.all.each do |backend|
+          "Sign in separately for each assistant runtime."
+        Agent::Catalog.authenticatable.each do |backend|
           provider = build_provider(backend)
           @rows[backend.id] = provider
           accounts.add(provider.row)
@@ -87,7 +87,7 @@ module Xd
         cli_versions.description =
           "Bundled with xd and updated only when xd updates."
         @cli_version_row = Adw::ActionRow.new
-        @cli_version_row.title = "Codex and Claude Code"
+        @cli_version_row.title = "Codex, Claude Code, and Claude mode proxy"
         @cli_version_row.subtitle = "Checking installed versions…"
         cli_versions.add(@cli_version_row)
 
@@ -395,7 +395,7 @@ module Xd
         fields : Hash(String, JSON::Any),
       ) : Nil
         provider = fields["provider"]?.try(&.as_s?) || return
-        return unless Agent::Catalog.lookup(provider)
+        return unless Agent::Catalog.authentication_lookup(provider)
 
         @cli_states[provider] =
           fields["state"]?.try(&.as_s?) || "idle"
@@ -408,12 +408,12 @@ module Xd
         failed = @cli_states.find { |_provider, state| state == "failed" }
         if failed
           provider = failed[0]
-          backend = Agent::Catalog.lookup(provider)
+          backend = Agent::Catalog.authentication_lookup(provider)
           @cli_version_row.subtitle =
             @cli_details[provider] ||
               "#{backend.try(&.display_name) || provider} version check failed."
         else
-          versions = Agent::Catalog.all.map do |backend|
+          versions = Agent::Catalog.authenticatable.map do |backend|
             version = @cli_versions[backend.id]?
             version ? version : "#{backend.display_name}: checking…"
           end
@@ -474,7 +474,8 @@ module Xd
 
       private def update_instructions(row : ProviderRow) : Nil
         @instructions.title = "Sign in to #{row.row.title}"
-        @instructions.description = if row.provider == "codex"
+        device_flow = {"codex", "claude-mode"}.includes?(row.provider)
+        @instructions.description = if device_flow
                                       "Open the page and enter the one-time code."
                                     else
                                       "Open the page, authorize Claude Code, then paste the code."

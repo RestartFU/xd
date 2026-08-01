@@ -110,7 +110,8 @@ RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
 
 # --- bundled agent CLIs ----------------------------------------------------
 #
-# Both agents are official native Linux builds. Keep Codex's whole package:
+# Codex and Claude are official native builds; Claude mode's MIT proxy is
+# pinned from its upstream release. Keep Codex's whole package:
 # its binary discovers the bundled ripgrep, sandbox and shell relative to its
 # package metadata. Claude is renamed because libexec/claude is a small wrapper
 # that starts it through the bundle's loader on hosts such as NixOS.
@@ -120,6 +121,8 @@ ARG CODEX_VERSION=0.146.0
 ARG CODEX_SHA256=3c89125af1d7c98abec8beb551292ef99daca52e204e5852a9139feae2c467e5
 ARG CLAUDE_VERSION=2.1.220
 ARG CLAUDE_SHA256=674f61f20ff306f3100cf9200e4c36c4b70278b5bef2884549819b942a89c863
+ARG CLAUDE_PROXY_VERSION=0.1.30
+ARG CLAUDE_PROXY_SHA256=afa08d97141be5003b3abcbfa482f58e9c119c128ef955f92776816dbcae96a0
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -140,9 +143,16 @@ RUN set -eux; \
       --output /agents/claude-bin; \
     printf '%s  %s\n' "$CLAUDE_SHA256" /agents/claude-bin \
       | sha256sum --check; \
+    curl --fail --location --silent --show-error \
+      "https://github.com/raine/claude-code-proxy/releases/download/v${CLAUDE_PROXY_VERSION}/claude-code-proxy-linux-amd64.tar.gz" \
+      --output /downloads/claude-code-proxy.tar.gz; \
+    printf '%s  %s\n' "$CLAUDE_PROXY_SHA256" /downloads/claude-code-proxy.tar.gz \
+      | sha256sum --check; \
+    tar -xzf /downloads/claude-code-proxy.tar.gz -C /agents; \
     chmod 0755 /agents/claude-bin; \
     /agents/codex --version | grep -F "$CODEX_VERSION"; \
     /agents/claude-bin --version | grep -F "$CLAUDE_VERSION"; \
+    /agents/claude-code-proxy --version | grep -F "$CLAUDE_PROXY_VERSION"; \
     rm -rf /downloads
 
 # --- bundle runtime closure ------------------------------------------------
@@ -224,11 +234,15 @@ RUN set -eux; \
       /stage/usr/share/applications \
       /stage/usr/share/fonts/xd \
       /stage/usr/share/glib-2.0/schemas \
+      /stage/usr/share/licenses/xd \
       /stage/usr/share/icons/hicolor/scalable/apps \
       /stage/usr/share/icons/hicolor/symbolic/apps; \
     install -m0644 \
       data/fonts/DMSans-Variable.ttf \
       /stage/usr/share/fonts/xd/DMSans-Variable.ttf; \
+    install -m0644 \
+      data/licenses/claude-code-proxy-LICENSE \
+      /stage/usr/share/licenses/xd/claude-code-proxy-LICENSE; \
     sed \
       -e "s|@APP_ID@|$app_id|g" \
       -e "s|@APP_NAME@|$app_name|g" \

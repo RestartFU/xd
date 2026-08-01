@@ -58,7 +58,10 @@ internal fun ChatOptionsDialog(
 
     LaunchedEffect(Unit) { model.loadCatalog() }
 
-    val efforts = catalog.firstOrNull { it.id == state.backend }?.efforts.orEmpty()
+    val efforts = catalog.firstOrNull { it.id == state.backend }
+        ?.efforts
+        .orEmpty()
+        .filterNot { state.claudeMode && it == "ultra" }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -80,6 +83,28 @@ internal fun ChatOptionsDialog(
                         label = { Text("Plan") },
                         enabled = !busy,
                     )
+                }
+
+                if (state.backend == "codex") {
+                    Section("Codex")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Claude mode")
+                            Text(
+                                "Run Codex through Claude Code's agent harness.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                        Switch(
+                            checked = state.claudeMode,
+                            onCheckedChange = { model.setClaudeMode(it) },
+                            enabled = !busy,
+                        )
+                    }
                 }
 
                 if (efforts.isNotEmpty()) {

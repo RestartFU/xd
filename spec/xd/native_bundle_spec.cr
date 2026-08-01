@@ -30,6 +30,8 @@ describe Xd::NativeBundle do
         missing.should contain("bundled Git")
         missing.should contain("PortAudio runtime")
         missing.should contain("Codex")
+        missing.should contain("Claude mode proxy")
+        missing.should contain("Claude mode proxy license")
         missing.should contain("Adwaita icon theme")
         missing.should contain("chat symbolic icon")
         missing.should contain("microphone symbolic icon")

@@ -114,6 +114,7 @@ module Xd
       getter effort : Effort
       getter access : Access
       getter fast : Bool
+      getter claude_mode : Bool
 
       def initialize(
         @prompt : String,
@@ -125,6 +126,7 @@ module Xd
         @effort = Effort::High,
         @access = Access::ReadOnly,
         @fast = false,
+        @claude_mode = false,
       )
       end
     end

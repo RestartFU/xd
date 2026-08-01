@@ -1003,10 +1003,15 @@ module Xd
 
         fields["title"] = json_any(stored.title)
         fields["backend"] = JSON::Any.new(stored.backend)
-        authentication = @authentication.snapshot(stored.backend)
+        auth_provider = if stored.backend == "codex" && stored.claude_mode
+                          "claude-mode"
+                        else
+                          stored.backend
+                        end
+        authentication = @authentication.snapshot(auth_provider)
         if authentication.state.unknown?
-          @authentication.refresh(stored.backend)
-          authentication = @authentication.snapshot(stored.backend)
+          @authentication.refresh(auth_provider)
+          authentication = @authentication.snapshot(auth_provider)
         end
         fields["auth_state"] = JSON::Any.new(
           authentication.state.wire_name
@@ -1018,6 +1023,9 @@ module Xd
         fields["plan"] = JSON::Any.new(stored.plan)
         fields["fast"] = JSON::Any.new(
           stored.backend == "codex" && stored.fast
+        )
+        fields["claude_mode"] = JSON::Any.new(
+          stored.backend == "codex" && stored.claude_mode
         )
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?
         fields["queue"] = json_any(stored.queue)
@@ -1051,7 +1059,7 @@ module Xd
 
         if usage = @store.get_context_usage(
              stored.id,
-             stored.backend,
+             auth_provider,
              stored.model
            )
           fields["context_used"] = JSON::Any.new(usage.used.to_i64)
@@ -1118,6 +1126,9 @@ module Xd
               @store.set_effort(chat_id, nil)
             end
             @store.set_fast(chat_id, false) if previous.fast && backend != "codex"
+            if previous.claude_mode && backend != "codex"
+              @store.set_claude_mode(chat_id, false)
+            end
             if previous.backend != backend || previous.model != model
               @store.append_message(
                 chat_id,
@@ -1134,8 +1145,10 @@ module Xd
             selected = Agent::Catalog.lookup(
               @store.get_chat(chat_id).backend
             ) || Agent::Catalog::CLAUDE
+            chat = @store.get_chat(chat_id)
             unless effort.wire_name == value &&
-                   selected.supports_effort?(effort)
+                   selected.supports_effort?(effort) &&
+                   !(chat.claude_mode && effort.ultra?)
               raise Protocol::Error.new(
                 "That reasoning effort is not available for this assistant."
               )
@@ -1154,12 +1167,28 @@ module Xd
             )
           end
           @store.set_fast(chat_id, fast)
+        when "claude-mode"
+          enabled = value == "true"
+          chat = @store.get_chat(chat_id)
+          if enabled && chat.backend != "codex"
+            raise Protocol::Error.new(
+              "Claude mode is only available for Codex."
+            )
+          end
+          @store.set_claude_mode(chat_id, enabled)
+          if enabled && chat.effort == Agent::Effort::Ultra.wire_name
+            @store.set_effort(chat_id, Agent::Effort::Max.wire_name)
+          end
         when "backend"
           backend = value || raise Protocol::Error.new(
             "A backend value is required."
           )
+          unless Agent::Catalog.lookup(backend)
+            raise Protocol::Error.new("No such assistant.")
+          end
           @store.set_backend(chat_id, backend)
           @store.set_fast(chat_id, false) unless backend == "codex"
+          @store.set_claude_mode(chat_id, false) unless backend == "codex"
         when "new-worktree"
           @store.set_new_worktree(chat_id, value == "true")
         when "workspace"
