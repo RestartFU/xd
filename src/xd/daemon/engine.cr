@@ -1044,6 +1044,12 @@ module Xd
             end
             previous = @store.get_chat(chat_id)
             @store.set_model_selection(chat_id, backend, model)
+            if previous.effort &&
+               !selected.supports_effort?(
+                 Agent::Effort.from_wire(previous.effort)
+               )
+              @store.set_effort(chat_id, nil)
+            end
             if previous.backend != backend || previous.model != model
               @store.append_message(
                 chat_id,
@@ -1055,6 +1061,18 @@ module Xd
             @store.set_model(chat_id, value)
           end
         when "effort"
+          if value
+            effort = Agent::Effort.from_wire(value)
+            selected = Agent::Catalog.lookup(
+              @store.get_chat(chat_id).backend
+            ) || Agent::Catalog::CLAUDE
+            unless effort.wire_name == value &&
+                   selected.supports_effort?(effort)
+              raise Protocol::Error.new(
+                "That reasoning effort is not available for this assistant."
+              )
+            end
+          end
           @store.set_effort(chat_id, value)
         when "access"
           @store.set_access(chat_id, value)

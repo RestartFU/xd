@@ -28,7 +28,7 @@ describe Xd::Agent::CodexProtocol do
         "hello",
         model: "gpt-5.6-sol",
         workdir: "/tmp",
-        effort: Xd::Agent::Effort::XHigh,
+        effort: Xd::Agent::Effort::Ultra,
         access: Xd::Agent::Access::Edit
       ),
       nil,
@@ -56,7 +56,7 @@ describe Xd::Agent::CodexProtocol do
     events.last.type.session_started?.should be_true
     sent_json(lines, 3)["method"].as_s.should eq("turn/start")
     start = sent_json(lines, 3)["params"]
-    start["effort"].as_s.should eq("xhigh")
+    start["effort"].as_s.should eq("ultra")
     start["sandboxPolicy"]["type"].as_s.should eq("workspaceWrite")
     start["sandboxPolicy"]["writableRoots"][0].as_s.should eq("/tmp")
     start["sandboxPolicy"]["networkAccess"].as_bool.should be_false

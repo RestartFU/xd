@@ -587,6 +587,7 @@ module Xd
           folder_ids = @workspaces.folder_ids(chat.folder_id)
           model = chat.model || settings.model || backend.default_model
           effort = chat.effort ? Effort.from_wire(chat.effort) : backend.default_effort
+          effort = Effort::High unless backend.supports_effort?(effort)
           access = chat.plan ? Access::Plan : Access.from_wire(chat.access)
           secrets = Secrets.effective(folder_ids)
           system_prompt = [

@@ -12,13 +12,6 @@ module Xd
       getter identity : Gtk::Box
       getter run : Gtk::Box
 
-      EFFORTS = [
-        Agent::Effort::Low,
-        Agent::Effort::Medium,
-        Agent::Effort::High,
-        Agent::Effort::XHigh,
-        Agent::Effort::Max,
-      ]
       ACCESS = [
         Agent::Access::ReadOnly,
         Agent::Access::Edit,
@@ -28,6 +21,7 @@ module Xd
       @backend = "claude"
       @model : String?
       @effort = Agent::Effort::High
+      @efforts : Array(Agent::Effort)
       @access = Agent::Access::ReadOnly
       @updating = false
       @model_picker : ModelPicker
@@ -44,6 +38,7 @@ module Xd
         @on_model : Proc(String, String, Nil),
       )
         @model = nil
+        @efforts = Agent::Catalog::CLAUDE.efforts
         @widget = Gtk::Box.new(:vertical, 2)
         @widget.add_css_class("xd-controls")
         @identity = Gtk::Box.new(:horizontal, 8)
@@ -54,20 +49,9 @@ module Xd
           "Which assistant and model answer in this chat"
 
         @effort_picker = OptionPicker.new(
-          EFFORTS.map_with_index do |effort, index|
-            OptionPicker::Option.new(
-              effort.label,
-              [
-                "Quick answers, little deliberation.",
-                "Balanced speed and depth.",
-                "Thinks longer before answering.",
-                "Extended reasoning for hard problems.",
-                "Everything the model has.",
-              ][index]
-            )
-          end,
+          effort_options(@efforts),
           ->(index : Int32) {
-            @on_option.call("effort", EFFORTS[index].wire_name)
+            @on_option.call("effort", @efforts[index].wire_name)
           }
         )
         @effort_picker.widget.tooltip_text =
@@ -170,16 +154,22 @@ module Xd
         @updating = true
         @backend = state["backend"]?.try(&.as_s?) || "claude"
         backend = Agent::Catalog.lookup(@backend) || Agent::Catalog::CLAUDE
+        efforts = backend.efforts
+        if @efforts != efforts
+          @efforts = efforts
+          @effort_picker.options = effort_options(@efforts)
+        end
         @model = state["model"]?.try(&.as_s?) || backend.default_model
-        @effort = Agent::Effort.from_wire(
+        selected_effort = Agent::Effort.from_wire(
           state["effort"]?.try(&.as_s?)
         )
+        @effort = backend.supports_effort?(selected_effort) ? selected_effort : Agent::Effort::High
         @access = Agent::Access.from_wire(
           state["access"]?.try(&.as_s?)
         )
 
         @model_picker.select(backend.id, @model)
-        @effort_picker.selected = EFFORTS.index(@effort) || 0
+        @effort_picker.selected = @efforts.index(@effort) || 0
         @access_picker.selected = ACCESS.index(@access) || 0
         plan = state["plan"]?.try(&.as_bool?) || false
         (plan ? @plan_button : @build_button).active = true
@@ -194,6 +184,32 @@ module Xd
         @workspace_picker.widget.sensitive = !has_messages
       ensure
         @updating = false
+      end
+
+      private def effort_options(
+        efforts : Array(Agent::Effort),
+      ) : Array(OptionPicker::Option)
+        efforts.map do |effort|
+          OptionPicker::Option.new(
+            effort.label,
+            case effort
+            when Agent::Effort::Low
+              "Quick answers, little deliberation."
+            when Agent::Effort::Medium
+              "Balanced speed and depth."
+            when Agent::Effort::High
+              "Thinks longer before answering."
+            when Agent::Effort::XHigh
+              "Extended reasoning for hard problems."
+            when Agent::Effort::Max
+              "Very deep reasoning for difficult problems."
+            when Agent::Effort::Ultra
+              "Longest available reasoning for the hardest problems."
+            else
+              "How hard the model is asked to think."
+            end
+          )
+        end
       end
 
       private def update_context_meter(

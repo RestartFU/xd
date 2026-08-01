@@ -55,6 +55,7 @@ module Xd
       High
       XHigh
       Max
+      Ultra
 
       def wire_name : String
         case self
@@ -63,6 +64,7 @@ module Xd
         when High   then "high"
         when XHigh  then "xhigh"
         when Max    then "max"
+        when Ultra  then "ultra"
         else             "high"
         end
       end
@@ -74,6 +76,7 @@ module Xd
         when "high"   then High
         when "xhigh"  then XHigh
         when "max"    then Max
+        when "ultra"  then Ultra
         else               High
         end
       end
@@ -85,6 +88,7 @@ module Xd
         when High   then "High"
         when XHigh  then "Extra high"
         when Max    then "Max"
+        when Ultra  then "Ultra"
         else             "High"
         end
       end

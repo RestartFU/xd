@@ -25,6 +25,18 @@ describe Xd::Agent::Catalog do
     Xd::Agent::Catalog.lookup(nil).should be_nil
   end
 
+  it "offers Ultra reasoning only to Codex" do
+    Xd::Agent::Catalog::CODEX.efforts.should contain(
+      Xd::Agent::Effort::Ultra
+    )
+    Xd::Agent::Catalog::CLAUDE.efforts.should_not contain(
+      Xd::Agent::Effort::Ultra
+    )
+    Xd::Agent::Effort.from_wire("ultra")
+      .should eq(Xd::Agent::Effort::Ultra)
+    Xd::Agent::Effort::Ultra.wire_name.should eq("ultra")
+  end
+
   it "builds resumable Claude arguments with access and effort" do
     claude = Xd::Agent::Catalog::CLAUDE
     plain = claude.build_argv(Xd::Agent::RunSpec.new("hello"))

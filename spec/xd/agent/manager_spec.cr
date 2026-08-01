@@ -597,24 +597,24 @@ describe Xd::Agent::Manager do
     with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
       chat_id = store.create_chat(folder_id, "Chat", "claude")
       store.set_model_selection(chat_id, "codex", "gpt-5.6-terra")
-      store.set_effort(chat_id, "xhigh")
+      store.set_effort(chat_id, "ultra")
       store.set_access(chat_id, "full")
       store.set_plan(chat_id, true)
 
       manager.send(chat_id, "plan this")
       launcher.backends.first.should eq("codex")
       launcher.specs.first.model.should eq("gpt-5.6-terra")
-      launcher.specs.first.effort.should eq(Xd::Agent::Effort::XHigh)
+      launcher.specs.first.effort.should eq(Xd::Agent::Effort::Ultra)
       launcher.specs.first.access.should eq(Xd::Agent::Access::Plan)
       manager.active_turn(chat_id).not_nil!.label.should eq(
-        "GPT-5.6 Terra · Extra high"
+        "GPT-5.6 Terra · Ultra"
       )
       launcher.finish(0, true)
 
       store.set_plan(chat_id, false)
       manager.send(chat_id, "build this")
       launcher.specs[1].model.should eq("gpt-5.6-terra")
-      launcher.specs[1].effort.should eq(Xd::Agent::Effort::XHigh)
+      launcher.specs[1].effort.should eq(Xd::Agent::Effort::Ultra)
       launcher.specs[1].access.should eq(Xd::Agent::Access::Full)
       launcher.finish(1, true)
     end

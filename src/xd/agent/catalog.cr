@@ -80,6 +80,22 @@ module Xd
         end
       end
 
+      def efforts : Array(Effort)
+        values = [
+          Effort::Low,
+          Effort::Medium,
+          Effort::High,
+          Effort::XHigh,
+          Effort::Max,
+        ]
+        values << Effort::Ultra if @id == "codex"
+        values
+      end
+
+      def supports_effort?(effort : Effort) : Bool
+        efforts.includes?(effort)
+      end
+
       def build_argv(spec : RunSpec) : Array(String)
         case @id
         when "claude" then claude_argv(spec)

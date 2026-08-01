@@ -977,8 +977,8 @@ describe Xd::Daemon::Engine do
     end
   end
 
-  it "selects an assistant and model atomically" do
-    with_daemon_engine do |_store, engine|
+  it "selects an assistant, model, and supported reasoning effort" do
+    with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
       folder = engine.dispatch(local, {
         "op"   => "new-folder",
@@ -1003,6 +1003,17 @@ describe Xd::Daemon::Engine do
       }.to_json)
       state["backend"].as_s.should eq("codex")
       state["model"].as_s.should eq("gpt-5.6-terra")
+      ultra = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "effort",
+        "value"  => "ultra",
+      }.to_json)
+      ultra.success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)["effort"].as_s.should eq("ultra")
       switch = engine.dispatch(local, {
         "op"   => "messages",
         "chat" => chat,
@@ -1038,6 +1049,23 @@ describe Xd::Daemon::Engine do
       }.to_json)
       unchanged["backend"].as_s.should eq("codex")
       unchanged["model"].as_s.should eq("gpt-5.6-terra")
+
+      claude = engine.dispatch(local, {
+        "op"      => "set-option",
+        "chat"    => chat,
+        "option"  => "model",
+        "backend" => "claude",
+        "value"   => "claude-opus-5",
+      }.to_json)
+      claude.success?.should be_true
+      store.get_chat(chat).effort.should be_nil
+      rejected_ultra = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "effort",
+        "value"  => "ultra",
+      }.to_json)
+      rejected_ultra.success?.should be_false
     end
   end
 
