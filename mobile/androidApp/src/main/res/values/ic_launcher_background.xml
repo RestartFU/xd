@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The desktop icon's tile colour. Near-black rather than black for the same
+      reason it is on the desktop: a true #000 tile disappears on an OLED
+      panel. The launcher supplies the squircle, so this layer stays flat.
+    -->
+    <color name="ic_launcher_background">#0b0b0b</color>
+</resources>

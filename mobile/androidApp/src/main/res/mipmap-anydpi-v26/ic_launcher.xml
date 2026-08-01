@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  minSdk is 26, so every device that can install this app supports adaptive
+  icons and no legacy density-specific bitmaps are needed.
+
+  The monochrome layer reuses the same wordmark, which is already a flat
+  silhouette, so Android 13+ themed icons pick up the launcher's palette.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
