@@ -33,6 +33,8 @@ module Xd
 
         This shows a text field. An <ask> may contain either two to six options, an <input> marker, or both.
 
+        Ask at most one question per reply. Put exactly one <ask> block at the end of the reply, with no prose after </ask>.
+
         Use it only when different answers lead to materially different work. Anything you can settle yourself, or find out by looking, is not a question -- decide it and say what you decided.
         </asking_the_user>
 
@@ -66,37 +68,46 @@ module Xd
       )
       end
 
-      # Returns the last valid block. Earlier tags may be prose explaining the
-      # format; the final valid block is the question the assistant meant.
+      # Returns the last valid block and strips every valid block from prose.
+      # Older agents sometimes emit several despite the one-question contract;
+      # raw control tags must never reach Markdown rendering.
       def self.parse(text : String) : Parsed?
-        found_at : Int32? = nil
-        found : Ask? = nil
+        blocks = [] of {Int32, Int32, Ask}
         offset = 0
 
         while open_at = text.byte_index(OPEN, offset)
           if candidate = parse_at(text, open_at)
-            found_at = open_at
-            found = candidate
+            close_at = text.byte_index(
+              CLOSE,
+              open_at + OPEN.bytesize
+            ).not_nil!
+            finish = close_at + CLOSE.bytesize
+            blocks << {open_at, finish, candidate}
+            offset = finish
+          else
+            offset = open_at + 1
           end
-          offset = open_at + 1
         end
 
-        open_at = found_at
-        ask = found
-        return unless open_at && ask
+        return if blocks.empty?
 
-        close_at = text.byte_index(CLOSE, open_at + OPEN.bytesize).not_nil!
-        before = text.byte_slice(0, open_at).strip
-        after_start = close_at + CLOSE.bytesize
-        after = text.byte_slice(after_start, text.bytesize - after_start).strip
-        remainder = [before, after].reject(&.empty?).join("\n\n")
-        Parsed.new(ask, remainder)
+        segments = [] of String
+        at = 0
+        blocks.each do |start, finish, _ask|
+          segment = text.byte_slice(at, start - at).strip
+          segments << segment unless segment.empty?
+          at = finish
+        end
+        segment = text.byte_slice(at, text.bytesize - at).strip
+        segments << segment unless segment.empty?
+        remainder = segments.join("\n\n")
+        Parsed.new(blocks.last[2], remainder)
       end
 
       # Bytes safe to expose while a UTF-8 reply streams. Holds complete valid
       # blocks, unclosed blocks, and partial opening tags at the tail.
       def self.visible_bytes(text : String) : Int32
-        if parsed_at = last_valid_open(text)
+        if parsed_at = first_valid_open(text)
           return parsed_at
         end
 
@@ -116,14 +127,13 @@ module Xd
         length
       end
 
-      private def self.last_valid_open(text : String) : Int32?
-        found : Int32? = nil
+      private def self.first_valid_open(text : String) : Int32?
         offset = 0
         while open_at = text.byte_index(OPEN, offset)
-          found = open_at if parse_at(text, open_at)
+          return open_at if parse_at(text, open_at)
           offset = open_at + 1
         end
-        found
+        nil
       end
 
       private def self.parse_at(text : String, open_at : Int32) : Ask?

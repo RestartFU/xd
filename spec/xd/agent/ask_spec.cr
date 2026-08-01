@@ -46,6 +46,35 @@ describe Xd::Agent::Ask do
     parsed.remainder.should eq("Before.\n\nAfter.")
   end
 
+  it "strips duplicate valid blocks and keeps the last actionable ask" do
+    text = <<-TEXT
+      Findings.
+
+      <ask>
+      Which implementation?
+      - Restore it
+      - Start fresh
+      </ask>
+
+      More context.
+
+      <ask>
+      What should v1 cover?
+      - Chat only
+      - Full parity
+      </ask>
+
+      Closing prose.
+      TEXT
+
+    parsed = Xd::Agent::Ask.parse(text).not_nil!
+    parsed.ask.question.should eq("What should v1 cover?")
+    parsed.ask.options.should eq(["Chat only", "Full parity"])
+    parsed.remainder.should eq(
+      "Findings.\n\nMore context.\n\nClosing prose."
+    )
+  end
+
   it "rejects blocks without a real choice or input" do
     Xd::Agent::Ask.parse("<ask>\nQuestion?\n- Only one\n</ask>")
       .should be_nil
@@ -65,6 +94,9 @@ describe Xd::Agent::Ask do
     Xd::Agent::Ask.visible_bytes(
       "Reply <ask>\nQuestion?\n- Yes\n- No\n</ask>"
     ).should eq(6)
+    multiple = "Reply <ask>\nFirst?\n- Yes\n- No\n</ask>\n" \
+               "middle <ask>\nSecond?\n- A\n- B\n</ask>"
+    Xd::Agent::Ask.visible_bytes(multiple).should eq(6)
   end
 
   it "releases invalid tags and counts UTF-8 bytes" do
