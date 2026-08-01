@@ -79,10 +79,10 @@ class TranscriptMachineTest {
     }
 
     @Test
-    fun changedDoesNotRefetchWhileWorking() {
-        assertTrue(
-            reduce(ChatState("chat", working = true), TranscriptInput.Changed)
-                .effects.isEmpty(),
+    fun changedRefetchesSettingsWhileWorking() {
+        assertEquals(
+            listOf(TranscriptEffect.Refetch),
+            reduce(ChatState("chat", working = true), TranscriptInput.Changed).effects,
         )
         assertEquals(
             listOf(TranscriptEffect.Refetch),

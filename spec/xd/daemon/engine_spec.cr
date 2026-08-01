@@ -1140,6 +1140,17 @@ describe Xd::Daemon::Engine do
         "value"  => "ultra",
       }.to_json)
       rejected_mode_ultra.success?.should be_false
+      mode_low = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "effort",
+        "value"  => "low",
+      }.to_json)
+      mode_low.success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)["effort"].as_s.should eq("low")
       switch = engine.dispatch(local, {
         "op"   => "messages",
         "chat" => chat,
@@ -1184,7 +1195,7 @@ describe Xd::Daemon::Engine do
         "value"   => "claude-opus-5",
       }.to_json)
       claude.success?.should be_true
-      store.get_chat(chat).effort.should eq("max")
+      store.get_chat(chat).effort.should eq("low")
       store.get_chat(chat).fast.should be_false
       store.get_chat(chat).claude_mode.should be_false
       rejected_ultra = engine.dispatch(local, {

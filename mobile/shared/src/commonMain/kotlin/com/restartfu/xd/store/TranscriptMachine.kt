@@ -152,11 +152,11 @@ public object TranscriptMachine {
         }
         TranscriptInput.Changed -> TranscriptTransition(
             state,
-            if (state.working) {
-                emptyList()
-            } else {
-                listOf(TranscriptEffect.Refetch)
-            },
+            // `changed` is emitted by set-option. Settings selected during a
+            // turn apply to the next turn, but must still become visible now.
+            // Reload already reconciles the live turn by its watermark, so it
+            // is safe to refresh without losing or duplicating streamed text.
+            listOf(TranscriptEffect.Refetch),
         )
         is TranscriptInput.Commands -> TranscriptTransition(
             state.copy(commands = input.commands),
