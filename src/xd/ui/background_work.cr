@@ -5,8 +5,10 @@ module Xd
     module BackgroundWork
       extend self
 
-      WORKERS    =   3
-      QUEUE_SIZE = 128
+      WORKERS = 3
+      # Jobs may retain 8–10 MiB diff, image, or recording payloads. A deep
+      # queue turns a brief refresh burst into hundreds of MiB of live memory.
+      QUEUE_SIZE = 16
 
       @@queue = Channel(Proc(Nil)).new(QUEUE_SIZE)
       @@mutex = Mutex.new

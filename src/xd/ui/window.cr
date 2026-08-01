@@ -534,6 +534,7 @@ module Xd
           @closed = true
           @transcript_pages.each_value(&.clear_workflows)
           @event_inbox.clear
+          @tool_panel.close
           @voice.close
           @presence.close
           persist_window_layout

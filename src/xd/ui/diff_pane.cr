@@ -8,6 +8,11 @@ require "./panel_call"
 module Xd
   module UI
     class DiffPane
+      private record PendingPrepare,
+        output : String,
+        token : Int64,
+        chat_id : String
+
       getter widget : Adw::Bin
 
       @chat_id : String?
@@ -18,6 +23,10 @@ module Xd
       @stack : Gtk::Stack
       @status : Adw::StatusPage
       @sections : DiffFileSections
+      @refresh_active = false
+      @refresh_pending = false
+      @prepare_active = false
+      @pending_prepare : PendingPrepare?
 
       def initialize(@request : PanelCall)
         @chat_id = nil
@@ -88,6 +97,7 @@ module Xd
         @chat_id = chat_id
         @sequence += 1
         @base = nil
+        @pending_prepare = nil
         clear
       end
 
@@ -98,19 +108,30 @@ module Xd
           return
         end
 
+        if @refresh_active
+          @refresh_pending = true
+          return
+        end
+        @refresh_active = true
+
         token = next_token
-        show_empty("Loading changes…")
+        show_empty("Loading changes…") unless @stack.visible_child_name == "changes"
         request_async({
           "op"   => JSON::Any.new("chat"),
           "chat" => JSON::Any.new(chat_id),
         }) do |result|
-          next unless active?(token, chat_id)
+          unless active?(token, chat_id)
+            finish_refresh
+            next
+          end
           unless state = result.body
             show_call_error(result)
+            finish_refresh
             next
           end
           unless state["workdir"]?.try(&.as_s?)
             show_empty("No working directory")
+            finish_refresh
             next
           end
 
@@ -128,14 +149,19 @@ module Xd
           "chat" => JSON::Any.new(chat_id),
           "read" => JSON::Any.new("base"),
         }) do |result|
-          next unless active?(token, chat_id)
+          unless active?(token, chat_id)
+            finish_refresh
+            next
+          end
           unless base = result.body
             show_call_error(result)
+            finish_refresh
             next
           end
           @base = base["output"]?.try(&.as_s?).try(&.strip)
           unless @base.presence
             show_empty("No branch to compare against")
+            finish_refresh
             next
           end
           read_diff(chat_id, token)
@@ -154,9 +180,13 @@ module Xd
           request["base"] = JSON::Any.new(@base.not_nil!)
         end
         request_async(request) do |result|
-          next unless active?(token, chat_id)
+          unless active?(token, chat_id)
+            finish_refresh
+            next
+          end
           unless response = result.body
             show_call_error(result)
+            finish_refresh
             next
           end
 
@@ -164,11 +194,21 @@ module Xd
           if output.empty?
             clear
             show_empty("No changes")
+            finish_refresh
             next
           end
 
           prepare_diff(output, token, chat_id)
+          finish_refresh
         end
+      end
+
+      private def finish_refresh : Nil
+        @refresh_active = false
+        return unless @refresh_pending
+
+        @refresh_pending = false
+        refresh
       end
 
       private def prepare_diff(
@@ -176,6 +216,18 @@ module Xd
         token : Int64,
         chat_id : String,
       ) : Nil
+        @pending_prepare = PendingPrepare.new(output, token, chat_id)
+        start_diff_prepare
+      end
+
+      private def start_diff_prepare : Nil
+        return if @prepare_active
+        work = @pending_prepare || return
+        @pending_prepare = nil
+        @prepare_active = true
+        output = work.output
+        token = work.token
+        chat_id = work.chat_id
         queued = BackgroundWork.submit do
           prepared : DiffFileSections::Prepared? = nil
           message : String? = nil
@@ -185,6 +237,7 @@ module Xd
             message = error.message || "The diff could not be parsed."
           end
           GLib.idle_add do
+            @prepare_active = false
             if active?(token, chat_id)
               if result = prepared
                 parsed = @sections.fill(result)
@@ -202,11 +255,14 @@ module Xd
                 )
               end
             end
+            start_diff_prepare
             false
           end
           nil
         end
         unless queued
+          @prepare_active = false
+          @pending_prepare = nil
           show_empty(
             "Still Loading Changes",
             "Too many previews are being prepared. Try again shortly."

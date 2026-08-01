@@ -16,6 +16,11 @@ module Xd
 
       record Entry, name : String, directory : Bool
 
+      record TextChange,
+        start : Int32,
+        finish : Int32,
+        replacement : String
+
       getter widget : Adw::Bin
 
       @chat_id : String?
@@ -27,6 +32,9 @@ module Xd
       @saving = false
       @sequence = 0_i64
       @entries_data = [] of Entry
+      @entries_ready = false
+      @refresh_active = false
+      @refresh_pending = false
       @tags = {} of SyntaxToken => Gtk::TextTag
 
       @back : Gtk::Button
@@ -153,6 +161,7 @@ module Xd
         @loading_preview = false
         @saving = false
         @entries_data.clear
+        @entries_ready = false
         @entries.remove_all
         @preview.modified = false
         set_header_path("")
@@ -176,15 +185,25 @@ module Xd
           return
         end
 
+        if @refresh_active
+          @refresh_pending = true
+          return
+        end
+        @refresh_active = true
+
         token = next_token
-        show_status("Loading…", nil)
+        show_status("Loading…", nil) unless @workdir
         request_async({
           "op"   => JSON::Any.new("chat"),
           "chat" => JSON::Any.new(chat_id),
         }) do |result|
-          next unless active?(token, chat_id)
+          unless active?(token, chat_id)
+            finish_refresh
+            next
+          end
           unless state = result.body
             show_call_error(result)
+            finish_refresh
             next
           end
 
@@ -195,37 +214,53 @@ module Xd
               "No Working Directory",
               "This chat has no files to browse."
             )
+            finish_refresh
             next
           end
-          if @workdir != workdir
+          workdir_changed = @workdir != workdir
+          if workdir_changed
             @workdir = workdir
             @path = ""
             @file_path = nil
             @showing_preview = false
+            @entries_ready = false
           end
 
           if @showing_preview
             if @preview.modified
               show_toast("Save or undo changes before reloading.")
+              finish_refresh
               next
             end
-            show_file(@file_path)
+            refresh_file(@file_path, auto_refresh: true)
           else
-            show_directory(@path)
+            show_directory(
+              @path,
+              incremental: !workdir_changed,
+              auto_refresh: true
+            )
           end
         end
       end
 
-      private def show_directory(path : String) : Nil
+      private def show_directory(
+        path : String,
+        incremental : Bool = false,
+        auto_refresh : Bool = false,
+      ) : Nil
         chat_id = @chat_id
-        return unless chat_id
+        unless chat_id
+          finish_refresh if auto_refresh
+          return
+        end
 
         @showing_preview = false
         @loading_preview = false
         @file_path = nil
         @path = path
+        @entries_ready = false unless incremental
         set_header_path(path)
-        show_status("Loading…", nil)
+        show_status("Loading…", nil) unless incremental
         token = next_token
 
         request_async({
@@ -234,14 +269,19 @@ module Xd
           "action" => JSON::Any.new("list"),
           "path"   => JSON::Any.new(path),
         }) do |result|
-          next unless active?(token, chat_id)
+          unless active?(token, chat_id)
+            finish_refresh if auto_refresh
+            next
+          end
           unless response = result.body
             show_call_error(result)
+            finish_refresh if auto_refresh
             next
           end
 
           nodes = response["entries"]?.try(&.as_a?) || [] of JSON::Any
-          prepare_entries(path, chat_id, token, nodes)
+          prepare_entries(path, chat_id, token, nodes, incremental)
+          finish_refresh if auto_refresh
         end
       end
 
@@ -280,11 +320,48 @@ module Xd
         text.byte_slice(start, finish - start)
       end
 
+      def self.text_change(old_text : String, new_text : String) : TextChange?
+        return if old_text == new_text
+
+        common = Math.min(old_text.bytesize, new_text.bytesize)
+        prefix = 0
+        while prefix < common &&
+              old_text.byte_at(prefix) == new_text.byte_at(prefix)
+          prefix += 1
+        end
+        while prefix > 0 && prefix < old_text.bytesize &&
+              (old_text.byte_at(prefix) & 0xc0) == 0x80
+          prefix -= 1
+        end
+
+        suffix = 0
+        suffix_limit = common - prefix
+        while suffix < suffix_limit &&
+              old_text.byte_at(old_text.bytesize - suffix - 1) ==
+                new_text.byte_at(new_text.bytesize - suffix - 1)
+          suffix += 1
+        end
+        while suffix > 0 &&
+              (((old_text.byte_at(old_text.bytesize - suffix) & 0xc0) == 0x80) ||
+              ((new_text.byte_at(new_text.bytesize - suffix) & 0xc0) == 0x80))
+          suffix -= 1
+        end
+
+        old_finish = old_text.bytesize - suffix
+        new_finish = new_text.bytesize - suffix
+        TextChange.new(
+          old_text.byte_slice(0, prefix).size,
+          old_text.byte_slice(0, old_finish).size,
+          new_text.byte_slice(prefix, new_finish - prefix)
+        )
+      end
+
       private def prepare_entries(
         path : String,
         chat_id : String,
         token : Int64,
         nodes : Array(JSON::Any),
+        incremental : Bool,
       ) : Nil
         queued = BackgroundWork.submit do
           entries : Array(Entry)? = nil
@@ -297,7 +374,7 @@ module Xd
           GLib.idle_add do
             if active?(token, chat_id)
               if result = entries
-                fill_entries(path, result, chat_id, token)
+                fill_entries(path, result, chat_id, token, incremental)
               else
                 show_status(
                   "Could Not Open Files",
@@ -322,19 +399,32 @@ module Xd
         entries : Array(Entry),
         chat_id : String,
         token : Int64,
+        incremental : Bool,
       ) : Nil
-        @entries.remove_all
-        @entries_data = entries
         @path = path
         @file_path = nil
         @showing_preview = false
         set_header_path(path)
+        incremental &&= @entries_ready
         if entries.empty?
+          if incremental
+            reconcile_entries(entries)
+          else
+            @entries.remove_all
+            @entries_data = entries
+          end
           show_status(
             "Empty Folder",
             "This folder has no visible files."
           )
+          @entries_ready = true
+        elsif incremental
+          reconcile_entries(entries)
+          @stack.visible_child_name = "entries"
         else
+          @entries_ready = false
+          @entries.remove_all
+          @entries_data = entries
           show_status(
             "Loading Files…",
             "Preparing #{entries.size} entries."
@@ -367,11 +457,22 @@ module Xd
             false
           end
         else
+          @entries_ready = true
           @stack.visible_child_name = "entries"
         end
       end
 
       private def add_entry_row(entry : Entry) : Nil
+        @entries.append(build_entry_row(entry))
+      end
+
+      private def build_entry_row(entry : Entry) : Gtk::ListBoxRow
+        row = Gtk::ListBoxRow.new
+        row.child = build_entry_content(entry)
+        row
+      end
+
+      private def build_entry_content(entry : Entry) : Gtk::Box
         icon = Gtk::Image.new_from_icon_name(
           entry.directory ? "folder-symbolic" : "text-x-generic-symbolic"
         )
@@ -395,9 +496,43 @@ module Xd
           )
         end
 
-        row = Gtk::ListBoxRow.new
-        row.child = box
-        @entries.append(row)
+        box
+      end
+
+      private def reconcile_entries(entries : Array(Entry)) : Nil
+        wanted = entries.to_h { |entry| {entry.name, entry} }
+        index = @entries_data.size - 1
+        while index >= 0
+          unless wanted.has_key?(@entries_data[index].name)
+            @entries.row_at_index(index).try { |row| @entries.remove(row) }
+            @entries_data.delete_at(index)
+          end
+          index -= 1
+        end
+
+        entries.each_with_index do |entry, target|
+          if current = @entries_data[target]?
+            if current.name == entry.name
+              if current != entry
+                @entries.row_at_index(target).try do |row|
+                  row.child = build_entry_content(entry)
+                end
+                @entries_data[target] = entry
+              end
+              next
+            end
+          end
+
+          if current = @entries_data.index { |value| value.name == entry.name }
+            @entries.row_at_index(current).try { |row| @entries.remove(row) }
+            @entries.insert(build_entry_row(entry), target)
+            @entries_data.delete_at(current)
+            @entries_data.insert(target, entry)
+          else
+            @entries.insert(build_entry_row(entry), target)
+            @entries_data.insert(target, entry)
+          end
+        end
       end
 
       private def activate_entry(index : Int32) : Nil
@@ -449,6 +584,115 @@ module Xd
           end
           start_preview_text(path, content, chat_id, token)
         end
+      end
+
+      private def refresh_file(
+        path : String?,
+        auto_refresh : Bool = false,
+      ) : Nil
+        chat_id = @chat_id
+        unless chat_id && path
+          finish_refresh if auto_refresh
+          return
+        end
+
+        token = next_token
+        request_async({
+          "op"     => JSON::Any.new("file-browse"),
+          "chat"   => JSON::Any.new(chat_id),
+          "action" => JSON::Any.new("read"),
+          "path"   => JSON::Any.new(path),
+        }) do |result|
+          unless active?(token, chat_id) && @file_path == path
+            finish_refresh if auto_refresh
+            next
+          end
+          unless response = result.body
+            show_toast(result.error || "The file could not be refreshed.")
+            finish_refresh if auto_refresh
+            next
+          end
+          text = response["content"]?.try(&.as_s?)
+          unless text
+            show_toast("The daemon returned an invalid file.")
+            finish_refresh if auto_refresh
+            next
+          end
+          if @preview.text == text
+            finish_refresh if auto_refresh
+            next
+          end
+
+          queued = BackgroundWork.submit do
+            spans = SyntaxHighlight.prepare(path, text)
+            GLib.idle_add do
+              apply_refreshed_preview(path, text, chat_id, token, spans)
+              false
+            end
+            nil
+          end
+          show_toast("Still refreshing file. Try again shortly.") unless queued
+          finish_refresh if auto_refresh
+        end
+      end
+
+      private def finish_refresh : Nil
+        @refresh_active = false
+        return unless @refresh_pending
+
+        @refresh_pending = false
+        refresh
+      end
+
+      private def apply_refreshed_preview(
+        path : String,
+        text : String,
+        chat_id : String,
+        token : Int64,
+        spans : Array(HighlightSpan),
+      ) : Nil
+        return unless active?(token, chat_id) &&
+                      @file_path == path &&
+                      !@preview.modified
+        change = self.class.text_change(@preview.text, text)
+        return unless change
+
+        cursor = @preview.cursor_position
+        line_start = @preview.iter_at_offset(change.start)
+        line_start.line_offset = 0
+        line_start_offset = line_start.offset
+        @loading_preview = true
+        @preview.delete(
+          @preview.iter_at_offset(change.start),
+          @preview.iter_at_offset(change.finish)
+        )
+        @preview.insert(
+          @preview.iter_at_offset(change.start),
+          change.replacement,
+          change.replacement.bytesize
+        )
+        @preview.remove_all_tags(
+          @preview.iter_at_offset(line_start_offset),
+          @preview.end_iter
+        )
+        replacement_size = change.replacement.size
+        cursor = if cursor <= change.start
+                   cursor
+                 elsif cursor >= change.finish
+                   cursor - (change.finish - change.start) + replacement_size
+                 else
+                   change.start + replacement_size
+                 end
+        @preview.place_cursor(
+          @preview.iter_at_offset(Math.min(cursor, @preview.char_count))
+        )
+        @preview.modified = false
+        @loading_preview = false
+        update_actions
+
+        span_start = spans.index { |span| span.finish > line_start_offset } ||
+                     spans.size
+        apply_highlight_batch(path, token, spans, span_start)
       end
 
       private def start_preview_text(

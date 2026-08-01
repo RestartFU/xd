@@ -44,4 +44,19 @@ describe Xd::UI::FilePane do
       chunk.bytesize.should be <= Xd::UI::FilePane::PREVIEW_BATCH
     end
   end
+
+  it "prepares minimal UTF-8-safe preview changes" do
+    old_text = "before\naéz\nafter"
+    new_text = "before\naêz!\nafter"
+    change = Xd::UI::FilePane.text_change(old_text, new_text).not_nil!
+
+    rebuilt = old_text[0, change.start] +
+              change.replacement +
+              old_text[change.finish..]
+    rebuilt.should eq(new_text)
+    change.start.should eq(8)
+    change.finish.should eq(10)
+    change.replacement.should eq("êz!")
+    Xd::UI::FilePane.text_change(new_text, new_text).should be_nil
+  end
 end

@@ -13,6 +13,8 @@ require "./panel_call"
 module Xd
   module UI
     class ToolPanel
+      REPOSITORY_REFRESH_DELAY = 180.milliseconds
+
       getter terminal_widget : Gtk::Box
       getter repository_widget : Gtk::Stack
       getter repository_page : String?
@@ -20,6 +22,7 @@ module Xd
       @chat_id : String?
       @view_key : String?
       @repository_page : String?
+      @repository_refresh_source = 0_u32
 
       @diff_pane : DiffPane
       @file_pane : FilePane
@@ -56,6 +59,7 @@ module Xd
 
         @chat_id = chat_id
         @view_key = view_key
+        cancel_repository_refresh
         @diff_pane.select_chat(chat_id)
         @file_pane.select_chat(chat_id)
         @terminal_panel.select_chat(chat_id, view_key)
@@ -71,6 +75,7 @@ module Xd
 
       def show_repository(page : String?) : Nil
         @repository_page = page
+        cancel_repository_refresh
         unless page
           @repository_widget.visible = false
           return
@@ -88,7 +93,7 @@ module Xd
         return unless self.class.repository_changed?(event)
         return unless @repository_widget.visible?
 
-        refresh_repository(@repository_page)
+        schedule_repository_refresh
       end
 
       def self.repository_changed?(
@@ -113,6 +118,10 @@ module Xd
         @terminal_panel.remote_connection_changed(connected, error)
       end
 
+      def close : Nil
+        cancel_repository_refresh
+      end
+
       private def refresh_visible : Nil
         return unless @chat_id
 
@@ -125,6 +134,23 @@ module Xd
         when "files" then @file_pane.refresh
         when "diff"  then @diff_pane.refresh
         end
+      end
+
+      private def schedule_repository_refresh : Nil
+        return unless @repository_refresh_source == 0
+
+        @repository_refresh_source = GLib.timeout(REPOSITORY_REFRESH_DELAY) do
+          @repository_refresh_source = 0_u32
+          refresh_repository(@repository_page) if @repository_widget.visible?
+          false
+        end
+      end
+
+      private def cancel_repository_refresh : Nil
+        return if @repository_refresh_source == 0
+
+        GLib.source_remove(@repository_refresh_source)
+        @repository_refresh_source = 0_u32
       end
     end
   end

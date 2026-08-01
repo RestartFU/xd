@@ -45,6 +45,9 @@ module Xd
       @render_jobs = {} of UInt64 => Int64
       @render_sequence = 0_i64
       @prepared_bodies = {} of Int32 => PreparedBody
+      @section_paths = [] of String
+      @sections_by_path = {} of String => DiffFileSection
+      @model : Gtk::StringList
       @retired_bodies = Deque(Gtk::Box).new
       @retire_scheduled = false
 
@@ -55,7 +58,8 @@ module Xd
         factory.unbind_signal.connect { |object| unbind_item(object) }
         factory.teardown_signal.connect { |object| teardown_item(object) }
 
-        @widget = Gtk::ListView.new(nil, factory)
+        @model = Gtk::StringList.new([] of String)
+        @widget = Gtk::ListView.new(Gtk::NoSelection.new(@model), factory)
         @widget.add_css_class("xd-diff-list")
         @widget.hexpand = true
       end
@@ -68,8 +72,11 @@ module Xd
         parsed = UnifiedDiff.parse(patch)
         sections = UnifiedDiff.file_sections(parsed.lines)
         bodies = {} of Int32 => PreparedBody
+        remaining = MAX_RENDERED_ROWS
         sections.each do |section|
-          bodies[section.start] = prepare_body(parsed, section)
+          body, rendered = prepare_body(parsed, section, remaining)
+          bodies[section.start] = body
+          remaining = Math.max(remaining - rendered, 0)
         end
         Prepared.new(
           parsed,
@@ -79,17 +86,21 @@ module Xd
       end
 
       def fill(prepared : Prepared) : ParsedDiff
-        @render_jobs.clear
-        @widget.model = nil
-        @parsed = prepared.parsed
+        paths = prepared.sections.map(&.path)
+        parsed = prepared.parsed
+        # Bodies already contain rendered markup. Retaining every parsed line
+        # until next refresh doubles large-pane memory for no UI benefit.
+        @parsed = ParsedDiff.new(
+          [] of DiffLine,
+          parsed.additions,
+          parsed.deletions
+        )
         @sections = prepared.sections
         @prepared_bodies = prepared.bodies
-
-        descriptors = Gtk::StringList.new(
-          @sections.each_index.map(&.to_s).to_a
-        )
-        @widget.model = Gtk::NoSelection.new(descriptors)
-        @parsed
+        @sections_by_path = @sections.to_h { |section| {section.path, section} }
+        reconcile_model(paths)
+        refresh_bound_sections
+        parsed
       end
 
       def self.render_plan(start : Int32, finish : Int32) : RenderPlan
@@ -103,12 +114,21 @@ module Xd
       private def self.prepare_body(
         parsed : ParsedDiff,
         section : DiffFileSection,
-      ) : PreparedBody
+        available : Int32,
+      ) : {PreparedBody, Int32}
         start = section.start
         if parsed.lines[start]?.try(&.kind.file?)
           start += 1
         end
-        plan = render_plan(start, section.finish)
+        visible_finish = Math.min(
+          section.finish,
+          start + Math.min(MAX_RENDERED_ROWS, available)
+        )
+        plan = RenderPlan.new(
+          visible_finish,
+          Math.max(section.finish - visible_finish, 0)
+        )
+        rendered = plan.finish - start
         chunks = [] of DiffMarkup
         while start < plan.finish
           finish = Math.min(start + CHUNK_ROWS, plan.finish)
@@ -120,7 +140,7 @@ module Xd
           )
           start = finish
         end
-        PreparedBody.new(chunks, plan.omitted)
+        {PreparedBody.new(chunks, plan.omitted), rendered}
       end
 
       private def setup_item(object : GObject::Object) : Nil
@@ -162,9 +182,17 @@ module Xd
         item = list_item(object)
         key = pointer_key(item)
         widgets = @row_widgets[key]? || return
-        section = @sections[item.position.to_i]?
+        section = section_for_item(item)
         return unless section
 
+        bind_section(key, widgets, section)
+      end
+
+      private def bind_section(
+        key : UInt64,
+        widgets : RowWidgets,
+        section : DiffFileSection,
+      ) : Nil
         widgets.path.markup =
           %(<span foreground="#ffbe6f" weight="bold">) +
             HTML.escape(UnifiedDiff.display_text(section.path)) +
@@ -183,6 +211,52 @@ module Xd
         else
           cancel_body(key)
           replace_body(key, widgets)
+        end
+      end
+
+      private def section_for_item(item : Gtk::ListItem) : DiffFileSection?
+        object = item.item
+        return unless object
+
+        path = Gtk::StringObject.new(
+          object.to_unsafe,
+          GICrystal::Transfer::None
+        ).string
+        @sections_by_path[path]?
+      end
+
+      private def reconcile_model(paths : Array(String)) : Nil
+        wanted = paths.to_set
+        index = @section_paths.size - 1
+        while index >= 0
+          unless wanted.includes?(@section_paths[index])
+            @model.splice(index.to_u32, 1_u32, nil)
+            @section_paths.delete_at(index)
+          end
+          index -= 1
+        end
+
+        paths.each_with_index do |path, target|
+          next if @section_paths[target]? == path
+
+          if current = @section_paths.index(path, target + 1)
+            @model.splice(current.to_u32, 1_u32, nil)
+            @section_paths.delete_at(current)
+          end
+          @model.splice(target.to_u32, 0_u32, [path])
+          @section_paths.insert(target, path)
+        end
+      end
+
+      private def refresh_bound_sections : Nil
+        @bound_sections.keys.each do |key|
+          old = @bound_sections[key]? || next
+          current = @sections_by_path[old.path]?
+          next unless current
+          next if current == old
+          widgets = @row_widgets[key]? || next
+
+          bind_section(key, widgets, current)
         end
       end
 
