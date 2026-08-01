@@ -228,6 +228,12 @@ describe Xd::Daemon::Server do
         certificate,
         key
       )
+      server.listen_remote(
+        "127.0.0.1",
+        0,
+        certificate,
+        key
+      ).should eq(port)
       context = OpenSSL::SSL::Context::Client.new
       context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
       socket = TCPSocket.new("127.0.0.1", port)

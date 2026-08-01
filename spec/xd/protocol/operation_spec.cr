@@ -6,7 +6,7 @@ describe Xd::Protocol::Operation do
       Xd::Protocol::Operation::Invalid
     ))
 
-    operations.size.should eq(49)
+    operations.size.should eq(50)
 
     operations.each do |operation|
       operation.wire_name.should_not be_empty
@@ -23,6 +23,7 @@ describe Xd::Protocol::Operation do
   it "allows only handshake operations before authentication" do
     Xd::Protocol::Operation::Pair.authentication_required?.should be_false
     Xd::Protocol::Operation::Hello.authentication_required?.should be_false
+    Xd::Protocol::Operation::PeerPairing.authentication_required?.should be_true
     Xd::Protocol::Operation::Tree.authentication_required?.should be_true
     Xd::Protocol::Operation::Send.authentication_required?.should be_true
     Xd::Protocol::Operation::Ping.authentication_required?.should be_true

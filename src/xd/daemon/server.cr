@@ -19,6 +19,8 @@ module Xd
       @local_token : String?
       @local_lock_path : String?
       @remote_listener : TCPServer?
+      @remote_host : String?
+      @remote_requested_port : Int32?
       @tls_context : OpenSSL::SSL::Context::Server?
       @clients = [] of IO
       @lock = Mutex.new
@@ -82,23 +84,30 @@ module Xd
         context.certificate_chain = certificate_path
         context.private_key = private_key_path
         context.disable_session_resume_tickets
-        listener = TCPServer.new(host, port)
-        actual_port = listener.local_address
-          .as(Socket::IPAddress)
-          .port
-
-        @lock.synchronize do
+        listener : TCPServer? = nil
+        actual_port = @lock.synchronize do
           raise IO::Error.new("Server is closed") if @closed
           if @remote_listener
-            listener.close
+            if @remote_host == host &&
+               (@remote_requested_port == port || @remote_port == port)
+              return @remote_port.not_nil!
+            end
             raise IO::Error.new("Remote listener is already running")
           end
+
+          listener = TCPServer.new(host, port)
+          bound_port = listener.not_nil!.local_address
+            .as(Socket::IPAddress)
+            .port
           @tls_context = context
           @remote_listener = listener
-          @remote_port = actual_port
+          @remote_host = host
+          @remote_requested_port = port.to_i32
+          @remote_port = bound_port
+          bound_port
         end
 
-        spawn accept_remote(listener, context)
+        spawn accept_remote(listener.not_nil!, context)
         actual_port
       rescue error
         listener.try(&.close)
@@ -120,6 +129,8 @@ module Xd
           remote = @remote_listener
           @local_listener = nil
           @remote_listener = nil
+          @remote_host = nil
+          @remote_requested_port = nil
           local_path = @local_path
           @local_path = nil
           local_token = @local_token

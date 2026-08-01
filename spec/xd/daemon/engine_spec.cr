@@ -202,6 +202,85 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "lets only a local client expose this engine and mint a peer code" do
+    with_daemon_engine(
+      token_generator: -> { "peer-token" }
+    ) do |_store, engine|
+      listened = nil.as({String, Int32}?)
+      engine.peer_listener = ->(host : String, port : Int32) {
+        listened = {host, port}
+        43210
+      }
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      response = engine.dispatch(local, {
+        "op"   => "peer-pairing",
+        "bind" => "127.0.0.1",
+        "port" => 0,
+      }.to_json)
+
+      response.success?.should be_true
+      listened.should eq({"127.0.0.1", 0})
+      response["host"].as_s.should eq(System.hostname)
+      response["port"].as_i64.should eq(43210)
+      response["expires_in"].as_i64.should eq(300)
+
+      paired = engine.dispatch(
+        Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote),
+        {
+          "op"   => "pair",
+          "code" => response["code"].as_s,
+          "name" => "laptop",
+        }.to_json
+      )
+      paired.success?.should be_true
+      paired["token"].as_s.should eq("peer-token")
+
+      remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      remote.authenticated = true
+      refused = engine.dispatch(remote, %({"op":"peer-pairing"}))
+      refused.success?.should be_false
+      refused["error"].as_s.should contain("daemon machine")
+    end
+  end
+
+  it "rejects invalid peer listener ports without invoking the listener" do
+    with_daemon_engine do |_store, engine|
+      invoked = false
+      engine.peer_listener = ->(_host : String, _port : Int32) {
+        invoked = true
+        4001
+      }
+
+      response = engine.dispatch(
+        Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
+        %({"op":"peer-pairing","port":70000})
+      )
+
+      response.success?.should be_false
+      response["error"].as_s.should contain("Port must be")
+      invoked.should be_false
+    end
+  end
+
+  it "returns a useful local error when the peer listener cannot open" do
+    with_daemon_engine do |_store, engine|
+      engine.peer_listener = ->(_host : String, _port : Int32) {
+        raise IO::Error.new("address already in use")
+      }
+
+      response = engine.dispatch(
+        Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
+        %({"op":"peer-pairing"})
+      )
+
+      response.success?.should be_false
+      response["error"].as_s.should eq(
+        "Cannot accept remote devices: address already in use"
+      )
+    end
+  end
+
   it "rejects expired pairing codes" do
     now = Time.instant
     clock = -> { now }

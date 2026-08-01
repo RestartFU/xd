@@ -33,12 +33,15 @@ module Xd
     # at this boundary. Every state-changing command is serialized here so
     # local and remote clients cannot diverge or race separate implementations.
     class Engine
+      alias PeerListener = Proc(String, Int32, Int32)
+
       getter events : EventBus
 
       @pairing : Pairing?
       @command_mutex = Mutex.new
       @command_events = [] of Protocol::Event
       @after_write : Proc(Nil)?
+      @peer_listener : PeerListener?
 
       def initialize(
         @store : Storage::Store,
@@ -130,15 +133,16 @@ module Xd
 
       def arm_pairing(ttl : Time::Span) : String
         @command_mutex.synchronize do
-          code = String.build do |io|
-            8.times do |index|
-              io << '-' if index == 4
-              io << PAIRING_ALPHABET[Random::Secure.rand(PAIRING_ALPHABET.size)]
-            end
-          end
-          @pairing = Pairing.new(code, @clock.call + ttl)
-          code
+          arm_pairing_unlocked(ttl)
         end
+      end
+
+      # Server ownership stays outside Engine, but local clients may ask that
+      # server to expose this exact Engine over TLS. Remote clients cannot
+      # open listeners or mint credentials for more devices.
+      def peer_listener=(listener : PeerListener) : PeerListener
+        @peer_listener = listener
+        listener
       end
 
       def dispatch(connection : Connection, line : String) : Protocol::Response
@@ -261,6 +265,8 @@ module Xd
         case request.operation
         when Protocol::Operation::Pair
           pair(connection, request)
+        when Protocol::Operation::PeerPairing
+          peer_pairing(connection, request)
         when Protocol::Operation::Hello
           hello(connection, request)
         when Protocol::Operation::AgentSecrets
@@ -387,6 +393,57 @@ module Xd
         Protocol::Response.ok({
           "token" => JSON::Any.new(token),
         })
+      end
+
+      private def peer_pairing(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        unless connection.transport.local?
+          return Protocol::Response.error(
+            "Pairing codes can only be created on the daemon machine."
+          )
+        end
+
+        listener = @peer_listener
+        unless listener
+          return Protocol::Response.error(
+            "This daemon cannot accept remote devices."
+          )
+        end
+
+        bind = request.string?("bind") || "::"
+        requested_port = request.int?("port") || 4001_i64
+        unless 0 <= requested_port <= UInt16::MAX
+          raise Protocol::Error.new("Port must be from 0 to 65535.")
+        end
+
+        port = begin
+          listener.call(bind, requested_port.to_i32)
+        rescue error
+          return Protocol::Response.error(
+            "Cannot accept remote devices: " \
+            "#{error.message || error.class.name}"
+          )
+        end
+        code = arm_pairing_unlocked(5.minutes)
+        Protocol::Response.ok({
+          "code"       => JSON::Any.new(code),
+          "host"       => JSON::Any.new(System.hostname),
+          "port"       => JSON::Any.new(port.to_i64),
+          "expires_in" => JSON::Any.new(300_i64),
+        })
+      end
+
+      private def arm_pairing_unlocked(ttl : Time::Span) : String
+        code = String.build do |io|
+          8.times do |index|
+            io << '-' if index == 4
+            io << PAIRING_ALPHABET[Random::Secure.rand(PAIRING_ALPHABET.size)]
+          end
+        end
+        @pairing = Pairing.new(code, @clock.call + ttl)
+        code
       end
 
       private def hello(

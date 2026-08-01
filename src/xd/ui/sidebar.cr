@@ -14,6 +14,7 @@ require "./dots"
 require "./folder_dialogs"
 require "./idle_queue"
 require "./git_writing_settings"
+require "./share_dialog"
 require "./sidebar_state"
 
 module Xd
@@ -371,6 +372,15 @@ module Xd
           "pair"
         ) do
           @on_pair.call
+        end
+        add_header_action(
+          menu_model,
+          menu_actions,
+          menu,
+          "Add a Device…",
+          "share"
+        ) do
+          ShareDialog.new(@parent, @local_source.endpoint).present
         end
         add_header_action(
           menu_model,

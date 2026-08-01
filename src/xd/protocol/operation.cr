@@ -8,6 +8,7 @@ module Xd
     enum Operation
       Invalid
       Pair
+      PeerPairing
       Hello
       Tree
       Messages
@@ -60,6 +61,7 @@ module Xd
       def wire_name : String
         case self
         when Pair               then "pair"
+        when PeerPairing        then "peer-pairing"
         when Hello              then "hello"
         when Tree               then "tree"
         when Messages           then "messages"
@@ -115,6 +117,7 @@ module Xd
       def self.from_wire?(name : String) : self?
         case name
         when "pair"                 then Pair
+        when "peer-pairing"         then PeerPairing
         when "hello"                then Hello
         when "tree"                 then Tree
         when "messages"             then Messages

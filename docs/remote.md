@@ -11,7 +11,16 @@ and the agent processes -- backends, folder inheritance and the ask-block
 parser are the same code either way, not a reimplementation.
 
     xd serve                 # listens on 4001
-    xd serve --pair          # prints a short-lived pairing code
+    xd serve --pair          # starts or attaches, then prints a pairing code
+
+When the desktop app already owns the local daemon, `xd serve --pair` attaches
+through its private local IPC endpoint. It asks that same daemon to enable TLS
+and exits after printing the code; it never tries to start a competing daemon.
+The app exposes the same action as **Add a Device…**. On the other machine,
+choose **Connect to a Machine…** and enter the shown address, port, and code.
+Both clients then attach to one Engine: they see the same saved chat and the
+same in-progress turn. The host desktop or foreground `xd serve` process must
+remain open while another device uses it.
 
 A remote appears in the sidebar as its own root beside the local workspaces,
 its folders and chats underneath, drawn from the same XdNode model with a
@@ -19,7 +28,7 @@ remote tree implementation in place of the filesystem one.
 
 ## Pairing
 
-The daemon prints a code (`4F2K-9QX1`) good for sixty seconds and one use. A
+The daemon prints a code (`4F2K-9QX1`) good for five minutes and one use. A
 client sends it once and receives a long-lived device token, kept in its
 settings. The daemon keeps paired devices in a table with names and last-seen
 times, each revocable on its own.

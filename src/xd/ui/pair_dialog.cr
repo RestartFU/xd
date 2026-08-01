@@ -39,8 +39,8 @@ module Xd
         title.add_css_class("title-3")
 
         description = Gtk::Label.new(
-          "Run “xd serve --pair” on the other machine, then enter the " \
-          "short-lived code it prints."
+          "Choose “Add a Device…” in XD on the other machine, or run " \
+          "“xd serve --pair”, then enter its short-lived code."
         )
         description.xalign = 0_f32
         description.wrap = true
@@ -192,7 +192,7 @@ module Xd
         end
         if code.empty?
           return show_error(
-            "Enter the code printed by “xd serve --pair”.",
+            "Enter the code shown by the other machine.",
             @code
           )
         end

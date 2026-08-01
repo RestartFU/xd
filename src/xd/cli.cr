@@ -1,6 +1,7 @@
 require "option_parser"
 require "./app_paths"
 require "./daemon/certificate"
+require "./daemon/client"
 require "./daemon/server"
 require "./native_bundle"
 require "./workspace/service"
@@ -72,7 +73,7 @@ module Xd
     rescue error : UsageError
       @error.puts error.message
       2
-    rescue error : Daemon::DeviceStoreError | Workspace::Error | Daemon::Certificate::Error | IO::Error | OpenSSL::Error
+    rescue error : Daemon::DeviceStoreError | Daemon::Client::Error | Workspace::Error | Daemon::Certificate::Error | IO::Error | OpenSSL::Error
       @error.puts "xd: #{error.message}"
       1
     end
@@ -116,10 +117,24 @@ module Xd
     end
 
     private def serve(options : ServeOptions) : Int32
+      return 0 if options.pair && pair_with_running_daemon(options)
+
       store = Storage::Store.new(options.database)
       workspaces = Workspace::Service.new(options.root, store)
       engine = Daemon::Engine.new(store, workspaces)
       server = Daemon::Server.new(engine)
+      engine.peer_listener = ->(bind : String, port : Int32) {
+        Daemon::Certificate.ensure_pair(
+          options.certificate,
+          options.private_key
+        )
+        server.listen_remote(
+          bind,
+          port,
+          options.certificate,
+          options.private_key
+        )
+      }
 
       begin
         store.clear_daemon_working
@@ -156,6 +171,33 @@ module Xd
         server.close
         engine.close
         store.close
+      end
+    end
+
+    private def pair_with_running_daemon(options : ServeOptions) : Bool
+      client = begin
+        Daemon::Client.local(options.socket, request_timeout: 5.seconds)
+      rescue Daemon::Client::Error
+        return false
+      end
+
+      begin
+        response = client.call({
+          "op"   => JSON::Any.new("peer-pairing"),
+          "bind" => JSON::Any.new(options.bind),
+          "port" => JSON::Any.new(options.port.to_i64),
+        })
+        @output.puts(
+          "xd serve: attached to running daemon, listening on " \
+          "#{response["port"].as_i64}"
+        )
+        @output.puts(
+          "pairing code (5 minutes, one use): #{response["code"].as_s}"
+        )
+        @output.flush
+        true
+      ensure
+        client.close
       end
     end
 

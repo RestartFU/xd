@@ -61,6 +61,63 @@ describe Xd::CLI do
       Xd::CLI.new.parse_serve(["--auto-update"])
     end
   end
+
+  it "asks a running daemon for a pairing code instead of starting another" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-cli-pair-running-#{Random::Secure.hex(12)}"
+    )
+    database = File.join(directory, "chats.db")
+    socket = File.join(directory, "daemon.sock")
+    certificate = File.join(directory, "certificate.pem")
+    key = File.join(directory, "private-key.pem")
+    store = Xd::Storage::Store.new(database)
+    engine = Xd::Daemon::Engine.new(
+      store,
+      token_generator: -> { "cli-peer-token" }
+    )
+    server = Xd::Daemon::Server.new(engine)
+    paired : Xd::Daemon::RemotePairing? = nil
+
+    begin
+      engine.peer_listener = ->(bind : String, port : Int32) {
+        Xd::Daemon::Certificate.ensure_pair(certificate, key)
+        server.listen_remote(bind, port, certificate, key)
+      }
+      server.listen_local(socket)
+      output = IO::Memory.new
+      errors = IO::Memory.new
+
+      Xd::CLI.new(output, errors).run([
+        "serve",
+        "--pair",
+        "--socket", socket,
+        "--bind", "127.0.0.1",
+        "--port", "0",
+        "--certificate", certificate,
+        "--private-key", key,
+      ]).should eq(0)
+
+      errors.to_s.should be_empty
+      output.to_s.should contain("attached to running daemon")
+      code = output.to_s.match(/one use\): ([A-Z0-9-]+)/)
+        .not_nil![1]
+      port = server.remote_port.not_nil!
+      paired = Xd::Daemon::Client.pair_remote(
+        "127.0.0.1",
+        port,
+        code,
+        "cli laptop"
+      )
+      paired.not_nil!.token.should eq("cli-peer-token")
+    ensure
+      paired.try(&.client.close)
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
 end
 
 describe Xd::Daemon::Certificate do

@@ -1,4 +1,5 @@
 require "../app_paths"
+require "../daemon/certificate"
 require "../daemon/client"
 require "../daemon/engine"
 require "../daemon/execution_host"
@@ -85,6 +86,18 @@ module Xd
             )
             engine = Daemon::Engine.new(store, workspaces)
             server = Daemon::Server.new(engine)
+            engine.peer_listener = ->(bind : String, port : Int32) {
+              Daemon::Certificate.ensure_pair(
+                AppPaths.certificate,
+                AppPaths.private_key
+              )
+              server.not_nil!.listen_remote(
+                bind,
+                port,
+                AppPaths.certificate,
+                AppPaths.private_key
+              )
+            }
             store.clear_daemon_working
             server.listen_local(AppPaths.local_socket)
             started.send({store, engine, server, nil})
