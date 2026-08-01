@@ -93,6 +93,46 @@ public object Ops {
         }
     }
 
+    /**
+     * Replaces a queued message.
+     *
+     * [oldText] is what the client believes is there. The daemon uses it to
+     * refuse an edit aimed at a queue another device has already changed.
+     */
+    public fun editQueue(
+        chatId: String,
+        index: Int,
+        oldText: String,
+        text: String,
+    ): JsonObject = buildJsonObject {
+        require(index >= 0) { "Queue index must not be negative" }
+        require(text.isNotEmpty()) { "Edited text must not be empty" }
+        put("op", "edit-queue")
+        put("chat", chatId)
+        put("index", index)
+        put("old-text", oldText)
+        put("text", text)
+    }
+
+    /**
+     * Promotes a queued message to the front and stops the running turn, so
+     * the agent takes it up immediately instead of finishing first.
+     *
+     * [text] must be the message currently at [index]; the daemon refuses the
+     * steer otherwise rather than redirecting the agent to the wrong thing.
+     */
+    public fun steerQueue(
+        chatId: String,
+        index: Int,
+        text: String,
+    ): JsonObject = buildJsonObject {
+        require(index >= 0) { "Queue index must not be negative" }
+        put("op", "steer-queue")
+        put("chat", chatId)
+        put("index", index)
+        put("text", text)
+    }
+
     public fun cancel(chatId: String): JsonObject = withChat("cancel", chatId)
 
     public fun newChat(

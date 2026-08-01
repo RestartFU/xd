@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -49,6 +50,39 @@ class OpsTest {
             "folder",
             Ops.newChat("folder").getValue("folder").jsonPrimitive.content,
         )
+    }
+
+    @Test
+    fun steerCarriesTheTextTheDaemonMatchesOn() {
+        // The daemon refuses a steer whose text is not what is queued, so the
+        // guard has to travel with the request.
+        val request = Ops.steerQueue("chat-1", 2, "do this instead")
+
+        assertEquals("steer-queue", request.getValue("op").jsonPrimitive.content)
+        assertEquals(2, request.getValue("index").jsonPrimitive.int)
+        assertEquals(
+            "do this instead",
+            request.getValue("text").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun editCarriesBothTheOldAndNewText() {
+        val request = Ops.editQueue("chat-1", 0, "before", "after")
+
+        assertEquals("edit-queue", request.getValue("op").jsonPrimitive.content)
+        assertEquals("before", request.getValue("old-text").jsonPrimitive.content)
+        assertEquals("after", request.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
+    fun queueEditsRejectImpossibleArguments() {
+        assertFailsWith<IllegalArgumentException> {
+            Ops.steerQueue("chat-1", -1, "x")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Ops.editQueue("chat-1", 0, "before", "")
+        }
     }
 
     private companion object {

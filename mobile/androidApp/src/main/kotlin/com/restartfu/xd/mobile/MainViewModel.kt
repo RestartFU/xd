@@ -102,6 +102,7 @@ class ChatViewModel(
     private val _sending = MutableStateFlow(false)
     private val _cancelling = MutableStateFlow(false)
     private val _droppingQueued = MutableStateFlow(false)
+    private val _steering = MutableStateFlow(false)
     private val _draft = MutableStateFlow("")
     private val _attachments = MutableStateFlow(emptyList<Attachment>())
     private val _attachmentError = MutableStateFlow<String?>(null)
@@ -109,6 +110,8 @@ class ChatViewModel(
     val attachmentError: StateFlow<String?> = _attachmentError.asStateFlow()
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
     val cancelling: StateFlow<Boolean> = _cancelling.asStateFlow()
+    val steering: StateFlow<Boolean> = _steering.asStateFlow()
+    val queueBusy: StateFlow<Boolean> = _droppingQueued.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
 
     fun updateDraft(value: String) {
@@ -174,6 +177,38 @@ class ChatViewModel(
         launchGuarded(_sending) {
             session.enqueue(text)
             if (_draft.value == text) _draft.value = ""
+        }
+    }
+
+    fun editQueued(index: Int, oldText: String, text: String) {
+        launchGuarded(_droppingQueued) {
+            session.editQueued(index, oldText, text)
+        }
+    }
+
+    /**
+     * Redirects the running turn to a queued message, editing it first when
+     * the text changed.
+     *
+     * Both happen in one coroutine because the daemon matches the steer
+     * against what is actually queued: sending them concurrently would race,
+     * and the steer would be refused for not matching an edit that had not
+     * landed yet.
+     *
+     * The daemon promotes the message and cancels the turn, so this waits for
+     * the turn to actually change rather than reporting success while the old
+     * one is still winding down.
+     */
+    fun steerQueued(index: Int, oldText: String, text: String) {
+        val before = state.value
+        launchGuarded(_steering) {
+            if (text != oldText) session.editQueued(index, oldText, text)
+            session.steerQueued(index, text)
+            withTimeoutOrNull(CANCEL_EVENT_TIMEOUT_MILLIS) {
+                state.first {
+                    !it.working || it.startedAtMillis != before.startedAtMillis
+                }
+            }
         }
     }
 

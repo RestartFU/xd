@@ -55,6 +55,16 @@ public class ChatSession internal constructor(
     public suspend fun dropQueued(index: Int? = null): Unit =
         core.call(Ops.dropQueue(core.chatId, index))
 
+    public suspend fun editQueued(
+        index: Int,
+        oldText: String,
+        text: String,
+    ): Unit = core.call(Ops.editQueue(core.chatId, index, oldText, text))
+
+    /** Promotes a queued message and stops the running turn to take it up. */
+    public suspend fun steerQueued(index: Int, text: String): Unit =
+        core.call(Ops.steerQueue(core.chatId, index, text))
+
     public suspend fun loadOlder(): Unit = core.loadOlder()
 
     /** The whole patch for [read], one of `working-all` or `branch-all`. */

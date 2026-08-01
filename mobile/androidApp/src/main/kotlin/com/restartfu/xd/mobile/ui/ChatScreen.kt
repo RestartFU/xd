@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -82,6 +83,7 @@ internal fun ChatScreen(
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
+    val steering by model.steering.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
 
     // The desktop shows these beside the conversation. A phone has room for
@@ -153,6 +155,7 @@ internal fun ChatScreen(
                     composer = composer,
                     sending = sending,
                     cancelling = cancelling,
+                    steering = steering,
                     model = model,
                 )
             }
@@ -237,11 +240,33 @@ private fun Composer(
     composer: String,
     sending: Boolean,
     cancelling: Boolean,
+    steering: Boolean,
     model: ChatViewModel,
 ) {
     val context = LocalContext.current
     val attachments by model.attachments.collectAsStateWithLifecycle()
     val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf<Pair<Int, String>?>(null) }
+
+    editing?.let { (index, original) ->
+        QueuedMessageDialog(
+            original = original,
+            working = state.working,
+            onDismiss = { editing = null },
+            onSave = { text ->
+                editing = null
+                if (text != original) model.editQueued(index, original, text)
+            },
+            onSteer = { text ->
+                editing = null
+                model.steerQueued(index, original, text)
+            },
+            onDrop = {
+                editing = null
+                model.dropQueued(index)
+            },
+        )
+    }
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(Limits.MAX_IMAGES),
     ) { uris -> model.attach(context, uris) }
@@ -300,7 +325,10 @@ private fun Composer(
             ) {
                 state.queue.forEachIndexed { index, queued ->
                     AssistChip(
-                        onClick = { model.dropQueued(index) },
+                        // Tapping opens the controls rather than dropping:
+                        // discarding a queued message on a stray tap, with no
+                        // undo, is not a good trade for one less tap.
+                        onClick = { editing = index to queued },
                         label = { Text(queued, maxLines = 1) },
                     )
                 }
@@ -337,7 +365,7 @@ private fun Composer(
                 }
                 TextButton(
                     onClick = model::cancel,
-                    enabled = !cancelling,
+                    enabled = !cancelling && !steering,
                 ) {
                     Text(if (cancelling) "Cancelling…" else "Cancel")
                 }
@@ -352,6 +380,70 @@ private fun Composer(
             }
         }
     }
+}
+
+/**
+ * Edit, steer or drop one queued message.
+ *
+ * Steering is only offered while a turn is running, because that is the only
+ * time it means anything: the daemon promotes the message and stops the turn
+ * so the agent takes it up instead of finishing first.
+ */
+@Composable
+private fun QueuedMessageDialog(
+    original: String,
+    working: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onSteer: (String) -> Unit,
+    onDrop: () -> Unit,
+) {
+    var text by rememberSaveable(original) { mutableStateOf(original) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Queued message") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Message") },
+                    minLines = 2,
+                    maxLines = 6,
+                )
+                if (working) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Steering stops the running turn and starts this instead.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                if (working) {
+                    TextButton(
+                        onClick = { onSteer(text) },
+                        enabled = text.isNotBlank(),
+                    ) { Text("Steer") }
+                }
+                TextButton(
+                    onClick = { onSave(text) },
+                    enabled = text.isNotBlank(),
+                ) { Text("Save") }
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDrop) { Text("Drop") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
 }
 
 /**
