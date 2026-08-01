@@ -35,6 +35,17 @@ COPY . .
 
 FROM source AS test
 
+# Android's PathParser reads numbers greedily and cannot split packed SVG arc
+# flags, so "0 014.21" becomes the number 14.21 instead of flags 0 and 1
+# followed by 4.21, and the shape comes out mangled. SVG optimisers emit that
+# form routinely, so an icon pasted straight from one looks fine everywhere
+# except here. Nothing in the build catches it: the drawable compiles happily.
+RUN if grep -rlP '[aA][\d.\s,\-]*?\s0\s0[01][\d.\-]' \
+        androidApp/src/main/res/drawable/ 2>/dev/null; then \
+      echo "Those drawables pack SVG arc flags; separate them." >&2; \
+      exit 1; \
+    fi
+
 RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
     ./gradlew --no-daemon :shared:allTests
 

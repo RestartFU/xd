@@ -172,6 +172,18 @@ sender meant literally.
 Assistant output streams, so the parser is called on half-written documents
 constantly; anything it cannot make sense of falls back to the literal text.
 
+## Vector drawables
+
+Android's `PathParser` reads numbers greedily and cannot split packed SVG arc
+flags: `0 014.21` becomes the number 14.21 rather than flags `0` and `1`
+followed by `4.21`, and the shape comes out mangled. SVG optimisers emit that
+form routinely, so an icon pasted straight from one looks right everywhere
+except on Android, and nothing in the build notices -- the drawable compiles
+happily.
+
+`make mobile-test` fails if any drawable packs arc flags. Separate them:
+`a1 1 0 0 1 2 2`, never `a1 1 0 012 2`.
+
 ## Syntax colouring
 
 Code in the transcript is coloured with the desktop's palette and language
