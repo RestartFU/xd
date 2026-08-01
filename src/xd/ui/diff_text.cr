@@ -64,6 +64,15 @@ module Xd
         @drawing.queue_draw
       end
 
+      def self.line_y(
+        label_origin_y : Float32,
+        layout_origin_y : Int32,
+        layout_units : Int32,
+      ) : Float32
+        label_origin_y + layout_origin_y.to_f32 +
+          layout_units.to_f32 / PANGO_SCALE
+      end
+
       private def draw_backgrounds(
         context : Cairo::Context,
         width : Int32,
@@ -73,11 +82,15 @@ module Xd
 
         layout = @label.layout
         iter = layout.iter
-        origin_y = 0
+        label_origin = @label.compute_point(
+          @drawing,
+          Graphene::Point.zero
+        )
+        layout_origin_y = 0
         LibGtk.gtk_label_get_layout_offsets(
           @label.to_unsafe,
           Pointer(Int32).null,
-          pointerof(origin_y)
+          pointerof(layout_origin_y)
         )
 
         row = 0
@@ -93,8 +106,16 @@ module Xd
             pointerof(top_units),
             pointerof(bottom_units)
           )
-          top = origin_y.to_f32 + top_units.to_f32 / PANGO_SCALE
-          bottom = origin_y.to_f32 + bottom_units.to_f32 / PANGO_SCALE
+          top = self.class.line_y(
+            label_origin.y,
+            layout_origin_y,
+            top_units
+          )
+          bottom = self.class.line_y(
+            label_origin.y,
+            layout_origin_y,
+            bottom_units
+          )
           colour = @row_kinds[row]?.try(&.background)
           top = 0_f32 if @chunk && row == 0 && colour
 

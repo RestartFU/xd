@@ -21,7 +21,7 @@ module Xd
       @draft_token : String?
 
       def initialize(
-        @parent : Gtk::Widget,
+        @parent : Gtk::Window,
         @request : PanelCall,
       )
         @chat_id = nil
@@ -189,11 +189,26 @@ module Xd
         warning : String? = nil,
       ) : Nil
         pull_request = action == "create-pr"
-        dialog = Adw::AlertDialog.new(
-          heading: pull_request ? "Review Pull Request" : "Review Commit",
-          body: warning || "Review and edit the assistant's draft."
+        heading = pull_request ? "Review Pull Request" : "Review Commit"
+        title_label = Gtk::Label.new(heading)
+        title_label.xalign = 0_f32
+        title_label.add_css_class("title-3")
+
+        description = Gtk::Label.new(
+          warning || "Review and edit the assistant's draft before continuing."
         )
+        description.xalign = 0_f32
+        description.wrap = true
+        description.add_css_class(warning ? "error" : "dim-label")
+
+        header = Gtk::Box.new(:vertical, 5)
+        header.append(title_label)
+        header.append(description)
+        header.add_css_class("xd-panel-bar")
+        header.add_css_class("xd-panel-head")
+
         group = Adw::PreferencesGroup.new
+        group.title = "Draft"
         title_row = Adw::EntryRow.new(title: "Title")
         title_row.text = title
         group.add(title_row)
@@ -217,39 +232,100 @@ module Xd
         body_scroll.child = body_view
         body_scroll.add_css_class("card")
 
-        content = Gtk::Box.new(:vertical, 8)
-        content.append(group)
-        content.append(body_label)
-        content.append(body_scroll)
-        dialog.extra_child = content
-        dialog.add_response("cancel", "Cancel")
-        confirm = pull_request ? "create" : "commit"
-        dialog.add_response(
-          confirm,
-          pull_request ? "Create Pull Request" : "Commit"
-        )
-        dialog.set_response_appearance(confirm, :suggested)
-        dialog.default_response = confirm
-        dialog.close_response = "cancel"
-        dialog.choose(@parent, nil) do |_source, result|
-          response = dialog.choose_finish(result)
-          next unless response == confirm
+        status = Gtk::Label.new("")
+        status.xalign = 0_f32
+        status.wrap = true
+        status.visible = false
+        status.add_css_class("error")
 
+        body_box = Gtk::Box.new(:vertical, 8)
+        body_box.margin_top = 22
+        body_box.margin_bottom = 22
+        body_box.margin_start = 22
+        body_box.margin_end = 22
+        body_box.append(group)
+        body_box.append(body_label)
+        body_box.append(body_scroll)
+        body_box.append(status)
+
+        footer = Gtk::Box.new(:horizontal, 12)
+        footer.append(hint("Esc", "Cancel"))
+        footer.append(hint("Ctrl Enter", pull_request ? "Open PR" : "Commit"))
+        spacer = Gtk::Box.new(:horizontal, 0)
+        spacer.hexpand = true
+        footer.append(spacer)
+
+        window = Gtk::Window.new
+        submit = -> {
           clean_title = title_row.text.strip
           if clean_title.empty?
-            show_error(
-              pull_request ? "Write a pull request title first." : "Write a commit title first."
-            )
-            next
-          end
-          clean_body = body_view.buffer.text.strip
-          if pull_request
-            perform("create-pr", title: clean_title, body: clean_body)
+            status.label = pull_request ? "Write a pull request title first." : "Write a commit title first."
+            status.visible = true
           else
-            message = clean_body.empty? ? clean_title : "#{clean_title}\n\n#{clean_body}"
-            perform("commit", message: message)
+            clean_body = body_view.buffer.text.strip
+            if pull_request
+              perform("create-pr", title: clean_title, body: clean_body)
+            else
+              message = clean_body.empty? ? clean_title : "#{clean_title}\n\n#{clean_body}"
+              perform("commit", message: message)
+            end
+            window.destroy
+          end
+        }
+
+        cancel = Gtk::Button.new_with_label("Cancel")
+        cancel.add_css_class("flat")
+        cancel.clicked_signal.connect { window.destroy }
+        footer.append(cancel)
+
+        confirm = Gtk::Button.new_with_label(
+          pull_request ? "Create Pull Request" : "Commit"
+        )
+        confirm.add_css_class("xd-panel-action")
+        confirm.clicked_signal.connect { submit.call }
+        footer.append(confirm)
+        footer.add_css_class("xd-panel-bar")
+        footer.add_css_class("xd-panel-foot")
+
+        column = Gtk::Box.new(:vertical, 0)
+        column.append(header)
+        column.append(body_box)
+        column.append(footer)
+
+        window.title = heading
+        window.transient_for = @parent
+        window.application = @parent.application
+        window.destroy_with_parent = true
+        window.modal = true
+        window.decorated = false
+        window.resizable = false
+        window.set_default_size(700, -1)
+        window.add_css_class("xd-panel")
+        window.child = column
+        window.close_request_signal.connect do
+          window.destroy
+          true
+        end
+
+        keys = Gtk::EventControllerKey.new
+        keys.propagation_phase = :capture
+        keys.key_pressed_signal.connect do |keyval, _keycode, state|
+          if keyval == Gdk::KEY_Escape
+            window.destroy
+            true
+          elsif (keyval == Gdk::KEY_Return ||
+                keyval == Gdk::KEY_KP_Enter) &&
+                state.includes?(Gdk::ModifierType::ControlMask)
+            submit.call
+            true
+          else
+            false
           end
         end
+        window.add_controller(keys)
+        window.present
+        title_row.grab_focus
+        title_row.select_region(0, -1)
       end
 
       private def perform(
@@ -316,6 +392,19 @@ module Xd
         dialog.add_response("close", "Close")
         dialog.default_response = "close"
         dialog.present(@parent)
+      end
+
+      private def hint(key : String, what : String) : Gtk::Box
+        label = Gtk::Label.new(key)
+        label.add_css_class("xd-key")
+        text = Gtk::Label.new(what)
+        text.add_css_class("dim-label")
+        text.add_css_class("caption")
+
+        box = Gtk::Box.new(:horizontal, 6)
+        box.append(label)
+        box.append(text)
+        box
       end
 
       private def next_token(kind : String) : String

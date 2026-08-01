@@ -13,14 +13,28 @@ module Xd
       end
 
       def present : Nil
-        dialog = Adw::PreferencesDialog.new
-        dialog.title = "Settings"
-        page = Adw::PreferencesPage.new
+        title = Gtk::Label.new("Settings")
+        title.xalign = 0_f32
+        title.add_css_class("title-3")
+
+        description = Gtk::Label.new(
+          "Choose which assistant writes Git metadata. Every draft stays " \
+          "editable before XD commits or opens a pull request."
+        )
+        description.xalign = 0_f32
+        description.wrap = true
+        description.add_css_class("dim-label")
+
+        header = Gtk::Box.new(:vertical, 5)
+        header.append(title)
+        header.append(description)
+        header.add_css_class("xd-panel-bar")
+        header.add_css_class("xd-panel-head")
+
         group = Adw::PreferencesGroup.new
         group.title = "Git Writing"
         group.description =
-          "Choose which assistant drafts commit messages and pull request " \
-          "details. XD always shows an editable preview before changing Git."
+          "Use the active chat model, or reserve another bundled model."
 
         backend_names = Gtk::StringList.new([
           "Use Chat Model",
@@ -65,9 +79,23 @@ module Xd
 
         group.add(backend_row)
         group.add(model_row)
-        page.add(group)
-        dialog.add(page)
-        dialog.closed_signal.connect do
+
+        body = Gtk::Box.new(:vertical, 10)
+        body.margin_top = 22
+        body.margin_bottom = 22
+        body.margin_start = 22
+        body.margin_end = 22
+        body.append(group)
+
+        footer = Gtk::Box.new(:horizontal, 12)
+        footer.append(hint("Esc", "Cancel"))
+        footer.append(hint("Ctrl Enter", "Save"))
+        spacer = Gtk::Box.new(:horizontal, 0)
+        spacer.hexpand = true
+        footer.append(spacer)
+
+        window = Gtk::Window.new
+        save = -> {
           backend = BACKEND_IDS[backend_row.selected.to_i]? || ""
           model = ""
           if selected_backend = Agent::Catalog.lookup(backend.presence)
@@ -76,8 +104,71 @@ module Xd
           end
           @settings.set_string("git-writing-backend", backend)
           @settings.set_string("git-writing-model", model)
+          window.destroy
+        }
+
+        cancel = Gtk::Button.new_with_label("Cancel")
+        cancel.add_css_class("flat")
+        cancel.clicked_signal.connect { window.destroy }
+        footer.append(cancel)
+
+        save_button = Gtk::Button.new_with_label("Save")
+        save_button.add_css_class("xd-panel-action")
+        save_button.clicked_signal.connect { save.call }
+        footer.append(save_button)
+        footer.add_css_class("xd-panel-bar")
+        footer.add_css_class("xd-panel-foot")
+
+        column = Gtk::Box.new(:vertical, 0)
+        column.append(header)
+        column.append(body)
+        column.append(footer)
+
+        window.title = "Settings"
+        window.transient_for = @parent
+        window.application = @parent.application
+        window.destroy_with_parent = true
+        window.modal = true
+        window.decorated = false
+        window.resizable = false
+        window.set_default_size(700, -1)
+        window.add_css_class("xd-panel")
+        window.child = column
+        window.close_request_signal.connect do
+          window.destroy
+          true
         end
-        dialog.present(@parent)
+
+        keys = Gtk::EventControllerKey.new
+        keys.propagation_phase = :capture
+        keys.key_pressed_signal.connect do |keyval, _keycode, state|
+          if keyval == Gdk::KEY_Escape
+            window.destroy
+            true
+          elsif (keyval == Gdk::KEY_Return ||
+                keyval == Gdk::KEY_KP_Enter) &&
+                state.includes?(Gdk::ModifierType::ControlMask)
+            save.call
+            true
+          else
+            false
+          end
+        end
+        window.add_controller(keys)
+        window.present
+      end
+
+      private def hint(key : String, what : String) : Gtk::Box
+        label = Gtk::Label.new(key)
+        label.add_css_class("xd-key")
+        text = Gtk::Label.new(what)
+        text.add_css_class("dim-label")
+        text.add_css_class("caption")
+
+        box = Gtk::Box.new(:horizontal, 6)
+        box.append(label)
+        box.append(text)
+        box
       end
     end
   end
