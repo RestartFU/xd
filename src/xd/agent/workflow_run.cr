@@ -1,3 +1,7 @@
+require "http/client"
+require "json"
+require "uri"
+
 module Xd
   module Agent
     # Stable tool record for a GitHub Actions run observed by an agent.
@@ -7,6 +11,52 @@ module Xd
       PREFIX = "workflow_run\n"
 
       record Run, id : String, repository : String, url : String
+
+      class StatusError < Exception
+      end
+
+      record Status,
+        name : String,
+        state : String,
+        conclusion : String? do
+        def terminal? : Bool
+          state == "completed"
+        end
+
+        def label : String
+          result = case state
+                   when "queued"      then "Queued"
+                   when "in_progress" then "In progress"
+                   when "completed"
+                     case conclusion
+                     when "success"         then "Passed"
+                     when "failure"         then "Failed"
+                     when "cancelled"       then "Cancelled"
+                     when "timed_out"       then "Timed out"
+                     when "action_required" then "Action required"
+                     when "startup_failure" then "Startup failed"
+                     when "skipped"         then "Skipped"
+                     when "stale"           then "Stale"
+                     when "neutral"         then "Neutral"
+                     else                        "Completed"
+                     end
+                   else
+                     state.split('_').map(&.capitalize).join(' ')
+                   end
+          name.empty? ? result : "#{name} · #{result}"
+        end
+
+        def css_class : String
+          return "xd-workflow-running" unless terminal?
+          case conclusion
+          when "success" then "xd-workflow-success"
+          when "failure", "timed_out", "startup_failure"
+            "xd-workflow-failure"
+          else
+            "xd-workflow-finished"
+          end
+        end
+      end
 
       def capture(message : String, workdir : String) : String
         return message if message.starts_with?(PREFIX)
@@ -72,6 +122,54 @@ module Xd
         return unless repository_from_spec(repository) == repository
 
         Run.new(run_id, repository, url)
+      end
+
+      def fetch_status(
+        run : Run,
+        token : String? = ENV["GH_TOKEN"]? || ENV["GITHUB_TOKEN"]?,
+      ) : Status
+        uri = URI.parse(
+          "https://api.github.com/repos/#{run.repository}/actions/runs/#{run.id}"
+        )
+        headers = HTTP::Headers{
+          "Accept"               => "application/vnd.github+json",
+          "User-Agent"           => "xd",
+          "X-GitHub-Api-Version" => "2022-11-28",
+        }
+        headers["Authorization"] = "Bearer #{token}" if token && !token.empty?
+        client = HTTP::Client.new(uri)
+        client.connect_timeout = 5.seconds
+        client.read_timeout = 10.seconds
+        begin
+          response = client.get(uri.request_target, headers)
+          unless response.status_code.in?(200..299)
+            raise StatusError.new(
+              "GitHub returned HTTP #{response.status_code}."
+            )
+          end
+          parse_status(response.body) || raise StatusError.new(
+            "GitHub returned an invalid workflow status."
+          )
+        ensure
+          client.close
+        end
+      rescue error : IO::Error | Socket::Error | URI::Error
+        raise StatusError.new(error.message || "Cannot read workflow status.")
+      end
+
+      def parse_status(body : String?) : Status?
+        return unless body
+        record = JSON.parse(body).as_h?
+        return unless record
+        name = record["name"]?.try(&.as_s?) || ""
+        state = record["status"]?.try(&.as_s?)
+        return unless state && !state.empty?
+        return if name.bytesize > 160 || state.bytesize > 40
+        conclusion = record["conclusion"]?.try(&.as_s?)
+        return if conclusion && conclusion.bytesize > 40
+        Status.new(name, state, conclusion)
+      rescue JSON::ParseException
+        nil
       end
 
       private def repository_from_workdir(workdir : String) : String?

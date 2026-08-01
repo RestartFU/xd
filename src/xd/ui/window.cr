@@ -34,6 +34,7 @@ require "./transcript_paging"
 require "./turn_recovery"
 require "./turn_timing"
 require "./voice_input"
+require "./workflow_card"
 
 module Xd
   module UI
@@ -45,6 +46,7 @@ module Xd
         property transcript : Gtk::Box
         getter paging = TranscriptPaging.new
         getter workflow_ids = Set(String).new
+        getter workflow_cards = [] of WorkflowCard
         property revision = -1_i64
         property choices_visible = false
         property tool_group : ToolCallGroup?
@@ -56,6 +58,12 @@ module Xd
           @transcript : Gtk::Box,
         )
           @tool_group = nil
+        end
+
+        def clear_workflows : Nil
+          @workflow_cards.each(&.close)
+          @workflow_cards.clear
+          @workflow_ids.clear
         end
       end
 
@@ -524,6 +532,7 @@ module Xd
 
         @widget.close_request_signal.connect do
           @closed = true
+          @transcript_pages.each_value(&.clear_workflows)
           @event_inbox.clear
           @voice.close
           @presence.close
@@ -927,6 +936,7 @@ module Xd
         return unless page
 
         @transcript_lru.delete(key)
+        page.clear_workflows
         @transcript_stack.remove(page.transcript)
         retire_transcript(page.transcript)
       end
@@ -1133,8 +1143,8 @@ module Xd
         @live_turn_key = nil
         reset_stream_segment
         remove_working_row(reset_started_at: false)
+        page.clear_workflows
         replace_transcript(page, request)
-        @workflow_ids.clear
         messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
         total = response["total_messages"]?.try(&.as_i64?) ||
                 messages.size.to_i64
@@ -1415,33 +1425,13 @@ module Xd
 
       private def add_workflow_message(
         workflow : Agent::WorkflowRun::Run,
-      ) : Gtk::Label?
+      ) : Nil
         return if @workflow_ids.includes?(workflow.id)
         @workflow_ids << workflow.id
 
-        title = Gtk::Label.new(
-          "GitHub Actions · Run ##{workflow.id}"
-        )
-        title.xalign = 0_f32
-        title.add_css_class("title")
-
-        status = Gtk::Label.new(workflow.repository)
-        status.xalign = 0_f32
-        status.add_css_class("dim-label")
-
-        link = Gtk::LinkButton.new_with_label(
-          workflow.url,
-          "Open live status and logs"
-        )
-        link.halign = :start
-
-        card = Gtk::Box.new(:vertical, 5)
-        card.add_css_class("xd-workflow")
-        card.append(title)
-        card.append(status)
-        card.append(link)
-        @transcript.append(card)
-        title
+        card = WorkflowCard.new(workflow)
+        @transcript_page.try { |page| page.workflow_cards << card }
+        @transcript.append(card.widget)
       end
 
       private def add_subagent_message(

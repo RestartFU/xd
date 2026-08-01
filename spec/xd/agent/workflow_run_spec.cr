@@ -53,4 +53,27 @@ describe Xd::Agent::WorkflowRun do
       "workflow_run\n12\nhttps://example.com/owner/repo/actions/runs/12"
     ).should be_nil
   end
+
+  it "turns live GitHub replies into display-ready status" do
+    running = Xd::Agent::WorkflowRun.parse_status(
+      %({"name":"nightly","status":"in_progress","conclusion":null})
+    ).not_nil!
+    running.label.should eq("nightly · In progress")
+    running.terminal?.should be_false
+    running.css_class.should eq("xd-workflow-running")
+
+    passed = Xd::Agent::WorkflowRun.parse_status(
+      %({"name":"nightly","status":"completed","conclusion":"success"})
+    ).not_nil!
+    passed.label.should eq("nightly · Passed")
+    passed.terminal?.should be_true
+    passed.css_class.should eq("xd-workflow-success")
+  end
+
+  it "rejects malformed workflow status replies" do
+    Xd::Agent::WorkflowRun.parse_status("not json").should be_nil
+    Xd::Agent::WorkflowRun.parse_status(
+      %({"name":"nightly","conclusion":null})
+    ).should be_nil
+  end
 end

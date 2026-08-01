@@ -452,6 +452,19 @@ module Xd
         margin: 0 14px;
         padding: 12px 14px;
       }
+      button.xd-workflow-run-link,
+      button.xd-workflow-run-link:hover {
+        min-height: 0;
+        padding: 0 2px;
+        background: none;
+        border: none;
+        font-weight: 700;
+      }
+      .xd-workflow-status { font-weight: 600; }
+      .xd-workflow-running { color: #99c1f1; }
+      .xd-workflow-success { color: #8ff0a4; }
+      .xd-workflow-failure { color: #ff7b63; }
+      .xd-workflow-finished { color: #c0bfbc; }
       .xd-message-error {
         background: alpha(#e01b24, 0.12);
         color: #ffb4ab;
