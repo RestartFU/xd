@@ -28,6 +28,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -659,18 +660,46 @@ private fun ToolRow(item: TranscriptItem) {
     }
 }
 
+/**
+ * One message.
+ *
+ * Only the reader's own messages get a bubble, as on the desktop. A reply is
+ * the page: it is most of what is on screen, it is the thing being read, and
+ * carding it too would leave the two indistinguishable — a wall of identical
+ * boxes where the only difference is which side is narrower.
+ */
 @Composable
 private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
     if (item.kind == TranscriptKind.TOOL) {
         ToolRow(item)
         return
     }
-    val user = item.kind == TranscriptKind.USER
+    if (item.kind != TranscriptKind.USER) {
+        Column(Modifier.fillMaxWidth()) {
+            item.label?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            MessageBody(item, model)
+        }
+        return
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
+        horizontalArrangement = Arrangement.End,
     ) {
-        Card(Modifier.fillMaxWidth(if (user) 0.86f else 1f)) {
+        Card(
+            modifier = Modifier.fillMaxWidth(0.86f),
+            // Tinted rather than the default surface: against plain reply text
+            // the bubble has to carry the distinction on its own.
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            ),
+        ) {
             Column(Modifier.padding(12.dp)) {
                 item.label?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall)

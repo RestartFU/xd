@@ -264,6 +264,14 @@ Esc, Tab, arrows, and a sticky Ctrl that applies to the next character.
 One limit worth knowing: a full-screen application will not render faithfully.
 The desktop keeps VTE for that.
 
+## Reading a transcript
+
+Only the reader's own messages get a bubble, as on the desktop, and it is
+tinted rather than left on the default surface. A reply is the page: it is most
+of what is on screen and it is the thing being read, so carding it too leaves
+the two indistinguishable — a column of identical boxes whose only difference
+is which side is narrower.
+
 ## Tagged questions
 
 When the assistant asks something with a short list of answers, it tags the
