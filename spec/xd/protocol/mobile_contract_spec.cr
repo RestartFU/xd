@@ -2,6 +2,7 @@ require "../../spec_helper"
 require "../../../src/xd/protocol/frame"
 require "../../../src/xd/protocol/message"
 require "../../../src/xd/protocol/operation"
+require "../../../src/xd/voice/data"
 
 # The mobile client is built against `docs/protocol.md`, not against this
 # source tree. These assertions pin the parts of the wire contract it depends
@@ -22,6 +23,11 @@ describe "mobile wire contract" do
       "set-option"    => Xd::Protocol::Operation::SetOption,
       "agent-catalog" => Xd::Protocol::Operation::AgentCatalog,
       "ping"          => Xd::Protocol::Operation::Ping,
+      # Voice: the phone captures audio and the daemon does everything after.
+      "voice-model"          => Xd::Protocol::Operation::VoiceModel,
+      "voice-model-download" => Xd::Protocol::Operation::VoiceModelDownload,
+      "voice-transcribe"     => Xd::Protocol::Operation::VoiceTranscribe,
+      "voice-cancel"         => Xd::Protocol::Operation::VoiceCancel,
     }.each do |wire, operation|
       Xd::Protocol::Operation.from_wire?(wire).should eq(operation)
       operation.wire_name.should eq(wire)
@@ -36,6 +42,20 @@ describe "mobile wire contract" do
     Xd::Protocol::Operation::Send.authentication_required?.should be_true
     # A paired phone must not be able to enrol further devices.
     Xd::Protocol::Operation::PeerPairing.authentication_required?.should be_true
+  end
+
+  it "keeps the audio format the mobile client records in" do
+    # The phone opens its microphone at exactly this rate and writes this WAV
+    # header. The daemon does not resample, so a change here is a change the
+    # phone has to make too.
+    Xd::Voice::SAMPLE_RATE.should eq(16_000_u32)
+    Xd::Voice::CHANNELS.should eq(1_u16)
+
+    header = Xd::Voice::Data.wav_from_s16(Bytes.new(4))
+    String.new(header[0, 4]).should eq("RIFF")
+    String.new(header[8, 8]).should eq("WAVEfmt ")
+    String.new(header[36, 4]).should eq("data")
+    header.size.should eq(48)
   end
 
   it "keeps the framing limits the client buffers against" do

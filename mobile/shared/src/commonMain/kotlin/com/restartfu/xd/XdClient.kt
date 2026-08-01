@@ -27,6 +27,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import com.restartfu.xd.terminal.TerminalEvent
 import com.restartfu.xd.terminal.TerminalWire
+import com.restartfu.xd.voice.VoiceEvent
+import com.restartfu.xd.voice.VoiceWire
 
 public class XdClient(
     socketFactory: PlatformSocketFactory,
@@ -49,6 +51,13 @@ public class XdClient(
      */
     public val terminalEvents: Flow<TerminalEvent> =
         actor.events.mapNotNull { TerminalWire.event(it.value) }
+
+    /**
+     * Voice job progress. Connection-scoped rather than chat-scoped: the daemon
+     * addresses these to the connection that asked and does not name a chat.
+     */
+    public val voiceEvents: Flow<VoiceEvent> =
+        actor.events.mapNotNull { VoiceWire.event(it.value) }
 
     init {
         scope.launch {

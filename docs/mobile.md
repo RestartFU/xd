@@ -264,6 +264,34 @@ Esc, Tab, arrows, and a sticky Ctrl that applies to the next character.
 One limit worth knowing: a full-screen application will not render faithfully.
 The desktop keeps VTE for that.
 
+## Voice
+
+The microphone button dictates into the composer. Capture is the only part that
+happens on the phone: `AudioRecord` at 16 kHz mono PCM16, wrapped in the WAV
+header `src/xd/voice/data.cr` validates, then base64 to the daemon. The daemon
+holds the speech model and runs whisper, so a remote chat transcribes on the
+remote machine — and a phone never downloads 574 MB or spends its battery on a
+model.
+
+That download is the one thing worth asking about, and the dialog says whose
+disk it lands on, because "574 MB" reads very differently for a phone than for
+the machine running the chat. Progress arrives as events, not in the reply.
+
+`VoiceSession` in `shared` is the state machine — check, record, transcribe,
+and every way each can fail — so the SwiftUI phase inherits it and only has to
+supply a `VoiceRecorder`. A generation counter discards results from a job the
+reader has already abandoned: the daemon may well be mid-transcription when a
+cancel is sent, and its answer must not land in a composer nobody is watching.
+
+A recorder is built per recording rather than per session. Stop and cancel are
+signals to a running capture, and a fresh object is what keeps a signal that
+arrives a moment early — before the capture coroutine is even scheduled — from
+being read by the next recording instead.
+
+The daemon addresses `voice` events to the connection that asked, and a
+reconnect is a new connection, so a job in flight when the socket drops is lost
+rather than resumed. The desktop behaves the same way.
+
 ## Images in the transcript
 
 Sending an attachment stores the PNG on the daemon and leaves

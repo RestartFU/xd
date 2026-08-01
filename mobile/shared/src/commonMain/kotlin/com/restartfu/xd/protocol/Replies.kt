@@ -211,3 +211,10 @@ public data class TerminalOpenReply(
     val ok: Boolean,
     val id: String,
 )
+
+/** Whether the daemon -- not the phone -- has the speech model on disk. */
+@Serializable
+public data class VoiceModelReply(
+    val ok: Boolean,
+    val available: Boolean,
+)

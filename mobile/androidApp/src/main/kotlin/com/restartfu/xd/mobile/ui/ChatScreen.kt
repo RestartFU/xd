@@ -370,6 +370,7 @@ private fun Composer(
                 }
             }
         }
+        VoiceStatus(model.voice)
         if (state.queue.isNotEmpty()) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -414,6 +415,7 @@ private fun Composer(
                 minLines = 1,
                 maxLines = 5,
             )
+            VoiceButton(model.voice)
             Spacer(Modifier.width(8.dp))
             if (state.working) {
                 Button(

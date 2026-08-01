@@ -12,6 +12,7 @@ import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.DaemonUpdateReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
+import com.restartfu.xd.voice.VoiceSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -178,8 +179,31 @@ class ChatViewModel(
     val selectingModel: StateFlow<Boolean> = _selectingModel.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
 
+    /**
+     * Dictation into the composer.
+     *
+     * The transcript is appended rather than replacing the draft, so speaking
+     * after typing adds to what is there — the same thing the desktop does.
+     */
+    val voice: VoiceSession = VoiceSession(
+        transport = session,
+        recorders = ::AndroidVoiceRecorder,
+        scope = viewModelScope,
+        onTranscript = ::appendToDraft,
+    )
+
+    init {
+        viewModelScope.launch { client.voiceEvents.collect(voice::onEvent) }
+    }
+
     fun updateDraft(value: String) {
         _draft.value = value
+    }
+
+    private fun appendToDraft(transcript: String) {
+        val existing = _draft.value
+        val separator = if (existing.isEmpty() || existing.last().isWhitespace()) "" else " "
+        _draft.value = existing + separator + transcript
     }
 
     fun attach(context: android.content.Context, uris: List<android.net.Uri>) {
@@ -373,6 +397,9 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        // Leaving the chat abandons a recording rather than transcribing into
+        // a composer nobody is looking at.
+        voice.cancel()
         session.close()
     }
 

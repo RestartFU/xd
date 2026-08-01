@@ -206,6 +206,50 @@ public object Ops {
         put("value", model)
     }
 
+    /**
+     * Whether the speech model is installed on the daemon.
+     *
+     * Transcription runs where the chat runs, so this asks about that machine's
+     * disk, not the phone's.
+     */
+    public fun voiceModel(chatId: String): JsonObject = withChat("voice-model", chatId)
+
+    /**
+     * Fetches the speech model onto the daemon. Progress arrives as `voice`
+     * events carrying [token], not in the reply.
+     */
+    public fun voiceModelDownload(chatId: String, token: String): JsonObject = buildJsonObject {
+        put("op", "voice-model-download")
+        put("chat", chatId)
+        put("request", validToken(token))
+    }
+
+    /**
+     * Transcribes a recording. [audio] is a base64 WAV -- see
+     * `com.restartfu.xd.voice.Wav` for the only shape the daemon's whisper
+     * accepts.
+     *
+     * The reply says only that the job started; the text arrives as a `voice`
+     * event, because transcription takes far longer than a request may.
+     */
+    public fun voiceTranscribe(
+        chatId: String,
+        token: String,
+        audio: String,
+    ): JsonObject = buildJsonObject {
+        require(audio.isNotEmpty()) { "A recording is required" }
+        put("op", "voice-transcribe")
+        put("chat", chatId)
+        put("request", validToken(token))
+        put("audio", audio)
+    }
+
+    /** Stops a download or transcription started with [token]. */
+    public fun voiceCancel(token: String): JsonObject = buildJsonObject {
+        put("op", "voice-cancel")
+        put("request", validToken(token))
+    }
+
     public fun ping(): JsonObject = op("ping")
 
     public fun setOption(
@@ -299,6 +343,18 @@ public object Ops {
     }
 
     private val DAEMON_UPDATE_ACTIONS = setOf("status", "check", "install", "restart")
+
+    /** The daemon keys voice jobs on this, and refuses anything longer. */
+    private const val MAX_TOKEN_BYTES = 128
+
+    private fun validToken(token: String): String {
+        val cleaned = token.trim()
+        require(cleaned.isNotEmpty()) { "A voice request needs a token" }
+        require(cleaned.encodeToByteArray().size <= MAX_TOKEN_BYTES) {
+            "That voice token is too long"
+        }
+        return cleaned
+    }
 
     private fun op(name: String): JsonObject = buildJsonObject {
         put("op", name)

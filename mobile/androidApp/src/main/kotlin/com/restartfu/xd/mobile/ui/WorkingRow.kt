@@ -55,7 +55,7 @@ internal fun WorkingRow(startedAtMillis: Long?) {
  * `working_for` on load and the store turns it into a start time.
  */
 @Composable
-private fun elapsedSeconds(startedAtMillis: Long?): Long {
+internal fun elapsedSeconds(startedAtMillis: Long?): Long {
     val seconds by produceState(0L, startedAtMillis) {
         if (startedAtMillis == null) {
             value = 0L

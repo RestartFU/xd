@@ -265,6 +265,7 @@ boundary, not an event cursor.
 | `daemon-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
+| `voice-model` | `chat` | `available: boolean` — whether *this daemon* has the speech model on disk |
 | `search` | `query` | matching stored messages |
 | `diff-read` | `chat` plus one `read` of `base`, `working-status`, or `branch-status` (with `base`) | `output: string`, limited to 8 MiB |
 | `ping` | none | no members beyond `ok` |
@@ -355,6 +356,31 @@ desktop reads its own compiled-in catalog because it ships with the daemon; a
 separately released client must ask, since `set-option` validates the model id
 and a hard-coded list would be refused as soon as one is added or retired.
 
+### Voice
+
+Only microphone capture belongs to the client. The daemon owns the speech model
+and the whisper binary, so a remote chat transcribes on the remote machine —
+which is also the machine whose CPU and disk are being spent.
+
+```json
+{"op":"voice-model-download","chat":"chat-1","request":"a1b2…"}
+{"op":"voice-transcribe","chat":"chat-1","request":"a1b2…","audio":"<base64 WAV>"}
+{"op":"voice-cancel","request":"a1b2…"}
+```
+
+`request` is a client-chosen token, at most 128 bytes, that ties the job to the
+`voice` events answering it. The daemon keys jobs on the connection as well, so
+it need only be unique among one client's own outstanding requests, and one
+client cannot cancel another's job.
+
+All three reply `ok` as soon as the job *starts*. Everything that matters —
+download progress, the transcript, failures — arrives as `voice` events, because
+downloading 574 MB or running whisper takes far longer than a request may.
+
+`audio` is a base64 WAV of 16 kHz mono 16-bit little-endian PCM, at most 64 MiB
+decoded. The daemon does not resample: any other rate or channel count is
+rejected. `src/xd/voice/data.cr` writes and validates this header.
+
 ### Folder and chat mutations
 
 `new-folder`, `rename-folder`, `move-folder`, `trash-folder`, `rename-chat`,
@@ -378,7 +404,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `repository-changed` | `chat` | HEAD moved outside the app. |
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |
-| `voice` | … | Voice model and transcription progress, addressed to one connection. |
+| `voice` | `request`, `state` of `downloading` (with `progress`, `-1` until the size is known), `ready`, `transcribed` (with `text`), `cancelled`, or `error` (with `error`) | Voice job progress, addressed to the connection that asked and naming no chat. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
 
 `text` deltas are already filtered to visible output: ask-blocks and workspace
