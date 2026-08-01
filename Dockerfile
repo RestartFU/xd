@@ -155,6 +155,7 @@ ARG GIT_VERSION=2.47.3
 RUN apt-get update && apt-get install -y --no-install-recommends \
       adwaita-icon-theme \
       ca-certificates \
+      curl \
       desktop-file-utils \
       file \
       fontconfig \
@@ -198,6 +199,7 @@ COPY scripts/bundle.sh /usr/local/bin/bundle.sh
 COPY scripts/smoke-bundle.sh /usr/local/bin/smoke-bundle.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 COPY scripts/claude.sh /stage/usr/libexec/claude
+COPY scripts/curl.sh /stage/usr/libexec/curl
 COPY scripts/git.sh /stage/usr/bin/git
 COPY scripts/git-helper.sh /stage/usr/libexec/git-helper
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
@@ -251,9 +253,11 @@ RUN set -eux; \
     mkdir -p /stage/usr/share/git-core; \
     cp -a /usr/share/git-core/templates /stage/usr/share/git-core/; \
     mv /usr/bin/openssl /stage/usr/libexec/openssl-bin; \
+    mv /usr/bin/curl /stage/usr/libexec/curl-bin; \
     chmod 0755 \
       /stage/usr/bin/git \
       /stage/usr/libexec/claude \
+      /stage/usr/libexec/curl \
       /stage/usr/libexec/git-helper \
       /stage/usr/libexec/openssl \
       /stage/usr/libexec/whisper; \

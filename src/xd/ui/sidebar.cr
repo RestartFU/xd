@@ -16,6 +16,7 @@ require "./idle_queue"
 require "./git_writing_settings"
 require "./share_dialog"
 require "./sidebar_state"
+require "./updater"
 
 module Xd
   module UI
@@ -442,6 +443,8 @@ module Xd
         settings_bar.margin_top = 3
         settings_bar.margin_bottom = 6
         settings_bar.append(settings_button)
+        @updater = Updater.new(@parent)
+        settings_bar.append(@updater.widget)
         @widget.add_bottom_bar(settings_bar)
 
         @remote_state_subscription = @remote.on_state do |_snapshot|
@@ -596,6 +599,7 @@ module Xd
         @closed = true
         @reload_generation += 1
         @remote.unsubscribe(@remote_state_subscription)
+        @updater.close
       end
 
       private def rebuild_tree : Nil

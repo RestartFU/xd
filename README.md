@@ -4,6 +4,8 @@ xd is a GTK4 desktop client for workspace-organized Codex and Claude Code
 conversations. Chats inherit their folder's working directory, repository,
 backend, model, and project instructions.
 
+![xd workspace, chat, terminal, and diff panes](docs/assets/xd-showcase.png)
+
 ## Install
 
 Linux x86_64:
@@ -27,8 +29,11 @@ irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 The Linux and macOS installers require no root access; Windows uses the
 standard MSI installer and may request UAC approval. Every platform receives a
 self-contained app with GTK, Git, Codex, Claude Code, speech support, and native
-runtime libraries. No system package-manager installation is required. xd has
-no in-app updater; quit it and rerun the installer to update.
+runtime libraries. No system package-manager installation is required. Installed
+Linux builds check for new releases in the background and only download an
+update after you click the update button. Linux nightly builds can also build
+and install a branch, pull request, or commit; that source-build action requires
+Docker.
 
 Nightly data lives in `~/.local/share/xd-nightly` on Linux and the equivalent
 platform data directory on macOS and Windows. Uninstalling the app does not

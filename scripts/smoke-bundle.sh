@@ -70,6 +70,8 @@ git_clean -C "$WORK/repository" config user.email bundle@example.com
 printf 'before\n' > "$WORK/repository/file.txt"
 git_clean -C "$WORK/repository" add file.txt
 git_clean -C "$WORK/repository" commit -qm initial
+
+"$BUNDLE/libexec/curl" --version | grep -F 'curl '
 printf 'after\n' > "$WORK/repository/file.txt"
 git_clean -C "$WORK/repository" diff --check
 git_clean -C "$WORK/repository" worktree add \

@@ -71,6 +71,7 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
   "$OUT/libexec/claude-bin" \
+  "$OUT/libexec/curl-bin" \
   "$OUT/libexec/git-bin" \
   "$OUT/libexec/git-core-real"/* \
   "$OUT/libexec/openssl-bin" \

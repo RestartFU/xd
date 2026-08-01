@@ -33,8 +33,7 @@ missing runtime path. Known missing behavior remains `[ ]`.
   the exact `b74ad2d` layout at 1100×720 have zero differing pixels across the
   complete 740×720 sidebar/body region, including divider, shared header
   height, title, empty-state icon, copy, and geometry. The only full-frame
-  delta is the intentional right-header reflow after removing the updater
-  control.
+  delta is the intentional right-header reflow from the C reference.
 - `[~]` Window size, maximized state, and sidebar position are persisted;
   restart verification remains.
 - `[x]` Restore the C overlay divider spanning the full header width.
@@ -448,9 +447,9 @@ Historical C reference (Git history): `src/storage`, `src/remote`,
 - `[x]` Bundled assistants are release-owned and never invoke `codex update`,
   `claude update`, npm, Homebrew, or another host package manager. The daemon
   reads versions asynchronously with `DISABLE_AUTOUPDATER=1`; local and paired
-  clients show those versions without exposing a self-update button or
-  protocol operation. Updating xd atomically replaces its pinned assistant
-  binaries with the rest of the signed bundle.
+  clients show those versions. XD's bounded background check only reads release
+  metadata; a user click atomically replaces the whole bundle, including its
+  pinned assistant binaries.
 - `[~]` Codex app-server and Claude stream-json turns work through the shared
   manager.
 - `[~]` Codex status, device login, browser link, cancellation, logout, and
@@ -494,8 +493,11 @@ Historical C reference (Git history): `src/backend`. Crystal implementation:
 
 - `[x]` Linux development, tests, and bundle builds require Docker only.
 - `[x]` One-line branch installer builds the latest branch commit.
-- `[x]` Installers reject replacement while xd is running, preventing GNOME
-  from reactivating a stale GtkApplication after an update.
+- `[x]` Installed Linux builds perform bounded release-metadata checks outside
+  GTK and expose manual update/restart controls only when a newer build exists.
+  Nightly Linux builds can explicitly build a branch, pull request, or commit
+  with Docker. The installer rejects unrelated live replacement and accepts the
+  updater's explicit same-process handoff.
 - `[x]` Linux bundle carries GTK, libadwaita, VTE, GL, fonts, icons, MIME, TLS,
   OpenSSL, Git, Codex, and Claude.
 - `[x]` Linux, macOS Apple Silicon, and Windows x86_64 build and publish

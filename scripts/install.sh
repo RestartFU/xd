@@ -100,14 +100,16 @@ esac
 # desktop. A later launch then activates stale code instead of the new binary.
 # Refusing is safer than killing a session that may contain unsent input.
 #
-for process_exe in /proc/[0-9]*/exe; do
-  executable=$(readlink "$process_exe" 2>/dev/null || true)
-  case "$executable" in
-    "$OPT"/*)
-      die "$NAME is running. Quit it completely, then rerun this installer."
-      ;;
-  esac
-done
+if [ "${XD_ALLOW_RUNNING_INSTALL:-}" != 1 ]; then
+  for process_exe in /proc/[0-9]*/exe; do
+    executable=$(readlink "$process_exe" 2>/dev/null || true)
+    case "$executable" in
+      "$OPT"/*)
+        die "$NAME is running. Quit it completely, then rerun this installer."
+        ;;
+    esac
+  done
+fi
 
 # --- the bundle -------------------------------------------------------------
 
@@ -129,16 +131,17 @@ if [ -n "$SOURCE" ]; then
   say "Installing the build in $SOURCE…"
   cp -a "$SOURCE" "$WORK/$NAME"
 else
-  command -v curl >/dev/null 2>&1 || die "curl is needed."
+  CURL=${XD_CURL:-curl}
+  command -v "$CURL" >/dev/null 2>&1 || [ -x "$CURL" ] || die "curl is needed."
   command -v tar  >/dev/null 2>&1 || die "tar is needed."
 
   say "Downloading the $CHANNEL build…"
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET" "$BASE/$ASSET" \
+  "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET" "$BASE/$ASSET" \
     || die "cannot download $BASE/$ASSET"
 
   # Published beside the tarball, so a truncated or tampered download is caught
   # before anything is unpacked.
-  if curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET.sha256" \
+  if "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET.sha256" \
        "$BASE/$ASSET.sha256" 2>/dev/null; then
     if command -v sha256sum >/dev/null 2>&1; then
       ( cd "$WORK" && sha256sum -c "$ASSET.sha256" >/dev/null ) \

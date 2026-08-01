@@ -155,5 +155,11 @@
       <summary>Sidebar width</summary>
     </key>
 
+    <key name="build-source" type="s">
+      <default>''</default>
+      <summary>Branch, pull request, or commit to build</summary>
+      <description>Last source entered in the XD source-build panel.</description>
+    </key>
+
   </schema>
 </schemalist>
