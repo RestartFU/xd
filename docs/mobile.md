@@ -196,3 +196,19 @@ Two limits worth knowing. A full-screen application will not render
 faithfully -- the desktop keeps VTE for that. And input is sent a line at a
 time, since a phone keyboard has no key events to forward, so anything needing
 raw keys will not work from here.
+
+## Attaching images
+
+The composer can attach up to 4 images, which is the daemon's limit alongside
+10 MiB per image and 20 MiB in total.
+
+The daemon accepts **PNG only** and checks the signature, but a phone gallery
+holds JPEG and HEIC, so images are decoded and re-encoded on the device. As on
+the desktop they are scaled to fit 1920 first: a modern phone photo encoded to
+PNG at full resolution runs to tens of megabytes and would simply be refused.
+PNG is lossless, so when a scaled image still exceeds 10 MiB the only remedy
+is fewer pixels; the encoder halves the bound until it fits.
+
+Picking uses Android's photo picker, which grants access to the chosen items
+only and needs no storage permission. The app still declares nothing beyond
+`INTERNET`.

@@ -1,5 +1,9 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -42,6 +47,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,6 +62,7 @@ import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
+import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.syntax.CodeBlocks
 
 /** The desktop's conversation, diff, files and terminal panes, as tabs. */
@@ -230,12 +239,60 @@ private fun Composer(
     cancelling: Boolean,
     model: ChatViewModel,
 ) {
+    val context = LocalContext.current
+    val attachments by model.attachments.collectAsStateWithLifecycle()
+    val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(Limits.MAX_IMAGES),
+    ) { uris -> model.attach(context, uris) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .imePadding()
             .padding(12.dp),
     ) {
+        attachmentError?.let { message ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    message,
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = model::clearAttachmentError) { Text("Dismiss") }
+            }
+        }
+        if (attachments.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                attachments.forEachIndexed { index, attachment ->
+                    Box {
+                        Image(
+                            bitmap = attachment.thumbnail,
+                            contentDescription = "Attached image",
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(MaterialTheme.shapes.small),
+                            contentScale = ContentScale.Crop,
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .clickable { model.removeAttachment(index) },
+                        ) {
+                            Text("✕", modifier = Modifier.padding(horizontal = 5.dp))
+                        }
+                    }
+                }
+            }
+        }
         if (state.queue.isNotEmpty()) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -250,6 +307,18 @@ private fun Composer(
             }
         }
         Row(verticalAlignment = Alignment.Bottom) {
+            TextButton(
+                onClick = {
+                    picker.launch(
+                        PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageOnly,
+                        ),
+                    )
+                },
+                enabled = attachments.size < Limits.MAX_IMAGES,
+            ) {
+                Text("+")
+            }
             OutlinedTextField(
                 value = composer,
                 onValueChange = model::updateDraft,
@@ -275,7 +344,8 @@ private fun Composer(
             } else {
                 Button(
                     onClick = model::send,
-                    enabled = !sending && composer.isNotBlank(),
+                    // The daemon accepts text, images, or both.
+                    enabled = !sending && (composer.isNotBlank() || attachments.isNotEmpty()),
                 ) {
                     Text(if (sending) "Sending…" else "Send")
                 }

@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.net.PairResult
+import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -102,6 +103,10 @@ class ChatViewModel(
     private val _cancelling = MutableStateFlow(false)
     private val _droppingQueued = MutableStateFlow(false)
     private val _draft = MutableStateFlow("")
+    private val _attachments = MutableStateFlow(emptyList<Attachment>())
+    private val _attachmentError = MutableStateFlow<String?>(null)
+    val attachments: StateFlow<List<Attachment>> = _attachments.asStateFlow()
+    val attachmentError: StateFlow<String?> = _attachmentError.asStateFlow()
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
     val cancelling: StateFlow<Boolean> = _cancelling.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
@@ -110,11 +115,45 @@ class ChatViewModel(
         _draft.value = value
     }
 
+    fun attach(context: android.content.Context, uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            val room = Limits.MAX_IMAGES - _attachments.value.size
+            if (room <= 0) {
+                _attachmentError.value = "A message can carry at most 4 images"
+                return@launch
+            }
+            val loaded = mutableListOf<Attachment>()
+            for (uri in uris.take(room)) {
+                try {
+                    loaded += ImageAttachments.load(context, uri)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    _attachmentError.value = error.message ?: "That image could not be attached"
+                }
+            }
+            if (loaded.isNotEmpty()) _attachments.value = _attachments.value + loaded
+        }
+    }
+
+    fun removeAttachment(index: Int) {
+        _attachments.value = _attachments.value.filterIndexed { at, _ -> at != index }
+    }
+
+    fun clearAttachmentError() {
+        _attachmentError.value = null
+    }
+
     fun send() {
         val text = _draft.value
+        val images = _attachments.value
         launchGuarded(_sending) {
-            session.send(text)
+            session.send(text, images.map(Attachment::png))
+            // Only clear what was actually sent: the composer may have moved
+            // on while the request was in flight.
             if (_draft.value == text) _draft.value = ""
+            _attachments.value = _attachments.value.drop(images.size)
         }
     }
 
