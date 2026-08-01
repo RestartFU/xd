@@ -17,6 +17,7 @@ require "./network_address"
 require "./repository"
 require "./repository_monitor"
 require "./search"
+require "./self_update"
 require "./terminals"
 require "./voice_jobs"
 require "./workspace_monitor"
@@ -122,6 +123,11 @@ module Xd
           resolver: cli_version_resolver,
           environment: cli_version_environment
         )
+        @self_update = SelfUpdate.new(
+          ->(name : String, fields : Hash(String, JSON::Any)) {
+            publish_async_event(name, fields)
+          }
+        )
         @voice = VoiceJobs.new(
           ->(name : String, fields : Hash(String, JSON::Any), audience : UInt64) {
             publish_async_event(name, fields, audience)
@@ -207,6 +213,8 @@ module Xd
         failed_outcome(error.message || "Terminal error")
       rescue error : VoiceJobs::Error
         failed_outcome(error.message || "Voice input error")
+      rescue error : SelfUpdate::Error
+        failed_outcome(error.message || "Daemon update error")
       rescue error
         STDERR.puts(
           "xd: unexpected daemon request failure: " \
@@ -289,6 +297,8 @@ module Xd
           agent_clis
         when Protocol::Operation::AgentCatalog
           agent_catalog
+        when Protocol::Operation::DaemonUpdate
+          daemon_update(request)
         when Protocol::Operation::Tree
           tree
         when Protocol::Operation::NewFolder
@@ -601,6 +611,27 @@ module Xd
         Protocol::Response.ok({
           "providers" => agent_cli_snapshots,
         })
+      end
+
+      # Updates this daemon's own installation.
+      #
+      # A paired device can see the machine is behind but cannot do anything
+      # about it without a shell there. Installing and restarting are separate
+      # actions: replacing files is safe while turns run, restarting drops
+      # every connection and loses the turn, so only the caller decides.
+      private def daemon_update(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        case request.string?("action") || "status"
+        when "status"  then nil
+        when "check"   then @self_update.check
+        when "install" then @self_update.install
+        when "restart" then @self_update.restart
+        else
+          raise Protocol::Error.new("No such daemon-update action.")
+        end
+
+        Protocol::Response.ok(@self_update.snapshot)
       end
 
       # The assistants and models this daemon can actually run.

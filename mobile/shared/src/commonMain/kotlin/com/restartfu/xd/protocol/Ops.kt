@@ -163,6 +163,19 @@ public object Ops {
     public fun agentCatalog(): JsonObject = op("agent-catalog")
 
     /**
+     * Asks about, or performs, an update of the daemon itself.
+     *
+     * `install` replaces the files, which is safe while turns run; `restart`
+     * drops every attached device and loses the running turn, so it is a
+     * separate action nobody takes by accident.
+     */
+    public fun daemonUpdate(action: String = "status"): JsonObject = buildJsonObject {
+        require(action in DAEMON_UPDATE_ACTIONS) { "No such daemon-update action" }
+        put("op", "daemon-update")
+        put("action", action)
+    }
+
+    /**
      * Selects an assistant and model together.
      *
      * The daemon only validates and reconciles when both travel in one
@@ -275,6 +288,8 @@ public object Ops {
         put("op", "terminal-kill")
         put("terminal", terminalId)
     }
+
+    private val DAEMON_UPDATE_ACTIONS = setOf("status", "check", "install", "restart")
 
     private fun op(name: String): JsonObject = buildJsonObject {
         put("op", name)

@@ -55,6 +55,7 @@ internal fun TreeScreen(
     val chats = tree.chats.groupBy(ChatSummary::folderId)
     val foldersById = tree.folders.associateBy(Folder::id)
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
+    var updatingDaemon by rememberSaveable { mutableStateOf(false) }
     var confirmingForget by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(createdChat) {
@@ -69,6 +70,9 @@ internal fun TreeScreen(
             TopAppBar(
                 title = { Text("xd") },
                 actions = {
+                    TextButton(onClick = { updatingDaemon = true }) {
+                        Text("Update")
+                    }
                     TextButton(onClick = { confirmingForget = true }) {
                         Text("Forget")
                     }
@@ -116,6 +120,9 @@ internal fun TreeScreen(
                 }
             }
         }
+    }
+    if (updatingDaemon) {
+        DaemonUpdateDialog(model) { updatingDaemon = false }
     }
     if (choosingFolder) {
         AlertDialog(

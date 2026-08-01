@@ -262,6 +262,7 @@ boundary, not an event cursor.
 | `file-browse` | `chat`, `action`, optional relative `path` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
 | `agent-clis` | none | bundled assistant versions |
+| `daemon-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
 | `search` | `query` | matching stored messages |
@@ -340,6 +341,14 @@ Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
 both, clears an unsupported effort, and appends a visible `Switched to …`
 transcript event.
+
+`daemon-update` updates the daemon's own installation, so a paired device can
+bring a machine forward without a shell on it. `install` replaces the files,
+which is safe while turns run because the process keeps the binary it already
+mapped; `restart` drops every connection and loses any running turn, so the
+two are separate actions and neither happens on its own. `supported` is false
+where the installation cannot replace itself -- anything but a Linux bundle
+install -- and both `install` and `restart` are refused there.
 
 `agent-catalog` lists the assistants and models this daemon can run. The
 desktop reads its own compiled-in catalog because it ships with the daemon; a

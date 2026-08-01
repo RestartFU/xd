@@ -6,6 +6,7 @@ import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.net.PlatformSocketFactory
+import com.restartfu.xd.protocol.DaemonUpdateReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
@@ -138,6 +139,16 @@ public class XdClient(
             chosen.requestReload()
         }
         return ChatSession(chosen) { releaseChat(chatId, chosen) }
+    }
+
+    /**
+     * Asks about, or performs, an update of the daemon this client is paired
+     * with. Connection-level rather than chat-level: it is the machine being
+     * updated, not a conversation.
+     */
+    public suspend fun daemonUpdate(action: String = "status"): DaemonUpdateReply {
+        val value = actor.call(Ops.daemonUpdate(action))
+        return actor.decodeReply(value) { it.decodeReply<DaemonUpdateReply>() }
     }
 
     public suspend fun createChat(

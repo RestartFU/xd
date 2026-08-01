@@ -143,6 +143,18 @@ public data class AgentCatalogReply(
 )
 
 @Serializable
+public data class DaemonUpdateReply(
+    val ok: Boolean,
+    val version: String = "",
+    val channel: String = "",
+    val state: String = "idle",
+    val supported: Boolean = false,
+    val available: Boolean = false,
+    val latest: String? = null,
+    val error: String? = null,
+)
+
+@Serializable
 public data class ImageReply(
     val ok: Boolean,
     val mime: String = "",

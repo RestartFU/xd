@@ -3,7 +3,7 @@ require "../agent/environment"
 require "../bundle_environment"
 require "../version"
 require "./branch_build_dialog"
-require "./update_channel"
+require "../update_channel"
 
 module Xd
   module UI
@@ -40,7 +40,7 @@ module Xd
         @branch = Gtk::Button.new_from_icon_name("applications-engineering-symbolic")
         @branch.add_css_class("flat")
         @branch.tooltip_text = "Build XD from a branch, pull request, or commit"
-        @branch.visible = !!@install_dir && UpdateChannel.current.nightly? && BranchBuild.supported?
+        @branch.visible = !!@install_dir && Xd::UpdateChannel.current.nightly? && BranchBuild.supported?
         @branch.clicked_signal.connect do
           BranchBuildDialog.present(@parent, -> { set_state(State::Done) })
         end
@@ -89,17 +89,17 @@ module Xd
           output = IO::Memory.new
           status = Process.run(
             @curl,
-            ["-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", UpdateChannel.check_url(UpdateChannel.current)],
+            ["-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", Xd::UpdateChannel.check_url(Xd::UpdateChannel.current)],
             env: Agent::Environment.host,
             clear_env: true,
             input: Process::Redirect::Close,
             output: output,
             error: Process::Redirect::Close
           )
-          latest = status.success? ? UpdateChannel.latest_from_reply(UpdateChannel.current, output.to_s) : nil
+          latest = status.success? ? Xd::UpdateChannel.latest_from_reply(Xd::UpdateChannel.current, output.to_s) : nil
           GLib.idle_add do
             @checking = false
-            set_state(State::Available) if !@closed && @state.quiet? && UpdateChannel.newer?(UpdateChannel.current, latest)
+            set_state(State::Available) if !@closed && @state.quiet? && Xd::UpdateChannel.newer?(Xd::UpdateChannel.current, latest)
             false
           end
         rescue File::Error | IO::Error
@@ -122,7 +122,7 @@ module Xd
           environment = Agent::Environment.host
           environment["XD_CURL"] = @curl
           process = Process.new(
-            ["sh", "-c", UpdateChannel.install_command(UpdateChannel.current, @curl)],
+            ["sh", "-c", Xd::UpdateChannel.install_command(Xd::UpdateChannel.current, @curl)],
             env: environment,
             clear_env: true,
             input: Process::Redirect::Close,

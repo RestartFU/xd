@@ -165,6 +165,52 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "reports what a client needs to offer a daemon update" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      response = engine.dispatch(local, %({"op":"daemon-update"}))
+
+      response.success?.should be_true
+      status = parse_response(response)
+      status["version"].as_s.should eq(Xd.version_string)
+      status["state"].as_s.should eq("idle")
+      # A build run from the spec suite is not an installed bundle, so there
+      # is nothing it could replace.
+      status["supported"].as_bool.should be_false
+      status["available"].as_bool.should be_false
+    end
+  end
+
+  it "refuses to install or restart where it cannot replace itself" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      ["install", "restart"].each do |action|
+        response = engine.dispatch(
+          local,
+          {"op" => "daemon-update", "action" => action}.to_json
+        )
+        response.success?.should be_false
+        response["error"].as_s.should contain("cannot")
+      end
+    end
+  end
+
+  it "rejects an unknown update action" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      response = engine.dispatch(
+        local,
+        %({"op":"daemon-update","action":"uninstall"})
+      )
+
+      response.success?.should be_false
+      response["error"].as_s.should eq("No such daemon-update action.")
+    end
+  end
+
   it "uses the same dispatcher after transport authentication" do
     with_daemon_engine do |_store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)

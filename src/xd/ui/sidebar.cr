@@ -7,6 +7,7 @@ require "../remote/connection"
 require "../version"
 require "./adw"
 require "./auth_dialog"
+require "./daemon_update_dialog"
 require "./background_work"
 require "./dialogs"
 require "./directory_browser"
@@ -1570,6 +1571,11 @@ module Xd
           menu, actions, popover, "Assistant Accounts…", "accounts"
         ) do
           auth(node.source, node.name)
+        end
+        add_menu_action(
+          menu, actions, popover, "Update Daemon…", "update-daemon"
+        ) do
+          DaemonUpdateDialog.new(@parent, node.source.endpoint, node.name).present
         end
         add_menu_action(menu, actions, popover, "Refresh", "refresh") do
           reload

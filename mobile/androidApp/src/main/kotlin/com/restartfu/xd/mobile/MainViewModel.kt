@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.protocol.BackendReply
+import com.restartfu.xd.protocol.DaemonUpdateReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
@@ -29,6 +30,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
+    private val _daemon = MutableStateFlow<DaemonUpdateReply?>(null)
+    private val _daemonError = MutableStateFlow<String?>(null)
+    private val _updating = MutableStateFlow(false)
+    val daemon: StateFlow<DaemonUpdateReply?> = _daemon.asStateFlow()
+    val daemonError: StateFlow<String?> = _daemonError.asStateFlow()
+    val daemonBusy: StateFlow<Boolean> = _updating.asStateFlow()
 
     fun pair(
         host: String,
@@ -87,6 +94,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _creatingChat.value = false
             }
         }
+    }
+
+    /**
+     * Drives the daemon update from the tree screen.
+     *
+     * Install and restart are separate calls because they differ in cost:
+     * replacing files is safe while turns run, restarting drops every attached
+     * device and loses the turn.
+     */
+    fun daemonUpdate(action: String = "status") {
+        if (_updating.value) return
+        _updating.value = true
+        viewModelScope.launch {
+            try {
+                _daemon.value = client.daemonUpdate(action)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _daemonError.value = error.message ?: "Could not reach the daemon"
+            } finally {
+                _updating.value = false
+            }
+        }
+    }
+
+    fun clearDaemonUpdate() {
+        _daemon.value = null
+        _daemonError.value = null
     }
 
     fun consumeCreatedChat(chatId: String) {
