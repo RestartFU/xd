@@ -83,6 +83,7 @@ public class TerminalScreen(
                 Parser.ESCAPE -> escape(ch)
                 Parser.CSI -> csi(ch)
                 Parser.OSC -> osc(ch)
+                Parser.OSC_ESCAPE -> oscEscape(ch)
             }
         }
     }
@@ -138,7 +139,17 @@ public class TerminalScreen(
             return
         }
         if (ch == '\u001B') {
-            parser = Parser.GROUND
+            parser = Parser.OSC_ESCAPE
+        }
+    }
+
+    private fun oscEscape(ch: Char) {
+        // Consume the backslash in the two-byte ST terminator. If ESC was not
+        // followed by one, remain inside the OSC rather than leaking the byte.
+        parser = when (ch) {
+            '\\' -> Parser.GROUND
+            7.toChar() -> Parser.GROUND
+            else -> Parser.OSC
         }
     }
 
@@ -264,7 +275,7 @@ public class TerminalScreen(
     private fun blank(columns: Int, rows: Int): Array<Array<Cell>> =
         Array(rows) { Array(columns) { Cell() } }
 
-    private enum class Parser { GROUND, ESCAPE, CSI, OSC }
+    private enum class Parser { GROUND, ESCAPE, CSI, OSC, OSC_ESCAPE }
 
     private companion object {
         /**

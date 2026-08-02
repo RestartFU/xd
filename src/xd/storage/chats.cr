@@ -102,6 +102,20 @@ module Xd
         )
       end
 
+      def set_chat_folder(chat_id : String, folder_id : String) : Nil
+        database_error("Cannot move the chat") do
+          result = @database.exec(
+            "UPDATE chats SET folder_id = ?, updated_at = ? WHERE id = ?",
+            folder_id,
+            now_seconds,
+            chat_id
+          )
+          if result.rows_affected != 1
+            raise NotFoundError.new("No chat #{chat_id}")
+          end
+        end
+      end
+
       def set_backend(chat_id : String, backend : String) : Nil
         update_chat_column(
           "backend",

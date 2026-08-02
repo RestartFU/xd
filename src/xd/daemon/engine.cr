@@ -368,6 +368,8 @@ module Xd
           file_browse(request)
         when Protocol::Operation::RenameChat
           rename_chat(request)
+        when Protocol::Operation::MoveChat
+          move_chat(request)
         when Protocol::Operation::DeleteChat
           delete_chat(request)
         when Protocol::Operation::Chat
@@ -1069,6 +1071,23 @@ module Xd
         end
 
         @store.set_chat_title(chat_id, title)
+        Protocol::Response.ok
+      end
+
+      private def move_chat(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string(
+          "chat",
+          "move-chat needs a chat id"
+        )
+        folder_id = request.string(
+          "folder",
+          "move-chat needs a folder"
+        )
+        @store.get_chat(chat_id)
+        @workspaces.find_folder(folder_id)
+        @store.set_chat_folder(chat_id, folder_id)
         Protocol::Response.ok
       end
 
@@ -1793,6 +1812,7 @@ module Xd
              Protocol::Operation::TrashFolder,
              Protocol::Operation::NewChat,
              Protocol::Operation::RenameChat,
+             Protocol::Operation::MoveChat,
              Protocol::Operation::DeleteChat
           @workspace_monitor.acknowledge
           [protocol_event("tree")]

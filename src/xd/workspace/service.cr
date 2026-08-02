@@ -103,6 +103,10 @@ module Xd
           raise Error.new("A folder cannot be moved inside itself.")
         end
 
+        if File.exists?(File.join(parent, ".git"))
+          raise Error.new("A folder cannot be moved inside a repository.")
+        end
+
         destination = File.join(parent, File.basename(path))
         if File.exists?(destination)
           raise Error.new("There is already a folder of that name there.")
