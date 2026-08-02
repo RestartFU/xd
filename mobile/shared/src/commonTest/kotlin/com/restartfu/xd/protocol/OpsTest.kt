@@ -55,6 +55,40 @@ class OpsTest {
     }
 
     @Test
+    fun newFolderDistinguishesAWorkspaceFromANestedFolder() {
+        val workspace = Ops.newFolder("Mobile")
+        val nested = Ops.newFolder("App", "workspace")
+
+        assertEquals("new-folder", workspace.getValue("op").jsonPrimitive.content)
+        assertEquals("Mobile", workspace.getValue("name").jsonPrimitive.content)
+        assertFalse("parent" in workspace)
+        assertEquals("workspace", nested.getValue("parent").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder(" ") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder(".hidden") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile/App") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile\\App") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder("App", " ") }
+    }
+
+    @Test
+    fun moveOperationsOmitRootParentsAndRequireIds() {
+        val folderToRoot = Ops.moveFolder("folder")
+        val folderNested = Ops.moveFolder("folder", "parent")
+        val chat = Ops.moveChat("chat", "folder")
+
+        assertEquals("move-folder", folderToRoot.getValue("op").jsonPrimitive.content)
+        assertFalse("parent" in folderToRoot)
+        assertEquals("parent", folderNested.getValue("parent").jsonPrimitive.content)
+        assertEquals("move-chat", chat.getValue("op").jsonPrimitive.content)
+        assertEquals("chat", chat.getValue("chat").jsonPrimitive.content)
+        assertEquals("folder", chat.getValue("folder").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.moveFolder("") }
+        assertFailsWith<IllegalArgumentException> { Ops.moveFolder("folder", " ") }
+        assertFailsWith<IllegalArgumentException> { Ops.moveChat("", "folder") }
+        assertFailsWith<IllegalArgumentException> { Ops.moveChat("chat", "") }
+    }
+
+    @Test
     fun selectingAModelSendsItsAssistantToo() {
         // Without a backend the daemon stores the string unvalidated and skips
         // the effort reconciliation and the visible switch event.

@@ -266,17 +266,26 @@ The desktop keeps VTE for that.
 
 ## The tree
 
-A long press on a chat offers Rename and Delete. Long press rather than
-visible buttons: both are rare, the row is already a tap target for the thing
-you usually want, and a delete affordance beside it invites exactly the mis-tap
-you do not want. Deleting is irreversible — the daemon forgets the agent
-session, kills the chat's terminals and removes the transcript — so it keeps a
-confirmation that names the chat.
+The New button creates either a workspace or a chat. A chat can be created once
+there is a workspace folder to hold it.
 
-Both refresh the tree rather than waiting for the daemon's `tree` broadcast, so
-the row has already changed by the time the dialog closes. Renaming also
-reloads an open session: it broadcasts `tree` and nothing else, so a chat
-already open would otherwise keep its old title in the header.
+A long press on a chat offers Move, Rename, and Delete. A long press on a folder
+offers Move. Move opens a destination picker rather than relying on drag-and-
+drop, which is difficult to discover on a phone; folders can be moved to the
+top level or into another folder, while chats must stay inside a folder. The
+daemon rejects cycles, repository leaves, and name collisions.
+
+Long press rather than visible buttons keeps rare actions out of rows that are
+already tap targets for the thing you usually want. Deleting is irreversible —
+the daemon forgets the agent session, kills the chat's terminals and removes the
+transcript — so it keeps a confirmation that names the chat.
+
+Mutations refresh the tree rather than waiting for the daemon's `tree` broadcast,
+so the row has already changed by the time the dialog closes. Tree broadcasts
+also reload open chat sessions because moving a chat or folder can change its
+inherited backend, model, or workdir. Renaming a chat likewise reloads its open
+session: it broadcasts `tree` and nothing else, so a chat already open would
+otherwise keep its old title in the header.
 
 ## Reading a transcript
 
