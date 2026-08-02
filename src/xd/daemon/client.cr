@@ -27,6 +27,7 @@ module Xd
       REQUEST_TIMEOUT        = 30.seconds
       LONG_REQUEST_TIMEOUT   = 5.minutes
       MAX_ABANDONED_REQUESTS = 256
+      MAX_PENDING_EVENTS     = 65_536
 
       class Error < Exception
       end
@@ -34,14 +35,20 @@ module Xd
       class AuthorizationError < Error
       end
 
+      class TimeoutError < Error
+      end
+
       @pending = {} of Int64 => Channel(ClientAnswer)
       @pending_order = Deque(Int64).new
       @abandoned = Set(Int64).new
+      @event_queue = Deque(Hash(String, JSON::Any)).new
+      @event_ready = Channel(Nil).new(1)
       @subscribers = {} of Int64 => Proc(Hash(String, JSON::Any), Nil)
       @disconnect_subscribers = {} of Int64 => Proc(String, Nil)
       @next_subscriber = 0_i64
       @next_request = 0_i64
       @lock = Mutex.new
+      @write_ready = Channel(Nil).new(1)
       @closed = false
       @disconnect_message : String?
 
@@ -52,6 +59,9 @@ module Xd
         @fingerprint : String? = nil,
         @request_timeout : Time::Span = REQUEST_TIMEOUT,
       )
+        @write_ready.send(nil)
+        set_write_timeout(@request_timeout)
+        spawn publish_loop
         spawn read_loop
       end
 
@@ -126,9 +136,24 @@ module Xd
       ) : Hash(String, JSON::Any)
         answer = Channel(ClientAnswer).new(1)
         request_id = 0_i64
+        write_deadline = Time.instant + @request_timeout
+
+        select
+        when @write_ready.receive
+        when timeout(@request_timeout)
+          disconnect("Daemon request timed out while waiting to write.")
+          raise TimeoutError.new("Daemon request timed out.")
+        end
 
         begin
-          @lock.synchronize do
+          remaining = write_deadline - Time.instant
+          if remaining <= 0.seconds
+            disconnect("Daemon request timed out while waiting to write.")
+            raise TimeoutError.new("Daemon request timed out.")
+          end
+          set_write_timeout(remaining)
+
+          encoded = @lock.synchronize do
             raise Error.new("Daemon connection is closed.") if @closed
 
             @next_request &+= 1
@@ -137,11 +162,16 @@ module Xd
             body[Protocol::REQUEST_ID] = JSON::Any.new(request_id)
             @pending[request_id] = answer
             @pending_order << request_id
-            @io << body.to_json << '\n'
-            @io.flush
+            "#{body.to_json}\n"
           end
-        rescue error : IO::Error
+          # Socket backpressure must not hold the state lock: the reader
+          # needs it to deliver replies and disconnect a failed transport.
+          @io << encoded
+          @io.flush
+        rescue error : IO::Error | OpenSSL::Error
           disconnect("Daemon connection failed: #{error.message}")
+        ensure
+          @write_ready.send(nil)
         end
 
         wait = request["op"]?.try(&.as_s?) == "git-action" ? LONG_REQUEST_TIMEOUT : @request_timeout
@@ -156,7 +186,7 @@ module Xd
                 "Too many daemon requests timed out."
               )
             end
-            raise Error.new("Daemon request timed out.")
+            raise TimeoutError.new("Daemon request timed out.")
           end
           answer.receive
         end
@@ -247,6 +277,17 @@ module Xd
         difference == 0
       end
 
+      private def set_write_timeout(value : Time::Span) : Nil
+        case io = @io
+        when Socket
+          io.write_timeout = value
+        when IO::FileDescriptor
+          io.write_timeout = value
+        when OpenSSL::SSL::Socket
+          io.write_timeout = value
+        end
+      end
+
       private def read_loop : Nil
         while line = Protocol.read_frame(@io)
           next if line.empty?
@@ -257,7 +298,9 @@ module Xd
           end
 
           if root.has_key?("event")
-            publish(root)
+            unless enqueue_event(root)
+              return disconnect("Daemon sent too many pending events.")
+            end
           else
             answer, abandoned = @lock.synchronize do
               if request_id = root[Protocol::REQUEST_ID]?.try(&.as_i64?)
@@ -297,7 +340,32 @@ module Xd
         disconnect("Daemon client failed: #{error.message}")
       end
 
-      private def publish(event : Hash(String, JSON::Any)) : Nil
+      private def enqueue_event(event : Hash(String, JSON::Any)) : Bool
+        signal = @lock.synchronize do
+          return false if @closed || @event_queue.size >= MAX_PENDING_EVENTS
+
+          was_empty = @event_queue.empty?
+          @event_queue << event
+          was_empty
+        end
+        @event_ready.send(nil) if signal
+        true
+      rescue Channel::ClosedError
+        false
+      end
+
+      private def publish_loop : Nil
+        loop do
+          @event_ready.receive
+          while event = @lock.synchronize { @event_queue.shift? }
+            publish_event(event)
+            Fiber.yield
+          end
+        end
+      rescue Channel::ClosedError
+      end
+
+      private def publish_event(event : Hash(String, JSON::Any)) : Nil
         subscribers = @lock.synchronize { @subscribers.values.dup }
         subscribers.each do |subscriber|
           begin
@@ -332,6 +400,7 @@ module Xd
             @pending.clear
             @pending_order.clear
             @abandoned.clear
+            @event_queue.clear
             subscribers = @disconnect_subscribers.values.dup
             true
           else
@@ -340,20 +409,23 @@ module Xd
         end
         return unless should_close
 
+        @event_ready.close
         begin
           @io.close
-        rescue IO::Error
-        end
-        pending.each do |answer|
-          answer.send(ClientAnswer.new(nil, message))
-        end
-        subscribers.each do |subscriber|
-          begin
-            subscriber.call(message)
-          rescue error
-            STDERR.puts(
-              "xd: disconnect subscriber failed: #{error.message}"
-            )
+        rescue error
+          STDERR.puts "xd: daemon connection close failed: #{error.message}"
+        ensure
+          pending.each do |answer|
+            answer.send(ClientAnswer.new(nil, message))
+          end
+          subscribers.each do |subscriber|
+            begin
+              subscriber.call(message)
+            rescue error
+              STDERR.puts(
+                "xd: disconnect subscriber failed: #{error.message}"
+              )
+            end
           end
         end
       end

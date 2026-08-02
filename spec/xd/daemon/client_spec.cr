@@ -214,6 +214,89 @@ describe Xd::Daemon::Client do
     FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
   end
 
+  it "allows an event subscriber to make a request" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-reentrant-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    server = XdSpec::LocalEndpoint::Server.new(path)
+    start = Channel(Nil).new
+    spawn do
+      socket = server.accept
+      start.receive
+      socket << %({"event":"request-needed"}) << '\n'
+      socket.flush
+      request = JSON.parse(socket.gets.not_nil!).as_h
+      socket << {
+        Xd::Protocol::REQUEST_ID => request[Xd::Protocol::REQUEST_ID],
+        "ok"                     => true,
+        "value"                  => "subscriber reply",
+      }.to_json << '\n'
+      socket.flush
+    ensure
+      socket.try(&.close)
+    end
+
+    client = Xd::Daemon::Client.local(path)
+    answer = Channel(Tuple(String?, String?)).new(1)
+    client.subscribe do |_event|
+      begin
+        response = client.call({"op" => JSON::Any.new("ping")})
+        answer.send({response["value"].as_s, nil})
+      rescue error
+        answer.send({nil, error.message})
+      end
+    end
+    start.send(nil)
+
+    select
+    when result = answer.receive
+      result.should eq({"subscriber reply", nil})
+    when timeout(2.seconds)
+      fail "event subscriber deadlocked the reply reader"
+    end
+  ensure
+    client.try(&.close)
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
+  it "times out while writing to a backpressured transport" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-write-timeout-#{Random::Secure.hex(12)}"
+    )
+    path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    server = XdSpec::LocalEndpoint::Server.new(path)
+    spawn do
+      socket = server.accept
+      sleep 1.second
+    ensure
+      socket.try(&.close)
+    end
+
+    client = Xd::Daemon::Client.local(
+      path,
+      request_timeout: 20.milliseconds
+    )
+    started = Time.instant
+    expect_raises(Xd::Daemon::Client::Error, /connection failed/i) do
+      client.call({
+        "op"      => JSON::Any.new("ping"),
+        "payload" => JSON::Any.new("x" * (4 * 1024 * 1024)),
+      })
+    end
+    (Time.instant - started).should be < 1.second
+    client.closed?.should be_true
+  ensure
+    client.try(&.close)
+    server.try(&.close)
+    FileUtils.rm_r(directory) if directory && Dir.exists?(directory)
+  end
+
   it "times out one request and ignores its late reply" do
     directory = File.join(
       Dir.tempdir,
@@ -252,7 +335,7 @@ describe Xd::Daemon::Client do
       request_timeout: 200.milliseconds
     )
     expect_raises(
-      Xd::Daemon::Client::Error,
+      Xd::Daemon::Client::TimeoutError,
       "Daemon request timed out."
     ) do
       client.call({"op" => JSON::Any.new("ping")})

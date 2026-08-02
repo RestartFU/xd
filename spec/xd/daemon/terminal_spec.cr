@@ -76,6 +76,59 @@ describe Xd::Daemon::Terminal do
     terminal.try(&.close)
   end
 
+  it "yields while terminal input is backpressured" do
+    output = IO::Memory.new
+    ready = Channel(Nil).new(1)
+    closed = Channel(Nil).new(1)
+    ready_sent = false
+    terminal = Xd::Daemon::Terminal.new(
+      "chat",
+      Dir.tempdir,
+      on_output: ->(_terminal : Xd::Daemon::Terminal, data : Bytes) {
+        output.write(data)
+        if !ready_sent && output.to_s.includes?("INPUT_READY")
+          ready_sent = true
+          ready.send(nil)
+        end
+      },
+      on_closed: ->(_terminal : Xd::Daemon::Terminal) {
+        closed.send(nil)
+      }
+    )
+    terminal.start
+    terminal.write(
+      "stty -echo; printf '\\nINPUT_READY\\n'; sleep 1; exit\n".to_slice
+    )
+    select
+    when ready.receive
+    when timeout(2.seconds)
+      fail "terminal input did not execute; output=#{output.to_s.inspect}"
+    end
+
+    terminal.write(("x" * (512 * 1024) + "\n").to_slice)
+    heartbeat = Channel(Time::Instant).new(1)
+    started = Time.instant
+    spawn do
+      sleep 50.milliseconds
+      heartbeat.send(Time.instant)
+    end
+    select
+    when tick = heartbeat.receive
+      (tick - started).should be < 250.milliseconds
+    when timeout(250.milliseconds)
+      fail "backpressured terminal input blocked the scheduler"
+    end
+
+    terminal.close
+    select
+    when closed.receive
+    when timeout(3.seconds)
+      fail "backpressured terminal did not close"
+    end
+  ensure
+    terminal.try(&.close)
+  end
+
   it "restores the host environment inside the shell" do
     output = IO::Memory.new
     closed = Channel(Nil).new
