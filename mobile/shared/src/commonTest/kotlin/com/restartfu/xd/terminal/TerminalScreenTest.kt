@@ -111,6 +111,18 @@ class TerminalScreenTest {
     }
 
     @Test
+    fun consumesStringTerminatorWithoutPrintingItsBackslash() {
+        val screen = TerminalScreen(columns = 12, rows = 1)
+        val escape = 27.toChar()
+
+        // OSC titles may be split between ESC and the backslash in ST.
+        screen.write("${escape}]0;title${escape}")
+        screen.write("${92.toChar()}prompt")
+
+        assertEquals("prompt", screen.row(0).trimEnd())
+    }
+
+    @Test
     fun aSplitMultibyteCharacterSurvivesTheBoundary() {
         val screen = TerminalScreen(columns = 4, rows = 1)
         val bytes = "é".encodeToByteArray()
