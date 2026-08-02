@@ -125,7 +125,9 @@ Start a pairing window on the machine that owns the workspaces:
 
 The daemon prints a single-use `XXXX-XXXX` code valid for five minutes. Install
 the Docker-built APK, open it, and enter the daemon's reachable hostname or
-Tailscale IP, port `4001`, device name, and code:
+Tailscale IP, port `4001`, and code. Android supplies its model automatically
+as the device name; there is no editable name field. The owner can rename the
+device later from **Manage Devices…**:
 
 ```sh
 adb install -r dist/mobile/xd-mobile-debug.apk

@@ -47,6 +47,7 @@ module Xd
       end
 
       def add_device(token_hash : String, name : String) : Nil
+        normalized = Daemon::DeviceStore.normalize_name(name)
         now = now_seconds
         @database.exec(
           <<-SQL,
@@ -54,7 +55,7 @@ module Xd
             VALUES (?, ?, ?, ?)
             SQL
           token_hash,
-          name.empty? ? "device" : name,
+          normalized,
           now,
           now
         )
@@ -79,6 +80,64 @@ module Xd
       rescue error : DB::Error
         raise Error.new(
           "Cannot authenticate the device: #{error.message}"
+        )
+      end
+
+      def list_devices : Array(Daemon::Device)
+        @database.query_all(
+          <<-SQL,
+            SELECT token_hash, name, created_at, last_seen
+              FROM devices
+             ORDER BY last_seen DESC, created_at DESC
+            SQL
+          as: {String, String, Int64, Int64}
+        ).map do |token_hash, name, created_at, last_seen|
+          Daemon::Device.new(token_hash, name, created_at, last_seen)
+        end
+      rescue error : DB::Error
+        raise Error.new(
+          "Cannot list paired devices: #{error.message}"
+        )
+      end
+
+      def rename_device(token_hash : String, name : String) : Nil
+        normalized = Daemon::DeviceStore.normalize_name(name)
+        renamed = @database.query_one?(
+          <<-SQL,
+            UPDATE devices
+               SET name = ?
+             WHERE token_hash = ?
+            RETURNING token_hash
+            SQL
+          normalized,
+          token_hash,
+          as: String
+        )
+        return if renamed
+
+        raise Daemon::DeviceStoreError.new("Unknown device.")
+      rescue error : DB::Error
+        raise Error.new(
+          "Cannot rename the device: #{error.message}"
+        )
+      end
+
+      def revoke_device(token_hash : String) : Nil
+        revoked = @database.query_one?(
+          <<-SQL,
+            DELETE FROM devices
+             WHERE token_hash = ?
+            RETURNING token_hash
+            SQL
+          token_hash,
+          as: String
+        )
+        return if revoked
+
+        raise Daemon::DeviceStoreError.new("Unknown device.")
+      rescue error : DB::Error
+        raise Error.new(
+          "Cannot revoke the device: #{error.message}"
         )
       end
 

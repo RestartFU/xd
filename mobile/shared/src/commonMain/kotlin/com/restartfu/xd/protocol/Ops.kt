@@ -1,5 +1,6 @@
 package com.restartfu.xd.protocol
 
+import com.restartfu.xd.automaticDeviceName
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.serialization.json.JsonObject
@@ -23,11 +24,20 @@ public enum class ChatOption(
 }
 
 public object Ops {
-    public fun pair(code: String, name: String): JsonObject = buildJsonObject {
-        put("op", "pair")
-        put("code", code)
-        put("name", name)
+    public fun pair(code: String, name: String): JsonObject {
+        require(name.isNotBlank()) { "Device name must not be blank" }
+        return buildJsonObject {
+            put("op", "pair")
+            put("code", code)
+            put("name", name)
+        }
     }
+
+    @Deprecated(
+        "Pairing uses the connecting platform's automatic device name.",
+    )
+    public fun pair(code: String): JsonObject =
+        pair(code, automaticDeviceName())
 
     public fun hello(token: String): JsonObject = buildJsonObject {
         put("op", "hello")

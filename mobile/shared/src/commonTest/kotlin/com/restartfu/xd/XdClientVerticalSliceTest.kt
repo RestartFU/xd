@@ -8,6 +8,7 @@ import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -20,11 +21,28 @@ import kotlinx.coroutines.test.runTest
 @OptIn(ExperimentalCoroutinesApi::class)
 class XdClientVerticalSliceTest {
     @Test
+    fun blankDeviceNameIsRejected() = runTest {
+        assertFailsWith<IllegalArgumentException> {
+            XdClient(
+                FakeSocketFactory(),
+                MemoryCredentialStore(),
+                backgroundScope,
+                deviceName = " ",
+            )
+        }
+    }
+
+    @Test
     fun pairTreeChatSendAndStream() = runTest {
         val factory = FakeSocketFactory()
-        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val client = XdClient(
+            factory,
+            MemoryCredentialStore(),
+            backgroundScope,
+            deviceName = "Test device",
+        )
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -32,10 +50,12 @@ class XdClientVerticalSliceTest {
         socket.connected(byteArrayOf(1, 2, 3))
         runCurrent()
         assertEquals("pair", socket.opAt(0))
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        assertTrue(socket.writes[0].decodeToString().contains(""""name":"Test device"""))
+        socket.receive("""{"ok":true,"token":"mobile-token","device":"Workstation"}""")
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
-        assertIs<Link.Up>(client.link.value)
+        val pair = assertIs<PairResult.Success>(pairing.await())
+        assertEquals("Workstation", pair.deviceName)
+        assertEquals(Link.Up("Workstation"), client.link.value)
 
         assertEquals("tree", socket.opAt(1))
         socket.receive(
@@ -155,7 +175,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -200,7 +220,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -234,7 +254,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -380,7 +400,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -414,7 +434,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         val socket = factory.latest
@@ -453,7 +473,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         val socket = factory.latest

@@ -30,12 +30,23 @@ import com.restartfu.xd.terminal.TerminalWire
 import com.restartfu.xd.voice.VoiceEvent
 import com.restartfu.xd.voice.VoiceWire
 
+private fun validatedDeviceName(name: String): String {
+    require(name.isNotBlank()) { "Device name must not be blank" }
+    return name
+}
+
 public class XdClient(
     socketFactory: PlatformSocketFactory,
     credentials: CredentialStore,
     private val scope: CoroutineScope,
+    deviceName: String = automaticDeviceName(),
 ) {
-    private val actor = ConnectionActor(socketFactory, credentials, scope)
+    private val actor = ConnectionActor(
+        socketFactory,
+        credentials,
+        scope,
+        validatedDeviceName(deviceName),
+    )
     private val treeStore = TreeStore(actor)
     private val treeRefreshRequests = Channel<Unit>(Channel.CONFLATED)
     private val sessions = MutableStateFlow<Map<String, SessionEntry>>(emptyMap())
@@ -112,8 +123,18 @@ public class XdClient(
         host: String,
         port: Int,
         code: String,
-        deviceName: String,
-    ): PairResult = actor.pair(host, port, code, deviceName)
+    ): PairResult = actor.pair(host, port, code)
+
+    @Deprecated(
+        "The device name comes from the connecting platform; the supplied name is ignored.",
+        ReplaceWith("pair(host, port, code)"),
+    )
+    public suspend fun pair(
+        host: String,
+        port: Int,
+        code: String,
+        _deviceName: String,
+    ): PairResult = pair(host, port, code)
 
     public suspend fun forget() {
         actor.forget()

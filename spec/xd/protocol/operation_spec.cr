@@ -6,7 +6,7 @@ describe Xd::Protocol::Operation do
       Xd::Protocol::Operation::Invalid
     ))
 
-    operations.size.should eq(53)
+    operations.size.should eq(56)
 
     operations.each do |operation|
       operation.wire_name.should_not be_empty
@@ -27,5 +27,8 @@ describe Xd::Protocol::Operation do
     Xd::Protocol::Operation::Tree.authentication_required?.should be_true
     Xd::Protocol::Operation::Send.authentication_required?.should be_true
     Xd::Protocol::Operation::Ping.authentication_required?.should be_true
+    Xd::Protocol::Operation::Devices.local_only?.should be_true
+    Xd::Protocol::Operation::RenameDevice.local_only?.should be_true
+    Xd::Protocol::Operation::RevokeDevice.local_only?.should be_true
   end
 end

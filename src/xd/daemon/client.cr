@@ -5,6 +5,7 @@ require "socket"
 require "../protocol/frame"
 require "../protocol/message"
 require "./endpoint"
+require "./errors"
 require "./local_ipc"
 
 module Xd
@@ -30,6 +31,9 @@ module Xd
       MAX_PENDING_EVENTS     = 65_536
 
       class Error < Exception
+      end
+
+      class AuthorizationError < Error
       end
 
       class TimeoutError < Error
@@ -90,12 +94,20 @@ module Xd
             "token" => JSON::Any.new(token),
           })
           client
+        rescue error : Error
+          client.close
+          if error.message == UNKNOWN_DEVICE_ERROR
+            raise AuthorizationError.new(error.message)
+          end
+          raise error
         rescue error
           client.close
           raise error
         end
       end
 
+      # The connecting client supplies its automatic name; the daemon stores it
+      # and the local owner may rename it later.
       def self.pair_remote(
         host : String,
         port : Int,

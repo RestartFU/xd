@@ -1,5 +1,6 @@
 package com.restartfu.xd.net
 
+import com.restartfu.xd.automaticDeviceName
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.protocol.HelloReply
@@ -91,6 +92,7 @@ internal class ConnectionActor(
     private val socketFactory: PlatformSocketFactory,
     private val credentialStore: CredentialStore,
     private val scope: CoroutineScope,
+    private val deviceName: String = automaticDeviceName(),
 ) {
     private val mailbox = Channel<Message>(MAILBOX_CAPACITY)
     private val backoff = Backoff()
@@ -135,12 +137,10 @@ internal class ConnectionActor(
         host: String,
         port: Int,
         code: String,
-        deviceName: String,
     ): PairResult {
         require(host.isNotBlank()) { "Host must not be blank" }
         require(port in 1..65535) { "Port must be between 1 and 65535" }
         require(code.isNotBlank()) { "Pairing code must not be blank" }
-        require(deviceName.isNotBlank()) { "Device name must not be blank" }
 
         val result = CompletableDeferred<PairResult>()
         mailbox.send(
@@ -154,6 +154,17 @@ internal class ConnectionActor(
         )
         return result.await()
     }
+
+    @Deprecated(
+        "The device name comes from the connecting platform; the supplied name is ignored.",
+        ReplaceWith("pair(host, port, code)"),
+    )
+    suspend fun pair(
+        host: String,
+        port: Int,
+        code: String,
+        _deviceName: String,
+    ): PairResult = pair(host, port, code)
 
     suspend fun forget() {
         val done = CompletableDeferred<Unit>()
@@ -348,15 +359,14 @@ internal class ConnectionActor(
         leafCertificateDer = message.certificateDer.copyOf()
         val attempt = pairing
         val reply = CompletableDeferred<SequencedReply>()
-        val request = if (attempt != null) {
-            Ops.pair(attempt.code, attempt.deviceName)
-        } else {
-            val saved = credentials
-                ?: return protocolFatal("Connected without credentials or pairing")
-            Ops.hello(saved.token)
-        }
-
         try {
+            val request = if (attempt != null) {
+                Ops.pair(attempt.code, attempt.deviceName)
+            } else {
+                val saved = credentials
+                    ?: return protocolFatal("Connected without credentials or pairing")
+                Ops.hello(saved.token)
+            }
             calls.enqueue(request, reply)
         } catch (error: Throwable) {
             handleClosed(
@@ -426,8 +436,8 @@ internal class ConnectionActor(
                 pairing = null
                 _hasCredentials.value = true
                 backoff.reset()
-                _link.value = Link.Up(attempt.deviceName)
-                attempt.result.complete(PairResult.Success(attempt.deviceName))
+                _link.value = Link.Up(reply.device)
+                attempt.result.complete(PairResult.Success(reply.device))
             } else {
                 val reply = value.decodeReply<HelloReply>()
                 if (reply.version != PROTOCOL_VERSION) {

@@ -72,6 +72,44 @@ describe Xd::Remote::Connection do
     end
   end
 
+
+  it "stops retrying and forgets credentials after revocation" do
+    with_remote_connection do |_socket, path, _store, _engine|
+      credentials = Xd::Remote::Credentials.new(
+        "test-host",
+        4001,
+        "revoked-token",
+        "ab" * 32
+      )
+      file = Xd::Remote::CredentialsFile.new(path)
+      file.save(credentials)
+      attempts = 0
+      connector = ->(_stored : Xd::Remote::Credentials) {
+        attempts += 1
+        raise Xd::Daemon::Client::AuthorizationError.new(
+          "Unknown device. Pair first."
+        )
+      }
+      connection = Xd::Remote::Connection.new(
+        file,
+        10.milliseconds,
+        connector
+      )
+
+      begin
+        await_remote_state(
+          connection,
+          Xd::Remote::ConnectionState::Unconfigured
+        )
+        attempts.should eq(1)
+        File.exists?(path).should be_false
+        connection.snapshot.error.should eq("Unknown device. Pair first.")
+      ensure
+        connection.close
+      end
+    end
+  end
+
   it "isolates state subscriber failures" do
     with_remote_connection do |_socket, path, _store, _engine|
       connection = Xd::Remote::Connection.new(

@@ -49,14 +49,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         host: String,
         port: Int,
         code: String,
-        deviceName: String,
     ) {
         if (_pairing.value) return
         _pairing.value = true
         _error.value = null
         viewModelScope.launch {
             try {
-                when (val result = client.pair(host, port, code, deviceName)) {
+                when (val result = client.pair(host, port, code)) {
                     is PairResult.Success -> Unit
                     is PairResult.Failure -> _error.value = result.message
                 }
