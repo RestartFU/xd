@@ -35,7 +35,6 @@ public object Ops {
 
     @Deprecated(
         "Pairing uses the connecting platform's automatic device name.",
-        ReplaceWith("pair(code, automaticDeviceName())"),
     )
     public fun pair(code: String): JsonObject =
         pair(code, automaticDeviceName())

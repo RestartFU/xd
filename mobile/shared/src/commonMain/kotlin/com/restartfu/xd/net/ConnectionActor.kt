@@ -359,15 +359,14 @@ internal class ConnectionActor(
         leafCertificateDer = message.certificateDer.copyOf()
         val attempt = pairing
         val reply = CompletableDeferred<SequencedReply>()
-        val request = if (attempt != null) {
-            Ops.pair(attempt.code, attempt.deviceName)
-        } else {
-            val saved = credentials
-                ?: return protocolFatal("Connected without credentials or pairing")
-            Ops.hello(saved.token)
-        }
-
         try {
+            val request = if (attempt != null) {
+                Ops.pair(attempt.code, attempt.deviceName)
+            } else {
+                val saved = credentials
+                    ?: return protocolFatal("Connected without credentials or pairing")
+                Ops.hello(saved.token)
+            }
             calls.enqueue(request, reply)
         } catch (error: Throwable) {
             handleClosed(

@@ -30,6 +30,11 @@ import com.restartfu.xd.terminal.TerminalWire
 import com.restartfu.xd.voice.VoiceEvent
 import com.restartfu.xd.voice.VoiceWire
 
+private fun validatedDeviceName(name: String): String {
+    require(name.isNotBlank()) { "Device name must not be blank" }
+    return name
+}
+
 public class XdClient(
     socketFactory: PlatformSocketFactory,
     credentials: CredentialStore,
@@ -40,7 +45,7 @@ public class XdClient(
         socketFactory,
         credentials,
         scope,
-        deviceName,
+        validatedDeviceName(deviceName),
     )
     private val treeStore = TreeStore(actor)
     private val treeRefreshRequests = Channel<Unit>(Channel.CONFLATED)

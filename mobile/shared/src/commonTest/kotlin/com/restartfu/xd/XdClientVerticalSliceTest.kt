@@ -8,6 +8,7 @@ import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -19,6 +20,18 @@ import kotlinx.coroutines.test.runTest
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XdClientVerticalSliceTest {
+    @Test
+    fun blankDeviceNameIsRejected() = runTest {
+        assertFailsWith<IllegalArgumentException> {
+            XdClient(
+                FakeSocketFactory(),
+                MemoryCredentialStore(),
+                backgroundScope,
+                deviceName = " ",
+            )
+        }
+    }
+
     @Test
     fun pairTreeChatSendAndStream() = runTest {
         val factory = FakeSocketFactory()

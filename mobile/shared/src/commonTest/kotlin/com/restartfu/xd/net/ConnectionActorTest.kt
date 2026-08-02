@@ -78,6 +78,29 @@ class ConnectionActorTest {
     }
 
     @Test
+    fun invalidPairingNameCompletesWithFailure() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(
+            factory,
+            MemoryCredentialStore(),
+            backgroundScope,
+            deviceName = " ",
+        )
+        val result = async {
+            actor.pair("daemon", 4001, "ABCD-EFGH")
+        }
+        runCurrent()
+
+        factory.latest.connected()
+        runCurrent()
+
+        val failure = assertIs<PairResult.Failure>(result.await())
+        assertEquals("Device name must not be blank", failure.message)
+        assertEquals(Link.Idle, actor.link.value)
+        assertTrue(factory.latest.closed)
+    }
+
+    @Test
     fun backgroundingCompletesAndClearsPairingAttempt() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
