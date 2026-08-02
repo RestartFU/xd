@@ -22,7 +22,12 @@ class XdClientVerticalSliceTest {
     @Test
     fun pairTreeChatSendAndStream() = runTest {
         val factory = FakeSocketFactory()
-        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val client = XdClient(
+            factory,
+            MemoryCredentialStore(),
+            backgroundScope,
+            deviceName = "Test device",
+        )
         val pairing = async {
             client.pair("daemon", 4001, "ABCD-EFGH")
         }
@@ -32,6 +37,7 @@ class XdClientVerticalSliceTest {
         socket.connected(byteArrayOf(1, 2, 3))
         runCurrent()
         assertEquals("pair", socket.opAt(0))
+        assertTrue(socket.writes[0].decodeToString().contains(""""name":"Test device"""))
         socket.receive("""{"ok":true,"token":"mobile-token","device":"Workstation"}""")
         runCurrent()
         val pair = assertIs<PairResult.Success>(pairing.await())

@@ -5,6 +5,7 @@ require "socket"
 require "../protocol/frame"
 require "../protocol/message"
 require "./endpoint"
+require "./errors"
 require "./local_ipc"
 
 module Xd
@@ -95,7 +96,7 @@ module Xd
           client
         rescue error : Error
           client.close
-          if error.message == "Unknown device. Pair first."
+          if error.message == UNKNOWN_DEVICE_ERROR
             raise AuthorizationError.new(error.message)
           end
           raise error

@@ -10,6 +10,7 @@ require "../version"
 require "../workspace/service"
 require "../workspace/worktrees"
 require "./connection"
+require "./errors"
 require "./event_bus"
 require "./filesystem"
 require "./images"
@@ -283,8 +284,12 @@ module Xd
       end
 
       def close : Nil
-        @active_connections.values.each(&.close)
-        @active_connections.clear
+        connections = @command_mutex.synchronize do
+          values = @active_connections.values
+          @active_connections.clear
+          values
+        end
+        connections.each(&.close)
         @workspace_monitor.close
         @repository_monitor.close
         @terminals.close
@@ -505,7 +510,7 @@ module Xd
         return Protocol::Response.error("hello needs a token") unless token
 
         name = @store.device_name(token_hash(token))
-        return Protocol::Response.error("Unknown device. Pair first.") unless name
+        return Protocol::Response.error(UNKNOWN_DEVICE_ERROR) unless name
 
         connection.authenticate(token_hash(token))
         @active_connections[connection.object_id] = connection

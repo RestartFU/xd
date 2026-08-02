@@ -24,12 +24,12 @@ public enum class ChatOption(
 }
 
 public object Ops {
-    public fun pair(code: String, deviceName: String): JsonObject {
-        require(deviceName.isNotBlank()) { "Device name must not be blank" }
+    public fun pair(code: String, name: String): JsonObject {
+        require(name.isNotBlank()) { "Device name must not be blank" }
         return buildJsonObject {
             put("op", "pair")
             put("code", code)
-            put("name", deviceName)
+            put("name", name)
         }
     }
 

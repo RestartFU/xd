@@ -13,6 +13,7 @@ module Xd
       @list : Gtk::ListBox
       @stack : Gtk::Stack
       @status : Adw::StatusPage
+      @error : Gtk::Label
       @endpoint : Daemon::Endpoint
       @parent : Gtk::Window
       @closed = false
@@ -39,6 +40,15 @@ module Xd
         @status.title = "No Paired Devices"
         @status.description = "Devices paired with this daemon appear here."
 
+        @error = Gtk::Label.new("")
+        @error.xalign = 0_f32
+        @error.wrap = true
+        @error.margin_top = 12
+        @error.margin_start = 12
+        @error.margin_end = 12
+        @error.add_css_class("error")
+        @error.visible = false
+
         @stack = Gtk::Stack.new
         @stack.vexpand = true
         @stack.add_named(@status, "empty")
@@ -57,7 +67,11 @@ module Xd
 
         toolbar = Adw::ToolbarView.new
         toolbar.add_top_bar(header)
-        toolbar.content = @stack
+        body = Gtk::Box.new(:vertical, 0)
+        body.vexpand = true
+        body.append(@error)
+        body.append(@stack)
+        toolbar.content = body
         @dialog.child = toolbar
         @dialog.closed_signal.connect { @closed = true }
       end
@@ -76,6 +90,7 @@ module Xd
       end
 
       private def apply(response : Hash(String, JSON::Any)) : Nil
+        @error.visible = false
         while child = @list.first_child
           @list.remove(child)
         end
@@ -108,7 +123,7 @@ module Xd
         connected : Bool,
         last_seen : Int64,
       ) : Nil
-        state = connected ? "Connected" : "Last seen #{last_seen}"
+        state = connected ? "Connected" : "Last seen #{Time.unix(last_seen).to_local}"
         row = Adw::ActionRow.new(title: name, subtitle: state)
 
         rename = Gtk::Button.new_from_icon_name("document-edit-symbolic")
@@ -139,7 +154,9 @@ module Xd
             "op"     => JSON::Any.new("rename-device"),
             "device" => JSON::Any.new(id),
             "name"   => JSON::Any.new(name),
-          }) { |_response| load }
+          }, on_error: ->(message : String) { show_action_error(message) }) { |_response|
+            load
+          }
         end
       end
 
@@ -153,13 +170,16 @@ module Xd
           request({
             "op"     => JSON::Any.new("revoke-device"),
             "device" => JSON::Any.new(id),
-          }) { |_response| load }
+          }, on_error: ->(message : String) { show_action_error(message) }) { |_response|
+            load
+          }
         end
       end
 
       private def request(
         request : Hash(String, JSON::Any),
-        &on_success : Hash(String, JSON::Any) -> Nil,
+        on_error : Proc(String, Nil)? = nil,
+        &on_success : Hash(String, JSON::Any) -> Nil
       ) : Nil
         spawn do
           response : Hash(String, JSON::Any)? = nil
@@ -172,7 +192,11 @@ module Xd
           GLib.idle_add do
             unless @closed
               if message = error_message
-                show_error(message)
+                if callback = on_error
+                  callback.call(message)
+                else
+                  show_error(message)
+                end
               elsif body = response
                 on_success.call(body)
               end
@@ -182,7 +206,13 @@ module Xd
         end
       end
 
+      private def show_action_error(message : String) : Nil
+        @error.text = message
+        @error.visible = true
+      end
+
       private def show_error(message : String) : Nil
+        @error.visible = false
         @status.title = "Device Request Failed"
         @status.description = message
         @stack.visible_child_name = "empty"

@@ -119,7 +119,7 @@ The displayed `XXXX-XXXX` code is valid for five minutes and one matching
 submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
 
 ```json
-{"op":"pair","code":"4F2K-9QX1","name":"Pixel 9"}
+{"op":"pair","code":"4F2K-9QX7","name":"Pixel 9"}
 {"ok":true,"token":"base64 device token","device":"Pixel 9"}
 ```
 

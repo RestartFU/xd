@@ -224,7 +224,7 @@ module Xd
       private def set_busy(busy : Bool) : Nil
         @busy = busy
         @refresh.sensitive = !busy
-        @refresh.label = busy ? "Opening…" : "New Code"
+        @refresh.label = busy ? "Opening…" : "Create Code"
       end
 
       private def dismiss : Nil

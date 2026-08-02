@@ -32,8 +32,8 @@ normative [wire protocol](protocol.md).
 
 ## Pairing
 
-The daemon prints a code (`4F2K-9QX1`) good for five minutes and one use. The
-The connecting client supplies its automatic device name with the code and
+The daemon prints a code (`4F2K-9QX7`) good for five minutes and one use. The
+connecting client supplies its automatic device name with the code and
 receives a long-lived device token saved in its settings; the owner can rename
 it afterward. The daemon keeps paired devices in a table with owner-managed
 names and last-seen times, each revocable on its own. The local **Manage
