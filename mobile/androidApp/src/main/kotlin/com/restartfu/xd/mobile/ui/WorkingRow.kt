@@ -11,6 +11,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -72,7 +73,7 @@ internal fun elapsedSeconds(startedAtMillis: Long?): Long {
 }
 
 @Composable
-private fun Dots(color: Color) {
+internal fun Dots(color: Color, contentDescription: String? = null) {
     val lit by produceState(0) {
         while (true) {
             delay(DOT_FRAME_MILLIS)
@@ -85,6 +86,9 @@ private fun Dots(color: Color) {
                 val shade = if (index < lit) color else color.copy(alpha = DIM_ALPHA)
                 withStyle(SpanStyle(color = shade)) { append(".") }
             }
+        },
+        modifier = Modifier.semantics {
+            contentDescription?.let { this.contentDescription = it }
         },
         style = MaterialTheme.typography.bodySmall,
     )
