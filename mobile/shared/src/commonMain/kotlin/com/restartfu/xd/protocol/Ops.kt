@@ -164,6 +164,44 @@ public object Ops {
         if (!title.isNullOrBlank()) put("title", title)
     }
 
+    public fun newFolder(
+        name: String,
+        parentId: String? = null,
+    ): JsonObject = buildJsonObject {
+        require(
+            name.isNotBlank() &&
+                !name.startsWith('.') &&
+                '/' !in name &&
+                '\\' !in name
+        ) { "A folder name cannot be empty or hidden, or contain a path separator" }
+        require(parentId == null || parentId.isNotBlank()) { "Parent id must not be blank" }
+        put("op", "new-folder")
+        put("name", name)
+        if (parentId != null) put("parent", parentId)
+    }
+
+    public fun moveFolder(
+        folderId: String,
+        parentId: String? = null,
+    ): JsonObject = buildJsonObject {
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        require(parentId == null || parentId.isNotBlank()) { "Parent id must not be blank" }
+        put("op", "move-folder")
+        put("folder", folderId)
+        if (parentId != null) put("parent", parentId)
+    }
+
+    public fun moveChat(
+        chatId: String,
+        folderId: String,
+    ): JsonObject = buildJsonObject {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        put("op", "move-chat")
+        put("chat", chatId)
+        put("folder", folderId)
+    }
+
     /**
      * Reads a stored image.
      *

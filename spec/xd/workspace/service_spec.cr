@@ -196,4 +196,17 @@ describe Xd::Workspace::Service do
       end
     end
   end
+
+  it "does not move folders inside repository leaves" do
+    with_workspace do |service, _store, _root|
+      repository = service.create_folder(nil, "Repository")
+      source = service.create_folder(nil, "Source")
+      Dir.mkdir(File.join(service.find_folder(repository), ".git"))
+
+      expect_raises(Xd::Workspace::Error, /inside a repository/) do
+        service.move_folder(source, repository)
+      end
+      service.find_folder(source).should end_with(File.join("Source"))
+    end
+  end
 end

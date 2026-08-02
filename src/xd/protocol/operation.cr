@@ -36,6 +36,7 @@ module Xd
       SetFolderSettings
       NewChat
       RenameChat
+      MoveChat
       DeleteChat
       Chat
       SetOption
@@ -91,6 +92,7 @@ module Xd
         when SetFolderSettings  then "set-folder-settings"
         when NewChat            then "new-chat"
         when RenameChat         then "rename-chat"
+        when MoveChat           then "move-chat"
         when DeleteChat         then "delete-chat"
         when Chat               then "chat"
         when SetOption          then "set-option"
@@ -149,6 +151,7 @@ module Xd
         when "set-folder-settings"  then SetFolderSettings
         when "new-chat"             then NewChat
         when "rename-chat"          then RenameChat
+        when "move-chat"            then MoveChat
         when "delete-chat"          then DeleteChat
         when "chat"                 then Chat
         when "set-option"           then SetOption

@@ -26,6 +26,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairing = MutableStateFlow(false)
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
+    private val _creatingWorkspace = MutableStateFlow(false)
+    private val _moving = MutableStateFlow(false)
     private val _createdChat = MutableStateFlow<String?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
@@ -35,6 +37,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
+    val moving: StateFlow<Boolean> = _moving.asStateFlow()
     private val _daemon = MutableStateFlow<DaemonUpdateReply?>(null)
     private val _daemonError = MutableStateFlow<String?>(null)
     private val _updating = MutableStateFlow(false)
@@ -97,6 +100,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not create a chat"
             } finally {
                 _creatingChat.value = false
+            }
+        }
+    }
+
+    fun createWorkspace(name: String) {
+        if (_creatingWorkspace.value) return
+        _creatingWorkspace.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.createFolder(name = name)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not create the workspace"
+            } finally {
+                _creatingWorkspace.value = false
+            }
+        }
+    }
+
+    fun moveFolder(folderId: String, parentId: String?) {
+        if (_moving.value) return
+        _moving.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.moveFolder(folderId, parentId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not move the folder"
+            } finally {
+                _moving.value = false
+            }
+        }
+    }
+
+    fun moveChat(chatId: String, folderId: String) {
+        if (_moving.value) return
+        _moving.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.moveChat(chatId, folderId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not move the chat"
+            } finally {
+                _moving.value = false
             }
         }
     }

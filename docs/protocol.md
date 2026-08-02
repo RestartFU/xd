@@ -290,6 +290,17 @@ acting at once are therefore ordered by the daemon rather than racing.
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
 its folder's backend and model.
 
+### `move-chat`
+
+```json
+{"op":"move-chat","chat":"chat-9","folder":"folder-2"}
+{"ok":true}
+```
+
+Both `chat` and `folder` are required. The target folder must exist. Moving a
+chat changes which folder settings it inherits; the chat id and transcript stay
+the same. The daemon broadcasts a `tree` event after a successful move.
+
 ### `send`
 
 ```json
@@ -387,8 +398,12 @@ rejected. `src/xd/voice/data.cr` writes and validates this header.
 ### Folder and chat mutations
 
 `new-folder`, `rename-folder`, `move-folder`, `trash-folder`, `rename-chat`,
-`delete-chat`, `set-folder-context`, and `set-folder-settings` all reply with
-`ok` alone and broadcast a `tree` event.
+`move-chat`, `delete-chat`, `set-folder-context`, and `set-folder-settings` all
+reply with `ok` alone and broadcast a `tree` event.
+
+`move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
+to move the folder to the workspace root. A folder cannot be moved into itself
+or one of its descendants, and the daemon rejects a destination name collision.
 
 ## Events
 

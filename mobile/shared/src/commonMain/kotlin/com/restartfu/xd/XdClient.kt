@@ -79,6 +79,9 @@ public class XdClient(
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
                 if (eventName == "tree") {
                     requestTreeRefresh()
+                    sessions.value.values.forEach { entry ->
+                        entry.core.requestReload()
+                    }
                 }
                 val chatId = (event.value["chat"] as? JsonPrimitive)?.contentOrNull
                 if (chatId != null && eventName in TURN_LIFECYCLE_EVENTS) {
@@ -196,6 +199,45 @@ public class XdClient(
             reply.id?.takeIf(String::isNotBlank)
                 ?: throw RemoteProtocolException("New chat reply has no id")
         }
+    }
+
+    public suspend fun createFolder(
+        name: String,
+        parentId: String? = null,
+    ): String {
+        val value = actor.call(Ops.newFolder(name, parentId))
+        val id = actor.decodeReply(value) {
+            val reply = it.decodeReply<DoneReply>()
+            reply.id?.takeIf(String::isNotBlank)
+                ?: throw RemoteProtocolException("New folder reply has no id")
+        }
+        // Do not wait for the daemon's tree broadcast: show the new workspace as
+        // soon as the creation dialog closes.
+        requestTreeRefresh()
+        return id
+    }
+
+    public suspend fun moveFolder(
+        folderId: String,
+        parentId: String? = null,
+    ) {
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        actor.call(Ops.moveFolder(folderId, parentId))
+        requestTreeRefresh()
+        // Moving a folder can change inherited settings for every chat below it.
+        sessions.value.values.forEach { entry -> entry.core.requestReload() }
+    }
+
+    public suspend fun moveChat(
+        chatId: String,
+        folderId: String,
+    ) {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        actor.call(Ops.moveChat(chatId, folderId))
+        requestTreeRefresh()
+        // A chat inherits backend, model, and workdir from its folder.
+        sessions.value[chatId]?.core?.requestReload()
     }
 
     private fun takeSessions(): Map<String, SessionEntry> {

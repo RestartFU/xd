@@ -728,6 +728,54 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "moves folders and individual chats through the protocol" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      source_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Source",
+      }.to_json)["id"].as_s
+      target_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Target",
+      }.to_json)["id"].as_s
+      child_id = engine.dispatch(local, {
+        "op"     => "new-folder",
+        "parent" => source_id,
+        "name"   => "Child",
+      }.to_json)["id"].as_s
+      chat_id = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => source_id,
+        "title"  => "Movable",
+      }.to_json)["id"].as_s
+
+      moved_folder = engine.process(local, {
+        "op"     => "move-folder",
+        "folder" => child_id,
+        "parent" => target_id,
+      }.to_json)
+      moved_folder.response.success?.should be_true
+      moved_folder.events.map { |event| event["event"].as_s }
+        .should eq(["tree"])
+
+      moved_chat = engine.process(local, {
+        "op"     => "move-chat",
+        "chat"   => chat_id,
+        "folder" => target_id,
+      }.to_json)
+      moved_chat.response.success?.should be_true
+      moved_chat.events.map { |event| event["event"].as_s }
+        .should eq(["tree"])
+
+      tree = engine.dispatch(local, %({"op":"tree"}))
+      child = tree["folders"].as_a.find { |folder| folder["id"].as_s == child_id }
+      child.not_nil!["parent"].as_s.should eq(target_id)
+      chat = tree["chats"].as_a.find { |item| item["id"].as_s == chat_id }
+      chat.not_nil!["folder"].as_s.should eq(target_id)
+    end
+  end
+
   it "opens a new chat in a hidden non-Git working directory" do
     with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
