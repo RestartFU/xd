@@ -3,6 +3,7 @@ require "file_utils"
 require "random/secure"
 require "../../../src/xd/daemon/server"
 require "../../../src/xd/remote/connection"
+require "../../support/local_endpoint"
 
 private def with_remote_connection(
   & : String, String, Xd::Storage::Store, Xd::Daemon::Engine ->
@@ -99,6 +100,47 @@ describe Xd::Remote::Connection do
     end
   end
 
+  it "does not publish connected for an already closed client" do
+    with_remote_connection do |socket, path, _store, engine|
+      server = Xd::Daemon::Server.new(engine)
+      server.listen_local(socket)
+      paired_client = Xd::Daemon::Client.local(socket)
+      paired_client.close
+      pairer = ->(_host : String, _port : Int32, _code : String, _name : String) {
+        Xd::Daemon::RemotePairing.new(
+          paired_client,
+          "paired-token",
+          "cd" * 32
+        )
+      }
+      connector = ->(_credentials : Xd::Remote::Credentials) {
+        raise IO::Error.new("offline")
+      }
+      connection = Xd::Remote::Connection.new(
+        Xd::Remote::CredentialsFile.new(path),
+        10.milliseconds,
+        connector,
+        pairer
+      )
+      states = [] of Xd::Remote::ConnectionState
+      state_lock = Mutex.new
+      connection.on_state do |snapshot|
+        state_lock.synchronize { states << snapshot.state }
+      end
+
+      begin
+        connection.pair("remote.example", 4242, "ABCD1234")
+        await_remote_state(connection, Xd::Remote::ConnectionState::Offline)
+        state_lock.synchronize do
+          states.should_not contain(Xd::Remote::ConnectionState::Connected)
+        end
+      ensure
+        connection.close
+        server.close
+      end
+    end
+  end
+
   it "isolates event subscriber failures" do
     with_remote_connection do |socket, path, _store, engine|
       server = Xd::Daemon::Server.new(engine)
@@ -188,6 +230,76 @@ describe Xd::Remote::Connection do
         states.empty?.should be_false
       ensure
         connection.close
+        server.close
+      end
+    end
+  end
+
+  it "reconnects after a request times out on a stale socket" do
+    with_remote_connection do |socket, path, _store, engine|
+      credentials = Xd::Remote::Credentials.new(
+        "test-host",
+        4001,
+        "test-token",
+        "ab" * 32
+      )
+      Xd::Remote::CredentialsFile.new(path).save(credentials)
+      stale_path = File.join(File.dirname(socket), "stale.sock")
+      stale = XdSpec::LocalEndpoint::Server.new(stale_path)
+      server = Xd::Daemon::Server.new(engine)
+      server.listen_local(socket)
+      first = true
+      connector_lock = Mutex.new
+      connector = ->(_stored : Xd::Remote::Credentials) {
+        use_stale = connector_lock.synchronize do
+          value = first
+          first = false
+          value
+        end
+        if use_stale
+          Xd::Daemon::Client.local(
+            stale_path,
+            request_timeout: 20.milliseconds
+          )
+        else
+          Xd::Daemon::Client.local(socket)
+        end
+      }
+      connection = Xd::Remote::Connection.new(
+        Xd::Remote::CredentialsFile.new(path),
+        10.milliseconds,
+        connector
+      )
+      spawn do
+        stale_client = stale.accept
+        stale_client.gets
+        sleep 1.second
+      ensure
+        stale_client.try(&.close)
+      end
+
+      begin
+        await_remote_state(
+          connection,
+          Xd::Remote::ConnectionState::Connected
+        )
+        expect_raises(
+          Xd::Daemon::Client::TimeoutError,
+          "Daemon request timed out."
+        ) do
+          connection.call({"op" => JSON::Any.new("ping")})
+        end
+
+        await_remote_state(
+          connection,
+          Xd::Remote::ConnectionState::Connected
+        )
+        connection.call({
+          "op" => JSON::Any.new("ping"),
+        })["ok"].as_bool.should be_true
+      ensure
+        connection.close
+        stale.close
         server.close
       end
     end

@@ -142,6 +142,8 @@ module Xd
       @working_dots : Dots?
       @working_timer = 0_u32
       @working_started_at : Time::Instant?
+      @subscriptions = [] of {Daemon::Endpoint, Int64}
+      @remote_state_subscription : Int64?
       @stream_buffer = ""
       @stream_source : String?
       @stream_reveal = TextReveal.new
@@ -534,6 +536,22 @@ module Xd
 
         @widget.close_request_signal.connect do
           @closed = true
+          @subscriptions.each do |endpoint, id|
+            endpoint.unsubscribe(id)
+          end
+          @subscriptions.clear
+          if id = @remote_state_subscription
+            @remote.unsubscribe(id)
+            @remote_state_subscription = nil
+          end
+          unless @working_timer == 0
+            GLib.source_remove(@working_timer)
+            @working_timer = 0_u32
+          end
+          unless @stream_render_timer == 0
+            GLib.source_remove(@stream_render_timer)
+            @stream_render_timer = 0_u32
+          end
           @transcript_pages.each_value(&.clear_workflows)
           @event_inbox.clear
           @tool_panel.close
@@ -546,8 +564,9 @@ module Xd
 
         subscribe(@local_client)
         subscribe(@remote)
-        @remote.on_state do |snapshot|
+        @remote_state_subscription = @remote.on_state do |snapshot|
           GLib.idle_add do
+            next false if @closed
             @tool_panel.remote_connection_changed(
               snapshot.state.connected?,
               snapshot.error
@@ -813,13 +832,15 @@ module Xd
       end
 
       private def subscribe(endpoint : Daemon::Endpoint) : Nil
-        endpoint.subscribe do |event|
+        id = endpoint.subscribe do |event|
+          next if @closed
           if @event_inbox.push(endpoint, event)
             GLib.idle_add do
               drain_events
             end
           end
         end
+        @subscriptions << {endpoint, id}
       end
 
       private def drain_events : Bool
@@ -2027,10 +2048,17 @@ module Xd
 
         if animated
           update_working_label
-          if @working_timer == 0 && !RENDER_SAFE_MODE
+          # Safe mode suppresses continuous decoration redraws, but the
+          # elapsed label still needs its low-frequency clock tick.
+          if @working_timer == 0
             @working_timer = GLib.timeout(1.second) do
-              update_working_label
-              true
+              if @closed
+                @working_timer = 0_u32
+                false
+              else
+                update_working_label
+                true
+              end
             end
           end
         elsif @working_timer != 0

@@ -283,6 +283,7 @@ module Xd
             @master = master
             @io = IO::FileDescriptor.new(master)
             @io.not_nil!.close_on_exec = true
+            @io.not_nil!.sync = true
           rescue error
             if pid > 0
               LibC.kill(-pid, LibC::SIGKILL)
@@ -337,9 +338,12 @@ module Xd
         loop do
           @input_ready.receive
           while data = next_input
-            master = @lock.synchronize { @master }
-            break if master < 0
-            write_all(master, data)
+            io = @lock.synchronize { @io }
+            break unless io
+            # Synchronous buffered writes reach the evented file descriptor
+            # immediately, yielding on PTY backpressure instead of blocking a
+            # daemon worker thread.
+            io.write(data)
             @lock.synchronize do
               @pending_bytes -= data.size
             end
@@ -353,30 +357,6 @@ module Xd
 
       private def next_input : Bytes?
         @lock.synchronize { @pending_input.shift? }
-      end
-
-      private def write_all(master : Int32, data : Bytes) : Nil
-        offset = 0
-        while offset < data.size
-          count = LibC.write(
-            master,
-            data.to_unsafe + offset,
-            data.size - offset
-          )
-          if count > 0
-            offset += count.to_i
-            next
-          end
-
-          error = Errno.value
-          if error == Errno::EINTR
-            next
-          elsif error == Errno::EAGAIN || error == Errno::EWOULDBLOCK
-            sleep 5.milliseconds
-            next
-          end
-          raise IO::Error.new("Cannot write terminal: #{error.message}")
-        end
       end
 
       private def natural_exit : Nil

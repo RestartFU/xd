@@ -89,6 +89,12 @@ module Xd
           )
         end
         client.call(request)
+      rescue error : Daemon::Client::TimeoutError
+        # A timed-out request can leave a half-open TCP connection looking
+        # healthy after the daemon host suspends or changes networks. Retire
+        # it so the disconnect callback starts the normal reconnect loop.
+        client.try(&.close)
+        raise error
       end
 
       def subscribe(
@@ -300,7 +306,6 @@ module Xd
         credentials : Credentials,
         generation : Int64,
       ) : Bool
-        snapshot : ConnectionSnapshot? = nil
         accepted = @lock.synchronize do
           next false if @closed || @generation != generation
 
@@ -308,7 +313,6 @@ module Xd
           @client = client
           @state = ConnectionState::Connected
           @error = nil
-          snapshot = snapshot_locked
           true
         end
         return false unless accepted
@@ -317,7 +321,14 @@ module Xd
         client.on_disconnect do |message|
           disconnected(client, generation, message)
         end
-        publish_state(snapshot.not_nil!)
+        snapshot = @lock.synchronize do
+          next unless !@closed && @generation == generation
+          next unless @client.same?(client) && @state.connected?
+          snapshot_locked
+        end
+        return false unless snapshot
+
+        publish_state(snapshot)
         true
       end
 
