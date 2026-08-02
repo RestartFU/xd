@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonArray
 public data class PairReply(
     val ok: Boolean,
     val token: String,
+    val device: String = "Unknown device",
 )
 
 @Serializable

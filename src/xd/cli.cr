@@ -15,6 +15,7 @@ module Xd
       property port = 4001
       property bind = "::"
       property pair = false
+      property device_name = "Unknown device"
       property root = AppPaths.workspaces
       property database = AppPaths.database
       property socket = AppPaths.local_socket
@@ -91,6 +92,9 @@ module Xd
         command.on("--pair", "print a five-minute pairing code") do
           options.pair = true
         end
+        command.on("--device-name NAME", "name the device paired by --pair") do |value|
+          options.device_name = value
+        end
         command.on("--root DIR", "workspace root") do |value|
           options.root = File.expand_path(value)
         end
@@ -160,7 +164,7 @@ module Xd
         if options.pair
           @output.puts(
             "pairing code (5 minutes, one use): " \
-            "#{engine.arm_pairing(5.minutes)}"
+            "#{engine.arm_pairing(5.minutes, options.device_name)}"
           )
         end
         @output.flush
@@ -189,6 +193,7 @@ module Xd
           "op"   => JSON::Any.new("peer-pairing"),
           "bind" => JSON::Any.new(options.bind),
           "port" => JSON::Any.new(options.port.to_i64),
+          "name" => JSON::Any.new(options.device_name),
         })
         @output.puts(
           "xd serve: attached to running daemon, listening on " \

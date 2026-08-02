@@ -8,6 +8,7 @@ require "../version"
 require "./adw"
 require "./auth_dialog"
 require "./daemon_update_dialog"
+require "./devices_dialog"
 require "./background_work"
 require "./dialogs"
 require "./directory_browser"
@@ -374,6 +375,15 @@ module Xd
           "pair"
         ) do
           @on_pair.call
+        end
+        add_header_action(
+          menu_model,
+          menu_actions,
+          menu,
+          "Manage Devices…",
+          "devices"
+        ) do
+          DevicesDialog.new(@parent, @local_source.endpoint).present
         end
         add_header_action(
           menu_model,

@@ -52,7 +52,34 @@ describe Xd::Storage::Store do
       remove_database(path)
     end
   end
+  it "lists, renames, and revokes paired devices" do
+    path = database_path
+    store = Xd::Storage::Store.new(path, -> { 100_000_000_i64 })
 
+    begin
+      store.add_device("first-hash", "First device")
+      store.add_device("second-hash", "Second device")
+
+      devices = store.list_devices
+      devices.map(&.id).sort.should eq(["first-hash", "second-hash"])
+      devices.map(&.name).sort.should eq(["First device", "Second device"])
+      devices.each do |device|
+        device.created_at.should eq(100_i64)
+        device.last_seen.should eq(100_i64)
+      end
+
+      store.rename_device("first-hash", "Renamed device")
+      store.device_name("first-hash").should eq("Renamed device")
+      store.revoke_device("second-hash")
+      store.list_devices.map(&.id).should eq(["first-hash"])
+      expect_raises(Xd::Daemon::DeviceStoreError, "Unknown device.") do
+        store.revoke_device("missing-hash")
+      end
+    ensure
+      store.close
+      remove_database(path)
+    end
+  end
   it "upgrades a version-one database without losing chats" do
     path = database_path
     Dir.mkdir_p(Path[path].dirname, 0o700)

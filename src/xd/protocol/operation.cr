@@ -9,6 +9,9 @@ module Xd
       Invalid
       Pair
       PeerPairing
+      Devices
+      RenameDevice
+      RevokeDevice
       Hello
       Tree
       Messages
@@ -64,6 +67,9 @@ module Xd
         case self
         when Pair               then "pair"
         when PeerPairing        then "peer-pairing"
+        when Devices            then "devices"
+        when RenameDevice       then "rename-device"
+        when RevokeDevice       then "revoke-device"
         when Hello              then "hello"
         when Tree               then "tree"
         when Messages           then "messages"
@@ -122,6 +128,9 @@ module Xd
         case name
         when "pair"                 then Pair
         when "peer-pairing"         then PeerPairing
+        when "devices"              then Devices
+        when "rename-device"        then RenameDevice
+        when "revoke-device"        then RevokeDevice
         when "hello"                then Hello
         when "tree"                 then Tree
         when "messages"             then Messages
@@ -173,6 +182,15 @@ module Xd
         when "voice-cancel"         then VoiceCancel
         when "ping"                 then Ping
         else                             nil
+        end
+      end
+
+      def local_only? : Bool
+        case self
+        when Devices, RenameDevice, RevokeDevice
+          true
+        else
+          false
         end
       end
 

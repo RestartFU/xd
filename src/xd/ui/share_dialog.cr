@@ -12,6 +12,7 @@ module Xd
       @status : Gtk::Label
       @host : Gtk::Entry
       @port : Gtk::Entry
+      @name : Gtk::Entry
       @code : Gtk::Entry
       @refresh : Gtk::Button
       @busy : Bool
@@ -53,13 +54,19 @@ module Xd
         header.add_css_class("xd-panel-bar")
         header.add_css_class("xd-panel-head")
 
-        @status = Gtk::Label.new("Opening a secure listener…")
+        @status = Gtk::Label.new("Choose a device name, then create a code.")
         @status.xalign = 0_f32
         @status.wrap = true
 
         @details = Gtk::Box.new(:vertical, 12)
         @host = field(@details, "Machine Address")
         @port = field(@details, "Port")
+        @name = field(
+          @details,
+          "Device name",
+          "Unknown device",
+          editable: true
+        )
 
         code_row = Gtk::Box.new(:horizontal, 8)
         @code = Gtk::Entry.new
@@ -84,8 +91,9 @@ module Xd
 
         help = Gtk::Label.new(
           "On the other device, choose “Connect to a Machine…”, then enter " \
-          "this address, port, and code. Code expires after five minutes " \
-          "and works once. Keep XD open on this machine."
+          "this address, port, and code. The device name is managed here. " \
+          "Code expires after five minutes and works once. Keep XD open on " \
+          "this machine."
         )
         help.xalign = 0_f32
         help.wrap = true
@@ -112,7 +120,7 @@ module Xd
         close_button.clicked_signal.connect { dismiss }
         footer.append(close_button)
 
-        @refresh = Gtk::Button.new_with_label("New Code")
+        @refresh = Gtk::Button.new_with_label("Create Code")
         @refresh.add_css_class("xd-panel-action")
         @refresh.clicked_signal.connect { request_code }
         footer.append(@refresh)
@@ -144,17 +152,23 @@ module Xd
 
       def present : Nil
         @window.present
-        request_code
+        @name.grab_focus
       end
 
-      private def field(body : Gtk::Box, title : String) : Gtk::Entry
+      private def field(
+        body : Gtk::Box,
+        title : String,
+        text : String = "",
+        editable : Bool = false,
+      ) : Gtk::Entry
         label = Gtk::Label.new(title)
         label.xalign = 0_f32
         label.add_css_class("caption")
         label.add_css_class("dim-label")
 
         entry = Gtk::Entry.new
-        entry.editable = false
+        entry.text = text
+        entry.editable = editable
         entry.hexpand = true
 
         box = Gtk::Box.new(:vertical, 5)
@@ -180,13 +194,22 @@ module Xd
       private def request_code : Nil
         return if @busy || @closed
 
+        name = @name.text.strip
+        if name.empty?
+          @status.text = "Enter a name for the device."
+          @status.add_css_class("error")
+          @name.grab_focus
+          return
+        end
+
         set_busy(true)
         @status.text = "Opening a secure listener…"
         @status.remove_css_class("error")
         spawn do
           begin
             response = @endpoint.call({
-              "op" => JSON::Any.new("peer-pairing"),
+              "op"   => JSON::Any.new("peer-pairing"),
+              "name" => JSON::Any.new(name),
             })
             GLib.idle_add do
               unless @closed
@@ -217,6 +240,7 @@ module Xd
 
       private def set_busy(busy : Bool) : Nil
         @busy = busy
+        @name.sensitive = !busy
         @refresh.sensitive = !busy
         @refresh.label = busy ? "Opening…" : "New Code"
       end

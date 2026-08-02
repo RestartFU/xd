@@ -108,21 +108,29 @@ with `Not authenticated. Say hello first.`
 ### Pair
 
 Pairing is armed by `xd serve --pair`, or from the desktop app's **Add a
-Device…** panel. The displayed `XXXX-XXXX` code is valid for five minutes and
-one matching submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
+Device…** panel. The local owner may send the name while arming a window:
 
 ```json
-{"op":"pair","code":"4F2K-9QX1","name":"Pixel"}
-{"ok":true,"token":"base64 device token"}
+{"op":"peer-pairing","name":"Phone"}
 ```
 
-`code` is required. `name` is optional and defaults to `Unknown device`. A
-successful pair:
+The displayed `XXXX-XXXX` code is valid for five minutes and one matching
+submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
+
+```json
+{"op":"pair","code":"4F2K-9QX1"}
+{"ok":true,"token":"base64 device token","device":"Phone"}
+```
+
+`code` is required. The device name is chosen by the daemon owner when the
+pairing window is armed; a peer-supplied `name` member is ignored for
+compatibility with older clients. If the owner does not provide a name, the
+name is `Unknown device`. A successful pair:
 
 - authenticates the existing connection; do not send `hello` afterward;
 - consumes the code before writing the device record, so even a storage failure
   requires a new code;
-- returns a long-lived bearer token;
+- returns a long-lived bearer token and the authoritative device name;
 - requires the client to persist token and pinned certificate atomically.
 
 ### Hello
@@ -131,19 +139,42 @@ Every later connection sends `hello` as its first request:
 
 ```json
 {"op":"hello","token":"base64 device token"}
-{"ok":true,"device":"Pixel","version":1}
+{"ok":true,"device":"Phone","version":1}
 ```
 
 An unknown or revoked token returns `ok:false`. Clients must stop retrying and
 offer pairing again. A certificate mismatch must also stop retries: continuing
 would disclose the bearer token to a different peer.
 
+### Device management
+
+The daemon owner manages paired credentials through the local IPC endpoint.
+These operations require local transport and are never accepted from a remote
+or mobile client:
+
+```json
+{"op":"devices"}
+{"ok":true,"devices":[
+  {"id":"local opaque id","name":"Phone","created_at":0,
+   "last_seen":0,"connected":true}
+]}
+{"op":"rename-device","device":"local opaque id","name":"Tablet"}
+{"ok":true}
+{"op":"revoke-device","device":"local opaque id"}
+{"ok":true}
+```
+
+The `id` is only for the local management surface; clients must not expose or
+persist it as a remote credential. Renaming changes the daemon-owned name.
+Revoking deletes the token, disconnects every active session for that device,
+and requires pairing again.
+
 ### What a remote client cannot do
 
 `peer-pairing` requires an authenticated connection **and** local transport
 (`Engine#peer_pairing`). A paired remote device cannot mint pairing codes for
-further devices, cannot open listeners, and cannot enable TLS. Pairing
-authority stays on the daemon machine.
+further devices, cannot open listeners, enable TLS, or manage other paired
+devices. Pairing and device-management authority stays on the daemon machine.
 
 ## State reads
 

@@ -31,6 +31,9 @@ module Xd
       class Error < Exception
       end
 
+      class AuthorizationError < Error
+      end
+
       @pending = {} of Int64 => Channel(ClientAnswer)
       @pending_order = Deque(Int64).new
       @abandoned = Set(Int64).new
@@ -80,12 +83,20 @@ module Xd
             "token" => JSON::Any.new(token),
           })
           client
+        rescue error : Error
+          client.close
+          if error.message == "Unknown device. Pair first."
+            raise AuthorizationError.new(error.message)
+          end
+          raise error
         rescue error
           client.close
           raise error
         end
       end
 
+      # `name` remains in this compatibility signature for older desktop
+      # callers, but the daemon assigns the authoritative name.
       def self.pair_remote(
         host : String,
         port : Int,
@@ -99,7 +110,6 @@ module Xd
           response = client.call({
             "op"   => JSON::Any.new("pair"),
             "code" => JSON::Any.new(code),
-            "name" => JSON::Any.new(name),
           })
           token = response["token"]?.try(&.as_s?) ||
                   raise Error.new("Pairing returned no device token.")

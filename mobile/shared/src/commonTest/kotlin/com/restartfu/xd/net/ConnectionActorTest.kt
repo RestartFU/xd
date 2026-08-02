@@ -48,7 +48,7 @@ class ConnectionActorTest {
         val store = MemoryCredentialStore()
         val actor = ConnectionActor(factory, store, backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+            actor.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -57,16 +57,16 @@ class ConnectionActorTest {
         factory.latest.connected(certificate)
         runCurrent()
         assertEquals(
-            """{"op":"pair","code":"ABCD-EFGH","name":"Phone","_xd_request":1}""" + "\n",
+            """{"op":"pair","code":"ABCD-EFGH","_xd_request":1}""" + "\n",
             factory.latest.writes.single().decodeToString(),
         )
 
-        factory.latest.receive("""{"ok":true,"token":"new-token"}""")
+        factory.latest.receive("""{"ok":true,"token":"new-token","device":"Workstation"}""")
         runCurrent()
         runCurrent()
 
-        assertEquals(PairResult.Success("Phone"), result.await())
-        assertEquals(Link.Up("Phone"), actor.link.value)
+        assertEquals(PairResult.Success("Workstation"), result.await())
+        assertEquals(Link.Up("Workstation"), actor.link.value)
         assertEquals("new-token", store.load()?.token)
         assertContentEquals(certificate, store.load()?.certificateDer)
         assertEquals(1, factory.latest.writes.size)
@@ -77,7 +77,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+            actor.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -292,7 +292,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+            actor.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         factory.latest.connected()
@@ -310,7 +310,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+            actor.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         factory.latest.connected()
@@ -330,7 +330,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val first = async {
-            actor.pair("daemon", 4001, "BAD1-CODE", "Phone")
+            actor.pair("daemon", 4001, "BAD1-CODE")
         }
         runCurrent()
         factory.latest.connected()
@@ -342,7 +342,7 @@ class ConnectionActorTest {
         assertEquals(Link.Idle, actor.link.value)
 
         val second = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH", "Phone")
+            actor.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         assertEquals(2, factory.sockets.size)

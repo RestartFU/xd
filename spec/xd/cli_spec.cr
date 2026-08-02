@@ -36,6 +36,7 @@ describe Xd::CLI do
       "--port", "0",
       "--bind", "127.0.0.1",
       "--pair",
+      "--device-name", "dev workstation",
       "--root", File.join(directory, "root"),
       "--database", File.join(directory, "db"),
       "--socket", File.join(directory, "socket"),
@@ -46,6 +47,7 @@ describe Xd::CLI do
     options.port.should eq(0)
     options.bind.should eq("127.0.0.1")
     options.pair.should be_true
+    options.device_name.should eq("dev workstation")
     options.root.should eq(File.join(directory, "root"))
     options.database.should eq(File.join(directory, "db"))
   end

@@ -264,16 +264,17 @@ describe Xd::Daemon::Engine do
       pairing_connection = Xd::Daemon::Connection.new(
         Xd::Daemon::Transport::Remote
       )
-      code = engine.arm_pairing(5.minutes)
+      code = engine.arm_pairing(5.minutes, "workstation")
 
       pair = engine.dispatch(pairing_connection, {
         "op"   => "pair",
         "code" => code,
-        "name" => "workstation",
+        "name" => "spoofed by peer",
       }.to_json)
 
       pair.success?.should be_true
       pair["token"].as_s.should eq("secret-token")
+      pair["device"].as_s.should eq("workstation")
       pairing_connection.authenticated.should be_true
       store.device_name(
         Digest::SHA256.hexdigest("secret-token")
@@ -299,6 +300,65 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "lets the local owner list, rename, and revoke paired devices" do
+    with_daemon_engine(
+      token_generator: -> { "managed-token" }
+    ) do |_store, engine|
+      pairing_connection = Xd::Daemon::Connection.new(
+        Xd::Daemon::Transport::Remote
+      )
+      code = engine.arm_pairing(5.minutes, "owner label")
+      paired = engine.dispatch(pairing_connection, {
+        "op"   => "pair",
+        "code" => code,
+        "name" => "peer label must be ignored",
+      }.to_json)
+      paired.success?.should be_true
+
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      listed = engine.dispatch(local, %({"op":"devices"}))
+      listed.success?.should be_true
+      devices = listed["devices"].as_a
+      devices.size.should eq(1)
+      device = devices.first
+      device["name"].as_s.should eq("owner label")
+      device["connected"].as_bool.should be_true
+      id = device["id"].as_s
+
+      remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      remote.authenticated = true
+      refused = engine.dispatch(remote, %({"op":"devices"}))
+      refused.success?.should be_false
+      refused["error"].as_s.should contain("daemon machine")
+
+      renamed = engine.dispatch(local, {
+        "op"     => "rename-device",
+        "device" => id,
+        "name"   => "renamed device",
+      }.to_json)
+      renamed.success?.should be_true
+      engine.dispatch(local, %({"op":"devices"}))["devices"].as_a
+        .first["name"].as_s.should eq("renamed device")
+
+      revoked = engine.dispatch(local, {
+        "op"     => "revoke-device",
+        "device" => id,
+      }.to_json)
+      revoked.success?.should be_true
+      pairing_connection.revoked.should be_true
+      pairing_connection.closed.should be_true
+      engine.dispatch(local, %({"op":"devices"}))["devices"].as_a
+        .should be_empty
+
+      engine.dispatch(pairing_connection, %({"op":"ping"})).success?.should be_false
+      returning = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      engine.dispatch(returning, {
+        "op"    => "hello",
+        "token" => "managed-token",
+      }.to_json).success?.should be_false
+    end
+  end
+
   it "lets only a local client expose this engine and mint a peer code" do
     with_daemon_engine(
       token_generator: -> { "peer-token" }
@@ -314,6 +374,7 @@ describe Xd::Daemon::Engine do
         "op"   => "peer-pairing",
         "bind" => "127.0.0.1",
         "port" => 0,
+        "name" => "laptop",
       }.to_json)
 
       response.success?.should be_true

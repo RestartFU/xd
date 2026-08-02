@@ -89,6 +89,16 @@ module Xd
         transport : Transport,
       ) : Nil
         connection = Connection.new(transport)
+        connection.on_close = -> {
+          begin
+            input.close
+          rescue IO::Error
+          end
+          begin
+            output.close
+          rescue IO::Error
+          end
+        }
         writer = Writer.new(output)
         outbound = OutboundEvents.new(writer, output)
         subscription = @events.try do |events|
@@ -125,6 +135,8 @@ module Xd
             Fiber.yield
           end
         ensure
+          @engine.connection_closed(connection)
+          connection.close
           if id = subscription
             @events.try(&.unsubscribe(id))
           end

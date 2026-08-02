@@ -11,6 +11,15 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class OpsTest {
     @Test
+    fun pairingSendsOnlyTheCode() {
+        val request = Ops.pair("ABCD-EFGH")
+
+        assertEquals("pair", request.getValue("op").jsonPrimitive.content)
+        assertEquals("ABCD-EFGH", request.getValue("code").jsonPrimitive.content)
+        assertFalse(request.containsKey("name"))
+    }
+
+    @Test
     fun booleanOptionsAreStringsOnWire() {
         val request = Ops.setBoolOption("chat", ChatOption.PLAN, true)
 

@@ -109,8 +109,18 @@ public class XdClient(
         host: String,
         port: Int,
         code: String,
-        deviceName: String,
-    ): PairResult = actor.pair(host, port, code, deviceName)
+    ): PairResult = actor.pair(host, port, code)
+
+    @Deprecated(
+        "The daemon owns device names; the supplied name is ignored.",
+        ReplaceWith("pair(host, port, code)"),
+    )
+    public suspend fun pair(
+        host: String,
+        port: Int,
+        code: String,
+        _deviceName: String,
+    ): PairResult = pair(host, port, code)
 
     public suspend fun forget() {
         actor.forget()

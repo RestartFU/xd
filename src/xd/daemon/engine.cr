@@ -27,7 +27,10 @@ module Xd
     PROTOCOL_VERSION = 1_i64
     PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-    private record Pairing, code : String, expires_at : Time::Instant
+    private record Pairing,
+      code : String,
+      name : String,
+      expires_at : Time::Instant
 
     # Sole application command dispatcher.
     #
@@ -44,6 +47,7 @@ module Xd
       @command_events = [] of Protocol::Event
       @after_write : Proc(Nil)?
       @peer_listener : PeerListener?
+      @active_connections = {} of UInt64 => Connection
 
       def initialize(
         @store : Storage::Store,
@@ -139,9 +143,21 @@ module Xd
         )
       end
 
-      def arm_pairing(ttl : Time::Span) : String
+      def arm_pairing(
+        ttl : Time::Span,
+        name : String = DeviceStore::DEFAULT_DEVICE_NAME,
+      ) : String
+        normalized = DeviceStore.normalize_name(name)
         @command_mutex.synchronize do
-          arm_pairing_unlocked(ttl)
+          arm_pairing_unlocked(ttl, normalized)
+        end
+      end
+
+      # Sessions call this when their transport closes so a device stops being
+      # reported as connected without leaving an in-memory reference behind.
+      def connection_closed(connection : Connection) : Nil
+        @command_mutex.synchronize do
+          @active_connections.delete(connection.object_id)
         end
       end
 
@@ -162,6 +178,10 @@ module Xd
       def process(connection : Connection, line : String) : Protocol::Outcome
         request = Protocol::Request.parse(line)
 
+        if connection.revoked || connection.closed
+          return failed_outcome("Device connection is no longer authorized.")
+        end
+
         if control_operation?(request.operation)
           return process_control(connection, request)
         end
@@ -173,6 +193,15 @@ module Xd
             return Protocol::Outcome.new(
               Protocol::Response.error(
                 "Not authenticated. Say hello first."
+              ),
+              [] of Protocol::Event
+            )
+          end
+
+          if request.operation.local_only? && !connection.transport.local?
+            return Protocol::Outcome.new(
+              Protocol::Response.error(
+                "Device management is only available on the daemon machine."
               ),
               [] of Protocol::Event
             )
@@ -259,6 +288,8 @@ module Xd
       end
 
       def close : Nil
+        @active_connections.values.each(&.close)
+        @active_connections.clear
         @workspace_monitor.close
         @repository_monitor.close
         @terminals.close
@@ -277,6 +308,12 @@ module Xd
           pair(connection, request)
         when Protocol::Operation::PeerPairing
           peer_pairing(connection, request)
+        when Protocol::Operation::Devices
+          devices
+        when Protocol::Operation::RenameDevice
+          rename_device(request)
+        when Protocol::Operation::RevokeDevice
+          revoke_device(request)
         when Protocol::Operation::Hello
           hello(connection, request)
         when Protocol::Operation::AgentSecrets
@@ -400,12 +437,15 @@ module Xd
         @pairing = nil
 
         token = @token_generator.call
-        name = request.string?("name") || "Unknown device"
-        @store.add_device(token_hash(token), name)
-        connection.authenticated = true
+        name = pairing.not_nil!.name
+        token_hash = token_hash(token)
+        @store.add_device(token_hash, name)
+        connection.authenticate(token_hash)
+        @active_connections[connection.object_id] = connection
 
         Protocol::Response.ok({
-          "token" => JSON::Any.new(token),
+          "token"  => JSON::Any.new(token),
+          "device" => JSON::Any.new(name),
         })
       end
 
@@ -428,6 +468,9 @@ module Xd
 
         bind = request.string?("bind") || "::"
         requested_port = request.int?("port") || 4001_i64
+        name = DeviceStore.normalize_name(
+          request.string?("name") || DeviceStore::DEFAULT_DEVICE_NAME
+        )
         unless 0 <= requested_port <= UInt16::MAX
           raise Protocol::Error.new("Port must be from 0 to 65535.")
         end
@@ -440,7 +483,7 @@ module Xd
             "#{error.message || error.class.name}"
           )
         end
-        code = arm_pairing_unlocked(5.minutes)
+        code = arm_pairing_unlocked(5.minutes, name)
         Protocol::Response.ok({
           "code"       => JSON::Any.new(code),
           "host"       => JSON::Any.new(@peer_host.call),
@@ -449,14 +492,17 @@ module Xd
         })
       end
 
-      private def arm_pairing_unlocked(ttl : Time::Span) : String
+      private def arm_pairing_unlocked(
+        ttl : Time::Span,
+        name : String = DeviceStore::DEFAULT_DEVICE_NAME,
+      ) : String
         code = String.build do |io|
           8.times do |index|
             io << '-' if index == 4
             io << PAIRING_ALPHABET[Random::Secure.rand(PAIRING_ALPHABET.size)]
           end
         end
-        @pairing = Pairing.new(code, @clock.call + ttl)
+        @pairing = Pairing.new(code, name, @clock.call + ttl)
         code
       end
 
@@ -470,11 +516,58 @@ module Xd
         name = @store.device_name(token_hash(token))
         return Protocol::Response.error("Unknown device. Pair first.") unless name
 
-        connection.authenticated = true
+        connection.authenticate(token_hash(token))
+        @active_connections[connection.object_id] = connection
         Protocol::Response.ok({
           "device"  => JSON::Any.new(name),
           "version" => JSON::Any.new(PROTOCOL_VERSION),
         })
+      end
+
+      private def devices : Protocol::Response
+        values = @store.list_devices.map do |device|
+          connected = @active_connections.values.any? do |connection|
+            !connection.closed && connection.device_id == device.id
+          end
+          JSON::Any.new({
+            "id"         => JSON::Any.new(device.id),
+            "name"       => JSON::Any.new(device.name),
+            "created_at" => JSON::Any.new(device.created_at),
+            "last_seen"  => JSON::Any.new(device.last_seen),
+            "connected"  => JSON::Any.new(connected),
+          })
+        end
+        Protocol::Response.ok({
+          "devices" => JSON::Any.new(values),
+        })
+      end
+
+      private def rename_device(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        id = request.string?(
+          "device"
+        ) || request.string("id", "rename-device needs a device id.")
+        name = request.string(
+          "name",
+          "rename-device needs a device name."
+        )
+        @store.rename_device(id, name)
+        Protocol::Response.ok
+      end
+
+      private def revoke_device(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        id = request.string?(
+          "device"
+        ) || request.string("id", "revoke-device needs a device id.")
+        @store.revoke_device(id)
+        connections = @active_connections.values.select do |connection|
+          connection.device_id == id
+        end
+        connections.each(&.revoke)
+        Protocol::Response.ok
       end
 
       private def agent_secrets(

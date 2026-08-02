@@ -278,6 +278,12 @@ module Xd
               client.close
             end
             return
+          rescue error : Daemon::Client::AuthorizationError
+            terminal_failure(
+              generation,
+              error.message || "The paired device is no longer authorized."
+            )
+            return
           rescue error
             offline : ConnectionSnapshot? = nil
             active = @lock.synchronize do
@@ -347,6 +353,32 @@ module Xd
         if retry = retry_generation
           start_connect_loop(retry)
         end
+      end
+
+      private def terminal_failure(
+        generation : Int64,
+        message : String,
+      ) : Nil
+        snapshot : ConnectionSnapshot? = nil
+        active = @lock.synchronize do
+          if @closed || @generation != generation
+            false
+          else
+            clear_error : String? = nil
+            begin
+              @credentials_file.clear
+            rescue error : CredentialsFile::Error
+              clear_error = error.message
+            end
+            @credentials = nil
+            @state = ConnectionState::Unconfigured
+            @error = clear_error || message
+            @generation += 1
+            snapshot = snapshot_locked
+            true
+          end
+        end
+        publish_state(snapshot.not_nil!) if active
       end
 
       private def start_connect_loop(generation : Int64) : Nil

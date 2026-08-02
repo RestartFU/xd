@@ -23,11 +23,16 @@ public enum class ChatOption(
 }
 
 public object Ops {
-    public fun pair(code: String, name: String): JsonObject = buildJsonObject {
+    public fun pair(code: String): JsonObject = buildJsonObject {
         put("op", "pair")
         put("code", code)
-        put("name", name)
     }
+
+    @Deprecated(
+        "The daemon owns device names; the supplied name is ignored.",
+        ReplaceWith("pair(code)"),
+    )
+    public fun pair(code: String, _name: String): JsonObject = pair(code)
 
     public fun hello(token: String): JsonObject = buildJsonObject {
         put("op", "hello")
