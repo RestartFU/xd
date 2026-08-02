@@ -15,7 +15,7 @@ module Xd
       property port = 4001
       property bind = "::"
       property pair = false
-      property device_name = "Unknown device"
+      property device_name : String? = nil
       property root = AppPaths.workspaces
       property database = AppPaths.database
       property socket = AppPaths.local_socket
@@ -92,7 +92,10 @@ module Xd
         command.on("--pair", "print a five-minute pairing code") do
           options.pair = true
         end
-        command.on("--device-name NAME", "name the device paired by --pair") do |value|
+        command.on(
+          "--device-name NAME",
+          "owner name for the device paired by --pair"
+        ) do |value|
           options.device_name = value
         end
         command.on("--root DIR", "workspace root") do |value|
@@ -115,6 +118,11 @@ module Xd
         end
       end
       parser.parse(arguments)
+      if options.pair && options.device_name.try(&.strip).to_s.empty?
+        raise UsageError.new(
+          "--pair requires --device-name so the owner can name the device"
+        )
+      end
       options
     rescue error : OptionParser::Exception
       raise UsageError.new("#{error.message}\n#{parser}")
@@ -164,7 +172,7 @@ module Xd
         if options.pair
           @output.puts(
             "pairing code (5 minutes, one use): " \
-            "#{engine.arm_pairing(5.minutes, options.device_name)}"
+            "#{engine.arm_pairing(5.minutes, options.device_name.not_nil!)}"
           )
         end
         @output.flush
@@ -193,7 +201,7 @@ module Xd
           "op"   => JSON::Any.new("peer-pairing"),
           "bind" => JSON::Any.new(options.bind),
           "port" => JSON::Any.new(options.port.to_i64),
-          "name" => JSON::Any.new(options.device_name),
+          "name" => JSON::Any.new(options.device_name.not_nil!),
         })
         @output.puts(
           "xd serve: attached to running daemon, listening on " \

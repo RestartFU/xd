@@ -24,6 +24,7 @@ describe Xd::UI::Runtime do
         "op"   => JSON::Any.new("peer-pairing"),
         "bind" => JSON::Any.new("127.0.0.1"),
         "port" => JSON::Any.new(0_i64),
+        "name" => JSON::Any.new("restart proof"),
       })
       port = response["port"].as_i64.to_i32
       paired = Xd::Daemon::Client.pair_remote(

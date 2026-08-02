@@ -52,6 +52,20 @@ describe Xd::Storage::Store do
       remove_database(path)
     end
   end
+  it "rejects paired devices without an owner-supplied name" do
+    path = database_path
+    store = Xd::Storage::Store.new(path)
+
+    begin
+      expect_raises(Xd::Daemon::DeviceStoreError, /cannot be empty/) do
+        store.add_device("token-hash", " ")
+      end
+    ensure
+      store.close
+      remove_database(path)
+    end
+  end
+
   it "lists, renames, and revokes paired devices" do
     path = database_path
     store = Xd::Storage::Store.new(path, -> { 100_000_000_i64 })

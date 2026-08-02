@@ -64,7 +64,7 @@ module Xd
         @name = field(
           @details,
           "Device name",
-          "Unknown device",
+          "",
           editable: true
         )
 

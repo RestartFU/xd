@@ -217,7 +217,7 @@ describe Xd::Daemon::Server do
       store,
       token_generator: -> { "tls-token" }
     )
-    code = engine.arm_pairing(1.minute)
+    code = engine.arm_pairing(1.minute, "tls device")
     server = Xd::Daemon::Server.new(engine)
 
     begin
@@ -296,7 +296,7 @@ describe Xd::Daemon::Server do
         )
       }
     )
-    code = engine.arm_pairing(1.minute)
+    code = engine.arm_pairing(1.minute, "tls device")
     server = Xd::Daemon::Server.new(engine)
 
     begin

@@ -10,7 +10,6 @@ module Xd
       last_seen : Int64
 
     abstract class DeviceStore
-      DEFAULT_DEVICE_NAME = "Unknown device"
       MAX_DEVICE_NAME_BYTES = 80
 
       abstract def add_device(token_hash : String, name : String) : Nil
@@ -46,9 +45,7 @@ module Xd
       @timestamps = {} of String => {Int64, Int64}
 
       def add_device(token_hash : String, name : String) : Nil
-        normalized = DeviceStore.normalize_name(
-          name.empty? ? DeviceStore::DEFAULT_DEVICE_NAME : name
-        )
+        normalized = DeviceStore.normalize_name(name)
         now = Time.utc.to_unix
         @devices[token_hash] = normalized
         @timestamps[token_hash] = {now, now}

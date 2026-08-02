@@ -52,6 +52,12 @@ describe Xd::CLI do
     options.database.should eq(File.join(directory, "db"))
   end
 
+  it "requires an owner device name when pairing" do
+    expect_raises(Xd::CLI::UsageError, /--pair requires --device-name/) do
+      Xd::CLI.new.parse_serve(["--pair"])
+    end
+  end
+
   it "rejects invalid ports" do
     expect_raises(Xd::CLI::UsageError, /Invalid port/) do
       Xd::CLI.new.parse_serve(["--port", "70000"])
@@ -93,6 +99,7 @@ describe Xd::CLI do
       Xd::CLI.new(output, errors).run([
         "serve",
         "--pair",
+        "--device-name", "cli owner",
         "--socket", socket,
         "--bind", "127.0.0.1",
         "--port", "0",

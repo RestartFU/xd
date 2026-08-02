@@ -145,7 +145,7 @@ module Xd
 
       def arm_pairing(
         ttl : Time::Span,
-        name : String = DeviceStore::DEFAULT_DEVICE_NAME,
+        name : String,
       ) : String
         normalized = DeviceStore.normalize_name(name)
         @command_mutex.synchronize do
@@ -469,7 +469,7 @@ module Xd
         bind = request.string?("bind") || "::"
         requested_port = request.int?("port") || 4001_i64
         name = DeviceStore.normalize_name(
-          request.string?("name") || DeviceStore::DEFAULT_DEVICE_NAME
+          request.string("name", "peer-pairing needs a device name.")
         )
         unless 0 <= requested_port <= UInt16::MAX
           raise Protocol::Error.new("Port must be from 0 to 65535.")
@@ -494,7 +494,7 @@ module Xd
 
       private def arm_pairing_unlocked(
         ttl : Time::Span,
-        name : String = DeviceStore::DEFAULT_DEVICE_NAME,
+        name : String,
       ) : String
         code = String.build do |io|
           8.times do |index|

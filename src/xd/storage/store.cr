@@ -47,9 +47,7 @@ module Xd
       end
 
       def add_device(token_hash : String, name : String) : Nil
-        normalized = Daemon::DeviceStore.normalize_name(
-          name.empty? ? Daemon::DeviceStore::DEFAULT_DEVICE_NAME : name
-        )
+        normalized = Daemon::DeviceStore.normalize_name(name)
         now = now_seconds
         @database.exec(
           <<-SQL,

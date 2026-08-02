@@ -161,7 +161,7 @@ private def run_transport_matrix(
                Xd::Daemon::Client.pair_remote(
                  "127.0.0.1",
                  port,
-                 engine.arm_pairing(1.minute),
+                 engine.arm_pairing(1.minute, "matrix client"),
                  "matrix-client"
                ).client
              end

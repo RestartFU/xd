@@ -103,7 +103,7 @@ describe Xd::Daemon::Engine do
     token_generator = -> { raise "entropy source failed" }
     with_daemon_engine(token_generator: token_generator) do |_store, engine|
       remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
-      code = engine.arm_pairing(1.minute)
+      code = engine.arm_pairing(1.minute, "failure proof")
 
       response = engine.dispatch(remote, {
         "op"   => "pair",
@@ -402,6 +402,22 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "requires the local owner to name a paired device" do
+    with_daemon_engine do |_store, engine|
+      engine.peer_listener = ->(_host : String, _port : Int32) { 4001 }
+
+      response = engine.dispatch(
+        Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
+        %({"op":"peer-pairing","port":0})
+      )
+
+      response.success?.should be_false
+      response["error"].as_s.should eq(
+        "peer-pairing needs a device name."
+      )
+    end
+  end
+
   it "rejects invalid peer listener ports without invoking the listener" do
     with_daemon_engine do |_store, engine|
       invoked = false
@@ -412,7 +428,7 @@ describe Xd::Daemon::Engine do
 
       response = engine.dispatch(
         Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
-        %({"op":"peer-pairing","port":70000})
+        %({"op":"peer-pairing","port":70000,"name":"owner label"})
       )
 
       response.success?.should be_false
@@ -429,7 +445,7 @@ describe Xd::Daemon::Engine do
 
       response = engine.dispatch(
         Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
-        %({"op":"peer-pairing"})
+        %({"op":"peer-pairing","name":"owner label"})
       )
 
       response.success?.should be_false
@@ -443,7 +459,7 @@ describe Xd::Daemon::Engine do
     now = Time.instant
     clock = -> { now }
     with_daemon_engine(clock: clock) do |_store, engine|
-      code = engine.arm_pairing(5.seconds)
+      code = engine.arm_pairing(5.seconds, "expiring device")
       now += 6.seconds
 
       response = engine.dispatch(
