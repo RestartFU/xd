@@ -29,7 +29,6 @@ module Xd
 
     private record Pairing,
       code : String,
-      name : String,
       expires_at : Time::Instant
 
     # Sole application command dispatcher.
@@ -143,13 +142,9 @@ module Xd
         )
       end
 
-      def arm_pairing(
-        ttl : Time::Span,
-        name : String,
-      ) : String
-        normalized = DeviceStore.normalize_name(name)
+      def arm_pairing(ttl : Time::Span) : String
         @command_mutex.synchronize do
-          arm_pairing_unlocked(ttl, normalized)
+          arm_pairing_unlocked(ttl)
         end
       end
 
@@ -434,10 +429,12 @@ module Xd
 
         # Spend valid code before storage. Retrying a half-completed pair must
         # never mint several permanent credentials.
+        name = DeviceStore.normalize_name(
+          request.string("name", "pair needs a device name.")
+        )
         @pairing = nil
 
         token = @token_generator.call
-        name = pairing.not_nil!.name
         token_hash = token_hash(token)
         @store.add_device(token_hash, name)
         connection.authenticate(token_hash)
@@ -468,9 +465,6 @@ module Xd
 
         bind = request.string?("bind") || "::"
         requested_port = request.int?("port") || 4001_i64
-        name = DeviceStore.normalize_name(
-          request.string("name", "peer-pairing needs a device name.")
-        )
         unless 0 <= requested_port <= UInt16::MAX
           raise Protocol::Error.new("Port must be from 0 to 65535.")
         end
@@ -483,7 +477,7 @@ module Xd
             "#{error.message || error.class.name}"
           )
         end
-        code = arm_pairing_unlocked(5.minutes, name)
+        code = arm_pairing_unlocked(5.minutes)
         Protocol::Response.ok({
           "code"       => JSON::Any.new(code),
           "host"       => JSON::Any.new(@peer_host.call),
@@ -492,17 +486,14 @@ module Xd
         })
       end
 
-      private def arm_pairing_unlocked(
-        ttl : Time::Span,
-        name : String,
-      ) : String
+      private def arm_pairing_unlocked(ttl : Time::Span) : String
         code = String.build do |io|
           8.times do |index|
             io << '-' if index == 4
             io << PAIRING_ALPHABET[Random::Secure.rand(PAIRING_ALPHABET.size)]
           end
         end
-        @pairing = Pairing.new(code, name, @clock.call + ttl)
+        @pairing = Pairing.new(code, @clock.call + ttl)
         code
       end
 

@@ -52,7 +52,7 @@ describe Xd::Storage::Store do
       remove_database(path)
     end
   end
-  it "rejects paired devices without an owner-supplied name" do
+  it "rejects paired devices without a connecting-device name" do
     path = database_path
     store = Xd::Storage::Store.new(path)
 

@@ -103,7 +103,7 @@ describe Xd::Daemon::Engine do
     token_generator = -> { raise "entropy source failed" }
     with_daemon_engine(token_generator: token_generator) do |_store, engine|
       remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
-      code = engine.arm_pairing(1.minute, "failure proof")
+      code = engine.arm_pairing(1.minute)
 
       response = engine.dispatch(remote, {
         "op"   => "pair",
@@ -264,7 +264,7 @@ describe Xd::Daemon::Engine do
       pairing_connection = Xd::Daemon::Connection.new(
         Xd::Daemon::Transport::Remote
       )
-      code = engine.arm_pairing(5.minutes, "workstation")
+      code = engine.arm_pairing(5.minutes)
 
       pair = engine.dispatch(pairing_connection, {
         "op"   => "pair",
@@ -274,11 +274,11 @@ describe Xd::Daemon::Engine do
 
       pair.success?.should be_true
       pair["token"].as_s.should eq("secret-token")
-      pair["device"].as_s.should eq("workstation")
+      pair["device"].as_s.should eq("spoofed by peer")
       pairing_connection.authenticated.should be_true
       store.device_name(
         Digest::SHA256.hexdigest("secret-token")
-      ).should eq("workstation")
+      ).should eq("spoofed by peer")
 
       second_pair = engine.dispatch(
         Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote),
@@ -293,7 +293,7 @@ describe Xd::Daemon::Engine do
       }.to_json)
 
       hello.success?.should be_true
-      hello["device"].as_s.should eq("workstation")
+      hello["device"].as_s.should eq("spoofed by peer")
       hello["version"].as_i64.should eq(1)
       returning.authenticated.should be_true
       engine.dispatch(returning, %({"op":"ping"})).success?.should be_true
@@ -307,11 +307,11 @@ describe Xd::Daemon::Engine do
       pairing_connection = Xd::Daemon::Connection.new(
         Xd::Daemon::Transport::Remote
       )
-      code = engine.arm_pairing(5.minutes, "owner label")
+      code = engine.arm_pairing(5.minutes)
       paired = engine.dispatch(pairing_connection, {
         "op"   => "pair",
         "code" => code,
-        "name" => "peer label must be ignored",
+        "name" => "peer-provided label",
       }.to_json)
       paired.success?.should be_true
 
@@ -321,7 +321,7 @@ describe Xd::Daemon::Engine do
       devices = listed["devices"].as_a
       devices.size.should eq(1)
       device = devices.first
-      device["name"].as_s.should eq("owner label")
+      device["name"].as_s.should eq("peer-provided label")
       device["connected"].as_bool.should be_true
       id = device["id"].as_s
 
@@ -374,7 +374,6 @@ describe Xd::Daemon::Engine do
         "op"   => "peer-pairing",
         "bind" => "127.0.0.1",
         "port" => 0,
-        "name" => "laptop",
       }.to_json)
 
       response.success?.should be_true
@@ -402,19 +401,24 @@ describe Xd::Daemon::Engine do
     end
   end
 
-  it "requires the local owner to name a paired device" do
+  it "requires the connecting device to provide a name" do
     with_daemon_engine do |_store, engine|
-      engine.peer_listener = ->(_host : String, _port : Int32) { 4001 }
+      code = engine.arm_pairing(1.minute)
+      connection = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
 
-      response = engine.dispatch(
-        Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
-        %({"op":"peer-pairing","port":0})
-      )
+      missing = engine.dispatch(connection, {
+        "op"   => "pair",
+        "code" => code,
+      }.to_json)
+      missing.success?.should be_false
+      missing["error"].as_s.should eq("pair needs a device name.")
 
-      response.success?.should be_false
-      response["error"].as_s.should eq(
-        "peer-pairing needs a device name."
-      )
+      paired = engine.dispatch(connection, {
+        "op"   => "pair",
+        "code" => code,
+        "name" => "connected device",
+      }.to_json)
+      paired.success?.should be_true
     end
   end
 
@@ -428,7 +432,7 @@ describe Xd::Daemon::Engine do
 
       response = engine.dispatch(
         Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
-        %({"op":"peer-pairing","port":70000,"name":"owner label"})
+        %({"op":"peer-pairing","port":70000})
       )
 
       response.success?.should be_false
@@ -445,7 +449,7 @@ describe Xd::Daemon::Engine do
 
       response = engine.dispatch(
         Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local),
-        %({"op":"peer-pairing","name":"owner label"})
+        %({"op":"peer-pairing"})
       )
 
       response.success?.should be_false
@@ -459,7 +463,7 @@ describe Xd::Daemon::Engine do
     now = Time.instant
     clock = -> { now }
     with_daemon_engine(clock: clock) do |_store, engine|
-      code = engine.arm_pairing(5.seconds, "expiring device")
+      code = engine.arm_pairing(5.seconds)
       now += 6.seconds
 
       response = engine.dispatch(

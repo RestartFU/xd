@@ -95,8 +95,8 @@ module Xd
         end
       end
 
-      # `name` remains in this compatibility signature for older desktop
-      # callers, but the daemon assigns the authoritative name.
+      # The connecting client supplies its automatic name; the daemon stores it
+      # and the local owner may rename it later.
       def self.pair_remote(
         host : String,
         port : Int,
@@ -110,6 +110,7 @@ module Xd
           response = client.call({
             "op"   => JSON::Any.new("pair"),
             "code" => JSON::Any.new(code),
+            "name" => JSON::Any.new(name),
           })
           token = response["token"]?.try(&.as_s?) ||
                   raise Error.new("Pairing returned no device token.")

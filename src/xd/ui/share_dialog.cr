@@ -12,7 +12,6 @@ module Xd
       @status : Gtk::Label
       @host : Gtk::Entry
       @port : Gtk::Entry
-      @name : Gtk::Entry
       @code : Gtk::Entry
       @refresh : Gtk::Button
       @busy : Bool
@@ -54,19 +53,13 @@ module Xd
         header.add_css_class("xd-panel-bar")
         header.add_css_class("xd-panel-head")
 
-        @status = Gtk::Label.new("Choose a device name, then create a code.")
+        @status = Gtk::Label.new("Create a code for the connecting device.")
         @status.xalign = 0_f32
         @status.wrap = true
 
         @details = Gtk::Box.new(:vertical, 12)
         @host = field(@details, "Machine Address")
         @port = field(@details, "Port")
-        @name = field(
-          @details,
-          "Device name",
-          "",
-          editable: true
-        )
 
         code_row = Gtk::Box.new(:horizontal, 8)
         @code = Gtk::Entry.new
@@ -91,9 +84,9 @@ module Xd
 
         help = Gtk::Label.new(
           "On the other device, choose “Connect to a Machine…”, then enter " \
-          "this address, port, and code. The device name is managed here. " \
-          "Code expires after five minutes and works once. Keep XD open on " \
-          "this machine."
+          "this address, port, and code. Its device name is supplied " \
+          "automatically. Rename it later from Manage Devices. Code expires " \
+          "after five minutes and works once. Keep XD open on this machine."
         )
         help.xalign = 0_f32
         help.wrap = true
@@ -152,7 +145,6 @@ module Xd
 
       def present : Nil
         @window.present
-        @name.grab_focus
       end
 
       private def field(
@@ -194,22 +186,13 @@ module Xd
       private def request_code : Nil
         return if @busy || @closed
 
-        name = @name.text.strip
-        if name.empty?
-          @status.text = "Enter a name for the device."
-          @status.add_css_class("error")
-          @name.grab_focus
-          return
-        end
-
         set_busy(true)
         @status.text = "Opening a secure listener…"
         @status.remove_css_class("error")
         spawn do
           begin
             response = @endpoint.call({
-              "op"   => JSON::Any.new("peer-pairing"),
-              "name" => JSON::Any.new(name),
+              "op" => JSON::Any.new("peer-pairing"),
             })
             GLib.idle_add do
               unless @closed
@@ -240,7 +223,6 @@ module Xd
 
       private def set_busy(busy : Bool) : Nil
         @busy = busy
-        @name.sensitive = !busy
         @refresh.sensitive = !busy
         @refresh.label = busy ? "Opening…" : "New Code"
       end

@@ -11,12 +11,12 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class OpsTest {
     @Test
-    fun pairingSendsOnlyTheCode() {
-        val request = Ops.pair("ABCD-EFGH")
+    fun pairingSendsTheConnectingDeviceName() {
+        val request = Ops.pair("ABCD-EFGH", "Pixel 9")
 
         assertEquals("pair", request.getValue("op").jsonPrimitive.content)
         assertEquals("ABCD-EFGH", request.getValue("code").jsonPrimitive.content)
-        assertFalse(request.containsKey("name"))
+        assertEquals("Pixel 9", request.getValue("name").jsonPrimitive.content)
     }
 
     @Test

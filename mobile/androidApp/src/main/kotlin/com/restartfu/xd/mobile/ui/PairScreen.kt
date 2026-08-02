@@ -53,7 +53,8 @@ internal fun PairScreen(model: MainViewModel) {
         Spacer(Modifier.height(8.dp))
         Text(
             "Run xd serve --pair on the machine, then enter its address and code. " +
-                "The machine assigns and manages this device’s name."
+                "This app supplies its model as the device name; the owner can " +
+                "rename it later."
         )
         Spacer(Modifier.height(24.dp))
         OutlinedTextField(

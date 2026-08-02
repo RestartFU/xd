@@ -1,5 +1,6 @@
 package com.restartfu.xd.net
 
+import com.restartfu.xd.automaticDeviceName
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.protocol.HelloReply
@@ -91,6 +92,7 @@ internal class ConnectionActor(
     private val socketFactory: PlatformSocketFactory,
     private val credentialStore: CredentialStore,
     private val scope: CoroutineScope,
+    private val deviceName: String = automaticDeviceName(),
 ) {
     private val mailbox = Channel<Message>(MAILBOX_CAPACITY)
     private val backoff = Backoff()
@@ -146,6 +148,7 @@ internal class ConnectionActor(
                 host = host,
                 port = port,
                 code = code,
+                deviceName = deviceName,
                 result = result,
             ),
         )
@@ -153,7 +156,7 @@ internal class ConnectionActor(
     }
 
     @Deprecated(
-        "The daemon owns device names; the supplied name is ignored.",
+        "The device name comes from the connecting platform; the supplied name is ignored.",
         ReplaceWith("pair(host, port, code)"),
     )
     suspend fun pair(
@@ -260,6 +263,7 @@ internal class ConnectionActor(
             host = message.host,
             port = message.port,
             code = message.code,
+            deviceName = message.deviceName,
             result = message.result,
         )
         connect()
@@ -356,7 +360,7 @@ internal class ConnectionActor(
         val attempt = pairing
         val reply = CompletableDeferred<SequencedReply>()
         val request = if (attempt != null) {
-            Ops.pair(attempt.code)
+            Ops.pair(attempt.code, attempt.deviceName)
         } else {
             val saved = credentials
                 ?: return protocolFatal("Connected without credentials or pairing")
@@ -632,6 +636,7 @@ internal class ConnectionActor(
         val host: String,
         val port: Int,
         val code: String,
+        val deviceName: String,
         val result: CompletableDeferred<PairResult>,
     )
 
@@ -644,6 +649,7 @@ internal class ConnectionActor(
             val host: String,
             val port: Int,
             val code: String,
+            val deviceName: String,
             val result: CompletableDeferred<PairResult>,
         ) : Message
 

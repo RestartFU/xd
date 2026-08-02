@@ -379,7 +379,7 @@ describe Xd::Daemon::Client do
         certificate,
         private_key
       )
-      code = engine.arm_pairing(1.minute, "client device")
+      code = engine.arm_pairing(1.minute)
 
       paired = Xd::Daemon::Client.pair_remote(
         "127.0.0.1",
@@ -482,7 +482,7 @@ describe Xd::Daemon::Client do
         certificate,
         private_key
       )
-      code = engine.arm_pairing(1.minute, "client device")
+      code = engine.arm_pairing(1.minute)
       paired = Xd::Daemon::Client.pair_remote(
         "127.0.0.1",
         port,
@@ -615,7 +615,7 @@ describe Xd::Daemon::Client do
       paired = Xd::Daemon::Client.pair_remote(
         "127.0.0.1",
         port,
-        engine.arm_pairing(1.minute, "client device"),
+        engine.arm_pairing(1.minute),
         "cli-update-manager"
       )
       client = paired.client

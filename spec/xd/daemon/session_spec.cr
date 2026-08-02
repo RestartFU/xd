@@ -44,7 +44,7 @@ describe Xd::Daemon::Session do
 
   it "keeps remote authentication for later lines" do
     with_session_engine do |engine, _store|
-      code = engine.arm_pairing(1.minute, "session device")
+      code = engine.arm_pairing(1.minute)
       input = IO::Memory.new(
         {
           "op"   => "pair",

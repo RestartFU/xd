@@ -46,7 +46,12 @@ class ConnectionActorTest {
     fun pairingUsesOneUnpinnedGreetingAndPersistsCertificate() = runTest {
         val factory = FakeSocketFactory()
         val store = MemoryCredentialStore()
-        val actor = ConnectionActor(factory, store, backgroundScope)
+        val actor = ConnectionActor(
+            factory,
+            store,
+            backgroundScope,
+            deviceName = "Test device",
+        )
         val result = async {
             actor.pair("daemon", 4001, "ABCD-EFGH")
         }
@@ -57,7 +62,7 @@ class ConnectionActorTest {
         factory.latest.connected(certificate)
         runCurrent()
         assertEquals(
-            """{"op":"pair","code":"ABCD-EFGH","_xd_request":1}""" + "\n",
+            """{"op":"pair","code":"ABCD-EFGH","name":"Test device","_xd_request":1}""" + "\n",
             factory.latest.writes.single().decodeToString(),
         )
 

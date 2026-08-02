@@ -34,8 +34,14 @@ public class XdClient(
     socketFactory: PlatformSocketFactory,
     credentials: CredentialStore,
     private val scope: CoroutineScope,
+    deviceName: String = automaticDeviceName(),
 ) {
-    private val actor = ConnectionActor(socketFactory, credentials, scope)
+    private val actor = ConnectionActor(
+        socketFactory,
+        credentials,
+        scope,
+        deviceName,
+    )
     private val treeStore = TreeStore(actor)
     private val treeRefreshRequests = Channel<Unit>(Channel.CONFLATED)
     private val sessions = MutableStateFlow<Map<String, SessionEntry>>(emptyMap())
@@ -112,7 +118,7 @@ public class XdClient(
     ): PairResult = actor.pair(host, port, code)
 
     @Deprecated(
-        "The daemon owns device names; the supplied name is ignored.",
+        "The device name comes from the connecting platform; the supplied name is ignored.",
         ReplaceWith("pair(host, port, code)"),
     )
     public suspend fun pair(

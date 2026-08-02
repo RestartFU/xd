@@ -107,25 +107,25 @@ with `Not authenticated. Say hello first.`
 
 ### Pair
 
-Pairing is armed by `xd serve --pair --device-name NAME`, or from the desktop
-app's **Add a Device…** panel. The local owner supplies the name while arming
-the window:
+Pairing is armed by `xd serve --pair`, or from the desktop app's **Add a
+Device…** panel. The pairing window has no device name; the connecting client
+supplies its automatic name when it submits the code:
 
 ```json
-{"op":"peer-pairing","name":"Phone"}
+{"op":"peer-pairing"}
 ```
 
 The displayed `XXXX-XXXX` code is valid for five minutes and one matching
 submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
 
 ```json
-{"op":"pair","code":"4F2K-9QX1"}
-{"ok":true,"token":"base64 device token","device":"Phone"}
+{"op":"pair","code":"4F2K-9QX1","name":"Pixel 9"}
+{"ok":true,"token":"base64 device token","device":"Pixel 9"}
 ```
 
-`code` is required. The local owner must supply a non-empty name while the
-pairing window is armed; the daemon does not invent one. A peer-supplied `name`
-member is ignored for compatibility with older clients. A successful pair:
+`code` is required, as is a non-empty `name` supplied by the connecting client.
+The daemon normalizes and stores that name; it does not invent one. The local
+owner can rename it later through device management. A successful pair:
 
 - authenticates the existing connection; do not send `hello` afterward;
 - consumes the code before writing the device record, so even a storage failure
