@@ -46,6 +46,17 @@ class OpsTest {
     }
 
     @Test
+    fun draftTextOmitsUnchangedAttachmentsAndCanReplaceThem() {
+        val png = PngAttachment(PNG_HEADER + byteArrayOf(4, 5, 6))
+        val text = Ops.setDraft("chat", "typing")
+        val images = Ops.setDraft("chat", "typing", listOf(png))
+
+        assertFalse("attachments" in text)
+        assertEquals(1, images.getValue("attachments").jsonArray.size)
+        assertEquals("set-draft", images.getValue("op").jsonPrimitive.content)
+    }
+
+    @Test
     fun invalidImageFailsBeforeEncoding() {
         assertFailsWith<IllegalArgumentException> {
             Ops.send("chat", "", listOf(PngAttachment(byteArrayOf(1, 2, 3))))

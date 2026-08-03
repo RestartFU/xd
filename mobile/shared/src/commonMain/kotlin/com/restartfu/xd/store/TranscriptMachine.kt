@@ -5,6 +5,9 @@ import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.MessagesReply
+import com.restartfu.xd.protocol.PngAttachment
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 public sealed interface TranscriptEffect {
     public data object Refetch : TranscriptEffect
@@ -45,6 +48,11 @@ public sealed interface TranscriptInput {
     public data object Changed : TranscriptInput
     public data class Commands(val commands: List<String>) : TranscriptInput
     public data class Queued(val messages: List<String>) : TranscriptInput
+    public data class Draft(
+        val text: String,
+        val revision: Long,
+        val attachments: List<PngAttachment>? = null,
+    ) : TranscriptInput
 
     public data class OptimisticSend(
         val id: String,
@@ -164,6 +172,17 @@ public object TranscriptMachine {
         is TranscriptInput.Queued -> TranscriptTransition(
             state.copy(queue = input.messages, pendingUser = null),
         )
+        is TranscriptInput.Draft -> if (input.revision <= state.draftRevision) {
+            TranscriptTransition(state)
+        } else {
+            TranscriptTransition(
+                state.copy(
+                    draft = input.text,
+                    draftRevision = input.revision,
+                    draftAttachments = input.attachments ?: state.draftAttachments,
+                ),
+            )
+        }
         is TranscriptInput.OptimisticSend -> TranscriptTransition(
             state.copy(
                 pendingUser = TranscriptItem(
@@ -231,6 +250,7 @@ public object TranscriptMachine {
         copy(turnId = turnId, turnSequence = turnSequence)
     }
 
+    @OptIn(ExperimentalEncodingApi::class)
     private fun loaded(
         state: ChatState,
         input: TranscriptInput.Loaded,
@@ -262,6 +282,11 @@ public object TranscriptMachine {
                 fast = chat.fast,
                 claudeMode = chat.claudeMode,
                 queue = chat.queue,
+                draft = chat.draft,
+                draftRevision = chat.draftRevision,
+                draftAttachments = chat.draftAttachments.map {
+                    PngAttachment(Base64.Default.decode(it.data))
+                },
                 working = chat.working,
                 label = chat.label,
                 turnId = if (chat.working) chat.turnId else null,

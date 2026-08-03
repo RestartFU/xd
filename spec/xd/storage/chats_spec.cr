@@ -60,6 +60,29 @@ describe Xd::Storage::Store do
     end
   end
 
+  it "persists a revisioned composer draft" do
+    with_chat_store do |store, _tick|
+      chat_id = store.create_chat("folder", "Chat", "claude")
+      store.get_chat(chat_id).draft.should be_empty
+      store.get_chat(chat_id).draft_revision.should eq(0)
+
+      first = store.set_draft(chat_id, "across devices")
+      first.revision.should eq(1)
+      first.attachments.should eq("[]")
+      second = store.set_draft(
+        chat_id,
+        "with preview",
+        %([{"name":"image.png","mime":"image/png","data":"png"}])
+      )
+
+      second.revision.should eq(2)
+      stored = store.get_chat(chat_id)
+      stored.draft.should eq("with preview")
+      stored.draft_attachments.should eq(second.attachments)
+      stored.draft_revision.should eq(2)
+    end
+  end
+
   it "inherits the complete last changed agent configuration" do
     with_chat_store do |store, _tick|
       changed = store.create_chat(

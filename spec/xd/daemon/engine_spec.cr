@@ -1071,6 +1071,62 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "persists and broadcasts message drafts with attachment previews" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Drafts",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+      png = Xd::Daemon::Images::PNG_SIGNATURE + Bytes[1_u8, 2_u8]
+      encoded = Base64.strict_encode(png)
+
+      outcome = engine.process(local, {
+        "op"   => "set-draft",
+        "chat" => chat,
+        "text" => "Continue here",
+        "attachments" => [{
+          "name" => "preview.png",
+          "mime" => "image/png",
+          "data" => encoded,
+        }],
+      }.to_json)
+
+      outcome.response.success?.should be_true
+      outcome.response["draft_revision"].as_i64.should eq(1)
+      outcome.events.size.should eq(1)
+      event = outcome.events.first
+      event["event"].as_s.should eq("draft")
+      event["chat"].as_s.should eq(chat)
+      event["draft"].as_s.should eq("Continue here")
+      event["draft_attachments"].as_a.first["data"].as_s.should eq(encoded)
+
+      state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)
+      state["draft"].as_s.should eq("Continue here")
+      state["draft_revision"].as_i64.should eq(1)
+      state["draft_attachments"].as_a.first["name"].as_s
+        .should eq("preview.png")
+
+      text_only = engine.process(local, {
+        "op"   => "set-draft",
+        "chat" => chat,
+        "text" => "Text changed",
+      }.to_json)
+      text_only.events.first.body.has_key?("draft_attachments").should be_false
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)["draft_attachments"].as_a.size.should eq(1)
+    end
+  end
+
   it "edits, drops, and steers the persisted turn queue" do
     launcher = EngineLauncher.new
 

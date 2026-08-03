@@ -18,6 +18,62 @@ module Xd
       class Error < Exception
       end
 
+      record Upload,
+        name : String,
+        encoded : String,
+        data : Bytes
+
+      def validate_attachments(
+        node : JSON::Any,
+        allow_empty : Bool = false,
+      ) : Array(Upload)
+        attachments = node.as_a?
+        unless attachments
+          raise Error.new("Message attachments must be an array.")
+        end
+        valid_size = if allow_empty
+                       attachments.size.in?(0..MAX_IMAGES)
+                     else
+                       attachments.size.in?(1..MAX_IMAGES)
+                     end
+        unless valid_size
+          raise Error.new(
+            allow_empty ?
+              "A draft can contain at most 4 images." :
+              "A message can contain between 1 and 4 images."
+          )
+        end
+
+        total = 0
+        attachments.map do |entry|
+          attachment = entry.as_h?
+          mime = attachment.try(&.["mime"]?.try(&.as_s?))
+          encoded = attachment.try(&.["data"]?.try(&.as_s?))
+          encoded_limit = ((MAX_IMAGE_BYTES + 2) // 3) * 4
+          unless mime == "image/png" &&
+                 encoded &&
+                 encoded.bytesize <= encoded_limit
+            raise Error.new("Only PNG images up to 10 MiB can be sent.")
+          end
+
+          data = Base64.decode(encoded)
+          unless png?(data) &&
+                 data.size <= MAX_IMAGE_BYTES &&
+                 total <= MAX_TOTAL_BYTES - data.size
+            raise Error.new(
+              "The attached images are invalid or too large."
+            )
+          end
+          total += data.size
+          supplied = attachment.try(&.["name"]?.try(&.as_s?))
+          name = supplied ? File.basename(supplied) : "image.png"
+          name = "image.png" if name.empty? || name.bytesize > 255
+          Upload.new(name, encoded, data)
+        end
+      rescue Base64::Error
+        raise Error.new("The attached images are invalid or too large.")
+      end
+
       def materialize(
         body : Hash(String, JSON::Any),
         text : String,
@@ -25,51 +81,22 @@ module Xd
         node = body["attachments"]?
         return text unless node
 
-        attachments = node.as_a?
-        unless attachments
-          raise Error.new("Message attachments must be an array.")
-        end
-        unless attachments.size.in?(1..MAX_IMAGES)
-          raise Error.new("A message can contain between 1 and 4 images.")
-        end
-
         directory = AppPaths.remote_pastes
+        attachments = validate_attachments(node)
         paths = [] of String
-        total = 0
         message = text
 
         begin
-          attachments.each do |node|
-            attachment = node.as_h?
-            mime = attachment.try(&.["mime"]?.try(&.as_s?))
-            encoded = attachment.try(&.["data"]?.try(&.as_s?))
-            encoded_limit = ((MAX_IMAGE_BYTES + 2) // 3) * 4
-            unless mime == "image/png" &&
-                   encoded &&
-                   encoded.bytesize <= encoded_limit
-              raise Error.new("Only PNG images up to 10 MiB can be sent.")
-            end
-
-            data = Base64.decode(encoded)
-            unless png?(data) &&
-                   data.size <= MAX_IMAGE_BYTES &&
-                   total <= MAX_TOTAL_BYTES - data.size
-              raise Error.new(
-                "The attached images are invalid or too large."
-              )
-            end
-            total += data.size
-
+          attachments.each do |attachment|
             path = File.join(directory, "paste-#{UUID.random}.png")
-            File.open(path, "w", perm: 0o600) { |file| file.write(data) }
+            File.open(path, "w", perm: 0o600) do |file|
+              file.write(attachment.data)
+            end
             File.chmod(path, 0o600)
             paths << path
             message += "\n" unless message.empty?
             message += "[image: #{path}]"
           end
-        rescue error : Base64::Error
-          remove(paths)
-          raise Error.new("The attached images are invalid or too large.")
         rescue error
           remove(paths)
           raise error

@@ -20,6 +20,9 @@ module Xd
       getter terminal_open : Bool
       getter diff_open : Bool
       getter daemon_working : Bool
+      getter draft : String
+      getter draft_attachments : String
+      getter draft_revision : Int64
       getter created_at : Int64
       getter updated_at : Int64
       property context_used : UInt64 = 0_u64
@@ -45,9 +48,17 @@ module Xd
         @new_worktree : Bool,
         @original_workdir : String?,
         @daemon_working : Bool,
+        @draft : String,
+        @draft_attachments : String,
+        @draft_revision : Int64,
       )
       end
     end
+
+    record DraftState,
+      text : String,
+      attachments : String,
+      revision : Int64
 
     record Message,
       id : Int64,

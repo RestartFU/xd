@@ -45,16 +45,31 @@ describe Xd::Workspace::Worktrees do
       first_id = store.create_chat(folder_id, "Chat", "claude")
       store.set_new_worktree(first_id, true)
       first = store.get_chat(first_id)
+      tree_before = workspaces.tree_signature
 
       created = service.prepare(first, "Fix parser!")
       created.should contain("fix-parser")
       File.directory?(created).should be_true
+      marker = File.join(
+        directory,
+        "Workspaces",
+        "worktrees",
+        Xd::Workspace::WORKTREE_CONTAINER_MARKER
+      )
+      File.file?(marker).should be_true
+      workspaces.snapshot.folders.map(&.name).should eq(["Project"])
+      workspaces.tree_signature.should eq(tree_before)
+
+      # Worktrees created by older XD builds have no marker. Loading one
+      # upgrades its container so it also disappears from workspace discovery.
+      File.delete(marker)
       stored = store.get_chat(first_id)
       stored.workdir.should eq(created)
       stored.original_workdir.should eq(repository)
       stored.new_worktree.should be_false
 
       state = service.state(stored)
+      File.file?(marker).should be_true
       state.linked.should be_true
       state.worktrees.size.should eq(2)
       service.describe(created, home: home_alias).should contain(

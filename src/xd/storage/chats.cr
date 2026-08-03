@@ -7,7 +7,8 @@ module Xd
     CHAT_COLUMNS = <<-SQL
       id, folder_id, title, backend, workdir, model, effort, access, plan, fast,
       claude_mode, created_at, updated_at, terminal_open, diff_open, queued,
-      new_worktree, original_workdir, daemon_working
+      new_worktree, original_workdir, daemon_working, draft,
+      draft_attachments, draft_revision
       SQL
 
     class Store
@@ -237,6 +238,31 @@ module Xd
         end
       end
 
+      def set_draft(
+        chat_id : String,
+        text : String,
+        attachments : String? = nil,
+      ) : DraftState
+        database_error("Cannot save the message draft") do
+          row = @database.query_one?(
+            <<-SQL,
+              UPDATE chats
+                 SET draft = ?,
+                     draft_attachments = COALESCE(?, draft_attachments),
+                     draft_revision = draft_revision + 1
+               WHERE id = ?
+              RETURNING draft, draft_attachments, draft_revision
+              SQL
+            text,
+            attachments,
+            chat_id,
+            as: {String, String, Int64}
+          )
+          value = row || raise NotFoundError.new("No chat #{chat_id}")
+          DraftState.new(value[0], value[1], value[2])
+        end
+      end
+
       def clear_daemon_working : Nil
         database_error("Cannot clear daemon turn state") do
           @database.exec(
@@ -287,7 +313,10 @@ module Xd
           queue: Storage.queue_from_column(row.read(String?)),
           new_worktree: row.read(Bool),
           original_workdir: row.read(String?),
-          daemon_working: row.read(Bool)
+          daemon_working: row.read(Bool),
+          draft: row.read(String),
+          draft_attachments: row.read(String),
+          draft_revision: row.read(Int64)
         )
       end
     end

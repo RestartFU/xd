@@ -386,6 +386,30 @@ module Xd
             connection.exec "DROP TRIGGER IF EXISTS remember_agent_defaults"
             connection.exec AGENT_DEFAULTS_TRIGGER
           end
+          if version < 21
+            chat_columns = connection.query_all(
+              "SELECT name FROM pragma_table_info('chats')",
+              as: String
+            )
+            unless chat_columns.includes?("draft")
+              connection.exec(
+                "ALTER TABLE chats " \
+                "ADD COLUMN draft TEXT NOT NULL DEFAULT ''"
+              )
+            end
+            unless chat_columns.includes?("draft_attachments")
+              connection.exec(
+                "ALTER TABLE chats " \
+                "ADD COLUMN draft_attachments TEXT NOT NULL DEFAULT '[]'"
+              )
+            end
+            unless chat_columns.includes?("draft_revision")
+              connection.exec(
+                "ALTER TABLE chats " \
+                "ADD COLUMN draft_revision INTEGER NOT NULL DEFAULT 0"
+              )
+            end
+          end
 
           connection.exec(
             <<-SQL,

@@ -2,6 +2,10 @@ require "../../spec_helper"
 require "../../../src/xd/ui/text_reveal"
 
 describe Xd::UI::TextReveal do
+  it "caps wrapping-label updates at ten frames per second" do
+    Xd::UI::TextReveal::FRAME_MILLISECONDS.should be >= 100
+  end
+
   it "starts late and then catches up" do
     reveal = Xd::UI::TextReveal.new
     reveal.note_append(1_000_i64)

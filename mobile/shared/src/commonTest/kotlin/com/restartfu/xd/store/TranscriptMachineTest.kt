@@ -7,6 +7,7 @@ import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.LiveItemReply
 import com.restartfu.xd.protocol.MessageReply
 import com.restartfu.xd.protocol.MessagesReply
+import com.restartfu.xd.protocol.PngAttachment
 import com.restartfu.xd.protocol.WorktreeReply
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -100,6 +101,25 @@ class TranscriptMachineTest {
 
         assertEquals(listOf("one", "two"), state.queue)
         assertNull(state.pendingUser)
+    }
+
+    @Test
+    fun draftEventsAreRevisionedAndPreserveOmittedAttachments() {
+        val png = PngAttachment(byteArrayOf(1, 2, 3))
+        var state = ChatState(
+            "chat",
+            draft = "old",
+            draftRevision = 2,
+            draftAttachments = listOf(png),
+        )
+
+        state = reduce(state, TranscriptInput.Draft("new", 3)).state
+        assertEquals("new", state.draft)
+        assertEquals(listOf(png), state.draftAttachments)
+
+        state = reduce(state, TranscriptInput.Draft("stale", 2, emptyList())).state
+        assertEquals("new", state.draft)
+        assertEquals(listOf(png), state.draftAttachments)
     }
 
     @Test

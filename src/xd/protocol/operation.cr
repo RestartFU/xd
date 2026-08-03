@@ -42,6 +42,7 @@ module Xd
       MoveChat
       DeleteChat
       Chat
+      SetDraft
       SetOption
       Send
       Queue
@@ -101,6 +102,7 @@ module Xd
         when MoveChat           then "move-chat"
         when DeleteChat         then "delete-chat"
         when Chat               then "chat"
+        when SetDraft           then "set-draft"
         when SetOption          then "set-option"
         when Send               then "send"
         when Queue              then "queue"
@@ -163,6 +165,7 @@ module Xd
         when "move-chat"            then MoveChat
         when "delete-chat"          then DeleteChat
         when "chat"                 then Chat
+        when "set-draft"            then SetDraft
         when "set-option"           then SetOption
         when "send"                 then Send
         when "queue"                then Queue

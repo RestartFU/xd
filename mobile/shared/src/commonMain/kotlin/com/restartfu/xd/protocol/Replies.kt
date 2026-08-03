@@ -57,6 +57,13 @@ public data class LiveItemReply(
 )
 
 @Serializable
+public data class DraftAttachmentReply(
+    val name: String = "image.png",
+    val mime: String,
+    val data: String,
+)
+
+@Serializable
 public data class ChatReply(
     val ok: Boolean,
     val title: String,
@@ -68,6 +75,11 @@ public data class ChatReply(
     val claudeMode: Boolean = false,
     val queued: String? = null,
     val queue: List<String> = emptyList(),
+    val draft: String = "",
+    @SerialName("draft_revision")
+    val draftRevision: Long = 0,
+    @SerialName("draft_attachments")
+    val draftAttachments: List<DraftAttachmentReply> = emptyList(),
     val working: Boolean,
     val label: String? = null,
     // Present only while a turn is live. Together they mark exactly how much

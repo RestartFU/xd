@@ -26,6 +26,7 @@ require "./workspace_monitor"
 module Xd
   module Daemon
     PROTOCOL_VERSION = 1_i64
+    MAX_DRAFT_BYTES  = 1024 * 1024
     PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
     private record Pairing,
@@ -374,6 +375,8 @@ module Xd
           delete_chat(request)
         when Protocol::Operation::Chat
           chat(request)
+        when Protocol::Operation::SetDraft
+          set_draft(request)
         when Protocol::Operation::SetOption
           set_option(request)
         when Protocol::Operation::Send
@@ -1137,6 +1140,9 @@ module Xd
         )
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?
         fields["queue"] = json_any(stored.queue)
+        fields["draft"] = JSON::Any.new(stored.draft)
+        fields["draft_revision"] = JSON::Any.new(stored.draft_revision)
+        fields["draft_attachments"] = JSON.parse(stored.draft_attachments)
         active_turn = @agents.active_turn(chat_id)
         fields["working"] = JSON::Any.new(
           !active_turn.nil? || stored.daemon_working
@@ -1197,6 +1203,38 @@ module Xd
         context = "New worktree from #{context}" if stored.new_worktree
         fields["context"] = JSON::Any.new(context)
 
+        Protocol::Response.ok(fields)
+      end
+
+      private def set_draft(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        message = "set-draft needs a chat and text."
+        chat_id = request.string("chat", message)
+        text = request.string("text", message)
+        if text.bytesize > MAX_DRAFT_BYTES
+          raise Protocol::Error.new("A message draft is too large.")
+        end
+
+        attachments : String? = nil
+        if node = request.body["attachments"]?
+          validated = @images.validate_attachments(node, allow_empty: true)
+          attachments = validated.map do |attachment|
+            {
+              "name" => attachment.name,
+              "mime" => "image/png",
+              "data" => attachment.encoded,
+            }
+          end.to_json
+        end
+        state = @store.set_draft(chat_id, text, attachments)
+        fields = {
+          "draft"          => JSON::Any.new(state.text),
+          "draft_revision" => JSON::Any.new(state.revision),
+        }
+        if attachments
+          fields["draft_attachments"] = JSON.parse(state.attachments)
+        end
         Protocol::Response.ok(fields)
       end
 
@@ -1822,6 +1860,22 @@ module Xd
             fields["chat"] = JSON::Any.new(chat_id)
           end
           [protocol_event("changed", fields)]
+        when Protocol::Operation::SetDraft
+          chat_id = request.string?("chat")
+          return [] of Protocol::Event unless chat_id
+
+          stored = @store.get_chat(chat_id)
+          fields = {
+            "chat"           => JSON::Any.new(chat_id),
+            "draft"          => JSON::Any.new(stored.draft),
+            "draft_revision" => JSON::Any.new(stored.draft_revision),
+          }
+          if request.member?("attachments")
+            fields["draft_attachments"] = JSON.parse(
+              stored.draft_attachments
+            )
+          end
+          [protocol_event("draft", fields)]
         when Protocol::Operation::Queue,
              Protocol::Operation::DropQueue,
              Protocol::Operation::EditQueue,

@@ -95,6 +95,7 @@ module Xd
       QUEUE_RETIRE_BATCH        =   8
       TURN_RECOVERY_EVENT_BATCH =  32
       TURN_RECOVERY_EVENT_LIMIT = 512
+      DRAFT_SYNC_DELAY          = 250.milliseconds
       RENDER_SAFE_MODE          = ENV["XD_RENDER_SAFE_MODE"]? == "1"
 
       getter widget : Adw::ApplicationWindow
@@ -173,6 +174,11 @@ module Xd
         Deque({Daemon::Endpoint, Hash(String, JSON::Any)}).new
       @send_pending = false
       @cancel_pending = false
+      @draft_sync_source = 0_u32
+      @draft_revision = -1_i64
+      @draft_local_dirty = false
+      @draft_attachments_dirty = false
+      @applying_draft = false
       @closed = false
       @retired_transcripts = Deque(Gtk::Box).new
       @transcript_retirement_scheduled = false
@@ -340,6 +346,7 @@ module Xd
         @entry.add_controller(paste_keys)
         @entry.buffer.changed_signal.connect do
           refresh_command_suggestions
+          schedule_draft_sync unless @applying_draft
         end
 
         @commands_flow = Gtk::FlowBox.new
@@ -551,6 +558,11 @@ module Xd
           unless @stream_render_timer == 0
             GLib.source_remove(@stream_render_timer)
             @stream_render_timer = 0_u32
+          end
+          unless @draft_sync_source == 0
+            GLib.source_remove(@draft_sync_source)
+            @draft_sync_source = 0_u32
+            sync_draft
           end
           @transcript_pages.each_value(&.clear_workflows)
           @event_inbox.clear
@@ -994,6 +1006,7 @@ module Xd
       ) : Nil
         changed = @active_chat != id || !@client.same?(endpoint)
         if changed
+          flush_draft
           keep_previous = current_transcript_cacheable?
           retire_open_questions
           leave_current_transcript(keep_previous)
@@ -1003,7 +1016,7 @@ module Xd
         end
         remember_panes
         hide_panes_for_switch
-        clear_attachments
+        reset_draft_ui if changed
         @client = endpoint
         @active_chat = id
         @waiting_for_input = false
@@ -1054,6 +1067,7 @@ module Xd
       end
 
       private def clear_active_chat : Nil
+        flush_draft
         remember_panes
         hide_panes_for_switch
         retire_open_questions
@@ -1068,7 +1082,7 @@ module Xd
         @chat_title.title = "xd"
         @chat_stack.visible_child_name = "empty"
         @composer.visible = false
-        @entry.buffer.text = ""
+        reset_draft_ui
         @entry.sensitive = false
         @attach.sensitive = false
         @voice.select(nil, nil)
@@ -1660,8 +1674,11 @@ module Xd
             @status.text = ""
             retire_open_questions
             unless explicit_text
-              @entry.buffer.text = ""
-              clear_attachments
+              if @entry.buffer.text.strip == text
+                @entry.buffer.text = ""
+                clear_attachments
+                schedule_draft_sync(attachments: true)
+              end
             end
             if QueuePresentation.reload_after_send?(response)
               load_messages
@@ -1780,6 +1797,7 @@ module Xd
         @attachments << attachment
         append_attachment_chip(attachment)
         @status.text = ""
+        schedule_draft_sync(attachments: true)
       end
 
       private def prepare_texture_attachment(
@@ -1870,6 +1888,7 @@ module Xd
           @attachments.delete(attachment)
           @attachments_bar.remove(chip)
           @attachments_bar.visible = !@attachments.empty?
+          schedule_draft_sync(attachments: true)
         end
 
         @attachments_bar.append(chip)
@@ -1880,6 +1899,166 @@ module Xd
         @attachments.clear
         clear(@attachments_bar)
         @attachments_bar.visible = false
+      end
+
+      private def schedule_draft_sync(attachments : Bool = false) : Nil
+        return unless @active_chat
+        return if @applying_draft
+
+        @draft_local_dirty = true
+        @draft_attachments_dirty ||= attachments
+        unless @draft_sync_source == 0
+          GLib.source_remove(@draft_sync_source)
+        end
+        @draft_sync_source = GLib.timeout(DRAFT_SYNC_DELAY) do
+          @draft_sync_source = 0_u32
+          sync_draft
+          false
+        end
+      end
+
+      private def flush_draft : Nil
+        unless @draft_sync_source == 0
+          GLib.source_remove(@draft_sync_source)
+          @draft_sync_source = 0_u32
+        end
+        sync_draft if @draft_local_dirty
+      end
+
+      private def sync_draft : Nil
+        chat_id = @active_chat || return
+        return unless @draft_local_dirty
+
+        endpoint = @client
+        include_attachments = @draft_attachments_dirty
+        request = {
+          "op"   => JSON::Any.new("set-draft"),
+          "chat" => JSON::Any.new(chat_id),
+          "text" => JSON::Any.new(@entry.buffer.text),
+        }
+        if include_attachments
+          request["attachments"] = JSON::Any.new(
+            @attachments.map do |attachment|
+              JSON::Any.new({
+                "name" => JSON::Any.new(attachment.name),
+                "mime" => JSON::Any.new("image/png"),
+                "data" => JSON::Any.new(attachment.data),
+              })
+            end
+          )
+        end
+        @draft_local_dirty = false
+        @draft_attachments_dirty = false
+
+        call_async(endpoint, request) do |response, error|
+          next unless @client.same?(endpoint) && @active_chat == chat_id
+          if error
+            @draft_local_dirty = true
+            @draft_attachments_dirty ||= include_attachments
+            @status.text = error
+          elsif response
+            apply_draft(
+              response["draft"]?.try(&.as_s?) || "",
+              response["draft_revision"]?.try(&.as_i64?) || 0_i64,
+              response["draft_attachments"]?.try(&.as_a?)
+            )
+          end
+        end
+      end
+
+      private def reset_draft_ui : Nil
+        unless @draft_sync_source == 0
+          GLib.source_remove(@draft_sync_source)
+          @draft_sync_source = 0_u32
+        end
+        @draft_revision = -1_i64
+        @draft_local_dirty = false
+        @draft_attachments_dirty = false
+        @applying_draft = true
+        @entry.buffer.text = ""
+        clear_attachments
+        @applying_draft = false
+      end
+
+      private def apply_draft(
+        text : String,
+        revision : Int64,
+        attachments : Array(JSON::Any)?,
+      ) : Nil
+        return if revision <= @draft_revision
+
+        @draft_revision = revision
+        unless @draft_local_dirty
+          @applying_draft = true
+          @entry.buffer.text = text unless @entry.buffer.text == text
+          @applying_draft = false
+        end
+        if nodes = attachments
+          prepare_synced_attachments(nodes, revision) unless @draft_attachments_dirty
+        end
+      end
+
+      private def prepare_synced_attachments(
+        nodes : Array(JSON::Any),
+        revision : Int64,
+      ) : Nil
+        if nodes.empty?
+          @applying_draft = true
+          clear_attachments
+          @applying_draft = false
+          return
+        end
+
+        chat_id = @active_chat || return
+        endpoint = @client
+        queued = BackgroundWork.submit do
+          prepared = [] of PreparedAttachment
+          message : String? = nil
+          begin
+            nodes.each do |node|
+              fields = node.as_h
+              name = fields["name"]?.try(&.as_s?) || "image.png"
+              encoded = fields["data"].as_s
+              data = Base64.decode(encoded)
+              image = ImageAttachment.prepare(data)
+              prepared << PreparedAttachment.new(
+                name,
+                encoded,
+                data.size,
+                image.preview
+              )
+            end
+          rescue error
+            message = error.message || "Cannot synchronize draft images."
+          end
+          GLib.idle_add do
+            if @client.same?(endpoint) &&
+               @active_chat == chat_id &&
+               @draft_revision == revision &&
+               !@draft_attachments_dirty
+              if message
+                @status.text = message.not_nil!
+              else
+                @applying_draft = true
+                clear_attachments
+                prepared.each do |attachment|
+                  value = Attachment.new(
+                    attachment.name,
+                    attachment.data,
+                    attachment.bytesize,
+                    ImageAttachment.texture(attachment.preview)
+                  )
+                  @attachments << value
+                  append_attachment_chip(value)
+                end
+                @applying_draft = false
+              end
+            end
+            false
+          end
+          nil
+        end
+        @status.text = "Image workers are busy. Try again shortly." unless queued
       end
 
       private def cancel_turn : Nil
@@ -2365,6 +2544,11 @@ module Xd
           state["commands"]?.try(&.as_a?) || [] of JSON::Any
         )
         refresh_command_suggestions
+        apply_draft(
+          state["draft"]?.try(&.as_s?) || "",
+          state["draft_revision"]?.try(&.as_i64?) || 0_i64,
+          state["draft_attachments"]?.try(&.as_a?)
+        )
         working = state["working"]?.try(&.as_bool?) || false
         if working
           queue_turn_recovery(state, request) if recover_turn
@@ -2834,6 +3018,15 @@ module Xd
           queue = QueuePresentation.event_queue(event) || return
           @status.text = queue.empty? ? "" : "Message queued"
           render_queue(queue)
+        when "draft"
+          return unless active_event?(endpoint, event)
+          text = event["draft"]?.try(&.as_s?) || return
+          revision = event["draft_revision"]?.try(&.as_i64?) || return
+          apply_draft(
+            text,
+            revision,
+            event["draft_attachments"]?.try(&.as_a?)
+          )
         when "agent-auth-changed"
           return unless @client.same?(endpoint)
           return unless event["provider"]?.try(&.as_s?) == @chat_backend

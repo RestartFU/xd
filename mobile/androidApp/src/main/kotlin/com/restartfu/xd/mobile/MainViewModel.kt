@@ -14,6 +14,10 @@ import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.voice.VoiceSession
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -249,6 +253,10 @@ class ChatViewModel(
     val catalogError: StateFlow<String?> = _catalogError.asStateFlow()
     val selectingModel: StateFlow<Boolean> = _selectingModel.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
+    private var draftSyncJob: Job? = null
+    private var draftTextDirty = false
+    private var draftAttachmentsDirty = false
+    private var draftRevision = -1L
 
     /**
      * Dictation into the composer.
@@ -265,16 +273,38 @@ class ChatViewModel(
 
     init {
         viewModelScope.launch { client.voiceEvents.collect(voice::onEvent) }
+        viewModelScope.launch {
+            state.collect { synced ->
+                if (synced.draftRevision <= draftRevision) return@collect
+                draftRevision = synced.draftRevision
+                if (!draftTextDirty) _draft.value = synced.draft
+                if (
+                    !draftAttachmentsDirty &&
+                    !sameImages(_attachments.value, synced.draftAttachments)
+                ) {
+                    val revision = synced.draftRevision
+                    val prepared = buildList {
+                        for (png in synced.draftAttachments) {
+                            add(ImageAttachments.fromPng(png))
+                        }
+                    }
+                    if (state.value.draftRevision == revision && !draftAttachmentsDirty) {
+                        _attachments.value = prepared
+                    }
+                }
+            }
+        }
     }
 
     fun updateDraft(value: String) {
         _draft.value = value
+        scheduleDraftSync()
     }
 
     private fun appendToDraft(transcript: String) {
         val existing = _draft.value
         val separator = if (existing.isEmpty() || existing.last().isWhitespace()) "" else " "
-        _draft.value = existing + separator + transcript
+        updateDraft(existing + separator + transcript)
     }
 
     fun attach(context: android.content.Context, uris: List<android.net.Uri>) {
@@ -295,12 +325,16 @@ class ChatViewModel(
                     _attachmentError.value = error.message ?: "That image could not be attached"
                 }
             }
-            if (loaded.isNotEmpty()) _attachments.value = _attachments.value + loaded
+            if (loaded.isNotEmpty()) {
+                _attachments.value = _attachments.value + loaded
+                scheduleDraftSync(attachments = true)
+            }
         }
     }
 
     fun removeAttachment(index: Int) {
         _attachments.value = _attachments.value.filterIndexed { at, _ -> at != index }
+        scheduleDraftSync(attachments = true)
     }
 
     fun clearAttachmentError() {
@@ -314,8 +348,11 @@ class ChatViewModel(
             session.send(text, images.map(Attachment::png))
             // Only clear what was actually sent: the composer may have moved
             // on while the request was in flight.
-            if (_draft.value == text) _draft.value = ""
-            _attachments.value = _attachments.value.drop(images.size)
+            if (_draft.value == text) {
+                _draft.value = ""
+                _attachments.value = _attachments.value.drop(images.size)
+                scheduleDraftSync(attachments = true)
+            }
         }
     }
 
@@ -346,7 +383,7 @@ class ChatViewModel(
         val text = _draft.value
         launchGuarded(_sending) {
             session.enqueue(text)
-            if (_draft.value == text) _draft.value = ""
+            if (_draft.value == text) updateDraft("")
         }
     }
 
@@ -494,7 +531,24 @@ class ChatViewModel(
         // Leaving the chat abandons a recording rather than transcribing into
         // a composer nobody is looking at.
         voice.cancel()
-        session.close()
+        draftSyncJob?.cancel()
+        if (draftTextDirty || draftAttachmentsDirty) {
+            val text = _draft.value
+            val images = if (draftAttachmentsDirty) {
+                _attachments.value.map(Attachment::png)
+            } else {
+                null
+            }
+            viewModelScope.launch(
+                context = NonCancellable,
+                start = CoroutineStart.UNDISPATCHED,
+            ) {
+                runCatching { session.setDraft(text, images) }
+                session.close()
+            }
+        } else {
+            session.close()
+        }
     }
 
     class Factory(
@@ -507,7 +561,40 @@ class ChatViewModel(
     }
 
     private companion object {
+        const val DRAFT_SYNC_DELAY_MILLIS = 250L
         const val QUEUE_EVENT_TIMEOUT_MILLIS = 5_000L
         const val CANCEL_EVENT_TIMEOUT_MILLIS = 5_000L
+    }
+
+    private fun scheduleDraftSync(attachments: Boolean = false) {
+        draftTextDirty = true
+        draftAttachmentsDirty = draftAttachmentsDirty || attachments
+        draftSyncJob?.cancel()
+        draftSyncJob = viewModelScope.launch {
+            delay(DRAFT_SYNC_DELAY_MILLIS)
+            val includeAttachments = draftAttachmentsDirty
+            val images = if (includeAttachments) {
+                _attachments.value.map(Attachment::png)
+            } else {
+                null
+            }
+            draftTextDirty = false
+            draftAttachmentsDirty = false
+            try {
+                session.setDraft(_draft.value, images)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                draftTextDirty = true
+                draftAttachmentsDirty = draftAttachmentsDirty || includeAttachments
+            }
+        }
+    }
+
+    private fun sameImages(
+        current: List<Attachment>,
+        synced: List<com.restartfu.xd.protocol.PngAttachment>,
+    ): Boolean = current.size == synced.size && current.indices.all { index ->
+        current[index].png.bytes.contentEquals(synced[index].bytes)
     }
 }

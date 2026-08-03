@@ -12,6 +12,7 @@ import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
 import com.restartfu.xd.protocol.ImageReply
+import com.restartfu.xd.protocol.Limits
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import com.restartfu.xd.protocol.MessagesReply
@@ -58,6 +59,11 @@ public class ChatSession internal constructor(
     public suspend fun cancel(): Unit = core.call(Ops.cancel(core.chatId))
 
     public suspend fun enqueue(text: String): Unit = core.call(Ops.queue(core.chatId, text))
+
+    public suspend fun setDraft(
+        text: String,
+        images: List<PngAttachment>? = null,
+    ): Unit = core.call(Ops.setDraft(core.chatId, text, images))
 
     public suspend fun dropQueued(index: Int? = null): Unit =
         core.call(Ops.dropQueue(core.chatId, index))
@@ -447,6 +453,17 @@ internal class ChatSessionCore(
                 val queue = value.requiredStringArray("queue") ?: return
                 apply(TranscriptInput.Queued(queue), event.sequence)
             }
+            "draft" -> {
+                val text = (value["draft"] as? JsonPrimitive)?.contentOrNull ?: return
+                val revision = value.longOrNull("draft_revision") ?: return
+                val attachments = value["draft_attachments"]?.let {
+                    decodeDraftAttachments(it as? JsonArray ?: return)
+                }
+                apply(
+                    TranscriptInput.Draft(text, revision, attachments),
+                    event.sequence,
+                )
+            }
         }
     }
 
@@ -535,6 +552,25 @@ internal class ChatSessionCore(
         return decoded
     }
 
+    @OptIn(ExperimentalEncodingApi::class)
+    private fun decodeDraftAttachments(values: JsonArray): List<PngAttachment>? {
+        val decoded = mutableListOf<PngAttachment>()
+        try {
+            for (value in values) {
+                val fields = value as? JsonObject ?: return null
+                val mime = (fields["mime"] as? JsonPrimitive)?.contentOrNull
+                val data = (fields["data"] as? JsonPrimitive)?.contentOrNull
+                    ?: return null
+                if (mime != Limits.PNG_MIME) return null
+                decoded += PngAttachment(Base64.Default.decode(data))
+            }
+            Limits.validateImages(decoded)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return decoded
+    }
+
     private suspend fun clearReloadAfterCancellation() {
         withContext(NonCancellable) {
             stateMutex.withLock {
@@ -557,6 +593,7 @@ internal class ChatSessionCore(
             "tool",
             "turn-finished",
             "queued",
+            "draft",
         )
     }
 

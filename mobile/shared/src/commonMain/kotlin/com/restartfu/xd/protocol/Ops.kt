@@ -48,6 +48,37 @@ public object Ops {
 
     public fun chat(chatId: String): JsonObject = withChat("chat", chatId)
 
+    @OptIn(ExperimentalEncodingApi::class)
+    public fun setDraft(
+        chatId: String,
+        text: String,
+        images: List<PngAttachment>? = null,
+    ): JsonObject = buildJsonObject {
+        require(text.encodeToByteArray().size <= 1024 * 1024) {
+            "Message draft is too large"
+        }
+        put("op", "set-draft")
+        put("chat", chatId)
+        put("text", text)
+        if (images != null) {
+            Limits.validateImages(images)
+            put(
+                "attachments",
+                buildJsonArray {
+                    images.forEach { image ->
+                        add(
+                            buildJsonObject {
+                                put("name", "image.png")
+                                put("mime", Limits.PNG_MIME)
+                                put("data", Base64.Default.encode(image.bytes))
+                            },
+                        )
+                    }
+                },
+            )
+        }
+    }
+
     public fun messages(chatId: String, limit: Int = 150): JsonObject = buildJsonObject {
         put("op", "messages")
         put("chat", chatId)

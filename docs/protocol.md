@@ -351,6 +351,21 @@ Attachments are PNG only:
 
 At most 4 images, each at most 10 MiB, 20 MiB in total.
 
+### `set-draft`
+
+```json
+{"op":"set-draft","chat":"chat-1","text":"unfinished"}
+{"ok":true,"draft":"unfinished","draft_revision":4}
+```
+
+The daemon persists one composer draft per chat and broadcasts a `draft` event
+after every update. `text` is required but may be empty and is limited to 1
+MiB. Optional `attachments` replaces the synchronized PNG preview list; omit it
+for ordinary text edits so large image payloads are not resent on every
+keystroke. An empty array clears previews. The `chat` snapshot returns `draft`,
+`draft_revision`, and `draft_attachments` so a newly connected device starts
+with the same composer.
+
 ### `queue`, `drop-queue`, `edit-queue`, `steer-queue`
 
 ```json
@@ -445,6 +460,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `tree` | — | Workspace tree changed; refetch `tree`. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `queued` | `chat`, `queue`, `text` | Queue replaced. `text` is the first item. |
+| `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` | Composer text changed; attachments are present only when replaced. |
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |
 | `turn-started` | `chat`, `label`, `turn_id`, `turn_sequence` | A turn began. |
 | `text` | `chat`, `text`, `turn_id`, `turn_sequence` | Assistant text delta. |
