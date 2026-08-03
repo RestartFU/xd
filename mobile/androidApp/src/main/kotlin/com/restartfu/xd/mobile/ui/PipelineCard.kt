@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -265,9 +266,14 @@ private fun workflowIcon(conclusion: String?): String = when (conclusion) {
     else -> "•"
 }
 
+// The desktop's .xd-workflow-success and .xd-workflow-failure, so a run reads
+// the same colour on both.
+private val WORKFLOW_SUCCESS = Color(0xFF8FF0A4)
+private val WORKFLOW_FAILURE = Color(0xFFFF7B63)
+
 @Composable
 private fun workflowColour(conclusion: String?) = when (conclusion) {
-    "success" -> androidx.compose.ui.graphics.Color(0xFF2E7D32)
-    "failure", "timed_out", "startup_failure" -> MaterialTheme.colorScheme.error
+    "success" -> WORKFLOW_SUCCESS
+    "failure", "timed_out", "startup_failure" -> WORKFLOW_FAILURE
     else -> MaterialTheme.colorScheme.outline
 }

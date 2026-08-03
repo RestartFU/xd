@@ -80,8 +80,8 @@ internal fun DiffText(
     Column(modifier.horizontalScroll(rememberScrollState())) {
         rendered.forEach { (line, annotated) ->
             val background = when (line.kind) {
-                DiffKind.ADDED -> Color(0x2626A269)
-                DiffKind.REMOVED -> Color(0x26C01C28)
+                DiffKind.ADDED -> Color(0xFF183522)
+                DiffKind.REMOVED -> Color(0xFF3A1D1B)
                 else -> Color.Transparent
             }
             Text(

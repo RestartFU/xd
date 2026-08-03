@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Xd" parent="android:style/Theme.Material.Light.NoActionBar" />
+    <!--
+      Dark whatever the system is set to, because the app is: the window this
+      theme draws is what shows for the frame before Compose paints, and a
+      white one there is a flash of a program xd is not.
+    -->
+    <style name="Theme.Xd" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

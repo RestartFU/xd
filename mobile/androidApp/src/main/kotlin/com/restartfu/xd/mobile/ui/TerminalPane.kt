@@ -55,14 +55,16 @@ import com.restartfu.xd.terminal.TerminalKey
 
 /** The xterm 16-colour palette, so SGR codes land on recognisable colours. */
 private val PALETTE = listOf(
-    Color(0xFF000000), Color(0xFFC01C28), Color(0xFF26A269), Color(0xFFA2734C),
-    Color(0xFF12488B), Color(0xFFA347BA), Color(0xFF2AA1B3), Color(0xFFD0CFCC),
-    Color(0xFF5E5C64), Color(0xFFF66151), Color(0xFF33D17A), Color(0xFFE9AD0C),
-    Color(0xFF2A7BDE), Color(0xFFC061CB), Color(0xFF33C7DE), Color(0xFFFFFFFF),
+    // Xd::UI::TerminalPanel::PALETTE, colour for colour.
+    Color(0xFF23232A), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFD19A66),
+    Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFB8BCC8),
+    Color(0xFF5C6370), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFD19A66),
+    Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFE6E6EC),
 )
 
-private val BACKGROUND = Color(0xFF12100E)
-private val FOREGROUND = Color(0xFFD0CFCC)
+// .xd-terminal on the desktop.
+private val BACKGROUND = Color(0xFF0A0A0C)
+private val FOREGROUND = Color(0xFFF2F2F4)
 
 /**
  * Keys a soft keyboard has no way to send, and a shell cannot do without.
