@@ -8,6 +8,7 @@ import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -20,11 +21,28 @@ import kotlinx.coroutines.test.runTest
 @OptIn(ExperimentalCoroutinesApi::class)
 class XdClientVerticalSliceTest {
     @Test
+    fun blankDeviceNameIsRejected() = runTest {
+        assertFailsWith<IllegalArgumentException> {
+            XdClient(
+                FakeSocketFactory(),
+                MemoryCredentialStore(),
+                backgroundScope,
+                deviceName = " ",
+            )
+        }
+    }
+
+    @Test
     fun pairTreeChatSendAndStream() = runTest {
         val factory = FakeSocketFactory()
-        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val client = XdClient(
+            factory,
+            MemoryCredentialStore(),
+            backgroundScope,
+            deviceName = "Test device",
+        )
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -32,10 +50,12 @@ class XdClientVerticalSliceTest {
         socket.connected(byteArrayOf(1, 2, 3))
         runCurrent()
         assertEquals("pair", socket.opAt(0))
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        assertTrue(socket.writes[0].decodeToString().contains(""""name":"Test device"""))
+        socket.receive("""{"ok":true,"token":"mobile-token","device":"Workstation"}""")
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
-        assertIs<Link.Up>(client.link.value)
+        val pair = assertIs<PairResult.Success>(pairing.await())
+        assertEquals("Workstation", pair.deviceName)
+        assertEquals(Link.Up("Workstation"), client.link.value)
 
         assertEquals("tree", socket.opAt(1))
         socket.receive(
@@ -155,7 +175,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -200,7 +220,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -234,7 +254,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -257,11 +277,130 @@ class XdClientVerticalSliceTest {
     }
 
     @Test
-    fun missingNewChatIdMakesProtocolFatal() = runTest {
+    fun creatingWorkspaceSendsTopLevelFolderAndRefreshesTree() = runTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
             client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+        socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
+        runCurrent()
+
+        val creating = async { client.createFolder("Mobile") }
+        runCurrent()
+        assertEquals("new-folder", socket.opAt(2))
+        assertTrue(socket.writes[2].decodeToString().contains(""""name":"Mobile""""))
+        assertFalse(socket.writes[2].decodeToString().contains(""""parent""""))
+
+        socket.receive("""{"ok":true,"id":"workspace"}""")
+        runCurrent()
+        assertEquals("workspace", creating.await())
+        assertEquals("tree", socket.opAt(3))
+
+        socket.receive(
+            """{"ok":true,"folders":[{"id":"workspace","name":"Mobile"}],"chats":[]}""",
+        )
+        runCurrent()
+        assertEquals("Mobile", client.tree.value.folders.single().name)
+    }
+
+    @Test
+    fun movingFolderAndChatRefreshesTheTree() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+        socket.receive(
+            """{"ok":true,"folders":[{"id":"source","name":"Source"},{"id":"target","name":"Target"}],"chats":[{"id":"chat","folder":"source","title":"Chat","backend":"codex","working":false}]}""",
+        )
+        runCurrent()
+
+        val movingFolder = async { client.moveFolder("source", "target") }
+        runCurrent()
+        assertEquals("move-folder", socket.opAt(2))
+        assertTrue(socket.writes[2].decodeToString().contains(""""folder":"source""""))
+        assertTrue(socket.writes[2].decodeToString().contains(""""parent":"target""""))
+        socket.receive("""{"ok":true}""")
+        runCurrent()
+        movingFolder.await()
+        assertEquals("tree", socket.opAt(3))
+        socket.receive(
+            """{"ok":true,"folders":[{"id":"source","name":"Source","parent":"target"},{"id":"target","name":"Target"}],"chats":[{"id":"chat","folder":"source","title":"Chat","backend":"codex","working":false}]}""",
+        )
+        runCurrent()
+
+        val movingChat = async { client.moveChat("chat", "target") }
+        runCurrent()
+        assertEquals("move-chat", socket.opAt(4))
+        assertTrue(socket.writes[4].decodeToString().contains(""""chat":"chat""""))
+        socket.receive("""{"ok":true}""")
+        runCurrent()
+        movingChat.await()
+        assertEquals("tree", socket.opAt(5))
+        socket.receive(
+            """{"ok":true,"folders":[{"id":"source","name":"Source","parent":"target"},{"id":"target","name":"Target"}],"chats":[{"id":"chat","folder":"target","title":"Chat","backend":"codex","working":false}]}""",
+        )
+        runCurrent()
+        assertEquals("target", client.tree.value.chats.single().folderId)
+    }
+
+    @Test
+    fun missingNewFolderIdMakesProtocolFatal() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+        }
+        runCurrent()
+
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        runCurrent()
+        assertIs<PairResult.Success>(pairing.await())
+        socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
+        runCurrent()
+
+        val creating = async {
+            runCatching { client.createFolder("Mobile") }
+        }
+        runCurrent()
+        socket.receive("""{"ok":true}""")
+        runCurrent()
+        runCurrent()
+
+        assertTrue(creating.await().isFailure)
+        assertEquals(
+            com.restartfu.xd.net.FatalReason.PROTOCOL,
+            assertIs<Link.Fatal>(client.link.value).reason,
+        )
+        assertTrue(socket.closed)
+    }
+
+    @Test
+    fun missingNewChatIdMakesProtocolFatal() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val pairing = async {
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -295,7 +434,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         val socket = factory.latest
@@ -334,7 +473,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("daemon", 4001, "ABCD-EFGH")
         }
         runCurrent()
         val socket = factory.latest

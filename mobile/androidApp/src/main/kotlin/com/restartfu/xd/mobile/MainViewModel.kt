@@ -14,6 +14,10 @@ import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.voice.VoiceSession
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +30,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairing = MutableStateFlow(false)
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
+    private val _creatingWorkspace = MutableStateFlow(false)
+    private val _moving = MutableStateFlow(false)
     private val _createdChat = MutableStateFlow<String?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
@@ -35,6 +41,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
+    val moving: StateFlow<Boolean> = _moving.asStateFlow()
     private val _daemon = MutableStateFlow<DaemonUpdateReply?>(null)
     private val _daemonError = MutableStateFlow<String?>(null)
     private val _updating = MutableStateFlow(false)
@@ -46,14 +53,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         host: String,
         port: Int,
         code: String,
-        deviceName: String,
     ) {
         if (_pairing.value) return
         _pairing.value = true
         _error.value = null
         viewModelScope.launch {
             try {
-                when (val result = client.pair(host, port, code, deviceName)) {
+                when (val result = client.pair(host, port, code)) {
                     is PairResult.Success -> Unit
                     is PairResult.Failure -> _error.value = result.message
                 }
@@ -97,6 +103,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not create a chat"
             } finally {
                 _creatingChat.value = false
+            }
+        }
+    }
+
+    fun createWorkspace(name: String) {
+        if (_creatingWorkspace.value) return
+        _creatingWorkspace.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.createFolder(name = name)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not create the workspace"
+            } finally {
+                _creatingWorkspace.value = false
+            }
+        }
+    }
+
+    fun moveFolder(folderId: String, parentId: String?) {
+        if (_moving.value) return
+        _moving.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.moveFolder(folderId, parentId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not move the folder"
+            } finally {
+                _moving.value = false
+            }
+        }
+    }
+
+    fun moveChat(chatId: String, folderId: String) {
+        if (_moving.value) return
+        _moving.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                client.moveChat(chatId, folderId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not move the chat"
+            } finally {
+                _moving.value = false
             }
         }
     }
@@ -196,6 +253,10 @@ class ChatViewModel(
     val catalogError: StateFlow<String?> = _catalogError.asStateFlow()
     val selectingModel: StateFlow<Boolean> = _selectingModel.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
+    private var draftSyncJob: Job? = null
+    private var draftTextDirty = false
+    private var draftAttachmentsDirty = false
+    private var draftRevision = -1L
 
     /**
      * Dictation into the composer.
@@ -212,16 +273,38 @@ class ChatViewModel(
 
     init {
         viewModelScope.launch { client.voiceEvents.collect(voice::onEvent) }
+        viewModelScope.launch {
+            state.collect { synced ->
+                if (synced.draftRevision <= draftRevision) return@collect
+                draftRevision = synced.draftRevision
+                if (!draftTextDirty) _draft.value = synced.draft
+                if (
+                    !draftAttachmentsDirty &&
+                    !sameImages(_attachments.value, synced.draftAttachments)
+                ) {
+                    val revision = synced.draftRevision
+                    val prepared = buildList {
+                        for (png in synced.draftAttachments) {
+                            add(ImageAttachments.fromPng(png))
+                        }
+                    }
+                    if (state.value.draftRevision == revision && !draftAttachmentsDirty) {
+                        _attachments.value = prepared
+                    }
+                }
+            }
+        }
     }
 
     fun updateDraft(value: String) {
         _draft.value = value
+        scheduleDraftSync()
     }
 
     private fun appendToDraft(transcript: String) {
         val existing = _draft.value
         val separator = if (existing.isEmpty() || existing.last().isWhitespace()) "" else " "
-        _draft.value = existing + separator + transcript
+        updateDraft(existing + separator + transcript)
     }
 
     fun attach(context: android.content.Context, uris: List<android.net.Uri>) {
@@ -242,12 +325,16 @@ class ChatViewModel(
                     _attachmentError.value = error.message ?: "That image could not be attached"
                 }
             }
-            if (loaded.isNotEmpty()) _attachments.value = _attachments.value + loaded
+            if (loaded.isNotEmpty()) {
+                _attachments.value = _attachments.value + loaded
+                scheduleDraftSync(attachments = true)
+            }
         }
     }
 
     fun removeAttachment(index: Int) {
         _attachments.value = _attachments.value.filterIndexed { at, _ -> at != index }
+        scheduleDraftSync(attachments = true)
     }
 
     fun clearAttachmentError() {
@@ -261,8 +348,11 @@ class ChatViewModel(
             session.send(text, images.map(Attachment::png))
             // Only clear what was actually sent: the composer may have moved
             // on while the request was in flight.
-            if (_draft.value == text) _draft.value = ""
-            _attachments.value = _attachments.value.drop(images.size)
+            if (_draft.value == text) {
+                _draft.value = ""
+                _attachments.value = _attachments.value.drop(images.size)
+                scheduleDraftSync(attachments = true)
+            }
         }
     }
 
@@ -293,7 +383,7 @@ class ChatViewModel(
         val text = _draft.value
         launchGuarded(_sending) {
             session.enqueue(text)
-            if (_draft.value == text) _draft.value = ""
+            if (_draft.value == text) updateDraft("")
         }
     }
 
@@ -441,7 +531,24 @@ class ChatViewModel(
         // Leaving the chat abandons a recording rather than transcribing into
         // a composer nobody is looking at.
         voice.cancel()
-        session.close()
+        draftSyncJob?.cancel()
+        if (draftTextDirty || draftAttachmentsDirty) {
+            val text = _draft.value
+            val images = if (draftAttachmentsDirty) {
+                _attachments.value.map(Attachment::png)
+            } else {
+                null
+            }
+            viewModelScope.launch(
+                context = NonCancellable,
+                start = CoroutineStart.UNDISPATCHED,
+            ) {
+                runCatching { session.setDraft(text, images) }
+                session.close()
+            }
+        } else {
+            session.close()
+        }
     }
 
     class Factory(
@@ -454,7 +561,40 @@ class ChatViewModel(
     }
 
     private companion object {
+        const val DRAFT_SYNC_DELAY_MILLIS = 250L
         const val QUEUE_EVENT_TIMEOUT_MILLIS = 5_000L
         const val CANCEL_EVENT_TIMEOUT_MILLIS = 5_000L
+    }
+
+    private fun scheduleDraftSync(attachments: Boolean = false) {
+        draftTextDirty = true
+        draftAttachmentsDirty = draftAttachmentsDirty || attachments
+        draftSyncJob?.cancel()
+        draftSyncJob = viewModelScope.launch {
+            delay(DRAFT_SYNC_DELAY_MILLIS)
+            val includeAttachments = draftAttachmentsDirty
+            val images = if (includeAttachments) {
+                _attachments.value.map(Attachment::png)
+            } else {
+                null
+            }
+            draftTextDirty = false
+            draftAttachmentsDirty = false
+            try {
+                session.setDraft(_draft.value, images)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                draftTextDirty = true
+                draftAttachmentsDirty = draftAttachmentsDirty || includeAttachments
+            }
+        }
+    }
+
+    private fun sameImages(
+        current: List<Attachment>,
+        synced: List<com.restartfu.xd.protocol.PngAttachment>,
+    ): Boolean = current.size == synced.size && current.indices.all { index ->
+        current[index].png.bytes.contentEquals(synced[index].bytes)
     }
 }

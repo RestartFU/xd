@@ -9,6 +9,9 @@ module Xd
       Invalid
       Pair
       PeerPairing
+      Devices
+      RenameDevice
+      RevokeDevice
       Hello
       Tree
       Messages
@@ -36,8 +39,10 @@ module Xd
       SetFolderSettings
       NewChat
       RenameChat
+      MoveChat
       DeleteChat
       Chat
+      SetDraft
       SetOption
       Send
       Queue
@@ -64,6 +69,9 @@ module Xd
         case self
         when Pair               then "pair"
         when PeerPairing        then "peer-pairing"
+        when Devices            then "devices"
+        when RenameDevice       then "rename-device"
+        when RevokeDevice       then "revoke-device"
         when Hello              then "hello"
         when Tree               then "tree"
         when Messages           then "messages"
@@ -91,8 +99,10 @@ module Xd
         when SetFolderSettings  then "set-folder-settings"
         when NewChat            then "new-chat"
         when RenameChat         then "rename-chat"
+        when MoveChat           then "move-chat"
         when DeleteChat         then "delete-chat"
         when Chat               then "chat"
+        when SetDraft           then "set-draft"
         when SetOption          then "set-option"
         when Send               then "send"
         when Queue              then "queue"
@@ -122,6 +132,9 @@ module Xd
         case name
         when "pair"                 then Pair
         when "peer-pairing"         then PeerPairing
+        when "devices"              then Devices
+        when "rename-device"        then RenameDevice
+        when "revoke-device"        then RevokeDevice
         when "hello"                then Hello
         when "tree"                 then Tree
         when "messages"             then Messages
@@ -149,8 +162,10 @@ module Xd
         when "set-folder-settings"  then SetFolderSettings
         when "new-chat"             then NewChat
         when "rename-chat"          then RenameChat
+        when "move-chat"            then MoveChat
         when "delete-chat"          then DeleteChat
         when "chat"                 then Chat
+        when "set-draft"            then SetDraft
         when "set-option"           then SetOption
         when "send"                 then Send
         when "queue"                then Queue
@@ -173,6 +188,15 @@ module Xd
         when "voice-cancel"         then VoiceCancel
         when "ping"                 then Ping
         else                             nil
+        end
+      end
+
+      def local_only? : Bool
+        case self
+        when Devices, RenameDevice, RevokeDevice
+          true
+        else
+          false
         end
       end
 

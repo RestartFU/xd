@@ -66,13 +66,23 @@ module Xd
         validate_name!(name)
         parent = parent_id ? find_folder(parent_id) : @root
         path = File.join(parent, name)
-        raise Error.new("There is already a folder of that name there.") if File.exists?(path)
+        created = false
+        if info = File.info?(path, follow_symlinks: false)
+          unless info.type.directory?
+            raise Error.new("There is already something of that name there.")
+          end
+          if SettingsFile.managed?(path)
+            raise Error.new("There is already a folder of that name there.")
+          end
+        else
+          Dir.mkdir(path, 0o700)
+          created = true
+        end
 
-        Dir.mkdir(path, 0o700)
         begin
           SettingsFile.ensure(path).id.not_nil!
         rescue error
-          Dir.delete(path) if Dir.empty?(path)
+          Dir.delete(path) if created && Dir.empty?(path)
           raise error
         end
       rescue error : File::Error
@@ -101,6 +111,10 @@ module Xd
 
         if parent == path || parent.starts_with?(path_prefix)
           raise Error.new("A folder cannot be moved inside itself.")
+        end
+
+        if File.exists?(File.join(parent, ".git"))
+          raise Error.new("A folder cannot be moved inside a repository.")
         end
 
         destination = File.join(parent, File.basename(path))
@@ -336,7 +350,8 @@ module Xd
           .compact_map do |name|
             child = File.join(path, name)
             info = File.info?(child, follow_symlinks: false)
-            child if info && info.type.directory?
+            marker = File.join(child, WORKTREE_CONTAINER_MARKER)
+            child if info && info.type.directory? && !File.file?(marker)
           end
       rescue error : File::Error
         raise Error.new("Cannot scan #{path}: #{error.message}")

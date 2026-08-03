@@ -1,6 +1,7 @@
 require "gtk4"
 require "../version"
 require "./adw"
+require "./dialogs"
 require "./runtime"
 require "./style"
 require "./window"
@@ -86,18 +87,13 @@ module Xd
                 else
                   "Cannot Start xd"
                 end
-      dialog = Adw::AlertDialog.new(
-        heading: heading,
-        body: error.message || error.class.name
+      Dialogs.alert(
+        window,
+        heading,
+        error.message || error.class.name,
+        "Quit",
+        -> { window.destroy; application.quit }
       )
-      dialog.add_response("quit", "Quit")
-      dialog.default_response = "quit"
-      dialog.close_response = "quit"
-      dialog.choose(window, nil) do |_source, result|
-        dialog.choose_finish(result)
-        window.destroy
-        application.quit
-      end
       window
     end
   end

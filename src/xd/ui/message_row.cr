@@ -1,10 +1,12 @@
 require "gtk4"
+require "../agent/assistant_sections"
 require "../markdown"
 require "./adw"
 require "./background_work"
 require "./diff_view"
 require "./host_launch"
 require "./message_content"
+require "./render_retry_queue"
 
 module Xd
   module UI
@@ -48,7 +50,11 @@ module Xd
 
     class MessageRow
       BUBBLE_MAX_WIDTH_CHARS = 60
+      RENDER_RETRY_INTERVAL  = 50.milliseconds
       alias LiteralPart = String | Gtk::Widget
+
+      @@render_retries = RenderRetryQueue.new
+      @@render_retry_source = 0_u32
 
       getter widget : Adw::Bin
       getter kind : MessageKind
@@ -56,6 +62,7 @@ module Xd
 
       @stream_label : Gtk::Label?
       @render_generation = 0_i64
+      @render_retry_generation : Int64?
 
       def initialize(
         @kind : MessageKind,
@@ -63,6 +70,7 @@ module Xd
         @literal_parts : Array(LiteralPart)? = nil,
       )
         @stream_label = nil
+        @render_retry_generation = nil
         @card = Gtk::Box.new(:vertical, 6)
         @body = Gtk::Box.new(:vertical, 8)
         render_body
@@ -114,7 +122,7 @@ module Xd
           @body.append(label)
           @stream_label = label
         end
-        label.text = @text
+        label.text = Agent::AssistantSections.stream(text)
       end
 
       private def render_body : Nil
@@ -149,7 +157,21 @@ module Xd
         text : String,
         generation : Int64,
       ) : Nil
-        queued = BackgroundWork.submit do
+        return if submit_assistant_render(text, generation)
+        return if @render_retry_generation == generation
+
+        @render_retry_generation = generation
+        @@render_retries.push do
+          retry_assistant_render(generation)
+        end
+        self.class.schedule_render_retries
+      end
+
+      private def submit_assistant_render(
+        text : String,
+        generation : Int64,
+      ) : Bool
+        BackgroundWork.submit do
           parts = MessageContent.prepare(text)
           index = 0
           GLib.idle_add do
@@ -160,42 +182,105 @@ module Xd
 
             clear_body if index == 0
             if part = parts[index]?
-              append_prepared_part(part)
-              index += 1
+              if part.section.analysis?
+                section_id = part.section_id
+                analysis_parts = [] of PreparedMessagePart
+                while candidate = parts[index]?
+                  break unless candidate.section.analysis? &&
+                                candidate.section_id == section_id
+                  analysis_parts << candidate
+                  index += 1
+                end
+                append_analysis_block(analysis_parts, generation)
+              else
+                append_prepared_part(part, @body)
+                index += 1
+              end
             end
             index < parts.size
           end
           nil
         end
-        return if queued
+      end
 
-        GLib.timeout(25.milliseconds) do
-          if @render_generation == generation && @stream_label.nil?
-            queue_assistant_render(text, generation)
-          end
-          false
+      private def retry_assistant_render(generation : Int64) : Bool
+        unless @render_generation == generation && @stream_label.nil?
+          @render_retry_generation = nil if @render_retry_generation == generation
+          return true
+        end
+
+        return false unless submit_assistant_render(@text, generation)
+
+        @render_retry_generation = nil if @render_retry_generation == generation
+        true
+      end
+
+      def self.schedule_render_retries : Nil
+        return unless @@render_retry_source == 0
+
+        @@render_retry_source = GLib.timeout(RENDER_RETRY_INTERVAL) do
+          more = @@render_retries.drain
+          @@render_retry_source = 0_u32 unless more
+          more
         end
       end
 
-      private def append_prepared_part(part : PreparedMessagePart) : Nil
+      private def append_prepared_part(
+        part : PreparedMessagePart,
+        target : Gtk::Box,
+      ) : Nil
         case part.kind
         when MessagePartKind::Prose
-          append_prose(part.markup || part.text)
+          append_prose(target, part.markup || part.text)
         when MessagePartKind::Code
-          @body.append(make_code_card(part.text, false, true))
+          target.append(make_code_card(part.text, false, true))
         when MessagePartKind::Diff
-          @body.append(make_code_card(part.text, true, false))
+          target.append(make_code_card(part.text, true, false))
         when MessagePartKind::Table
-          @body.append(make_code_card(part.text, false, false))
+          target.append(make_code_card(part.text, false, false))
         end
+      end
+
+      private def append_analysis_block(
+        parts : Array(PreparedMessagePart),
+        generation : Int64,
+      ) : Nil
+        expander = Gtk::Expander.new("Analysis")
+        expander.expanded = false
+        expander.add_css_class("dim-label")
+        loaded = false
+        expander.notify_signal["expanded"].connect do |_property|
+          unless @render_generation == generation
+            next
+          end
+
+          if expander.expanded?
+            next if loaded
+            box = Gtk::Box.new(:vertical, 8)
+            box.margin_start = 12
+            parts.each do |part|
+              append_prepared_part(part, box)
+            end
+            expander.child = box
+            loaded = true
+          else
+            expander.child = nil
+            loaded = false
+          end
+        end
+        @body.append(expander)
       end
 
       private def append_prose(markup : String) : Nil
+        append_prose(@body, markup)
+      end
+
+      private def append_prose(target : Gtk::Box, markup : String) : Nil
         return if markup.empty?
 
         label = make_text_label
         label.markup = markup
-        @body.append(label)
+        target.append(label)
       end
 
       private def make_code_card(

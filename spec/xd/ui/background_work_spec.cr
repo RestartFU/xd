@@ -2,6 +2,10 @@ require "../../spec_helper"
 require "../../../src/xd/ui/background_work"
 
 describe Xd::UI::BackgroundWork do
+  it "limits CPU-heavy desktop preparation to one worker" do
+    Xd::UI::BackgroundWork::WORKERS.should eq(1)
+  end
+
   it "runs jobs inside a scheduler-backed execution context" do
     finished = Channel(String).new(1)
 

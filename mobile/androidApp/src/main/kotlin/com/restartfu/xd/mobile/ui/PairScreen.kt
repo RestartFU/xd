@@ -1,6 +1,5 @@
 package com.restartfu.xd.mobile.ui
 
-import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -35,13 +34,11 @@ import com.restartfu.xd.net.Link
 internal fun PairScreen(model: MainViewModel) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf("4001") }
-    var deviceName by rememberSaveable { mutableStateOf(Build.MODEL.orEmpty()) }
     var code by rememberSaveable { mutableStateOf("") }
     val pairing by model.pairing.collectAsStateWithLifecycle()
     val error by model.error.collectAsStateWithLifecycle()
     val valid = host.isNotBlank() &&
         port.toIntOrNull() in 1..65535 &&
-        deviceName.isNotBlank() &&
         code.length == 9
 
     Column(
@@ -54,7 +51,11 @@ internal fun PairScreen(model: MainViewModel) {
     ) {
         Text("Pair with xd", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
-        Text("Run xd serve --pair on the machine, then enter its address and code.")
+        Text(
+            "Run xd serve --pair on the machine, then enter its address and code. " +
+                "This app supplies its model as the device name; the owner can " +
+                "rename it later."
+        )
         Spacer(Modifier.height(24.dp))
         OutlinedTextField(
             value = host,
@@ -74,14 +75,6 @@ internal fun PairScreen(model: MainViewModel) {
         )
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
-            value = deviceName,
-            onValueChange = { deviceName = it },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Device name") },
-            singleLine = true,
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
             value = code,
             onValueChange = { code = formatPairingCode(it) },
             modifier = Modifier.fillMaxWidth(),
@@ -96,7 +89,7 @@ internal fun PairScreen(model: MainViewModel) {
         Spacer(Modifier.height(20.dp))
         Button(
             onClick = {
-                model.pair(host, port.toInt(), code, deviceName)
+                model.pair(host, port.toInt(), code)
             },
             enabled = valid && !pairing,
             modifier = Modifier.fillMaxWidth(),

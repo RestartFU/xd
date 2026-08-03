@@ -53,7 +53,7 @@ module Xd
         header.add_css_class("xd-panel-bar")
         header.add_css_class("xd-panel-head")
 
-        @status = Gtk::Label.new("Opening a secure listener…")
+        @status = Gtk::Label.new("Create a code for the connecting device.")
         @status.xalign = 0_f32
         @status.wrap = true
 
@@ -84,8 +84,9 @@ module Xd
 
         help = Gtk::Label.new(
           "On the other device, choose “Connect to a Machine…”, then enter " \
-          "this address, port, and code. Code expires after five minutes " \
-          "and works once. Keep XD open on this machine."
+          "this address, port, and code. Its device name is supplied " \
+          "automatically. Rename it later from Manage Devices. Code expires " \
+          "after five minutes and works once. Keep XD open on this machine."
         )
         help.xalign = 0_f32
         help.wrap = true
@@ -112,7 +113,7 @@ module Xd
         close_button.clicked_signal.connect { dismiss }
         footer.append(close_button)
 
-        @refresh = Gtk::Button.new_with_label("New Code")
+        @refresh = Gtk::Button.new_with_label("Create Code")
         @refresh.add_css_class("xd-panel-action")
         @refresh.clicked_signal.connect { request_code }
         footer.append(@refresh)
@@ -144,17 +145,22 @@ module Xd
 
       def present : Nil
         @window.present
-        request_code
       end
 
-      private def field(body : Gtk::Box, title : String) : Gtk::Entry
+      private def field(
+        body : Gtk::Box,
+        title : String,
+        text : String = "",
+        editable : Bool = false,
+      ) : Gtk::Entry
         label = Gtk::Label.new(title)
         label.xalign = 0_f32
         label.add_css_class("caption")
         label.add_css_class("dim-label")
 
         entry = Gtk::Entry.new
-        entry.editable = false
+        entry.text = text
+        entry.editable = editable
         entry.hexpand = true
 
         box = Gtk::Box.new(:vertical, 5)
@@ -218,7 +224,7 @@ module Xd
       private def set_busy(busy : Bool) : Nil
         @busy = busy
         @refresh.sensitive = !busy
-        @refresh.label = busy ? "Opening…" : "New Code"
+        @refresh.label = busy ? "Opening…" : "Create Code"
       end
 
       private def dismiss : Nil

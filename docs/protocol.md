@@ -108,21 +108,29 @@ with `Not authenticated. Say hello first.`
 ### Pair
 
 Pairing is armed by `xd serve --pair`, or from the desktop app's **Add a
-Device…** panel. The displayed `XXXX-XXXX` code is valid for five minutes and
-one matching submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
+Device…** panel. The pairing window has no device name; the connecting client
+supplies its automatic name when it submits the code:
 
 ```json
-{"op":"pair","code":"4F2K-9QX1","name":"Pixel"}
-{"ok":true,"token":"base64 device token"}
+{"op":"peer-pairing"}
 ```
 
-`code` is required. `name` is optional and defaults to `Unknown device`. A
-successful pair:
+The displayed `XXXX-XXXX` code is valid for five minutes and one matching
+submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
+
+```json
+{"op":"pair","code":"4F2K-9QX7","name":"Pixel 9"}
+{"ok":true,"token":"base64 device token","device":"Pixel 9"}
+```
+
+`code` is required, as is a non-empty `name` supplied by the connecting client.
+The daemon normalizes and stores that name; it does not invent one. The local
+owner can rename it later through device management. A successful pair:
 
 - authenticates the existing connection; do not send `hello` afterward;
 - consumes the code before writing the device record, so even a storage failure
   requires a new code;
-- returns a long-lived bearer token;
+- returns a long-lived bearer token and the authoritative device name;
 - requires the client to persist token and pinned certificate atomically.
 
 ### Hello
@@ -131,19 +139,42 @@ Every later connection sends `hello` as its first request:
 
 ```json
 {"op":"hello","token":"base64 device token"}
-{"ok":true,"device":"Pixel","version":1}
+{"ok":true,"device":"Phone","version":1}
 ```
 
 An unknown or revoked token returns `ok:false`. Clients must stop retrying and
 offer pairing again. A certificate mismatch must also stop retries: continuing
 would disclose the bearer token to a different peer.
 
+### Device management
+
+The daemon owner manages paired credentials through the local IPC endpoint.
+These operations require local transport and are never accepted from a remote
+or mobile client:
+
+```json
+{"op":"devices"}
+{"ok":true,"devices":[
+  {"id":"local opaque id","name":"Phone","created_at":0,
+   "last_seen":0,"connected":true}
+]}
+{"op":"rename-device","device":"local opaque id","name":"Tablet"}
+{"ok":true}
+{"op":"revoke-device","device":"local opaque id"}
+{"ok":true}
+```
+
+The `id` is only for the local management surface; clients must not expose or
+persist it as a remote credential. Renaming changes the daemon-owned name.
+Revoking deletes the token, disconnects every active session for that device,
+and requires pairing again.
+
 ### What a remote client cannot do
 
 `peer-pairing` requires an authenticated connection **and** local transport
 (`Engine#peer_pairing`). A paired remote device cannot mint pairing codes for
-further devices, cannot open listeners, and cannot enable TLS. Pairing
-authority stays on the daemon machine.
+further devices, cannot open listeners, enable TLS, or manage other paired
+devices. Pairing and device-management authority stays on the daemon machine.
 
 ## State reads
 
@@ -290,6 +321,17 @@ acting at once are therefore ordered by the daemon rather than racing.
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
 its folder's backend and model.
 
+### `move-chat`
+
+```json
+{"op":"move-chat","chat":"chat-9","folder":"folder-2"}
+{"ok":true}
+```
+
+Both `chat` and `folder` are required. The target folder must exist. Moving a
+chat changes which folder settings it inherits; the chat id and transcript stay
+the same. The daemon broadcasts a `tree` event after a successful move.
+
 ### `send`
 
 ```json
@@ -308,6 +350,21 @@ Attachments are PNG only:
 ```
 
 At most 4 images, each at most 10 MiB, 20 MiB in total.
+
+### `set-draft`
+
+```json
+{"op":"set-draft","chat":"chat-1","text":"unfinished"}
+{"ok":true,"draft":"unfinished","draft_revision":4}
+```
+
+The daemon persists one composer draft per chat and broadcasts a `draft` event
+after every update. `text` is required but may be empty and is limited to 1
+MiB. Optional `attachments` replaces the synchronized PNG preview list; omit it
+for ordinary text edits so large image payloads are not resent on every
+keystroke. An empty array clears previews. The `chat` snapshot returns `draft`,
+`draft_revision`, and `draft_attachments` so a newly connected device starts
+with the same composer.
 
 ### `queue`, `drop-queue`, `edit-queue`, `steer-queue`
 
@@ -387,8 +444,12 @@ rejected. `src/xd/voice/data.cr` writes and validates this header.
 ### Folder and chat mutations
 
 `new-folder`, `rename-folder`, `move-folder`, `trash-folder`, `rename-chat`,
-`delete-chat`, `set-folder-context`, and `set-folder-settings` all reply with
-`ok` alone and broadcast a `tree` event.
+`move-chat`, `delete-chat`, `set-folder-context`, and `set-folder-settings` all
+reply with `ok` alone and broadcast a `tree` event.
+
+`move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
+to move the folder to the workspace root. A folder cannot be moved into itself
+or one of its descendants, and the daemon rejects a destination name collision.
 
 ## Events
 
@@ -399,6 +460,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `tree` | — | Workspace tree changed; refetch `tree`. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `queued` | `chat`, `queue`, `text` | Queue replaced. `text` is the first item. |
+| `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` | Composer text changed; attachments are present only when replaced. |
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |
 | `turn-started` | `chat`, `label`, `turn_id`, `turn_sequence` | A turn began. |
 | `text` | `chat`, `text`, `turn_id`, `turn_sequence` | Assistant text delta. |

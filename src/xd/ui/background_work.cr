@@ -1,11 +1,12 @@
 module Xd
   module UI
-    # Small shared pool for CPU-heavy UI preparation. Bounded queue prevents
-    # refresh storms from creating one native thread per stale request.
+    # One shared worker for CPU-heavy UI preparation. UI rendering must never
+    # consume every laptop core while GTK is also laying out a long transcript.
+    # The bounded queue prevents refresh storms from retaining arbitrary data.
     module BackgroundWork
       extend self
 
-      WORKERS = 3
+      WORKERS = 1
       # Jobs may retain 8–10 MiB diff, image, or recording payloads. A deep
       # queue turns a brief refresh burst into hundreds of MiB of live memory.
       QUEUE_SIZE = 16

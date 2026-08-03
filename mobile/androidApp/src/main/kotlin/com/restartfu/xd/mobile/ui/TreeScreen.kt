@@ -51,15 +51,21 @@ internal fun TreeScreen(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
+    val moving by model.moving.collectAsStateWithLifecycle()
     val createdChat by model.createdChat.collectAsStateWithLifecycle()
     var expandedIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     val roots = tree.folders.filter { it.parentId == null }
     val children = tree.folders.groupBy(Folder::parentId)
     val chats = tree.chats.groupBy(ChatSummary::folderId)
     val foldersById = tree.folders.associateBy(Folder::id)
+    var choosingNew by rememberSaveable { mutableStateOf(false) }
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
+    var namingWorkspace by rememberSaveable { mutableStateOf(false) }
     var updatingDaemon by rememberSaveable { mutableStateOf(false) }
-    var acting by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    var acting by rememberSaveable { mutableStateOf<Triple<String, String, String>?>(null) }
+    var actingFolder by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    var movingChat by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    var movingFolder by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var renaming by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var deleting by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var confirmingForget by rememberSaveable { mutableStateOf(false) }
@@ -87,7 +93,7 @@ internal fun TreeScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = { choosingFolder = true },
+                onClick = { choosingNew = true },
             ) { Text("New") }
         },
     ) { padding ->
@@ -121,17 +127,27 @@ internal fun TreeScreen(
                                 }
                             },
                             openChat = openChat,
-                            actOnChat = { chat -> acting = chat.id to chat.title },
+                            actOnFolder = { folder ->
+                                if (!moving) actingFolder = folder.id to folder.name
+                            },
+                            actOnChat = { chat ->
+                                if (!moving) acting = Triple(chat.id, chat.title, chat.folderId)
+                            },
                         )
                     }
                 }
             }
         }
     }
-    acting?.let { (chatId, title) ->
+    acting?.let { (chatId, title, folderId) ->
         ChatActionsDialog(
             title = title,
+            moveEnabled = !moving,
             onDismiss = { acting = null },
+            onMove = {
+                acting = null
+                movingChat = chatId to folderId
+            },
             onRename = {
                 acting = null
                 renaming = chatId to title
@@ -141,6 +157,50 @@ internal fun TreeScreen(
                 deleting = chatId to title
             },
         )
+    }
+    actingFolder?.let { (folderId, name) ->
+        FolderActionsDialog(
+            name = name,
+            moveEnabled = !moving,
+            onDismiss = { actingFolder = null },
+            onMove = {
+                actingFolder = null
+                movingFolder = folderId to name
+            },
+        )
+    }
+    movingChat?.let { (chatId, currentFolderId) ->
+        MoveDestinationDialog(
+            title = "Move chat to…",
+            folders = tree.folders,
+            foldersById = foldersById,
+            currentParentId = currentFolderId,
+            includeTopLevel = false,
+            sourceName = null,
+            onDismiss = { movingChat = null },
+            onMove = { folderId ->
+                movingChat = null
+                if (folderId != null) model.moveChat(chatId, folderId)
+            },
+        )
+    }
+    movingFolder?.let { (folderId, name) ->
+        foldersById[folderId]?.let { folder ->
+            MoveDestinationDialog(
+                title = "Move folder to…",
+                folders = tree.folders,
+                foldersById = foldersById,
+                excludedIds = folderDescendants(folder.id, tree.folders),
+                currentParentId = folder.parentId,
+                includeTopLevel = true,
+                sourceName = name,
+                onDismiss = { movingFolder = null },
+                onMove = { parentId ->
+                    movingFolder = null
+                    model.moveFolder(folderId, parentId)
+                },
+            )
+        }
     }
     renaming?.let { (chatId, title) ->
         RenameChatDialog(
@@ -178,6 +238,60 @@ internal fun TreeScreen(
     }
     if (updatingDaemon) {
         DaemonUpdateDialog(model) { updatingDaemon = false }
+    }
+    if (choosingNew) {
+        AlertDialog(
+            onDismissRequest = { choosingNew = false },
+            title = { Text("Create new") },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        "Workspace",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                choosingNew = false
+                                namingWorkspace = true
+                            }
+                            .padding(vertical = 12.dp),
+                    )
+                    Text(
+                        "Chat",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = tree.folders.isNotEmpty()) {
+                                choosingNew = false
+                                choosingFolder = true
+                            }
+                            .padding(vertical = 12.dp),
+                        color = if (tree.folders.isEmpty()) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
+                    if (tree.folders.isEmpty()) {
+                        Text(
+                            "Create a workspace before starting a chat.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { choosingNew = false }) { Text("Cancel") }
+            },
+        )
+    }
+    if (namingWorkspace) {
+        CreateWorkspaceDialog(
+            onDismiss = { namingWorkspace = false },
+            onCreate = { name ->
+                namingWorkspace = false
+                model.createWorkspace(name)
+            },
+        )
     }
     if (choosingFolder) {
         AlertDialog(
@@ -236,14 +350,16 @@ internal fun TreeScreen(
 /**
  * What a long press on a chat offers.
  *
- * A list rather than dialog buttons: these are two things to do, not a
- * question with a yes and a no, and a destructive action does not belong where
- * a thumb expects Confirm.
+ * A list rather than dialog buttons: these are things to do, not a question with
+ * a yes and a no, and a destructive action does not belong where a thumb expects
+ * Confirm.
  */
 @Composable
 private fun ChatActionsDialog(
     title: String,
+    moveEnabled: Boolean,
     onDismiss: () -> Unit,
+    onMove: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -258,6 +374,18 @@ private fun ChatActionsDialog(
         },
         text = {
             Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "Move",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = moveEnabled, onClick = onMove)
+                        .padding(vertical = 12.dp),
+                    color = if (moveEnabled) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
                 Text(
                     "Rename",
                     modifier = Modifier
@@ -279,6 +407,170 @@ private fun ChatActionsDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+@Composable
+private fun FolderActionsDialog(
+    name: String,
+    moveEnabled: Boolean,
+    onDismiss: () -> Unit,
+    onMove: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                name,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        text = {
+            Text(
+                "Move",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = moveEnabled, onClick = onMove)
+                    .padding(vertical = 12.dp),
+                color = if (moveEnabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun MoveDestinationDialog(
+    title: String,
+    folders: List<Folder>,
+    foldersById: Map<String, Folder>,
+    excludedIds: Set<String> = emptySet(),
+    currentParentId: String?,
+    includeTopLevel: Boolean,
+    sourceName: String?,
+    onDismiss: () -> Unit,
+    onMove: (String?) -> Unit,
+) {
+    val candidates = folders.filterNot { it.id in excludedIds }
+
+    fun hasNameCollision(parentId: String?): Boolean =
+        sourceName != null && folders.any {
+            it.parentId == parentId && it.name == sourceName
+        }
+
+    fun enabled(parentId: String?): Boolean =
+        parentId != currentParentId && !hasNameCollision(parentId)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                if (includeTopLevel) {
+                    Text(
+                        "Top level",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = enabled(null)) {
+                                onMove(null)
+                            }
+                            .padding(vertical = 12.dp),
+                        color = if (enabled(null)) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                if (candidates.isEmpty()) {
+                    Text(
+                        "No other workspace folders are available.",
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                candidates.forEach { folder ->
+                    val canMove = enabled(folder.id)
+                    Text(
+                        folderPath(folder, foldersById),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = canMove) { onMove(folder.id) }
+                            .padding(vertical = 12.dp),
+                        color = if (canMove) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun CreateWorkspaceDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String) -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    val cleaned = name.trim()
+    val nameError = workspaceNameError(cleaned)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New workspace") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Name") },
+                    singleLine = true,
+                    isError = nameError != null,
+                )
+                nameError?.let {
+                    Text(
+                        it,
+                        modifier = Modifier.padding(top = 4.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onCreate(cleaned) },
+                enabled = cleaned.isNotEmpty() && nameError == null,
+            ) { Text("Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+private fun workspaceNameError(name: String): String? = when {
+    name.isEmpty() -> null
+    name.startsWith('.') -> "A workspace name cannot begin with a period."
+    '/' in name || '\\' in name -> "A workspace name cannot contain a path separator."
+    else -> null
 }
 
 @Composable
@@ -360,6 +652,23 @@ private fun folderPath(
     return names.asReversed().joinToString(" / ")
 }
 
+/** Includes [sourceId] so a folder cannot be moved into itself or its subtree. */
+private fun folderDescendants(
+    sourceId: String,
+    folders: List<Folder>,
+): Set<String> {
+    val children = folders.groupBy(Folder::parentId)
+    val excluded = mutableSetOf<String>()
+    val pending = ArrayDeque<String>()
+    pending.add(sourceId)
+    while (pending.isNotEmpty()) {
+        val id = pending.removeFirst()
+        if (!excluded.add(id)) continue
+        children[id].orEmpty().forEach { child -> pending.add(child.id) }
+    }
+    return excluded
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 private fun LazyListScope.folderRows(
     folder: Folder,
@@ -369,13 +678,17 @@ private fun LazyListScope.folderRows(
     expanded: Set<String>,
     toggle: (String) -> Unit,
     openChat: (String) -> Unit,
+    actOnFolder: (Folder) -> Unit,
     actOnChat: (ChatSummary) -> Unit,
 ) {
     item(key = "folder-${folder.id}") {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { toggle(folder.id) }
+                .combinedClickable(
+                    onClick = { toggle(folder.id) },
+                    onLongClick = { actOnFolder(folder) },
+                )
                 .padding(start = (16 + depth * 16).dp, top = 12.dp, bottom = 12.dp),
         ) {
             Text(if (folder.id in expanded) "▾" else "▸")
@@ -429,7 +742,8 @@ private fun LazyListScope.folderRows(
         }
         children[folder.id].orEmpty().forEach { child ->
             folderRows(
-                child, depth + 1, children, chats, expanded, toggle, openChat, actOnChat,
+                child, depth + 1, children, chats, expanded, toggle, openChat,
+                actOnFolder, actOnChat,
             )
         }
     }

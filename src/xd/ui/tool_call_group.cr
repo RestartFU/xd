@@ -77,6 +77,10 @@ module Xd
       # the subagent's own toggle, so showing it inline as well would put the
       # same command in two places.
       def absorb : Nil
+        # A subagent card has its own header, so the single-call label is no
+        # longer visible. Remove it instead of keeping a needless Pango child
+        # in every collapsed card.
+        @widget.remove(@single)
         @single.visible = false
         @expander.visible = true
         @expander.label = self.class.collapsed_label(@summaries.size)

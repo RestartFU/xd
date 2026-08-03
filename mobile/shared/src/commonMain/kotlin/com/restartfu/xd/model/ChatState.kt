@@ -1,5 +1,7 @@
 package com.restartfu.xd.model
 
+import com.restartfu.xd.protocol.PngAttachment
+
 public enum class TranscriptKind {
     USER,
     ASSISTANT,
@@ -33,6 +35,9 @@ public data class ChatState(
     val fast: Boolean = false,
     val claudeMode: Boolean = false,
     val queue: List<String> = emptyList(),
+    val draft: String = "",
+    val draftRevision: Long = 0,
+    val draftAttachments: List<PngAttachment> = emptyList(),
     val working: Boolean = false,
     val label: String? = null,
     /** Live turn this state reflects, and how far into it we have applied. */

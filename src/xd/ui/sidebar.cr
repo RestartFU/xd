@@ -8,6 +8,7 @@ require "../version"
 require "./adw"
 require "./auth_dialog"
 require "./daemon_update_dialog"
+require "./devices_dialog"
 require "./background_work"
 require "./dialogs"
 require "./directory_browser"
@@ -341,6 +342,15 @@ module Xd
         @list_view.activate_signal.connect do |position|
           activate_row(position)
         end
+        free_space_menu = Gtk::GestureClick.new
+        free_space_menu.button = Gdk::BUTTON_SECONDARY.to_u32
+        free_space_menu.pressed_signal.connect do |_presses, x, y|
+          target = @list_view.pick(x, y, Gtk::PickFlags::Default)
+          if target && target.to_unsafe == @list_view.to_unsafe
+            open_workspace_menu(x, y)
+          end
+        end
+        @list_view.add_controller(free_space_menu)
         @list_view.add_controller(build_drop_target(nil))
 
         scroll = Gtk::ScrolledWindow.new
@@ -374,6 +384,15 @@ module Xd
           "pair"
         ) do
           @on_pair.call
+        end
+        add_header_action(
+          menu_model,
+          menu_actions,
+          menu,
+          "Manage Devices…",
+          "devices"
+        ) do
+          DevicesDialog.new(@parent, @local_source.endpoint).present
         end
         add_header_action(
           menu_model,
@@ -983,6 +1002,11 @@ module Xd
 
         widgets.expander.list_row = row
         widgets.icon.icon_name = node.icon_name
+        if node.backend == "codex"
+          widgets.icon.add_css_class("xd-backend-codex")
+        else
+          widgets.icon.remove_css_class("xd-backend-codex")
+        end
         widgets.label.text = node.name
         show_state(widgets, node)
 
@@ -1529,13 +1553,44 @@ module Xd
                   else
                     raise "Unknown sidebar node kind"
                   end
+        present_menu(popover, box)
+      end
+
+      private def open_workspace_menu(x : Float64, y : Float64) : Nil
+        if previous = @row_popover
+          previous.popdown
+        end
+
+        popover, menu, actions = row_menu_shell
+        add_menu_action(
+          menu,
+          actions,
+          popover,
+          "New Workspace",
+          "new-workspace"
+        ) do
+          begin_creating(@local_source, nil, NodeKind::Folder)
+        end
+        present_menu(
+          popover,
+          @list_view,
+          Gdk::Rectangle.new(x.to_i32, y.to_i32, 1, 1)
+        )
+      end
+
+      private def present_menu(
+        popover : Gtk::Popover,
+        anchor : Gtk::Widget,
+        pointing_to : Gdk::Rectangle? = nil,
+      ) : Nil
         popover.has_arrow = false
         popover.halign = :start
-        popover.parent = box
+        popover.parent = anchor
+        popover.pointing_to = pointing_to if pointing_to
         @row_popover = popover
         popover.closed_signal.connect do
           # GtkModelButton closes a popover before its action runs. Keep the
-          # row attached through that activation, exactly as the C sidebar
+          # anchor attached through that activation, exactly as the C sidebar
           # does, then detach from an idle so recycled list rows stay safe.
           GLib.idle_add do
             unless popover.visible?
@@ -1707,6 +1762,16 @@ module Xd
         @pending_menu = popover
         @pending_menu_action = action
         popover.popdown
+
+        # GtkModelButton normally emits ::closed before activating the action,
+        # but the activation may arrive after the close handler's idle has
+        # already run. In that ordering there is nobody left to start an
+        # inline create/rename operation. Schedule the same idempotent finish
+        # from activation so either event ordering completes the action.
+        GLib.idle_add do
+          finish_menu_action(popover) unless popover.visible?
+          false
+        end
       end
 
       private def finish_menu_action(popover : Gtk::Popover) : Nil
@@ -2016,13 +2081,7 @@ module Xd
       end
 
       private def show_error(heading : String, message : String) : Nil
-        dialog = Adw::AlertDialog.new(
-          heading: heading,
-          body: message
-        )
-        dialog.add_response("close", "Close")
-        dialog.default_response = "close"
-        dialog.present(@parent)
+        Dialogs.alert(@parent, heading, message)
       end
 
       private def clear(box : Gtk::Box) : Nil

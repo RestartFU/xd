@@ -1,6 +1,6 @@
 module Xd
   module Storage
-    SCHEMA_VERSION = 20
+    SCHEMA_VERSION = 21
 
     BASE_SCHEMA = [
       <<-SQL,

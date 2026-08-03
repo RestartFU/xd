@@ -110,6 +110,53 @@ describe Xd::Workspace::Service do
     end
   end
 
+  it "hides generated worktree containers" do
+    with_workspace do |service, _store, root|
+      visible = File.join(root, "Visible")
+      container = File.join(root, "worktrees")
+      checkout = File.join(container, "Repo", "task", "Repo")
+      Dir.mkdir(visible)
+      Dir.mkdir_p(checkout)
+      File.write(
+        File.join(container, Xd::Workspace::WORKTREE_CONTAINER_MARKER),
+        "generated\n"
+      )
+
+      service.snapshot.folders.map(&.name).should eq(["Visible"])
+      File.exists?(
+        File.join(container, Xd::Workspace::SETTINGS_FILE)
+      ).should be_false
+    end
+  end
+
+  it "adopts an existing unmanaged directory as a workspace" do
+    with_workspace do |service, _store, root|
+      existing = File.join(root, "Existing")
+      preserved = File.join(existing, "keep.txt")
+      Dir.mkdir(existing)
+      File.write(preserved, "keep\n")
+
+      id = service.create_folder(nil, "Existing")
+
+      service.find_folder(id).should eq(existing)
+      File.read(preserved).should eq("keep\n")
+      Xd::Workspace::SettingsFile.load(existing).id.should eq(id)
+      expect_raises(Xd::Workspace::Error, /already a folder/) do
+        service.create_folder(nil, "Existing")
+      end
+    end
+  end
+
+  it "does not adopt a non-directory" do
+    with_workspace do |service, _store, root|
+      File.write(File.join(root, "Existing"), "file\n")
+
+      expect_raises(Xd::Workspace::Error, /already something/) do
+        service.create_folder(nil, "Existing")
+      end
+    end
+  end
+
   it "creates, renames, moves, and recoverably trashes folders" do
     with_workspace do |service, _store, _root|
       first = service.create_folder(nil, "First")
@@ -194,6 +241,19 @@ describe Xd::Workspace::Service do
       expect_raises(Xd::Workspace::Error, /inside itself/) do
         service.move_folder(parent, child)
       end
+    end
+  end
+
+  it "does not move folders inside repository leaves" do
+    with_workspace do |service, _store, _root|
+      repository = service.create_folder(nil, "Repository")
+      source = service.create_folder(nil, "Source")
+      Dir.mkdir(File.join(service.find_folder(repository), ".git"))
+
+      expect_raises(Xd::Workspace::Error, /inside a repository/) do
+        service.move_folder(source, repository)
+      end
+      service.find_folder(source).should end_with(File.join("Source"))
     end
   end
 end

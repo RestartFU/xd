@@ -13,6 +13,19 @@ describe Xd::UI::MessageContent do
     ])
   end
 
+  it "marks analysis parts without changing their Markdown preparation" do
+    prepared = Xd::UI::MessageContent.prepare(
+      "<analysis>\n**thought**\n</analysis>\n<summary>\nanswer\n</summary>"
+    )
+
+    prepared.map(&.section).should eq([
+      Xd::Agent::AssistantSectionKind::Analysis,
+      Xd::Agent::AssistantSectionKind::Normal,
+    ])
+    prepared.first.markup.not_nil!.should contain("<b>thought</b>")
+    prepared.last.markup.not_nil!.should contain("answer")
+  end
+
   it "splits fenced code from surrounding prose" do
     parts = Xd::UI::MessageContent.parse(
       "Before\n```crystal\nputs :ok\n```\nAfter"

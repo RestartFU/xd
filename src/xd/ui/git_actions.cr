@@ -1,6 +1,7 @@
 require "json"
 require "gtk4"
 require "./adw"
+require "./dialogs"
 require "./host_launch"
 require "./panel_call"
 require "../version"
@@ -385,13 +386,7 @@ module Xd
       end
 
       private def show_error(message : String) : Nil
-        dialog = Adw::AlertDialog.new(
-          heading: "Git Refused",
-          body: message
-        )
-        dialog.add_response("close", "Close")
-        dialog.default_response = "close"
-        dialog.present(@parent)
+        Dialogs.alert(@parent, "Git Refused", message)
       end
 
       private def hint(key : String, what : String) : Gtk::Box

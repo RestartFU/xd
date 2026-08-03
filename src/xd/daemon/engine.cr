@@ -10,6 +10,7 @@ require "../version"
 require "../workspace/service"
 require "../workspace/worktrees"
 require "./connection"
+require "./errors"
 require "./event_bus"
 require "./filesystem"
 require "./images"
@@ -25,9 +26,12 @@ require "./workspace_monitor"
 module Xd
   module Daemon
     PROTOCOL_VERSION = 1_i64
+    MAX_DRAFT_BYTES  = 1024 * 1024
     PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-    private record Pairing, code : String, expires_at : Time::Instant
+    private record Pairing,
+      code : String,
+      expires_at : Time::Instant
 
     # Sole application command dispatcher.
     #
@@ -44,6 +48,7 @@ module Xd
       @command_events = [] of Protocol::Event
       @after_write : Proc(Nil)?
       @peer_listener : PeerListener?
+      @active_connections = {} of UInt64 => Connection
 
       def initialize(
         @store : Storage::Store,
@@ -145,6 +150,14 @@ module Xd
         end
       end
 
+      # Sessions call this when their transport closes so a device stops being
+      # reported as connected without leaving an in-memory reference behind.
+      def connection_closed(connection : Connection) : Nil
+        @command_mutex.synchronize do
+          @active_connections.delete(connection.object_id)
+        end
+      end
+
       # Server ownership stays outside Engine, but local clients may ask that
       # server to expose this exact Engine over TLS. Remote clients cannot
       # open listeners or mint credentials for more devices.
@@ -162,6 +175,10 @@ module Xd
       def process(connection : Connection, line : String) : Protocol::Outcome
         request = Protocol::Request.parse(line)
 
+        if connection.revoked || connection.closed
+          return failed_outcome("Device connection is no longer authorized.")
+        end
+
         if control_operation?(request.operation)
           return process_control(connection, request)
         end
@@ -173,6 +190,15 @@ module Xd
             return Protocol::Outcome.new(
               Protocol::Response.error(
                 "Not authenticated. Say hello first."
+              ),
+              [] of Protocol::Event
+            )
+          end
+
+          if request.operation.local_only? && !connection.transport.local?
+            return Protocol::Outcome.new(
+              Protocol::Response.error(
+                "Device management is only available on the daemon machine."
               ),
               [] of Protocol::Event
             )
@@ -259,6 +285,12 @@ module Xd
       end
 
       def close : Nil
+        connections = @command_mutex.synchronize do
+          values = @active_connections.values
+          @active_connections.clear
+          values
+        end
+        connections.each(&.close)
         @workspace_monitor.close
         @repository_monitor.close
         @terminals.close
@@ -277,6 +309,12 @@ module Xd
           pair(connection, request)
         when Protocol::Operation::PeerPairing
           peer_pairing(connection, request)
+        when Protocol::Operation::Devices
+          devices
+        when Protocol::Operation::RenameDevice
+          rename_device(request)
+        when Protocol::Operation::RevokeDevice
+          revoke_device(request)
         when Protocol::Operation::Hello
           hello(connection, request)
         when Protocol::Operation::AgentSecrets
@@ -331,10 +369,14 @@ module Xd
           file_browse(request)
         when Protocol::Operation::RenameChat
           rename_chat(request)
+        when Protocol::Operation::MoveChat
+          move_chat(request)
         when Protocol::Operation::DeleteChat
           delete_chat(request)
         when Protocol::Operation::Chat
           chat(request)
+        when Protocol::Operation::SetDraft
+          set_draft(request)
         when Protocol::Operation::SetOption
           set_option(request)
         when Protocol::Operation::Send
@@ -397,15 +439,20 @@ module Xd
 
         # Spend valid code before storage. Retrying a half-completed pair must
         # never mint several permanent credentials.
+        name = DeviceStore.normalize_name(
+          request.string("name", "pair needs a device name.")
+        )
         @pairing = nil
 
         token = @token_generator.call
-        name = request.string?("name") || "Unknown device"
-        @store.add_device(token_hash(token), name)
-        connection.authenticated = true
+        token_hash = token_hash(token)
+        @store.add_device(token_hash, name)
+        connection.authenticate(token_hash)
+        @active_connections[connection.object_id] = connection
 
         Protocol::Response.ok({
-          "token" => JSON::Any.new(token),
+          "token"  => JSON::Any.new(token),
+          "device" => JSON::Any.new(name),
         })
       end
 
@@ -468,13 +515,60 @@ module Xd
         return Protocol::Response.error("hello needs a token") unless token
 
         name = @store.device_name(token_hash(token))
-        return Protocol::Response.error("Unknown device. Pair first.") unless name
+        return Protocol::Response.error(UNKNOWN_DEVICE_ERROR) unless name
 
-        connection.authenticated = true
+        connection.authenticate(token_hash(token))
+        @active_connections[connection.object_id] = connection
         Protocol::Response.ok({
           "device"  => JSON::Any.new(name),
           "version" => JSON::Any.new(PROTOCOL_VERSION),
         })
+      end
+
+      private def devices : Protocol::Response
+        values = @store.list_devices.map do |device|
+          connected = @active_connections.values.any? do |connection|
+            !connection.closed && connection.device_id == device.id
+          end
+          JSON::Any.new({
+            "id"         => JSON::Any.new(device.id),
+            "name"       => JSON::Any.new(device.name),
+            "created_at" => JSON::Any.new(device.created_at),
+            "last_seen"  => JSON::Any.new(device.last_seen),
+            "connected"  => JSON::Any.new(connected),
+          })
+        end
+        Protocol::Response.ok({
+          "devices" => JSON::Any.new(values),
+        })
+      end
+
+      private def rename_device(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        id = request.string?(
+          "device"
+        ) || request.string("id", "rename-device needs a device id.")
+        name = request.string(
+          "name",
+          "rename-device needs a device name."
+        )
+        @store.rename_device(id, name)
+        Protocol::Response.ok
+      end
+
+      private def revoke_device(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        id = request.string?(
+          "device"
+        ) || request.string("id", "revoke-device needs a device id.")
+        @store.revoke_device(id)
+        connections = @active_connections.values.select do |connection|
+          connection.device_id == id
+        end
+        connections.each(&.revoke)
+        Protocol::Response.ok
       end
 
       private def agent_secrets(
@@ -983,6 +1077,23 @@ module Xd
         Protocol::Response.ok
       end
 
+      private def move_chat(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string(
+          "chat",
+          "move-chat needs a chat id"
+        )
+        folder_id = request.string(
+          "folder",
+          "move-chat needs a folder"
+        )
+        @store.get_chat(chat_id)
+        @workspaces.find_folder(folder_id)
+        @store.set_chat_folder(chat_id, folder_id)
+        Protocol::Response.ok
+      end
+
       private def delete_chat(
         request : Protocol::Request,
       ) : Protocol::Response
@@ -1029,6 +1140,9 @@ module Xd
         )
         fields["queued"] = JSON::Any.new(stored.queue.first) unless stored.queue.empty?
         fields["queue"] = json_any(stored.queue)
+        fields["draft"] = JSON::Any.new(stored.draft)
+        fields["draft_revision"] = JSON::Any.new(stored.draft_revision)
+        fields["draft_attachments"] = JSON.parse(stored.draft_attachments)
         active_turn = @agents.active_turn(chat_id)
         fields["working"] = JSON::Any.new(
           !active_turn.nil? || stored.daemon_working
@@ -1089,6 +1203,38 @@ module Xd
         context = "New worktree from #{context}" if stored.new_worktree
         fields["context"] = JSON::Any.new(context)
 
+        Protocol::Response.ok(fields)
+      end
+
+      private def set_draft(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        message = "set-draft needs a chat and text."
+        chat_id = request.string("chat", message)
+        text = request.string("text", message)
+        if text.bytesize > MAX_DRAFT_BYTES
+          raise Protocol::Error.new("A message draft is too large.")
+        end
+
+        attachments : String? = nil
+        if node = request.body["attachments"]?
+          validated = @images.validate_attachments(node, allow_empty: true)
+          attachments = validated.map do |attachment|
+            {
+              "name" => attachment.name,
+              "mime" => "image/png",
+              "data" => attachment.encoded,
+            }
+          end.to_json
+        end
+        state = @store.set_draft(chat_id, text, attachments)
+        fields = {
+          "draft"          => JSON::Any.new(state.text),
+          "draft_revision" => JSON::Any.new(state.revision),
+        }
+        if attachments
+          fields["draft_attachments"] = JSON.parse(state.attachments)
+        end
         Protocol::Response.ok(fields)
       end
 
@@ -1704,6 +1850,7 @@ module Xd
              Protocol::Operation::TrashFolder,
              Protocol::Operation::NewChat,
              Protocol::Operation::RenameChat,
+             Protocol::Operation::MoveChat,
              Protocol::Operation::DeleteChat
           @workspace_monitor.acknowledge
           [protocol_event("tree")]
@@ -1713,6 +1860,22 @@ module Xd
             fields["chat"] = JSON::Any.new(chat_id)
           end
           [protocol_event("changed", fields)]
+        when Protocol::Operation::SetDraft
+          chat_id = request.string?("chat")
+          return [] of Protocol::Event unless chat_id
+
+          stored = @store.get_chat(chat_id)
+          fields = {
+            "chat"           => JSON::Any.new(chat_id),
+            "draft"          => JSON::Any.new(stored.draft),
+            "draft_revision" => JSON::Any.new(stored.draft_revision),
+          }
+          if request.member?("attachments")
+            fields["draft_attachments"] = JSON.parse(
+              stored.draft_attachments
+            )
+          end
+          [protocol_event("draft", fields)]
         when Protocol::Operation::Queue,
              Protocol::Operation::DropQueue,
              Protocol::Operation::EditQueue,

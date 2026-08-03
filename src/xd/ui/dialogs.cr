@@ -1,5 +1,4 @@
 require "gtk4"
-require "./adw"
 
 module Xd
   module UI
@@ -54,18 +53,62 @@ module Xd
         accept_label : String,
         &on_accept : -> Nil
       ) : Nil
-        dialog = Adw::AlertDialog.new(
-          heading: title,
-          body: description
-        )
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("accept", accept_label)
-        dialog.set_response_appearance("accept", :destructive)
-        dialog.default_response = "cancel"
-        dialog.close_response = "cancel"
-        dialog.choose(parent, nil) do |_source, result|
-          on_accept.call if dialog.choose_finish(result) == "accept"
+        window, content, actions = shell(parent, title)
+
+        description_label = Gtk::Label.new(description)
+        description_label.xalign = 0_f32
+        description_label.wrap = true
+
+        cancel = Gtk::Button.new_with_label("Cancel")
+        cancel.clicked_signal.connect { window.destroy }
+        accept = Gtk::Button.new_with_label(accept_label)
+        accept.add_css_class("destructive-action")
+        accept.clicked_signal.connect do
+          window.destroy
+          on_accept.call
         end
+
+        content.append(description_label)
+        actions.append(cancel)
+        actions.append(accept)
+        window.present
+        cancel.grab_focus
+      end
+
+      def alert(
+        parent : Gtk::Window,
+        title : String,
+        description : String,
+        accept_label : String = "Close",
+        on_close : Proc(Nil)? = nil,
+      ) : Nil
+        window, content, actions = shell(parent, title)
+
+        description_label = Gtk::Label.new(description)
+        description_label.xalign = 0_f32
+        description_label.wrap = true
+
+        closed = false
+        finish = -> {
+          unless closed
+            closed = true
+            window.destroy
+            on_close.try(&.call)
+          end
+        }
+        window.destroy_signal.connect do
+          unless closed
+            closed = true
+            on_close.try(&.call)
+          end
+        end
+        accept = Gtk::Button.new_with_label(accept_label)
+        accept.clicked_signal.connect { finish.call }
+
+        content.append(description_label)
+        actions.append(accept)
+        window.present
+        accept.grab_focus
       end
 
       def shell(
@@ -106,6 +149,16 @@ module Xd
           window.destroy
           true
         end
+        keys = Gtk::EventControllerKey.new
+        keys.key_pressed_signal.connect do |keyval, _keycode, _state|
+          if keyval == Gdk::KEY_Escape
+            window.destroy
+            true
+          else
+            false
+          end
+        end
+        window.add_controller(keys)
         {window, content, actions}
       end
     end

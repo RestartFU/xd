@@ -46,6 +46,16 @@ object ImageAttachments {
             }
         }
 
+    suspend fun fromPng(png: PngAttachment): Attachment =
+        withContext(Dispatchers.Default) {
+            Limits.validateImages(listOf(png))
+            val bitmap = BitmapFactory.decodeByteArray(png.bytes, 0, png.bytes.size)
+                ?: error("That synchronized image could not be decoded")
+            val preview = thumbnail(bitmap)
+            if (preview !== bitmap) bitmap.recycle()
+            Attachment(png, preview.asImageBitmap())
+        }
+
     private fun decode(context: Context, uri: Uri): Bitmap =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             // ImageDecoder applies EXIF orientation itself.

@@ -1,5 +1,6 @@
 package com.restartfu.xd.protocol
 
+import com.restartfu.xd.automaticDeviceName
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.serialization.json.JsonObject
@@ -23,11 +24,20 @@ public enum class ChatOption(
 }
 
 public object Ops {
-    public fun pair(code: String, name: String): JsonObject = buildJsonObject {
-        put("op", "pair")
-        put("code", code)
-        put("name", name)
+    public fun pair(code: String, name: String): JsonObject {
+        require(name.isNotBlank()) { "Device name must not be blank" }
+        return buildJsonObject {
+            put("op", "pair")
+            put("code", code)
+            put("name", name)
+        }
     }
+
+    @Deprecated(
+        "Pairing uses the connecting platform's automatic device name.",
+    )
+    public fun pair(code: String): JsonObject =
+        pair(code, automaticDeviceName())
 
     public fun hello(token: String): JsonObject = buildJsonObject {
         put("op", "hello")
@@ -37,6 +47,37 @@ public object Ops {
     public fun tree(): JsonObject = op("tree")
 
     public fun chat(chatId: String): JsonObject = withChat("chat", chatId)
+
+    @OptIn(ExperimentalEncodingApi::class)
+    public fun setDraft(
+        chatId: String,
+        text: String,
+        images: List<PngAttachment>? = null,
+    ): JsonObject = buildJsonObject {
+        require(text.encodeToByteArray().size <= 1024 * 1024) {
+            "Message draft is too large"
+        }
+        put("op", "set-draft")
+        put("chat", chatId)
+        put("text", text)
+        if (images != null) {
+            Limits.validateImages(images)
+            put(
+                "attachments",
+                buildJsonArray {
+                    images.forEach { image ->
+                        add(
+                            buildJsonObject {
+                                put("name", "image.png")
+                                put("mime", Limits.PNG_MIME)
+                                put("data", Base64.Default.encode(image.bytes))
+                            },
+                        )
+                    }
+                },
+            )
+        }
+    }
 
     public fun messages(chatId: String, limit: Int = 150): JsonObject = buildJsonObject {
         put("op", "messages")
@@ -162,6 +203,44 @@ public object Ops {
         require(folderId.isNotBlank()) { "Folder id must not be blank" }
         put("folder", folderId)
         if (!title.isNullOrBlank()) put("title", title)
+    }
+
+    public fun newFolder(
+        name: String,
+        parentId: String? = null,
+    ): JsonObject = buildJsonObject {
+        require(
+            name.isNotBlank() &&
+                !name.startsWith('.') &&
+                '/' !in name &&
+                '\\' !in name
+        ) { "A folder name cannot be empty or hidden, or contain a path separator" }
+        require(parentId == null || parentId.isNotBlank()) { "Parent id must not be blank" }
+        put("op", "new-folder")
+        put("name", name)
+        if (parentId != null) put("parent", parentId)
+    }
+
+    public fun moveFolder(
+        folderId: String,
+        parentId: String? = null,
+    ): JsonObject = buildJsonObject {
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        require(parentId == null || parentId.isNotBlank()) { "Parent id must not be blank" }
+        put("op", "move-folder")
+        put("folder", folderId)
+        if (parentId != null) put("parent", parentId)
+    }
+
+    public fun moveChat(
+        chatId: String,
+        folderId: String,
+    ): JsonObject = buildJsonObject {
+        require(chatId.isNotBlank()) { "Chat id must not be blank" }
+        require(folderId.isNotBlank()) { "Folder id must not be blank" }
+        put("op", "move-chat")
+        put("chat", chatId)
+        put("folder", folderId)
     }
 
     /**

@@ -11,6 +11,15 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class OpsTest {
     @Test
+    fun pairingSendsTheConnectingDeviceName() {
+        val request = Ops.pair("ABCD-EFGH", "Pixel 9")
+
+        assertEquals("pair", request.getValue("op").jsonPrimitive.content)
+        assertEquals("ABCD-EFGH", request.getValue("code").jsonPrimitive.content)
+        assertEquals("Pixel 9", request.getValue("name").jsonPrimitive.content)
+    }
+
+    @Test
     fun booleanOptionsAreStringsOnWire() {
         val request = Ops.setBoolOption("chat", ChatOption.PLAN, true)
 
@@ -37,6 +46,17 @@ class OpsTest {
     }
 
     @Test
+    fun draftTextOmitsUnchangedAttachmentsAndCanReplaceThem() {
+        val png = PngAttachment(PNG_HEADER + byteArrayOf(4, 5, 6))
+        val text = Ops.setDraft("chat", "typing")
+        val images = Ops.setDraft("chat", "typing", listOf(png))
+
+        assertFalse("attachments" in text)
+        assertEquals(1, images.getValue("attachments").jsonArray.size)
+        assertEquals("set-draft", images.getValue("op").jsonPrimitive.content)
+    }
+
+    @Test
     fun invalidImageFailsBeforeEncoding() {
         assertFailsWith<IllegalArgumentException> {
             Ops.send("chat", "", listOf(PngAttachment(byteArrayOf(1, 2, 3))))
@@ -52,6 +72,40 @@ class OpsTest {
             "folder",
             Ops.newChat("folder").getValue("folder").jsonPrimitive.content,
         )
+    }
+
+    @Test
+    fun newFolderDistinguishesAWorkspaceFromANestedFolder() {
+        val workspace = Ops.newFolder("Mobile")
+        val nested = Ops.newFolder("App", "workspace")
+
+        assertEquals("new-folder", workspace.getValue("op").jsonPrimitive.content)
+        assertEquals("Mobile", workspace.getValue("name").jsonPrimitive.content)
+        assertFalse("parent" in workspace)
+        assertEquals("workspace", nested.getValue("parent").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder(" ") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder(".hidden") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile/App") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile\\App") }
+        assertFailsWith<IllegalArgumentException> { Ops.newFolder("App", " ") }
+    }
+
+    @Test
+    fun moveOperationsOmitRootParentsAndRequireIds() {
+        val folderToRoot = Ops.moveFolder("folder")
+        val folderNested = Ops.moveFolder("folder", "parent")
+        val chat = Ops.moveChat("chat", "folder")
+
+        assertEquals("move-folder", folderToRoot.getValue("op").jsonPrimitive.content)
+        assertFalse("parent" in folderToRoot)
+        assertEquals("parent", folderNested.getValue("parent").jsonPrimitive.content)
+        assertEquals("move-chat", chat.getValue("op").jsonPrimitive.content)
+        assertEquals("chat", chat.getValue("chat").jsonPrimitive.content)
+        assertEquals("folder", chat.getValue("folder").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.moveFolder("") }
+        assertFailsWith<IllegalArgumentException> { Ops.moveFolder("folder", " ") }
+        assertFailsWith<IllegalArgumentException> { Ops.moveChat("", "folder") }
+        assertFailsWith<IllegalArgumentException> { Ops.moveChat("chat", "") }
     }
 
     @Test

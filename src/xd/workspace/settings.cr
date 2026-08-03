@@ -3,8 +3,9 @@ require "uuid"
 
 module Xd
   module Workspace
-    SETTINGS_FILE        = ".xd.json"
-    LEGACY_SETTINGS_FILE = ".hy.json"
+    SETTINGS_FILE             = ".xd.json"
+    LEGACY_SETTINGS_FILE      = ".hy.json"
+    WORKTREE_CONTAINER_MARKER = ".xd-worktrees"
 
     class Error < Exception
     end

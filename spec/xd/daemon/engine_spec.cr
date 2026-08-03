@@ -269,15 +269,16 @@ describe Xd::Daemon::Engine do
       pair = engine.dispatch(pairing_connection, {
         "op"   => "pair",
         "code" => code,
-        "name" => "workstation",
+        "name" => "spoofed by peer",
       }.to_json)
 
       pair.success?.should be_true
       pair["token"].as_s.should eq("secret-token")
+      pair["device"].as_s.should eq("spoofed by peer")
       pairing_connection.authenticated.should be_true
       store.device_name(
         Digest::SHA256.hexdigest("secret-token")
-      ).should eq("workstation")
+      ).should eq("spoofed by peer")
 
       second_pair = engine.dispatch(
         Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote),
@@ -292,10 +293,69 @@ describe Xd::Daemon::Engine do
       }.to_json)
 
       hello.success?.should be_true
-      hello["device"].as_s.should eq("workstation")
+      hello["device"].as_s.should eq("spoofed by peer")
       hello["version"].as_i64.should eq(1)
       returning.authenticated.should be_true
       engine.dispatch(returning, %({"op":"ping"})).success?.should be_true
+    end
+  end
+
+  it "lets the local owner list, rename, and revoke paired devices" do
+    with_daemon_engine(
+      token_generator: -> { "managed-token" }
+    ) do |_store, engine|
+      pairing_connection = Xd::Daemon::Connection.new(
+        Xd::Daemon::Transport::Remote
+      )
+      code = engine.arm_pairing(5.minutes)
+      paired = engine.dispatch(pairing_connection, {
+        "op"   => "pair",
+        "code" => code,
+        "name" => "peer-provided label",
+      }.to_json)
+      paired.success?.should be_true
+
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      listed = engine.dispatch(local, %({"op":"devices"}))
+      listed.success?.should be_true
+      devices = listed["devices"].as_a
+      devices.size.should eq(1)
+      device = devices.first
+      device["name"].as_s.should eq("peer-provided label")
+      device["connected"].as_bool.should be_true
+      id = device["id"].as_s
+
+      remote = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      remote.authenticated = true
+      refused = engine.dispatch(remote, %({"op":"devices"}))
+      refused.success?.should be_false
+      refused["error"].as_s.should contain("daemon machine")
+
+      renamed = engine.dispatch(local, {
+        "op"     => "rename-device",
+        "device" => id,
+        "name"   => "renamed device",
+      }.to_json)
+      renamed.success?.should be_true
+      engine.dispatch(local, %({"op":"devices"}))["devices"].as_a
+        .first["name"].as_s.should eq("renamed device")
+
+      revoked = engine.dispatch(local, {
+        "op"     => "revoke-device",
+        "device" => id,
+      }.to_json)
+      revoked.success?.should be_true
+      pairing_connection.revoked.should be_true
+      pairing_connection.closed.should be_true
+      engine.dispatch(local, %({"op":"devices"}))["devices"].as_a
+        .should be_empty
+
+      engine.dispatch(pairing_connection, %({"op":"ping"})).success?.should be_false
+      returning = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+      engine.dispatch(returning, {
+        "op"    => "hello",
+        "token" => "managed-token",
+      }.to_json).success?.should be_false
     end
   end
 
@@ -338,6 +398,27 @@ describe Xd::Daemon::Engine do
       refused = engine.dispatch(remote, %({"op":"peer-pairing"}))
       refused.success?.should be_false
       refused["error"].as_s.should contain("daemon machine")
+    end
+  end
+
+  it "requires the connecting device to provide a name" do
+    with_daemon_engine do |_store, engine|
+      code = engine.arm_pairing(1.minute)
+      connection = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Remote)
+
+      missing = engine.dispatch(connection, {
+        "op"   => "pair",
+        "code" => code,
+      }.to_json)
+      missing.success?.should be_false
+      missing["error"].as_s.should eq("pair needs a device name.")
+
+      paired = engine.dispatch(connection, {
+        "op"   => "pair",
+        "code" => code,
+        "name" => "connected device",
+      }.to_json)
+      paired.success?.should be_true
     end
   end
 
@@ -728,6 +809,54 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "moves folders and individual chats through the protocol" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      source_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Source",
+      }.to_json)["id"].as_s
+      target_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Target",
+      }.to_json)["id"].as_s
+      child_id = engine.dispatch(local, {
+        "op"     => "new-folder",
+        "parent" => source_id,
+        "name"   => "Child",
+      }.to_json)["id"].as_s
+      chat_id = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => source_id,
+        "title"  => "Movable",
+      }.to_json)["id"].as_s
+
+      moved_folder = engine.process(local, {
+        "op"     => "move-folder",
+        "folder" => child_id,
+        "parent" => target_id,
+      }.to_json)
+      moved_folder.response.success?.should be_true
+      moved_folder.events.map { |event| event["event"].as_s }
+        .should eq(["tree"])
+
+      moved_chat = engine.process(local, {
+        "op"     => "move-chat",
+        "chat"   => chat_id,
+        "folder" => target_id,
+      }.to_json)
+      moved_chat.response.success?.should be_true
+      moved_chat.events.map { |event| event["event"].as_s }
+        .should eq(["tree"])
+
+      tree = engine.dispatch(local, %({"op":"tree"}))
+      child = tree["folders"].as_a.find { |folder| folder["id"].as_s == child_id }
+      child.not_nil!["parent"].as_s.should eq(target_id)
+      chat = tree["chats"].as_a.find { |item| item["id"].as_s == chat_id }
+      chat.not_nil!["folder"].as_s.should eq(target_id)
+    end
+  end
+
   it "opens a new chat in a hidden non-Git working directory" do
     with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
@@ -939,6 +1068,62 @@ describe Xd::Daemon::Engine do
         fail("serialized send did not finish")
       end
       launcher.handles.first.canceled.should be_true
+    end
+  end
+
+  it "persists and broadcasts message drafts with attachment previews" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Drafts",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+      png = Xd::Daemon::Images::PNG_SIGNATURE + Bytes[1_u8, 2_u8]
+      encoded = Base64.strict_encode(png)
+
+      outcome = engine.process(local, {
+        "op"   => "set-draft",
+        "chat" => chat,
+        "text" => "Continue here",
+        "attachments" => [{
+          "name" => "preview.png",
+          "mime" => "image/png",
+          "data" => encoded,
+        }],
+      }.to_json)
+
+      outcome.response.success?.should be_true
+      outcome.response["draft_revision"].as_i64.should eq(1)
+      outcome.events.size.should eq(1)
+      event = outcome.events.first
+      event["event"].as_s.should eq("draft")
+      event["chat"].as_s.should eq(chat)
+      event["draft"].as_s.should eq("Continue here")
+      event["draft_attachments"].as_a.first["data"].as_s.should eq(encoded)
+
+      state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)
+      state["draft"].as_s.should eq("Continue here")
+      state["draft_revision"].as_i64.should eq(1)
+      state["draft_attachments"].as_a.first["name"].as_s
+        .should eq("preview.png")
+
+      text_only = engine.process(local, {
+        "op"   => "set-draft",
+        "chat" => chat,
+        "text" => "Text changed",
+      }.to_json)
+      text_only.events.first.body.has_key?("draft_attachments").should be_false
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)["draft_attachments"].as_a.size.should eq(1)
     end
   end
 

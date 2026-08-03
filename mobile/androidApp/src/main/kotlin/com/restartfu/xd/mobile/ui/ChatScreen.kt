@@ -68,6 +68,9 @@ import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.AskBlock
+import com.restartfu.xd.model.AssistantSection
+import com.restartfu.xd.model.AssistantSectionKind
+import com.restartfu.xd.model.AssistantSections
 import com.restartfu.xd.model.ToolGrouping
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
@@ -540,7 +543,11 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
             when (part) {
                 is MessagePart.Image -> MessageImage(model, part.path)
                 is MessagePart.Prose -> when (item.kind) {
-                    TranscriptKind.ASSISTANT -> AssistantProse(part.text)
+                    TranscriptKind.ASSISTANT -> AssistantProse(
+                        text = part.text,
+                        messageId = item.id,
+                        live = item.live,
+                    )
                     TranscriptKind.SYSTEM ->
                         Text(part.text, fontFamily = FontFamily.Monospace)
                     else -> Text(part.text)
@@ -551,23 +558,73 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
 }
 
 /**
- * Assistant prose with its `<ask>` blocks lifted out.
+ * Assistant prose with its client-side presentation blocks lifted out.
  *
- * The daemon stores a reply verbatim so every client can render the question
- * its own way; left alone the tags would show up as literal text. The question
- * stays in the transcript in bold, as it does on the desktop, so the
- * conversation still reads in order once the buttons are gone.
+ * `<ask>` becomes the existing question controls, `<analysis>` is an initially
+ * closed disclosure, and `<summary>` is ordinary visible Markdown.
  */
 @Composable
-private fun AssistantProse(text: String) {
-    val parsed = remember(text) { AskBlock.parse(text) }
-    if (parsed == null) {
-        MarkdownText(text)
-        return
+private fun AssistantProse(
+    text: String,
+    messageId: String,
+    live: Boolean,
+) {
+    val ask = remember(text) { AskBlock.parse(text) }
+    val source = ask?.remainder ?: text
+    val visible = remember(source, live) {
+        if (live) AssistantSections.stream(source) else source
     }
+    val sections = remember(visible) { AssistantSections.parse(visible) }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (parsed.remainder.isNotEmpty()) MarkdownText(parsed.remainder)
-        Text(parsed.ask.question, fontWeight = FontWeight.Bold)
+        sections.forEachIndexed { index, section ->
+            when (section.kind) {
+                AssistantSectionKind.NORMAL ->
+                    if (section.text.isNotBlank()) MarkdownText(section.text)
+                AssistantSectionKind.ANALYSIS ->
+                    AnalysisDisclosure(messageId, index, section)
+            }
+        }
+        ask?.let { Text(it.ask.question, fontWeight = FontWeight.Bold) }
+    }
+}
+
+@Composable
+private fun AnalysisDisclosure(
+    messageId: String,
+    ordinal: Int,
+    section: AssistantSection,
+) {
+    val key = "$messageId-analysis-$ordinal"
+    var expanded by rememberSaveable(key) { mutableStateOf(false) }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(if (expanded) "▾" else "▸")
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Analysis",
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (expanded && section.text.isNotBlank()) {
+                MarkdownText(
+                    section.text,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+        }
     }
 }
 

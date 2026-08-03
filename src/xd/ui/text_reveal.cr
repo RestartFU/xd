@@ -1,7 +1,10 @@
 module Xd
   module UI
     class TextReveal
-      FRAME_MILLISECONDS =          33
+      # Updating a wrapping label relays out all streamed text. Ten frames per
+      # second stays visibly live without turning long responses into a CPU
+      # benchmark on lower-power laptops.
+      FRAME_MILLISECONDS =         100
       INITIAL_DELAY_USEC =  80_000_i64
       TAIL_DELAY_USEC    = 100_000_i64
       TRAILING_CHARS     =           2

@@ -1,3 +1,4 @@
+require "../agent/assistant_sections"
 require "../markdown"
 
 module Xd
@@ -16,7 +17,9 @@ module Xd
     record PreparedMessagePart,
       kind : MessagePartKind,
       text : String,
-      markup : String?
+      markup : String?,
+      section : Agent::AssistantSectionKind = Agent::AssistantSectionKind::Normal,
+      section_id : Int32 = 0
 
     module MessageContent
       extend self
@@ -58,16 +61,20 @@ module Xd
         chunk_bytes : Int32 = RENDER_CHUNK_BYTES,
       ) : Array(PreparedMessagePart)
         prepared = [] of PreparedMessagePart
-        parse(text).each do |part|
-          each_chunk(part.text, chunk_bytes) do |chunk|
-            markup = if part.kind.prose?
-                       Markdown.to_pango(chunk)
-                     end
-            prepared << PreparedMessagePart.new(
-              part.kind,
-              chunk,
-              markup
-            )
+        Agent::AssistantSections.parse(text).each_with_index do |section, section_id|
+          parse(section.text).each do |part|
+            each_chunk(part.text, chunk_bytes) do |chunk|
+              markup = if part.kind.prose?
+                         Markdown.to_pango(chunk)
+                       end
+              prepared << PreparedMessagePart.new(
+                part.kind,
+                chunk,
+                markup,
+                section.kind,
+                section_id
+              )
+            end
           end
         end
         prepared
