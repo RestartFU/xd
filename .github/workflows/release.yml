@@ -1,12 +1,23 @@
-# A release, cut from a tag.
+# A release, cut by hand.
 #
 # The same bundle the nightly publishes, built from the default profile -- so
-# it installs as "xd", keeps its data in ~/.local/share/xd, and a nightly sitting
-# beside it stays out of its way.
+# it installs as "xd", keeps its data in ~/.local/share/xd, and a nightly
+# sitting beside it stays out of its way.
 #
-# Tag and push to cut one:
+# Run this workflow and choose what to release:
 #
-#   git tag -a v0.2.0 -m "..." && git push origin v0.2.0
+#   current   release the version the source already states
+#   patch     0.0.1, for a fix
+#   minor     0.1.0, for something new
+#   major     1.0.0, for something that breaks
+#
+# A bump writes the new version into every file that states one, commits it,
+# and tags it. Pushing a v* tag by hand still works and builds that tag as it
+# stands.
+#
+# If a build fails after the tag is pushed, run it again with "current": a tag
+# on this commit with no release behind it is picked up and finished rather
+# than tagged twice.
 
 name: release
 
@@ -15,21 +26,146 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: The existing tag to build a release from
+      bump:
+        description: >-
+          Release the current version, or increment patch 0.0.1,
+          minor 0.1.0, major 1.0.0
         required: true
+        default: current
+        type: choice
+        options:
+          - current
+          - patch
+          - minor
+          - major
+
+# One release at a time, and never cancelled: a half-published release is
+# worse than a slow one.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
+  # What is being released, decided once, before anything is built. On a bump
+  # this is also what writes the version, commits it and tags it -- and pushes
+  # both, because the build jobs check that tag out.
+  prepare:
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch'
+            && 'master' || github.ref }}
+
+      - name: Work out the version and tag
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          source_version () {
+            sed -nE 's/^[[:space:]]*VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/p' \
+              src/xd/version.cr
+          }
+
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            current=$(source_version)
+            recovery_tag="v$current"
+
+            if [[ "$BUMP" == current ]]; then
+              version="$current"
+              tag="$recovery_tag"
+              if gh release view "$tag" >/dev/null 2>&1; then
+                echo "::error::Release $tag already exists."
+                exit 1
+              fi
+              if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+                if ! git tag --points-at HEAD | grep -Fxq "$tag"; then
+                  echo "::error::Tag $tag is on another commit."
+                  exit 1
+                fi
+                echo "Finishing the unpublished $tag release."
+              else
+                git config user.name "github-actions[bot]"
+                git config user.email \
+                  "41898282+github-actions[bot]@users.noreply.github.com"
+                git tag -a "$tag" -m "xd $tag"
+              fi
+            elif git tag --points-at HEAD | grep -Fxq "$recovery_tag" \
+              && ! gh release view "$recovery_tag" >/dev/null 2>&1; then
+              # This commit is already tagged and was never published, so
+              # bumping again would leave that tag behind unreleased.
+              version="$current"
+              tag="$recovery_tag"
+              echo "Finishing the unpublished $tag release."
+            else
+              version=$(./scripts/bump-version.sh "$BUMP")
+              tag="v$version"
+
+              if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+                echo "::error::Tag $tag already exists."
+                exit 1
+              fi
+
+              git config user.name "github-actions[bot]"
+              git config user.email \
+                "41898282+github-actions[bot]@users.noreply.github.com"
+              git add \
+                src/xd/version.cr \
+                shard.yml \
+                installer/macos/Info.plist.in \
+                scripts/package-windows.ps1
+              git commit -m "chore: release $tag"
+              git tag -a "$tag" -m "xd $tag"
+            fi
+          else
+            tag="$GITHUB_REF_NAME"
+            version="${tag#v}"
+
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::A release tag has to look like v1.2.3."
+              exit 1
+            fi
+            if [[ "$version" != "$(source_version)" ]]; then
+              echo "::error::$tag does not match the source version $(source_version)."
+              exit 1
+            fi
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Pushed before the builds because they check the tag out. A build that
+      # fails leaves this tag unpublished, which is what "current" finishes.
+      - name: Push the release commit and tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        # Atomic: master refusing a push must not leave the tag behind on its
+        # own, pointing at a commit nothing else has.
+        run: git push --atomic origin HEAD:master "$TAG"
+
   linux:
+    needs: prepare
     runs-on: [self-hosted, linux, x64, xd]
 
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Run the headless tests
         run: ./scripts/test.sh
@@ -53,12 +189,13 @@ jobs:
             scripts/install.sh
 
   macos:
+    needs: prepare
     runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Install native build dependencies
         env:
@@ -110,12 +247,13 @@ jobs:
             scripts/install-macos.sh
 
   windows:
+    needs: prepare
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -163,7 +301,7 @@ jobs:
           -Payload windows-dist
           -OutputDirectory windows-artifacts
           -Profile release
-          -Version 0.1.0
+          -Version ${{ needs.prepare.outputs.version }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -174,7 +312,7 @@ jobs:
             scripts/install.ps1
 
   publish:
-    needs: [linux, macos, windows]
+    needs: [prepare, linux, macos, windows]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -182,7 +320,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: actions/download-artifact@v5
         with:
@@ -195,7 +333,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="${{ needs.prepare.outputs.tag }}"
 
           notes=$(cat <<EOF
           Install it:
@@ -236,6 +374,7 @@ jobs:
               scripts/install.sh scripts/install-macos.sh scripts/install.ps1
           else
             gh release create "$tag" \
+              --verify-tag \
               --title "$tag" \
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
