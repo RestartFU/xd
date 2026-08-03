@@ -20,4 +20,15 @@ class TurnTimingTest {
     fun clampsAClockThatRunsBackwards() {
         assertEquals("Working for 0s", TurnTiming.format("Working", -3))
     }
+
+    @Test
+    fun readsTheSameWithoutAVerb() {
+        // Workflow cards name the run beside the count, so they drop the verb.
+        assertEquals("0s", TurnTiming.duration(0))
+        assertEquals("59s", TurnTiming.duration(59))
+        assertEquals("1m 00s", TurnTiming.duration(60))
+        assertEquals("59m 59s", TurnTiming.duration(3599))
+        assertEquals("1h 00m", TurnTiming.duration(3600))
+        assertEquals("0s", TurnTiming.duration(-3))
+    }
 }

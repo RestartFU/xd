@@ -1,11 +1,13 @@
 require "gtk4"
 require "../agent/workflow_run"
+require "./turn_timing"
 
 module Xd
   module UI
     class WorkflowCard
       POLL_INTERVAL  = 10.seconds
       RETRY_INTERVAL = 1.minute
+      TICK_INTERVAL  = 1.second
       STATUS_CLASSES = {
         "xd-workflow-running",
         "xd-workflow-success",
@@ -23,6 +25,9 @@ module Xd
         @closed = false
         @generation = 0_i64
         @source_id = 0_u32
+        @tick_id = 0_u32
+        @snapshot = nil.as(Agent::WorkflowRun::Status?)
+        @job_clocks = [] of Tuple(Agent::WorkflowRun::Job, Gtk::Label)
 
         heading_text = Gtk::Label.new("GitHub Actions ·")
         heading_text.xalign = 0_f32
@@ -44,6 +49,11 @@ module Xd
         @run_name.hexpand = true
         @run_name.add_css_class("xd-workflow-name")
 
+        @run_elapsed = Gtk::Label.new("")
+        @run_elapsed.xalign = 1_f32
+        @run_elapsed.visible = false
+        @run_elapsed.add_css_class("xd-workflow-elapsed")
+
         @run_status = Gtk::Label.new("")
         @run_status.xalign = 1_f32
         @run_status.visible = false
@@ -53,6 +63,7 @@ module Xd
         summary = Gtk::Box.new(:horizontal, 8)
         summary.append(@run_spinner)
         summary.append(@run_name)
+        summary.append(@run_elapsed)
         summary.append(@run_status)
 
         @jobs = Gtk::Box.new(:vertical, 6)
@@ -79,6 +90,7 @@ module Xd
           GLib.source_remove(@source_id)
           @source_id = 0_u32
         end
+        stop_ticking
       end
 
       private def check : Nil
@@ -105,6 +117,7 @@ module Xd
         generation : Int64,
       ) : Nil
         return if @closed || generation != @generation
+        @snapshot = snapshot
         if snapshot
           set_status(snapshot)
           render_jobs(snapshot.jobs)
@@ -114,6 +127,7 @@ module Xd
           render_jobs([] of Agent::WorkflowRun::Job)
           schedule(RETRY_INTERVAL)
         end
+        show_elapsed
       end
 
       private def set_status(
@@ -137,6 +151,62 @@ module Xd
         apply_status_class("xd-workflow-finished")
       end
 
+      # A run's own clock, so a card that has been sitting on the same job for
+      # a while says how long rather than only that it is still going. Counts
+      # from GitHub's start time, which survives the card being rebuilt.
+      private def show_elapsed : Nil
+        refresh_elapsed
+        if running?
+          start_ticking
+        else
+          stop_ticking
+        end
+      end
+
+      private def running? : Bool
+        snapshot = @snapshot
+        !@closed && !snapshot.nil? && !snapshot.terminal?
+      end
+
+      private def refresh_elapsed : Nil
+        now = Time.utc
+        snapshot = @snapshot
+        run_span = snapshot.try(&.elapsed(now))
+        @run_elapsed.visible = !run_span.nil?
+        if run_span
+          @run_elapsed.text = TurnTiming.duration(
+            run_span.total_seconds.to_i64
+          )
+        end
+
+        @job_clocks.each do |job, label|
+          span = job.elapsed(now)
+          label.visible = !span.nil?
+          label.text = TurnTiming.duration(span.total_seconds.to_i64) if span
+        end
+      end
+
+      private def start_ticking : Nil
+        return if @closed || @tick_id != 0
+        @tick_id = GLib.timeout(TICK_INTERVAL) do
+          # The source removes itself by returning false rather than being
+          # removed from inside its own callback.
+          if running?
+            refresh_elapsed
+            true
+          else
+            @tick_id = 0_u32
+            false
+          end
+        end
+      end
+
+      private def stop_ticking : Nil
+        return if @tick_id == 0
+        GLib.source_remove(@tick_id)
+        @tick_id = 0_u32
+      end
+
       private def apply_status_class(css_class : String) : Nil
         STATUS_CLASSES.each { |name| @run_status.remove_css_class(name) }
         @run_status.add_css_class(css_class)
@@ -146,6 +216,7 @@ module Xd
         jobs : Array(Agent::WorkflowRun::Job),
       ) : Nil
         @jobs.children.each { |child| @jobs.remove(child) }
+        @job_clocks.clear
         if jobs.empty?
           empty = Gtk::Label.new("No jobs reported yet")
           empty.xalign = 0_f32
@@ -165,15 +236,16 @@ module Xd
 
         header = Gtk::Box.new(:horizontal, 8)
         if job.terminal?
-          icon_name = case job.conclusion
-                      when "success" then "emblem-ok-symbolic"
-                      when "failure", "timed_out", "startup_failure"
-                        "dialog-error-symbolic"
-                      else
-                        "dialog-information-symbolic"
-                      end
-          icon = Gtk::Image.new_from_icon_name(icon_name)
-          icon.valign = :center
+          glyph = case job.conclusion
+                  when "success" then "✓"
+                  when "failure", "timed_out", "startup_failure"
+                    "✕"
+                  else
+                    "•"
+                  end
+          icon = Gtk::Label.new(glyph)
+          icon.add_css_class("xd-workflow-status")
+          icon.add_css_class(job.css_class)
           header.append(icon)
         else
           spinner = Gtk::Spinner.new
@@ -186,6 +258,13 @@ module Xd
         name.hexpand = true
         name.add_css_class("xd-workflow-job-name")
         header.append(name)
+
+        clock = Gtk::Label.new("")
+        clock.xalign = 1_f32
+        clock.visible = false
+        clock.add_css_class("xd-workflow-elapsed")
+        header.append(clock)
+        @job_clocks << {job, clock}
 
         if job.terminal?
           status = Gtk::Label.new(job.label)

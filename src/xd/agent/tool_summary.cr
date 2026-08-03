@@ -133,7 +133,11 @@ module Xd
         end
         append_unique(detail, state_message)
 
-        SubagentTool.build(identity.join(" · "), detail.join(" · "))
+        SubagentTool.build(
+          identity.join(" · "),
+          detail.join(" · "),
+          key: receivers.first?
+        )
       end
 
       private def codex_agent_state(
@@ -159,20 +163,20 @@ module Xd
         when "failed"     then {"Spawn failed", nil}
         when "inProgress" then {"Starting", nil}
         when "completed"  then {"Started", nil}
-        else                    {"Delegated", nil}
+        else                   {"Delegated", nil}
         end
       end
 
       private def human_agent_status(status : String?) : String
         case status
-        when "pendingInit"  then "Starting"
-        when "running"      then "Running"
-        when "interrupted"  then "Interrupted"
-        when "completed"    then "Completed"
-        when "errored"      then "Failed"
-        when "shutdown"     then "Stopped"
-        when "notFound"     then "Not found"
-        else                      "Delegated"
+        when "pendingInit" then "Starting"
+        when "running"     then "Running"
+        when "interrupted" then "Interrupted"
+        when "completed"   then "Completed"
+        when "errored"     then "Failed"
+        when "shutdown"    then "Stopped"
+        when "notFound"    then "Not found"
+        else                    "Delegated"
         end
       end
 

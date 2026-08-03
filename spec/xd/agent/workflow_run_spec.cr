@@ -100,7 +100,7 @@ describe Xd::Agent::WorkflowRun do
       #!/bin/sh
       set -eu
       printf '%s\n' "$@" > "$XD_GH_ARGUMENTS"
-      printf '%s\n' '{"name":"nightly","status":"completed","conclusion":"success","jobs":[{"databaseId":101,"name":"linux","status":"completed","conclusion":"success","steps":[{"name":"Publish","status":"completed","conclusion":"success"}]}]}'
+      printf '%s\n' '{"name":"nightly","status":"completed","conclusion":"success","startedAt":"2026-08-03T10:00:00Z","updatedAt":"2026-08-03T10:03:00Z","jobs":[{"databaseId":101,"name":"linux","status":"completed","conclusion":"success","startedAt":"2026-08-03T10:00:05Z","completedAt":"2026-08-03T10:02:05Z","steps":[{"name":"Publish","status":"completed","conclusion":"success"}]}]}'
       SH
     File.chmod(executable, 0o700)
 
@@ -119,6 +119,8 @@ describe Xd::Agent::WorkflowRun do
       status.label.should eq("nightly · Passed")
       status.jobs.first.id.should eq("101")
       status.jobs.first.log.should eq("Publish")
+      status.elapsed.should eq(3.minutes)
+      status.jobs.first.elapsed.should eq(2.minutes)
       File.read(arguments).lines.map(&.chomp).should eq([
         "run",
         "view",
@@ -126,7 +128,7 @@ describe Xd::Agent::WorkflowRun do
         "--repo",
         "owner/repo%",
         "--json",
-        "name,status,conclusion,jobs",
+        "name,status,conclusion,startedAt,updatedAt,jobs",
       ])
     ensure
       if old_executable
@@ -168,6 +170,51 @@ describe Xd::Agent::WorkflowRun do
       end
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
+  end
+
+  it "times runs and jobs from either GitHub spelling" do
+    running = Xd::Agent::WorkflowRun.parse_status(
+      %({"name":"nightly","status":"in_progress","conclusion":null,
+         "run_started_at":"2026-08-03T10:00:00Z",
+         "updated_at":"2026-08-03T10:01:00Z"})
+    ).not_nil!
+    running.started_at.should eq(Time.utc(2026, 8, 3, 10, 0, 0))
+    # A run still going has no finish time, whatever it was last written.
+    running.completed_at.should be_nil
+    running.elapsed(Time.utc(2026, 8, 3, 10, 2, 30)).should eq(150.seconds)
+
+    passed = Xd::Agent::WorkflowRun.parse_status(
+      %({"name":"nightly","status":"completed","conclusion":"success",
+         "startedAt":"2026-08-03T10:00:00Z",
+         "updatedAt":"2026-08-03T10:04:05Z"})
+    ).not_nil!
+    passed.elapsed(Time.utc(2026, 8, 3, 12, 0, 0)).should eq(245.seconds)
+
+    jobs = Xd::Agent::WorkflowRun.parse_jobs(
+      %({"jobs":[
+        {"id":101,"name":"linux","status":"in_progress","conclusion":null,
+         "started_at":"2026-08-03T10:00:10Z","completed_at":null},
+        {"databaseId":102,"name":"macos","status":"completed",
+         "conclusion":"success","startedAt":"2026-08-03T10:00:10Z",
+         "completedAt":"2026-08-03T10:01:10Z"},
+        {"databaseId":103,"name":"windows","status":"queued","conclusion":null,
+         "startedAt":"0001-01-01T00:00:00Z",
+         "completedAt":"0001-01-01T00:00:00Z"}
+      ]})
+    ).not_nil!
+    jobs[0].elapsed(Time.utc(2026, 8, 3, 10, 0, 40)).should eq(30.seconds)
+    jobs[1].elapsed(Time.utc(2026, 8, 3, 12, 0, 0)).should eq(60.seconds)
+    # The CLI writes a zero time for a job that has not started.
+    jobs[2].started_at.should be_nil
+    jobs[2].elapsed.should be_nil
+  end
+
+  it "reports no elapsed time for a run that finished without saying when" do
+    finished = Xd::Agent::WorkflowRun.parse_status(
+      %({"name":"nightly","status":"completed","conclusion":"success",
+         "run_started_at":"2026-08-03T10:00:00Z"})
+    ).not_nil!
+    finished.elapsed(Time.utc(2026, 8, 3, 12, 0, 0)).should be_nil
   end
 
   it "rejects malformed workflow status replies" do

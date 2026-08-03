@@ -1205,8 +1205,8 @@ module Xd
           WorkspaceCreateDialog.new(
             @parent,
             panel_call(source),
-            ->(name : String, repo : String?) {
-              create_folder(source, nil, name, repo)
+            ->(name : String, repo : String?, repo_url : String?) {
+              create_folder(source, nil, name, repo, repo_url)
               nil
             }
           ).present
@@ -1821,6 +1821,7 @@ module Xd
         parent_id : String?,
         name : String,
         repo : String? = nil,
+        repo_url : String? = nil,
       ) : Nil
         request = {
           "op"   => JSON::Any.new("new-folder"),
@@ -1828,6 +1829,7 @@ module Xd
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
         request["repo"] = JSON::Any.new(repo) if repo
+        request["repo_url"] = JSON::Any.new(repo_url) if repo_url
         call_async(
           source,
           request,

@@ -91,6 +91,16 @@ class OpsTest {
             "/home/user/project",
             connected.getValue("repo").jsonPrimitive.content,
         )
+
+        val cloned = Ops.newFolder(
+            "Cloned",
+            repositoryUrl = "https://github.com/owner/repo.git",
+        )
+        assertEquals(
+            "https://github.com/owner/repo.git",
+            cloned.getValue("repo_url").jsonPrimitive.content,
+        )
+        assertFalse("repo_url" in connected)
         assertFailsWith<IllegalArgumentException> { Ops.newFolder(" ") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder(".hidden") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile/App") }

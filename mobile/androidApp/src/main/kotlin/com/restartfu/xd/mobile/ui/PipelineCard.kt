@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.model.PipelineRun
+import com.restartfu.xd.model.TurnTiming
 import com.restartfu.xd.protocol.WorkflowJobReply
 import com.restartfu.xd.protocol.WorkflowStatusReply
 import kotlinx.coroutines.CancellationException
@@ -112,6 +113,18 @@ internal fun PipelineCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                elapsedText(
+                    status?.startedAt,
+                    status?.completedAt,
+                    terminal,
+                )?.let { elapsed ->
+                    Text(
+                        elapsed,
+                        color = MaterialTheme.colorScheme.outline,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
                 if (terminal) {
                     Text(
                         workflowLabel(status?.conclusion),
@@ -180,6 +193,14 @@ private fun PipelineJob(job: WorkflowJobReply) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            elapsedText(job.startedAt, job.completedAt, terminal)?.let { elapsed ->
+                Text(
+                    elapsed,
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             if (terminal) {
                 Text(
                     workflowLabel(job.conclusion),
@@ -198,6 +219,30 @@ private fun PipelineJob(job: WorkflowJobReply) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
+    }
+}
+
+/**
+ * How long a run or job has been going, or took.
+ *
+ * The daemon reports instants rather than an elapsed count, so a running row
+ * keeps counting between the ten-second polls instead of stepping in jumps. A
+ * finished row without a finish time shows nothing: a climbing count on
+ * something already over reads worse than no count at all.
+ */
+@Composable
+private fun elapsedText(
+    startedAt: Long?,
+    completedAt: Long?,
+    terminal: Boolean,
+): String? {
+    val running = startedAt != null && completedAt == null && !terminal
+    val live = elapsedSeconds(if (running) startedAt!! * 1000 else null)
+    return when {
+        startedAt == null -> null
+        completedAt != null -> TurnTiming.duration(completedAt - startedAt)
+        terminal -> null
+        else -> TurnTiming.duration(live)
     }
 }
 

@@ -7,6 +7,7 @@ require "../agent/cli_versions"
 require "../protocol/message"
 require "../storage/workflow_state"
 require "../version"
+require "../workspace/clone"
 require "../workspace/service"
 require "../workspace/worktrees"
 require "./connection"
@@ -789,14 +790,28 @@ module Xd
           }
           fields["conclusion"] = JSON::Any.new(job.conclusion) if job.conclusion
           fields["log"] = JSON::Any.new(job.log) if job.log
+          # Sent as instants rather than as an elapsed count: the phone polls
+          # on its own clock and counts up between replies.
+          if started_at = job.started_at
+            fields["started_at"] = JSON::Any.new(started_at.to_unix)
+          end
+          if completed_at = job.completed_at
+            fields["completed_at"] = JSON::Any.new(completed_at.to_unix)
+          end
           JSON::Any.new(fields)
         end
         fields = {
-          "name" => JSON::Any.new(status.name),
+          "name"  => JSON::Any.new(status.name),
           "state" => JSON::Any.new(status.state),
-          "jobs" => JSON::Any.new(jobs),
+          "jobs"  => JSON::Any.new(jobs),
         }
         fields["conclusion"] = JSON::Any.new(status.conclusion) if status.conclusion
+        if started_at = status.started_at
+          fields["started_at"] = JSON::Any.new(started_at.to_unix)
+        end
+        if completed_at = status.completed_at
+          fields["completed_at"] = JSON::Any.new(completed_at.to_unix)
+        end
         Protocol::Response.ok(fields)
       rescue error : Agent::WorkflowRun::StatusError
         Protocol::Response.error(error.message || "Workflow status unavailable.")
@@ -854,12 +869,84 @@ module Xd
           "name",
           "A folder name cannot be empty or hidden, or contain a path separator."
         )
+        # Checked before the folder exists, so a mistyped address leaves
+        # nothing behind to clean up.
+        url = Workspace::Clone.normalize(request.string?("repo_url"))
         id = @workspaces.create_folder(
           request.string?("parent"),
           name,
           request.string?("repo")
         )
-        Protocol::Response.ok({"id" => JSON::Any.new(id)})
+        fields = {"id" => JSON::Any.new(id)}
+        if url
+          start_clone(id, url)
+          fields["cloning"] = JSON::Any.new(url)
+        end
+        Protocol::Response.ok(fields)
+      end
+
+      # Clones in the background: a repository of any size takes longer than a
+      # request should, and every command here is serialized behind one lock.
+      # The folder is already there and usable; clients follow the events.
+      private def start_clone(folder_id : String, url : String) : Nil
+        destination = @workspaces.find_folder(folder_id)
+        publish_async_event("folder-clone", {
+          "folder" => JSON::Any.new(folder_id),
+          "url"    => JSON::Any.new(url),
+          "state"  => JSON::Any.new("cloning"),
+        })
+
+        Fiber::ExecutionContext::Isolated.new("xd clone #{folder_id}") do
+          trouble : String? = nil
+          begin
+            Workspace::Clone.run(url, destination)
+          rescue error : Workspace::Clone::Error
+            trouble = error.message
+          end
+          finish_clone(folder_id, url, destination, trouble)
+        end
+      rescue error : RuntimeError
+        publish_async_event("folder-clone", {
+          "folder" => JSON::Any.new(folder_id),
+          "url"    => JSON::Any.new(url),
+          "state"  => JSON::Any.new("failed"),
+          "error"  => JSON::Any.new(error.message || "Cannot clone."),
+        })
+      end
+
+      private def finish_clone(
+        folder_id : String,
+        url : String,
+        destination : String,
+        trouble : String?,
+      ) : Nil
+        unless trouble
+          # Same lock every other write to the tree takes: this one arrives
+          # from the clone's own thread.
+          begin
+            @command_mutex.synchronize do
+              settings = @workspaces.folder_settings(folder_id)
+              @workspaces.set_folder_settings(
+                folder_id,
+                settings.backend,
+                settings.model,
+                settings.workdir,
+                settings.repo || destination
+              )
+            end
+          rescue error : Workspace::Error
+            trouble = error.message
+          end
+        end
+
+        fields = {
+          "folder" => JSON::Any.new(folder_id),
+          "url"    => JSON::Any.new(url),
+          "state"  => JSON::Any.new(trouble ? "failed" : "ready"),
+        }
+        fields["error"] = JSON::Any.new(trouble) if trouble
+        publish_async_event("folder-clone", fields)
+        publish_async_event("tree", {} of String => JSON::Any)
       end
 
       private def rename_folder(

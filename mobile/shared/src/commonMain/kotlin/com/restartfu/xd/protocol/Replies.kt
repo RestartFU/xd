@@ -143,6 +143,10 @@ public data class WorkflowJobReply(
     val state: String,
     val conclusion: String? = null,
     val log: String? = null,
+    @SerialName("started_at")
+    val startedAt: Long? = null,
+    @SerialName("completed_at")
+    val completedAt: Long? = null,
 )
 
 @Serializable
@@ -152,6 +156,10 @@ public data class WorkflowStatusReply(
     val state: String = "",
     val conclusion: String? = null,
     val jobs: List<WorkflowJobReply> = emptyList(),
+    @SerialName("started_at")
+    val startedAt: Long? = null,
+    @SerialName("completed_at")
+    val completedAt: Long? = null,
 )
 
 @Serializable

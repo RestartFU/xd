@@ -70,10 +70,13 @@ describe Xd::Agent::ToolSummary do
         "model"         => "haiku",
       })
     )
-    Xd::Agent::SubagentTool.parse(message).should eq({
-      "Claude · Explore agent · haiku",
-      "Inspect parser carefully · Trace every parser path",
-    })
+    parsed = Xd::Agent::SubagentTool.parse(message).not_nil!
+    # A Task call is one card, so it needs no key to tell it from another.
+    parsed.key.should be_empty
+    parsed.identity.should eq("Claude · Explore agent · haiku")
+    parsed.task.should eq(
+      "Inspect parser carefully · Trace every parser path"
+    )
   end
 
   it "builds useful Codex subagent cards from app-server state" do
@@ -95,18 +98,37 @@ describe Xd::Agent::ToolSummary do
       "collab_agent_tool_call",
       input
     )
-    Xd::Agent::SubagentTool.parse(collab).should eq({
-      "Codex · gpt-5.6-sol · high",
-      "Running · Review diff · Agent thread-agent… · Checking native builds",
-    })
+    parsed = Xd::Agent::SubagentTool.parse(collab).not_nil!
+    parsed.identity.should eq("Codex · gpt-5.6-sol · high")
+    parsed.task.should eq(
+      "Running · Review diff · Agent thread-agent… · Checking native builds"
+    )
+    # The agent this is about, so its next report updates this card rather
+    # than adding another one beside it.
+    parsed.key.should eq("thread-agent-123456789")
+
+    input["agentsStates"] = JSON.parse({
+      "thread-agent-123456789" => {
+        "status"  => "completed",
+        "message" => "Done",
+      },
+    }.to_json)
+    later = Xd::Agent::SubagentTool.parse(
+      Xd::Agent::ToolSummary.build("collab_agent_tool_call", input)
+    ).not_nil!
+    later.key.should eq(parsed.key)
+    later.task.should_not eq(parsed.task)
   end
 
   it "keeps old subagent records readable and bounds new ones" do
     old = "subagent\nExplore\nInspect parser"
-    Xd::Agent::SubagentTool.parse(old).should eq({
-      "Explore",
-      "Inspect parser",
-    })
+    Xd::Agent::SubagentTool.parse(old).should eq(
+      Xd::Agent::SubagentTool::Delegation.new(
+        "",
+        "Explore",
+        "Inspect parser"
+      )
+    )
 
     message = Xd::Agent::ToolSummary.build(
       "Task",
@@ -115,9 +137,15 @@ describe Xd::Agent::ToolSummary do
         "prompt"      => "p" * 400,
       })
     )
-    parsed = Xd::Agent::SubagentTool.parse(message).not_nil!
-    parsed[0].size.should be <= 81
-    parsed[1].size.should be <= 321
+    bounded = Xd::Agent::SubagentTool.parse(message).not_nil!
+    bounded.identity.size.should be <= 81
+    bounded.task.size.should be <= 321
+
+    keyed = Xd::Agent::SubagentTool.parse(
+      Xd::Agent::SubagentTool.build("Codex", "Review", key: "k" * 400)
+    ).not_nil!
+    keyed.key.size.should be <= 121
+    keyed.identity.should eq("Codex")
   end
 
   it "builds Codex file diffs without a Git repository" do

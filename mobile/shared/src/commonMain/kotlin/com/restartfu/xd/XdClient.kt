@@ -235,8 +235,11 @@ public class XdClient(
         name: String,
         parentId: String? = null,
         repository: String? = null,
+        repositoryUrl: String? = null,
     ): String {
-        val value = actor.call(Ops.newFolder(name, parentId, repository))
+        val value = actor.call(
+            Ops.newFolder(name, parentId, repository, repositoryUrl),
+        )
         val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)

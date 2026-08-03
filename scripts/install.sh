@@ -135,8 +135,19 @@ else
   command -v "$CURL" >/dev/null 2>&1 || [ -x "$CURL" ] || die "curl is needed."
   command -v tar  >/dev/null 2>&1 || die "tar is needed."
 
+  # XD_PROGRESS=1 asks for curl's meter, which the in-app updater reads off
+  # stderr to show how far the download is. Off by default: piped into a
+  # terminal the meter is noise, and there the bundle's size is already known.
+  fetch () {
+    if [ "${XD_PROGRESS:-}" = 1 ]; then
+      "$CURL" -fL --progress-bar --proto '=https' --tlsv1.2 -o "$1" "$2"
+    else
+      "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$1" "$2"
+    fi
+  }
+
   say "Downloading the $CHANNEL build…"
-  "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET" "$BASE/$ASSET" \
+  fetch "$WORK/$ASSET" "$BASE/$ASSET" \
     || die "cannot download $BASE/$ASSET"
 
   # Published beside the tarball, so a truncated or tampered download is caught

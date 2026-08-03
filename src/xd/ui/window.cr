@@ -28,6 +28,7 @@ require "./pane_state"
 require "./queue_presentation"
 require "./search_dialog"
 require "./sidebar"
+require "./subagent_card"
 require "./text_reveal"
 require "./tool_call_group"
 require "./tool_panel"
@@ -48,6 +49,7 @@ module Xd
         getter paging = TranscriptPaging.new
         getter workflow_ids = Set(String).new
         getter workflow_cards = [] of WorkflowCard
+        getter subagent_cards = {} of String => SubagentCard
         property revision = -1_i64
         property choices_visible = false
         property tool_group : ToolCallGroup?
@@ -65,6 +67,9 @@ module Xd
           @workflow_cards.each(&.close)
           @workflow_cards.clear
           @workflow_ids.clear
+          # Cards belong to the transcript that is about to be replaced; the
+          # rebuild makes them again from the same records.
+          @subagent_cards.clear
         end
       end
 
@@ -1400,7 +1405,7 @@ module Xd
           if subagent = Agent::SubagentTool.parse(content)
             activity = @transcript_page.try(&.tool_group)
             end_tool_group
-            add_subagent_message(subagent[0], subagent[1], activity)
+            add_subagent_message(subagent, activity)
             return
           end
           content = "Files changed" if Agent::GitDiffTracker.file_change?(content)
@@ -1484,84 +1489,29 @@ module Xd
         @transcript.append(card.widget)
       end
 
+      # A keyed agent reporting again updates the card it already has. Only an
+      # agent the transcript has not seen adds one.
       private def add_subagent_message(
-        identity : String,
-        task : String,
+        delegation : Agent::SubagentTool::Delegation,
         activity : ToolCallGroup?,
-      ) : Gtk::Label
-        title = Gtk::Label.new("Subagent · #{identity}")
-        title.xalign = 0_f32
-        title.add_css_class("title")
-
-        detail = Gtk::Label.new(task)
-        detail.xalign = 0_f32
-        # Keep card headers single-line so a run of subagents does not make
-        # GTK repeatedly perform height-for-width Pango measurement. The full
-        # task remains available as a tooltip.
-        detail.ellipsize = :end
-        detail.max_width_chars = 100
-        detail.tooltip_text = task
-        detail.add_css_class("xd-body")
-
-        card = Gtk::Box.new(:vertical, 6)
-        card.add_css_class("xd-subagent")
-        if activity && (parent = activity.widget.parent.as?(Gtk::Box))
-          # The subagent's toggle becomes the disclosure for this run.
-          activity.absorb
-          parent.remove(activity.widget)
-
-          indicator = Gtk::Image.new_from_icon_name("pan-end-symbolic")
-          indicator.valign = :start
-          indicator.margin_top = 3
-
-          body = Gtk::Box.new(:vertical, 6)
-          body.append(title)
-          body.append(detail)
-
-          header = Gtk::Box.new(:horizontal, 8)
-          header.hexpand = true
-          header.margin_top = 12
-          header.margin_bottom = 12
-          header.margin_start = 14
-          header.margin_end = 14
-          header.append(indicator)
-          header.append(body)
-
-          toggle = Gtk::ToggleButton.new
-          toggle.child = header
-          toggle.hexpand = true
-          toggle.tooltip_text = "Show subagent activity"
-          toggle.add_css_class("xd-subagent-toggle")
-          toggle.bind_property(
-            "active",
-            activity.expander,
-            "expanded",
-            GObject::BindingFlags::SyncCreate
-          )
-          toggle.bind_property(
-            "active",
-            activity.widget,
-            "visible",
-            GObject::BindingFlags::SyncCreate
-          )
-          toggle.toggled_signal.connect do
-            expanded = toggle.active?
-            indicator.icon_name =
-              expanded ? "pan-down-symbolic" : "pan-end-symbolic"
-            toggle.tooltip_text =
-              expanded ? "Hide subagent activity" : "Show subagent activity"
+      ) : Nil
+        page = @transcript_page
+        key = delegation.key
+        if page && !key.empty?
+          if card = page.subagent_cards[key]?
+            card.update(delegation.identity, delegation.task)
+            card.absorb(activity) if activity
+            return
           end
-
-          activity.widget.margin_start = 12
-          activity.widget.margin_end = 0
-          card.append(toggle)
-          card.append(activity.widget)
-        else
-          card.append(title)
-          card.append(detail)
         end
-        @transcript.append(card)
-        title
+
+        card = SubagentCard.new(
+          delegation.identity,
+          delegation.task,
+          activity
+        )
+        page.subagent_cards[key] = card if page && !key.empty?
+        @transcript.append(card.widget)
       end
 
       private def reply_answerable?(
@@ -3075,6 +3025,18 @@ module Xd
           if active_event?(endpoint, event)
             load_messages
             load_chat_state
+          end
+        when "folder-clone"
+          return unless @client.same?(endpoint)
+          url = event["url"]?.try(&.as_s?) || "the repository"
+          case event["state"]?.try(&.as_s?)
+          when "cloning"
+            @status.text = "Cloning #{url}…"
+          when "ready"
+            @status.text = "Cloned #{url}"
+          when "failed"
+            @status.text = event["error"]?.try(&.as_s?) ||
+                           "Could not clone #{url}."
           end
         when "worktrees-changed"
           return unless @client.same?(endpoint)

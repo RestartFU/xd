@@ -1,4 +1,5 @@
 require "gtk4"
+require "../workspace/clone"
 require "./directory_browser"
 require "./panel_call"
 
@@ -10,7 +11,7 @@ module Xd
       def initialize(
         @parent : Gtk::Window,
         @request : PanelCall,
-        @on_create : Proc(String, String?, Nil),
+        @on_create : Proc(String, String?, String?, Nil),
       )
         @repository = nil
         @closed = false
@@ -47,18 +48,26 @@ module Xd
         name_box.append(name_label)
         name_box.append(@name)
 
-        repository_label = Gtk::Label.new("No repository selected")
-        repository_label.xalign = 0_f32
-        repository_label.ellipsize = :start
-        repository_label.hexpand = true
-        repository_label.add_css_class("dim-label")
+        @url = Gtk::Entry.new
+        @url.placeholder_text =
+          "Clone a URL — https://…, git@host:owner/repo.git"
+        @url.changed_signal.connect { update_state }
 
-        choose = Gtk::Button.new_with_label("Choose Git repository…")
-        choose.add_css_class("flat")
-        choose.clicked_signal.connect do
+        @repository_label = Gtk::Label.new("No repository selected")
+        @repository_label.xalign = 0_f32
+        @repository_label.ellipsize = :start
+        @repository_label.hexpand = true
+        @repository_label.add_css_class("dim-label")
+
+        @choose = Gtk::Button.new_with_label("Choose Git repository…")
+        @choose.add_css_class("flat")
+        @choose.clicked_signal.connect do
           DirectoryBrowser.present(@parent, @request, @repository) do |path|
             @repository = path
-            repository_label.text = path || "No repository selected"
+            # One or the other: a chosen checkout and a URL to clone are two
+            # answers to the same question.
+            @url.text = "" if path
+            update_state
           end
         end
 
@@ -67,12 +76,12 @@ module Xd
         clear.tooltip_text = "Clear repository"
         clear.clicked_signal.connect do
           @repository = nil
-          repository_label.text = "No repository selected"
+          update_state
         end
 
         repository_box = Gtk::Box.new(:horizontal, 8)
-        repository_box.append(repository_label)
-        repository_box.append(choose)
+        repository_box.append(@repository_label)
+        repository_box.append(@choose)
         repository_box.append(clear)
 
         repository_hint = Gtk::Label.new(
@@ -83,6 +92,7 @@ module Xd
         repository_hint.add_css_class("dim-label")
 
         project_box = Gtk::Box.new(:vertical, 5)
+        project_box.append(@url)
         project_box.append(repository_box)
         project_box.append(repository_hint)
 
@@ -170,21 +180,53 @@ module Xd
         return if @closed || !@create.sensitive?
 
         name = @name.text.strip
-        @on_create.call(name, @repository)
+        url = clone_url
+        @on_create.call(name, url ? nil : @repository, url)
         close
+      end
+
+      private def clone_url : String?
+        text = @url.text.strip
+        text.empty? ? nil : text
       end
 
       private def update_state : Nil
         return if @closed
 
+        url = clone_url
+        # A URL clones into the workspace folder itself, so there is nothing
+        # left to choose.
+        @choose.sensitive = url.nil?
+        @repository_label.text = if url
+                                   "Cloned into this workspace"
+                                 elsif repository = @repository
+                                   repository
+                                 else
+                                   "No repository selected"
+                                 end
+
         name = @name.text.strip
-        valid = !name.empty? &&
-                !name.starts_with?('.') &&
-                !name.includes?('/') &&
-                !name.includes?('\\')
-        @create.sensitive = valid
-        @status.visible = !name.empty? && !valid
-        @status.text = "A workspace name cannot be hidden or contain a path separator." if !valid && !name.empty?
+        trouble = if name.empty?
+                    nil
+                  elsif name.starts_with?('.') ||
+                        name.includes?('/') ||
+                        name.includes?('\\')
+                    "A workspace name cannot be hidden or contain a " \
+                    "path separator."
+                  else
+                    # The daemon checks this again; saying so here means a
+                    # mistyped address never creates a folder at all.
+                    begin
+                      Workspace::Clone.normalize(url)
+                      nil
+                    rescue error : Workspace::Clone::Error
+                      error.message
+                    end
+                  end
+
+        @create.sensitive = !name.empty? && trouble.nil?
+        @status.visible = !trouble.nil?
+        @status.text = trouble || ""
       end
 
       private def close : Nil

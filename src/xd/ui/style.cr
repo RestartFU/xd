@@ -475,7 +475,17 @@ module Xd
         border: none;
         font-weight: 700;
       }
+      .xd-update-progress {
+        font-size: 0.85em;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
       .xd-workflow-status { font-weight: 600; }
+      .xd-workflow-elapsed {
+        color: #a8a8a5;
+        font-size: 0.88em;
+        font-variant-numeric: tabular-nums;
+      }
       .xd-workflow-running { color: #99c1f1; }
       .xd-workflow-success { color: #8ff0a4; }
       .xd-workflow-failure { color: #ff7b63; }

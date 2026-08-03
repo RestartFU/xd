@@ -22,6 +22,7 @@ module Xd
       @summaries = [] of String
       @single : Gtk::Label
       @render_source = 0_u32
+      @count_source = 0_u32
 
       # Collapsing one call hides its command and shows a count instead, which
       # is less in the same space. Two or more is where it starts paying.
@@ -102,7 +103,7 @@ module Xd
         # The second call is what turns the run into something worth hiding.
         @single.visible = false
         @expander.visible = true
-        @expander.label = self.class.collapsed_label(@summaries.size)
+        schedule_count
         schedule_render if @expander.expanded?
       end
 
@@ -118,8 +119,23 @@ module Xd
         @widget.remove(@single)
         @single.visible = false
         @expander.visible = true
-        @expander.label = self.class.collapsed_label(@summaries.size)
+        schedule_count
         schedule_render if @expander.expanded?
+      end
+
+      # A count that changes is a resize, and a resize in the transcript box is
+      # measured against everything else in it. Tool calls arrive in bursts, so
+      # the count is written once per turn of the main loop rather than once
+      # per call: the reader cannot tell the difference and the layout can.
+      private def schedule_count : Nil
+        return unless @count_source == 0
+
+        @count_source = GLib.idle_add do
+          @count_source = 0_u32
+          label = self.class.collapsed_label(@summaries.size)
+          @expander.label = label unless @expander.label == label
+          false
+        end
       end
 
       private def schedule_render : Nil

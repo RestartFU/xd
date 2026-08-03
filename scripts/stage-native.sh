@@ -101,6 +101,9 @@ install -m0644 \
 install -m0644 \
   "$ROOT/data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg" \
   "$STAGE/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg"
+install -m0644 \
+  "$ROOT/data/icons/hicolor/symbolic/apps/xd-download-symbolic.svg" \
+  "$STAGE/share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg"
 
 glib-compile-schemas "$STAGE/share/glib-2.0/schemas"
 

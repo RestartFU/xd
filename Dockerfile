@@ -265,6 +265,9 @@ RUN set -eux; \
     install -m0644 \
       data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg \
       /stage/usr/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg; \
+    install -m0644 \
+      data/icons/hicolor/symbolic/apps/xd-download-symbolic.svg \
+      /stage/usr/share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg; \
     install -Dm755 /usr/bin/git /stage/usr/libexec/git-bin; \
     cp -a /usr/lib/git-core /stage/usr/libexec/git-core-real; \
     mkdir -p /stage/usr/share/git-core; \

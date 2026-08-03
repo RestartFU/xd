@@ -215,6 +215,7 @@ public object Ops {
         name: String,
         parentId: String? = null,
         repository: String? = null,
+        repositoryUrl: String? = null,
     ): JsonObject = buildJsonObject {
         require(
             name.isNotBlank() &&
@@ -227,6 +228,9 @@ public object Ops {
         put("name", name)
         if (parentId != null) put("parent", parentId)
         if (!repository.isNullOrBlank()) put("repo", repository)
+        // The daemon clones this into the folder it makes, and checks the
+        // address itself: only it knows what its Git can reach.
+        if (!repositoryUrl.isNullOrBlank()) put("repo_url", repositoryUrl)
     }
 
     public fun listDirectories(path: String? = null): JsonObject = buildJsonObject {

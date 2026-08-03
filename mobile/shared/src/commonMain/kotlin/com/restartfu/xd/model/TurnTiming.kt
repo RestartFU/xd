@@ -12,12 +12,16 @@ package com.restartfu.xd.model
  * and "Working for -3s" is worse than a moment of "0s".
  */
 public object TurnTiming {
-    public fun format(verb: String, seconds: Long): String {
+    public fun format(verb: String, seconds: Long): String =
+        "$verb for ${duration(seconds)}"
+
+    /** The same reading without the verb, for a row that already names it. */
+    public fun duration(seconds: Long): String {
         val safe = seconds.coerceAtLeast(0)
         return when {
-            safe >= 3600 -> "$verb for ${safe / 3600}h ${pad((safe % 3600) / 60)}m"
-            safe >= 60 -> "$verb for ${safe / 60}m ${pad(safe % 60)}s"
-            else -> "$verb for ${safe}s"
+            safe >= 3600 -> "${safe / 3600}h ${pad((safe % 3600) / 60)}m"
+            safe >= 60 -> "${safe / 60}m ${pad(safe % 60)}s"
+            else -> "${safe}s"
         }
     }
 

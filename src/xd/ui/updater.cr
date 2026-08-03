@@ -3,13 +3,15 @@ require "../agent/environment"
 require "../bundle_environment"
 require "../version"
 require "./branch_build_dialog"
+require "./download_progress"
 require "../update_channel"
 
 module Xd
   module UI
     class Updater
-      FIRST_CHECK = 8.seconds
-      POLL        = 5.minutes
+      FIRST_CHECK   = 8.seconds
+      POLL          = 5.minutes
+      DOWNLOAD_ICON = "xd-download-symbolic"
 
       private enum State
         Quiet
@@ -33,7 +35,18 @@ module Xd
         @install_dir = find_install_dir
         @curl = BundleEnvironment.executable("curl") || "curl"
 
-        @button = Gtk::Button.new_from_icon_name("software-update-available-symbolic")
+        # An icon and a label rather than an icon button: while the bundle is
+        # coming down the button says how far in it is, and a 390 MB download
+        # on a slow line is a long time to show nothing but a dimmed icon.
+        @button_icon = Gtk::Image.new_from_icon_name(DOWNLOAD_ICON)
+        @button_label = Gtk::Label.new("")
+        @button_label.visible = false
+        @button_label.add_css_class("xd-update-progress")
+        button_content = Gtk::Box.new(:horizontal, 0)
+        button_content.append(@button_icon)
+        button_content.append(@button_label)
+        @button = Gtk::Button.new
+        @button.child = button_content
         @button.add_css_class("suggested-action")
         @button.visible = false
         @button.clicked_signal.connect { clicked }
@@ -121,15 +134,21 @@ module Xd
           errors = IO::Memory.new
           environment = Agent::Environment.host
           environment["XD_CURL"] = @curl
+          # Asks the installer for curl's meter. An older installer ignores
+          # this and the button simply stays at its waiting mark.
+          environment["XD_PROGRESS"] = "1"
+          reader, writer = IO.pipe
           process = Process.new(
             ["sh", "-c", Xd::UpdateChannel.install_command(Xd::UpdateChannel.current, @curl)],
             env: environment,
             clear_env: true,
             input: Process::Redirect::Close,
             output: Process::Redirect::Close,
-            error: errors
+            error: writer
           )
           @process = process
+          writer.close
+          read_progress(reader, errors)
           status = process.wait
           GLib.idle_add do
             @process = nil
@@ -147,6 +166,32 @@ module Xd
             false
           end
         end
+      end
+
+      # Drains the installer's error stream until it ends, showing each new
+      # percentage as it arrives and keeping the rest for the failure message.
+      private def read_progress(reader : IO, errors : IO::Memory) : Nil
+        buffer = Bytes.new(4096)
+        loop do
+          read = reader.read(buffer)
+          break if read == 0
+          reading = DownloadProgress.read(String.new(buffer[0, read]))
+          errors << reading.text
+          if percent = reading.percent
+            GLib.idle_add { show_percent(percent); false }
+          end
+        end
+      rescue IO::Error
+      ensure
+        reader.close rescue IO::Error
+      end
+
+      private def show_percent(percent : Int32) : Nil
+        return if @closed || !@state.updating?
+        @button_icon.visible = false
+        @button_label.visible = true
+        @button_label.text = "#{percent}%"
+        @button.tooltip_text = "Downloading… #{percent}%"
       end
 
       private def restart : Nil
@@ -170,21 +215,26 @@ module Xd
         @state = state
         case state
         when .available?
-          @button.icon_name = "software-update-available-symbolic"
+          show_icon(DOWNLOAD_ICON)
           @button.tooltip_text = "New XD build available. Click to install."
           @button.sensitive = true
           @button.visible = true
         when .updating?
+          # Until curl reports a size there is nothing to be a percentage of,
+          # so the button waits at nought rather than inventing a number.
+          @button_icon.visible = false
+          @button_label.visible = true
+          @button_label.text = "0%"
           @button.tooltip_text = "Downloading and installing…"
           @button.sensitive = false
           @button.visible = true
         when .done?
-          @button.icon_name = "view-refresh-symbolic"
+          show_icon("view-refresh-symbolic")
           @button.tooltip_text = "Installed. Click to restart XD."
           @button.sensitive = true
           @button.visible = true
         when .failed?
-          @button.icon_name = "dialog-error-symbolic"
+          show_icon("dialog-error-symbolic")
           @button.tooltip_text = @trouble.presence || "Update failed. Click to retry."
           @button.sensitive = true
           @button.visible = true
@@ -192,6 +242,13 @@ module Xd
           @button.visible = false
         end
         @widget.visible = @button.visible? || @branch.visible?
+      end
+
+      private def show_icon(name : String) : Nil
+        @button_icon.icon_name = name
+        @button_icon.visible = true
+        @button_label.visible = false
+        @button_label.text = ""
       end
     end
   end

@@ -179,6 +179,74 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "clones a repository into the workspace folder it creates" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      source = File.join(
+        Dir.tempdir,
+        "xd-engine-source-#{Random::Secure.hex(12)}.git"
+      )
+      Process.run("git", ["init", "-q", "--bare", source])
+
+      events = Channel(Xd::Protocol::Event).new(8)
+      subscription = engine.events.subscribe { |event| events.send(event) }
+      begin
+        created = engine.dispatch(local, {
+          "op"       => "new-folder",
+          "name"     => "Cloned",
+          "repo_url" => "file://#{source}",
+        }.to_json)
+        created.success?.should be_true
+        folder_id = created["id"].as_s
+        created["cloning"].as_s.should eq("file://#{source}")
+
+        started = events.receive
+        started["event"].as_s.should eq("folder-clone")
+        started["state"].as_s.should eq("cloning")
+
+        finished = events.receive
+        while finished["event"].as_s != "folder-clone"
+          finished = events.receive
+        end
+        finished["state"].as_s.should eq("ready")
+        finished["folder"].as_s.should eq(folder_id)
+
+        folder = File.join(
+          Path[store.path].dirname,
+          "Workspaces",
+          "Cloned"
+        )
+        File.exists?(File.join(folder, ".git")).should be_true
+        settings = engine.dispatch(local, {
+          "op"     => "folder-settings",
+          "folder" => folder_id,
+        }.to_json)
+        settings["repo"].as_s.should eq(folder)
+      ensure
+        engine.events.unsubscribe(subscription)
+        FileUtils.rm_r(source) if Dir.exists?(source)
+      end
+    end
+  end
+
+  it "refuses an address Git should never be handed" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      response = engine.dispatch(local, {
+        "op"       => "new-folder",
+        "name"     => "Rejected",
+        "repo_url" => "--upload-pack=touch /tmp/pwned",
+      }.to_json)
+
+      response.success?.should be_false
+      # And nothing was created for it.
+      tree = engine.dispatch(local, {"op" => "tree"}.to_json)
+      tree["folders"].as_a.any? do |folder|
+        folder["name"].as_s == "Rejected"
+      end.should be_false
+    end
+  end
+
   it "removes selected worktrees and refreshes their chat state" do
     with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
@@ -1204,9 +1272,9 @@ describe Xd::Daemon::Engine do
       encoded = Base64.strict_encode(png)
 
       outcome = engine.process(local, {
-        "op"   => "set-draft",
-        "chat" => chat,
-        "text" => "Continue here",
+        "op"          => "set-draft",
+        "chat"        => chat,
+        "text"        => "Continue here",
         "attachments" => [{
           "name" => "preview.png",
           "mime" => "image/png",

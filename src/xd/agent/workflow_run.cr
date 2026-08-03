@@ -24,9 +24,15 @@ module Xd
         name : String,
         state : String,
         conclusion : String?,
-        log : String? do
+        log : String?,
+        started_at : Time? = nil,
+        completed_at : Time? = nil do
         def terminal? : Bool
           state == "completed"
+        end
+
+        def elapsed(now : Time = Time.utc) : Time::Span?
+          WorkflowRun.elapsed(started_at, completed_at, terminal?, now)
         end
 
         def label : String
@@ -62,9 +68,15 @@ module Xd
         name : String,
         state : String,
         conclusion : String?,
-        jobs : Array(Job) do
+        jobs : Array(Job),
+        started_at : Time? = nil,
+        completed_at : Time? = nil do
         def terminal? : Bool
           state == "completed"
+        end
+
+        def elapsed(now : Time = Time.utc) : Time::Span?
+          WorkflowRun.elapsed(started_at, completed_at, terminal?, now)
         end
 
         def label : String
@@ -193,7 +205,14 @@ module Xd
         rescue StatusError
           [] of Job
         end
-        Status.new(status.name, status.state, status.conclusion, jobs)
+        Status.new(
+          status.name,
+          status.state,
+          status.conclusion,
+          jobs,
+          status.started_at,
+          status.completed_at
+        )
       rescue error : StatusError | IO::Error | Socket::Error | URI::Error
         fetch_cli_status(run)
       end
@@ -208,9 +227,41 @@ module Xd
         return if name.bytesize > 160 || state.bytesize > 40
         conclusion = record["conclusion"]?.try(&.as_s?)
         return if conclusion && conclusion.bytesize > 40
-        Status.new(name, state, conclusion, [] of Job)
+        # REST names a run's clock `run_started_at`, the CLI `startedAt`, and
+        # neither reports a finish time: `updated_at` is the last write, which
+        # for a completed run is the moment it completed.
+        started_at = timestamp(
+          record["run_started_at"]? || record["startedAt"]? ||
+          record["created_at"]? || record["createdAt"]?
+        )
+        completed_at = if state == "completed"
+                         timestamp(record["updated_at"]? || record["updatedAt"]?)
+                       end
+        Status.new(
+          name,
+          state,
+          conclusion,
+          [] of Job,
+          started_at,
+          completed_at
+        )
       rescue JSON::ParseException
         nil
+      end
+
+      # Time a run or job has been going, or took. Nil when it never started,
+      # or when it finished without saying when — a growing count on something
+      # already over reads worse than no count.
+      def elapsed(
+        started_at : Time?,
+        completed_at : Time?,
+        terminal : Bool,
+        now : Time = Time.utc,
+      ) : Time::Span?
+        return unless started_at
+        return if completed_at.nil? && terminal
+        span = (completed_at || now) - started_at
+        span < Time::Span.zero ? Time::Span.zero : span
       end
 
       def parse_jobs(body : String?) : Array(Job)?
@@ -238,7 +289,9 @@ module Xd
             name,
             state,
             conclusion,
-            latest_job_activity(item, state)
+            latest_job_activity(item, state),
+            timestamp(item["started_at"]? || item["startedAt"]?),
+            timestamp(item["completed_at"]? || item["completedAt"]?)
           )
           break if result.size >= MAX_JOBS
         end
@@ -259,7 +312,7 @@ module Xd
             "--repo",
             run.repository,
             "--json",
-            "name,status,conclusion,jobs",
+            "name,status,conclusion,startedAt,updatedAt,jobs",
           ],
           env: Environment.host,
           clear_env: true,
@@ -280,7 +333,14 @@ module Xd
         jobs = parse_jobs(body) || raise StatusError.new(
           "GitHub CLI returned invalid workflow jobs."
         )
-        Status.new(parsed.name, parsed.state, parsed.conclusion, jobs)
+        Status.new(
+          parsed.name,
+          parsed.state,
+          parsed.conclusion,
+          jobs,
+          parsed.started_at,
+          parsed.completed_at
+        )
       rescue error : File::Error | IO::Error
         raise StatusError.new(error.message || "Cannot run GitHub CLI.")
       end
@@ -299,6 +359,17 @@ module Xd
         parse_jobs(response[1]) || raise StatusError.new(
           "GitHub returned invalid workflow jobs."
         )
+      end
+
+      # The CLI writes a zero time rather than null for a job that has not
+      # finished, so an unset clock arrives as year one rather than as absent.
+      private def timestamp(value : JSON::Any?) : Time?
+        text = value.try(&.as_s?)
+        return if text.nil? || text.empty?
+        moment = Time.parse_rfc3339(text)
+        moment.year < 2000 ? nil : moment
+      rescue Time::Format::Error
+        nil
       end
 
       private def latest_job_activity(
