@@ -78,16 +78,34 @@ class OpsTest {
     fun newFolderDistinguishesAWorkspaceFromANestedFolder() {
         val workspace = Ops.newFolder("Mobile")
         val nested = Ops.newFolder("App", "workspace")
+        val connected = Ops.newFolder(
+            "Connected",
+            repository = "/home/user/project",
+        )
 
         assertEquals("new-folder", workspace.getValue("op").jsonPrimitive.content)
         assertEquals("Mobile", workspace.getValue("name").jsonPrimitive.content)
         assertFalse("parent" in workspace)
         assertEquals("workspace", nested.getValue("parent").jsonPrimitive.content)
+        assertEquals(
+            "/home/user/project",
+            connected.getValue("repo").jsonPrimitive.content,
+        )
         assertFailsWith<IllegalArgumentException> { Ops.newFolder(" ") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder(".hidden") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile/App") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile\\App") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("App", " ") }
+    }
+
+    @Test
+    fun directoryListingUsesTheDaemonFilesystem() {
+        val home = Ops.listDirectories()
+        val nested = Ops.listDirectories("/home/user")
+
+        assertEquals("list-dir", home.getValue("op").jsonPrimitive.content)
+        assertFalse("path" in home)
+        assertEquals("/home/user", nested.getValue("path").jsonPrimitive.content)
     }
 
     @Test

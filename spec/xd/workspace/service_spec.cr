@@ -66,6 +66,118 @@ describe Xd::Workspace::SettingsFile do
 end
 
 describe Xd::Workspace::Service do
+  it "imports legacy sidecars into SQLite and stops rewriting them" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workspace-import-#{Random::Secure.hex(12)}"
+    )
+    root = File.join(directory, "Workspaces")
+    folder = File.join(root, "Legacy")
+    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+    begin
+      Dir.mkdir_p(folder)
+      sidecar = File.join(folder, Xd::Workspace::SETTINGS_FILE)
+      File.write(
+        sidecar,
+        %({"id":"legacy-id","backend":"codex","model":"codex-model","workdir":"/legacy/work","repo":"/legacy/repo","instructions":"Keep it short."})
+      )
+
+      service = Xd::Workspace::Service.new(root, store)
+      service.snapshot.folders.map(&.id).should eq(["legacy-id"])
+      settings = service.folder_settings("legacy-id")
+      settings.backend.should eq("codex")
+      settings.model.should eq("codex-model")
+      settings.workdir.should eq("/legacy/work")
+      settings.repo.should eq("/legacy/repo")
+      service.folder_context("legacy-id").should eq("Keep it short.")
+
+      original = File.read(sidecar)
+      service.set_folder_context("legacy-id", "Database wins.")
+      service.folder_context("legacy-id").should eq("Database wins.")
+      File.read(sidecar).should eq(original)
+
+      stale = %({"id":"legacy-id","backend":"claude"})
+      File.write(sidecar, stale)
+      store.close
+      store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+      service = Xd::Workspace::Service.new(root, store)
+      reopened = service.folder_settings("legacy-id")
+      reopened.backend.should eq("codex")
+      reopened.model.should eq("codex-model")
+      reopened.workdir.should eq("/legacy/work")
+      reopened.repo.should eq("/legacy/repo")
+      service.folder_context("legacy-id").should eq("Database wins.")
+      File.read(sidecar).should eq(stale)
+    ensure
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
+  it "imports legacy .hy.json metadata without creating a current sidecar" do
+    with_workspace do |service, _store, root|
+      folder = File.join(root, "Hyphen")
+      Dir.mkdir(folder)
+      legacy = File.join(folder, Xd::Workspace::LEGACY_SETTINGS_FILE)
+      File.write(
+        legacy,
+        %({"id":"legacy-hy-id","backend":"codex","instructions":"Legacy context."})
+      )
+
+      service.snapshot.folders.map(&.id).should eq(["legacy-hy-id"])
+      service.folder_context("legacy-hy-id").should eq("Legacy context.")
+      File.exists?(File.join(folder, Xd::Workspace::SETTINGS_FILE)).should be_false
+      File.read(legacy).should contain("Legacy context.")
+    end
+  end
+
+  it "keeps a legacy id when the folder is renamed outside the app" do
+    with_workspace do |service, _store, root|
+      old_path = File.join(root, "Before")
+      new_path = File.join(root, "After")
+      Dir.mkdir(old_path)
+      File.write(
+        File.join(old_path, Xd::Workspace::SETTINGS_FILE),
+        %({"id":"externally-renamed"})
+      )
+
+      service.snapshot.folders.map(&.id).should eq(["externally-renamed"])
+      File.rename(old_path, new_path)
+
+      service.find_folder("externally-renamed").should eq(new_path)
+      service.snapshot.folders.map(&.id).should eq(["externally-renamed"])
+    end
+  end
+
+  it "keeps legacy ids when the configured workspace root moves" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workspace-root-move-#{Random::Secure.hex(12)}"
+    )
+    old_root = File.join(directory, "Before")
+    new_root = File.join(directory, "After")
+    folder = File.join(old_root, "Project")
+    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+    begin
+      Dir.mkdir_p(folder)
+      File.write(
+        File.join(folder, Xd::Workspace::SETTINGS_FILE),
+        %({"id":"root-moved"})
+      )
+      old_service = Xd::Workspace::Service.new(old_root, store)
+      old_service.snapshot.folders.map(&.id).should eq(["root-moved"])
+
+      File.rename(old_root, new_root)
+      moved_service = Xd::Workspace::Service.new(new_root, store)
+      moved_service.find_folder("root-moved").should eq(
+        File.join(new_root, "Project")
+      )
+    ensure
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "scans top-level workspaces and only managed nested folders" do
     with_workspace do |service, _store, root|
       workspace = File.join(root, "Workspace")
@@ -117,12 +229,27 @@ describe Xd::Workspace::Service do
       checkout = File.join(container, "Repo", "task", "Repo")
       Dir.mkdir(visible)
       Dir.mkdir_p(checkout)
+      generated_id = service.create_folder(nil, "Generated")
+      generated_child_id = service.create_folder(generated_id, "Nested")
       File.write(
         File.join(container, Xd::Workspace::WORKTREE_CONTAINER_MARKER),
         "generated\n"
       )
+      File.write(
+        File.join(
+          service.find_folder(generated_id),
+          Xd::Workspace::WORKTREE_CONTAINER_MARKER
+        ),
+        "generated\n"
+      )
 
       service.snapshot.folders.map(&.name).should eq(["Visible"])
+      expect_raises(Xd::Workspace::Error, /No such folder/) do
+        service.find_folder(generated_id)
+      end
+      expect_raises(Xd::Workspace::Error, /No such folder/) do
+        service.find_folder(generated_child_id)
+      end
       File.exists?(
         File.join(container, Xd::Workspace::SETTINGS_FILE)
       ).should be_false
@@ -140,10 +267,11 @@ describe Xd::Workspace::Service do
 
       service.find_folder(id).should eq(existing)
       File.read(preserved).should eq("keep\n")
-      Xd::Workspace::SettingsFile.load(existing).id.should eq(id)
-      expect_raises(Xd::Workspace::Error, /already a folder/) do
-        service.create_folder(nil, "Existing")
-      end
+      service.folder_settings(id).id.should eq(id)
+      File.exists?(
+        File.join(existing, Xd::Workspace::SETTINGS_FILE)
+      ).should be_false
+      service.create_folder(nil, "Existing").should eq(id)
     end
   end
 
@@ -158,10 +286,11 @@ describe Xd::Workspace::Service do
   end
 
   it "creates, renames, moves, and recoverably trashes folders" do
-    with_workspace do |service, _store, _root|
+    with_workspace do |service, store, _root|
       first = service.create_folder(nil, "First")
       second = service.create_folder(nil, "Second")
       child = service.create_folder(first, "Child")
+      chat_id = store.create_chat(child, "Kept chat", "claude")
       service.rename_folder(child, "Renamed")
       service.move_folder(child, first)
       service.move_folder(child, second)
@@ -169,6 +298,8 @@ describe Xd::Workspace::Service do
       service.find_folder(child).should end_with(
         File.join("Second", "Renamed")
       )
+      service.snapshot.chats.map(&.id).should contain(chat_id)
+      store.get_chat(chat_id).folder_id.should eq(child)
       trashed = service.trash_folder(child)
       File.directory?(trashed).should be_true
       expect_raises(Xd::Workspace::Error, /No such folder/) do
@@ -178,35 +309,34 @@ describe Xd::Workspace::Service do
   end
 
   it "inherits overrides and accumulates instructions root-first" do
-    with_workspace do |service, _store, _root|
+    with_workspace do |service, _store, root|
       parent_id = service.create_folder(nil, "Lunar")
       child_id = service.create_folder(parent_id, "Proxy")
-      parent_path = service.find_folder(parent_id)
-      child_path = service.find_folder(child_id)
+      workdir = File.join(root, "code")
+      Dir.mkdir(workdir)
 
-      parent = Xd::Workspace::SettingsFile.ensure(parent_path)
-      parent.backend = "claude"
-      parent.model = "claude-opus"
-      parent.workdir = "/code/proxy"
-      parent.instructions = "Always answer in French."
-      Xd::Workspace::SettingsFile.save(parent, parent_path)
-
-      child = Xd::Workspace::SettingsFile.ensure(child_path)
-      child.backend = "codex"
-      child.instructions = "This is a Go codebase."
-      Xd::Workspace::SettingsFile.save(child, child_path)
+      service.set_folder_settings(
+        parent_id,
+        "claude",
+        "claude-opus",
+        workdir,
+        nil
+      )
+      service.set_folder_context(parent_id, "Always answer in French.")
+      service.set_folder_settings(child_id, "codex", nil, nil, nil)
+      service.set_folder_context(child_id, "This is a Go codebase.")
 
       resolved = service.resolve(child_id)
       resolved.backend.should eq("codex")
       resolved.model.should eq("claude-opus")
-      resolved.workdir.should eq("/code/proxy")
+      resolved.workdir.should eq(workdir)
       resolved.instructions.should eq(
         "Always answer in French.\n\nThis is a Go codebase."
       )
       inherited = service.inherited_settings(child_id)
       inherited.backend.should eq("claude")
       inherited.model.should eq("claude-opus")
-      inherited.workdir.should eq("/code/proxy")
+      inherited.workdir.should eq(workdir)
       inherited.backend_from.should be_nil
       inherited.model_from.should be_nil
       inherited.workdir_from.should be_nil
@@ -244,12 +374,34 @@ describe Xd::Workspace::Service do
     end
   end
 
+  it "connects a new workspace to a selected repository" do
+    with_workspace do |service, _store, root|
+      repository = File.join(File.dirname(root), "project")
+      Dir.mkdir(repository)
+
+      folder_id = service.create_folder(nil, "Project", repository)
+
+      settings = service.folder_settings(folder_id)
+      settings.repo.should eq(repository)
+      service.resolve(folder_id).workdir.should eq(repository)
+      child_id = service.create_folder(folder_id, "Child")
+      service.inherited_settings(child_id).workdir.should eq(repository)
+    end
+  end
+
   it "does not move folders inside repository leaves" do
     with_workspace do |service, _store, _root|
       repository = service.create_folder(nil, "Repository")
+      nested = service.create_folder(repository, "Nested")
       source = service.create_folder(nil, "Source")
       Dir.mkdir(File.join(service.find_folder(repository), ".git"))
 
+      expect_raises(Xd::Workspace::Error, /No such folder/) do
+        service.find_folder(nested)
+      end
+      expect_raises(Xd::Workspace::Error, /No such folder/) do
+        service.folder_context(nested)
+      end
       expect_raises(Xd::Workspace::Error, /inside a repository/) do
         service.move_folder(source, repository)
       end

@@ -190,6 +190,12 @@ module Xd
             as: String
           ).try(&.to_i) || 0
 
+          if version > SCHEMA_VERSION
+            raise Error.new(
+              "The chat database requires a newer xd version (schema #{version})."
+            )
+          end
+
           connection.exec(
             "ALTER TABLE chats ADD COLUMN workdir TEXT"
           ) if version < 2
@@ -409,6 +415,28 @@ module Xd
                 "ADD COLUMN draft_revision INTEGER NOT NULL DEFAULT 0"
               )
             end
+          end
+
+          if version < 22
+            connection.exec <<-SQL
+              CREATE TABLE IF NOT EXISTS workspace_folders (
+                id            TEXT PRIMARY KEY,
+                root_path     TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                backend       TEXT,
+                model         TEXT,
+                workdir       TEXT,
+                repo          TEXT,
+                instructions  TEXT,
+                created_at    INTEGER NOT NULL,
+                updated_at    INTEGER NOT NULL,
+                UNIQUE (root_path, relative_path)
+              )
+              SQL
+            connection.exec <<-SQL
+              CREATE INDEX IF NOT EXISTS workspace_folders_root
+                  ON workspace_folders (root_path, relative_path)
+              SQL
           end
 
           connection.exec(

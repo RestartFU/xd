@@ -56,40 +56,44 @@ module Xd
       XHigh
       Max
       Ultra
+      UltraCode
 
       def wire_name : String
         case self
-        when Low    then "low"
-        when Medium then "medium"
-        when High   then "high"
-        when XHigh  then "xhigh"
-        when Max    then "max"
-        when Ultra  then "ultra"
-        else             "high"
+        when Low       then "low"
+        when Medium    then "medium"
+        when High      then "high"
+        when XHigh     then "xhigh"
+        when Max       then "max"
+        when Ultra     then "ultra"
+        when UltraCode then "ultracode"
+        else                "high"
         end
       end
 
       def self.from_wire(name : String?) : self
         case name
-        when "low"    then Low
-        when "medium" then Medium
-        when "high"   then High
-        when "xhigh"  then XHigh
-        when "max"    then Max
-        when "ultra"  then Ultra
-        else               High
+        when "low"      then Low
+        when "medium"   then Medium
+        when "high"     then High
+        when "xhigh"    then XHigh
+        when "max"      then Max
+        when "ultra"    then Ultra
+        when "ultracode" then UltraCode
+        else                 High
         end
       end
 
       def label : String
         case self
-        when Low    then "Low"
-        when Medium then "Medium"
-        when High   then "High"
-        when XHigh  then "Extra high"
-        when Max    then "Max"
-        when Ultra  then "Ultra"
-        else             "High"
+        when Low       then "Low"
+        when Medium    then "Medium"
+        when High      then "High"
+        when XHigh     then "Extra high"
+        when Max       then "Max"
+        when Ultra     then "Ultra"
+        when UltraCode then "UltraCode"
+        else                "High"
         end
       end
     end

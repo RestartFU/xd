@@ -1,6 +1,9 @@
 require "file_utils"
 require "digest/sha256"
+require "set"
+require "uuid"
 require "../storage/workflow_state"
+require "../storage/workspaces"
 require "./settings"
 
 module Xd
@@ -27,60 +30,85 @@ module Xd
       def initialize(root : String, @store : Storage::Store)
         @root = File.expand_path(root)
         Dir.mkdir_p(@root, 0o700)
+        reconcile_metadata
       end
 
       def snapshot : TreeSnapshot
+        rows = reconcile_metadata
         folders = [] of FolderSummary
         chats = [] of ChatSummary
 
         directory_children(@root).each do |path|
-          settings = SettingsFile.ensure(path)
-          scan_folder(path, settings, nil, folders, chats)
+          scan_folder(path, rows, nil, folders, chats)
         end
 
         TreeSnapshot.new(folders, chats)
       end
 
-      # Filesystem-only identity used by the daemon's external-change monitor.
-      # Include settings contents because replacing an id changes every client
-      # node even when the directory name stays the same.
+      # Filesystem topology is reconciled into SQLite before calculating the
+      # signature. Legacy sidecars are read only during that reconciliation;
+      # database settings are authoritative afterwards.
       def tree_signature : String
+        rows = reconcile_metadata
         digest = Digest::SHA256.new
-        append_tree_signature(digest, @root, root: true)
+        append_tree_signature(digest, @root, rows, root: true)
         digest.final.hexstring
       end
 
       def find_folder(folder_id : String) : String
-        found = find_folder?(@root, folder_id, root: true)
-        found || raise Error.new("No such folder on the daemon.")
+        row = workspace_for_id(folder_id)
+        path = path_for(row.relative_path)
+        return path if visible_folder_path?(path)
+
+        raise Error.new("No such folder on the daemon.")
       end
 
       def folder_ids(folder_id : String) : Array(String)
         folder = find_folder(folder_id)
         ancestor_paths(folder).compact_map do |path|
-          SettingsFile.load?(path).try(&.id)
+          @store.workspace_folder(@root, relative_path(path)).try(&.id)
         end
       end
 
-      def create_folder(parent_id : String?, name : String) : String
+      def create_folder(
+        parent_id : String?,
+        name : String,
+        repo : String? = nil,
+      ) : String
         validate_name!(name)
+        repository = directory_setting(repo, "repository")
+        reconcile_metadata
         parent = parent_id ? find_folder(parent_id) : @root
         path = File.join(parent, name)
+        relative = relative_path(path)
         created = false
         if info = File.info?(path, follow_symlinks: false)
           unless info.type.directory?
             raise Error.new("There is already something of that name there.")
           end
-          if SettingsFile.managed?(path)
-            raise Error.new("There is already a folder of that name there.")
+          if row = @store.workspace_folder(@root, relative)
+            return row.id
           end
         else
           Dir.mkdir(path, 0o700)
           created = true
         end
 
+        id = UUID.random.to_s
         begin
-          SettingsFile.ensure(path).id.not_nil!
+          @store.save_workspace_folder(
+            Storage::WorkspaceFolder.new(
+              id,
+              @root,
+              relative,
+              nil,
+              nil,
+              nil,
+              repository,
+              nil
+            )
+          )
+          id
         rescue error
           Dir.delete(path) if created && Dir.empty?(path)
           raise error
@@ -91,19 +119,31 @@ module Xd
 
       def rename_folder(folder_id : String, name : String) : Nil
         validate_name!(name)
-        path = find_folder(folder_id)
+        row = workspace_for_id(folder_id)
+        path = path_for(row.relative_path)
         destination = File.join(Path[path].parent, name)
         if File.exists?(destination)
           raise Error.new("There is already a folder of that name there.")
         end
 
         File.rename(path, destination)
+        begin
+          @store.relocate_workspace_subtree(
+            @root,
+            row.relative_path,
+            relative_path(destination)
+          )
+        rescue error
+          File.rename(destination, path) rescue nil
+          raise error
+        end
       rescue error : File::Error
         raise Error.new("Cannot rename folder: #{error.message}")
       end
 
       def move_folder(folder_id : String, parent_id : String?) : Nil
-        path = find_folder(folder_id)
+        row = workspace_for_id(folder_id)
+        path = path_for(row.relative_path)
         parent = parent_id ? find_folder(parent_id) : @root
         path_prefix = path + File::SEPARATOR
 
@@ -123,13 +163,24 @@ module Xd
         end
 
         File.rename(path, destination)
+        begin
+          @store.relocate_workspace_subtree(
+            @root,
+            row.relative_path,
+            relative_path(destination)
+          )
+        rescue error
+          File.rename(destination, path) rescue nil
+          raise error
+        end
       rescue error : File::Error
         raise Error.new("Cannot move folder: #{error.message}")
       end
 
       # Cross-platform, recoverable app trash. Hidden from the workspace tree.
       def trash_folder(folder_id : String) : String
-        path = find_folder(folder_id)
+        row = workspace_for_id(folder_id)
+        path = path_for(row.relative_path)
         trash = File.join(@root, ".Trash")
         Dir.mkdir_p(trash, 0o700)
         destination = File.join(
@@ -137,30 +188,51 @@ module Xd
           "#{Time.utc.to_unix}-#{UUID.random}-#{File.basename(path)}"
         )
         File.rename(path, destination)
+        begin
+          @store.relocate_workspace_subtree(
+            @root,
+            row.relative_path,
+            relative_path(destination)
+          )
+        rescue error
+          File.rename(destination, path) rescue nil
+          raise error
+        end
         destination
       rescue error : File::Error
         raise Error.new("Cannot trash folder: #{error.message}")
       end
 
       def folder_context(folder_id : String) : String?
-        SettingsFile.ensure(find_folder(folder_id)).instructions
+        workspace_for_id(folder_id).instructions
       end
 
       def set_folder_context(
         folder_id : String,
         context : String?,
       ) : Nil
-        path = find_folder(folder_id)
-        settings = SettingsFile.ensure(path)
+        row = workspace_for_id(folder_id)
         stripped = context.try(&.strip)
-        settings.instructions = if stripped && !stripped.empty?
-                                  stripped
-                                end
-        SettingsFile.save(settings, path)
+        @store.update_workspace_settings(
+          row.id,
+          row.backend,
+          row.model,
+          row.workdir,
+          row.repo,
+          stripped && !stripped.empty? ? stripped : nil
+        )
       end
 
       def folder_settings(folder_id : String) : Settings
-        SettingsFile.ensure(find_folder(folder_id))
+        row = workspace_for_id(folder_id)
+        Settings.new(
+          id: row.id,
+          backend: row.backend,
+          model: row.model,
+          workdir: row.workdir,
+          repo: row.repo,
+          instructions: row.instructions
+        )
       end
 
       # Values a folder receives when its own scalar settings are blank.
@@ -184,7 +256,7 @@ module Xd
         repo_from = nil
 
         paths.each do |path|
-          settings = SettingsFile.load?(path)
+          settings = workspace_settings_at(path)
           next unless settings
 
           source = path == parent ? nil : File.basename(path)
@@ -227,13 +299,15 @@ module Xd
         workdir : String?,
         repo : String?,
       ) : Nil
-        path = find_folder(folder_id)
-        settings = SettingsFile.ensure(path)
-        settings.backend = clean(backend)
-        settings.model = clean(model)
-        settings.workdir = directory_setting(workdir, "working directory")
-        settings.repo = directory_setting(repo, "repository")
-        SettingsFile.save(settings, path)
+        row = workspace_for_id(folder_id)
+        @store.update_workspace_settings(
+          row.id,
+          clean(backend),
+          clean(model),
+          directory_setting(workdir, "working directory"),
+          directory_setting(repo, "repository"),
+          row.instructions
+        )
       end
 
       def resolve(
@@ -249,7 +323,7 @@ module Xd
         instructions = [] of String
 
         paths.each do |path|
-          settings = SettingsFile.load?(path)
+          settings = workspace_settings_at(path)
           next unless settings
 
           backend = settings.backend if settings.backend
@@ -264,7 +338,7 @@ module Xd
         EffectiveSettings.new(
           backend || default_backend,
           model,
-          workdir || folder,
+          workdir || repo || folder,
           repo,
           instructions.empty? ? nil : instructions.join("\n\n")
         )
@@ -295,12 +369,13 @@ module Xd
 
       private def scan_folder(
         path : String,
-        settings : Settings,
+        rows : Hash(String, Storage::WorkspaceFolder),
         parent_id : String?,
         folders : Array(FolderSummary),
         chats : Array(ChatSummary),
       ) : Nil
-        id = settings.id.not_nil!
+        row = rows[relative_path(path)]? || return
+        id = row.id
         folders << FolderSummary.new(id, File.basename(path), parent_id)
         @store.list_chats(id).each do |chat|
           chats << ChatSummary.new(
@@ -315,32 +390,171 @@ module Xd
         return if File.exists?(File.join(path, ".git"))
 
         directory_children(path).each do |child|
-          next unless SettingsFile.managed?(child)
-
-          child_settings = SettingsFile.ensure(child)
-          scan_folder(child, child_settings, id, folders, chats)
+          next unless rows.has_key?(relative_path(child))
+          scan_folder(child, rows, id, folders, chats)
         end
       end
 
-      private def find_folder?(
+      # Existing database rows are authoritative at their stored paths. Legacy
+      # ids can reconnect a folder moved outside xd; a DB-only folder has no
+      # portable filesystem identity, so arbitrary external renames cannot be
+      # correlated safely without reintroducing an on-disk marker.
+      private def reconcile_metadata : Hash(String, Storage::WorkspaceFolder)
+        existing = @store.list_workspace_folders(@root)
+        by_path = existing.to_h { |row| {row.relative_path, row} }
+        by_id = existing.to_h { |row| {row.id, row} }
+        used = Set(String).new
+        rows = {} of String => Storage::WorkspaceFolder
+
+        if by_path.has_key?("") || SettingsFile.managed?(@root)
+          reconcile_metadata_path(
+            @root,
+            by_path,
+            by_id,
+            used,
+            rows
+          )
+        end
+        directory_children(@root).each do |path|
+          reconcile_metadata_path(path, by_path, by_id, used, rows)
+        end
+        rows
+      end
+
+      private def reconcile_metadata_path(
         path : String,
-        folder_id : String,
-        root : Bool = false,
-      ) : String?
-        unless root
-          if settings = SettingsFile.load?(path)
-            return path if settings.id == folder_id
+        by_path : Hash(String, Storage::WorkspaceFolder),
+        by_id : Hash(String, Storage::WorkspaceFolder),
+        used : Set(String),
+        rows : Hash(String, Storage::WorkspaceFolder),
+      ) : Nil
+        relative = relative_path(path)
+        current = by_path[relative]?
+        legacy = SettingsFile.managed?(path) ? SettingsFile.load?(path) : nil
+        row = current
+
+        if row.nil? && (legacy_id = legacy.try(&.id))
+          candidate = by_id[legacy_id]? || @store.workspace_folder_with_id(legacy_id)
+          if candidate &&
+             !used.includes?(candidate.id) &&
+             (candidate.root_path == @root ||
+              !stored_workspace_root_exists?(candidate))
+            row = Storage::WorkspaceFolder.new(
+              candidate.id,
+              @root,
+              relative,
+              candidate.backend,
+              candidate.model,
+              candidate.workdir,
+              candidate.repo,
+              candidate.instructions
+            )
           end
-          return nil if File.exists?(File.join(path, ".git"))
         end
 
-        directory_children(path).each do |child|
-          next unless root || SettingsFile.managed?(child)
-          if found = find_folder?(child, folder_id)
-            return found
+        if row.nil? || used.includes?(row.id)
+          id = legacy.try(&.id)
+          id = nil if id && used.includes?(id)
+          if id && (existing = @store.workspace_folder_with_id(id)) &&
+             existing.root_path != @root
+            id = nil
           end
+          row = Storage::WorkspaceFolder.new(
+            id || UUID.random.to_s,
+            @root,
+            relative,
+            legacy.try(&.backend),
+            legacy.try(&.model),
+            legacy.try(&.workdir),
+            legacy.try(&.repo),
+            legacy.try(&.instructions)
+          )
         end
-        nil
+
+        @store.save_workspace_folder(row) if current != row
+        by_path[relative] = row
+        by_id[row.id] = row
+        used << row.id
+        rows[relative] = row
+
+        return if File.exists?(File.join(path, ".git"))
+
+        directory_children(path).each do |child|
+          child_relative = relative_path(child)
+          next unless by_path.has_key?(child_relative) ||
+                      SettingsFile.managed?(child)
+          reconcile_metadata_path(child, by_path, by_id, used, rows)
+        end
+      end
+
+      private def workspace_for_id(folder_id : String) : Storage::WorkspaceFolder
+        reconcile_metadata
+        row = @store.workspace_folder_by_id(@root, folder_id) ||
+              raise Error.new("No such folder on the daemon.")
+        path = path_for(row.relative_path)
+        unless visible_folder_path?(path)
+          raise Error.new("No such folder on the daemon.")
+        end
+        row
+      end
+
+      private def stored_workspace_root_exists?(
+        folder : Storage::WorkspaceFolder,
+      ) : Bool
+        info = File.info?(folder.root_path, follow_symlinks: false)
+        info ? info.type.directory? : false
+      end
+
+      private def workspace_settings_at(path : String) : Settings?
+        @store.workspace_folder(@root, relative_path(path)).try do |row|
+          Settings.new(
+            id: row.id,
+            backend: row.backend,
+            model: row.model,
+            workdir: row.workdir,
+            repo: row.repo,
+            instructions: row.instructions
+          )
+        end
+      end
+
+      private def path_for(relative : String) : String
+        relative.empty? ? @root : File.join(@root, relative)
+      end
+
+      private def relative_path(path : String) : String
+        return "" if path == @root
+
+        prefix = @root + File::SEPARATOR
+        path.starts_with?(prefix) ?
+          path.byte_slice(prefix.bytesize, path.bytesize - prefix.bytesize) :
+          path
+      end
+
+      private def visible_folder_path?(path : String) : Bool
+        return false unless within_root?(path)
+        return false unless path != @root
+
+        info = File.info?(path, follow_symlinks: false)
+        return false unless info && info.type.directory?
+        return false if File.file?(File.join(path, WORKTREE_CONTAINER_MARKER))
+
+        relative = relative_path(path)
+        return false if relative.split(File::SEPARATOR).any? do |part|
+          part.starts_with?('.')
+        end
+
+        ancestor = File.dirname(path)
+        while ancestor != @root
+          info = File.info?(ancestor, follow_symlinks: false)
+          return false unless info && info.type.directory?
+          return false if File.exists?(File.join(ancestor, ".git"))
+          return false if File.file?(
+            File.join(ancestor, WORKTREE_CONTAINER_MARKER)
+          )
+          ancestor = File.dirname(ancestor)
+        end
+        true
       end
 
       private def directory_children(path : String) : Array(String)
@@ -360,21 +574,34 @@ module Xd
       private def append_tree_signature(
         digest : Digest::SHA256,
         path : String,
+        rows : Hash(String, Storage::WorkspaceFolder),
         root : Bool,
       ) : Nil
         directory_children(path).each do |child|
-          next unless root || SettingsFile.managed?(child)
+          row = rows[relative_path(child)]?
+          next if row.nil? && !root
 
-          digest.update(child.byte_slice(@root.bytesize, child.bytesize - @root.bytesize))
+          digest.update(relative_path(child))
           digest.update(Bytes[0_u8])
-          settings_path = SettingsFile.path_for(child)
-          digest.update(File.read(settings_path)) if File.file?(settings_path)
+          if row
+            digest.update(row.id)
+            digest.update(Bytes[0_u8])
+            digest.update(row.backend || "")
+            digest.update(Bytes[0_u8])
+            digest.update(row.model || "")
+            digest.update(Bytes[0_u8])
+            digest.update(row.workdir || "")
+            digest.update(Bytes[0_u8])
+            digest.update(row.repo || "")
+            digest.update(Bytes[0_u8])
+            digest.update(row.instructions || "")
+          end
           digest.update(Bytes[0_u8])
 
           if File.exists?(File.join(child, ".git"))
             digest.update("repository")
           else
-            append_tree_signature(digest, child, root: false)
+            append_tree_signature(digest, child, rows, root: false)
           end
         end
       rescue error : File::Error

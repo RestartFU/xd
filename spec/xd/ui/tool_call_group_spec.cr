@@ -19,4 +19,13 @@ describe Xd::UI::ToolCallGroup do
     # A subagent card can collapse a single call, so this still has to read.
     Xd::UI::ToolCallGroup.collapsed_label(1).should eq("1 tool call")
   end
+
+  it "bounds expanded activity text" do
+    summaries = Array.new(60) { |index| "tool-#{index}" }
+    rendered = Xd::UI::ToolCallGroup.rendered_label(summaries)
+
+    rendered.should contain("earlier tool calls")
+    rendered.should contain("tool-59")
+    rendered.size.should be <= Xd::UI::ToolCallGroup::MAX_RENDERED_CHARS + 64
+  end
 end

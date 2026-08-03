@@ -44,6 +44,7 @@ module Xd
       Chat
       SetDraft
       SetOption
+      RemoveWorktree
       Send
       Queue
       DropQueue
@@ -104,6 +105,7 @@ module Xd
         when Chat               then "chat"
         when SetDraft           then "set-draft"
         when SetOption          then "set-option"
+        when RemoveWorktree     then "remove-worktree"
         when Send               then "send"
         when Queue              then "queue"
         when DropQueue          then "drop-queue"
@@ -167,6 +169,7 @@ module Xd
         when "chat"                 then Chat
         when "set-draft"            then SetDraft
         when "set-option"           then SetOption
+        when "remove-worktree"      then RemoveWorktree
         when "send"                 then Send
         when "queue"                then Queue
         when "drop-queue"           then DropQueue

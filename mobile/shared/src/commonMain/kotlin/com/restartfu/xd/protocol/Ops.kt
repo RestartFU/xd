@@ -208,6 +208,7 @@ public object Ops {
     public fun newFolder(
         name: String,
         parentId: String? = null,
+        repository: String? = null,
     ): JsonObject = buildJsonObject {
         require(
             name.isNotBlank() &&
@@ -219,6 +220,12 @@ public object Ops {
         put("op", "new-folder")
         put("name", name)
         if (parentId != null) put("parent", parentId)
+        if (!repository.isNullOrBlank()) put("repo", repository)
+    }
+
+    public fun listDirectories(path: String? = null): JsonObject = buildJsonObject {
+        put("op", "list-dir")
+        if (!path.isNullOrBlank()) put("path", path)
     }
 
     public fun moveFolder(

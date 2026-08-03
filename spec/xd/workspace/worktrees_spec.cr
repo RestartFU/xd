@@ -90,10 +90,72 @@ describe Xd::Workspace::Worktrees do
         "~ — not a repository"
       )
 
-      worktree_git(repository, "worktree", "remove", "--force", created)
+      expect_raises(Xd::Workspace::Worktrees::Error) do
+        service.remove(store.get_chat(first_id), directory)
+      end
+      expect_raises(Xd::Workspace::Worktrees::Error) do
+        service.remove(store.get_chat(first_id), created)
+      end
+      store.delete_chat(second_id)
+
+      File.write(File.join(created, "untracked.txt"), "dirty\n")
+      expect_raises(Xd::Workspace::Worktrees::Error) do
+        service.remove(store.get_chat(first_id), created)
+      end
+      File.delete(File.join(created, "untracked.txt"))
+
+      main_id = store.create_chat(
+        folder_id,
+        "Main",
+        "claude",
+        workdir: repository
+      )
+      service.select(store.get_chat(main_id), repository).should eq(repository)
+      expect_raises(Xd::Workspace::Worktrees::Error) do
+        service.remove(store.get_chat(main_id), repository)
+      end
+      store.delete_chat(main_id)
+
+      current_id = store.create_chat(
+        folder_id,
+        "Current",
+        "claude",
+        workdir: created
+      )
+      service.select(store.get_chat(current_id), created).should eq(created)
+      expect_raises(Xd::Workspace::Worktrees::Error) do
+        service.remove(store.get_chat(current_id), created)
+      end
+      store.delete_chat(current_id)
+
+      message_id = store.create_chat(folder_id, "Messages", "claude")
+      store.set_new_worktree(message_id, true)
+      message_worktree = service.prepare(
+        store.get_chat(message_id),
+        "Messages"
+      )
+      store.append_message(message_id, "user", "first")
+      expect_raises(Xd::Workspace::Worktrees::Error) do
+        service.remove(store.get_chat(message_id), message_worktree)
+      end
+      store.delete_chat(message_id)
+
+      branch = state.worktrees.find { |item| item.path == created }
+        .try(&.branch).not_nil!
+
+      service.remove(store.get_chat(first_id), created)
+      File.directory?(created).should be_false
+      worktree_git(
+        repository,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/#{branch}"
+      )
       service.resolve(store.get_chat(first_id)).should eq(repository)
-      store.get_chat(first_id).workdir.should eq(repository)
-      store.get_chat(first_id).original_workdir.should be_nil
+      restored = store.get_chat(first_id)
+      restored.workdir.should eq(repository)
+      restored.original_workdir.should be_nil
     ensure
       store.close
       File.delete?(home_alias)

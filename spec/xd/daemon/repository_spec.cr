@@ -199,6 +199,7 @@ describe Xd::Daemon::Repository do
 
   it "recognizes the checked-out remote base as up to date" do
     with_repository do |repository, folder, chat_id|
+      File.write(File.join(folder, "tracked.txt"), "after\n")
       git(folder, "add", "-A")
       git(folder, "commit", "-q", "-m", "Track workspace settings")
       git(folder, "checkout", "-q", "-b", "release/next")

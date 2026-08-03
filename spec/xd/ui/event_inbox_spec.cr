@@ -87,13 +87,17 @@ describe Xd::UI::EventInbox do
     end
 
     first, more = inbox.drain
-    first.size.should eq(32)
+    first.size.should eq(Xd::UI::EventInbox::BATCH_SIZE)
     more.should be_true
     inbox.push("local", ui_event("tool", "after")).should be_false
 
     second, more = inbox.drain
-    second.size.should eq(9)
-    more.should be_false
+    second.size.should eq(Xd::UI::EventInbox::BATCH_SIZE)
+    more.should be_true
+    loop do
+      _batch, more = inbox.drain
+      break unless more
+    end
     inbox.push("local", ui_event("tool", "new")).should be_true
   end
 

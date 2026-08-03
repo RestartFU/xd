@@ -101,7 +101,7 @@ describe Xd::Daemon::Client do
       folder = File.join(directory, "Workspaces", "Manual deletion")
       File.exists?(
         File.join(folder, Xd::Workspace::SETTINGS_FILE)
-      ).should be_true
+      ).should be_false
       FileUtils.rm_r(folder)
 
       select

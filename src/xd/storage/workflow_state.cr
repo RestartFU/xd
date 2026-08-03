@@ -95,6 +95,65 @@ module Xd
         end
       end
 
+      def worktree_referenced_by_other_chat?(
+        chat_id : String,
+        workdir : String,
+      ) : Bool
+        raise ArgumentError.new("workdir cannot be empty") if workdir.empty?
+
+        database_error("Cannot check worktree references") do
+          references = @database.query_one(
+            <<-SQL,
+              SELECT COUNT(*)
+                FROM chats
+               WHERE id != ?
+                 AND (workdir = ? OR original_workdir = ?)
+              SQL
+            chat_id,
+            workdir,
+            workdir,
+            as: Int64
+          )
+          references > 0
+        end
+      end
+
+      def restore_selected_worktree(
+        chat_id : String,
+        expected_workdir : String,
+        expected_original_workdir : String,
+      ) : Nil
+        validate_workdirs(expected_workdir, expected_original_workdir)
+        database_error("Cannot restore the original workspace") do
+          result = @database.exec(
+            <<-SQL,
+              UPDATE chats
+                 SET workdir = ?,
+                     original_workdir = NULL,
+                     new_worktree = 0,
+                     updated_at = ?
+               WHERE id = ?
+                 AND workdir = ?
+                 AND original_workdir = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages WHERE chat_id = ?
+                 )
+              SQL
+            expected_original_workdir,
+            now_seconds,
+            chat_id,
+            expected_workdir,
+            expected_original_workdir,
+            chat_id
+          )
+          if result.rows_affected != 1
+            raise ConflictError.new(
+              "The workspace changed before the worktree was removed."
+            )
+          end
+        end
+      end
+
       def use_worktree(
         chat_id : String,
         workdir : String,

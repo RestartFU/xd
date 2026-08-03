@@ -107,13 +107,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createWorkspace(name: String) {
+    fun createWorkspace(name: String, repository: String? = null) {
         if (_creatingWorkspace.value) return
         _creatingWorkspace.value = true
         _error.value = null
         viewModelScope.launch {
             try {
-                client.createFolder(name = name)
+                client.createFolder(name = name, repository = repository)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {

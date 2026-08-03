@@ -10,6 +10,9 @@ module Xd
     #
     # Text-only while collapsed. Hidden tool calls create no label/layout work.
     class ToolCallGroup
+      MAX_RENDERED_CALLS = 48
+      MAX_RENDERED_CHARS = 12 * 1024
+
       getter widget : Gtk::Box
 
       # The subagent card binds its own toggle to this, so it needs the
@@ -18,6 +21,7 @@ module Xd
 
       @summaries = [] of String
       @single : Gtk::Label
+      @render_source = 0_u32
 
       # Collapsing one call hides its command and shows a count instead, which
       # is less in the same space. Two or more is where it starts paying.
@@ -27,6 +31,37 @@ module Xd
 
       def self.collapsed_label(count : Int) : String
         count == 1 ? "1 tool call" : "#{count} tool calls"
+      end
+
+      def self.rendered_label(summaries : Array(String)) : String
+        return "" if summaries.empty?
+
+        shown = [] of String
+        characters = 0
+        index = summaries.size - 1
+        while index >= 0 && shown.size < MAX_RENDERED_CALLS
+          remaining = MAX_RENDERED_CHARS - characters
+          break if remaining <= 0
+
+          summary = summaries[index]
+          if summary.size > remaining
+            summary = if remaining == 1
+                        "…"
+                      else
+                        "#{summary[0, remaining - 1]}…"
+                      end
+          end
+          shown << summary
+          characters += summary.size
+          index -= 1
+        end
+        shown.reverse!
+
+        if index >= 0
+          "… #{index + 1} earlier tool calls …\n#{shown.join('\n')}"
+        else
+          shown.join('\n')
+        end
       end
 
       def initialize
@@ -46,7 +81,7 @@ module Xd
         @expander.visible = false
         @expander.notify_signal["expanded"].connect do |_property|
           if @expander.expanded?
-            render
+            schedule_render
           else
             @expander.child = nil
           end
@@ -68,7 +103,7 @@ module Xd
         @single.visible = false
         @expander.visible = true
         @expander.label = self.class.collapsed_label(@summaries.size)
-        render if @expander.expanded?
+        schedule_render if @expander.expanded?
       end
 
       # Hands the run to a subagent card, which supplies the disclosure.
@@ -84,7 +119,17 @@ module Xd
         @single.visible = false
         @expander.visible = true
         @expander.label = self.class.collapsed_label(@summaries.size)
-        render if @expander.expanded?
+        schedule_render if @expander.expanded?
+      end
+
+      private def schedule_render : Nil
+        return unless @render_source == 0
+
+        @render_source = GLib.idle_add do
+          @render_source = 0_u32
+          render if @expander.expanded?
+          false
+        end
       end
 
       private def render : Nil
@@ -95,7 +140,7 @@ module Xd
           label.margin_start = 12
           @expander.child = label
         end
-        label.text = @summaries.join('\n')
+        label.text = self.class.rendered_label(@summaries)
       end
 
       private def summary_label : Gtk::Label

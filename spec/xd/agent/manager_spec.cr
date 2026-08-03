@@ -623,6 +623,20 @@ describe Xd::Agent::Manager do
     end
   end
 
+  it "maps the Claude UltraCode setting to the native run specification" do
+    with_agent_manager do |manager, store, _workspaces, folder_id, launcher, _events|
+      chat_id = store.create_chat(folder_id, "Chat", "claude")
+      store.set_effort(chat_id, "ultracode")
+
+      manager.send(chat_id, "use maximum Claude effort")
+
+      launcher.backends.first.should eq("claude")
+      launcher.specs.first.effort.should eq(Xd::Agent::Effort::UltraCode)
+      launcher.specs.first.claude_mode.should be_false
+      launcher.finish(0, true)
+    end
+  end
+
   it "isolates Claude mode authentication and sessions from native Codex" do
     checked = [] of String
     authorizer = ->(provider : String) : String? {

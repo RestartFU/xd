@@ -130,6 +130,89 @@ module Xd
         raise Error.new(error.message || "Cannot change the workspace.")
       end
 
+      def remove(
+        chat : Storage::Chat,
+        requested_path : String,
+      ) : Nil
+        unless !requested_path.empty? && Path[requested_path].absolute?
+          raise Error.new("An absolute worktree path is required.")
+        end
+
+        original_workdir = chat.original_workdir
+        unless original_workdir
+          raise Error.new("That chat is not using a removable worktree.")
+        end
+        selected_workdir = chat.workdir
+        unless selected_workdir
+          raise Error.new("That chat is not using a removable worktree.")
+        end
+        if chat.new_worktree
+          raise Error.new("The chat has not selected an existing worktree.")
+        end
+        if @store.last_message_id(chat.id) > 0
+          raise Error.new(
+            "A worktree cannot be removed after the first message."
+          )
+        end
+
+        requested = normalize(requested_path)
+        unless same_path?(selected_workdir, requested)
+          raise Error.new("That worktree is no longer selected.")
+        end
+
+        target = list(original_workdir).find do |item|
+          same_path?(item.path, requested)
+        end
+        unless target
+          raise Error.new(
+            "That path is not a worktree of this repository."
+          )
+        end
+        if target.main
+          raise Error.new("The main checkout cannot be removed.")
+        end
+        if target.current
+          raise Error.new("The currently active worktree cannot be removed.")
+        end
+        if @store.worktree_referenced_by_other_chat?(chat.id, target.path)
+          raise Error.new("Another chat is still using that worktree.")
+        end
+
+        output, status, error = git(
+          target.path,
+          ["status", "--porcelain", "--untracked-files=all"]
+        )
+        unless status.success?
+          message = error.strip
+          raise Error.new(
+            message.empty? ? "Cannot inspect the worktree." : message
+          )
+        end
+        validate_output(output)
+        unless output.empty?
+          raise Error.new("The worktree must be clean before it is removed.")
+        end
+
+        _, status, error = git(
+          original_workdir,
+          ["worktree", "remove", target.path]
+        )
+        unless status.success?
+          message = error.strip
+          raise Error.new(
+            message.empty? ? "git worktree remove failed" : message
+          )
+        end
+
+        @store.restore_selected_worktree(
+          chat.id,
+          selected_workdir,
+          original_workdir
+        )
+      rescue error : Storage::Error
+        raise Error.new(error.message || "Cannot remove the worktree.")
+      end
+
       # Resolves only a checkout already registered with the same repository.
       # Agent-reported paths may move future turns, but never widen their
       # sandbox to an unrelated directory.

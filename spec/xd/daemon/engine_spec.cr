@@ -165,6 +165,88 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "removes selected worktrees and refreshes their chat state" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder_id = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Worktree removal",
+      }.to_json)["id"].as_s
+      folder = File.join(
+        Path[store.path].dirname,
+        "Workspaces",
+        "Worktree removal"
+      )
+      engine_git(folder, "init", "-q", "-b", "main")
+      engine_git(folder, "config", "user.email", "test@example.com")
+      engine_git(folder, "config", "user.name", "Test")
+      File.write(File.join(folder, "tracked.txt"), "initial\n")
+      engine_git(folder, "add", "tracked.txt")
+      engine_git(folder, "commit", "-q", "-m", "initial")
+
+      chat_id = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder_id,
+      }.to_json)["id"].as_s
+      before = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat_id,
+      }.to_json)
+      parse_response(before).as_h.has_key?("selected_worktree")
+        .should be_false
+
+      engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat_id,
+        "option" => "new-worktree",
+        "value"  => "true",
+      }.to_json).success?.should be_true
+      workspaces = Xd::Workspace::Service.new(
+        File.join(Path[store.path].dirname, "Workspaces"),
+        store
+      )
+      worktrees = Xd::Workspace::Worktrees.new(store, workspaces)
+      selected = worktrees.prepare(
+        store.get_chat(chat_id),
+        "removable"
+      )
+      branch = worktrees.list(folder).find { |item| item.path == selected }
+        .try(&.branch).not_nil!
+
+      selected_state = parse_response(engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat_id,
+      }.to_json))
+      selected_state["selected_worktree"].as_s.should eq(selected)
+
+      outcome = engine.process(local, {
+        "op"       => "remove-worktree",
+        "chat"     => chat_id,
+        "worktree" => selected,
+      }.to_json)
+      outcome.response.success?.should be_true
+      outcome.events.map { |event| event["event"].as_s }
+        .should eq(["changed", "worktrees-changed"])
+      outcome.events.first["chat"].as_s.should eq(chat_id)
+      File.directory?(selected).should be_false
+      store.get_chat(chat_id).workdir.should eq(folder)
+      store.get_chat(chat_id).original_workdir.should be_nil
+      engine_git(
+        folder,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/#{branch}"
+      )
+
+      after = parse_response(engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat_id,
+      }.to_json))
+      after.as_h.has_key?("selected_worktree").should be_false
+    end
+  end
+
   it "reports what a client needs to offer a daemon update" do
     with_daemon_engine do |_store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
@@ -809,6 +891,28 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "creates a workspace with a selected repository" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      repository = File.join(Path[store.path].dirname, "repository")
+      Dir.mkdir(repository)
+
+      created = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Project",
+        "repo" => repository,
+      }.to_json)
+      created.success?.should be_true
+
+      settings = engine.dispatch(local, {
+        "op"     => "folder-settings",
+        "folder" => created["id"].as_s,
+      }.to_json)
+      settings["repo"].as_s.should eq(repository)
+      settings["effective_workdir"].as_s.should eq(repository)
+    end
+  end
+
   it "moves folders and individual chats through the protocol" do
     with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
@@ -1294,6 +1398,13 @@ describe Xd::Daemon::Engine do
         "op"   => "chat",
         "chat" => chat,
       }.to_json)["effort"].as_s.should eq("ultra")
+      codex_ultracode = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "effort",
+        "value"  => "ultracode",
+      }.to_json)
+      codex_ultracode.success?.should be_false
       fast = engine.dispatch(local, {
         "op"     => "set-option",
         "chat"   => chat,
@@ -1383,6 +1494,17 @@ describe Xd::Daemon::Engine do
       store.get_chat(chat).effort.should eq("low")
       store.get_chat(chat).fast.should be_false
       store.get_chat(chat).claude_mode.should be_false
+      claude_ultracode = engine.dispatch(local, {
+        "op"     => "set-option",
+        "chat"   => chat,
+        "option" => "effort",
+        "value"  => "ultracode",
+      }.to_json)
+      claude_ultracode.success?.should be_true
+      engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat,
+      }.to_json)["effort"].as_s.should eq("ultracode")
       rejected_ultra = engine.dispatch(local, {
         "op"     => "set-option",
         "chat"   => chat,

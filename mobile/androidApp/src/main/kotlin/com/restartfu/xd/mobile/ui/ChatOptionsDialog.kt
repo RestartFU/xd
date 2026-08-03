@@ -39,6 +39,7 @@ internal val EFFORT_LABELS = mapOf(
     "xhigh" to "XHigh",
     "max" to "Max",
     "ultra" to "Ultra",
+    "ultracode" to "UltraCode",
 )
 
 /**

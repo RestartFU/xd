@@ -379,6 +379,8 @@ module Xd
           set_draft(request)
         when Protocol::Operation::SetOption
           set_option(request)
+        when Protocol::Operation::RemoveWorktree
+          remove_worktree(request)
         when Protocol::Operation::Send
           send_message(request)
         when Protocol::Operation::Queue
@@ -818,7 +820,11 @@ module Xd
           "name",
           "A folder name cannot be empty or hidden, or contain a path separator."
         )
-        id = @workspaces.create_folder(request.string?("parent"), name)
+        id = @workspaces.create_folder(
+          request.string?("parent"),
+          name,
+          request.string?("repo")
+        )
         Protocol::Response.ok({"id" => JSON::Any.new(id)})
       end
 
@@ -1181,9 +1187,8 @@ module Xd
         end
 
         fields["new_worktree"] = JSON::Any.new(stored.new_worktree)
-        fields["has_messages"] = JSON::Any.new(
-          @store.last_message_id(stored.id) > 0
-        )
+        has_messages = @store.last_message_id(stored.id) > 0
+        fields["has_messages"] = JSON::Any.new(has_messages)
         resolved_workdir : String? = nil
         begin
           state = @git_worktrees.state(stored)
@@ -1191,6 +1196,10 @@ module Xd
           fields["workdir"] = JSON::Any.new(state.workdir)
           fields["linked_worktree"] = JSON::Any.new(state.linked)
           fields["worktrees"] = worktrees_json(state.worktrees)
+          if !has_messages && !stored.new_worktree &&
+             stored.original_workdir && state.linked
+            fields["selected_worktree"] = JSON::Any.new(state.workdir)
+          end
         rescue Workspace::Error | Workspace::Worktrees::Error
           # Orphaned chats remain readable even when their folder disappeared.
           begin
@@ -1343,6 +1352,21 @@ module Xd
           raise Protocol::Error.new("No such option.")
         end
 
+        Protocol::Response.ok
+      end
+
+      private def remove_worktree(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        chat_id = request.string(
+          "chat",
+          "remove-worktree needs a chat and worktree path."
+        )
+        requested_path = request.string(
+          "worktree",
+          "remove-worktree needs a chat and worktree path."
+        )
+        @git_worktrees.remove(@store.get_chat(chat_id), requested_path)
         Protocol::Response.ok
       end
 
@@ -1848,6 +1872,8 @@ module Xd
              Protocol::Operation::RenameFolder,
              Protocol::Operation::MoveFolder,
              Protocol::Operation::TrashFolder,
+             Protocol::Operation::SetFolderContext,
+             Protocol::Operation::SetFolderSettings,
              Protocol::Operation::NewChat,
              Protocol::Operation::RenameChat,
              Protocol::Operation::MoveChat,
@@ -1860,6 +1886,17 @@ module Xd
             fields["chat"] = JSON::Any.new(chat_id)
           end
           [protocol_event("changed", fields)]
+        when Protocol::Operation::RemoveWorktree
+          chat_id = request.string?("chat")
+          return [] of Protocol::Event unless chat_id
+
+          fields = {
+            "chat" => JSON::Any.new(chat_id),
+          }
+          [
+            protocol_event("changed", fields),
+            protocol_event("worktrees-changed"),
+          ]
         when Protocol::Operation::SetDraft
           chat_id = request.string?("chat")
           return [] of Protocol::Event unless chat_id

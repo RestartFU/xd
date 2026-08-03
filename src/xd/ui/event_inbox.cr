@@ -10,7 +10,7 @@ module Xd
     # GTK paints it. Keep one source active, merge replaceable events, and let
     # GTK regain control between bounded batches.
     class EventInbox(T)
-      BATCH_SIZE          = 32
+      BATCH_SIZE          = 8
       TEXT_COALESCE_LIMIT = 16 * 1024
       ITEM_LIMIT          = 512
 

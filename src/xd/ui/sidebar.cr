@@ -14,6 +14,7 @@ require "./dialogs"
 require "./directory_browser"
 require "./dots"
 require "./folder_dialogs"
+require "./workspace_create_dialog"
 require "./idle_queue"
 require "./git_writing_settings"
 require "./share_dialog"
@@ -346,7 +347,7 @@ module Xd
         free_space_menu.button = Gdk::BUTTON_SECONDARY.to_u32
         free_space_menu.pressed_signal.connect do |_presses, x, y|
           target = @list_view.pick(x, y, Gtk::PickFlags::Default)
-          if target && target.to_unsafe == @list_view.to_unsafe
+          if target.nil? || target.to_unsafe == @list_view.to_unsafe
             open_workspace_menu(x, y)
           end
         end
@@ -1196,6 +1197,18 @@ module Xd
         parent : Node?,
         kind : NodeKind,
       ) : Nil
+        if kind.folder? && parent.nil?
+          WorkspaceCreateDialog.new(
+            @parent,
+            panel_call(source),
+            ->(name : String, repo : String?) {
+              create_folder(source, nil, name, repo)
+              nil
+            }
+          ).present
+          return
+        end
+
         parent_key = parent.try(&.key)
         end_editing(true)
 
@@ -1794,12 +1807,14 @@ module Xd
         source : Source,
         parent_id : String?,
         name : String,
+        repo : String? = nil,
       ) : Nil
         request = {
           "op"   => JSON::Any.new("new-folder"),
           "name" => JSON::Any.new(name),
         }
         request["parent"] = JSON::Any.new(parent_id) if parent_id
+        request["repo"] = JSON::Any.new(repo) if repo
         call_async(
           source,
           request,

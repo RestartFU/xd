@@ -101,6 +101,82 @@ describe Xd::Storage::Store do
     end
   end
 
+  it "guards selected worktree restoration and detects references" do
+    with_workflow_store do |store|
+      chat_id = store.create_chat(
+        "folder",
+        "Chat",
+        "claude",
+        workdir: "/tmp/original-checkout"
+      )
+      store.use_existing_worktree(
+        chat_id,
+        "/tmp/linked-worktree",
+        "/tmp/original-checkout"
+      )
+      other_id = store.create_chat(
+        "folder",
+        "Other",
+        "claude",
+        workdir: "/tmp/other-checkout"
+      )
+      store.use_existing_worktree(
+        other_id,
+        "/tmp/linked-worktree",
+        "/tmp/other-checkout"
+      )
+
+      store.worktree_referenced_by_other_chat?(
+        chat_id,
+        "/tmp/linked-worktree"
+      ).should be_true
+      store.worktree_referenced_by_other_chat?(
+        other_id,
+        "/tmp/other-checkout"
+      ).should be_false
+
+      expect_raises(Xd::Storage::ConflictError) do
+        store.restore_selected_worktree(
+          chat_id,
+          "/tmp/stale-worktree",
+          "/tmp/original-checkout"
+        )
+      end
+      store.get_chat(chat_id).workdir.should eq("/tmp/linked-worktree")
+
+      store.delete_chat(other_id)
+      store.restore_selected_worktree(
+        chat_id,
+        "/tmp/linked-worktree",
+        "/tmp/original-checkout"
+      )
+      restored = store.get_chat(chat_id)
+      restored.workdir.should eq("/tmp/original-checkout")
+      restored.original_workdir.should be_nil
+      restored.new_worktree.should be_false
+
+      second_id = store.create_chat(
+        "folder",
+        "Second",
+        "claude",
+        workdir: "/tmp/original-checkout"
+      )
+      store.use_existing_worktree(
+        second_id,
+        "/tmp/another-linked-worktree",
+        "/tmp/original-checkout"
+      )
+      store.append_message(second_id, "user", "first")
+      expect_raises(Xd::Storage::ConflictError) do
+        store.restore_selected_worktree(
+          second_id,
+          "/tmp/another-linked-worktree",
+          "/tmp/original-checkout"
+        )
+      end
+    end
+  end
+
   it "locks workspace selection after the first message" do
     with_workflow_store do |store|
       chat_id = store.create_chat("folder", "Chat", "claude")

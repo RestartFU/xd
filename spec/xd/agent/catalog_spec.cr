@@ -25,9 +25,15 @@ describe Xd::Agent::Catalog do
     Xd::Agent::Catalog.lookup(nil).should be_nil
   end
 
-  it "offers Ultra reasoning only to Codex" do
+  it "offers backend-specific maximum reasoning efforts" do
     Xd::Agent::Catalog::CODEX.efforts.should contain(
       Xd::Agent::Effort::Ultra
+    )
+    Xd::Agent::Catalog::CODEX.efforts.should_not contain(
+      Xd::Agent::Effort::UltraCode
+    )
+    Xd::Agent::Catalog::CLAUDE.efforts.should contain(
+      Xd::Agent::Effort::UltraCode
     )
     Xd::Agent::Catalog::CLAUDE.efforts.should_not contain(
       Xd::Agent::Effort::Ultra
@@ -35,6 +41,9 @@ describe Xd::Agent::Catalog do
     Xd::Agent::Effort.from_wire("ultra")
       .should eq(Xd::Agent::Effort::Ultra)
     Xd::Agent::Effort::Ultra.wire_name.should eq("ultra")
+    Xd::Agent::Effort.from_wire("ultracode")
+      .should eq(Xd::Agent::Effort::UltraCode)
+    Xd::Agent::Effort::UltraCode.wire_name.should eq("ultracode")
   end
 
   it "builds resumable Claude arguments with access and effort" do
@@ -59,6 +68,15 @@ describe Xd::Agent::Catalog do
     resumed.each_cons(2).to_a.should contain([
       "--permission-mode",
       "acceptEdits",
+    ])
+
+    ultracode = claude.build_argv(Xd::Agent::RunSpec.new(
+      "hello",
+      effort: Xd::Agent::Effort::UltraCode
+    ))
+    ultracode.each_cons(2).to_a.should contain([
+      "--effort",
+      "ultracode",
     ])
   end
 

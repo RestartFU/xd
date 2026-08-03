@@ -137,6 +137,9 @@ module Xd
 
         tabs = Gtk::Box.new(:horizontal, 0)
         tabs.append(@bar)
+        spacer = Gtk::Box.new(:horizontal, 0)
+        spacer.hexpand = true
+        tabs.append(spacer)
         tabs.append(controls)
 
         header = Gtk::Overlay.new

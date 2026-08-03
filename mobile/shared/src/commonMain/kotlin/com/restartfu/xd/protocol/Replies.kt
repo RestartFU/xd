@@ -108,6 +108,8 @@ public data class ChatReply(
     @SerialName("linked_worktree")
     val linkedWorktree: Boolean? = null,
     val worktrees: List<WorktreeReply> = emptyList(),
+    @SerialName("selected_worktree")
+    val selectedWorktree: String? = null,
 )
 
 @Serializable
@@ -193,6 +195,13 @@ public data class FileEntryReply(
 public data class BrowseListReply(
     val ok: Boolean,
     val entries: List<FileEntryReply> = emptyList(),
+)
+
+@Serializable
+public data class DirectoryListReply(
+    val ok: Boolean,
+    val path: String = "",
+    val entries: List<String> = emptyList(),
 )
 
 @Serializable

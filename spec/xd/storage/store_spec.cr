@@ -2,6 +2,7 @@ require "../../spec_helper"
 require "file_utils"
 require "random/secure"
 require "../../../src/xd/storage/store"
+require "../../../src/xd/storage/workspaces"
 
 private def database_path : String
   File.join(
@@ -48,6 +49,47 @@ describe Xd::Storage::Store do
         )
         values.should eq({100_i64, 200_i64})
       end
+    ensure
+      remove_database(path)
+    end
+  end
+  it "persists workspace metadata in the database" do
+    path = database_path
+    root = File.join(Path[path].dirname, "Workspaces")
+    folder = Xd::Storage::WorkspaceFolder.new(
+      "stable",
+      root,
+      "Project",
+      "codex",
+      "gpt-5",
+      "/code",
+      "/repo",
+      "Use concise answers."
+    )
+
+    begin
+      store = Xd::Storage::Store.new(path)
+      store.save_workspace_folder(folder)
+      store.workspace_folder(root, "Project").should eq(folder)
+      store.close
+
+      reopened = Xd::Storage::Store.new(path)
+      reopened.workspace_folder_by_id(root, "stable").should eq(folder)
+      reopened.update_workspace_settings(
+        "stable",
+        "claude",
+        nil,
+        nil,
+        nil,
+        "Updated."
+      )
+      updated = reopened.workspace_folder(root, "Project").not_nil!
+      updated.backend.should eq("claude")
+      updated.instructions.should eq("Updated.")
+      reopened.relocate_workspace_subtree(root, "Project", "Renamed")
+      reopened.workspace_folder(root, "Renamed").not_nil!.id.should eq("stable")
+      reopened.workspace_folder(root, "Project").should be_nil
+      reopened.close
     ensure
       remove_database(path)
     end
@@ -134,6 +176,66 @@ describe Xd::Storage::Store do
         columns.should contain("original_workdir")
         columns.should contain("fast")
         columns.should contain("claude_mode")
+      end
+    ensure
+      remove_database(path)
+    end
+  end
+
+  it "creates workspace metadata while upgrading a version-21 database" do
+    path = database_path
+
+    begin
+      store = Xd::Storage::Store.new(path)
+      store.close
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        database.exec("DROP TABLE workspace_folders")
+        database.exec(
+          "UPDATE meta SET value = '21' WHERE key = 'schema_version'"
+        )
+      end
+
+      upgraded = Xd::Storage::Store.new(path)
+      upgraded.schema_version.should eq(Xd::Storage::SCHEMA_VERSION)
+      upgraded.close
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        columns = database.query_all(
+          "SELECT name FROM pragma_table_info('workspace_folders')",
+          as: String
+        )
+        columns.should contain("id")
+        columns.should contain("relative_path")
+        columns.should contain("instructions")
+      end
+    ensure
+      remove_database(path)
+    end
+  end
+
+  it "rejects databases from a newer xd version" do
+    path = database_path
+
+    begin
+      store = Xd::Storage::Store.new(path)
+      store.close
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        database.exec(
+          "UPDATE meta SET value = '23' WHERE key = 'schema_version'"
+        )
+      end
+
+      expect_raises(Xd::Storage::Error, /requires a newer xd version/) do
+        Xd::Storage::Store.new(path)
+      end
+
+      DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        version = database.query_one(
+          "SELECT value FROM meta WHERE key = 'schema_version'",
+          as: String
+        )
+        version.should eq("23")
       end
     ensure
       remove_database(path)

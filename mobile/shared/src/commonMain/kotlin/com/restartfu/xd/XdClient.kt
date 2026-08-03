@@ -7,6 +7,7 @@ import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.net.PlatformSocketFactory
 import com.restartfu.xd.protocol.DaemonUpdateReply
+import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
@@ -225,8 +226,9 @@ public class XdClient(
     public suspend fun createFolder(
         name: String,
         parentId: String? = null,
+        repository: String? = null,
     ): String {
-        val value = actor.call(Ops.newFolder(name, parentId))
+        val value = actor.call(Ops.newFolder(name, parentId, repository))
         val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)
@@ -236,6 +238,13 @@ public class XdClient(
         // soon as the creation dialog closes.
         requestTreeRefresh()
         return id
+    }
+
+    public suspend fun listDirectories(path: String? = null): DirectoryListReply {
+        val value = actor.call(Ops.listDirectories(path))
+        return actor.decodeReply(value) {
+            it.decodeReply<DirectoryListReply>()
+        }
     }
 
     public suspend fun moveFolder(

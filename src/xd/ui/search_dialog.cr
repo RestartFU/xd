@@ -17,17 +17,27 @@ module Xd
         @generation = 0_i64
         @closed = false
 
-        @dialog = Adw::Dialog.new
-        @dialog.title = "Search"
-        @dialog.content_width = 560
-        @dialog.content_height = 480
+        @window = Gtk::Window.new
+        @window.title = "Search"
+        @window.transient_for = @parent
+        @window.application = @parent.application
+        @window.destroy_with_parent = true
+        @window.modal = true
+        @window.decorated = false
+        @window.set_default_size(560, 480)
+        @window.add_css_class("xd-panel")
 
         @entry = Gtk::SearchEntry.new
         @entry.hexpand = true
-        @entry.search_changed_signal.connect { run_search }
+        @entry.search_changed_signal.connect { queue_search }
 
         header = Adw::HeaderBar.new
         header.title_widget = @entry
+        close_button = Gtk::Button.new_from_icon_name("window-close-symbolic")
+        close_button.add_css_class("flat")
+        close_button.tooltip_text = "Close"
+        close_button.clicked_signal.connect { close }
+        header.pack_end(close_button)
 
         @results = Gtk::ListBox.new
         @results.selection_mode = :none
@@ -61,19 +71,45 @@ module Xd
         toolbar = Adw::ToolbarView.new
         toolbar.add_top_bar(header)
         toolbar.content = @stack
-        @dialog.child = toolbar
-        @dialog.closed_signal.connect do
-          @closed = true
-          @on_close.call
+        @window.child = toolbar
+        @window.destroy_signal.connect { closed }
+        @window.close_request_signal.connect do
+          close
+          true
         end
+
+        keys = Gtk::EventControllerKey.new
+        keys.propagation_phase = :capture
+        keys.key_pressed_signal.connect do |keyval, _keycode, _state|
+          if keyval == Gdk::KEY_Escape
+            close
+            true
+          else
+            false
+          end
+        end
+        @window.add_controller(keys)
       end
 
       def present : Nil
-        @dialog.present(@parent)
+        @window.present
         @entry.grab_focus
       end
 
+      private def queue_search : Nil
+        return if @closed
+
+        @generation += 1
+        generation = @generation
+        GLib.timeout(150.milliseconds) do
+          run_search if !@closed && generation == @generation
+          false
+        end
+      end
+
       private def run_search : Nil
+        return if @closed
+
         clear_results
         @generation += 1
         generation = @generation
@@ -142,7 +178,19 @@ module Xd
         return unless result
 
         @on_chat.call(result[0], result[1])
-        @dialog.close
+        close
+      end
+
+      private def close : Nil
+        @window.destroy unless @closed
+      end
+
+      private def closed : Nil
+        return if @closed
+
+        @closed = true
+        @generation += 1
+        @on_close.call
       end
 
       private def show_placeholder(title : String, detail : String) : Nil

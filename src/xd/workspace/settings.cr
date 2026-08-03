@@ -3,6 +3,8 @@ require "uuid"
 
 module Xd
   module Workspace
+    # Legacy on-disk metadata. New workspace state is stored in SQLite; these
+    # files are imported once by Workspace::Service for backward compatibility.
     SETTINGS_FILE             = ".xd.json"
     LEGACY_SETTINGS_FILE      = ".hy.json"
     WORKTREE_CONTAINER_MARKER = ".xd-worktrees"

@@ -219,7 +219,7 @@ Success always includes `ok`, `title`, `backend`, `auth_state`, `commands`,
 
 Optional members: `auth_detail`, `queued` (compatibility alias for the first
 queue item), `model`, `access`, `context_used`, `context_window`, `workdir`,
-`linked_worktree`, `worktrees`.
+`linked_worktree`, `worktrees`, `selected_worktree`.
 
 A worktree is:
 
@@ -228,6 +228,11 @@ A worktree is:
 ```
 
 `branch` is absent for a detached worktree.
+
+`selected_worktree` is present only when the chat has no messages, is not
+requesting a new worktree, has an original checkout, and is currently using a
+linked worktree. Its value is the selected worktree's absolute path; clients
+may offer removal only while this member is present.
 
 When a turn is live the reply also carries its snapshot:
 
@@ -320,6 +325,19 @@ acting at once are therefore ordered by the daemon rather than racing.
 
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
 its folder's backend and model.
+
+### `new-folder`
+
+```json
+{"op":"new-folder","name":"Project","repo":"/home/user/project"}
+{"ok":true,"id":"folder-1"}
+```
+
+`name` is required and creates a top-level workspace folder unless `parent`
+contains an existing folder id. `repo` is optional; when present it must be an
+existing directory on the daemon and becomes the new folder's repository and
+fallback working directory. An explicit folder working-directory setting still
+takes precedence. The selected repository is not moved or modified.
 
 ### `move-chat`
 
@@ -416,6 +434,21 @@ desktop reads its own compiled-in catalog because it ships with the daemon; a
 separately released client must ask, since `set-option` validates the model id
 and a hard-coded list would be refused as soon as one is added or retired.
 
+### `remove-worktree`
+
+```json
+{"op":"remove-worktree","chat":"chat-1","worktree":"/absolute/path/to/worktree"}
+{"ok":true}
+```
+
+The `chat` and absolute `worktree` path are required. Only the selected linked
+worktree reported by `selected_worktree` may be removed, and the chat must not
+have any messages. The target must be a clean, registered worktree that is
+neither the repository's main checkout nor its current checkout, and no other
+chat may reference it. The daemon removes the checkout without force and keeps
+the Git branch, then returns the chat to its original checkout. A successful
+request replies with `ok` alone.
+
 ### Voice
 
 Only microphone capture belongs to the client. The daemon owns the speech model
@@ -459,6 +492,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | --- | --- | --- |
 | `tree` | — | Workspace tree changed; refetch `tree`. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
+| `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `queued` | `chat`, `queue`, `text` | Queue replaced. `text` is the first item. |
 | `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` | Composer text changed; attachments are present only when replaced. |
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |

@@ -16,6 +16,7 @@ require "./auth_dialog"
 require "./background_work"
 require "./chat_controls"
 require "./command_suggestions"
+require "./dialogs"
 require "./dots"
 require "./event_inbox"
 require "./git_actions"
@@ -129,6 +130,7 @@ module Xd
       @transcript_page : TranscriptPage?
       @follow_bottom = true
       @history_bottom_distance = -1.0
+      @programmatic_scroll = false
       @bottom_pin_tick = 0_u32
       @bottom_jump_tick = 0_u32
       @bottom_jump_upper = -1.0
@@ -289,6 +291,9 @@ module Xd
           },
           ->(backend : String, model : String) {
             set_model(backend, model)
+          },
+          ->(path : String) {
+            remove_worktree(path)
           }
         )
         @controls.widget.add_css_class("xd-composer")
@@ -1013,6 +1018,7 @@ module Xd
           clear_queue
           @follow_bottom = true
           @history_bottom_distance = -1.0
+          @controls.sensitive = false
         end
         remember_panes
         hide_panes_for_switch
@@ -1189,6 +1195,7 @@ module Xd
         append_history_button(page, total, messages.size)
         start = page.paging.start(messages.size)
         batch = TranscriptBatch(JSON::Any).new(messages, start)
+        durations = turn_durations(messages)
         GLib.idle_add do
           active = !@closed &&
                    request == @messages_request &&
@@ -1198,7 +1205,7 @@ module Xd
           if active
             batch.next_batch.each do |entry|
               index, message = entry
-              if seconds = turn_duration(messages, index)
+              if seconds = durations[index]?
                 append_worked_for(seconds)
               end
               next if message["role"].as_s == "duration"
@@ -1238,42 +1245,47 @@ module Xd
         resume_turn_recovery
       end
 
-      private def turn_duration(
+      private def turn_durations(
         messages : Array(JSON::Any),
-        position : Int,
-      ) : Int64?
-        return if position <= 0
-        before = messages[position - 1]
-        return unless before["role"].as_s == "user"
+      ) : Hash(Int32, Int64)
+        durations = {} of Int32 => Int64
+        index = 1
+        while index < messages.size
+          message = messages[index]
+          if message["role"].as_s? == "assistant" &&
+             messages[index - 1]["role"].as_s? == "user"
+            seconds : Int64? = nil
+            cursor = index
+            while cursor < messages.size
+              role = messages[cursor]["role"].as_s
+              break if role == "user"
+              if role == "duration"
+                stored = messages[cursor]["content"].as_s.to_i64?
+                seconds = stored if stored && stored >= 0
+                break
+              end
+              cursor += 1
+            end
 
-        seconds : Int64? = nil
-        (position...messages.size).each do |index|
-          at = messages[index]
-          role = at["role"].as_s
-          break if role == "user"
-          next unless role == "duration"
+            if seconds.nil?
+              last = index
+              while last < messages.size &&
+                    messages[last]["role"].as_s? == "assistant"
+                last += 1
+              end
+              last -= 1
+              started_at = messages[index - 1]["at"]?.try(&.as_i64?)
+              finished_at = messages[last]["at"]?.try(&.as_i64?)
+              if started_at && finished_at
+                seconds = finished_at - started_at
+              end
+            end
 
-          stored = at["content"].as_s.to_i64?
-          seconds = stored if stored && stored >= 0
-          break
-        end
-
-        message = messages[position]
-        if seconds.nil? && message["role"].as_s == "assistant"
-          last = message
-          (position...messages.size).each do |index|
-            at = messages[index]
-            break unless at["role"].as_s == "assistant"
-            last = at
+            durations[index] = seconds if seconds && seconds >= 1
           end
-          started_at = before["at"]?.try(&.as_i64?)
-          finished_at = last["at"]?.try(&.as_i64?)
-          if started_at && finished_at
-            seconds = finished_at - started_at
-          end
+          index += 1
         end
-
-        seconds if seconds && seconds >= 1
+        durations
       end
 
       private def append_worked_for(seconds : Int64) : Gtk::Label
@@ -2105,6 +2117,35 @@ module Xd
         end
       end
 
+      private def remove_worktree(path : String) : Nil
+        chat_id = @active_chat
+        return unless chat_id
+
+        endpoint = @client
+        Dialogs.confirm(
+          @widget,
+          "Remove Worktree",
+          "This permanently removes the clean worktree from disk. " \
+          "The Git branch is kept, and the chat returns to its original checkout.",
+          "Remove"
+        ) do
+          call_async(endpoint, {
+            "op"       => JSON::Any.new("remove-worktree"),
+            "chat"     => JSON::Any.new(chat_id),
+            "worktree" => JSON::Any.new(path),
+          }) do |_response, error|
+            next unless @client.same?(endpoint) && @active_chat == chat_id
+
+            if error
+              @status.text = error
+            else
+              @status.text = ""
+              load_chat_state(recover_turn: false)
+            end
+          end
+        end
+      end
+
       private def set_model(backend : String, model : String) : Nil
         chat_id = @active_chat
         return unless chat_id
@@ -2182,7 +2223,29 @@ module Xd
           @stream_buffer,
           monotonic_microseconds
         )
-        if frame.shown > 0
+
+        if frame.caught_up
+          # A scrolled-away live turn must not keep relaying out a wrapping
+          # label. Keep the timer alive until the user returns to the tail;
+          # the final turn-finished event still commits the buffered text.
+          return true unless @follow_bottom
+
+          row = @stream_row
+          unless row
+            row = add_message("assistant", "")
+            @stream_row = row
+            row.try { |created| created.source = @stream_source }
+          end
+          if row
+            row.set_stream_text(@stream_buffer)
+            keep_working_last
+            scroll_to_bottom
+          end
+          @stream_render_timer = 0_u32
+          return false
+        end
+
+        if frame.shown > 0 && @follow_bottom
           row = @stream_row
           unless row
             row = add_message("assistant", "")
@@ -2193,20 +2256,12 @@ module Xd
             row.set_stream_text(
               TextReveal.prefix(@stream_buffer, frame.shown)
             )
+            keep_working_last
+            scroll_to_bottom
           end
-          keep_working_last
-          scroll_to_bottom
         end
 
-        if frame.caught_up
-          # A token pause is not the end of the response. Keep one plain label
-          # alive so the next delta never tears down a Markdown widget tree.
-          @stream_row.try(&.set_stream_text(@stream_buffer))
-          @stream_render_timer = 0_u32
-          false
-        else
-          true
-        end
+        true
       end
 
       private def working_seconds : Int64
@@ -2230,9 +2285,9 @@ module Xd
 
         if animated
           update_working_label
-          # Safe mode suppresses continuous decoration redraws, including the
-          # elapsed clock, while the transcript is busy with large cards.
-          if @working_timer == 0 && !RENDER_SAFE_MODE
+          # Safe mode suppresses continuous decoration redraws, but the
+          # elapsed label still needs its low-frequency clock tick.
+          if @working_timer == 0
             @working_timer = GLib.timeout(1.second) do
               if @closed
                 @working_timer = 0_u32
@@ -2249,7 +2304,7 @@ module Xd
         end
 
         @working_dots.try do |dots|
-          dots.animated = animated
+          dots.animated = animated && !RENDER_SAFE_MODE
         end
       end
 
@@ -2748,12 +2803,16 @@ module Xd
           "document-edit-symbolic"
         )
         edit.add_css_class("flat")
+        edit.valign = :center
+        edit.vexpand = false
         edit.tooltip_text = "Edit queued message"
 
         steer = Gtk::Button.new_from_icon_name(
           "media-skip-forward-symbolic"
         )
         steer.add_css_class("flat")
+        steer.valign = :center
+        steer.vexpand = false
         steer.tooltip_text = "Send this now, interrupting the agent"
         steer.clicked_signal.connect do
           steer_queue(index, text)
@@ -2763,6 +2822,8 @@ module Xd
           "window-close-symbolic"
         )
         remove.add_css_class("flat")
+        remove.valign = :center
+        remove.vexpand = false
         remove.tooltip_text = "Discard"
         remove.clicked_signal.connect { drop_queue(index) }
 
@@ -2802,6 +2863,8 @@ module Xd
 
         save = Gtk::Button.new_from_icon_name("document-save-symbolic")
         save.add_css_class("flat")
+        save.valign = :center
+        save.vexpand = false
         save.tooltip_text = "Save queued message"
         save.clicked_signal.connect do
           save_queue_editor(row, index, old_text, editor)
@@ -2811,6 +2874,8 @@ module Xd
           "window-close-symbolic"
         )
         cancel.add_css_class("flat")
+        cancel.valign = :center
+        cancel.vexpand = false
         cancel.tooltip_text = "Cancel editing"
         cancel.clicked_signal.connect do
           populate_queue_row(row, index, old_text)
@@ -3011,6 +3076,9 @@ module Xd
             load_messages
             load_chat_state
           end
+        when "worktrees-changed"
+          return unless @client.same?(endpoint)
+          load_chat_state(recover_turn: false) if @active_chat
         when "repository-changed"
           load_chat_state(recover_turn: false) if active_event?(endpoint, event)
         when "queued"
@@ -3091,7 +3159,21 @@ module Xd
           adjustment.lower,
           adjustment.upper - adjustment.page_size
         )
-        adjustment.value = bottom if adjustment.value != bottom
+        set_scroll_value(adjustment, bottom)
+      end
+
+      private def set_scroll_value(
+        adjustment : Gtk::Adjustment,
+        value : Float64,
+      ) : Nil
+        return if adjustment.value == value
+
+        @programmatic_scroll = true
+        begin
+          adjustment.value = value
+        ensure
+          @programmatic_scroll = false
+        end
       end
 
       private def queue_bottom_pin : Nil
@@ -3147,13 +3229,15 @@ module Xd
       private def on_scroll_adjustment_changed(
         adjustment : Gtk::Adjustment,
       ) : Nil
+        return if @programmatic_scroll
+
         bottom = Math.max(
           adjustment.lower,
           adjustment.upper - adjustment.page_size
         )
 
         if @follow_bottom
-          queue_bottom_pin
+          queue_bottom_pin unless @bottom_jump_tick != 0
         elsif @history_bottom_distance >= 0
           value = Math.max(
             adjustment.lower,
@@ -3194,7 +3278,7 @@ module Xd
             page_size = adjustment.page_size
             value = Math.max(adjustment.lower, upper - distance)
             value_held = adjustment.value == value
-            adjustment.value = value unless value_held
+            set_scroll_value(adjustment, value) unless value_held
 
             if upper == @history_restore_upper &&
                page_size == @history_restore_page_size &&
@@ -3218,8 +3302,10 @@ module Xd
                       else
                         Math.max(value - 1.0, adjustment.lower)
                       end
-              adjustment.value = nudge if nudge != value
-              adjustment.value = value
+              if nudge != value
+                set_scroll_value(adjustment, nudge)
+                set_scroll_value(adjustment, value)
+              end
               @transcript_scroll.queue_draw
               @transcript_scroll.opacity = 1.0
               false

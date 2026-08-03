@@ -32,14 +32,18 @@ module Xd
       @build_button : Gtk::ToggleButton
       @plan_button : Gtk::ToggleButton
       @workspace_picker : OptionPicker
+      @remove_worktree_button : Gtk::Button
       @workspace_values = [] of Tuple(String, String?)
+      @selected_worktree : String?
       @context_meter : Gtk::ProgressBar
 
       def initialize(
         @on_option : Proc(String, String?, Nil),
         @on_model : Proc(String, String, Nil),
+        @on_remove_worktree : Proc(String, Nil),
       )
         @model = nil
+        @selected_worktree = nil
         @efforts = Agent::Catalog::CLAUDE.efforts
         @widget = Gtk::Box.new(:vertical, 2)
         @widget.add_css_class("xd-controls")
@@ -145,6 +149,19 @@ module Xd
         @workspace_picker.widget.tooltip_text =
           "Where this chat works; locked after the first message"
 
+        @remove_worktree_button = Gtk::Button.new_from_icon_name(
+          "user-trash-symbolic"
+        )
+        @remove_worktree_button.add_css_class("flat")
+        @remove_worktree_button.add_css_class("destructive-action")
+        @remove_worktree_button.tooltip_text = "Remove selected worktree"
+        @remove_worktree_button.visible = false
+        @remove_worktree_button.clicked_signal.connect do
+          if worktree = @selected_worktree
+            @on_remove_worktree.call(worktree)
+          end
+        end
+
         @context_meter = Gtk::ProgressBar.new
         @context_meter.show_text = true
         @context_meter.set_size_request(108, -1)
@@ -153,6 +170,7 @@ module Xd
         @context_meter.add_css_class("xd-context-meter")
 
         @identity.append(@workspace_picker.widget)
+        @identity.append(@remove_worktree_button)
         @identity.append(@model_picker.widget)
         @identity.append(@context_meter)
         @run.append(@effort_picker.widget)
@@ -170,6 +188,10 @@ module Xd
       end
 
       def sensitive=(enabled : Bool) : Bool
+        unless enabled
+          @selected_worktree = nil
+          @remove_worktree_button.visible = false
+        end
         @model_picker.widget.sensitive = enabled
         @effort_picker.widget.sensitive = enabled
         @fast_button.sensitive = enabled && @backend == "codex"
@@ -179,6 +201,7 @@ module Xd
         @build_button.sensitive = enabled
         @plan_button.sensitive = enabled
         @workspace_picker.widget.sensitive = enabled
+        @remove_worktree_button.sensitive = enabled && !!@selected_worktree
         enabled
       end
 
@@ -219,11 +242,14 @@ module Xd
         update_context_meter(state)
 
         new_worktree = state["new_worktree"]?.try(&.as_bool?) || false
+        @selected_worktree = state["selected_worktree"]?.try(&.as_s?)
+        @remove_worktree_button.visible = !!@selected_worktree
         build_workspace_menu(state)
         @workspace_picker.selected = new_worktree ? 1 : 0
         has_messages = state["has_messages"]?.try(&.as_bool?) || false
         self.sensitive = true
         @workspace_picker.widget.sensitive = !has_messages
+        @remove_worktree_button.sensitive = !has_messages && !!@selected_worktree
       ensure
         @updating = false
       end
@@ -247,6 +273,8 @@ module Xd
               "Very deep reasoning for difficult problems."
             when Agent::Effort::Ultra
               "Longest available reasoning for the hardest problems."
+            when Agent::Effort::UltraCode
+              "Maximum Claude Code effort for the hardest problems."
             else
               "How hard the model is asked to think."
             end

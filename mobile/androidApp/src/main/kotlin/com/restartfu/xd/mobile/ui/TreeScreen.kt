@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -30,10 +32,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,6 +46,9 @@ import com.restartfu.xd.model.ChatSummary
 import com.restartfu.xd.model.Folder
 import com.restartfu.xd.net.Link
 
+private const val MOBILE_UPDATE_URL =
+    "https://github.com/RestartFU/xd/releases/download/nightly/xd-nightly-android.apk"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TreeScreen(
@@ -49,6 +56,7 @@ internal fun TreeScreen(
     link: Link,
     openChat: (String) -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val operationError by model.error.collectAsStateWithLifecycle()
     val moving by model.moving.collectAsStateWithLifecycle()
@@ -61,7 +69,6 @@ internal fun TreeScreen(
     var choosingNew by rememberSaveable { mutableStateOf(false) }
     var choosingFolder by rememberSaveable { mutableStateOf(false) }
     var namingWorkspace by rememberSaveable { mutableStateOf(false) }
-    var updatingDaemon by rememberSaveable { mutableStateOf(false) }
     var acting by rememberSaveable { mutableStateOf<Triple<String, String, String>?>(null) }
     var actingFolder by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     var movingChat by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
@@ -82,8 +89,8 @@ internal fun TreeScreen(
             TopAppBar(
                 title = { Text("xd") },
                 actions = {
-                    TextButton(onClick = { updatingDaemon = true }) {
-                        Text("Update")
+                    TextButton(onClick = { uriHandler.openUri(MOBILE_UPDATE_URL) }) {
+                        Text("Update app")
                     }
                     TextButton(onClick = { confirmingForget = true }) {
                         Text("Forget")
@@ -236,9 +243,6 @@ internal fun TreeScreen(
             },
         )
     }
-    if (updatingDaemon) {
-        DaemonUpdateDialog(model) { updatingDaemon = false }
-    }
     if (choosingNew) {
         AlertDialog(
             onDismissRequest = { choosingNew = false },
@@ -286,10 +290,11 @@ internal fun TreeScreen(
     }
     if (namingWorkspace) {
         CreateWorkspaceDialog(
+            model = model,
             onDismiss = { namingWorkspace = false },
-            onCreate = { name ->
+            onCreate = { name, repository ->
                 namingWorkspace = false
-                model.createWorkspace(name)
+                model.createWorkspace(name, repository)
             },
         )
     }
@@ -524,10 +529,13 @@ private fun MoveDestinationDialog(
 
 @Composable
 private fun CreateWorkspaceDialog(
+    model: MainViewModel,
     onDismiss: () -> Unit,
-    onCreate: (String) -> Unit,
+    onCreate: (String, String?) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
+    var repository by rememberSaveable { mutableStateOf<String?>(null) }
+    var choosingRepository by rememberSaveable { mutableStateOf(false) }
     val cleaned = name.trim()
     val nameError = workspaceNameError(cleaned)
 
@@ -552,11 +560,29 @@ private fun CreateWorkspaceDialog(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                Text(
+                    repository ?: "No Git repository selected",
+                    modifier = Modifier.padding(top = 12.dp),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row {
+                    TextButton(onClick = { choosingRepository = true }) {
+                        Text("Choose repository")
+                    }
+                    if (repository != null) {
+                        TextButton(onClick = { repository = null }) {
+                            Text("Clear")
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onCreate(cleaned) },
+                onClick = { onCreate(cleaned, repository) },
                 enabled = cleaned.isNotEmpty() && nameError == null,
             ) { Text("Create") }
         },
@@ -564,6 +590,127 @@ private fun CreateWorkspaceDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+
+    if (choosingRepository) {
+        RepositoryPickerDialog(
+            model = model,
+            onDismiss = { choosingRepository = false },
+            onChoose = {
+                repository = it
+                choosingRepository = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun RepositoryPickerDialog(
+    model: MainViewModel,
+    onDismiss: () -> Unit,
+    onChoose: (String) -> Unit,
+) {
+    var requestedPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var currentPath by rememberSaveable { mutableStateOf("") }
+    var entries by remember { mutableStateOf(emptyList<String>()) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(requestedPath) {
+        loading = true
+        error = null
+        try {
+            val result = model.client.listDirectories(requestedPath)
+            currentPath = result.path
+            entries = result.entries
+        } catch (failure: Throwable) {
+            error = failure.message ?: "Could not list that directory"
+            entries = emptyList()
+        } finally {
+            loading = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose Git repository") },
+        text = {
+            Column {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        currentPath.ifBlank { "Loading…" },
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    parentDirectory(currentPath)?.let { parent ->
+                        TextButton(
+                            onClick = { requestedPath = parent },
+                            enabled = !loading,
+                        ) { Text("Up") }
+                    }
+                }
+                error?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(vertical = 20.dp),
+                    )
+                } else if (entries.isEmpty()) {
+                    Text(
+                        "No subfolders are available.",
+                        modifier = Modifier.padding(vertical = 20.dp),
+                    )
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                        items(entries, key = { it }) { entry ->
+                            Text(
+                                entry,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        requestedPath = joinDirectory(currentPath, entry)
+                                    }
+                                    .padding(vertical = 12.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onChoose(currentPath) },
+                enabled = !loading && currentPath.isNotBlank(),
+            ) { Text("Use this folder") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+private fun joinDirectory(parent: String, child: String): String = when {
+    parent.endsWith('/') || parent.endsWith('\\') -> parent + child
+    else -> "$parent/$child"
+}
+
+private fun parentDirectory(path: String): String? {
+    if (path.isBlank()) return null
+    val trimmed = path.trimEnd('/', '\\')
+    if (trimmed.isEmpty()) return path.take(1)
+    val separator = maxOf(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+    if (separator < 0) return null
+    if (separator == 0) return trimmed.substring(0, 1)
+    if (separator == 2 && trimmed.getOrNull(1) == ':') {
+        return trimmed.substring(0, 3)
+    }
+    return trimmed.substring(0, separator)
 }
 
 private fun workspaceNameError(name: String): String? = when {

@@ -88,6 +88,7 @@ module Xd
           Effort::XHigh,
           Effort::Max,
         ]
+        values << Effort::UltraCode if @id == "claude"
         values << Effort::Ultra if @id == "codex"
         values
       end
