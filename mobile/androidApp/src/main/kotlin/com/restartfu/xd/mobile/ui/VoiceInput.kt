@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -23,8 +24,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.restartfu.xd.mobile.R
 import com.restartfu.xd.voice.VoiceSession
 import com.restartfu.xd.voice.VoiceState
 
@@ -68,7 +71,12 @@ internal fun VoiceButton(voice: VoiceSession) {
                     request.launch(Manifest.permission.RECORD_AUDIO)
                 }
             },
-        ) { Text("🎤", style = MaterialTheme.typography.titleMedium) }
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_mic),
+                contentDescription = "Dictate",
+            )
+        }
     }
 }
 
