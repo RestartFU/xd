@@ -94,9 +94,12 @@ module Xd
         bytesize : Int32,
         preview : ImageAttachment::Pixels
 
-      MAX_IMAGES                = 4
-      MAX_IMAGE_BYTES           = 10 * 1024 * 1024
-      MAX_TOTAL_BYTES           = 20 * 1024 * 1024
+      MAX_IMAGES      = 4
+      MAX_IMAGE_BYTES = 10 * 1024 * 1024
+      MAX_TOTAL_BYTES = 20 * 1024 * 1024
+      # About a second and a half at 60Hz, after which a transcript is shown
+      # whatever the daemon is or is not doing.
+      BOTTOM_JUMP_FRAME_LIMIT   =  90
       QUEUE_RENDER_BATCH        =   8
       QUEUE_RETIRE_BATCH        =   8
       TURN_RECOVERY_EVENT_BATCH =  32
@@ -141,6 +144,7 @@ module Xd
       @bottom_jump_upper = -1.0
       @bottom_jump_page_size = -1.0
       @bottom_jump_stable_frames = 0
+      @bottom_jump_frames = 0
       @history_restore_tick = 0_u32
       @history_restore_upper = -1.0
       @history_restore_page_size = -1.0
@@ -3180,6 +3184,7 @@ module Xd
         @bottom_jump_upper = -1.0
         @bottom_jump_page_size = -1.0
         @bottom_jump_stable_frames = 0
+        @bottom_jump_frames = 0
         @transcript_scroll.opacity = 0.0
         return unless @bottom_jump_tick == 0
 
@@ -3197,8 +3202,18 @@ module Xd
           end
           @bottom_jump_upper = upper
           @bottom_jump_page_size = page_size
+          @bottom_jump_frames += 1
 
-          if @bottom_jump_stable_frames >= 2
+          # An empty transcript is stable immediately, so opening a chat would
+          # otherwise show it -- blank, or holding what was there last time --
+          # for the moment before its messages arrive, and then rebuild it. Wait
+          # for the messages this jump is being made for. The frame limit is for
+          # a daemon that never answers: a chat kept invisible forever is worse
+          # than one that flickers.
+          settled = @bottom_jump_stable_frames >= 2 &&
+                    (@history_request.nil? ||
+                     @bottom_jump_frames >= BOTTOM_JUMP_FRAME_LIMIT)
+          if settled
             @bottom_jump_tick = 0_u32
             @transcript_scroll.queue_draw
             @transcript_scroll.opacity = 1.0
