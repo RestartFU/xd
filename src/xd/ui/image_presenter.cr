@@ -54,6 +54,10 @@ module Xd
         button.halign = :start
         button.valign = :start
         button.tooltip_text = "Open image"
+        # An open hand over the picture. The arrow says nothing about it being
+        # a thing to pick up and look at closely, and the tooltip only says so
+        # after a wait.
+        button.cursor_from_name = "grab"
         button.clicked_signal.connect do
           open(endpoint, path, button)
         end
