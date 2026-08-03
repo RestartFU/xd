@@ -72,7 +72,7 @@ RUN apt-get update \
       libvte-2.91-gtk4-dev \
  && rm -rf /var/lib/apt/lists/*
 
-FROM crystal-toolchain AS crystal
+FROM crystal-toolchain AS crystal-source
 
 ARG PROFILE=default
 ARG COMMIT=
@@ -90,10 +90,27 @@ COPY tests/fixtures ./tests/fixtures
 COPY scripts/stage-native.sh ./scripts/stage-native.sh
 COPY data ./data
 
-RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
- && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+RUN test "$PROFILE" = default || test "$PROFILE" = nightly
+
+# The suite, the loopback suite and the release binary each compile the whole
+# program, and none of them needs the others' output. As separate stages the
+# builder runs them at once, so a run costs the longest of the three rather
+# than the sum. The binary still waits on both suites below.
+FROM crystal-source AS crystal-specs
+
+ARG PROFILE=default
+ARG COMMIT=
+
+RUN XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec --error-trace \
- && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
+ && touch /specs-passed
+
+FROM crystal-source AS crystal-loopback-specs
+
+ARG PROFILE=default
+ARG COMMIT=
+
+RUN XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal spec \
         spec/xd/daemon/local_ipc_spec.cr \
         spec/xd/daemon/local_connection_spec.cr \
@@ -103,10 +120,22 @@ RUN test "$PROFILE" = default || test "$PROFILE" = nightly \
         spec/xd/daemon/transport_parity_spec.cr \
         spec/xd/ui/runtime_spec.cr \
         -Dxd_loopback_local --error-trace \
- && mkdir -p /crystal-build \
+ && touch /loopback-specs-passed
+
+FROM crystal-source AS crystal
+
+ARG PROFILE=default
+ARG COMMIT=
+
+RUN mkdir -p /crystal-build \
  && XD_BUILD_PROFILE="$PROFILE" XD_BUILD_COMMIT="$COMMIT" \
       crystal build src/xd.cr --release --no-debug -o /crystal-build/xd \
  && /crystal-build/xd --version
+
+# Nothing is bundled from a commit whose suites did not pass: these make the
+# binary depend on them, whichever target is asked for.
+COPY --from=crystal-specs /specs-passed /specs-passed
+COPY --from=crystal-loopback-specs /loopback-specs-passed /loopback-specs-passed
 
 # --- bundled agent CLIs ----------------------------------------------------
 #

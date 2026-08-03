@@ -36,35 +36,52 @@ for command in cc curl make shasum tar; do
   }
 done
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-git.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# Compiling Git is most of a macOS run, and it depends on nothing but the
+# version pinned above.
+. "$(dirname "$0")/payload-cache.sh"
+CACHE_KEY="macos-arm64-git-$GIT_VERSION"
 
-curl --fail --location --silent --show-error \
-  "$GIT_URL" --output "$WORK/git.tar.xz"
-printf '%s  %s\n' "$GIT_SHA256" "$WORK/git.tar.xz" |
-  shasum -a 256 --check
-mkdir "$WORK/source"
-tar -xJf "$WORK/git.tar.xz" -C "$WORK/source" --strip-components=1
+build_git()
+{
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-git.XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT INT TERM
 
-jobs=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')
-flags='prefix=/ RUNTIME_PREFIX=YesPlease HAVE_NS_GET_EXECUTABLE_PATH=YesPlease'
-flags="$flags NO_OPENSSL=YesPlease APPLE_COMMON_CRYPTO=YesPlease"
-flags="$flags NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease"
-flags="$flags NO_PYTHON=YesPlease NO_EXPAT=YesPlease"
+  curl --fail --location --silent --show-error \
+    "$GIT_URL" --output "$WORK/git.tar.xz"
+  printf '%s  %s\n' "$GIT_SHA256" "$WORK/git.tar.xz" |
+    shasum -a 256 --check
+  mkdir "$WORK/source"
+  tar -xJf "$WORK/git.tar.xz" -C "$WORK/source" --strip-components=1
 
-# Word splitting is intentional: each entry above is one Make variable.
-# shellcheck disable=SC2086
-make -C "$WORK/source" -j"$jobs" $flags all
-# shellcheck disable=SC2086
-make -C "$WORK/source" $flags DESTDIR="$STAGE/git" install
+  jobs=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')
+  flags='prefix=/ RUNTIME_PREFIX=YesPlease HAVE_NS_GET_EXECUTABLE_PATH=YesPlease'
+  flags="$flags NO_OPENSSL=YesPlease APPLE_COMMON_CRYPTO=YesPlease"
+  flags="$flags NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease"
+  flags="$flags NO_PYTHON=YesPlease NO_EXPAT=YesPlease"
 
-mkdir -p "$STAGE/git/ssl/certs"
-curl --fail --location --silent --show-error \
-  "$CA_URL" --output "$STAGE/git/ssl/certs/ca-bundle.crt"
-printf '%s  %s\n' \
-  "$CA_SHA256" "$STAGE/git/ssl/certs/ca-bundle.crt" |
-  shasum -a 256 --check
+  # Word splitting is intentional: each entry above is one Make variable.
+  # shellcheck disable=SC2086
+  make -C "$WORK/source" -j"$jobs" $flags all
+  # shellcheck disable=SC2086
+  make -C "$WORK/source" $flags DESTDIR="$STAGE/git" install
 
+  mkdir -p "$STAGE/git/ssl/certs"
+  curl --fail --location --silent --show-error \
+    "$CA_URL" --output "$STAGE/git/ssl/certs/ca-bundle.crt"
+  printf '%s  %s\n' \
+    "$CA_SHA256" "$STAGE/git/ssl/certs/ca-bundle.crt" |
+    shasum -a 256 --check
+}
+
+if payload_cached "$CACHE_KEY"; then
+  payload_restore "$CACHE_KEY" "$STAGE"
+else
+  build_git
+  payload_store "$CACHE_KEY" "$STAGE" git
+fi
+
+# Whether it was just built or restored: a cache that no longer holds a working
+# Git has to fail here rather than be bundled.
 "$STAGE/git/bin/git" --version | grep -F "git version $GIT_VERSION"
 actual_exec_path=$("$STAGE/git/bin/git" --exec-path)
 test -d "$actual_exec_path"

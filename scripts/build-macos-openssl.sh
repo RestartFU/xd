@@ -31,38 +31,54 @@ for command in cc curl make perl shasum tar; do
   }
 done
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-openssl.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# Building OpenSSL depends on nothing but the version pinned above, so a run
+# that has one already has no reason to build it again.
+. "$(dirname "$0")/payload-cache.sh"
+CACHE_KEY="macos-arm64-openssl-$OPENSSL_VERSION"
 
-curl --fail --location --silent --show-error \
-  "$OPENSSL_URL" --output "$WORK/openssl.tar.gz"
-printf '%s  %s\n' "$OPENSSL_SHA256" "$WORK/openssl.tar.gz" |
-  shasum -a 256 --check
-mkdir "$WORK/source"
-tar -xzf "$WORK/openssl.tar.gz" \
-  -C "$WORK/source" --strip-components=1
+build_openssl()
+{
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-openssl.XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT INT TERM
 
-(
-  cd "$WORK/source"
-  ./Configure \
-    darwin64-arm64-cc \
-    no-shared \
-    no-module \
-    no-tests \
-    --prefix=/ \
-    --openssldir=/etc/ssl
-  jobs=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')
-  make -j"$jobs" build_sw
-  make DESTDIR="$WORK/install" install_sw
-  make DESTDIR="$WORK/install" install_ssldirs
-)
+  curl --fail --location --silent --show-error \
+    "$OPENSSL_URL" --output "$WORK/openssl.tar.gz"
+  printf '%s  %s\n' "$OPENSSL_SHA256" "$WORK/openssl.tar.gz" |
+    shasum -a 256 --check
+  mkdir "$WORK/source"
+  tar -xzf "$WORK/openssl.tar.gz" \
+    -C "$WORK/source" --strip-components=1
 
-mkdir -p "$STAGE/libexec" "$STAGE/etc/ssl"
-install -m0755 "$WORK/install/bin/openssl" "$STAGE/libexec/openssl"
-install -m0644 \
-  "$WORK/install/etc/ssl/openssl.cnf" \
-  "$STAGE/etc/ssl/openssl.cnf"
+  (
+    cd "$WORK/source"
+    ./Configure \
+      darwin64-arm64-cc \
+      no-shared \
+      no-module \
+      no-tests \
+      --prefix=/ \
+      --openssldir=/etc/ssl
+    jobs=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '4')
+    make -j"$jobs" build_sw
+    make DESTDIR="$WORK/install" install_sw
+    make DESTDIR="$WORK/install" install_ssldirs
+  )
 
+  mkdir -p "$STAGE/libexec" "$STAGE/etc/ssl"
+  install -m0755 "$WORK/install/bin/openssl" "$STAGE/libexec/openssl"
+  install -m0644 \
+    "$WORK/install/etc/ssl/openssl.cnf" \
+    "$STAGE/etc/ssl/openssl.cnf"
+}
+
+if payload_cached "$CACHE_KEY"; then
+  payload_restore "$CACHE_KEY" "$STAGE"
+else
+  build_openssl
+  payload_store "$CACHE_KEY" "$STAGE" libexec/openssl etc/ssl/openssl.cnf
+fi
+
+# Built or restored, it has to be the version this bundle expects.
 OPENSSL_CONF="$STAGE/etc/ssl/openssl.cnf" \
   "$STAGE/libexec/openssl" version |
   grep -F "OpenSSL $OPENSSL_VERSION"

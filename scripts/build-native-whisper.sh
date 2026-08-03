@@ -51,32 +51,49 @@ checksum()
   fi
 }
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-native-whisper.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# Compiling whisper.cpp depends on nothing but the version pinned above and
+# the platform, both of which are in the key.
+. "$(dirname "$0")/payload-cache.sh"
+CACHE_KEY="$PLATFORM-whisper-$WHISPER_VERSION"
 
-curl --fail --location --silent --show-error \
-  "$WHISPER_URL" --output "$WORK/whisper.tar.gz"
-checksum "$WHISPER_SHA256" "$WORK/whisper.tar.gz"
-mkdir "$WORK/source"
-tar -xzf "$WORK/whisper.tar.gz" \
-  -C "$WORK/source" --strip-components=1
+build_whisper()
+{
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-native-whisper.XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT INT TERM
 
-cmake -S "$WORK/source" -B "$WORK/build" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DWHISPER_BUILD_TESTS=OFF \
-  -DWHISPER_BUILD_EXAMPLES=ON \
-  -DWHISPER_BUILD_SERVER=OFF \
-  -DGGML_NATIVE=OFF \
-  -DGGML_BACKEND_DL=OFF \
-  -DGGML_OPENMP=OFF \
-  -DGGML_CCACHE=OFF
-cmake --build "$WORK/build" --target whisper-cli --parallel
+  curl --fail --location --silent --show-error \
+    "$WHISPER_URL" --output "$WORK/whisper.tar.gz"
+  checksum "$WHISPER_SHA256" "$WORK/whisper.tar.gz"
+  mkdir "$WORK/source"
+  tar -xzf "$WORK/whisper.tar.gz" \
+    -C "$WORK/source" --strip-components=1
 
-mkdir -p "$STAGE/libexec"
-install -m0755 \
-  "$WORK/build/bin/$BUILT_NAME" \
-  "$STAGE/libexec/$EXECUTABLE"
+  cmake -S "$WORK/source" -B "$WORK/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DWHISPER_BUILD_TESTS=OFF \
+    -DWHISPER_BUILD_EXAMPLES=ON \
+    -DWHISPER_BUILD_SERVER=OFF \
+    -DGGML_NATIVE=OFF \
+    -DGGML_BACKEND_DL=OFF \
+    -DGGML_OPENMP=OFF \
+    -DGGML_CCACHE=OFF
+  cmake --build "$WORK/build" --target whisper-cli --parallel
+
+  mkdir -p "$STAGE/libexec"
+  install -m0755 \
+    "$WORK/build/bin/$BUILT_NAME" \
+    "$STAGE/libexec/$EXECUTABLE"
+}
+
+if payload_cached "$CACHE_KEY"; then
+  payload_restore "$CACHE_KEY" "$STAGE"
+else
+  build_whisper
+  payload_store "$CACHE_KEY" "$STAGE" "libexec/$EXECUTABLE"
+fi
+
+# Built or restored, it has to run.
 "$STAGE/libexec/$EXECUTABLE" --help >/dev/null
 
 printf 'native whisper.cpp: %s\n' "$WHISPER_VERSION"

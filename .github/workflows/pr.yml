@@ -59,6 +59,9 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          # The toolchain and GTK stack are a two-minute download every run
+          # otherwise, and they only change when this list does.
+          cache: true
           install: >-
             git
             unzip
@@ -74,9 +77,23 @@ jobs:
             mingw-w64-ucrt-x86_64-librsvg
             mingw-w64-ucrt-x86_64-portaudio
 
+      # whisper.cpp is compiled from a pinned tag; see the macOS job.
+      - uses: actions/cache@v4
+        with:
+          path: .payload-cache
+          key: >-
+            payloads-windows-x86_64-${{ hashFiles(
+            'scripts/build-native-whisper.sh',
+            'scripts/payload-cache.sh') }}
+          restore-keys: payloads-windows-x86_64-
+
       - name: Build the complete Windows payload
         shell: msys2 {0}
-        run: ./scripts/build-windows.sh "$PWD/windows-dist" nightly
+        run: |
+          # msys2 needs a Unix path; the workspace one is a drive path.
+          XD_PAYLOAD_CACHE="$(cygpath -u "$GITHUB_WORKSPACE")/.payload-cache"
+          export XD_PAYLOAD_CACHE
+          ./scripts/build-windows.sh "$PWD/windows-dist" nightly
 
       - name: Build the MSI
         shell: pwsh
@@ -96,6 +113,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install native build dependencies
+        env:
+          # No `brew update` first: the formulae this needs are pinned by the
+          # runner image and updating costs more than it can save here.
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
         run: >-
           brew install
           crystal
@@ -111,5 +133,22 @@ jobs:
           librsvg
           cmake
 
+      # Git, OpenSSL and whisper.cpp are pinned by version and compiled the same
+      # way every run, which is most of this job. Keyed on the scripts that
+      # build them; each entry inside is keyed on its own version, so a partial
+      # hit is still safe.
+      - uses: actions/cache@v4
+        with:
+          path: .payload-cache
+          key: >-
+            payloads-macos-arm64-${{ hashFiles(
+            'scripts/build-macos-git.sh',
+            'scripts/build-macos-openssl.sh',
+            'scripts/build-native-whisper.sh',
+            'scripts/payload-cache.sh') }}
+          restore-keys: payloads-macos-arm64-
+
       - name: Build the complete macOS app
+        env:
+          XD_PAYLOAD_CACHE: ${{ github.workspace }}/.payload-cache
         run: ./scripts/build-macos.sh "$PWD/macos-dist" nightly
