@@ -1469,9 +1469,12 @@ module Xd
 
         detail = Gtk::Label.new(task)
         detail.xalign = 0_f32
-        detail.wrap = true
-        detail.wrap_mode = :word_char
-        detail.selectable = true
+        # Keep card headers single-line so a run of subagents does not make
+        # GTK repeatedly perform height-for-width Pango measurement. The full
+        # task remains available as a tooltip.
+        detail.ellipsize = :end
+        detail.max_width_chars = 100
+        detail.tooltip_text = task
         detail.add_css_class("xd-body")
 
         card = Gtk::Box.new(:vertical, 6)
@@ -1641,7 +1644,6 @@ module Xd
           request["attachments"] = JSON::Any.new(encoded)
         end
 
-        begin_bottom_jump
         @send_pending = true
         update_send_button
         call_async(endpoint, request) do |response, error|
@@ -1661,11 +1663,12 @@ module Xd
               @entry.buffer.text = ""
               clear_attachments
             end
-            if response["queued"]?.try(&.as_bool?) == true
+            if QueuePresentation.reload_after_send?(response)
+              load_messages
+              load_chat_state
+            else
               @status.text = "Message queued"
             end
-            load_messages
-            load_chat_state
           end
         end
       end
@@ -2048,9 +2051,9 @@ module Xd
 
         if animated
           update_working_label
-          # Safe mode suppresses continuous decoration redraws, but the
-          # elapsed label still needs its low-frequency clock tick.
-          if @working_timer == 0
+          # Safe mode suppresses continuous decoration redraws, including the
+          # elapsed clock, while the transcript is busy with large cards.
+          if @working_timer == 0 && !RENDER_SAFE_MODE
             @working_timer = GLib.timeout(1.second) do
               if @closed
                 @working_timer = 0_u32
@@ -2067,7 +2070,7 @@ module Xd
         end
 
         @working_dots.try do |dots|
-          dots.animated = animated && !RENDER_SAFE_MODE
+          dots.animated = animated
         end
       end
 
@@ -2539,6 +2542,17 @@ module Xd
       end
 
       private def queue_row(index : Int, text : String) : Gtk::Box
+        row = Gtk::Box.new(:horizontal, 6)
+        populate_queue_row(row, index, text)
+        row
+      end
+
+      private def populate_queue_row(
+        row : Gtk::Box,
+        index : Int,
+        text : String,
+      ) : Nil
+        clear(row)
         icon = Gtk::Image.new_from_icon_name("document-send-symbolic")
         label = Gtk::Label.new(text)
         label.xalign = 0_f32
@@ -2568,7 +2582,6 @@ module Xd
         remove.tooltip_text = "Discard"
         remove.clicked_signal.connect { drop_queue(index) }
 
-        row = Gtk::Box.new(:horizontal, 6)
         edit.clicked_signal.connect do
           show_queue_editor(row, index, text)
         end
@@ -2577,7 +2590,6 @@ module Xd
         row.append(edit)
         row.append(steer)
         row.append(remove)
-        row
       end
 
       private def show_queue_editor(
@@ -2608,7 +2620,7 @@ module Xd
         save.add_css_class("flat")
         save.tooltip_text = "Save queued message"
         save.clicked_signal.connect do
-          save_queue_editor(index, old_text, editor)
+          save_queue_editor(row, index, old_text, editor)
         end
 
         cancel = Gtk::Button.new_from_icon_name(
@@ -2616,17 +2628,19 @@ module Xd
         )
         cancel.add_css_class("flat")
         cancel.tooltip_text = "Cancel editing"
-        cancel.clicked_signal.connect { load_chat_state }
+        cancel.clicked_signal.connect do
+          populate_queue_row(row, index, old_text)
+        end
 
         keys = Gtk::EventControllerKey.new
         keys.key_pressed_signal.connect do |keyval, _keycode, state|
           if keyval == Gdk::KEY_Escape
-            load_chat_state
+            populate_queue_row(row, index, old_text)
             true
           elsif (keyval == Gdk::KEY_Return ||
                 keyval == Gdk::KEY_KP_Enter) &&
                 !state.includes?(Gdk::ModifierType::ShiftMask)
-            save_queue_editor(index, old_text, editor)
+            save_queue_editor(row, index, old_text, editor)
             true
           else
             false
@@ -2642,13 +2656,17 @@ module Xd
       end
 
       private def save_queue_editor(
+        row : Gtk::Box,
         index : Int,
         old_text : String,
         editor : Gtk::TextView,
       ) : Nil
         text = editor.buffer.text.strip
         return if text.empty?
-        return load_chat_state if text == old_text
+        if text == old_text
+          populate_queue_row(row, index, old_text)
+          return
+        end
 
         edit_queue(index, old_text, text)
       end
@@ -2675,13 +2693,8 @@ module Xd
           "op"    => JSON::Any.new("drop-queue"),
           "chat"  => JSON::Any.new(chat_id),
           "index" => JSON::Any.new(index.to_i64),
-        }) do |response, error|
-          if error
-            @status.text = error if @client.same?(endpoint)
-          elsif response && @client.same?(endpoint) &&
-                @active_chat == chat_id
-            load_chat_state(recover_turn: false)
-          end
+        }) do |_response, error|
+          @status.text = error if error && @client.same?(endpoint)
         end
       end
 
@@ -2699,13 +2712,8 @@ module Xd
           "index"    => JSON::Any.new(index.to_i64),
           "old-text" => JSON::Any.new(old_text),
           "text"     => JSON::Any.new(text),
-        }) do |response, error|
-          if error
-            @status.text = error if @client.same?(endpoint)
-          elsif response && @client.same?(endpoint) &&
-                @active_chat == chat_id
-            load_chat_state(recover_turn: false)
-          end
+        }) do |_response, error|
+          @status.text = error if error && @client.same?(endpoint)
         end
       end
 
@@ -2823,9 +2831,9 @@ module Xd
           load_chat_state(recover_turn: false) if active_event?(endpoint, event)
         when "queued"
           return unless active_event?(endpoint, event)
-          queue = event["queue"]?.try(&.as_a?)
-          @status.text = queue && !queue.empty? ? "Message queued" : ""
-          load_chat_state(recover_turn: false)
+          queue = QueuePresentation.event_queue(event) || return
+          @status.text = queue.empty? ? "" : "Message queued"
+          render_queue(queue)
         when "agent-auth-changed"
           return unless @client.same?(endpoint)
           return unless event["provider"]?.try(&.as_s?) == @chat_backend

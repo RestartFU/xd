@@ -426,6 +426,12 @@ module Xd
       .xd-status-done { background-color: @success_color; }
       .xd-offline { color: @error_color; }
       .xd-sidebar listview { padding-top: 0.5em; }
+      /* Symbolic icons inherit the selected row's accent colour by default.
+         Keep the monochrome OpenAI mark neutral in every GTK theme/state. */
+      .xd-sidebar .xd-backend-codex,
+      .xd-sidebar row:selected .xd-backend-codex {
+        color: #bebebe;
+      }
       .xd-inline-entry { min-height: 0; padding: 0 4px; }
       .xd-sidebar-row-action {
         min-width: 20px;

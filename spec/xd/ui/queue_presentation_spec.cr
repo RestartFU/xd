@@ -21,4 +21,31 @@ describe Xd::UI::QueuePresentation do
     plan.rows.should eq(["one", "two"])
     plan.hidden.should eq(0)
   end
+
+  it "uses queued events as incremental queue snapshots" do
+    queue = [JSON::Any.new("next")]
+    event = {
+      "event" => JSON::Any.new("queued"),
+      "queue" => JSON::Any.new(queue),
+    }
+
+    Xd::UI::QueuePresentation.event_queue(event).should eq(queue)
+    Xd::UI::QueuePresentation.event_queue({
+      "event" => JSON::Any.new("queued"),
+    }).should be_nil
+    Xd::UI::QueuePresentation.event_queue({
+      "queue" => JSON::Any.new("invalid"),
+    }).should be_nil
+  end
+
+  it "reloads the transcript only when a send starts a turn" do
+    queued = {"queued" => JSON::Any.new(true)}
+    started = {"queued" => JSON::Any.new(false)}
+
+    Xd::UI::QueuePresentation.reload_after_send?(queued).should be_false
+    Xd::UI::QueuePresentation.reload_after_send?(started).should be_true
+    Xd::UI::QueuePresentation.reload_after_send?(
+      {} of String => JSON::Any
+    ).should be_true
+  end
 end

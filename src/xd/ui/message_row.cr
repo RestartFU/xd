@@ -1,4 +1,5 @@
 require "gtk4"
+require "../agent/assistant_sections"
 require "../markdown"
 require "./adw"
 require "./background_work"
@@ -114,7 +115,7 @@ module Xd
           @body.append(label)
           @stream_label = label
         end
-        label.text = @text
+        label.text = Agent::AssistantSections.stream(text)
       end
 
       private def render_body : Nil
@@ -160,8 +161,20 @@ module Xd
 
             clear_body if index == 0
             if part = parts[index]?
-              append_prepared_part(part)
-              index += 1
+              if part.section.analysis?
+                section_id = part.section_id
+                analysis_parts = [] of PreparedMessagePart
+                while candidate = parts[index]?
+                  break unless candidate.section.analysis? &&
+                                candidate.section_id == section_id
+                  analysis_parts << candidate
+                  index += 1
+                end
+                append_analysis_block(analysis_parts, generation)
+              else
+                append_prepared_part(part, @body)
+                index += 1
+              end
             end
             index < parts.size
           end
@@ -177,25 +190,62 @@ module Xd
         end
       end
 
-      private def append_prepared_part(part : PreparedMessagePart) : Nil
+      private def append_prepared_part(
+        part : PreparedMessagePart,
+        target : Gtk::Box,
+      ) : Nil
         case part.kind
         when MessagePartKind::Prose
-          append_prose(part.markup || part.text)
+          append_prose(target, part.markup || part.text)
         when MessagePartKind::Code
-          @body.append(make_code_card(part.text, false, true))
+          target.append(make_code_card(part.text, false, true))
         when MessagePartKind::Diff
-          @body.append(make_code_card(part.text, true, false))
+          target.append(make_code_card(part.text, true, false))
         when MessagePartKind::Table
-          @body.append(make_code_card(part.text, false, false))
+          target.append(make_code_card(part.text, false, false))
         end
       end
 
+      private def append_analysis_block(
+        parts : Array(PreparedMessagePart),
+        generation : Int64,
+      ) : Nil
+        expander = Gtk::Expander.new("Analysis")
+        expander.expanded = false
+        expander.add_css_class("dim-label")
+        loaded = false
+        expander.notify_signal["expanded"].connect do |_property|
+          unless @render_generation == generation
+            next
+          end
+
+          if expander.expanded?
+            next if loaded
+            box = Gtk::Box.new(:vertical, 8)
+            box.margin_start = 12
+            parts.each do |part|
+              append_prepared_part(part, box)
+            end
+            expander.child = box
+            loaded = true
+          else
+            expander.child = nil
+            loaded = false
+          end
+        end
+        @body.append(expander)
+      end
+
       private def append_prose(markup : String) : Nil
+        append_prose(@body, markup)
+      end
+
+      private def append_prose(target : Gtk::Box, markup : String) : Nil
         return if markup.empty?
 
         label = make_text_label
         label.markup = markup
-        @body.append(label)
+        target.append(label)
       end
 
       private def make_code_card(

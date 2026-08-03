@@ -17,6 +17,14 @@ module Xd
         visible.times { |index| rows << queue[index].as_s }
         Plan.new(rows, Math.max(queue.size - visible, 0).to_i32)
       end
+
+      def event_queue(event : Hash(String, JSON::Any)) : Array(JSON::Any)?
+        event["queue"]?.try(&.as_a?)
+      end
+
+      def reload_after_send?(response : Hash(String, JSON::Any)) : Bool
+        response["queued"]?.try(&.as_bool?) != true
+      end
     end
   end
 end
