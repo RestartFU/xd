@@ -38,6 +38,8 @@ module Xd
       SetFolderContext
       FolderSettings
       SetFolderSettings
+      Shortcuts
+      SetShortcuts
       NewChat
       RenameChat
       MoveChat
@@ -100,6 +102,8 @@ module Xd
         when SetFolderContext   then "set-folder-context"
         when FolderSettings     then "folder-settings"
         when SetFolderSettings  then "set-folder-settings"
+        when Shortcuts          then "shortcuts"
+        when SetShortcuts       then "set-shortcuts"
         when NewChat            then "new-chat"
         when RenameChat         then "rename-chat"
         when MoveChat           then "move-chat"
@@ -165,6 +169,8 @@ module Xd
         when "set-folder-context"   then SetFolderContext
         when "folder-settings"      then FolderSettings
         when "set-folder-settings"  then SetFolderSettings
+        when "shortcuts"            then Shortcuts
+        when "set-shortcuts"        then SetShortcuts
         when "new-chat"             then NewChat
         when "rename-chat"          then RenameChat
         when "move-chat"            then MoveChat

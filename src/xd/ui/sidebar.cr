@@ -18,6 +18,7 @@ require "./workspace_create_dialog"
 require "./idle_queue"
 require "./git_writing_settings"
 require "./share_dialog"
+require "./shortcut_dialog"
 require "./sidebar_state"
 require "./updater"
 
@@ -285,7 +286,10 @@ module Xd
         @local_source = Source.new(local, false)
         @remote_source = Source.new(@remote, true)
         @settings = Gio::Settings.new(APP_ID)
-        @git_writing_settings = GitWritingSettings.new(@parent)
+        @git_writing_settings = GitWritingSettings.new(
+          @parent,
+          -> { shortcuts_dialog(@local_source, nil, "Global Shortcuts") }
+        )
         @expanded = Set(String).new(@settings.strv("expanded-folders"))
         @nodes = {} of String => Node
         @row_widgets = {} of UInt64 => RowWidgets
@@ -1650,6 +1654,11 @@ module Xd
           dialogs(node.source).secrets
         end
         add_menu_action(
+          menu, actions, popover, "Global Shortcuts…", "shortcuts"
+        ) do
+          shortcuts_dialog(node.source, nil, "Global Shortcuts")
+        end
+        add_menu_action(
           menu, actions, popover, "Assistant Accounts…", "accounts"
         ) do
           auth(node.source, node.name)
@@ -1701,6 +1710,15 @@ module Xd
           dialogs(source).secrets(
             folder_id,
             source.folder_names[folder_id]
+          )
+        end
+        add_menu_action(
+          menu, actions, popover, "Prompt Shortcuts…", "shortcuts"
+        ) do
+          shortcuts_dialog(
+            source,
+            folder_id,
+            "#{source.folder_names[folder_id]} Shortcuts"
           )
         end
         unless source.remote
@@ -2051,6 +2069,20 @@ module Xd
           @on_error,
           source.remote
         )
+      end
+
+      private def shortcuts_dialog(
+        source : Source,
+        folder_id : String?,
+        title : String,
+      ) : Nil
+        ShortcutDialog.new(
+          @parent,
+          panel_call(source),
+          @on_error,
+          folder_id,
+          title
+        ).present
       end
 
       private def auth(source : Source, machine : String? = nil) : Nil

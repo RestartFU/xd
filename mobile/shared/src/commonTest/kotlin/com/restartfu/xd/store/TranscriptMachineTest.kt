@@ -220,6 +220,20 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun loadedChatCarriesPromptShortcuts() {
+        val state = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat(shortcuts = listOf("Review the diff", "Run tests")),
+                messages(),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertEquals(listOf("Review the diff", "Run tests"), state.shortcuts)
+    }
+
+    @Test
     fun durationRowsRemainTranscriptMetadata() {
         val result = reduce(
             ChatState("chat"),
@@ -395,6 +409,7 @@ class TranscriptMachineTest {
         hasMessages: Boolean = false,
         fast: Boolean = false,
         claudeMode: Boolean = false,
+        shortcuts: List<String> = emptyList(),
     ): ChatReply = ChatReply(
         ok = true,
         title = "Title",
@@ -402,6 +417,7 @@ class TranscriptMachineTest {
         plan = false,
         fast = fast,
         claudeMode = claudeMode,
+        shortcuts = shortcuts,
         working = working,
         items = items,
         segment = segment,

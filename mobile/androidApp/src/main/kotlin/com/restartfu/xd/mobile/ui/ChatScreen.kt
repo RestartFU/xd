@@ -442,6 +442,27 @@ private fun Composer(
         remember(state) { AskBlock.pending(state) }?.let { ask ->
             AskButtons(ask, onAnswer = model::answer, enabled = !sending)
         }
+        if (state.shortcuts.isNotEmpty()) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                state.shortcuts.forEach { prompt ->
+                    AssistChip(
+                        onClick = { model.shortcut(prompt) },
+                        enabled = !sending,
+                        label = {
+                            Text(
+                                prompt,
+                                modifier = Modifier.widthIn(max = 240.dp),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                    )
+                }
+            }
+        }
         if (state.queue.isNotEmpty()) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),

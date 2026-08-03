@@ -25,6 +25,15 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
+data class ShortcutEditorState(
+    val folderId: String?,
+    val title: String,
+    val prompts: List<String> = emptyList(),
+    val loading: Boolean = true,
+    val saving: Boolean = false,
+    val error: String? = null,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val client: XdClient = (application as XdApplication).client
     private val _pairing = MutableStateFlow(false)
@@ -36,12 +45,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
+    private val _shortcutEditor = MutableStateFlow<ShortcutEditorState?>(null)
 
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val moving: StateFlow<Boolean> = _moving.asStateFlow()
+    val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
     private val _daemon = MutableStateFlow<DaemonUpdateReply?>(null)
     private val _daemonError = MutableStateFlow<String?>(null)
     private val _updating = MutableStateFlow(false)
@@ -188,6 +199,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not rename the chat"
             } finally {
                 _renamingChat.value = false
+            }
+        }
+    }
+
+    fun openShortcutEditor(folderId: String?, title: String) {
+        val opened = ShortcutEditorState(folderId = folderId, title = title)
+        _shortcutEditor.value = opened
+        viewModelScope.launch {
+            try {
+                val reply = client.shortcuts(folderId)
+                if (_shortcutEditor.value?.folderId == folderId) {
+                    _shortcutEditor.value = opened.copy(
+                        prompts = if (folderId == null) reply.global else reply.workspace,
+                        loading = false,
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (_shortcutEditor.value?.folderId == folderId) {
+                    _shortcutEditor.value = opened.copy(
+                        loading = false,
+                        error = error.message ?: "Could not load shortcuts",
+                    )
+                }
+            }
+        }
+    }
+
+    fun closeShortcutEditor() {
+        _shortcutEditor.value = null
+    }
+
+    fun saveShortcuts(prompts: List<String>) {
+        val editor = _shortcutEditor.value ?: return
+        if (editor.saving) return
+        _shortcutEditor.value = editor.copy(saving = true, error = null)
+        viewModelScope.launch {
+            try {
+                client.setShortcuts(editor.folderId, prompts)
+                if (_shortcutEditor.value?.folderId == editor.folderId) {
+                    _shortcutEditor.value = null
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (_shortcutEditor.value?.folderId == editor.folderId) {
+                    _shortcutEditor.value = editor.copy(
+                        saving = false,
+                        error = error.message ?: "Could not save shortcuts",
+                    )
+                }
             }
         }
     }
@@ -370,6 +433,11 @@ class ChatViewModel(
      */
     fun answer(option: String) {
         launchGuarded(_sending) { session.send(option) }
+    }
+
+    /** Sends a configured prompt without replacing or clearing the draft. */
+    fun shortcut(prompt: String) {
+        launchGuarded(_sending) { session.send(prompt) }
     }
 
     fun cancel() {

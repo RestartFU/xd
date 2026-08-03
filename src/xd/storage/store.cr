@@ -439,6 +439,19 @@ module Xd
               SQL
           end
 
+          if version < 23
+            workspace_columns = connection.query_all(
+              "SELECT name FROM pragma_table_info('workspace_folders')",
+              as: String
+            )
+            unless workspace_columns.includes?("shortcuts")
+              connection.exec(
+                "ALTER TABLE workspace_folders " \
+                "ADD COLUMN shortcuts TEXT NOT NULL DEFAULT '[]'"
+              )
+            end
+          end
+
           connection.exec(
             <<-SQL,
               INSERT INTO meta (key, value)

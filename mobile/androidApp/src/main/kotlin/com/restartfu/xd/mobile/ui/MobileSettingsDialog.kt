@@ -30,6 +30,7 @@ internal fun MobileSettingsDialog(
     speechEnabled: Boolean,
     onAccentChanged: (AccentPreset) -> Unit,
     onSpeechChanged: (Boolean) -> Unit,
+    onShortcuts: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -57,6 +58,28 @@ internal fun MobileSettingsDialog(
                         checked = speechEnabled,
                         onCheckedChange = onSpeechChanged,
                     )
+                }
+                Spacer(Modifier.size(12.dp))
+                Text(
+                    "Prompt shortcuts",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onShortcuts)
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Global shortcuts")
+                        Text(
+                            "Buttons shared by every workspace on this daemon.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Text("Edit")
                 }
                 Spacer(Modifier.size(12.dp))
                 Text(

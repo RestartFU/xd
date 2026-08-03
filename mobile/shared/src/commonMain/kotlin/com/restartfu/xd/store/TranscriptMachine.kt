@@ -278,6 +278,7 @@ public object TranscriptMachine {
                 newWorktree = chat.newWorktree,
                 canCreateWorktree = chat.worktrees.isNotEmpty() && !chat.hasMessages,
                 commands = chat.commands,
+                shortcuts = chat.shortcuts,
                 plan = chat.plan,
                 fast = chat.fast,
                 claudeMode = chat.claudeMode,

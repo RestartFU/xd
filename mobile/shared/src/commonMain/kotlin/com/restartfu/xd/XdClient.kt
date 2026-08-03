@@ -11,6 +11,7 @@ import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
+import com.restartfu.xd.protocol.ShortcutsReply
 import com.restartfu.xd.protocol.WorkflowStatusReply
 import com.restartfu.xd.protocol.decodeReply
 import com.restartfu.xd.store.ChatSession
@@ -191,6 +192,19 @@ public class XdClient(
         return actor.decodeReply(value) { value ->
             value.decodeReply<WorkflowStatusReply>()
         }
+    }
+
+    public suspend fun shortcuts(folderId: String? = null): ShortcutsReply {
+        val value = actor.call(Ops.shortcuts(folderId))
+        return actor.decodeReply(value) { it.decodeReply<ShortcutsReply>() }
+    }
+
+    public suspend fun setShortcuts(
+        folderId: String? = null,
+        prompts: List<String>,
+    ): ShortcutsReply {
+        val value = actor.call(Ops.setShortcuts(folderId, prompts))
+        return actor.decodeReply(value) { it.decodeReply<ShortcutsReply>() }
     }
 
     /**

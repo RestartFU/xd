@@ -473,6 +473,7 @@ internal class ChatSessionCore(
                 }
             }
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
+            "shortcuts-changed" -> apply(TranscriptInput.Changed, event.sequence)
             "commands" -> {
                 val commands = value.requiredStringArray("commands") ?: return
                 apply(TranscriptInput.Commands(commands), event.sequence)

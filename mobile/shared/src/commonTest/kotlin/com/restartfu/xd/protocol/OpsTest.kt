@@ -11,6 +11,21 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class OpsTest {
     @Test
+    fun shortcutOperationsDistinguishGlobalAndWorkspaceScope() {
+        val global = Ops.setShortcuts(prompts = listOf("Run tests"))
+        assertEquals("set-shortcuts", global.getValue("op").jsonPrimitive.content)
+        assertFalse(global.containsKey("folder"))
+        assertEquals(
+            "Run tests",
+            global.getValue("shortcuts").jsonArray.single().jsonPrimitive.content,
+        )
+
+        val workspace = Ops.shortcuts("folder-1")
+        assertEquals("shortcuts", workspace.getValue("op").jsonPrimitive.content)
+        assertEquals("folder-1", workspace.getValue("folder").jsonPrimitive.content)
+    }
+
+    @Test
     fun pairingSendsTheConnectingDeviceName() {
         val request = Ops.pair("ABCD-EFGH", "Pixel 9")
 

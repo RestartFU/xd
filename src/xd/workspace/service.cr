@@ -25,6 +25,9 @@ module Xd
       chats : Array(ChatSummary)
 
     class Service
+      MAX_SHORTCUTS      =   24
+      MAX_SHORTCUT_BYTES = 4096
+
       getter root : String
 
       def initialize(root : String, @store : Storage::Store)
@@ -105,7 +108,8 @@ module Xd
               nil,
               nil,
               repository,
-              nil
+              nil,
+              "[]"
             )
           )
           id
@@ -231,8 +235,46 @@ module Xd
           model: row.model,
           workdir: row.workdir,
           repo: row.repo,
-          instructions: row.instructions
+          instructions: row.instructions,
+          shortcuts: parse_shortcuts(row.shortcuts)
         )
+      end
+
+      def global_shortcuts : Array(String)
+        @store.global_shortcuts
+      end
+
+      def set_global_shortcuts(shortcuts : Array(String)) : Array(String)
+        cleaned = clean_shortcuts(shortcuts)
+        @store.save_global_shortcuts(cleaned)
+        cleaned
+      end
+
+      def workspace_shortcuts(folder_id : String) : Array(String)
+        parse_shortcuts(workspace_for_id(folder_id).shortcuts)
+      end
+
+      def set_workspace_shortcuts(
+        folder_id : String,
+        shortcuts : Array(String),
+      ) : Array(String)
+        row = workspace_for_id(folder_id)
+        cleaned = clean_shortcuts(shortcuts)
+        @store.update_workspace_shortcuts(row.id, cleaned.to_json)
+        cleaned
+      end
+
+      def resolve_shortcuts(folder_id : String) : Array(String)
+        folder = find_folder(folder_id)
+        resolved = [] of String
+        seen = Set(String).new
+        (@store.global_shortcuts + ancestor_paths(folder).flat_map do |path|
+          settings = workspace_settings_at(path)
+          settings.try(&.shortcuts) || [] of String
+        end).each do |prompt|
+          resolved << prompt if seen.add?(prompt)
+        end
+        resolved
       end
 
       # Values a folder receives when its own scalar settings are blank.
@@ -438,7 +480,7 @@ module Xd
           if candidate &&
              !used.includes?(candidate.id) &&
              (candidate.root_path == @root ||
-              !stored_workspace_root_exists?(candidate))
+             !stored_workspace_root_exists?(candidate))
             row = Storage::WorkspaceFolder.new(
               candidate.id,
               @root,
@@ -447,7 +489,8 @@ module Xd
               candidate.model,
               candidate.workdir,
               candidate.repo,
-              candidate.instructions
+              candidate.instructions,
+              candidate.shortcuts
             )
           end
         end
@@ -467,7 +510,8 @@ module Xd
             legacy.try(&.model),
             legacy.try(&.workdir),
             legacy.try(&.repo),
-            legacy.try(&.instructions)
+            legacy.try(&.instructions),
+            imported_shortcuts(legacy)
           )
         end
 
@@ -513,7 +557,8 @@ module Xd
             model: row.model,
             workdir: row.workdir,
             repo: row.repo,
-            instructions: row.instructions
+            instructions: row.instructions,
+            shortcuts: parse_shortcuts(row.shortcuts)
           )
         end
       end
@@ -526,9 +571,7 @@ module Xd
         return "" if path == @root
 
         prefix = @root + File::SEPARATOR
-        path.starts_with?(prefix) ?
-          path.byte_slice(prefix.bytesize, path.bytesize - prefix.bytesize) :
-          path
+        path.starts_with?(prefix) ? path.byte_slice(prefix.bytesize, path.bytesize - prefix.bytesize) : path
       end
 
       private def visible_folder_path?(path : String) : Bool
@@ -541,8 +584,8 @@ module Xd
 
         relative = relative_path(path)
         return false if relative.split(File::SEPARATOR).any? do |part|
-          part.starts_with?('.')
-        end
+                          part.starts_with?('.')
+                        end
 
         ancestor = File.dirname(path)
         while ancestor != @root
@@ -550,8 +593,8 @@ module Xd
           return false unless info && info.type.directory?
           return false if File.exists?(File.join(ancestor, ".git"))
           return false if File.file?(
-            File.join(ancestor, WORKTREE_CONTAINER_MARKER)
-          )
+                            File.join(ancestor, WORKTREE_CONTAINER_MARKER)
+                          )
           ancestor = File.dirname(ancestor)
         end
         true
@@ -595,6 +638,8 @@ module Xd
             digest.update(row.repo || "")
             digest.update(Bytes[0_u8])
             digest.update(row.instructions || "")
+            digest.update(Bytes[0_u8])
+            digest.update(row.shortcuts)
           end
           digest.update(Bytes[0_u8])
 
@@ -621,6 +666,35 @@ module Xd
           current = parent
         end
         paths
+      end
+
+      private def clean_shortcuts(shortcuts : Array(String)) : Array(String)
+        if shortcuts.size > MAX_SHORTCUTS
+          raise Error.new("A shortcut list can contain at most #{MAX_SHORTCUTS} prompts.")
+        end
+
+        cleaned = [] of String
+        shortcuts.each do |prompt|
+          value = prompt.strip
+          next if value.empty? || cleaned.includes?(value)
+          if value.bytesize > MAX_SHORTCUT_BYTES
+            raise Error.new(
+              "A shortcut prompt can contain at most #{MAX_SHORTCUT_BYTES} bytes."
+            )
+          end
+          cleaned << value
+        end
+        cleaned
+      end
+
+      private def parse_shortcuts(value : String) : Array(String)
+        clean_shortcuts(Array(String).from_json(value))
+      rescue error : JSON::ParseException | JSON::SerializableError
+        raise Error.new("Cannot read workspace shortcuts: #{error.message}")
+      end
+
+      private def imported_shortcuts(settings : Settings?) : String
+        clean_shortcuts(settings.try(&.shortcuts) || [] of String).to_json
       end
 
       private def within_root?(path : String) : Bool

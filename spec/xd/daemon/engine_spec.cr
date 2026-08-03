@@ -970,6 +970,43 @@ describe Xd::Daemon::Engine do
       settings["repo"].raw.should be_nil
       settings["effective_backend"].as_s.should eq("codex")
       settings["effective_workdir"].as_s.should eq(project)
+
+      global = engine.process(local, {
+        "op"        => "set-shortcuts",
+        "shortcuts" => [" Review the diff ", "Run tests", "Run tests", " "],
+      }.to_json)
+      global.response["global"].as_a.map(&.as_s).should eq([
+        "Review the diff",
+        "Run tests",
+      ])
+      global.events.map { |event| event["event"].as_s }
+        .should eq(["shortcuts-changed"])
+
+      workspace = engine.process(local, {
+        "op"        => "set-shortcuts",
+        "folder"    => folder_id,
+        "shortcuts" => ["Run tests", "Check this workspace"],
+      }.to_json)
+      workspace.response["workspace"].as_a.map(&.as_s).should eq([
+        "Run tests",
+        "Check this workspace",
+      ])
+      workspace.response["effective"].as_a.map(&.as_s).should eq([
+        "Review the diff",
+        "Run tests",
+        "Check this workspace",
+      ])
+      workspace.events.first["folder"].as_s.should eq(folder_id)
+
+      state = engine.dispatch(local, {
+        "op"   => "chat",
+        "chat" => chat["id"].as_s,
+      }.to_json)
+      state["shortcuts"].as_a.map(&.as_s).should eq([
+        "Review the diff",
+        "Run tests",
+        "Check this workspace",
+      ])
     end
   end
 
@@ -1146,6 +1183,18 @@ describe Xd::Daemon::Engine do
         launcher.specs.first.prompt.should eq("inspect")
         seen.map { |event| event["event"].as_s }
           .should contain("turn-started")
+
+        queued = engine.dispatch(local, {
+          "op"   => "send",
+          "chat" => chat,
+          "text" => "Run the tests",
+        }.to_json)
+        queued["queued"].as_bool.should be_true
+        launcher.specs.size.should eq(1)
+        engine.dispatch(local, {
+          "op"   => "chat",
+          "chat" => chat,
+        }.to_json)["queue"].as_a.map(&.as_s).should eq(["Run the tests"])
 
         launcher.emit(0, Xd::Agent::Event.new(
           Xd::Agent::EventType::TextDelta,

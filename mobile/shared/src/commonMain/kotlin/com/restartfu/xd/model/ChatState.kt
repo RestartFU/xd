@@ -31,6 +31,7 @@ public data class ChatState(
     /** True when this chat is in Git and has not locked its checkout yet. */
     val canCreateWorktree: Boolean = false,
     val commands: List<String> = emptyList(),
+    val shortcuts: List<String> = emptyList(),
     val plan: Boolean = false,
     val fast: Boolean = false,
     val claudeMode: Boolean = false,

@@ -358,6 +358,10 @@ module Xd
           folder_settings(request)
         when Protocol::Operation::SetFolderSettings
           set_folder_settings(request)
+        when Protocol::Operation::Shortcuts
+          shortcuts(request)
+        when Protocol::Operation::SetShortcuts
+          set_shortcuts(request)
         when Protocol::Operation::NewChat
           new_chat(request)
         when Protocol::Operation::Messages
@@ -1077,6 +1081,59 @@ module Xd
         Protocol::Response.ok
       end
 
+      private def shortcuts(request : Protocol::Request) : Protocol::Response
+        folder_id = request.member?("folder") ? request.string(
+          "folder",
+          "folder must be a workspace id."
+        ) : nil
+        Protocol::Response.ok(shortcut_fields(folder_id))
+      end
+
+      private def set_shortcuts(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        nodes = request.body["shortcuts"]?.try(&.as_a?) ||
+                raise Protocol::Error.new(
+                  "set-shortcuts needs a shortcuts array."
+                )
+        prompts = nodes.map do |node|
+          node.as_s? || raise Protocol::Error.new(
+            "Every shortcut must be a text prompt."
+          )
+        end
+        folder_id = request.member?("folder") ? request.string(
+          "folder",
+          "folder must be a workspace id."
+        ) : nil
+        if folder_id
+          @workspaces.set_workspace_shortcuts(folder_id, prompts)
+        else
+          @workspaces.set_global_shortcuts(prompts)
+        end
+        Protocol::Response.ok(shortcut_fields(folder_id))
+      end
+
+      private def shortcut_fields(
+        folder_id : String?,
+      ) : Hash(String, JSON::Any)
+        global = @workspaces.global_shortcuts
+        workspace = if folder_id
+                      @workspaces.workspace_shortcuts(folder_id)
+                    else
+                      [] of String
+                    end
+        effective = if folder_id
+                      @workspaces.resolve_shortcuts(folder_id)
+                    else
+                      global
+                    end
+        {
+          "global"    => json_any(global),
+          "workspace" => json_any(workspace),
+          "effective" => json_any(effective),
+        }
+      end
+
       private def nullable_text(
         request : Protocol::Request,
         name : String,
@@ -1270,6 +1327,14 @@ module Xd
         fields["draft"] = JSON::Any.new(stored.draft)
         fields["draft_revision"] = JSON::Any.new(stored.draft_revision)
         fields["draft_attachments"] = JSON.parse(stored.draft_attachments)
+        shortcuts = begin
+          @workspaces.resolve_shortcuts(stored.folder_id)
+        rescue Workspace::Error
+          # Chats remain readable after their workspace is removed. Global
+          # buttons still apply; only the missing workspace layer is skipped.
+          @workspaces.global_shortcuts
+        end
+        fields["shortcuts"] = json_any(shortcuts)
         active_turn = @agents.active_turn(chat_id)
         fields["working"] = JSON::Any.new(
           !active_turn.nil? || stored.daemon_working
@@ -2001,6 +2066,13 @@ module Xd
              Protocol::Operation::DeleteChat
           @workspace_monitor.acknowledge
           [protocol_event("tree")]
+        when Protocol::Operation::SetShortcuts
+          @workspace_monitor.acknowledge
+          fields = {} of String => JSON::Any
+          if folder_id = request.string?("folder")
+            fields["folder"] = JSON::Any.new(folder_id)
+          end
+          [protocol_event("shortcuts-changed", fields)]
         when Protocol::Operation::SetOption
           fields = {} of String => JSON::Any
           if chat_id = request.string?("chat")

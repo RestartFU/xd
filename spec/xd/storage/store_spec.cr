@@ -64,17 +64,21 @@ describe Xd::Storage::Store do
       "gpt-5",
       "/code",
       "/repo",
-      "Use concise answers."
+      "Use concise answers.",
+      %(["Review the diff"])
     )
 
     begin
       store = Xd::Storage::Store.new(path)
       store.save_workspace_folder(folder)
       store.workspace_folder(root, "Project").should eq(folder)
+      store.global_shortcuts.should be_empty
+      store.save_global_shortcuts(["Run all tests"])
       store.close
 
       reopened = Xd::Storage::Store.new(path)
       reopened.workspace_folder_by_id(root, "stable").should eq(folder)
+      reopened.global_shortcuts.should eq(["Run all tests"])
       reopened.update_workspace_settings(
         "stable",
         "claude",
@@ -86,6 +90,13 @@ describe Xd::Storage::Store do
       updated = reopened.workspace_folder(root, "Project").not_nil!
       updated.backend.should eq("claude")
       updated.instructions.should eq("Updated.")
+      updated.shortcuts.should eq(%(["Review the diff"]))
+      reopened.update_workspace_shortcuts(
+        "stable",
+        %(["Check formatting"])
+      )
+      reopened.workspace_folder(root, "Project").not_nil!.shortcuts
+        .should eq(%(["Check formatting"]))
       reopened.relocate_workspace_subtree(root, "Project", "Renamed")
       reopened.workspace_folder(root, "Renamed").not_nil!.id.should eq("stable")
       reopened.workspace_folder(root, "Project").should be_nil
@@ -208,6 +219,7 @@ describe Xd::Storage::Store do
         columns.should contain("id")
         columns.should contain("relative_path")
         columns.should contain("instructions")
+        columns.should contain("shortcuts")
       end
     ensure
       remove_database(path)
@@ -221,8 +233,10 @@ describe Xd::Storage::Store do
       store = Xd::Storage::Store.new(path)
       store.close
       DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
+        newer = Xd::Storage::SCHEMA_VERSION + 1
         database.exec(
-          "UPDATE meta SET value = '23' WHERE key = 'schema_version'"
+          "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+          newer.to_s
         )
       end
 
@@ -235,7 +249,7 @@ describe Xd::Storage::Store do
           "SELECT value FROM meta WHERE key = 'schema_version'",
           as: String
         )
-        version.should eq("23")
+        version.should eq((Xd::Storage::SCHEMA_VERSION + 1).to_s)
       end
     ensure
       remove_database(path)

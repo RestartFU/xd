@@ -10,11 +10,38 @@ module Xd
       model : String?,
       workdir : String?,
       repo : String?,
-      instructions : String?
+      instructions : String?,
+      shortcuts : String
 
     class Store
       WORKSPACE_FOLDER_COLUMNS =
-        "id, root_path, relative_path, backend, model, workdir, repo, instructions"
+        "id, root_path, relative_path, backend, model, workdir, repo, " \
+        "instructions, shortcuts"
+
+      def global_shortcuts : Array(String)
+        database_error("Cannot read global shortcuts") do
+          value = @database.query_one?(
+            "SELECT value FROM meta WHERE key = 'global_shortcuts'",
+            as: String
+          )
+          value ? Array(String).from_json(value) : [] of String
+        end
+      rescue error : JSON::ParseException | JSON::SerializableError
+        raise Error.new("Cannot read global shortcuts: #{error.message}")
+      end
+
+      def save_global_shortcuts(shortcuts : Array(String)) : Nil
+        database_error("Cannot save global shortcuts") do
+          @database.exec(
+            <<-SQL,
+              INSERT INTO meta (key, value)
+              VALUES ('global_shortcuts', ?)
+              ON CONFLICT (key) DO UPDATE SET value = excluded.value
+              SQL
+            shortcuts.to_json
+          )
+        end
+      end
 
       def list_workspace_folders(root_path : String) : Array(WorkspaceFolder)
         database_error("Cannot list workspace folders") do
@@ -84,9 +111,9 @@ module Xd
             <<-SQL,
               INSERT INTO workspace_folders (
                 id, root_path, relative_path, backend, model, workdir, repo,
-                instructions, created_at, updated_at
+                instructions, shortcuts, created_at, updated_at
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT (id) DO UPDATE SET
                 root_path = excluded.root_path,
                 relative_path = excluded.relative_path,
@@ -95,6 +122,7 @@ module Xd
                 workdir = excluded.workdir,
                 repo = excluded.repo,
                 instructions = excluded.instructions,
+                shortcuts = excluded.shortcuts,
                 updated_at = excluded.updated_at
               SQL
             folder.id,
@@ -105,9 +133,26 @@ module Xd
             folder.workdir,
             folder.repo,
             folder.instructions,
+            folder.shortcuts,
             now,
             now
           )
+        end
+      end
+
+      def update_workspace_shortcuts(id : String, shortcuts : String) : Nil
+        database_error("Cannot update workspace shortcuts") do
+          result = @database.exec(
+            <<-SQL,
+              UPDATE workspace_folders
+                 SET shortcuts = ?, updated_at = ?
+               WHERE id = ?
+              SQL
+            shortcuts,
+            now_seconds,
+            id
+          )
+          raise NotFoundError.new("No such workspace folder.") if result.rows_affected != 1
         end
       end
 
@@ -203,7 +248,8 @@ module Xd
           row.read(String?),
           row.read(String?),
           row.read(String?),
-          row.read(String?)
+          row.read(String?),
+          row.read(String)
         )
       end
     end

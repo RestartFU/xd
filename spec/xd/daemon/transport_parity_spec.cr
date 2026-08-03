@@ -43,6 +43,7 @@ private record TransportTrace,
   folder_context : String,
   folder_backend : String?,
   folder_model : String?,
+  shortcuts : Array(String),
   directory_entries : Array(String),
   file_entries : Array(String),
   file_content : String,
@@ -207,6 +208,15 @@ private def run_transport_matrix(
       "op"     => "folder-context",
       "folder" => folder_id,
     })["context"].as_s
+    matrix_call(endpoint, {
+      "op"        => "set-shortcuts",
+      "shortcuts" => ["Global prompt"],
+    })
+    shortcut_state = matrix_call(endpoint, {
+      "op"        => "set-shortcuts",
+      "folder"    => folder_id,
+      "shortcuts" => ["Workspace prompt"],
+    })
 
     chat_id = matrix_call(endpoint, {
       "op"     => "new-chat",
@@ -357,8 +367,8 @@ private def run_transport_matrix(
     await_matrix_events(
       events,
       event_mutex,
-      ["tree", "changed", "queued", "turn-started", "terminal-opened",
-       "terminal-resized"]
+      ["tree", "changed", "queued", "shortcuts-changed", "turn-started",
+       "terminal-opened", "terminal-resized"]
     )
 
     spec = launcher.specs.first
@@ -379,6 +389,7 @@ private def run_transport_matrix(
       folder_context,
       folder_state["backend"].as_s?,
       folder_state["model"].as_s?,
+      shortcut_state["effective"].as_a.map(&.as_s),
       directory_entries,
       file_entries,
       file_content,
@@ -444,6 +455,7 @@ describe "daemon transport parity" do
       "Use one daemon.",
       nil,
       nil,
+      ["Global prompt", "Workspace prompt"],
       ["src"],
       ["src", "note.txt"],
       "after\n",

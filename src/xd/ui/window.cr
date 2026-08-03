@@ -169,6 +169,9 @@ module Xd
       @queue_retirement_scheduled = false
       @commands_bar : Gtk::ScrolledWindow
       @commands_flow : Gtk::FlowBox
+      @shortcuts_bar : Gtk::ScrolledWindow
+      @shortcuts_flow : Gtk::FlowBox
+      @shortcut_buttons : Array(Gtk::Button)
       @queue_host : Gtk::Box
       @queue_box : Gtk::Box
       @choices_bar : Gtk::Box
@@ -381,6 +384,25 @@ module Xd
         @commands_bar.margin_start = 10
         @commands_bar.margin_end = 10
 
+        @shortcut_buttons = [] of Gtk::Button
+        @shortcuts_flow = Gtk::FlowBox.new
+        @shortcuts_flow.selection_mode = :none
+        @shortcuts_flow.min_children_per_line = 1_u32
+        @shortcuts_flow.max_children_per_line = 4_u32
+        @shortcuts_flow.column_spacing = 6_u32
+        @shortcuts_flow.row_spacing = 6_u32
+        @shortcuts_flow.halign = :fill
+
+        @shortcuts_bar = Gtk::ScrolledWindow.new
+        @shortcuts_bar.set_policy(:never, :automatic)
+        @shortcuts_bar.max_content_height = 120
+        @shortcuts_bar.propagate_natural_height = true
+        @shortcuts_bar.child = @shortcuts_flow
+        @shortcuts_bar.visible = false
+        @shortcuts_bar.margin_top = 8
+        @shortcuts_bar.margin_start = 10
+        @shortcuts_bar.margin_end = 10
+
         @attach = Gtk::Button.new_from_icon_name(
           "mail-attachment-symbolic"
         )
@@ -433,6 +455,7 @@ module Xd
         composer_column.append(@queue_host)
         composer_column.append(@choices_bar)
         composer_column.append(@attachments_bar)
+        composer_column.append(@shortcuts_bar)
         composer_column.append(@commands_bar)
         composer_column.append(entry_scroll)
         composer_column.append(@controls.widget)
@@ -1054,7 +1077,10 @@ module Xd
         end
         remember_panes
         hide_panes_for_switch
-        reset_draft_ui if changed
+        if changed
+          reset_draft_ui
+          render_shortcuts([] of JSON::Any)
+        end
         @client = endpoint
         @active_chat = id
         @waiting_for_input = false
@@ -1121,6 +1147,7 @@ module Xd
         @chat_stack.visible_child_name = "empty"
         @composer.visible = false
         reset_draft_ui
+        render_shortcuts([] of JSON::Any)
         @entry.sensitive = false
         @attach.sensitive = false
         @voice.select(nil, nil)
@@ -1890,6 +1917,36 @@ module Xd
         @attachments_bar.visible = false
       end
 
+      private def render_shortcuts(nodes : Array(JSON::Any)) : Nil
+        while child = @shortcuts_flow.first_child
+          @shortcuts_flow.remove(child)
+        end
+        @shortcut_buttons.clear
+        nodes.each do |node|
+          prompt = node.as_s?.try(&.strip)
+          next unless prompt && !prompt.empty?
+
+          label = Gtk::Label.new(prompt)
+          label.ellipsize = :end
+          label.max_width_chars = 36
+          label.xalign = 0_f32
+
+          button = Gtk::Button.new
+          button.child = label
+          button.tooltip_text = prompt
+          button.clicked_signal.connect { send_message(prompt) }
+          @shortcut_buttons << button
+          @shortcuts_flow.append(button)
+        end
+        @shortcuts_bar.visible = !@shortcut_buttons.empty?
+        update_shortcut_buttons
+      end
+
+      private def update_shortcut_buttons : Nil
+        enabled = @auth_state == "signed-in" && !@send_pending
+        @shortcut_buttons.each(&.sensitive=(enabled))
+      end
+
       private def schedule_draft_sync(attachments : Bool = false) : Nil
         return unless @active_chat
         return if @applying_draft
@@ -2576,6 +2633,9 @@ module Xd
           state["commands"]?.try(&.as_a?) || [] of JSON::Any
         )
         refresh_command_suggestions
+        render_shortcuts(
+          state["shortcuts"]?.try(&.as_a?) || [] of JSON::Any
+        )
         apply_draft(
           state["draft"]?.try(&.as_s?) || "",
           state["draft_revision"]?.try(&.as_i64?) || 0_i64,
@@ -2610,6 +2670,7 @@ module Xd
         end
         @send.sensitive = (@working && !@cancel_pending) ||
                           (@auth_state == "signed-in" && !@send_pending)
+        update_shortcut_buttons
       end
 
       private def update_auth_controls(detail : String? = nil) : Nil
@@ -3053,6 +3114,9 @@ module Xd
             load_messages
             load_chat_state
           end
+        when "shortcuts-changed"
+          return unless @client.same?(endpoint)
+          load_chat_state(recover_turn: false) if @active_chat
         when "folder-clone"
           return unless @client.same?(endpoint)
           url = event["url"]?.try(&.as_s?) || "the repository"

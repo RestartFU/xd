@@ -48,6 +48,29 @@ public object Ops {
 
     public fun chat(chatId: String): JsonObject = withChat("chat", chatId)
 
+    public fun shortcuts(folderId: String? = null): JsonObject = buildJsonObject {
+        put("op", "shortcuts")
+        folderId?.let { put("folder", it) }
+    }
+
+    public fun setShortcuts(
+        folderId: String? = null,
+        prompts: List<String>,
+    ): JsonObject = buildJsonObject {
+        require(prompts.size <= 24) { "A shortcut list can contain at most 24 prompts" }
+        prompts.forEach { prompt ->
+            require(prompt.encodeToByteArray().size <= 4096) {
+                "A shortcut prompt can contain at most 4096 bytes"
+            }
+        }
+        put("op", "set-shortcuts")
+        folderId?.let { put("folder", it) }
+        put(
+            "shortcuts",
+            buildJsonArray { prompts.forEach(::add) },
+        )
+    }
+
     @OptIn(ExperimentalEncodingApi::class)
     public fun setDraft(
         chatId: String,

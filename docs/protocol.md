@@ -295,6 +295,7 @@ boundary, not an event cursor.
 |---|---|---|
 | `folder-context` | `folder: string` | `context: string \| null` |
 | `folder-settings` | `folder: string` | inherited folder settings |
+| `shortcuts` | optional `folder: string` | daemon-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to daemon home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
@@ -326,6 +327,19 @@ acting at once are therefore ordered by the daemon rather than racing.
 
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
 its folder's backend and model.
+
+### `set-shortcuts`
+
+```json
+{"op":"set-shortcuts","shortcuts":["Review the current diff","Run the tests"]}
+{"op":"set-shortcuts","folder":"folder-1","shortcuts":["Check this workspace"]}
+```
+
+Without `folder`, the operation replaces daemon-wide shortcuts. With a folder
+id it replaces that workspace's shortcuts. Blank and duplicate prompts are
+removed. Chats receive global prompts followed by prompts inherited from their
+workspace ancestry and display them as send buttons. Activating one uses the
+normal `send` intent, so it is queued automatically while a turn is active.
 
 ### `new-folder`
 
@@ -496,6 +510,9 @@ rejected. `src/xd/voice/data.cr` writes and validates this header.
 `move-chat`, `delete-chat`, `set-folder-context`, and `set-folder-settings` all
 reply with `ok` alone and broadcast a `tree` event.
 
+`set-shortcuts` replies with the resulting shortcut sets and broadcasts a
+`shortcuts-changed` event so open chats can refresh their buttons.
+
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
 or one of its descendants, and the daemon rejects a destination name collision.
@@ -509,6 +526,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `tree` | — | Workspace tree changed; refetch `tree`. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
+| `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |
 | `queued` | `chat`, `queue`, `text` | Queue replaced. `text` is the first item. |
 | `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` | Composer text changed; attachments are present only when replaced. |
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |

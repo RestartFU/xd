@@ -69,6 +69,7 @@ internal fun TreeScreen(
     val operationError by model.error.collectAsStateWithLifecycle()
     val moving by model.moving.collectAsStateWithLifecycle()
     val createdChat by model.createdChat.collectAsStateWithLifecycle()
+    val shortcutEditor by model.shortcutEditor.collectAsStateWithLifecycle()
     var expandedIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     val roots = tree.folders.filter { it.parentId == null }
     val children = tree.folders.groupBy(Folder::parentId)
@@ -188,6 +189,10 @@ internal fun TreeScreen(
             onMove = {
                 actingFolder = null
                 movingFolder = folderId to name
+            },
+            onShortcuts = {
+                actingFolder = null
+                model.openShortcutEditor(folderId, "$name shortcuts")
             },
         )
     }
@@ -351,7 +356,18 @@ internal fun TreeScreen(
             speechEnabled = speechEnabled,
             onAccentChanged = settings::setAccent,
             onSpeechChanged = settings::setSpeechEnabled,
+            onShortcuts = {
+                showingSettings = false
+                model.openShortcutEditor(null, "Global shortcuts")
+            },
             onDismiss = { showingSettings = false },
+        )
+    }
+    shortcutEditor?.let { editor ->
+        ShortcutEditorDialog(
+            state = editor,
+            onDismiss = model::closeShortcutEditor,
+            onSave = model::saveShortcuts,
         )
     }
     if (confirmingForget) {
@@ -444,6 +460,7 @@ private fun FolderActionsDialog(
     moveEnabled: Boolean,
     onDismiss: () -> Unit,
     onMove: () -> Unit,
+    onShortcuts: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -455,18 +472,27 @@ private fun FolderActionsDialog(
             )
         },
         text = {
-            Text(
-                "Move",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = moveEnabled, onClick = onMove)
-                    .padding(vertical = 12.dp),
-                color = if (moveEnabled) {
-                    MaterialTheme.colorScheme.onSurface
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "Prompt shortcuts",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onShortcuts)
+                        .padding(vertical = 12.dp),
+                )
+                Text(
+                    "Move",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = moveEnabled, onClick = onMove)
+                        .padding(vertical = 12.dp),
+                    color = if (moveEnabled) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }

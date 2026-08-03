@@ -21,6 +21,7 @@ module Xd
       property workdir : String?
       property repo : String?
       property instructions : String?
+      property shortcuts : Array(String)?
 
       def initialize(
         @id : String? = nil,
@@ -29,6 +30,7 @@ module Xd
         @workdir : String? = nil,
         @repo : String? = nil,
         @instructions : String? = nil,
+        @shortcuts : Array(String)? = nil,
       )
       end
     end

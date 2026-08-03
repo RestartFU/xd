@@ -42,6 +42,14 @@ public data class TreeReply(
 )
 
 @Serializable
+public data class ShortcutsReply(
+    val ok: Boolean,
+    val global: List<String>,
+    val workspace: List<String>,
+    val effective: List<String>,
+)
+
+@Serializable
 public data class WorktreeReply(
     val path: String,
     val branch: String? = null,
@@ -69,6 +77,7 @@ public data class ChatReply(
     val title: String,
     val backend: String,
     val commands: List<String> = emptyList(),
+    val shortcuts: List<String> = emptyList(),
     val plan: Boolean,
     val fast: Boolean = false,
     @SerialName("claude_mode")

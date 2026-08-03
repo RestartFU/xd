@@ -323,8 +323,14 @@ describe Xd::Workspace::Service do
         nil
       )
       service.set_folder_context(parent_id, "Always answer in French.")
+      service.set_global_shortcuts(["Review the diff", "Run tests"])
+      service.set_workspace_shortcuts(
+        parent_id,
+        ["Run tests", "Check parent"]
+      )
       service.set_folder_settings(child_id, "codex", nil, nil, nil)
       service.set_folder_context(child_id, "This is a Go codebase.")
+      service.set_workspace_shortcuts(child_id, ["Check child"])
 
       resolved = service.resolve(child_id)
       resolved.backend.should eq("codex")
@@ -333,6 +339,13 @@ describe Xd::Workspace::Service do
       resolved.instructions.should eq(
         "Always answer in French.\n\nThis is a Go codebase."
       )
+      service.resolve_shortcuts(child_id).should eq([
+        "Review the diff",
+        "Run tests",
+        "Check parent",
+        "Check child",
+      ])
+      service.workspace_shortcuts(child_id).should eq(["Check child"])
       inherited = service.inherited_settings(child_id)
       inherited.backend.should eq("claude")
       inherited.model.should eq("claude-opus")

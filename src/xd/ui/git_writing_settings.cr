@@ -8,7 +8,10 @@ module Xd
     class GitWritingSettings
       BACKEND_IDS = [nil, "claude", "codex"] of String?
 
-      def initialize(@parent : Gtk::Window)
+      def initialize(
+        @parent : Gtk::Window,
+        @on_shortcuts : Proc(Nil),
+      )
         @settings = Gio::Settings.new(APP_ID)
       end
 
@@ -80,12 +83,25 @@ module Xd
         group.add(backend_row)
         group.add(model_row)
 
+        shortcuts = Adw::PreferencesGroup.new
+        shortcuts.title = "Prompt Shortcuts"
+        shortcuts.description =
+          "Create buttons that send frequently used prompts in every workspace."
+        shortcut_row = Adw::ActionRow.new
+        shortcut_row.title = "Global Shortcuts"
+        shortcut_row.subtitle = "Stored by this daemon and shared with paired devices."
+        edit_shortcuts = Gtk::Button.new_with_label("Edit…")
+        edit_shortcuts.valign = :center
+        shortcut_row.add_suffix(edit_shortcuts)
+        shortcuts.add(shortcut_row)
+
         body = Gtk::Box.new(:vertical, 10)
         body.margin_top = 22
         body.margin_bottom = 22
         body.margin_start = 22
         body.margin_end = 22
         body.append(group)
+        body.append(shortcuts)
 
         footer = Gtk::Box.new(:horizontal, 12)
         footer.append(hint("Esc", "Cancel"))
@@ -95,6 +111,10 @@ module Xd
         footer.append(spacer)
 
         window = Gtk::Window.new
+        edit_shortcuts.clicked_signal.connect do
+          window.destroy
+          @on_shortcuts.call
+        end
         save = -> {
           backend = BACKEND_IDS[backend_row.selected.to_i]? || ""
           model = ""
