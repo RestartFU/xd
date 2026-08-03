@@ -443,6 +443,22 @@ module Xd
       .xd-tool-panel, .xd-terminal { background: #0a0a0c; }
       .xd-terminal { color: #f2f2f4; padding: 8px; }
       .xd-sidebar button.flat { background: transparent; border: 0; }
+      /* Stripping a flat button bare is right inside a row, where a surface
+         on every rename and delete would be noise, and wrong in the bar under
+         the tree: those are the window's own controls, and next to the update
+         button they have to read as the same kind of thing. */
+      .xd-sidebar-tools button {
+        min-height: 26px;
+        min-width: 26px;
+        padding: 2px 6px;
+      }
+      .xd-sidebar-tools button.flat {
+        background-color: alpha(#ffffff, 0.05);
+        border: 1px solid alpha(#ffffff, 0.07);
+      }
+      .xd-sidebar-tools button.flat:hover {
+        background-color: alpha(#ffffff, 0.09);
+      }
       .xd-search-result { border-radius: 10px; padding: 10px 12px; }
       .xd-search-result:hover { background: alpha(#ffffff, 0.07); }
       .xd-message-diff {

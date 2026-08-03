@@ -462,7 +462,8 @@ module Xd
         settings_button.clicked_signal.connect do
           @git_writing_settings.present
         end
-        settings_bar = Gtk::Box.new(:horizontal, 0)
+        settings_bar = Gtk::Box.new(:horizontal, 6)
+        settings_bar.add_css_class("xd-sidebar-tools")
         settings_bar.margin_start = 6
         settings_bar.margin_end = 6
         settings_bar.margin_top = 3
