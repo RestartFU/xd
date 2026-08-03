@@ -110,7 +110,9 @@ describe Xd::Workspace::Worktrees do
         "claude",
         workdir: repository
       )
-      service.select(store.get_chat(main_id), repository).should eq(repository)
+      service.select(store.get_chat(main_id), repository).should eq(
+        File.realpath(repository)
+      )
       expect_raises(Xd::Workspace::Worktrees::Error) do
         service.remove(store.get_chat(main_id), repository)
       end
