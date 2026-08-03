@@ -218,6 +218,31 @@ describe Xd::UnifiedDiff do
     ])
   end
 
+  it "names files without pathing them, for an inline diff" do
+    patch = <<-DIFF
+      diff --git a/home/danick/Workspaces/worktrees/lunar/tmp/main.go b/home/danick/Workspaces/worktrees/lunar/tmp/main.go
+      @@ -1,1 +1,1 @@
+      -old
+      +new
+      diff --git a/src/xd/ui/window.cr b/src/xd/ui/window.cr
+      @@ -1,1 +1,1 @@
+      -old
+      +new
+      DIFF
+    lines = Xd::UnifiedDiff.name_only(Xd::UnifiedDiff.parse(patch).lines)
+
+    titles = lines.select(&.kind.file?).map(&.text)
+    titles.should eq(["main.go", "window.cr"])
+    # Everything else is untouched, including where the lines came from.
+    lines.count(&.kind.added?).should eq(2)
+    Xd::UnifiedDiff.name_only(
+      [Xd::DiffLine.new(Xd::DiffLineKind::File, "notes.txt")]
+    ).first.text.should eq("notes.txt")
+    Xd::UnifiedDiff.name_only(
+      [Xd::DiffLine.new(Xd::DiffLineKind::File, "C:\\src\\xd\\window.cr")]
+    ).first.text.should eq("window.cr")
+  end
+
   it "truncates display text on a valid UTF-8 boundary" do
     text = "a" * 1023 + "é" + "tail"
     shown = Xd::UnifiedDiff.display_text(text)

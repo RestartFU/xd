@@ -117,6 +117,24 @@ module Xd
       ParsedDiff.new(lines, additions, deletions)
     end
 
+    # The same patch with each file named rather than pathed.
+    #
+    # A patch built from a tool payload carries whatever path the tool used,
+    # which is usually absolute: inline in a transcript that is a line of home
+    # directory and worktree before the part worth reading, and the part worth
+    # reading is what falls off the end. The repository pane keeps whole paths,
+    # where telling apart two files of the same name is the point.
+    def name_only(lines : Array(DiffLine)) : Array(DiffLine)
+      return lines unless lines.any?(&.kind.file?)
+
+      lines.map do |line|
+        next line unless line.kind.file?
+
+        name = file_name(line.text)
+        name == line.text ? line : DiffLine.new(DiffLineKind::File, name)
+      end
+    end
+
     def display_rows(
       lines : Array(DiffLine),
       show_file_headers : Bool,
@@ -234,6 +252,15 @@ module Xd
       end
 
       line.lchop("diff --git ")
+    end
+
+    # Windows tools report paths with their own separator.
+    private def file_name(title : String) : String
+      at = title.rindex('/') || title.rindex('\\')
+      return title unless at
+
+      name = title[(at + 1)..]
+      name.empty? ? title : name
     end
 
     private def render_line(

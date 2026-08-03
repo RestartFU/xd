@@ -71,8 +71,12 @@ module Xd
         show_file_headers : Bool = true,
       ) : Prepared
         parsed = UnifiedDiff.parse(patch)
+        # Inline in a transcript there is one narrow column, and the path a
+        # tool reported is usually absolute: the name is the part that would
+        # otherwise be pushed off the end.
+        lines = UnifiedDiff.name_only(parsed.lines)
         rows = UnifiedDiff.display_rows(
-          parsed.lines,
+          lines,
           show_file_headers
         )
         Prepared.new(
@@ -80,7 +84,7 @@ module Xd
           parsed.additions,
           parsed.deletions,
           UnifiedDiff.markup(
-            parsed.lines,
+            lines,
             show_file_headers,
             INLINE_PREVIEW_ROWS
           )
