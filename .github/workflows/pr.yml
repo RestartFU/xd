@@ -26,7 +26,13 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # The self-hosted runner for our own branches, GitHub's for a fork: this
+    # repository is public, and a pull request runs whatever it contains. A
+    # fork must not get that on the machine the runner lives on.
+    runs-on: >-
+      ${{ github.event.pull_request.head.repo.fork
+      && 'ubuntu-latest'
+      || fromJSON('["self-hosted", "linux", "x64", "xd"]') }}
 
     steps:
       - uses: actions/checkout@v5

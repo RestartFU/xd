@@ -21,7 +21,12 @@ permissions:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    # Ours on the self-hosted runner, a fork's on GitHub's, for the reason
+    # given in pr.yml.
+    runs-on: >-
+      ${{ github.event.pull_request.head.repo.fork
+      && 'ubuntu-latest'
+      || fromJSON('["self-hosted", "linux", "x64", "xd"]') }}
 
     steps:
       - uses: actions/checkout@v5

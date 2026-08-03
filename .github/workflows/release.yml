@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, xd]
 
     steps:
       - uses: actions/checkout@v5
@@ -136,7 +136,7 @@ jobs:
 
   publish:
     needs: [linux, macos, windows]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, xd]
 
     steps:
       - uses: actions/checkout@v5
