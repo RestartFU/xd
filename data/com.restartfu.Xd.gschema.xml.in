@@ -133,6 +133,22 @@
       <description>How tall the shell panel was left, in pixels.</description>
     </key>
 
+    <key name="terminal-columns" type="i">
+      <default>0</default>
+      <summary>Columns a terminal last had</summary>
+      <description>
+        Size of the last shell on screen, in character cells. A shell lays out
+        its first prompt for the size it is opened at, before any resize can
+        reach it, so a new one is opened at the size it is about to be given.
+        Zero means none has been measured yet.
+      </description>
+    </key>
+
+    <key name="terminal-rows" type="i">
+      <default>0</default>
+      <summary>Rows a terminal last had</summary>
+    </key>
+
     <key name="diff-visible" type="b">
       <default>false</default>
       <summary>Changed-files pane shown</summary>

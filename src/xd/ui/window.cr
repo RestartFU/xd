@@ -601,6 +601,7 @@ module Xd
           end
         end
 
+        restore_terminal_geometry
         restore_active_chat
         @sidebar.reload
       end
@@ -756,6 +757,27 @@ module Xd
         @settings.set_int("terminal-height", height.to_i32) if height > 0
       end
 
+      # A shell lays out its first prompt for the size it is opened at, and the
+      # window comes back the size it was left, so the size its terminals were
+      # is worth keeping: the first shell of the next run opens at the size it
+      # is about to be given rather than at a default.
+      private def remember_terminal_geometry : Nil
+        geometry = @tool_panel.terminal_geometry
+        return unless geometry
+
+        columns, rows = geometry
+        return unless columns > 1 && rows > 1
+        @settings.set_int("terminal-columns", columns.to_i32)
+        @settings.set_int("terminal-rows", rows.to_i32)
+      end
+
+      private def restore_terminal_geometry : Nil
+        columns = @settings.int("terminal-columns").to_i64
+        rows = @settings.int("terminal-rows").to_i64
+        return unless columns > 1 && rows > 1
+        @tool_panel.terminal_geometry = {columns, rows}
+      end
+
       private def remember_repository_width : Nil
         return unless @tool_panel.repository_widget.visible?
 
@@ -766,6 +788,7 @@ module Xd
       private def persist_window_layout : Nil
         remember_panes
         remember_terminal_height
+        remember_terminal_geometry
         remember_repository_width
         @settings.set_int("window-width", @widget.default_width)
         @settings.set_int("window-height", @widget.default_height)

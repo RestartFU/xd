@@ -54,6 +54,16 @@ module Xd
         @terminal_widget.visible = false
       end
 
+      # The size the shell panel's terminals are at, which the window remembers
+      # between runs so the first shell of a run opens at the right one.
+      def terminal_geometry : Tuple(Int64, Int64)?
+        @terminal_panel.geometry
+      end
+
+      def terminal_geometry=(value : Tuple(Int64, Int64)?) : Nil
+        @terminal_panel.geometry = value
+      end
+
       def select_chat(chat_id : String?, view_key : String?) : Nil
         return if @chat_id == chat_id && @view_key == view_key
 

@@ -9,6 +9,10 @@ module Xd
     class TerminalPanel
       getter widget : Gtk::Box
 
+      # Nothing measures anything here, but the window saves and restores this
+      # the same way on every platform.
+      property geometry : Tuple(Int64, Int64)?
+
       def initialize(
         @request : PanelCall,
         @on_empty : Proc(Nil),

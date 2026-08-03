@@ -18,6 +18,8 @@ module Xd
     class TerminalPanel
       URL_PATTERN     = %q((?i)\b(?:https?|ftp)://[^[:space:]<>"']*[-[:alnum:]_~/#?&=%+])
       REGEX_MULTILINE = 0x00000400_u32
+      DEFAULT_COLUMNS =         80_i64
+      DEFAULT_ROWS    =         24_i64
 
       PALETTE = {
         "#23232a", "#e06c75", "#98c379", "#d19a66",
@@ -76,6 +78,17 @@ module Xd
       @title : Gtk::Label
       @title_sizes : Gtk::SizeGroup
       @focus_next = false
+
+      # The last size a terminal in this panel actually had.
+      #
+      # A shell prints its first prompt before any resize can reach it, and it
+      # lays that prompt out for the size it was given. Opening at a default
+      # nobody has ever seen therefore leaves the first prompt -- and the
+      # cursor inside it -- placed for a terminal that never existed on screen.
+      # The window remembers this across runs, because the window remembers its
+      # own size too, so the first terminal of a run is opened at the size it
+      # is about to be given.
+      property geometry : Tuple(Int64, Int64)?
 
       def initialize(
         @request : PanelCall,
@@ -385,6 +398,12 @@ module Xd
         end
         clear_status(view)
         update_title
+        # Once GTK has given it a size, tell the shell if it differs from what
+        # it was opened at, rather than waiting for the next tick to notice.
+        GLib.idle_add do
+          sync_size
+          false
+        end
         session
       end
 
@@ -597,11 +616,12 @@ module Xd
             "Waiting for the daemon"
           )
         end
+        columns, rows = open_geometry(view)
         request_async({
           "op"      => JSON::Any.new("terminal-open"),
           "chat"    => JSON::Any.new(chat_id),
-          "columns" => JSON::Any.new(80_i64),
-          "rows"    => JSON::Any.new(24_i64),
+          "columns" => JSON::Any.new(columns),
+          "rows"    => JSON::Any.new(rows),
           "reuse"   => JSON::Any.new(reuse),
         }) do |result|
           view.opening = false
@@ -746,6 +766,7 @@ module Xd
         columns = session.terminal.column_count
         rows = session.terminal.row_count
         return if columns <= 0 || rows <= 0
+        @geometry = {columns, rows}
         return if columns == session.columns && rows == session.rows
 
         session.columns = columns
@@ -756,6 +777,19 @@ module Xd
           "columns"  => JSON::Any.new(columns),
           "rows"     => JSON::Any.new(rows),
         }) { |_result| }
+      end
+
+      # What to ask for when opening. A terminal already on screen is the exact
+      # answer; failing that, the last one this panel measured, in this run or
+      # the last. The default is only for a terminal opened before this window
+      # has ever shown one.
+      private def open_geometry(view : View) : Tuple(Int64, Int64)
+        view.sessions.each_value do |session|
+          columns = session.terminal.column_count
+          rows = session.terminal.row_count
+          return {columns, rows} if columns > 1 && rows > 1
+        end
+        @geometry || {DEFAULT_COLUMNS, DEFAULT_ROWS}
       end
 
       private def request_async(
