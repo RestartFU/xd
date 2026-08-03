@@ -6,8 +6,13 @@
 #
 # Each runner is a container with a named volume holding its registration, and
 # a restart policy, so it comes back after a crash, a daemon restart or a
-# reboot without being registered again. Re-running this is safe: a runner of
-# the same name is replaced, not duplicated.
+# reboot without being registered again.
+#
+# Asks for as many runners as the count: one already running is left alone, so
+# raising the count adds to them rather than replacing them. Replacing a live
+# registration strands whatever GitHub has already dispatched to it -- the job
+# waits for a runner that no longer exists -- so that is deliberate. Force it
+# with --recreate when the image or the labels have changed.
 #
 # Needs a GitHub token with repo admin rights, from `gh auth` or GH_TOKEN, to
 # ask for a registration token. Registration tokens last an hour and are only
@@ -51,6 +56,12 @@ remove () {
 
 [ "${1:-}" = "--remove" ] && remove
 
+RECREATE=no
+if [ "${1:-}" = "--recreate" ]; then
+  RECREATE=yes
+  shift
+fi
+
 COUNT=${1:-2}
 case "$COUNT" in
   ''|*[!0-9]*) die "the count must be a number." ;;
@@ -62,6 +73,12 @@ docker build --quiet --tag "$IMAGE" . >/dev/null
 for index in $(seq 1 "$COUNT"); do
   name="${PREFIX}-${index}"
   volume="${name}-data"
+
+  if [ "$RECREATE" = no ] &&
+     [ -n "$(docker ps --quiet --filter "name=^${name}$")" ]; then
+    say "Leaving $name alone; it is already running."
+    continue
+  fi
 
   say "Registering $name…"
   token=$(gh api \
