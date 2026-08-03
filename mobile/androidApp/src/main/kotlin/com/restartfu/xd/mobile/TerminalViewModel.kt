@@ -40,6 +40,11 @@ class TerminalViewModel(
     private val chatId: String,
 ) : ViewModel() {
     private val screen = TerminalScreen(COLUMNS, ROWS)
+
+    // What the phone can show, once it has measured itself. Until then the
+    // usual default, which is what a pty is given when nobody says otherwise.
+    private var columns = COLUMNS
+    private var rows = ROWS
     private val _state = MutableStateFlow(TerminalPane())
     val state: StateFlow<TerminalPane> = _state.asStateFlow()
 
@@ -53,7 +58,7 @@ class TerminalViewModel(
             try {
                 val existing = session.terminals().firstOrNull()
                 val id = existing?.id
-                    ?: session.openTerminal(COLUMNS, ROWS, reuse = true)
+                    ?: session.openTerminal(columns, rows, reuse = true)
                 // A terminal opened elsewhere already has scrollback. Replay
                 // rebuilds it, resize frames included and in order, so older
                 // output is interpreted at the geometry that produced it.
@@ -64,7 +69,7 @@ class TerminalViewModel(
                             is ReplayFrame.Resize -> screen.resize(frame.columns, frame.rows)
                         }
                     }
-                    screen.resize(COLUMNS, ROWS)
+                    screen.resize(columns, rows)
                 }
                 _state.value = TerminalPane(
                     id = id,
@@ -72,7 +77,7 @@ class TerminalViewModel(
                     cursorRow = screen.cursorRow,
                     cursorColumn = screen.cursorColumn,
                 )
-                session.resizeTerminal(id, COLUMNS, ROWS)
+                session.resizeTerminal(id, columns, rows)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -95,6 +100,34 @@ class TerminalViewModel(
                 )
             }
             is TerminalEvent.Closed -> _state.value = _state.value.copy(closed = true)
+        }
+    }
+
+    /**
+     * Fits the pty to what the phone is actually showing.
+     *
+     * A pty wider than the screen wraps its lines where the screen cannot show
+     * the break, so a prompt arrives split with its middle off to the right;
+     * one taller leaves a screenful of blank rows under the prompt and the
+     * previous one stranded at the bottom. A fixed 80x24 gave a phone both.
+     */
+    fun resize(columns: Int, rows: Int) {
+        val width = columns.coerceIn(MIN_COLUMNS, MAX_COLUMNS)
+        val height = rows.coerceIn(MIN_ROWS, MAX_ROWS)
+        if (width == this.columns && height == this.rows) return
+
+        this.columns = width
+        this.rows = height
+        screen.resize(width, height)
+        _state.value = _state.value.copy(
+            rows = screen.snapshot(),
+            cursorRow = screen.cursorRow,
+            cursorColumn = screen.cursorColumn,
+        )
+
+        val id = _state.value.id ?: return
+        viewModelScope.launch {
+            runCatching { session.resizeTerminal(id, width, height) }
         }
     }
 
@@ -136,5 +169,11 @@ class TerminalViewModel(
     private companion object {
         const val COLUMNS = 80
         const val ROWS = 24
+        // A phone in portrait measures somewhere near 40 columns; the bounds
+        // are only here so a bad measurement cannot ask for a 1-column pty.
+        const val MIN_COLUMNS = 20
+        const val MAX_COLUMNS = 500
+        const val MIN_ROWS = 4
+        const val MAX_ROWS = 200
     }
 }

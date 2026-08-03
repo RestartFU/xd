@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,12 +34,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
@@ -48,6 +52,8 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.terminal.Cell
@@ -126,7 +132,7 @@ internal fun TerminalPaneContent(model: TerminalViewModel) {
                     modifier = Modifier.padding(16.dp),
                 )
             }
-            else -> Box(
+            else -> BoxWithConstraints(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -137,6 +143,16 @@ internal fun TerminalPaneContent(model: TerminalViewModel) {
                         indication = null,
                     ) { focus.requestFocus() },
             ) {
+                // The pty is told what fits here, so its lines break where the
+                // screen breaks them and its last row is the last row shown.
+                // Measured from the font rather than guessed: the app scales
+                // density, and the reader may have asked for larger text.
+                val cell = measureCell()
+                val gutter = padding(LocalDensity.current)
+                val columns = (constraints.maxWidth - gutter) / cell.width
+                val rows = (constraints.maxHeight - gutter) / cell.height
+                LaunchedEffect(columns, rows) { model.resize(columns, rows) }
+
                 Column(
                     Modifier
                         .fillMaxSize()
@@ -216,6 +232,34 @@ internal fun TerminalPaneContent(model: TerminalViewModel) {
         }
     }
 }
+
+/** One monospace cell of the style the rows are drawn in, in pixels. */
+@Composable
+private fun measureCell(): IntSize {
+    val measurer = rememberTextMeasurer()
+    val style = MaterialTheme.typography.bodySmall.copy(
+        fontFamily = FontFamily.Monospace,
+    )
+    return remember(measurer, style, LocalDensity.current) {
+        // A row of them, divided back down: one glyph on its own rounds its
+        // advance, and eighty of those is a column and a half of drift.
+        val sample = "M".repeat(CELL_SAMPLE)
+        val measured = measurer.measure(AnnotatedString(sample), style = style)
+        // Rounded up, so a fraction of a pixel per cell cannot add up to a
+        // column that does not fit.
+        IntSize(
+            ((measured.size.width + CELL_SAMPLE - 1) / CELL_SAMPLE).coerceAtLeast(1),
+            measured.size.height.coerceAtLeast(1),
+        )
+    }
+}
+
+// The 6dp the rows are padded by, on both sides.
+private fun padding(density: Density): Int =
+    (PADDING_DP * 2 * density.density).toInt()
+
+private const val CELL_SAMPLE = 40
+private const val PADDING_DP = 6
 
 /**
  * Turns an IME edit into pty input.
