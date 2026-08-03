@@ -33,6 +33,33 @@ describe Xd::Agent::ToolSummary do
     Xd::Agent::ToolSummary.build("Think", nil).should eq("Think")
   end
 
+  it "summarizes task tool calls" do
+    Xd::Agent::ToolSummary.build(
+      "TaskCreate",
+      summary_input({
+        "subject"     => "Identify every stacked PR",
+        "description" => "The longer task description",
+      })
+    ).should eq("TaskCreate  Identify every stacked PR")
+
+    Xd::Agent::ToolSummary.build(
+      "TaskUpdate",
+      summary_input({
+        "taskId" => "7",
+        "status" => "completed",
+      })
+    ).should eq("TaskUpdate  #7 → completed")
+    Xd::Agent::ToolSummary.build(
+      "TaskGet",
+      summary_input({"taskId" => "7"})
+    ).should eq("TaskGet  #7")
+    Xd::Agent::ToolSummary.build("TaskList", nil).should eq("TaskList")
+    Xd::Agent::ToolSummary.build(
+      "TaskStop",
+      summary_input({"task_id" => "background-7"})
+    ).should eq("TaskStop  background-7")
+  end
+
   it "builds useful Claude subagent cards" do
     message = Xd::Agent::ToolSummary.build(
       "Agent",

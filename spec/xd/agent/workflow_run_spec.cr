@@ -88,6 +88,88 @@ describe Xd::Agent::WorkflowRun do
     jobs[1].css_class.should eq("xd-workflow-success")
   end
 
+  it "falls back to authenticated gh output when the API is unavailable" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workflow-gh-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "gh")
+    arguments = File.join(directory, "arguments")
+    Dir.mkdir_p(directory)
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      set -eu
+      printf '%s\n' "$@" > "$XD_GH_ARGUMENTS"
+      printf '%s\n' '{"name":"nightly","status":"completed","conclusion":"success","jobs":[{"databaseId":101,"name":"linux","status":"completed","conclusion":"success","steps":[{"name":"Publish","status":"completed","conclusion":"success"}]}]}'
+      SH
+    File.chmod(executable, 0o700)
+
+    old_executable = ENV["XD_GH_EXECUTABLE"]?
+    old_arguments = ENV["XD_GH_ARGUMENTS"]?
+    begin
+      ENV["XD_GH_EXECUTABLE"] = executable
+      ENV["XD_GH_ARGUMENTS"] = arguments
+      run = Xd::Agent::WorkflowRun::Run.new(
+        "123%",
+        "owner/repo%",
+        ""
+      )
+
+      status = Xd::Agent::WorkflowRun.fetch_status(run)
+      status.label.should eq("nightly · Passed")
+      status.jobs.first.id.should eq("101")
+      status.jobs.first.log.should eq("Publish")
+      File.read(arguments).lines.map(&.chomp).should eq([
+        "run",
+        "view",
+        "123%",
+        "--repo",
+        "owner/repo%",
+        "--json",
+        "name,status,conclusion,jobs",
+      ])
+    ensure
+      if old_executable
+        ENV["XD_GH_EXECUTABLE"] = old_executable
+      else
+        ENV.delete("XD_GH_EXECUTABLE")
+      end
+      if old_arguments
+        ENV["XD_GH_ARGUMENTS"] = old_arguments
+      else
+        ENV.delete("XD_GH_ARGUMENTS")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "reports a status error when gh cannot provide fallback data" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workflow-gh-error-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "gh")
+    Dir.mkdir_p(directory)
+    File.write(executable, "#!/bin/sh\nexit 1\n")
+    File.chmod(executable, 0o700)
+
+    old_executable = ENV["XD_GH_EXECUTABLE"]?
+    begin
+      ENV["XD_GH_EXECUTABLE"] = executable
+      run = Xd::Agent::WorkflowRun::Run.new("123%", "owner/repo%", "")
+      expect_raises(Xd::Agent::WorkflowRun::StatusError) do
+        Xd::Agent::WorkflowRun.fetch_status(run)
+      end
+    ensure
+      if old_executable
+        ENV["XD_GH_EXECUTABLE"] = old_executable
+      else
+        ENV.delete("XD_GH_EXECUTABLE")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
   it "rejects malformed workflow status replies" do
     Xd::Agent::WorkflowRun.parse_status("not json").should be_nil
     Xd::Agent::WorkflowRun.parse_status(

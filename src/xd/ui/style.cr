@@ -513,6 +513,10 @@ module Xd
         border-radius: 6px;
         background: alpha(#ffffff, 0.09);
       }
+      .xd-secret-name {
+        font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+        font-size: 0.9em;
+      }
       .xd-auth-code {
         font-family: "JetBrains Mono", monospace;
         font-size: 1.2em;

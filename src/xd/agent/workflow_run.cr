@@ -1,6 +1,8 @@
 require "http/client"
 require "json"
 require "uri"
+require "./environment"
+require "./executable"
 
 module Xd
   module Agent
@@ -192,8 +194,8 @@ module Xd
           [] of Job
         end
         Status.new(status.name, status.state, status.conclusion, jobs)
-      rescue error : IO::Error | Socket::Error | URI::Error
-        raise StatusError.new(error.message || "Cannot read workflow status.")
+      rescue error : StatusError | IO::Error | Socket::Error | URI::Error
+        fetch_cli_status(run)
       end
 
       def parse_status(body : String?) : Status?
@@ -222,7 +224,7 @@ module Xd
         values.each do |value|
           item = value.as_h?
           next unless item
-          id_value = item["id"]?.try(&.as_i64?).try(&.to_s)
+          id_value = (item["id"]? || item["databaseId"]?).try(&.as_i64?).try(&.to_s)
           name_value = item["name"]?.try(&.as_s?)
           state_value = item["status"]?.try(&.as_s?)
           next unless id_value && name_value && state_value
@@ -243,6 +245,44 @@ module Xd
         result
       rescue JSON::ParseException
         nil
+      end
+
+      private def fetch_cli_status(run : Run) : Status
+        output = IO::Memory.new
+        executable = Executable.resolve("gh")
+        status = Process.run(
+          executable,
+          [
+            "run",
+            "view",
+            run.id,
+            "--repo",
+            run.repository,
+            "--json",
+            "name,status,conclusion,jobs",
+          ],
+          env: Environment.host,
+          clear_env: true,
+          input: Process::Redirect::Close,
+          output: output,
+          error: Process::Redirect::Close
+        )
+        unless status.success?
+          raise StatusError.new(
+            "GitHub CLI returned status #{status.exit_code}."
+          )
+        end
+
+        body = output.to_s
+        parsed = parse_status(body) || raise StatusError.new(
+          "GitHub CLI returned an invalid workflow status."
+        )
+        jobs = parse_jobs(body) || raise StatusError.new(
+          "GitHub CLI returned invalid workflow jobs."
+        )
+        Status.new(parsed.name, parsed.state, parsed.conclusion, jobs)
+      rescue error : File::Error | IO::Error
+        raise StatusError.new(error.message || "Cannot run GitHub CLI.")
       end
 
       private def fetch_jobs(run : Run, token : String?) : Array(Job)

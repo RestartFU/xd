@@ -41,6 +41,10 @@ module Xd
           end
         end
 
+        if task = task_summary(tool, input)
+          return task
+        end
+
         detail = nil
         command = false
         DETAIL_KEYS.each_with_index do |key, index|
@@ -60,6 +64,44 @@ module Xd
         text = truncate(text)
 
         command ? "$ #{text}" : "#{stable_name}  #{text}"
+      end
+
+      private def task_summary(
+        tool : String,
+        input : Hash(String, JSON::Any)?,
+      ) : String?
+        case tool
+        when "TaskCreate"
+          detail = string?(input, "subject") || string?(input, "description")
+          return task_with_detail(tool, detail)
+        when "TaskUpdate"
+          task_id = string?(input, "taskId") || string?(input, "task_id")
+          status = string?(input, "status")
+          detail = [] of String
+          if task_id
+            detail << "##{task_id}"
+          end
+          detail << status if status
+          return task_with_detail(tool, detail.empty? ? nil : detail.join(" → "))
+        when "TaskGet"
+          task_id = string?(input, "taskId") || string?(input, "task_id")
+          return task_with_detail(tool, task_id && "##{task_id}")
+        when "TaskList"
+          return tool
+        when "TaskStop"
+          task_id = string?(input, "task_id") || string?(input, "taskId")
+          return task_with_detail(tool, task_id)
+        else
+          return nil
+        end
+      end
+
+      private def task_with_detail(tool : String, detail : String?) : String
+        return tool unless detail
+
+        normalized = detail.split.join(" ")
+        return tool if normalized.empty?
+        "#{tool}  #{truncate(normalized)}"
       end
 
       private def claude_subagent(

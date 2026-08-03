@@ -79,6 +79,28 @@ describe Xd::Agent::Parser do
     events.count(&.type.error?).should eq(0)
   end
 
+  it "summarizes Claude task tools" do
+    parser = Xd::Agent::Parser.new(Xd::Agent::Catalog::CLAUDE)
+    events = parser.feed_line({
+      type:    "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "TaskCreate",
+            input: {
+              subject:     "Identify every stacked PR",
+              description: "Inspect branches and merge relationships",
+            },
+          },
+        ],
+      },
+    }.to_json)
+
+    events.count(&.type.tool_use?).should eq(1)
+    events.first.text.should eq("TaskCreate  Identify every stacked PR")
+  end
+
   it "reads exact Codex context from the bounded rollout tail" do
     directory = File.join(
       Dir.tempdir,

@@ -247,6 +247,7 @@ module Xd
         name_entry.placeholder_text = "ENVIRONMENT_VARIABLE"
         name_entry.editable = !existing
         name_entry.hexpand = true
+        name_entry.add_css_class("xd-secret-name")
 
         value_entry = Gtk::PasswordEntry.new
         value_entry.placeholder_text = existing ? "Unchanged" : "Secret value"
