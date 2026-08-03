@@ -287,6 +287,7 @@ internal fun ChatScreen(
                 when (row) {
                     is TranscriptRow.Single -> TranscriptRow(row.item, model)
                     is TranscriptRow.Tools -> ToolGroupRow(row)
+                    is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
                 }
             }
             if (state.working) {
@@ -632,6 +633,7 @@ private fun rowKey(row: TranscriptRow): String = when (row) {
     is TranscriptRow.Single -> row.item.id
     // Keyed on the run's first call, which is stable as the run grows.
     is TranscriptRow.Tools -> "tools-${row.items.first().id}"
+    is TranscriptRow.Pipeline -> "pipeline-${row.item.id}"
 }
 
 /**

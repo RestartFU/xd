@@ -338,6 +338,10 @@ module Xd
 
         @list_view = Gtk::ListView.new(@selection, factory)
         @list_view.single_click_activate = false
+        # Keep the gesture target covering the unused part of the sidebar so
+        # context menus can use the actual pointer location there as well.
+        @list_view.hexpand = true
+        @list_view.vexpand = true
         @list_view.add_css_class("navigation-sidebar")
         @list_view.add_css_class("xd-sidebar")
         @list_view.activate_signal.connect do |position|
@@ -958,9 +962,9 @@ module Xd
 
         gesture = Gtk::GestureClick.new
         gesture.button = Gdk::BUTTON_SECONDARY.to_u32
-        gesture.pressed_signal.connect do |_presses, _x, _y|
+        gesture.pressed_signal.connect do |_presses, x, y|
           if node = @bound_nodes[pointer_key(box)]?
-            open_row_menu(box, node)
+            open_row_menu(box, node, x, y)
           end
         end
         box.add_controller(gesture)
@@ -1549,7 +1553,12 @@ module Xd
         end
       end
 
-      private def open_row_menu(box : Gtk::Box, node : Node) : Nil
+      private def open_row_menu(
+        box : Gtk::Box,
+        node : Node,
+        x : Float64,
+        y : Float64,
+      ) : Nil
         return if node.placeholder?
 
         if previous = @row_popover
@@ -1566,7 +1575,11 @@ module Xd
                   else
                     raise "Unknown sidebar node kind"
                   end
-        present_menu(popover, box)
+        present_menu(
+          popover,
+          box,
+          Gdk::Rectangle.new(x.to_i32, y.to_i32, 1, 1)
+        )
       end
 
       private def open_workspace_menu(x : Float64, y : Float64) : Nil

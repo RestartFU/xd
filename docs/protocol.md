@@ -301,6 +301,7 @@ boundary, not an event cursor.
 | `agent-clis` | none | bundled assistant versions |
 | `daemon-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
+| `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the daemon |
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
 | `voice-model` | `chat` | `available: boolean` — whether *this daemon* has the speech model on disk |
 | `search` | `query` | matching stored messages |
@@ -433,6 +434,21 @@ install -- and both `install` and `restart` are refused there.
 desktop reads its own compiled-in catalog because it ships with the daemon; a
 separately released client must ask, since `set-option` validates the model id
 and a hard-coded list would be refused as soon as one is added or retired.
+
+### `workflow-status`
+
+```json
+{
+  "op":"workflow-status",
+  "text":"workflow_run\\n123\\nhttps://github.com/RestartFU/xd/actions/runs/123"
+}
+```
+
+The daemon validates the captured marker, then fetches the run and its jobs from
+GitHub using its configured token. Active jobs omit a terminal conclusion and
+include their latest step name in `log`; clients should show a loading indicator
+rather than an `In progress` label. The endpoint is intended for mobile clients,
+while the desktop card may fetch the same data directly.
 
 ### `remove-worktree`
 

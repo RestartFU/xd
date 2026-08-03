@@ -12,21 +12,62 @@ module Xd
 
       record Run, id : String, repository : String, url : String
 
+      MAX_JOBS = 100
+
       class StatusError < Exception
+      end
+
+      record Job,
+        id : String,
+        name : String,
+        state : String,
+        conclusion : String?,
+        log : String? do
+        def terminal? : Bool
+          state == "completed"
+        end
+
+        def label : String
+          return "" unless terminal?
+
+          case conclusion
+          when "success"         then "Passed"
+          when "failure"         then "Failed"
+          when "cancelled"       then "Cancelled"
+          when "timed_out"       then "Timed out"
+          when "action_required" then "Action required"
+          when "startup_failure" then "Startup failed"
+          when "skipped"         then "Skipped"
+          when "stale"           then "Stale"
+          when "neutral"         then "Neutral"
+          else                        "Completed"
+          end
+        end
+
+        def css_class : String
+          return "xd-workflow-running" unless terminal?
+          case conclusion
+          when "success" then "xd-workflow-success"
+          when "failure", "timed_out", "startup_failure"
+            "xd-workflow-failure"
+          else
+            "xd-workflow-finished"
+          end
+        end
       end
 
       record Status,
         name : String,
         state : String,
-        conclusion : String? do
+        conclusion : String?,
+        jobs : Array(Job) do
         def terminal? : Bool
           state == "completed"
         end
 
         def label : String
           result = case state
-                   when "queued"      then "Queued"
-                   when "in_progress" then "In progress"
+                   when "queued", "in_progress" then ""
                    when "completed"
                      case conclusion
                      when "success"         then "Passed"
@@ -43,7 +84,12 @@ module Xd
                    else
                      state.split('_').map(&.capitalize).join(' ')
                    end
+          return name if result.empty? && !name.empty?
           name.empty? ? result : "#{name} · #{result}"
+        end
+
+        def result_label : String
+          name.empty? ? label : label.sub("#{name} · ", "")
         end
 
         def css_class : String
@@ -131,28 +177,21 @@ module Xd
         uri = URI.parse(
           "https://api.github.com/repos/#{run.repository}/actions/runs/#{run.id}"
         )
-        headers = HTTP::Headers{
-          "Accept"               => "application/vnd.github+json",
-          "User-Agent"           => "xd",
-          "X-GitHub-Api-Version" => "2022-11-28",
-        }
-        headers["Authorization"] = "Bearer #{token}" if token && !token.empty?
-        client = HTTP::Client.new(uri)
-        client.connect_timeout = 5.seconds
-        client.read_timeout = 10.seconds
-        begin
-          response = client.get(uri.request_target, headers)
-          unless response.status_code.in?(200..299)
-            raise StatusError.new(
-              "GitHub returned HTTP #{response.status_code}."
-            )
-          end
-          parse_status(response.body) || raise StatusError.new(
-            "GitHub returned an invalid workflow status."
+        response = request_body(uri, api_headers(token))
+        unless response[0].in?(200..299)
+          raise StatusError.new(
+            "GitHub returned HTTP #{response[0]}."
           )
-        ensure
-          client.close
         end
+        status = parse_status(response[1]) || raise StatusError.new(
+          "GitHub returned an invalid workflow status."
+        )
+        jobs = begin
+          fetch_jobs(run, token)
+        rescue StatusError
+          [] of Job
+        end
+        Status.new(status.name, status.state, status.conclusion, jobs)
       rescue error : IO::Error | Socket::Error | URI::Error
         raise StatusError.new(error.message || "Cannot read workflow status.")
       end
@@ -167,9 +206,110 @@ module Xd
         return if name.bytesize > 160 || state.bytesize > 40
         conclusion = record["conclusion"]?.try(&.as_s?)
         return if conclusion && conclusion.bytesize > 40
-        Status.new(name, state, conclusion)
+        Status.new(name, state, conclusion, [] of Job)
       rescue JSON::ParseException
         nil
+      end
+
+      def parse_jobs(body : String?) : Array(Job)?
+        return unless body
+        record = JSON.parse(body).as_h?
+        return unless record
+        values = record["jobs"]?.try(&.as_a?)
+        return unless values
+
+        result = [] of Job
+        values.each do |value|
+          item = value.as_h?
+          next unless item
+          id_value = item["id"]?.try(&.as_i64?).try(&.to_s)
+          name_value = item["name"]?.try(&.as_s?)
+          state_value = item["status"]?.try(&.as_s?)
+          next unless id_value && name_value && state_value
+          name = name_value.not_nil!
+          state = state_value.not_nil!
+          next if name.empty? || name.bytesize > 160 || state.empty? || state.bytesize > 40
+          conclusion = item["conclusion"]?.try(&.as_s?)
+          next if conclusion && conclusion.bytesize > 40
+          result << Job.new(
+            id_value.not_nil!,
+            name,
+            state,
+            conclusion,
+            latest_job_activity(item, state)
+          )
+          break if result.size >= MAX_JOBS
+        end
+        result
+      rescue JSON::ParseException
+        nil
+      end
+
+      private def fetch_jobs(run : Run, token : String?) : Array(Job)
+        uri = URI.parse(
+          "https://api.github.com/repos/#{run.repository}/actions/runs/" \
+          "#{run.id}/jobs?per_page=#{MAX_JOBS}"
+        )
+        response = request_body(uri, api_headers(token))
+        unless response[0].in?(200..299)
+          raise StatusError.new(
+            "GitHub returned HTTP #{response[0]} while reading jobs."
+          )
+        end
+        parse_jobs(response[1]) || raise StatusError.new(
+          "GitHub returned invalid workflow jobs."
+        )
+      end
+
+      private def latest_job_activity(
+        item : Hash(String, JSON::Any),
+        job_state : String,
+      ) : String?
+        steps = item["steps"]?.try(&.as_a?) || return nil
+        selected : JSON::Any? = nil
+        if job_state == "in_progress"
+          selected = steps.reverse.find do |value|
+            step = value.as_h?
+            next false unless step
+            step["status"]?.try(&.as_s?) == "in_progress"
+          end
+        end
+        selected ||= steps.reverse.find do |value|
+          step = value.as_h?
+          next false unless step
+          status = step["status"]?.try(&.as_s?)
+          next false unless status
+          !{"queued", "pending", "requested"}.includes?(status)
+        end
+        step = selected.try(&.as_h?) || return nil
+        name = step["name"]?.try(&.as_s?)
+        return if name.nil? || name.empty?
+        name
+      end
+
+      private def api_headers(token : String?) : HTTP::Headers
+        headers = HTTP::Headers{
+          "Accept"               => "application/vnd.github+json",
+          "User-Agent"           => "xd",
+          "X-GitHub-Api-Version" => "2022-11-28",
+        }
+        headers["Authorization"] = "Bearer #{token}" if token && !token.empty?
+        headers
+      end
+
+      private def request_body(
+        uri : URI,
+        headers : HTTP::Headers,
+      ) : Tuple(Int32, String)
+        client = HTTP::Client.new(uri)
+        client.connect_timeout = 5.seconds
+        client.read_timeout = 10.seconds
+        begin
+          response = client.get(uri.request_target, headers)
+          {response.status_code, response.body}
+        ensure
+          client.close
+        end
       end
 
       private def repository_from_workdir(workdir : String) : String?

@@ -59,6 +59,21 @@ class ToolGroupingTest {
     }
 
     @Test
+    fun aPipelineGetsItsOwnCardRow() {
+        val pipeline = tool(
+            "workflow_run\n123\n" +
+                "https://github.com/RestartFU/xd/actions/runs/123",
+        )
+        val rows = ToolGrouping.rows(listOf(tool("before"), pipeline, tool("after")))
+
+        assertEquals(3, rows.size)
+        assertIs<TranscriptRow.Single>(rows[0])
+        val card = assertIs<TranscriptRow.Pipeline>(rows[1])
+        assertEquals("123", card.run.id)
+        assertIs<TranscriptRow.Single>(rows[2])
+    }
+
+    @Test
     fun nonToolItemsPassThroughInOrder() {
         val items = listOf(message("first"), message("second"))
 

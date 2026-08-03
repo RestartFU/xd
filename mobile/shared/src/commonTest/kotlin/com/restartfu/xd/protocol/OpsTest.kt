@@ -181,6 +181,17 @@ class OpsTest {
         }
     }
 
+    @Test
+    fun workflowStatusCarriesTheCapturedMarker() {
+        val marker = "workflow_run\n123\n" +
+            "https://github.com/RestartFU/xd/actions/runs/123"
+        val request = Ops.workflowStatus(marker)
+
+        assertEquals("workflow-status", request.getValue("op").jsonPrimitive.content)
+        assertEquals(marker, request.getValue("text").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.workflowStatus(" ") }
+    }
+
     private companion object {
         val PNG_HEADER = byteArrayOf(
             0x89.toByte(),

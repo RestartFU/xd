@@ -24,8 +24,9 @@ describe "mobile wire contract" do
       "drop-queue"    => Xd::Protocol::Operation::DropQueue,
       "cancel"        => Xd::Protocol::Operation::Cancel,
       "set-option"    => Xd::Protocol::Operation::SetOption,
-      "agent-catalog" => Xd::Protocol::Operation::AgentCatalog,
-      "ping"          => Xd::Protocol::Operation::Ping,
+      "agent-catalog"  => Xd::Protocol::Operation::AgentCatalog,
+      "workflow-status" => Xd::Protocol::Operation::WorkflowStatus,
+      "ping"           => Xd::Protocol::Operation::Ping,
       # Voice: the phone captures audio and the daemon does everything after.
       "voice-model"          => Xd::Protocol::Operation::VoiceModel,
       "voice-model-download" => Xd::Protocol::Operation::VoiceModelDownload,

@@ -11,6 +11,7 @@ import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
+import com.restartfu.xd.protocol.WorkflowStatusReply
 import com.restartfu.xd.protocol.decodeReply
 import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.store.ChatSessionCore
@@ -183,6 +184,13 @@ public class XdClient(
     public suspend fun daemonUpdate(action: String = "status"): DaemonUpdateReply {
         val value = actor.call(Ops.daemonUpdate(action))
         return actor.decodeReply(value) { it.decodeReply<DaemonUpdateReply>() }
+    }
+
+    public suspend fun workflowStatus(marker: String): WorkflowStatusReply {
+        val value = actor.call(Ops.workflowStatus(marker))
+        return actor.decodeReply(value) { value ->
+            value.decodeReply<WorkflowStatusReply>()
+        }
     }
 
     /**

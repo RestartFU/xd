@@ -28,6 +28,7 @@ module Xd
       AgentAuthLogout
       AgentClis
       AgentCatalog
+      WorkflowStatus
       DaemonUpdate
       NewFolder
       RenameFolder
@@ -89,6 +90,7 @@ module Xd
         when AgentAuthLogout    then "agent-auth-logout"
         when AgentClis          then "agent-clis"
         when AgentCatalog       then "agent-catalog"
+        when WorkflowStatus     then "workflow-status"
         when DaemonUpdate       then "daemon-update"
         when NewFolder          then "new-folder"
         when RenameFolder       then "rename-folder"
@@ -153,6 +155,7 @@ module Xd
         when "agent-auth-logout"    then AgentAuthLogout
         when "agent-clis"           then AgentClis
         when "agent-catalog"        then AgentCatalog
+        when "workflow-status"      then WorkflowStatus
         when "daemon-update"        then DaemonUpdate
         when "new-folder"           then NewFolder
         when "rename-folder"        then RenameFolder

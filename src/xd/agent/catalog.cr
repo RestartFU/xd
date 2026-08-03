@@ -233,7 +233,7 @@ module Xd
         "claude-mode",
         "Claude mode",
         "claude-code-proxy",
-        "xd-backend-claude",
+        "xd-backend-claude-mode",
         Transport::Exec,
         CODEX.models,
         CODEX.default_model

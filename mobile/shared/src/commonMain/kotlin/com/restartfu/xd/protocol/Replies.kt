@@ -137,6 +137,24 @@ public data class DoneReply(
 )
 
 @Serializable
+public data class WorkflowJobReply(
+    val id: String,
+    val name: String,
+    val state: String,
+    val conclusion: String? = null,
+    val log: String? = null,
+)
+
+@Serializable
+public data class WorkflowStatusReply(
+    val ok: Boolean,
+    val name: String = "",
+    val state: String = "",
+    val conclusion: String? = null,
+    val jobs: List<WorkflowJobReply> = emptyList(),
+)
+
+@Serializable
 public data class ModelReply(
     val id: String,
     val name: String,

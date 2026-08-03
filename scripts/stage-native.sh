@@ -96,6 +96,9 @@ install -m0644 \
   "$ROOT/data/icons/hicolor/scalable/apps/xd-backend-claude.svg" \
   "$STAGE/share/icons/hicolor/scalable/apps/xd-backend-claude.svg"
 install -m0644 \
+  "$ROOT/data/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg" \
+  "$STAGE/share/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg"
+install -m0644 \
   "$ROOT/data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg" \
   "$STAGE/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg"
 

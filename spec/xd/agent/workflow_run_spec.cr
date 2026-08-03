@@ -58,7 +58,7 @@ describe Xd::Agent::WorkflowRun do
     running = Xd::Agent::WorkflowRun.parse_status(
       %({"name":"nightly","status":"in_progress","conclusion":null})
     ).not_nil!
-    running.label.should eq("nightly · In progress")
+    running.label.should eq("nightly")
     running.terminal?.should be_false
     running.css_class.should eq("xd-workflow-running")
 
@@ -68,6 +68,24 @@ describe Xd::Agent::WorkflowRun do
     passed.label.should eq("nightly · Passed")
     passed.terminal?.should be_true
     passed.css_class.should eq("xd-workflow-success")
+  end
+
+  it "parses individual workflow jobs" do
+    jobs = Xd::Agent::WorkflowRun.parse_jobs(
+      %({"jobs":[
+        {"id":101,"name":"linux","status":"in_progress","conclusion":null,
+         "steps":[{"name":"Build Linux","status":"in_progress","conclusion":null}]},
+        {"id":102,"name":"macos","status":"completed","conclusion":"success",
+         "steps":[{"name":"Publish","status":"completed","conclusion":"success"}]}
+      ]})
+    ).not_nil!
+    jobs.size.should eq(2)
+    jobs[0].name.should eq("linux")
+    jobs[0].log.should eq("Build Linux")
+    jobs[0].terminal?.should be_false
+    jobs[1].log.should eq("Publish")
+    jobs[1].label.should eq("Passed")
+    jobs[1].css_class.should eq("xd-workflow-success")
   end
 
   it "rejects malformed workflow status replies" do

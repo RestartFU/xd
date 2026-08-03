@@ -141,6 +141,20 @@ describe Xd::Daemon::Engine do
     end
   end
 
+  it "rejects invalid workflow status markers" do
+    with_daemon_engine do |_store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      response = engine.dispatch(local, {
+        "op"   => "workflow-status",
+        "text" => "not a workflow marker",
+      }.to_json)
+
+      response.success?.should be_false
+      response["error"].as_s.should eq("Invalid workflow run marker.")
+    end
+  end
+
   it "accepts every published model for its own backend" do
     with_daemon_engine do |store, engine|
       local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)

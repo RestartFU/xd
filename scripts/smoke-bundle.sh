@@ -29,6 +29,8 @@ require_file \
 require_file \
   share/icons/hicolor/scalable/apps/xd-backend-claude.svg
 require_file \
+  share/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg
+require_file \
   share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 
 svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \

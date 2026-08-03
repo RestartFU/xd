@@ -5,6 +5,12 @@ public sealed interface TranscriptRow {
     /** Anything that stands on its own, including a lone tool call. */
     public data class Single(val item: TranscriptItem) : TranscriptRow
 
+    /** A GitHub Actions run with live job status. */
+    public data class Pipeline(
+        val item: TranscriptItem,
+        val run: PipelineRun,
+    ) : TranscriptRow
+
     /** A run of ordinary tool calls worth hiding behind one line. */
     public data class Tools(val items: List<TranscriptItem>) : TranscriptRow {
         val label: String get() = "${items.size} tool calls"
@@ -36,7 +42,15 @@ public object ToolGrouping {
         }
 
         items.forEach { item ->
-            if (item.kind == TranscriptKind.TOOL && ToolText.patch(item.text) == null) {
+            val pipeline = if (item.kind == TranscriptKind.TOOL) {
+                PipelineRun.parse(item.text)
+            } else {
+                null
+            }
+            if (pipeline != null) {
+                flush()
+                rows += TranscriptRow.Pipeline(item, pipeline)
+            } else if (item.kind == TranscriptKind.TOOL && ToolText.patch(item.text) == null) {
                 run += item
             } else {
                 flush()

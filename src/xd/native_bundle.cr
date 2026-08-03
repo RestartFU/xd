@@ -78,6 +78,10 @@ module Xd
           "#{resources}/share/icons/hicolor/scalable/apps/xd-backend-claude.svg"
         ),
         requirement(
+          "Claude mode icon",
+          "#{resources}/share/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg"
+        ),
+        requirement(
           "Codex icon",
           "#{resources}/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg"
         ),
@@ -181,6 +185,10 @@ module Xd
         requirement(
           "Claude icon",
           "share/icons/hicolor/scalable/apps/xd-backend-claude.svg"
+        ),
+        requirement(
+          "Claude mode icon",
+          "share/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg"
         ),
         requirement(
           "Codex icon",

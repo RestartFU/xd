@@ -335,6 +335,8 @@ module Xd
           agent_clis
         when Protocol::Operation::AgentCatalog
           agent_catalog
+        when Protocol::Operation::WorkflowStatus
+          workflow_status(request)
         when Protocol::Operation::DaemonUpdate
           daemon_update(request)
         when Protocol::Operation::Tree
@@ -766,6 +768,38 @@ module Xd
           JSON::Any.new(snapshot.wire_fields)
         end
         JSON::Any.new(values)
+      end
+
+      private def workflow_status(
+        request : Protocol::Request,
+      ) : Protocol::Response
+        content = request.string(
+          "text",
+          "Workflow status needs the captured run marker."
+        )
+        run = Agent::WorkflowRun.parse(content)
+        return Protocol::Response.error("Invalid workflow run marker.") unless run
+
+        status = Agent::WorkflowRun.fetch_status(run)
+        jobs = status.jobs.map do |job|
+          fields = {
+            "id"    => JSON::Any.new(job.id),
+            "name"  => JSON::Any.new(job.name),
+            "state" => JSON::Any.new(job.state),
+          }
+          fields["conclusion"] = JSON::Any.new(job.conclusion) if job.conclusion
+          fields["log"] = JSON::Any.new(job.log) if job.log
+          JSON::Any.new(fields)
+        end
+        fields = {
+          "name" => JSON::Any.new(status.name),
+          "state" => JSON::Any.new(status.state),
+          "jobs" => JSON::Any.new(jobs),
+        }
+        fields["conclusion"] = JSON::Any.new(status.conclusion) if status.conclusion
+        Protocol::Response.ok(fields)
+      rescue error : Agent::WorkflowRun::StatusError
+        Protocol::Response.error(error.message || "Workflow status unavailable.")
       end
 
       private def secrets_for(

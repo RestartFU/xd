@@ -260,6 +260,9 @@ RUN set -eux; \
       data/icons/hicolor/scalable/apps/xd-backend-claude.svg \
       /stage/usr/share/icons/hicolor/scalable/apps/xd-backend-claude.svg; \
     install -m0644 \
+      data/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg \
+      /stage/usr/share/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg; \
+    install -m0644 \
       data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg \
       /stage/usr/share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg; \
     install -Dm755 /usr/bin/git /stage/usr/libexec/git-bin; \

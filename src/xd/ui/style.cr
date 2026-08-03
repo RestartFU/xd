@@ -451,6 +451,15 @@ module Xd
         font-family: "JetBrains Mono", monospace;
         font-size: 0.9em;
       }
+      .xd-workflow-jobs {
+        margin-top: 3px;
+      }
+      .xd-workflow-job {
+        background: alpha(#000000, 0.16);
+        border-radius: 8px;
+        padding: 6px 8px;
+      }
+      .xd-workflow-job-name { font-weight: 600; }
       .xd-workflow {
         background: alpha(#ffffff, 0.045);
         border: 1px solid alpha(#ffffff, 0.09);

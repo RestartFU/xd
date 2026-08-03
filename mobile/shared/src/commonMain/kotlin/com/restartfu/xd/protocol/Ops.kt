@@ -85,6 +85,12 @@ public object Ops {
         put("limit", limit)
     }
 
+    public fun workflowStatus(marker: String): JsonObject = buildJsonObject {
+        require(marker.isNotBlank()) { "A workflow marker is required" }
+        put("op", "workflow-status")
+        put("text", marker)
+    }
+
     @OptIn(ExperimentalEncodingApi::class)
     public fun send(
         chatId: String,
