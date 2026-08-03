@@ -34,20 +34,23 @@ import com.restartfu.xd.mobile.ui.ChatScreen
 import com.restartfu.xd.mobile.ui.FatalScreen
 import com.restartfu.xd.mobile.ui.PairScreen
 import com.restartfu.xd.mobile.ui.TreeScreen
-import com.restartfu.xd.mobile.ui.XdColors
+import com.restartfu.xd.mobile.ui.xdColors
 import com.restartfu.xd.net.Link
 
 class MainActivity : ComponentActivity() {
     private val model: MainViewModel by viewModels()
+    private val settings: MobileSettings by lazy {
+        (application as XdApplication).settings
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            // The desktop's palette, always: see XdColors.
-            MaterialTheme(colorScheme = XdColors) {
+            val accent by settings.accent.collectAsStateWithLifecycle()
+            MaterialTheme(colorScheme = xdColors(accent)) {
                 Compact {
                     Surface(Modifier.fillMaxSize()) {
-                        XdMobileApp(model)
+                        XdMobileApp(model, settings)
                     }
                 }
             }
@@ -82,7 +85,10 @@ private fun Compact(content: @Composable () -> Unit) {
 private const val COMPACT_SCALE = 0.875f
 
 @Composable
-private fun XdMobileApp(model: MainViewModel) {
+private fun XdMobileApp(
+    model: MainViewModel,
+    settings: MobileSettings,
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val activity = LocalContext.current as? Activity
     val hasCredentials by model.client.hasCredentials.collectAsStateWithLifecycle()
@@ -118,7 +124,7 @@ private fun XdMobileApp(model: MainViewModel) {
     } else if (link is Link.Fatal) {
         FatalScreen(link as Link.Fatal, operationError, model::forget)
     } else {
-        ConnectedNavigation(model, link)
+        ConnectedNavigation(model, link, settings)
     }
 }
 
@@ -126,6 +132,7 @@ private fun XdMobileApp(model: MainViewModel) {
 private fun ConnectedNavigation(
     model: MainViewModel,
     link: Link,
+    settings: MobileSettings,
 ) {
     val navigation = rememberNavController()
     NavHost(navigation, startDestination = "tree") {
@@ -133,6 +140,7 @@ private fun ConnectedNavigation(
             TreeScreen(
                 model = model,
                 link = link,
+                settings = settings,
                 openChat = { navigation.navigate("chat/${Uri.encode(it)}") },
             )
         }
@@ -145,7 +153,11 @@ private fun ConnectedNavigation(
                 key = chatId,
                 factory = ChatViewModel.Factory(model.client, chatId),
             )
-            ChatScreen(chatModel, navigation::popBackStack)
+            ChatScreen(
+                model = chatModel,
+                settings = settings,
+                goBack = navigation::popBackStack,
+            )
         }
     }
 }

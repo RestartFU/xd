@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -64,11 +65,17 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.restartfu.xd.mobile.AndroidSpeechSpeaker
 import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
+import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.AskBlock
@@ -84,6 +91,7 @@ import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.model.TranscriptRow
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.syntax.CodeBlocks
+import com.restartfu.xd.voice.SpeakTagVisibility
 
 /** The desktop's conversation, diff, files and terminal panes, as tabs. */
 internal enum class Pane(val label: String) {
@@ -97,6 +105,7 @@ internal enum class Pane(val label: String) {
 @Composable
 internal fun ChatScreen(
     model: ChatViewModel,
+    settings: MobileSettings,
     goBack: () -> Unit,
 ) {
     val state by model.state.collectAsStateWithLifecycle()
@@ -104,6 +113,12 @@ internal fun ChatScreen(
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val steering by model.steering.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
+    val speechEnabled by settings.speechEnabled.collectAsStateWithLifecycle()
+
+    SpeechOutput(model, speechEnabled)
+    LaunchedEffect(speechEnabled) {
+        if (!speechEnabled) model.resetSpeech()
+    }
 
     // The desktop shows these beside the conversation. A phone has room for
     // one at a time, so they are tabs over the same chat.
@@ -297,6 +312,35 @@ internal fun ChatScreen(
             if (state.working) {
                 item(key = "working") { WorkingRow(state.startedAtMillis) }
             }
+        }
+    }
+}
+
+@Composable
+private fun SpeechOutput(
+    model: ChatViewModel,
+    enabled: Boolean,
+) {
+    if (!enabled) return
+
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val speaker = remember(context) { AndroidSpeechSpeaker(context) }
+
+    DisposableEffect(lifecycleOwner, speaker) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) speaker.stop()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            speaker.shutdown()
+        }
+    }
+    LaunchedEffect(model, speaker, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            model.resetSpeech()
+            model.speech.collect { speaker.speak(it) }
         }
     }
 }
@@ -600,7 +644,8 @@ private fun AssistantProse(
     val ask = remember(text) { AskBlock.parse(text) }
     val source = ask?.remainder ?: text
     val visible = remember(source, live) {
-        if (live) AssistantSections.stream(source) else source
+        val projected = if (live) AssistantSections.stream(source) else source
+        SpeakTagVisibility.render(projected, live)
     }
     val sections = remember(visible) { AssistantSections.parse(visible) }
 

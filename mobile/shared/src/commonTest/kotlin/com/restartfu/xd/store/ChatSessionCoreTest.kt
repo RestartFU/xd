@@ -10,8 +10,11 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
@@ -21,6 +24,21 @@ import kotlinx.serialization.json.put
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatSessionCoreTest {
+    @Test
+    fun speechFlowEmitsOnlyCompleteAssistantBlocksAndResetsForTools() = runTest {
+        val core = ChatSessionCore("chat", testActor(backgroundScope), backgroundScope) { 10_000L }
+        val spoken = async { core.speech.take(2).toList() }
+        runCurrent()
+
+        core.onEvent(textEvent(1, "<speak>hel"))
+        core.onEvent(textEvent(2, "lo</spe"))
+        core.onEvent(textEvent(3, "ak>"))
+        core.onEvent(toolEvent(4, "Read"))
+        core.onEvent(textEvent(5, "<speak>after tool</speak>"))
+
+        assertEquals(listOf("hello", "after tool"), spoken.await())
+    }
+
     @Test
     fun eventCoveredByCompletedSnapshotIsDiscarded() = runTest {
         val factory = FakeSocketFactory()
@@ -211,6 +229,39 @@ class ChatSessionCoreTest {
 
         assertEquals(listOf("safe"), core.state.value.queue)
     }
+
+    private fun textEvent(sequence: Long, text: String): SequencedEvent =
+        SequencedEvent(
+            sequence = sequence,
+            value = buildJsonObject {
+                put("event", "text")
+                put("chat", "chat")
+                put("text", text)
+            },
+        )
+
+    private fun toolEvent(sequence: Long, text: String): SequencedEvent =
+        SequencedEvent(
+            sequence = sequence,
+            value = buildJsonObject {
+                put("event", "tool")
+                put("chat", "chat")
+                put("text", text)
+            },
+        )
+
+    private fun testActor(scope: CoroutineScope): ConnectionActor = ConnectionActor(
+        FakeSocketFactory(),
+        MemoryCredentialStore(
+            StoredCredentials(
+                host = "daemon",
+                port = 4001,
+                token = "token",
+                certificateDer = byteArrayOf(1, 2, 3),
+            ),
+        ),
+        scope,
+    )
 
     private fun com.restartfu.xd.net.FakeSocket.countOps(op: String): Int =
         writes.count { it.decodeToString().contains(""""op":"$op"""") }

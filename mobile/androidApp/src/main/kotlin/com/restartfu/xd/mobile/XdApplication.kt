@@ -11,6 +11,8 @@ import kotlinx.coroutines.SupervisorJob
 class XdApplication : Application() {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    val settings: MobileSettings by lazy { MobileSettings(this) }
+
     val client: XdClient by lazy {
         XdClient(
             socketFactory = AndroidSocketFactory(),

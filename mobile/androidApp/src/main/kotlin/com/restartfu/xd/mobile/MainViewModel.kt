@@ -231,6 +231,7 @@ class ChatViewModel(
 ) : ViewModel() {
     val session: ChatSession = client.openChat(chatId)
     val state = session.state
+    val speech = session.speech
     private val _sending = MutableStateFlow(false)
     private val _cancelling = MutableStateFlow(false)
     private val _droppingQueued = MutableStateFlow(false)
@@ -270,6 +271,10 @@ class ChatViewModel(
         scope = viewModelScope,
         onTranscript = ::appendToDraft,
     )
+
+    suspend fun resetSpeech() {
+        session.resetSpeech()
+    }
 
     init {
         viewModelScope.launch { client.voiceEvents.collect(voice::onEvent) }

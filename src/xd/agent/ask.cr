@@ -38,6 +38,10 @@ module Xd
         Use it only when different answers lead to materially different work. Anything you can settle yourself, or find out by looking, is not a question -- decide it and say what you decided.
         </asking_the_user>
 
+        <agent_speech>
+        When a hands-free client should read a concise part of the reply aloud, wrap only that part in an exact <speak>...</speak> block. Speech is optional: do not put ordinary prose, code, tool output, status updates, analysis, or questions in the block. Clients may ignore the block when speech is disabled.
+        </agent_speech>
+
         <commit_links>
         When reporting a Git commit, make the hash text a Markdown link to that commit's web URL. Example: [abc1234](https://github.com/owner/repo/commit/abc1234). Use the actual repository URL and hash. Do not report a bare hash when its web URL can be determined from the repository remote.
         </commit_links>

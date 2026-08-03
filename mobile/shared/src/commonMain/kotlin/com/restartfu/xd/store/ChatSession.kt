@@ -23,6 +23,7 @@ import com.restartfu.xd.protocol.TerminalOpenReply
 import com.restartfu.xd.protocol.TerminalReply
 import com.restartfu.xd.protocol.VoiceModelReply
 import com.restartfu.xd.protocol.decodeReply
+import com.restartfu.xd.voice.SpeakTagParser
 import com.restartfu.xd.voice.VoiceTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -31,8 +32,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -49,7 +53,12 @@ public class ChatSession internal constructor(
     private val release: () -> Unit,
 ) : AutoCloseable, VoiceTransport {
     public val state: StateFlow<ChatState> = core.state
+    /** Complete assistant `<speak>` blocks from this live turn. */
+    public val speech: Flow<String> = core.speech
     private var closed = false
+
+    /** Drops any speech block that was in progress when speech was disabled. */
+    public suspend fun resetSpeech(): Unit = core.resetSpeech()
 
     public suspend fun send(
         text: String,
@@ -196,6 +205,9 @@ internal class ChatSessionCore(
     private val reloadMutex = Mutex()
     private val sendMutex = Mutex()
     private val _state = MutableStateFlow(ChatState(chatId = chatId))
+    private val _speech = MutableSharedFlow<String>(extraBufferCapacity = SPEECH_BUFFER_CAPACITY)
+    private val speakParser = SpeakTagParser()
+    private val speechMutex = Mutex()
     private var pendingSequence = 0L
     private var pendingTimer: Job? = null
     private var messageLimit = MESSAGE_PAGE_SIZE
@@ -209,6 +221,7 @@ internal class ChatSessionCore(
     }
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
+    val speech: Flow<String> = _speech.asSharedFlow()
 
     suspend fun reload() {
         reloadMutex.withLock {
@@ -425,25 +438,40 @@ internal class ChatSessionCore(
         val arrivalGate = if (turnId == null) event.sequence else null
 
         when (eventName) {
-            "turn-started" -> apply(
-                TranscriptInput.TurnStarted(
-                    label = (value["label"] as? JsonPrimitive)?.contentOrNull,
-                    nowMillis = nowMillis(),
-                    turnId = turnId,
-                    turnSequence = turnSequence,
-                ),
-                arrivalGate,
-            )
-            "text" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let {
-                apply(TranscriptInput.Text(it, turnId, turnSequence), arrivalGate)
+            "turn-started" -> {
+                if (apply(
+                        TranscriptInput.TurnStarted(
+                            label = (value["label"] as? JsonPrimitive)?.contentOrNull,
+                            nowMillis = nowMillis(),
+                            turnId = turnId,
+                            turnSequence = turnSequence,
+                        ),
+                        arrivalGate,
+                    )
+                ) {
+                    speechMutex.withLock { speakParser.reset() }
+                }
             }
-            "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let {
-                apply(TranscriptInput.Tool(it, turnId, turnSequence), arrivalGate)
+            "text" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
+                if (apply(TranscriptInput.Text(text, turnId, turnSequence), arrivalGate)) {
+                    val spoken = speechMutex.withLock { speakParser.feed(text) }
+                    spoken.forEach { _speech.tryEmit(it) }
+                }
             }
-            "turn-finished" -> apply(
-                TranscriptInput.TurnFinished(turnId, turnSequence),
-                arrivalGate,
-            )
+            "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
+                if (apply(TranscriptInput.Tool(text, turnId, turnSequence), arrivalGate)) {
+                    speechMutex.withLock { speakParser.reset() }
+                }
+            }
+            "turn-finished" -> {
+                if (apply(
+                        TranscriptInput.TurnFinished(turnId, turnSequence),
+                        arrivalGate,
+                    )
+                ) {
+                    speechMutex.withLock { speakParser.reset() }
+                }
+            }
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
             "commands" -> {
                 val commands = value.requiredStringArray("commands") ?: return
@@ -479,6 +507,7 @@ internal class ChatSessionCore(
     }
 
     suspend fun invalidate() {
+        resetSpeech()
         reloadRequests.close()
         reloadWorker.cancel()
         val timer = stateMutex.withLock {
@@ -494,6 +523,10 @@ internal class ChatSessionCore(
         timer?.cancel()
     }
 
+    suspend fun resetSpeech() {
+        speechMutex.withLock { speakParser.reset() }
+    }
+
     fun requestReload() {
         reloadRequests.trySend(Unit)
     }
@@ -501,16 +534,17 @@ internal class ChatSessionCore(
     private suspend fun apply(
         input: TranscriptInput,
         sequence: Long? = null,
-    ) {
+    ): Boolean {
         var timerToCancel: Job? = null
-        val effects = stateMutex.withLock {
+        val result = stateMutex.withLock {
             if (
                 invalidated ||
                 (sequence != null && sequence <= snapshotSequence)
             ) {
-                return@withLock emptyList()
+                return@withLock false to emptyList<TranscriptEffect>()
             }
-            val transition = TranscriptMachine.reduce(_state.value, input)
+            val before = _state.value
+            val transition = TranscriptMachine.reduce(before, input)
             _state.value = transition.state
             if (reloadInProgress && input !is TranscriptInput.Loaded) {
                 inputsDuringReload += BufferedInput(sequence, input)
@@ -524,12 +558,13 @@ internal class ChatSessionCore(
                 timerToCancel = pendingTimer
                 pendingTimer = null
             }
-            transition.effects
+            (transition.state != before || transition.effects.isNotEmpty()) to transition.effects
         }
         timerToCancel?.cancel()
-        if (effects.isNotEmpty()) {
+        if (result.second.isNotEmpty()) {
             requestReload()
         }
+        return result.first
     }
 
     private suspend fun ensureActive() {
@@ -586,6 +621,7 @@ internal class ChatSessionCore(
     private companion object {
         const val MESSAGE_PAGE_SIZE = 150
         const val PENDING_TIMEOUT_MILLIS = 10_000L
+        const val SPEECH_BUFFER_CAPACITY = 32
         val CHAT_SCOPED_EVENTS = setOf(
             "commands",
             "turn-started",
