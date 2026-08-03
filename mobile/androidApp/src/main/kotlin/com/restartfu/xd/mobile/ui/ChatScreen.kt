@@ -24,15 +24,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -56,6 +59,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -298,8 +302,13 @@ internal fun ChatScreen(
 }
 
 /**
- * One turn per chat is a daemon rule, so while a turn runs the send action
- * becomes Queue and Cancel appears beside it.
+ * The composer, with the desktop's one round button: an arrow while the next
+ * message is yours to send, a stop while the turn is the assistant's to finish.
+ *
+ * One turn per chat is a daemon rule, so a message written while one runs is
+ * queued rather than sent. That happens from the keyboard's own send key, which
+ * is what Enter does on the desktop for the same reason: the button is a stop
+ * by then.
  */
 @Composable
 private fun Composer(
@@ -435,30 +444,48 @@ private fun Composer(
                 label = { Text("Message") },
                 minLines = 1,
                 maxLines = 5,
+                // The desktop queues with Enter while a turn runs, since its
+                // button is the stop. The keyboard's own action key is where
+                // that lives here.
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(
+                    onSend = { if (state.working) model.enqueue() else model.send() },
+                ),
             )
             VoiceButton(model.voice)
             Spacer(Modifier.width(8.dp))
-            if (state.working) {
-                Button(
-                    onClick = model::enqueue,
-                    enabled = !sending && composer.isNotBlank(),
-                ) {
-                    Text(if (sending) "Queueing…" else "Queue")
-                }
-                TextButton(
-                    onClick = model::cancel,
-                    enabled = !cancelling && !steering,
-                ) {
-                    Text(if (cancelling) "Cancelling…" else "Cancel")
-                }
-            } else {
-                Button(
-                    onClick = model::send,
+            // One round button that sends and then stops, worded and coloured
+            // the way the desktop words and colours it: an arrow in the accent
+            // while it is yours to send, a stop in the error colour while the
+            // turn is the assistant's to finish.
+            FilledIconButton(
+                onClick = { if (state.working) model.cancel() else model.send() },
+                enabled = if (state.working) {
+                    !cancelling && !steering
+                } else {
                     // The daemon accepts text, images, or both.
-                    enabled = !sending && (composer.isNotBlank() || attachments.isNotEmpty()),
-                ) {
-                    Text(if (sending) "Sending…" else "Send")
-                }
+                    !sending && (composer.isNotBlank() || attachments.isNotEmpty())
+                },
+                colors = if (state.working) {
+                    IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    )
+                } else {
+                    IconButtonDefaults.filledIconButtonColors()
+                },
+            ) {
+                Icon(
+                    painter = painterResource(
+                        if (state.working) R.drawable.ic_stop else R.drawable.ic_send,
+                    ),
+                    contentDescription = when {
+                        cancelling -> "Stopping"
+                        state.working -> "Stop"
+                        sending -> "Sending"
+                        else -> "Send"
+                    },
+                )
             }
         }
     }
