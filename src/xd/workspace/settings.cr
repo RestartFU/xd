@@ -1,10 +1,9 @@
 require "json"
-require "uuid"
 
 module Xd
   module Workspace
-    # Legacy on-disk metadata. New workspace state is stored in SQLite; these
-    # files are imported once by Workspace::Service for backward compatibility.
+    # Legacy on-disk metadata. Workspace::Service consumes these files into
+    # SQLite and removes them; nothing writes sidecars anymore.
     SETTINGS_FILE             = ".xd.json"
     LEGACY_SETTINGS_FILE      = ".hy.json"
     WORKTREE_CONTAINER_MARKER = ".xd-worktrees"
@@ -48,47 +47,6 @@ module Xd
         nil
       end
 
-      def self.ensure(folder_path : String) : Settings
-        path = path_for(folder_path)
-        settings = if File.file?(path)
-                     load?(folder_path) || Settings.new
-                   else
-                     Settings.new
-                   end
-
-        if settings.id.nil?
-          settings.id = UUID.random.to_s
-          save(settings, folder_path)
-        elsif !File.file?(path)
-          save(settings, folder_path)
-        end
-        settings
-      end
-
-      def self.save(settings : Settings, folder_path : String) : Nil
-        raise Error.new("Folder settings need an id") unless settings.id
-
-        path = path_for(folder_path)
-        temporary = File.tempfile(".xd-settings-", dir: folder_path)
-        temporary_path : String? = temporary.path
-        begin
-          File.chmod(temporary.path, 0o600)
-          temporary << settings.to_pretty_json << '\n'
-          temporary.flush
-          temporary.fsync
-          temporary.close
-          File.rename(temporary.path, path)
-          temporary_path = nil
-        ensure
-          temporary.close unless temporary.closed?
-          if pending = temporary_path
-            File.delete?(pending)
-          end
-        end
-      rescue error : File::Error | IO::Error
-        raise Error.new("Cannot save folder settings: #{error.message}")
-      end
-
       def self.managed?(folder_path : String) : Bool
         File.file?(File.join(folder_path, SETTINGS_FILE)) ||
           File.file?(File.join(folder_path, LEGACY_SETTINGS_FILE))
@@ -98,6 +56,13 @@ module Xd
         current = File.join(folder_path, SETTINGS_FILE)
         legacy = File.join(folder_path, LEGACY_SETTINGS_FILE)
         !File.exists?(current) && File.exists?(legacy) ? legacy : current
+      end
+
+      def self.remove(folder_path : String) : Nil
+        File.delete?(File.join(folder_path, SETTINGS_FILE))
+        File.delete?(File.join(folder_path, LEGACY_SETTINGS_FILE))
+      rescue error : File::Error
+        raise Error.new("Cannot remove imported folder settings: #{error.message}")
       end
     end
 

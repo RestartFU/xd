@@ -22,51 +22,8 @@ private def with_workspace(
   end
 end
 
-describe Xd::Workspace::SettingsFile do
-  it "round-trips nullable folder settings and preserves legacy ids" do
-    with_workspace do |_service, _store, root|
-      folder = File.join(root, "Legacy")
-      Dir.mkdir(folder)
-      legacy = File.join(folder, Xd::Workspace::LEGACY_SETTINGS_FILE)
-      File.write(legacy, %({"id":"stable","backend":"codex"}))
-
-      settings = Xd::Workspace::SettingsFile.ensure(folder)
-      settings.id.should eq("stable")
-      settings.backend.should eq("codex")
-      Xd::Workspace::SettingsFile.save(settings, folder)
-      File.exists?(legacy).should be_true
-      File.exists?(
-        File.join(folder, Xd::Workspace::SETTINGS_FILE)
-      ).should be_false
-    end
-  end
-
-  it "atomically replaces folder identity metadata" do
-    with_workspace do |_service, _store, root|
-      folder = File.join(root, "Atomic")
-      Dir.mkdir(folder)
-      settings = Xd::Workspace::Settings.new(
-        id: "stable",
-        instructions: "before"
-      )
-      Xd::Workspace::SettingsFile.save(settings, folder)
-
-      settings.instructions = "after"
-      Xd::Workspace::SettingsFile.save(settings, folder)
-
-      loaded = Xd::Workspace::SettingsFile.load(folder)
-      loaded.id.should eq("stable")
-      loaded.instructions.should eq("after")
-      Dir.children(folder).should eq([Xd::Workspace::SETTINGS_FILE])
-      File.info(
-        File.join(folder, Xd::Workspace::SETTINGS_FILE)
-      ).permissions.value.should eq(0o600)
-    end
-  end
-end
-
 describe Xd::Workspace::Service do
-  it "imports legacy sidecars into SQLite and stops rewriting them" do
+  it "consumes legacy sidecars into SQLite" do
     directory = File.join(
       Dir.tempdir,
       "xd-workspace-import-#{Random::Secure.hex(12)}"
@@ -91,13 +48,10 @@ describe Xd::Workspace::Service do
       settings.repo.should eq("/legacy/repo")
       service.folder_context("legacy-id").should eq("Keep it short.")
 
-      original = File.read(sidecar)
+      File.exists?(sidecar).should be_false
       service.set_folder_context("legacy-id", "Database wins.")
       service.folder_context("legacy-id").should eq("Database wins.")
-      File.read(sidecar).should eq(original)
 
-      stale = %({"id":"legacy-id","backend":"claude"})
-      File.write(sidecar, stale)
       store.close
       store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
       service = Xd::Workspace::Service.new(root, store)
@@ -107,14 +61,14 @@ describe Xd::Workspace::Service do
       reopened.workdir.should eq("/legacy/work")
       reopened.repo.should eq("/legacy/repo")
       service.folder_context("legacy-id").should eq("Database wins.")
-      File.read(sidecar).should eq(stale)
+      File.exists?(sidecar).should be_false
     ensure
       store.close
       FileUtils.rm_r(directory)
     end
   end
 
-  it "imports legacy .hy.json metadata without creating a current sidecar" do
+  it "consumes legacy .hy.json metadata without creating a current sidecar" do
     with_workspace do |service, _store, root|
       folder = File.join(root, "Hyphen")
       Dir.mkdir(folder)
@@ -127,65 +81,19 @@ describe Xd::Workspace::Service do
       service.snapshot.folders.map(&.id).should eq(["legacy-hy-id"])
       service.folder_context("legacy-hy-id").should eq("Legacy context.")
       File.exists?(File.join(folder, Xd::Workspace::SETTINGS_FILE)).should be_false
-      File.read(legacy).should contain("Legacy context.")
+      File.exists?(legacy).should be_false
     end
   end
 
-  it "keeps a legacy id when the folder is renamed outside the app" do
-    with_workspace do |service, _store, root|
-      old_path = File.join(root, "Before")
-      new_path = File.join(root, "After")
-      Dir.mkdir(old_path)
-      File.write(
-        File.join(old_path, Xd::Workspace::SETTINGS_FILE),
-        %({"id":"externally-renamed"})
-      )
-
-      service.snapshot.folders.map(&.id).should eq(["externally-renamed"])
-      File.rename(old_path, new_path)
-
-      service.find_folder("externally-renamed").should eq(new_path)
-      service.snapshot.folders.map(&.id).should eq(["externally-renamed"])
-    end
-  end
-
-  it "keeps legacy ids when the configured workspace root moves" do
-    directory = File.join(
-      Dir.tempdir,
-      "xd-workspace-root-move-#{Random::Secure.hex(12)}"
-    )
-    old_root = File.join(directory, "Before")
-    new_root = File.join(directory, "After")
-    folder = File.join(old_root, "Project")
-    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
-    begin
-      Dir.mkdir_p(folder)
-      File.write(
-        File.join(folder, Xd::Workspace::SETTINGS_FILE),
-        %({"id":"root-moved"})
-      )
-      old_service = Xd::Workspace::Service.new(old_root, store)
-      old_service.snapshot.folders.map(&.id).should eq(["root-moved"])
-
-      File.rename(old_root, new_root)
-      moved_service = Xd::Workspace::Service.new(new_root, store)
-      moved_service.find_folder("root-moved").should eq(
-        File.join(new_root, "Project")
-      )
-    ensure
-      store.close
-      FileUtils.rm_r(directory)
-    end
-  end
-
-  it "scans top-level workspaces and only managed nested folders" do
+  it "scans top-level workspaces and only database-managed nested folders" do
     with_workspace do |service, _store, root|
       workspace = File.join(root, "Workspace")
       managed = File.join(workspace, "Managed")
       source = File.join(workspace, "src")
       Dir.mkdir_p(managed)
       Dir.mkdir(source)
-      Xd::Workspace::SettingsFile.ensure(managed)
+      workspace_id = service.snapshot.folders.first.id
+      service.create_folder(workspace_id, "Managed")
 
       snapshot = service.snapshot
       snapshot.folders.map(&.name).should eq(["Workspace", "Managed"])
@@ -200,8 +108,8 @@ describe Xd::Workspace::Service do
       parent = File.join(root, "Workspace")
       child = File.join(parent, "Managed")
       Dir.mkdir_p(child)
-      Xd::Workspace::SettingsFile.ensure(parent)
-      Xd::Workspace::SettingsFile.ensure(child)
+      parent_id = service.snapshot.folders.first.id
+      service.create_folder(parent_id, "Managed")
       before = service.tree_signature
 
       FileUtils.rm_r(child)
@@ -216,7 +124,6 @@ describe Xd::Workspace::Service do
       nested = File.join(repository, "ManagedButHidden")
       Dir.mkdir_p(File.join(repository, ".git"))
       Dir.mkdir(nested)
-      Xd::Workspace::SettingsFile.ensure(nested)
 
       service.snapshot.folders.map(&.name).should eq(["Repo"])
     end

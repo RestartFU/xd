@@ -49,7 +49,7 @@ module Xd
       end
 
       # Filesystem topology is reconciled into SQLite before calculating the
-      # signature. Legacy sidecars are read only during that reconciliation;
+      # signature. Legacy sidecars are consumed during that reconciliation;
       # database settings are authoritative afterwards.
       def tree_signature : String
         rows = reconcile_metadata
@@ -438,9 +438,8 @@ module Xd
       end
 
       # Existing database rows are authoritative at their stored paths. Legacy
-      # ids can reconnect a folder moved outside xd; a DB-only folder has no
-      # portable filesystem identity, so arbitrary external renames cannot be
-      # correlated safely without reintroducing an on-disk marker.
+      # sidecars are accepted only as migration input and removed once their
+      # contents have been committed to SQLite.
       private def reconcile_metadata : Hash(String, Storage::WorkspaceFolder)
         existing = @store.list_workspace_folders(@root)
         by_path = existing.to_h { |row| {row.relative_path, row} }
@@ -516,6 +515,7 @@ module Xd
         end
 
         @store.save_workspace_folder(row) if current != row
+        SettingsFile.remove(path) if legacy
         by_path[relative] = row
         by_id[row.id] = row
         used << row.id
