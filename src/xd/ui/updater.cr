@@ -43,6 +43,8 @@ module Xd
         @button_label.visible = false
         @button_label.add_css_class("xd-update-progress")
         button_content = Gtk::Box.new(:horizontal, 0)
+        button_content.halign = :center
+        button_content.valign = :center
         button_content.append(@button_icon)
         button_content.append(@button_label)
         @button = Gtk::Button.new
