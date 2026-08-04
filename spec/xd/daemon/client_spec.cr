@@ -79,6 +79,96 @@ private def await_cli_event(
 end
 
 describe Xd::Daemon::Client do
+  it "keeps account checks responsive during a blocked workflow refresh" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-workflow-block-#{Random::Secure.hex(12)}"
+    )
+    socket_path = File.join(directory, "daemon.sock")
+    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+    resolver_started = Channel(Nil).new(1)
+    release_resolver = Channel(Nil).new(1)
+    workflow_done = Channel(Exception?).new(1)
+    status = Xd::Agent::WorkflowRun::Status.new(
+      "nightly",
+      "in_progress",
+      nil,
+      [] of Xd::Agent::WorkflowRun::Job
+    )
+    engine = Xd::Daemon::Engine.new(
+      store,
+      authentication_resolver: ->(_provider : String) { "/bin/true" },
+      authentication_environment: {} of String => String,
+      cli_version_resolver: ->(_provider : String) { "/bin/true" },
+      cli_version_environment: {} of String => String,
+      workflow_status_resolver: ->(_run : Xd::Agent::WorkflowRun::Run) {
+        resolver_started.send(nil)
+        release_resolver.receive
+        status
+      }
+    )
+    server = Xd::Daemon::Server.new(engine)
+    client : Xd::Daemon::Client? = nil
+    released = false
+
+    begin
+      server.listen_local(socket_path)
+      client = Xd::Daemon::Client.local(
+        socket_path,
+        request_timeout: 2.seconds
+      )
+      spawn do
+        begin
+          client.not_nil!.call({
+            "op"   => JSON::Any.new("workflow-status"),
+            "text" => JSON::Any.new(
+              "workflow_run\n123\n" \
+              "https://github.com/owner/repo/actions/runs/123"
+            ),
+          })
+          workflow_done.send(nil)
+        rescue error
+          workflow_done.send(error)
+        end
+      end
+
+      select
+      when resolver_started.receive
+      when timeout(1.second)
+        fail "workflow resolver did not start"
+      end
+
+      client.call({"op" => JSON::Any.new("tree")})["folders"]
+        .as_a.should be_empty
+      response = client.call({"op" => JSON::Any.new("agent-auth")})
+      response["ok"].as_bool.should be_true
+      response = client.call({"op" => JSON::Any.new("agent-clis")})
+      response["ok"].as_bool.should be_true
+      client.closed?.should be_false
+
+      release_resolver.send(nil)
+      released = true
+      select
+      when error = workflow_done.receive
+        raise error if error
+      when timeout(1.second)
+        fail "workflow request did not finish"
+      end
+    ensure
+      unless released
+        select
+        when release_resolver.send(nil)
+        else
+        end
+      end
+      client.try(&.close)
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "stays connected when account checks stop responding" do
     directory = File.join(
       Dir.tempdir,

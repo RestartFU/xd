@@ -272,7 +272,10 @@ module Xd
         case operation
         when Protocol::Operation::Cancel,
              Protocol::Operation::VoiceCancel,
+             Protocol::Operation::AgentAuth,
              Protocol::Operation::AgentAuthCancel,
+             Protocol::Operation::AgentClis,
+             Protocol::Operation::WorkflowStatus,
              Protocol::Operation::Ping
           true
         else
