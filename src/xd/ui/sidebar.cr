@@ -1634,6 +1634,10 @@ module Xd
             false
           end
         end
+        # These context menus are attached after the already-visible list or
+        # row has been allocated. Recompute the popup layout now, otherwise
+        # GTK can retain the parent's origin and open the menu at the top.
+        popover.present
         popover.popup
       end
 
