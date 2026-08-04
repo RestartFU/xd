@@ -276,6 +276,29 @@ module Xd
     }
     NO_WORDS = Set(String).new
 
+    def language_for_fence(label : String?) : SyntaxLanguage
+      info = label.try(&.strip.downcase) || ""
+      name = info.split(/[\s,]/).first? || ""
+      case name
+      when "c", "h"                     then SyntaxLanguage::C
+      when "go", "golang"               then SyntaxLanguage::Go
+      when "docker", "dockerfile"       then SyntaxLanguage::Dockerfile
+      when "kotlin", "kt", "kts"        then SyntaxLanguage::Kotlin
+      when "make", "makefile"           then SyntaxLanguage::Makefile
+      when "rust", "rs"                 then SyntaxLanguage::Rust
+      when "json"                       then SyntaxLanguage::JSON
+      when "yaml", "yml"                then SyntaxLanguage::YAML
+      when "toml"                       then SyntaxLanguage::TOML
+      when "v", "vlang"                 then SyntaxLanguage::V
+      when "odin"                       then SyntaxLanguage::Odin
+      when "ruby", "rb"                 then SyntaxLanguage::Ruby
+      when "crystal", "cr"              then SyntaxLanguage::Crystal
+      when "csharp", "cs", "c#"         then SyntaxLanguage::CSharp
+      when "bash", "sh", "shell", "zsh" then SyntaxLanguage::Bash
+      else                                   SyntaxLanguage::None
+      end
+    end
+
     def language_for_path(path : String?) : SyntaxLanguage
       return SyntaxLanguage::None unless path
 

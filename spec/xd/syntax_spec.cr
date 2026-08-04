@@ -59,6 +59,29 @@ describe Xd::Syntax do
       .should eq(Xd::SyntaxLanguage::None)
   end
 
+  it "maps Markdown fence labels and common aliases" do
+    {
+      "go"             => Xd::SyntaxLanguage::Go,
+      "golang"         => Xd::SyntaxLanguage::Go,
+      "C"              => Xd::SyntaxLanguage::C,
+      "dockerfile"     => Xd::SyntaxLanguage::Dockerfile,
+      "kt"             => Xd::SyntaxLanguage::Kotlin,
+      "kotlin title=x" => Xd::SyntaxLanguage::Kotlin,
+      "rs"             => Xd::SyntaxLanguage::Rust,
+      "yml"            => Xd::SyntaxLanguage::YAML,
+      "rb"             => Xd::SyntaxLanguage::Ruby,
+      "cr"             => Xd::SyntaxLanguage::Crystal,
+      "c#"             => Xd::SyntaxLanguage::CSharp,
+      "shell"          => Xd::SyntaxLanguage::Bash,
+    }.each do |label, language|
+      Xd::Syntax.language_for_fence(label).should eq(language)
+    end
+    Xd::Syntax.language_for_fence("text")
+      .should eq(Xd::SyntaxLanguage::None)
+    Xd::Syntax.language_for_fence(nil)
+      .should eq(Xd::SyntaxLanguage::None)
+  end
+
   it "uses the exact C token palette" do
     {
       Xd::SyntaxToken::Text         => nil,

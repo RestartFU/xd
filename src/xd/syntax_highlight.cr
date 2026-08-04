@@ -1,3 +1,4 @@
+require "html"
 require "./syntax"
 
 module Xd
@@ -36,6 +37,29 @@ module Xd
         offset += 1 if index < lines.size - 1
       end
       spans
+    end
+
+    def markup(
+      language : SyntaxLanguage,
+      text : String,
+      state : SyntaxState = SyntaxState.new,
+    ) : String?
+      return if language.none?
+
+      rendered = String::Builder.new
+      lines = text.split('\n', remove_empty: false)
+      lines.each_with_index do |line, index|
+        rendered << '\n' if index > 0
+        Syntax.scan_line(language, line, state).each do |piece|
+          escaped = HTML.escape(piece.text)
+          if colour = piece.token.colour
+            rendered << %(<span foreground="#{colour}">#{escaped}</span>)
+          else
+            rendered << escaped
+          end
+        end
+      end
+      rendered.to_s
     end
   end
 end

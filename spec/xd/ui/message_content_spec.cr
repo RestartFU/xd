@@ -43,6 +43,34 @@ describe Xd::UI::MessageContent do
     ])
   end
 
+  it "keeps a fenced language and prepares highlighted code" do
+    text = "```go\nfunc main() { println(\"<ok>\") }\n```"
+    parsed = Xd::UI::MessageContent.parse(text)
+
+    parsed.size.should eq(1)
+    parsed.first.kind.should eq(Xd::UI::MessagePartKind::Code)
+    parsed.first.language.should eq(Xd::SyntaxLanguage::Go)
+
+    prepared = Xd::UI::MessageContent.prepare(text)
+    prepared.size.should eq(1)
+    prepared.first.language.should eq(Xd::SyntaxLanguage::Go)
+    prepared.first.markup.not_nil!
+      .should contain(%(<span foreground="#dc8add">func</span>))
+    prepared.first.markup.not_nil!.should contain("&lt;ok&gt;")
+  end
+
+  it "leaves unknown and unlabelled code fences uncoloured" do
+    unknown = Xd::UI::MessageContent.prepare(
+      "```typescript\nconst value = 1\n```"
+    )
+    plain = Xd::UI::MessageContent.prepare("```\nplain\n```")
+
+    unknown.first.kind.should eq(Xd::UI::MessagePartKind::Code)
+    unknown.first.language.should eq(Xd::SyntaxLanguage::None)
+    unknown.first.markup.should be_nil
+    plain.first.markup.should be_nil
+  end
+
   it "keeps an unfinished fence as code while streaming" do
     parts = Xd::UI::MessageContent.parse(
       "Before\n```text\nunfinished"

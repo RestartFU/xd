@@ -32,4 +32,20 @@ describe Xd::SyntaxHighlight do
     end.should be_true
     spans.none? { |span| span.start > 10 }.should be_true
   end
+
+  it "builds escaped Pango markup for a fenced language" do
+    markup = Xd::SyntaxHighlight.markup(
+      Xd::SyntaxLanguage::Go,
+      "func main() {\n\tprintln(\"<ok>\")\n}"
+    ).not_nil!
+
+    markup.should contain(%(<span foreground="#dc8add">func</span>))
+    markup.should contain(%(<span foreground="#99c1f1">main</span>))
+    markup.should contain("&lt;ok&gt;")
+    markup.should_not contain("<ok>")
+    Xd::SyntaxHighlight.markup(
+      Xd::SyntaxLanguage::None,
+      "plain"
+    ).should be_nil
+  end
 end

@@ -1,5 +1,6 @@
 require "../agent/assistant_sections"
 require "../markdown"
+require "../syntax_highlight"
 
 module Xd
   module UI
@@ -12,14 +13,16 @@ module Xd
 
     record MessagePart,
       kind : MessagePartKind,
-      text : String
+      text : String,
+      language : SyntaxLanguage = SyntaxLanguage::None
 
     record PreparedMessagePart,
       kind : MessagePartKind,
       text : String,
       markup : String?,
       section : Agent::AssistantSectionKind = Agent::AssistantSectionKind::Normal,
-      section_id : Int32 = 0
+      section_id : Int32 = 0,
+      language : SyntaxLanguage = SyntaxLanguage::None
 
     module MessageContent
       extend self
@@ -37,19 +40,39 @@ module Xd
         chunk = [] of String
         in_fence = false
         diff_fence = false
+        fence_language = SyntaxLanguage::None
 
         text.split('\n').each do |line|
           if line.starts_with?("```")
-            append_chunk(parts, chunk.join('\n'), in_fence, diff_fence)
+            append_chunk(
+              parts,
+              chunk.join('\n'),
+              in_fence,
+              diff_fence,
+              fence_language
+            )
             chunk.clear
             in_fence = !in_fence
-            diff_fence = in_fence && line.lchop("```") == "diff"
+            if in_fence
+              label = line.lchop("```").strip
+              diff_fence = label.downcase == "diff"
+              fence_language = Syntax.language_for_fence(label)
+            else
+              diff_fence = false
+              fence_language = SyntaxLanguage::None
+            end
             next
           end
 
           chunk << line
         end
-        append_chunk(parts, chunk.join('\n'), in_fence, diff_fence)
+        append_chunk(
+          parts,
+          chunk.join('\n'),
+          in_fence,
+          diff_fence,
+          fence_language
+        )
         parts
       end
 
@@ -63,16 +86,24 @@ module Xd
         prepared = [] of PreparedMessagePart
         Agent::AssistantSections.parse(text).each_with_index do |section, section_id|
           parse(section.text).each do |part|
+            syntax_state = SyntaxState.new
             each_chunk(part.text, chunk_bytes) do |chunk|
               markup = if part.kind.prose?
                          Markdown.to_pango(chunk)
+                       elsif part.kind.code?
+                         SyntaxHighlight.markup(
+                           part.language,
+                           chunk,
+                           syntax_state
+                         )
                        end
               prepared << PreparedMessagePart.new(
                 part.kind,
                 chunk,
                 markup,
                 section.kind,
-                section_id
+                section_id,
+                part.language
               )
             end
           end
@@ -85,12 +116,13 @@ module Xd
         chunk : String,
         in_fence : Bool,
         diff_fence : Bool,
+        language : SyntaxLanguage,
       ) : Nil
         return if chunk.empty?
 
         if in_fence
           kind = diff_fence ? MessagePartKind::Diff : MessagePartKind::Code
-          parts << MessagePart.new(kind, chunk)
+          parts << MessagePart.new(kind, chunk, language)
         else
           append_markdown_chunk(parts, chunk)
         end

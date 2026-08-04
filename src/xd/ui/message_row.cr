@@ -187,7 +187,7 @@ module Xd
                 analysis_parts = [] of PreparedMessagePart
                 while candidate = parts[index]?
                   break unless candidate.section.analysis? &&
-                                candidate.section_id == section_id
+                               candidate.section_id == section_id
                   analysis_parts << candidate
                   index += 1
                 end
@@ -233,7 +233,7 @@ module Xd
         when MessagePartKind::Prose
           append_prose(target, part.markup || part.text)
         when MessagePartKind::Code
-          target.append(make_code_card(part.text, false, true))
+          target.append(make_code_card(part.text, false, true, part.markup))
         when MessagePartKind::Diff
           target.append(make_code_card(part.text, true, false))
         when MessagePartKind::Table
@@ -287,6 +287,7 @@ module Xd
         code : String,
         diff : Bool,
         wrap : Bool,
+        markup : String? = nil,
       ) : Gtk::Box
         content : Gtk::Widget
         if diff
@@ -296,7 +297,12 @@ module Xd
           scroller.child = DiffView.build_async(code, true)
           content = scroller
         else
-          label = Gtk::Label.new(code)
+          label = Gtk::Label.new("")
+          if markup
+            label.markup = markup
+          else
+            label.text = code
+          end
           label.wrap = wrap
           label.wrap_mode = :word_char
           label.xalign = 0_f32
