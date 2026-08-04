@@ -52,6 +52,7 @@ public class TerminalScreen(
         if (width == this.columns && height == this.rows) return
 
         val resized = blank(width, height)
+        val rowOffset = height - this.rows
         // Keep the bottom of the screen: that is where the prompt is.
         val keep = minOf(this.rows, height)
         for (row in 0 until keep) {
@@ -65,7 +66,10 @@ public class TerminalScreen(
         this.rows = height
         grid = resized
         cursorX = cursorX.coerceIn(0, width - 1)
-        cursorY = cursorY.coerceIn(0, height - 1)
+        // Rows were translated to remain bottom-aligned; the cursor belongs
+        // to that same coordinate space. Leaving it at the old row makes new
+        // output appear near the top while the old prompt remains below.
+        cursorY = (cursorY + rowOffset).coerceIn(0, height - 1)
     }
 
     public fun write(bytes: ByteArray) {

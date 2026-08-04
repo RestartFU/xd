@@ -144,6 +144,32 @@ class TerminalScreenTest {
 
         assertEquals("b", screen.row(0).trimEnd())
         assertEquals("c", screen.row(1).trimEnd())
+        assertEquals(1, screen.cursorRow)
+    }
+
+    @Test
+    fun growingTheScreenMovesTheCursorWithItsPrompt() {
+        val screen = TerminalScreen(columns = 10, rows = 2)
+        screen.write("prompt$ ")
+
+        screen.resize(10, 5)
+        screen.write("x")
+
+        assertEquals("prompt$ x", screen.row(3).trimEnd())
+        assertEquals("", screen.row(0).trimEnd())
+        assertEquals(3, screen.cursorRow)
+    }
+
+    @Test
+    fun shrinkingTheScreenTranslatesACursorInTheRetainedRows() {
+        val screen = TerminalScreen(columns = 8, rows = 4)
+        screen.write("\u001B[3;1Hprompt")
+
+        screen.resize(8, 2)
+        screen.write("$")
+
+        assertEquals("prompt$", screen.row(0).trimEnd())
+        assertEquals(0, screen.cursorRow)
     }
 
     private fun TerminalScreen.row(index: Int): String =
