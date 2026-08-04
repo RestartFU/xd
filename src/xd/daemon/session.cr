@@ -1,3 +1,4 @@
+require "openssl"
 require "./engine"
 require "./event_bus"
 require "../protocol/frame"
@@ -68,7 +69,7 @@ module Xd
           while event = @queue.receive?
             @writer.write(event)
           end
-        rescue IO::Error | Channel::ClosedError
+        rescue IO::Error | OpenSSL::Error | Channel::ClosedError
         ensure
           close
         end
@@ -76,7 +77,7 @@ module Xd
         private def shutdown : Nil
           @queue.close
           @output.close
-        rescue IO::Error
+        rescue IO::Error | OpenSSL::Error
         end
       end
 
@@ -92,11 +93,11 @@ module Xd
         connection.on_close = -> {
           begin
             input.close
-          rescue IO::Error
+          rescue IO::Error | OpenSSL::Error
           end
           begin
             output.close
-          rescue IO::Error
+          rescue IO::Error | OpenSSL::Error
           end
         }
         writer = Writer.new(output)
@@ -142,7 +143,7 @@ module Xd
           end
           outbound.close
         end
-      rescue IO::Error
+      rescue IO::Error | OpenSSL::Error
         # EOF, disconnect, and a listener shutdown all end only this session.
       end
 
@@ -164,7 +165,7 @@ module Xd
         ensure
           outcome.after_write.try(&.call)
         end
-      rescue IO::Error
+      rescue IO::Error | OpenSSL::Error
       end
 
       private def request_id(line : String) : Int64?

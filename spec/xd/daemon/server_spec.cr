@@ -263,6 +263,58 @@ describe Xd::Daemon::Server do
     end
   end
 
+  it "closes with an active TLS client" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-server-active-tls-#{Random::Secure.hex(12)}"
+    )
+    database_path = File.join(directory, "chats.db")
+    certificate = File.join(directory, "certificate.pem")
+    key = File.join(directory, "private-key.pem")
+    store = Xd::Storage::Store.new(database_path)
+    engine = Xd::Daemon::Engine.new(
+      store,
+      token_generator: -> { "active-tls-token" }
+    )
+    code = engine.arm_pairing(1.minute)
+    server = Xd::Daemon::Server.new(engine)
+    client : OpenSSL::SSL::Socket::Client? = nil
+
+    begin
+      Xd::Daemon::Certificate.ensure_pair(certificate, key)
+      port = server.listen_remote("127.0.0.1", 0, certificate, key)
+      context = OpenSSL::SSL::Context::Client.new
+      context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
+      socket = TCPSocket.new("127.0.0.1", port)
+      client = OpenSSL::SSL::Socket::Client.new(
+        socket,
+        context,
+        sync_close: true
+      )
+      client.puts({
+        "op"   => "pair",
+        "code" => code,
+        "name" => "active-tls-test",
+      }.to_json)
+      client.flush
+      JSON.parse(client.gets.not_nil!)["token"].as_s
+        .should eq("active-tls-token")
+
+      server.close
+    ensure
+      client.try do |active|
+        begin
+          active.close
+        rescue OpenSSL::Error | IO::Error
+        end
+      end
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "returns remote voice results only to the requesting TLS client" do
     directory = File.join(
       Dir.tempdir,

@@ -146,7 +146,7 @@ module Xd
         clients.each do |client|
           begin
             client.close
-          rescue IO::Error
+          rescue IO::Error | OpenSSL::Error
           end
         end
         if path = local_path
