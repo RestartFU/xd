@@ -172,7 +172,7 @@ module Xd
       @shortcuts_bar : Gtk::ScrolledWindow
       @shortcuts_flow : Gtk::FlowBox
       @shortcut_buttons : Array(Gtk::Button)
-      @queue_host : Gtk::Box
+      @queue_host : Gtk::ScrolledWindow
       @queue_box : Gtk::Box
       @choices_bar : Gtk::Box
       @messages_request = 0_i64
@@ -422,8 +422,11 @@ module Xd
         @voice = VoiceInput.new(@widget, @entry)
 
         @queue_box = new_queue_box
-        @queue_host = Gtk::Box.new(:vertical, 0)
-        @queue_host.append(@queue_box)
+        @queue_host = Gtk::ScrolledWindow.new
+        @queue_host.set_policy(:never, :automatic)
+        @queue_host.max_content_height = 160
+        @queue_host.propagate_natural_height = true
+        @queue_host.child = @queue_box
 
         @choices_bar = Gtk::Box.new(:vertical, 6)
         @choices_bar.margin_top = 6
@@ -2784,8 +2787,8 @@ module Xd
         box = new_queue_box
         box.visible = visible
         @queue_box = box
-        @queue_host.remove(previous)
-        @queue_host.append(box)
+        @queue_host.child = box
+        @queue_host.visible = visible
         retire_queue_box(previous)
         box
       end
@@ -2831,7 +2834,7 @@ module Xd
       ) : Nil
         clear(row)
         icon = Gtk::Image.new_from_icon_name("document-send-symbolic")
-        label = Gtk::Label.new(text)
+        label = Gtk::Label.new(QueuePresentation.preview(text))
         label.xalign = 0_f32
         label.hexpand = true
         label.ellipsize = :end

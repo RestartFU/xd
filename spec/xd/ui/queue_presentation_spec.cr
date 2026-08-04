@@ -22,6 +22,22 @@ describe Xd::UI::QueuePresentation do
     plan.hidden.should eq(0)
   end
 
+  it "makes long multiline messages safe for compact queue rows" do
+    text = "  First line\n\nsecond\tline  " + ("界" * 300)
+    preview = Xd::UI::QueuePresentation.preview(text)
+
+    preview.should start_with("First line second line 界")
+    preview.should_not contain('\n')
+    preview.should_not contain('\t')
+    preview.size.should eq(Xd::UI::QueuePresentation::PREVIEW_CHAR_LIMIT)
+    preview.should end_with("…")
+  end
+
+  it "keeps a short queued message unchanged" do
+    Xd::UI::QueuePresentation.preview("Send this next")
+      .should eq("Send this next")
+  end
+
   it "uses queued events as incremental queue snapshots" do
     queue = [JSON::Any.new("next")]
     event = {
