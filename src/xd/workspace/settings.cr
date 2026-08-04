@@ -36,7 +36,7 @@ module Xd
     class SettingsFile
       def self.load(folder_path : String) : Settings
         Settings.from_json(File.read(path_for(folder_path)))
-      rescue error : File::Error | JSON::SerializableError
+      rescue error : File::Error | JSON::ParseException | JSON::SerializableError
         raise Error.new("Cannot read folder settings: #{error.message}")
       end
 

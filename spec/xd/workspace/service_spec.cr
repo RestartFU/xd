@@ -85,6 +85,61 @@ describe Xd::Workspace::Service do
     end
   end
 
+  it "removes malformed legacy sidecars after persisting database rows" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workspace-malformed-#{Random::Secure.hex(12)}"
+    )
+    root = File.join(directory, "Workspaces")
+    current_folder = File.join(root, "BrokenCurrent")
+    older_folder = File.join(root, "BrokenLegacy")
+    database = File.join(directory, "chats.db")
+    current_sidecar = File.join(
+      current_folder,
+      Xd::Workspace::SETTINGS_FILE
+    )
+    older_sidecar = File.join(
+      older_folder,
+      Xd::Workspace::LEGACY_SETTINGS_FILE
+    )
+    store = Xd::Storage::Store.new(database)
+
+    begin
+      Dir.mkdir_p(current_folder)
+      Dir.mkdir(older_folder)
+      File.write(current_sidecar, "{not-json")
+      File.write(older_sidecar, %({"shortcuts":"not-an-array"}))
+
+      service = Xd::Workspace::Service.new(root, store)
+      first = service.snapshot.folders.to_h do |folder|
+        {folder.name, folder.id}
+      end
+      first.keys.sort.should eq(["BrokenCurrent", "BrokenLegacy"])
+      first.each do |name, id|
+        store.workspace_folder(root, name).try(&.id).should eq(id)
+      end
+      File.exists?(current_sidecar).should be_false
+      File.exists?(older_sidecar).should be_false
+
+      current_id = first["BrokenCurrent"]
+      service.set_folder_context(current_id, "Database is authoritative.")
+      File.write(current_sidecar, "[")
+
+      store.close
+      store = Xd::Storage::Store.new(database)
+      reopened = Xd::Workspace::Service.new(root, store)
+      reopened.snapshot.folders.to_h { |folder| {folder.name, folder.id} }
+        .should eq(first)
+      reopened.folder_context(current_id).should eq(
+        "Database is authoritative."
+      )
+      File.exists?(current_sidecar).should be_false
+    ensure
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "scans top-level workspaces and only database-managed nested folders" do
     with_workspace do |service, _store, root|
       workspace = File.join(root, "Workspace")

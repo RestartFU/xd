@@ -473,7 +473,8 @@ module Xd
       ) : Nil
         relative = relative_path(path)
         current = by_path[relative]?
-        legacy = SettingsFile.managed?(path) ? SettingsFile.load?(path) : nil
+        legacy_files = SettingsFile.managed?(path)
+        legacy = legacy_files ? SettingsFile.load?(path) : nil
         row = current
 
         if row.nil? && (legacy_id = legacy.try(&.id))
@@ -517,7 +518,7 @@ module Xd
         end
 
         @store.save_workspace_folder(row) if current != row
-        SettingsFile.remove(path) if legacy
+        SettingsFile.remove(path) if legacy_files
         by_path[relative] = row
         by_id[row.id] = row
         used << row.id
