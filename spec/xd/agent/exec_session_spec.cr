@@ -60,6 +60,23 @@ describe Xd::Agent::ExecSession do
     result[1].should eq("decisive failure")
   end
 
+  it "reports a signal exit without raising" do
+    finished = Channel(Tuple(Bool, String?)).new(1)
+    session = Xd::Agent::ExecSession.new(
+      Xd::Agent::Catalog::CLAUDE,
+      Xd::Agent::RunSpec.new("unused"),
+      ENV.to_h,
+      ->(_event : Xd::Agent::Event) { },
+      ->(ok : Bool, message : String?) { finished.send({ok, message}) },
+      arguments: ["/bin/sh", "-c", "kill -TERM $$"]
+    )
+
+    session.start
+    result = await_finish(finished)
+    result[0].should be_false
+    result[1].should eq("Agent exited with status TERM")
+  end
+
   it "kills a CLI before parsing an oversized output line" do
     finished = Channel(Tuple(Bool, String?)).new(1)
     session = Xd::Agent::ExecSession.new(

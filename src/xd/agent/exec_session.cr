@@ -173,7 +173,7 @@ module Xd
           finish(true, nil)
         else
           message = stderr.empty? ? backend_error : stderr
-          message ||= "Agent exited with status #{status.exit_code}"
+          message ||= "Agent exited with status #{status}"
           finish(false, message)
         end
       rescue error
