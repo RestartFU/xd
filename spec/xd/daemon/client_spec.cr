@@ -79,6 +79,64 @@ private def await_cli_event(
 end
 
 describe Xd::Daemon::Client do
+  it "stays connected when account checks stop responding" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-client-auth-timeout-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "stuck-assistant")
+    socket_path = File.join(directory, "daemon.sock")
+    Dir.mkdir_p(directory)
+    store = Xd::Storage::Store.new(File.join(directory, "chats.db"))
+    File.write(executable, "#!/bin/sh\nexec /bin/sleep 60\n")
+    File.chmod(executable, 0o700)
+    engine = Xd::Daemon::Engine.new(
+      store,
+      authentication_resolver: ->(_provider : String) { executable },
+      authentication_environment: {} of String => String,
+      authentication_timeout: 50.milliseconds,
+      cli_version_resolver: ->(_provider : String) { executable },
+      cli_version_environment: {} of String => String,
+      cli_version_timeout: 50.milliseconds
+    )
+    server = Xd::Daemon::Server.new(engine)
+    client : Xd::Daemon::Client? = nil
+
+    begin
+      server.listen_local(socket_path)
+      client = Xd::Daemon::Client.local(socket_path)
+      events = [] of Hash(String, JSON::Any)
+      events_mutex = Mutex.new
+      client.subscribe do |event|
+        events_mutex.synchronize { events << event }
+      end
+
+      client.call({"op" => JSON::Any.new("agent-auth")})
+      client.call({"op" => JSON::Any.new("agent-clis")})
+      client.call({"op" => JSON::Any.new("ping")})["ok"]
+        .as_bool.should be_true
+
+      await_auth_event(events, events_mutex, "codex") do |event|
+        event["state"].as_s == "failed" &&
+          event["detail"]?.try(&.as_s.includes?("timed out")) == true
+      end
+      await_cli_event(events, events_mutex, "codex") do |event|
+        event["state"].as_s == "failed" &&
+          event["detail"]?.try(&.as_s.includes?("timed out")) == true
+      end
+
+      client.closed?.should be_false
+      client.call({"op" => JSON::Any.new("ping")})["ok"]
+        .as_bool.should be_true
+    ensure
+      client.try(&.close)
+      server.close
+      engine.close
+      store.close
+      FileUtils.rm_r(directory)
+    end
+  end
+
   it "publishes tree changes after a managed folder is deleted externally" do
     with_client_server(10.milliseconds) do |server, _engine, _store, directory|
       path = File.join(directory, "daemon.sock")

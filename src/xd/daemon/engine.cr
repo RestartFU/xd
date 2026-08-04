@@ -59,9 +59,11 @@ module Xd
         launcher : Agent::Launcher? = nil,
         authentication_resolver : Agent::Authentication::Resolver? = nil,
         authentication_environment : Hash(String, String)? = nil,
+        authentication_timeout : Time::Span = Agent::Authentication::COMMAND_TIMEOUT,
         agent_authorizer : Agent::Manager::Authorizer? = nil,
         cli_version_resolver : Agent::CliVersions::Resolver? = nil,
         cli_version_environment : Hash(String, String)? = nil,
+        cli_version_timeout : Time::Span = Agent::CliVersions::CHECK_TIMEOUT,
         workspace_monitor_interval : Time::Span = WorkspaceMonitor::INTERVAL,
         voice_model_factory : VoiceJobs::ModelFactory? = nil,
         voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
@@ -117,7 +119,8 @@ module Xd
             publish_async_event(name, fields)
           },
           resolver: authentication_resolver,
-          environment: authentication_environment
+          environment: authentication_environment,
+          command_timeout: authentication_timeout
         )
         authorizer = agent_authorizer || ->(provider : String) {
           @authentication.authorization_error(provider)
@@ -138,7 +141,8 @@ module Xd
             publish_async_event(name, fields)
           },
           resolver: cli_version_resolver,
-          environment: cli_version_environment
+          environment: cli_version_environment,
+          check_timeout: cli_version_timeout
         )
         @self_update = SelfUpdate.new(
           ->(name : String, fields : Hash(String, JSON::Any)) {

@@ -7,7 +7,8 @@ module Xd
   module Agent
     # Daemon-owned version reader for bundled assistant CLIs.
     class CliVersions
-      OUTPUT_LIMIT = 4096
+      OUTPUT_LIMIT  = 4096
+      CHECK_TIMEOUT = 10.seconds
 
       class Error < Exception
       end
@@ -81,6 +82,7 @@ module Xd
         @publisher : Publisher = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
         resolver : Resolver? = nil,
         environment : Hash(String, String)? = nil,
+        @check_timeout : Time::Span = CHECK_TIMEOUT,
       )
         @resolver = resolver || ->(name : String) { Executable.resolve(name) }
         @environment = environment || Environment.host
@@ -189,14 +191,41 @@ module Xd
           end
         end
 
-        output_done = Channel(Nil).new
-        error_done = Channel(Nil).new
+        output_done = Channel(Nil).new(1)
+        error_done = Channel(Nil).new(1)
+        status_done = Channel(Process::Status).new(1)
         spawn read_stream(process.output, output, output_done)
         spawn read_stream(process.error, errors, error_done)
+        spawn { status_done.send(process.wait) }
+
+        status : Process::Status? = nil
+        timed_out = false
+        select
+        when result = status_done.receive
+          status = result
+        when timeout(@check_timeout)
+          timed_out = true
+          begin
+            process.terminate(graceful: false)
+          rescue RuntimeError
+          end
+          select
+          when result = status_done.receive
+            status = result
+          when timeout(1.second)
+          end
+          process.output.close unless process.output.closed?
+          process.error.close unless process.error.closed?
+        end
         output_done.receive
         error_done.receive
-        status = process.wait
-        {status, limited([output.to_s, errors.to_s].join("\n"))}
+        if timed_out
+          raise Error.new(
+            "Assistant version check timed out after " \
+            "#{@check_timeout.total_seconds} seconds."
+          )
+        end
+        {status.not_nil!, limited([output.to_s, errors.to_s].join("\n"))}
       end
 
       private def read_stream(
@@ -208,7 +237,8 @@ module Xd
         loop do
           count = stream.read(buffer)
           break if count == 0
-          collected.write(buffer[0, count])
+          remaining = OUTPUT_LIMIT - collected.bytesize
+          collected.write(buffer[0, Math.min(count, remaining)]) if remaining > 0
           Fiber.yield
         end
       rescue IO::Error
@@ -256,7 +286,7 @@ module Xd
         status : Process::Status,
       ) : String
         text = clean(output).strip
-        text.empty? ? "Version check exited with status #{status.exit_code}." : text
+        text.empty? ? "Version check exited with status #{status}." : text
       end
 
       private def clean(text : String) : String

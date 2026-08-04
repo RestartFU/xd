@@ -11,11 +11,12 @@ module Xd
     # request waits for the process. State and output return over the same
     # event bus used by local Unix and remote TLS clients.
     class Authentication
-      OUTPUT_LIMIT = 64 * 1024
-      DETAIL_LIMIT = 2048
-      ANSI         = /\e\[[0-?]*[ -\/]*[@-~]/
-      URL          = %r{https://[^\s<>"']+}
-      DEVICE_CODE  = /\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/
+      OUTPUT_LIMIT    = 64 * 1024
+      DETAIL_LIMIT    = 2048
+      COMMAND_TIMEOUT = 10.seconds
+      ANSI            = /\e\[[0-?]*[ -\/]*[@-~]/
+      URL             = %r{https://[^\s<>"']+}
+      DEVICE_CODE     = /\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/
 
       class Error < Exception
       end
@@ -120,6 +121,7 @@ module Xd
         @publisher : Publisher = ->(_name : String, _fields : Hash(String, JSON::Any)) { },
         resolver : Resolver? = nil,
         environment : Hash(String, String)? = nil,
+        @command_timeout : Time::Span = COMMAND_TIMEOUT,
       )
         @resolver = resolver || ->(name : String) { Executable.resolve(name) }
         @environment = environment || Environment.host
@@ -302,8 +304,9 @@ module Xd
 
         output = IO::Memory.new
         errors = IO::Memory.new
-        output_done = Channel(Nil).new
-        error_done = Channel(Nil).new
+        output_done = Channel(Nil).new(1)
+        error_done = Channel(Nil).new(1)
+        status_done = Channel(Process::Status).new(1)
         spawn read_stream(
           provider,
           serial,
@@ -320,14 +323,42 @@ module Xd
           errors,
           error_done
         )
+        spawn { status_done.send(process.wait) }
+
+        status : Process::Status? = nil
+        timed_out = false
+        if command.login?
+          status = status_done.receive
+        else
+          select
+          when result = status_done.receive
+            status = result
+          when timeout(@command_timeout)
+            timed_out = true
+            terminate(process)
+            select
+            when result = status_done.receive
+              status = result
+            when timeout(1.second)
+            end
+            process.output.close unless process.output.closed?
+            process.error.close unless process.error.closed?
+          end
+        end
         output_done.receive
         error_done.receive
-        status = process.wait
+        if timed_out
+          return fail_command(
+            provider,
+            serial,
+            "#{backend.display_name} authentication check timed out."
+          )
+        end
         complete_command(
           provider,
           serial,
           command,
-          status,
+          status.not_nil!,
           output.to_s,
           errors.to_s
         )
@@ -378,7 +409,8 @@ module Xd
           break if count == 0
 
           text = String.new(buffer[0, count])
-          collected << text
+          remaining = OUTPUT_LIMIT - collected.bytesize
+          collected << text.byte_slice(0, Math.min(text.bytesize, remaining)) if remaining > 0
           append_output(provider, serial, text) if command.login?
           # Pipes can remain continuously readable while a CLI draws a
           # spinner. Crystal fibers are cooperative, so yield even when the
@@ -582,7 +614,7 @@ module Xd
         text = output.strip if text.empty?
         text = clean_output(text)
         if text.empty?
-          "Authentication exited with status #{status.exit_code}."
+          "Authentication exited with status #{status}."
         elsif text.bytesize > DETAIL_LIMIT
           text.byte_slice(0, DETAIL_LIMIT)
         else
@@ -667,6 +699,11 @@ module Xd
           rescue RuntimeError
           end
         {% end %}
+      rescue RuntimeError
+      end
+
+      private def terminate(process : Process) : Nil
+        process.terminate(graceful: false)
       rescue RuntimeError
       end
 
