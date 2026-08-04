@@ -2,6 +2,7 @@ require "../../spec_helper"
 require "file_utils"
 require "random/secure"
 require "../../../src/xd/storage/store"
+require "../../../src/xd/storage/worktree_containers"
 require "../../../src/xd/storage/workspaces"
 
 private def database_path : String
@@ -105,6 +106,31 @@ describe Xd::Storage::Store do
       remove_database(path)
     end
   end
+  it "persists normalized generated-worktree containers" do
+    path = database_path
+    directory = Path[path].dirname.to_s
+    container = File.join(directory, "worktrees")
+    alias_path = File.join(directory, "worktree-alias")
+
+    begin
+      Dir.mkdir_p(container)
+      File.symlink(container, alias_path)
+      store = Xd::Storage::Store.new(path)
+      store.register_worktree_container(alias_path).should eq(
+        File.realpath(container)
+      )
+      store.worktree_container?(container).should be_true
+      store.close
+
+      reopened = Xd::Storage::Store.new(path)
+      reopened.worktree_container?(alias_path).should be_true
+      reopened.forget_worktree_container(container)
+      reopened.worktree_container?(alias_path).should be_false
+      reopened.close
+    ensure
+      remove_database(path)
+    end
+  end
   it "rejects paired devices without a connecting-device name" do
     path = database_path
     store = Xd::Storage::Store.new(path)
@@ -202,6 +228,7 @@ describe Xd::Storage::Store do
 
       DB.open("sqlite3://#{URI.encode_path(path)}") do |database|
         database.exec("DROP TABLE workspace_folders")
+        database.exec("DROP TABLE worktree_containers")
         database.exec(
           "UPDATE meta SET value = '21' WHERE key = 'schema_version'"
         )
@@ -220,6 +247,11 @@ describe Xd::Storage::Store do
         columns.should contain("relative_path")
         columns.should contain("instructions")
         columns.should contain("shortcuts")
+        worktree_columns = database.query_all(
+          "SELECT name FROM pragma_table_info('worktree_containers')",
+          as: String
+        )
+        worktree_columns.should contain("path")
       end
     ensure
       remove_database(path)

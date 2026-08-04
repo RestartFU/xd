@@ -452,6 +452,16 @@ module Xd
             end
           end
 
+          if version < 24
+            connection.exec <<-SQL
+              CREATE TABLE IF NOT EXISTS worktree_containers (
+                path       TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+              )
+              SQL
+          end
+
           connection.exec(
             <<-SQL,
               INSERT INTO meta (key, value)

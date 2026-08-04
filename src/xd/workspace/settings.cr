@@ -4,9 +4,8 @@ module Xd
   module Workspace
     # Legacy on-disk metadata. Workspace::Service consumes these files into
     # SQLite and removes them; nothing writes sidecars anymore.
-    SETTINGS_FILE             = ".xd.json"
-    LEGACY_SETTINGS_FILE      = ".hy.json"
-    WORKTREE_CONTAINER_MARKER = ".xd-worktrees"
+    SETTINGS_FILE        = ".xd.json"
+    LEGACY_SETTINGS_FILE = ".hy.json"
 
     class Error < Exception
     end

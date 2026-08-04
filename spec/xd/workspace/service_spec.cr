@@ -130,7 +130,7 @@ describe Xd::Workspace::Service do
   end
 
   it "hides generated worktree containers" do
-    with_workspace do |service, _store, root|
+    with_workspace do |service, store, root|
       visible = File.join(root, "Visible")
       container = File.join(root, "worktrees")
       checkout = File.join(container, "Repo", "task", "Repo")
@@ -139,18 +139,50 @@ describe Xd::Workspace::Service do
       generated_id = service.create_folder(nil, "Generated")
       generated_child_id = service.create_folder(generated_id, "Nested")
       File.write(
-        File.join(container, Xd::Workspace::WORKTREE_CONTAINER_MARKER),
+        File.join(
+          container,
+          Xd::Workspace::LEGACY_WORKTREE_CONTAINER_MARKER
+        ),
         "generated\n"
+      )
+      File.write(
+        File.join(container, Xd::Workspace::SETTINGS_FILE),
+        %({"id":"stale-worktree-container"})
+      )
+      File.write(
+        File.join(container, Xd::Workspace::LEGACY_SETTINGS_FILE),
+        %({"id":"older-stale-worktree-container"})
       )
       File.write(
         File.join(
           service.find_folder(generated_id),
-          Xd::Workspace::WORKTREE_CONTAINER_MARKER
+          Xd::Workspace::LEGACY_WORKTREE_CONTAINER_MARKER
         ),
         "generated\n"
       )
 
       service.snapshot.folders.map(&.name).should eq(["Visible"])
+      store.worktree_container?(container).should be_true
+      File.exists?(
+        File.join(
+          container,
+          Xd::Workspace::LEGACY_WORKTREE_CONTAINER_MARKER
+        )
+      ).should be_false
+      File.exists?(
+        File.join(container, Xd::Workspace::SETTINGS_FILE)
+      ).should be_false
+      File.exists?(
+        File.join(container, Xd::Workspace::LEGACY_SETTINGS_FILE)
+      ).should be_false
+      generated = File.join(root, "Generated")
+      store.worktree_container?(generated).should be_true
+      File.exists?(
+        File.join(
+          generated,
+          Xd::Workspace::LEGACY_WORKTREE_CONTAINER_MARKER
+        )
+      ).should be_false
       expect_raises(Xd::Workspace::Error, /No such folder/) do
         service.find_folder(generated_id)
       end

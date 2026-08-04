@@ -50,26 +50,31 @@ describe Xd::Workspace::Worktrees do
       created = service.prepare(first, "Fix parser!")
       created.should contain("fix-parser")
       File.directory?(created).should be_true
-      marker = File.join(
+      container = File.join(
         directory,
         "Workspaces",
-        "worktrees",
-        Xd::Workspace::WORKTREE_CONTAINER_MARKER
+        "worktrees"
       )
-      File.file?(marker).should be_true
+      marker = File.join(
+        container,
+        Xd::Workspace::LEGACY_WORKTREE_CONTAINER_MARKER
+      )
+      File.exists?(marker).should be_false
+      store.worktree_container?(container).should be_true
       workspaces.snapshot.folders.map(&.name).should eq(["Project"])
       workspaces.tree_signature.should eq(tree_before)
 
-      # Worktrees created by older XD builds have no marker. Loading one
-      # upgrades its container so it also disappears from workspace discovery.
-      File.delete(marker)
+      # Worktrees created by older XD builds had no database registration.
+      # Loading one recognizes XD's exact layout and persists the container.
+      store.forget_worktree_container(container)
       stored = store.get_chat(first_id)
       stored.workdir.should eq(created)
       stored.original_workdir.should eq(repository)
       stored.new_worktree.should be_false
 
       state = service.state(stored)
-      File.file?(marker).should be_true
+      store.worktree_container?(container).should be_true
+      File.exists?(marker).should be_false
       state.linked.should be_true
       state.worktrees.size.should eq(2)
       service.describe(created, home: home_alias).should contain(

@@ -5,6 +5,7 @@ require "uuid"
 require "../storage/workflow_state"
 require "../storage/workspaces"
 require "./settings"
+require "./worktree_containers"
 
 module Xd
   module Workspace
@@ -32,6 +33,7 @@ module Xd
 
       def initialize(root : String, @store : Storage::Store)
         @root = File.expand_path(root)
+        @worktree_containers = WorktreeContainers.new(@store)
         Dir.mkdir_p(@root, 0o700)
         reconcile_metadata
       end
@@ -580,7 +582,7 @@ module Xd
 
         info = File.info?(path, follow_symlinks: false)
         return false unless info && info.type.directory?
-        return false if File.file?(File.join(path, WORKTREE_CONTAINER_MARKER))
+        return false if @worktree_containers.registered?(path)
 
         relative = relative_path(path)
         return false if relative.split(File::SEPARATOR).any? do |part|
@@ -592,9 +594,7 @@ module Xd
           info = File.info?(ancestor, follow_symlinks: false)
           return false unless info && info.type.directory?
           return false if File.exists?(File.join(ancestor, ".git"))
-          return false if File.file?(
-                            File.join(ancestor, WORKTREE_CONTAINER_MARKER)
-                          )
+          return false if @worktree_containers.registered?(ancestor)
           ancestor = File.dirname(ancestor)
         end
         true
@@ -607,8 +607,8 @@ module Xd
           .compact_map do |name|
             child = File.join(path, name)
             info = File.info?(child, follow_symlinks: false)
-            marker = File.join(child, WORKTREE_CONTAINER_MARKER)
-            child if info && info.type.directory? && !File.file?(marker)
+            child if info && info.type.directory? &&
+                     !@worktree_containers.registered?(child)
           end
       rescue error : File::Error
         raise Error.new("Cannot scan #{path}: #{error.message}")
