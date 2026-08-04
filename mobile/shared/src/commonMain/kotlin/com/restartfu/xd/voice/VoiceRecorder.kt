@@ -10,12 +10,13 @@ package com.restartfu.xd.voice
  */
 public interface VoiceRecorder {
     /**
-     * Captures 16 kHz mono 16-bit little-endian PCM until [stop] or [cancel],
-     * then returns what it captured. [cancel] returns nothing.
+     * Captures 16 kHz mono 16-bit little-endian PCM until [stop] or [cancel].
+     * [onChunk] receives ordered incremental samples for live recognition;
+     * the return value remains the complete recording for the final pass.
      *
      * Stops on its own at [Wav.MAX_PCM_BYTES] rather than recording forever.
      */
-    public suspend fun record(): ByteArray
+    public suspend fun record(onChunk: (ByteArray) -> Unit): ByteArray
 
     /** Ends the recording; [record] returns what it has. */
     public fun stop()

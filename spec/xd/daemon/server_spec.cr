@@ -6,6 +6,7 @@ require "socket"
 require "../../../src/xd/daemon/certificate"
 require "../../../src/xd/daemon/server"
 require "../../support/local_endpoint"
+require "../../support/voice_transcriber"
 
 describe Xd::Daemon::Server do
   it "serves the shared engine over private local IPC" do
@@ -271,15 +272,8 @@ describe Xd::Daemon::Server do
     certificate = File.join(directory, "certificate.pem")
     key = File.join(directory, "private-key.pem")
     model_path = File.join(directory, "model.bin")
-    executable = File.join(directory, "whisper")
     Dir.mkdir_p(directory)
     File.write(model_path, "remote-daemon-model")
-    File.write(executable, <<-'SH')
-      #!/bin/sh
-      set -eu
-      printf 'private remote transcript\n'
-      SH
-    File.chmod(executable, 0o700)
 
     store = Xd::Storage::Store.new(database_path)
     chat_id = store.create_chat("folder", "Remote Voice", "claude")
@@ -290,10 +284,8 @@ describe Xd::Daemon::Server do
         Xd::Voice::Model.new(override_path: model_path)
       },
       voice_transcriber_factory: -> {
-        Xd::Voice::Transcriber.new(
-          resolver: -> { executable },
-          environment: {} of String => String
-        )
+        XdSpec::VoiceTranscriber.new("private remote transcript")
+          .as(Xd::Voice::Transcriber)
       }
     )
     code = engine.arm_pairing(1.minute)

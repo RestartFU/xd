@@ -14,6 +14,8 @@ module Xd
 
       MAX_AUDIO_BYTES       = 64 * 1024 * 1024
       TRANSCRIPTION_TIMEOUT = 5.minutes
+      PARTIAL_MIN_BYTES     = Voice::SAMPLE_RATE.to_i * 2
+      PARTIAL_STEP_BYTES    = Voice::SAMPLE_RATE.to_i
 
       alias Publisher = Proc(
         String,
@@ -77,15 +79,23 @@ module Xd
       private class Job
         @done = Channel(Nil).new(1)
 
+        getter pcm : IO::Memory?
+        property in_flight : Bool
+        property last_started_size : Int32
+        property final_wav : Bytes?
+
         def initialize(
           @model : Voice::Model? = nil,
-          @transcriber : Voice::Transcriber? = nil,
+          streaming : Bool = false,
         )
+          @pcm = streaming ? IO::Memory.new : nil
+          @in_flight = false
+          @last_started_size = 0
+          @final_wav = nil
         end
 
         def cancel : Nil
           @model.try(&.cancel)
-          @transcriber.try(&.cancel)
           complete
         end
 
@@ -116,10 +126,13 @@ module Xd
         @download = nil
         @closed = false
         @mutex = Mutex.new
+        @transcriber = @transcriber_factory.call
       end
 
       def model_available? : Bool
-        !@model_factory.call.find.nil?
+        path = @model_factory.call.find
+        @transcriber.warm(path) if path
+        !path.nil?
       end
 
       def download(owner : UInt64, token : String) : Nil
@@ -173,8 +186,7 @@ module Xd
         end
 
         key = JobKey.new(owner, validate_token(token))
-        transcriber = @transcriber_factory.call
-        job = Job.new(transcriber: transcriber)
+        job = Job.new
         model_path = @model_factory.call.find ||
                      raise Error.new(
                        "Speech model is not installed on this machine."
@@ -186,25 +198,62 @@ module Xd
           @jobs[key] = job
         end
 
-        transcriber.transcribe(audio, model_path) do |result|
-          if result.cancelled
-            finish(key, job, "cancelled")
-          elsif text = result.text
-            finish(key, job, "transcribed", fields: {
-              "text" => JSON::Any.new(text),
-            })
-          else
-            finish(
-              key,
-              job,
-              "error",
-              result.error || "Voice transcription failed."
-            )
-          end
+        @transcriber.transcribe(audio, model_path) do |result|
+          transcription_finished(key, job, result)
         end
         spawn monitor_transcription(key, job)
       rescue error : Base64::Error
         raise Error.new("Voice recording is not valid base64.")
+      end
+
+      def start_stream(owner : UInt64, token : String) : Nil
+        key = JobKey.new(owner, validate_token(token))
+        model_path = @model_factory.call.find ||
+                     raise Error.new(
+                       "Speech model is not installed on this machine."
+                     )
+        job = Job.new(streaming: true)
+        @mutex.synchronize do
+          raise Error.new("Voice service is closed.") if @closed
+          raise Error.new("That voice request is already running.") if @jobs.has_key?(key)
+          @jobs[key] = job
+        end
+        @transcriber.warm(model_path)
+        spawn monitor_transcription(key, job)
+      end
+
+      def append_stream(
+        owner : UInt64,
+        token : String,
+        encoded_audio : String,
+      ) : Nil
+        audio = decode_audio(encoded_audio, "Voice audio chunk")
+        key = JobKey.new(owner, validate_token(token))
+        inference = @mutex.synchronize do
+          job = stream_job(key)
+          pcm = job.pcm.not_nil!
+          if pcm.size + audio.size > MAX_AUDIO_BYTES
+            raise Error.new("Voice recording is too large.")
+          end
+          pcm.write(audio)
+          next_inference(job)
+        end
+        start_inference(key, inference) if inference
+      end
+
+      def finish_stream(
+        owner : UInt64,
+        token : String,
+        encoded_audio : String,
+      ) : Nil
+        audio = decode_audio(encoded_audio, "Voice recording")
+        key = JobKey.new(owner, validate_token(token))
+        inference = @mutex.synchronize do
+          job = stream_job(key)
+          job.final_wav = audio
+          next_inference(job)
+        end
+        start_inference(key, inference) if inference
       end
 
       def cancel(owner : UInt64, token : String) : Bool
@@ -229,6 +278,125 @@ module Xd
           values
         end
         jobs.each(&.cancel)
+        @transcriber.close
+      end
+
+      private def decode_audio(encoded : String, label : String) : Bytes
+        if encoded.bytesize > MAX_AUDIO_BYTES * 2
+          raise Error.new("#{label} is too large.")
+        end
+        audio = Base64.decode(encoded)
+        raise Error.new("#{label} is empty.") if audio.empty?
+        raise Error.new("#{label} is too large.") if audio.size > MAX_AUDIO_BYTES
+        audio
+      rescue Base64::Error
+        raise Error.new("#{label} is not valid base64.")
+      end
+
+      private def stream_job(key : JobKey) : Job
+        job = @jobs[key]? || raise Error.new("Voice stream is not running.")
+        raise Error.new("Voice request is not a stream.") unless job.pcm
+        job
+      end
+
+      private def next_inference(job : Job) : {Bytes, Bool}?
+        return if job.in_flight
+
+        if wav = job.final_wav
+          job.in_flight = true
+          return {wav, true}
+        end
+
+        pcm = job.pcm || return
+        return if pcm.size < PARTIAL_MIN_BYTES
+        return if pcm.size - job.last_started_size < PARTIAL_STEP_BYTES
+
+        job.in_flight = true
+        job.last_started_size = pcm.size
+        {Voice::Data.wav_from_s16(pcm.to_slice), false}
+      end
+
+      private def start_inference(
+        key : JobKey,
+        inference : {Bytes, Bool},
+      ) : Nil
+        wav, final = inference
+        model_path = @model_factory.call.find
+        unless model_path
+          if job = @mutex.synchronize { @jobs[key]? }
+            finish(key, job, "error", "Speech model is not installed on this machine.")
+          end
+          return
+        end
+
+        @transcriber.transcribe(wav, model_path) do |result|
+          inference_finished(key, final, result)
+        end
+      end
+
+      private def inference_finished(
+        key : JobKey,
+        final : Bool,
+        result : Voice::Transcription,
+      ) : Nil
+        job : Job? = nil
+        next_run : {Bytes, Bool}? = nil
+        @mutex.synchronize do
+          job = @jobs[key]?
+          if current = job
+            current.in_flight = false
+            next_run = next_inference(current) unless final
+          end
+        end
+        current = job || return
+        text = result.text
+
+        if result.cancelled
+          finish(key, current, "cancelled")
+        elsif text
+          if final
+            finish(key, current, "transcribed", fields: {
+              "text" => JSON::Any.new(text),
+            })
+          else
+            publish_if_current(key, current, "partial", {
+              "text" => JSON::Any.new(text),
+            })
+            start_inference(key, next_run) if next_run
+          end
+        elsif !final
+          # Silence and unstable early windows are normal while someone is
+          # still talking. The authoritative final pass reports real errors.
+          start_inference(key, next_run) if next_run
+        else
+          finish(
+            key,
+            current,
+            "error",
+            result.error || "Voice transcription failed."
+          )
+        end
+      end
+
+      private def transcription_finished(
+        key : JobKey,
+        job : Job,
+        result : Voice::Transcription,
+      ) : Nil
+        if result.cancelled
+          finish(key, job, "cancelled")
+        elsif result.text
+          finish(key, job, "transcribed", fields: {
+            "text" => JSON::Any.new(result.text.not_nil!),
+          })
+        else
+          finish(
+            key,
+            job,
+            "error",
+            result.error || "Voice transcription failed."
+          )
+        end
       end
 
       private def validate_token(token : String) : String

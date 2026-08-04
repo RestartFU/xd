@@ -3,9 +3,9 @@ module Xd
     SAMPLE_RATE = 16_000_u32
     CHANNELS    =      1_u16
 
-    MODEL_SIZE   = 574_041_195_u64
+    MODEL_SIZE   = 147_964_211_u64
     MODEL_SHA256 =
-      "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
+      "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
 
     class Error < Exception
     end

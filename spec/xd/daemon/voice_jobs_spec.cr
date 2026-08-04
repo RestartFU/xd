@@ -63,7 +63,84 @@ private class StalledVoiceTranscriber < Xd::Voice::Transcriber
   end
 end
 
+private class ControlledVoiceTranscriber < Xd::Voice::Transcriber
+  getter calls = [] of Bytes
+  getter warmed = [] of String
+
+  def initialize
+    super()
+    @results = Channel(Xd::Voice::Transcription).new
+  end
+
+  def warm(model_path : String) : Nil
+    @warmed << model_path
+  end
+
+  def transcribe(
+    wav : Bytes,
+    _model_path : String,
+    &finished : Xd::Voice::Transcription -> Nil
+  ) : Nil
+    @calls << wav.dup
+    spawn { finished.call(@results.receive) }
+  end
+
+  def complete(text : String) : Nil
+    @results.send(
+      Xd::Voice::Transcription.new(text, nil, false)
+    )
+  end
+
+  def close : Nil
+  end
+end
+
 describe Xd::Daemon::VoiceJobs do
+  it "coalesces live PCM while one inference runs and prioritizes the final WAV" do
+    events = [] of Hash(String, JSON::Any)
+    transcriber = ControlledVoiceTranscriber.new
+    jobs = Xd::Daemon::VoiceJobs.new(
+      ->(_name : String, fields : Hash(String, JSON::Any), _owner : UInt64) { events << fields },
+      model_factory: -> {
+        InstalledVoiceModel.new.as(Xd::Voice::Model)
+      },
+      transcriber_factory: -> {
+        transcriber.as(Xd::Voice::Transcriber)
+      }
+    )
+    first_second = Bytes.new(Xd::Voice::SAMPLE_RATE.to_i * 2, 0x21_u8)
+    half_second = Bytes.new(Xd::Voice::SAMPLE_RATE.to_i, 0x42_u8)
+    final_wav = Xd::Voice::Data.wav_from_s16(first_second + half_second)
+
+    jobs.start_stream(5_u64, "stream-token")
+    transcriber.warmed.should eq(["/xd-test-model"])
+
+    jobs.append_stream(5_u64, "stream-token", Base64.strict_encode(first_second))
+    transcriber.calls.size.should eq(1)
+    String.new(transcriber.calls[0][0, 4]).should eq("RIFF")
+
+    # A newer partial and then the final recording arrive while Whisper is
+    # busy. Neither starts a parallel request.
+    jobs.append_stream(5_u64, "stream-token", Base64.strict_encode(half_second))
+    jobs.finish_stream(5_u64, "stream-token", Base64.strict_encode(final_wav))
+    transcriber.calls.size.should eq(1)
+
+    transcriber.complete("live words")
+    events.map { |event| event["state"].as_s }.should eq(["partial"])
+    events[0]["text"].as_s.should eq("live words")
+    transcriber.calls.size.should eq(2)
+    transcriber.calls[1].should eq(final_wav)
+
+    transcriber.complete("live words finalized")
+    events.map { |event| event["state"].as_s }.should eq([
+      "partial",
+      "transcribed",
+    ])
+    events.last["text"].as_s.should eq("live words finalized")
+  ensure
+    jobs.try(&.close)
+  end
+
   it "cancels a stalled transcription and releases its request token" do
     events = Channel(Hash(String, JSON::Any)).new(4)
     transcribers = [] of StalledVoiceTranscriber
@@ -92,8 +169,7 @@ describe Xd::Daemon::VoiceJobs do
       end
     end
 
-    transcribers.size.should eq(2)
-    transcribers.all?(&.cancelled?).should be_true
+    transcribers.size.should eq(1)
   ensure
     jobs.try(&.close)
   end

@@ -325,14 +325,16 @@ all — the composer is already there.
 ## Voice
 
 The microphone button dictates into the composer. Capture is the only part that
-happens on the phone: `AudioRecord` at 16 kHz mono PCM16, wrapped in the WAV
-header `src/xd/voice/data.cr` validates, then base64 to the daemon. The daemon
-holds the speech model and runs whisper, so a remote chat transcribes on the
-remote machine — and a phone never downloads 574 MB or spends its battery on a
-model.
+happens on the phone: `AudioRecord` at 16 kHz mono PCM16 sends ordered half-second
+chunks while recording, followed by the complete WAV that
+`src/xd/voice/data.cr` validates. The daemon keeps the English `base.en` model
+resident, coalesces live windows to one inference at a time, and returns
+provisional text before the authoritative final transcript. A remote chat still
+transcribes on the remote machine — the phone never downloads the 148 MB model
+or spends its battery on inference.
 
 That download is the one thing worth asking about, and the dialog says whose
-disk it lands on, because "574 MB" reads very differently for a phone than for
+disk it lands on, because "148 MB" reads very differently for a phone than for
 the machine running the chat. Progress arrives as events, not in the reply.
 
 `VoiceSession` in `shared` is the state machine — check, record, transcribe,

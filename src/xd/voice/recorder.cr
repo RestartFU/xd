@@ -45,6 +45,7 @@ module Xd
       BACKEND = :portaudio
 
       CHUNK_MILLISECONDS = 100
+      STREAM_CHUNKS       =   5
       MAX_SECONDS        = 120
       MIN_BYTES          = SAMPLE_RATE.to_i * 2 // 4
       CHUNK_FRAMES       =
@@ -60,7 +61,10 @@ module Xd
         @running = Atomic(Bool).new(false)
       end
 
-      def record(&finished : Recording -> Nil) : Nil
+      def record(
+        on_chunk : Bytes -> Nil = ->(_chunk : Bytes) { },
+        &finished : Recording -> Nil
+      ) : Nil
         unless @running.compare_and_set(false, true)[1]
           raise Error.new("Voice recording is already running.")
         end
@@ -68,7 +72,7 @@ module Xd
         @stop_requested.set(false)
         @cancelled.set(false)
         Fiber::ExecutionContext::Isolated.new("xd voice recorder") do
-          result = record_blocking
+          result = record_blocking(on_chunk)
           @running.set(false)
           finished.call(result)
         end
@@ -83,8 +87,8 @@ module Xd
         @stop_requested.set(true)
       end
 
-      private def record_blocking : Recording
-        pcm = record_portaudio
+      private def record_blocking(on_chunk : Bytes -> Nil) : Recording
+        pcm = record_portaudio(on_chunk)
 
         return Recording.new(nil, nil, true) if @cancelled.get
         if pcm.size < MIN_BYTES
@@ -103,7 +107,7 @@ module Xd
         )
       end
 
-      private def record_portaudio : IO::Memory
+      private def record_portaudio(on_chunk : Bytes -> Nil) : IO::Memory
         code = LibPortAudio.initialize
         unless code == LibPortAudio::PA_NO_ERROR
           raise Error.new(
@@ -139,6 +143,7 @@ module Xd
           started = true
 
           pcm = IO::Memory.new
+          streaming = IO::Memory.new
           chunk = Bytes.new(CHUNK_BYTES)
           while !@stop_requested.get && pcm.size < MAX_BYTES
             code = LibPortAudio.read_stream(
@@ -153,6 +158,11 @@ module Xd
               )
             end
             pcm.write(chunk)
+            streaming.write(chunk)
+            if streaming.size >= CHUNK_BYTES * STREAM_CHUNKS
+              on_chunk.call(streaming.to_slice.dup)
+              streaming.clear
+            end
           end
           pcm
         ensure

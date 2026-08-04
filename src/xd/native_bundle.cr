@@ -145,6 +145,10 @@ module Xd
           "#{resources}/share/licenses/xd/claude-code-proxy-LICENSE"
         ),
         requirement("whisper.cpp", "#{resources}/libexec/whisper"),
+        requirement(
+          "resident whisper.cpp server",
+          "#{resources}/libexec/whisper-server"
+        ),
         requirement("OpenSSL", "#{resources}/libexec/openssl"),
         requirement(
           "OpenSSL configuration",
@@ -240,6 +244,10 @@ module Xd
           "share/licenses/xd/claude-code-proxy-LICENSE"
         ),
         requirement("whisper.cpp", "libexec/whisper.exe"),
+        requirement(
+          "resident whisper.cpp server",
+          "libexec/whisper-server.exe"
+        ),
         requirement(
           "OpenSSL",
           "libexec/openssl.exe",

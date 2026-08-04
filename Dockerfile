@@ -37,15 +37,16 @@ RUN set -eux; \
       -DBUILD_SHARED_LIBS=ON \
       -DWHISPER_BUILD_TESTS=OFF \
       -DWHISPER_BUILD_EXAMPLES=ON \
-      -DWHISPER_BUILD_SERVER=OFF \
+      -DWHISPER_BUILD_SERVER=ON \
       -DGGML_NATIVE=OFF \
       -DGGML_BACKEND_DL=ON \
       -DGGML_CPU_ALL_VARIANTS=ON \
       -DGGML_OPENMP=OFF \
       -DGGML_CCACHE=OFF; \
-    cmake --build /build --target whisper-cli --parallel 4; \
+    cmake --build /build --target whisper-cli whisper-server --parallel 4; \
     install -d /voice/lib /voice/libexec; \
     install -m0755 /build/bin/whisper-cli /voice/libexec/whisper-bin; \
+    install -m0755 /build/bin/whisper-server /voice/libexec/whisper-server-bin; \
     cp -a /build/bin/libwhisper.so* /build/bin/libggml*.so* /voice/lib/; \
     find /voice -type f -exec strip --strip-unneeded {} +; \
     rm -rf /build /source /tmp/whisper.tar.gz
@@ -243,6 +244,7 @@ COPY scripts/git.sh /stage/usr/bin/git
 COPY scripts/git-helper.sh /stage/usr/libexec/git-helper
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
 COPY scripts/whisper.sh /stage/usr/libexec/whisper
+COPY scripts/whisper-server.sh /stage/usr/libexec/whisper-server
 COPY --from=crystal /crystal-build/xd /stage/usr/bin/xd
 COPY --from=agent-binaries /agents/ /stage/usr/libexec/
 COPY --from=voice-build /voice/libexec/ /stage/usr/libexec/
@@ -309,7 +311,8 @@ RUN set -eux; \
       /stage/usr/libexec/curl \
       /stage/usr/libexec/git-helper \
       /stage/usr/libexec/openssl \
-      /stage/usr/libexec/whisper; \
+      /stage/usr/libexec/whisper \
+      /stage/usr/libexec/whisper-server; \
     desktop-file-validate "/stage/usr/share/applications/$app_id.desktop"; \
     bash /usr/local/bin/bundle.sh \
       /stage /out /usr/local/share/xd-launcher.sh; \

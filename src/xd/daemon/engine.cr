@@ -422,6 +422,12 @@ module Xd
           voice_model(request)
         when Protocol::Operation::VoiceModelDownload
           voice_model_download(connection, request)
+        when Protocol::Operation::VoiceStreamStart
+          voice_stream_start(connection, request)
+        when Protocol::Operation::VoiceStreamChunk
+          voice_stream_chunk(connection, request)
+        when Protocol::Operation::VoiceStreamFinish
+          voice_stream_finish(connection, request)
         when Protocol::Operation::VoiceTranscribe
           voice_transcribe(connection, request)
         when Protocol::Operation::VoiceCancel
@@ -1910,6 +1916,44 @@ module Xd
         voice_chat(request, "voice-model-download")
         token = voice_token(request, "voice-model-download")
         @voice.download(connection.object_id, token)
+        Protocol::Response.ok
+      end
+
+      private def voice_stream_start(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        voice_chat(request, "voice-stream-start")
+        token = voice_token(request, "voice-stream-start")
+        @voice.start_stream(connection.object_id, token)
+        Protocol::Response.ok
+      end
+
+      private def voice_stream_chunk(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        voice_chat(request, "voice-stream-chunk")
+        token = voice_token(request, "voice-stream-chunk")
+        audio = request.string(
+          "audio",
+          "voice-stream-chunk needs audio."
+        )
+        @voice.append_stream(connection.object_id, token, audio)
+        Protocol::Response.ok
+      end
+
+      private def voice_stream_finish(
+        connection : Connection,
+        request : Protocol::Request,
+      ) : Protocol::Response
+        voice_chat(request, "voice-stream-finish")
+        token = voice_token(request, "voice-stream-finish")
+        audio = request.string(
+          "audio",
+          "voice-stream-finish needs audio."
+        )
+        @voice.finish_stream(connection.object_id, token, audio)
         Protocol::Response.ok
       end
 

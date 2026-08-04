@@ -28,6 +28,11 @@ public sealed interface VoiceEvent {
         val text: String,
     ) : VoiceEvent
 
+    public data class Partial(
+        override val token: String,
+        val text: String,
+    ) : VoiceEvent
+
     public data class Cancelled(override val token: String) : VoiceEvent
 
     public data class Failed(
@@ -51,6 +56,7 @@ public object VoiceWire {
             "ready" -> VoiceEvent.Ready(token)
             "transcribed" -> value.text("text")?.let { VoiceEvent.Transcribed(token, it) }
                 ?: VoiceEvent.Failed(token, "The daemon returned no transcription")
+            "partial" -> value.text("text")?.let { VoiceEvent.Partial(token, it) }
             "cancelled" -> VoiceEvent.Cancelled(token)
             "error" -> VoiceEvent.Failed(
                 token,

@@ -12,8 +12,10 @@ private class FakeTransport(
     var available: Boolean = true,
 ) : VoiceTransport {
     var failure: Throwable? = null
-    val transcribed = mutableListOf<ByteArray>()
+    val chunks = mutableListOf<ByteArray>()
+    val finished = mutableListOf<ByteArray>()
     val cancelled = mutableListOf<String>()
+    val started = mutableListOf<String>()
     var downloads = 0
 
     override suspend fun voiceModelAvailable(): Boolean {
@@ -25,9 +27,19 @@ private class FakeTransport(
         downloads++
     }
 
-    override suspend fun transcribe(token: String, wav: ByteArray) {
+    override suspend fun startVoiceStream(token: String) {
         failure?.let { throw it }
-        transcribed += wav
+        started += token
+    }
+
+    override suspend fun streamVoiceChunk(token: String, pcm: ByteArray) {
+        failure?.let { throw it }
+        chunks += pcm
+    }
+
+    override suspend fun finishVoiceStream(token: String, wav: ByteArray) {
+        failure?.let { throw it }
+        finished += wav
     }
 
     override suspend fun cancelVoice(token: String) {
@@ -42,11 +54,16 @@ private class FakeRecorder(
     // record() is scheduled still ends it -- which is exactly what happens
     // when a reader taps the microphone and then backs out.
     private val finished = CompletableDeferred<ByteArray>()
+    private var onChunk: ((ByteArray) -> Unit)? = null
     var cancels = 0
 
-    override suspend fun record(): ByteArray = finished.await()
+    override suspend fun record(onChunk: (ByteArray) -> Unit): ByteArray {
+        this.onChunk = onChunk
+        return finished.await()
+    }
 
     override fun stop() {
+        onChunk?.invoke(audio.copyOf())
         finished.complete(audio)
     }
 
@@ -81,12 +98,17 @@ class VoiceSessionTest {
         voice.start()
         testScheduler.runCurrent()
         assertIs<VoiceState.Recording>(voice.state.value)
+        assertEquals(listOf("token"), transport.started)
 
         voice.stop()
         testScheduler.runCurrent()
-        assertEquals(1, transport.transcribed.size)
+        assertEquals(1, transport.chunks.size)
+        assertEquals(1, transport.finished.size)
         // The daemon is handed a WAV, not raw samples.
-        assertEquals("RIFF", transport.transcribed[0].decodeToString(0, 4))
+        assertEquals("RIFF", transport.finished[0].decodeToString(0, 4))
+
+        voice.onEvent(VoiceEvent.Partial("token", "make it"))
+        assertEquals("make it", voice.partial.value)
 
         voice.onEvent(VoiceEvent.Transcribed("token", "make it faster"))
         assertEquals(listOf("make it faster"), transcripts)
@@ -101,7 +123,7 @@ class VoiceSessionTest {
 
         voice.start()
         testScheduler.runCurrent()
-        // 574 MB on someone else's machine is not a thing to start unasked.
+        // 148 MB on someone else's machine is not a thing to start unasked.
         assertEquals(VoiceState.NeedsModel, voice.state.value)
         assertEquals(0, transport.downloads)
 
@@ -116,6 +138,7 @@ class VoiceSessionTest {
         assertEquals(VoiceState.Downloading(40), voice.state.value)
 
         voice.onEvent(VoiceEvent.Ready("token"))
+        testScheduler.runCurrent()
         assertIs<VoiceState.Recording>(voice.state.value)
 
         // Leave no recorder awaiting: the test scope outlives this call.
@@ -152,9 +175,8 @@ class VoiceSessionTest {
         voice.cancel()
         testScheduler.runCurrent()
 
-        assertTrue(transport.transcribed.isEmpty())
-        // Cancelling while recording is not a daemon job, so nothing to cancel.
-        assertTrue(transport.cancelled.isEmpty())
+        assertTrue(transport.finished.isEmpty())
+        assertEquals(listOf("token"), transport.cancelled)
     }
 
     @Test
@@ -168,7 +190,7 @@ class VoiceSessionTest {
         voice.stop()
         testScheduler.runCurrent()
 
-        assertTrue(transport.transcribed.isEmpty())
+        assertTrue(transport.finished.isEmpty())
         assertIs<VoiceState.Failed>(voice.state.value)
     }
 

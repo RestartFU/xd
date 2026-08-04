@@ -14,6 +14,8 @@ module Xd
     # transcription run on the selected chat's endpoint, so remote chats use
     # the remote machine's CPU, storage, and bundled whisper binary.
     class VoiceInput
+      private record Upload, audio : String, final : Bool
+
       enum State
         Idle
         Confirming
@@ -52,6 +54,8 @@ module Xd
         @timer = 0_u32
         @started_at = Time.instant
         @download_progress = 0
+        @uploads = Deque(Upload).new
+        @uploading = false
 
         @widget = Gtk::Box.new(:horizontal, 6)
         @widget.valign = :center
@@ -62,6 +66,10 @@ module Xd
         @button.add_css_class("circular")
         @button.clicked_signal.connect { clicked }
         @busy_spinner = Gtk::Spinner.new
+        @partial_label = Gtk::Label.new("")
+        @partial_label.ellipsize = :end
+        @partial_label.max_width_chars = 48
+        @partial_label.visible = false
 
         @download_prompt = Gtk::Box.new(:horizontal, 6)
         @download_prompt.valign = :center
@@ -107,6 +115,7 @@ module Xd
         @error_status.append(@error_dismiss)
 
         @widget.append(@button)
+        @widget.append(@partial_label)
         @widget.append(@download_prompt)
         @widget.append(@download_status)
         @widget.append(@error_status)
@@ -148,7 +157,10 @@ module Xd
       def cancel : Nil
         endpoint = @endpoint
         token = @request_token
-        daemon_job = @state.downloading? || @state.transcribing?
+        daemon_job = @state.downloading? ||
+                     @state.recording? ||
+                     @state.transcribing? ||
+                     @state.confirming?
 
         @generation &+= 1
         @recorder.try(&.cancel)
@@ -277,6 +289,41 @@ module Xd
       private def start_recording(generation : UInt64) : Nil
         return unless current?(generation)
 
+        endpoint = @endpoint || return reset
+        chat_id = @chat_id || return reset
+        token = @request_token || return reset
+        @state = State::Confirming
+        update_button
+
+        spawn do
+          message : String? = nil
+          begin
+            endpoint.call({
+              "op"      => JSON::Any.new("voice-stream-start"),
+              "chat"    => JSON::Any.new(chat_id),
+              "request" => JSON::Any.new(token),
+            })
+          rescue error : Daemon::Client::Error
+            message = error.message || "Cannot start voice recognition."
+          end
+
+          GLib.idle_add do
+            if current?(generation)
+              if message
+                reset
+                show_error(message)
+              else
+                capture_recording(generation)
+              end
+            end
+            false
+          end
+        end
+      end
+
+      private def capture_recording(generation : UInt64) : Nil
+        return unless current?(generation)
+
         recorder = Voice::Recorder.new
         @recorder = recorder
         @state = State::Recording
@@ -284,7 +331,15 @@ module Xd
         update_button
         start_recording_timer
 
-        recorder.record do |result|
+        recorder.record(->(chunk : Bytes) {
+          encoded = Base64.strict_encode(chunk)
+          GLib.idle_add do
+            enqueue_upload(Upload.new(encoded, false), generation) \
+              if current?(generation)
+            false
+          end
+          nil
+        }) do |result|
           GLib.idle_add do
             handle_recording(result, generation) if current?(generation)
             false
@@ -308,7 +363,7 @@ module Xd
           update_button
           start_transcription(wav, generation)
         else
-          reset
+          cancel
           show_error(result.error || "Cannot record microphone.")
         end
       end
@@ -329,7 +384,7 @@ module Xd
           GLib.idle_add do
             if current?(generation)
               if payload = encoded
-                send_transcription(payload, generation)
+                enqueue_upload(Upload.new(payload, true), generation)
               else
                 reset
                 show_error(message)
@@ -345,31 +400,47 @@ module Xd
         end
       end
 
-      private def send_transcription(
-        encoded : String,
+      private def enqueue_upload(
+        upload : Upload,
         generation : UInt64,
       ) : Nil
+        return unless current?(generation)
+        @uploads << upload
+        send_next_upload(generation)
+      end
+
+      private def send_next_upload(generation : UInt64) : Nil
+        return unless current?(generation) && !@uploading
+        upload = @uploads.shift? || return
         endpoint = @endpoint || return reset
         chat_id = @chat_id || return reset
         token = @request_token || return reset
+        @uploading = true
 
         spawn do
           message : String? = nil
           begin
             endpoint.call({
-              "op"      => JSON::Any.new("voice-transcribe"),
+              "op"      => JSON::Any.new(
+                upload.final ? "voice-stream-finish" : "voice-stream-chunk"
+              ),
               "chat"    => JSON::Any.new(chat_id),
               "request" => JSON::Any.new(token),
-              "audio"   => JSON::Any.new(encoded),
+              "audio"   => JSON::Any.new(upload.audio),
             })
           rescue error : Daemon::Client::Error
             message = error.message || "Voice transcription failed."
           end
 
           GLib.idle_add do
-            if current?(generation) && message
-              reset
-              show_error(message)
+            if current?(generation)
+              @uploading = false
+              if message
+                cancel
+                show_error(message)
+              else
+                send_next_upload(generation)
+              end
             end
             false
           end
@@ -393,6 +464,14 @@ module Xd
           end
         when "ready"
           start_recording(@generation) if @state.downloading?
+        when "partial"
+          if @state.recording? || @state.transcribing?
+            if text = event["text"]?.try(&.as_s?)
+              @partial_label.text = text
+              @partial_label.tooltip_text = text
+              @partial_label.visible = !text.empty?
+            end
+          end
         when "transcribed"
           if @state.transcribing?
             text = event["text"]?.try(&.as_s?)
@@ -466,6 +545,10 @@ module Xd
         @recorder = nil
         @request_token = nil
         @download_progress = 0
+        @uploads.clear
+        @uploading = false
+        @partial_label.text = ""
+        @partial_label.visible = false
         @error_message = nil
         update_button
       end
@@ -494,9 +577,9 @@ module Xd
         @download_status.visible = downloading
         @error_status.visible = showing_error
         @download_prompt_label.text =
-          "Speech model on #{target_name} · 548 MiB"
+          "English speech model on #{target_name} · 141 MiB"
         @download_prompt_label.tooltip_text =
-          "Download Whisper large-v3-turbo onto #{target_name} once."
+          "Download Whisper base.en onto #{target_name} once."
         if message = @error_message
           @error_label.text = message
           @error_label.tooltip_text = message

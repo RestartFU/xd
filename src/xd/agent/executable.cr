@@ -6,7 +6,7 @@ module Xd
       extend self
 
       def resolve(name : String) : String
-        key = "XD_#{name.upcase}_EXECUTABLE"
+        key = "XD_#{name.upcase.gsub('-', '_')}_EXECUTABLE"
         if configured = ENV[key]?
           return configured unless configured.empty?
         end

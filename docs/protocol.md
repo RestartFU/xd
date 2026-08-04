@@ -487,6 +487,9 @@ which is also the machine whose CPU and disk are being spent.
 
 ```json
 {"op":"voice-model-download","chat":"chat-1","request":"a1b2…"}
+{"op":"voice-stream-start","chat":"chat-1","request":"a1b2…"}
+{"op":"voice-stream-chunk","chat":"chat-1","request":"a1b2…","audio":"<base64 PCM16>"}
+{"op":"voice-stream-finish","chat":"chat-1","request":"a1b2…","audio":"<base64 WAV>"}
 {"op":"voice-transcribe","chat":"chat-1","request":"a1b2…","audio":"<base64 WAV>"}
 {"op":"voice-cancel","request":"a1b2…"}
 ```
@@ -496,13 +499,22 @@ which is also the machine whose CPU and disk are being spent.
 it need only be unique among one client's own outstanding requests, and one
 client cannot cancel another's job.
 
-All three reply `ok` as soon as the job *starts*. Everything that matters —
-download progress, the transcript, failures — arrives as `voice` events, because
-downloading 574 MB or running whisper takes far longer than a request may.
+Every mutation replies `ok` as soon as it is accepted. Everything that matters
+— download progress, live text, the final transcript, failures — arrives as
+`voice` events, because model loading and inference take longer than a request
+may.
 
-`audio` is a base64 WAV of 16 kHz mono 16-bit little-endian PCM, at most 64 MiB
-decoded. The daemon does not resample: any other rate or channel count is
-rejected. `src/xd/voice/data.cr` writes and validates this header.
+For low-latency dictation, start a stream, send ordered chunks of raw 16 kHz
+mono signed 16-bit little-endian PCM, then finish with the complete recording as
+a WAV. The daemon coalesces partial windows so each stream has at most one
+Whisper inference running. It emits `partial` text while recording and an
+authoritative `transcribed` result after the final WAV. The legacy
+`voice-transcribe` operation remains available for clients that only send a
+complete WAV.
+
+Decoded audio is limited to 64 MiB. The daemon does not resample; the final WAV
+must contain 16 kHz mono PCM16. `src/xd/voice/data.cr` writes and validates this
+header.
 
 ### Folder and chat mutations
 
@@ -537,7 +549,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `repository-changed` | `chat` | HEAD moved outside the app. |
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |
-| `voice` | `request`, `state` of `downloading` (with `progress`, `-1` until the size is known), `ready`, `transcribed` (with `text`), `cancelled`, or `error` (with `error`) | Voice job progress, addressed to the connection that asked and naming no chat. |
+| `voice` | `request`, `state` of `downloading` (with `progress`, `-1` until the size is known), `ready`, `partial` (with provisional `text`), `transcribed` (with final `text`), `cancelled`, or `error` (with `error`) | Voice job progress, addressed to the connection that asked and naming no chat. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
 
 ### Tagged questions

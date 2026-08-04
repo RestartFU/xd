@@ -29,7 +29,7 @@ class AndroidVoiceRecorder : VoiceRecorder {
     // The permission is checked before a recording is ever started; Compose
     // asks for it and will not call this without it.
     @SuppressLint("MissingPermission")
-    override suspend fun record(): ByteArray = withContext(Dispatchers.IO) {
+    override suspend fun record(onChunk: (ByteArray) -> Unit): ByteArray = withContext(Dispatchers.IO) {
         val minimum = AudioRecord.getMinBufferSize(Wav.SAMPLE_RATE, CHANNEL, ENCODING)
         if (minimum <= 0) {
             throw VoiceRecorderException("This device cannot record at 16 kHz")
@@ -58,7 +58,7 @@ class AndroidVoiceRecorder : VoiceRecorder {
                 throw VoiceRecorderException("The microphone is not available")
             }
             recorder.startRecording()
-            capture(recorder, bufferBytes)
+            capture(recorder, bufferBytes, onChunk)
         } finally {
             runCatching { recorder.stop() }
             recorder.release()
@@ -73,8 +73,13 @@ class AndroidVoiceRecorder : VoiceRecorder {
         cancelled.set(true)
     }
 
-    private fun capture(recorder: AudioRecord, bufferBytes: Int): ByteArray {
+    private fun capture(
+        recorder: AudioRecord,
+        bufferBytes: Int,
+        onChunk: (ByteArray) -> Unit,
+    ): ByteArray {
         val captured = ByteArrayOutputStream()
+        val streaming = ByteArrayOutputStream()
         val buffer = ByteArray(bufferBytes)
 
         // read() blocks until the buffer fills, so a stop takes effect within
@@ -84,6 +89,11 @@ class AndroidVoiceRecorder : VoiceRecorder {
             if (read < 0) throw VoiceRecorderException(describe(read))
             val room = Wav.MAX_PCM_BYTES - captured.size()
             captured.write(buffer, 0, minOf(read, room))
+            streaming.write(buffer, 0, minOf(read, room))
+            if (streaming.size() >= STREAM_CHUNK_BYTES) {
+                onChunk(streaming.toByteArray())
+                streaming.reset()
+            }
         }
         if (cancelled.get()) return ByteArray(0)
 
@@ -104,5 +114,6 @@ class AndroidVoiceRecorder : VoiceRecorder {
     private companion object {
         const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
         const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
+        const val STREAM_CHUNK_BYTES = Wav.SAMPLE_RATE * 2 / 2
     }
 }

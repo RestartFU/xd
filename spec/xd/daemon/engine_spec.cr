@@ -3,6 +3,7 @@ require "base64"
 require "file_utils"
 require "random/secure"
 require "../../../src/xd/daemon/engine"
+require "../../support/voice_transcriber"
 
 private def parse_response(response : Xd::Protocol::Response) : JSON::Any
   JSON.parse(response.to_json)
@@ -798,22 +799,12 @@ describe Xd::Daemon::Engine do
     )
     Dir.mkdir_p(directory)
     model_path = File.join(directory, "model.bin")
-    executable = File.join(directory, "whisper")
     File.write(model_path, "daemon-owned-model")
-    File.write(executable, <<-'SH')
-      #!/bin/sh
-      set -eu
-      printf 'daemon transcript\n'
-      SH
-    File.chmod(executable, 0o700)
     model_factory = -> {
       Xd::Voice::Model.new(override_path: model_path)
     }
     transcriber_factory = -> {
-      Xd::Voice::Transcriber.new(
-        resolver: -> { executable },
-        environment: {} of String => String
-      )
+      XdSpec::VoiceTranscriber.new("daemon transcript").as(Xd::Voice::Transcriber)
     }
 
     begin

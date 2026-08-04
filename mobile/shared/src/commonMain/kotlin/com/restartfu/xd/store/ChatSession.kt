@@ -176,11 +176,23 @@ public class ChatSession internal constructor(
         core.read(Ops.voiceModelDownload(core.chatId, token)) { }
     }
 
-    /** Queues a recording for transcription; the text arrives as an event. */
+    /** Starts one ordered stream; partial text arrives as voice events. */
+    override suspend fun startVoiceStream(token: String) {
+        core.read(Ops.voiceStreamStart(core.chatId, token)) { }
+    }
+
     @OptIn(ExperimentalEncodingApi::class)
-    override suspend fun transcribe(token: String, wav: ByteArray) {
+    override suspend fun streamVoiceChunk(token: String, pcm: ByteArray) {
         core.read(
-            Ops.voiceTranscribe(core.chatId, token, Base64.Default.encode(wav)),
+            Ops.voiceStreamChunk(core.chatId, token, Base64.Default.encode(pcm)),
+        ) { }
+    }
+
+    /** Ends streaming with the authoritative complete recording. */
+    @OptIn(ExperimentalEncodingApi::class)
+    override suspend fun finishVoiceStream(token: String, wav: ByteArray) {
+        core.read(
+            Ops.voiceStreamFinish(core.chatId, token, Base64.Default.encode(wav)),
         ) { }
     }
 

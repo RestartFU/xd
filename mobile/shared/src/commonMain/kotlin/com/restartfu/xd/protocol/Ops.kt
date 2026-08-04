@@ -353,6 +353,36 @@ public object Ops {
         put("request", validToken(token))
     }
 
+    public fun voiceStreamStart(chatId: String, token: String): JsonObject = buildJsonObject {
+        put("op", "voice-stream-start")
+        put("chat", chatId)
+        put("request", validToken(token))
+    }
+
+    public fun voiceStreamChunk(
+        chatId: String,
+        token: String,
+        audio: String,
+    ): JsonObject = buildJsonObject {
+        require(audio.isNotEmpty()) { "A voice audio chunk is required" }
+        put("op", "voice-stream-chunk")
+        put("chat", chatId)
+        put("request", validToken(token))
+        put("audio", audio)
+    }
+
+    public fun voiceStreamFinish(
+        chatId: String,
+        token: String,
+        audio: String,
+    ): JsonObject = buildJsonObject {
+        require(audio.isNotEmpty()) { "A voice recording is required" }
+        put("op", "voice-stream-finish")
+        put("chat", chatId)
+        put("request", validToken(token))
+        put("audio", audio)
+    }
+
     /**
      * Transcribes a recording. [audio] is a base64 WAV -- see
      * `com.restartfu.xd.voice.Wav` for the only shape the daemon's whisper

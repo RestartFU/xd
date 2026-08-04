@@ -30,6 +30,9 @@ describe "mobile wire contract" do
       # Voice: the phone captures audio and the daemon does everything after.
       "voice-model"          => Xd::Protocol::Operation::VoiceModel,
       "voice-model-download" => Xd::Protocol::Operation::VoiceModelDownload,
+      "voice-stream-start"    => Xd::Protocol::Operation::VoiceStreamStart,
+      "voice-stream-chunk"    => Xd::Protocol::Operation::VoiceStreamChunk,
+      "voice-stream-finish"   => Xd::Protocol::Operation::VoiceStreamFinish,
       "voice-transcribe"     => Xd::Protocol::Operation::VoiceTranscribe,
       "voice-cancel"         => Xd::Protocol::Operation::VoiceCancel,
     }.each do |wire, operation|

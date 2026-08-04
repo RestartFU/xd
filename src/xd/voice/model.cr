@@ -6,7 +6,7 @@ require "./data"
 
 module Xd
   module Voice
-    MODEL_FILE = "ggml-large-v3-turbo-q5_0.bin"
+    MODEL_FILE = "ggml-base.en.bin"
     MODEL_URL  = "https://huggingface.co/ggerganov/whisper.cpp/resolve/" \
                  "98aa99a0a9db05ae2342309f5096248665f7cba3/" \
                  "#{MODEL_FILE}"

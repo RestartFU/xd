@@ -35,7 +35,7 @@ import com.restartfu.xd.voice.VoiceState
  * The microphone, and everything one recording can be doing.
  *
  * Only capture happens here. The daemon holds the speech model and runs
- * whisper, so a phone never downloads 574 MB or spends its battery on
+ * whisper, so a phone never downloads 148 MB or spends its battery on
  * transcription — and a remote chat transcribes on the remote machine.
  */
 @Composable
@@ -89,6 +89,7 @@ internal fun VoiceButton(voice: VoiceSession) {
 @Composable
 internal fun VoiceStatus(voice: VoiceSession) {
     val state by voice.state.collectAsStateWithLifecycle()
+    val partial by voice.partial.collectAsStateWithLifecycle()
 
     when (val current = state) {
         is VoiceState.Recording -> Row(
@@ -98,7 +99,11 @@ internal fun VoiceStatus(voice: VoiceSession) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "Recording ${clock(elapsedSeconds(current.startedAtMillis))}",
+                if (partial.isBlank()) {
+                    "Recording ${clock(elapsedSeconds(current.startedAtMillis))}"
+                } else {
+                    partial
+                },
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary,
@@ -140,7 +145,7 @@ internal fun VoiceStatus(voice: VoiceSession) {
             title = { Text("Download the speech model?") },
             text = {
                 Text(
-                    "This machine has no speech model yet. It is a 574 MB " +
+                    "This machine has no speech model yet. It is a 148 MB " +
                         "download onto the machine running this chat, not onto " +
                         "your phone, and it only happens once.",
                 )

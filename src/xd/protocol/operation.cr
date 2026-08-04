@@ -65,6 +65,9 @@ module Xd
       TerminalKill
       VoiceModel
       VoiceModelDownload
+      VoiceStreamStart
+      VoiceStreamChunk
+      VoiceStreamFinish
       VoiceTranscribe
       VoiceCancel
       Ping
@@ -129,6 +132,9 @@ module Xd
         when TerminalKill       then "terminal-kill"
         when VoiceModel         then "voice-model"
         when VoiceModelDownload then "voice-model-download"
+        when VoiceStreamStart    then "voice-stream-start"
+        when VoiceStreamChunk    then "voice-stream-chunk"
+        when VoiceStreamFinish   then "voice-stream-finish"
         when VoiceTranscribe    then "voice-transcribe"
         when VoiceCancel        then "voice-cancel"
         when Ping               then "ping"
@@ -196,6 +202,9 @@ module Xd
         when "terminal-kill"        then TerminalKill
         when "voice-model"          then VoiceModel
         when "voice-model-download" then VoiceModelDownload
+        when "voice-stream-start"    then VoiceStreamStart
+        when "voice-stream-chunk"    then VoiceStreamChunk
+        when "voice-stream-finish"   then VoiceStreamFinish
         when "voice-transcribe"     then VoiceTranscribe
         when "voice-cancel"         then VoiceCancel
         when "ping"                 then Ping

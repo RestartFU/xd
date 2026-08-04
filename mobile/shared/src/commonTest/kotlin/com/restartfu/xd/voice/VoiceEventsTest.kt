@@ -18,6 +18,10 @@ class VoiceEventsTest {
             VoiceEvent.Transcribed("t", "ship it"),
             VoiceWire.event(event("transcribed") { put("text", "ship it") }),
         )
+        assertEquals(
+            VoiceEvent.Partial("t", "ship"),
+            VoiceWire.event(event("partial") { put("text", "ship") }),
+        )
         assertEquals(VoiceEvent.Cancelled("t"), VoiceWire.event(event("cancelled")))
         assertEquals(
             VoiceEvent.Failed("t", "whisper is not installed"),

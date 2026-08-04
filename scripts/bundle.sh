@@ -77,6 +77,7 @@ mapfile -t roots < <(printf '%s\n' \
   "$OUT/libexec/git-core-real"/* \
   "$OUT/libexec/openssl-bin" \
   "$OUT/libexec/whisper-bin" \
+  "$OUT/libexec/whisper-server-bin" \
   "$OUT/lib/ossl-modules"/*.so \
   "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \

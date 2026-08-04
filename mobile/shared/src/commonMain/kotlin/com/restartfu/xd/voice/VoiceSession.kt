@@ -4,6 +4,7 @@ import com.restartfu.xd.time.currentEpochMillis
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,7 +17,7 @@ public sealed interface VoiceState {
     /** Asking the daemon whether it has the speech model. */
     public data object Checking : VoiceState
 
-    /** It does not, and 574 MB is not something to fetch without asking. */
+    /** It does not, and 148 MB is not something to fetch without asking. */
     public data object NeedsModel : VoiceState
 
     public data class Downloading(val percent: Int) : VoiceState
@@ -34,7 +35,11 @@ public interface VoiceTransport {
 
     public suspend fun downloadVoiceModel(token: String)
 
-    public suspend fun transcribe(token: String, wav: ByteArray)
+    public suspend fun startVoiceStream(token: String)
+
+    public suspend fun streamVoiceChunk(token: String, pcm: ByteArray)
+
+    public suspend fun finishVoiceStream(token: String, wav: ByteArray)
 
     public suspend fun cancelVoice(token: String)
 }
@@ -44,7 +49,7 @@ public interface VoiceTransport {
  *
  * The phone captures audio and the daemon does everything after that: it owns
  * the speech model and the whisper binary, and a phone should not be running a
- * 574 MB model or holding it on disk. So this is mostly a state machine over
+ * 148 MB model or holding it on disk. So this is mostly a state machine over
  * one request and the `voice` events that answer it.
  *
  * The daemon addresses those events to the connection that asked, and a
@@ -64,6 +69,8 @@ public class VoiceSession internal constructor(
 ) {
     private val _state = MutableStateFlow<VoiceState>(VoiceState.Idle)
     public val state: StateFlow<VoiceState> = _state.asStateFlow()
+    private val _partial = MutableStateFlow("")
+    public val partial: StateFlow<String> = _partial.asStateFlow()
 
     /** Bumped by anything that abandons a job, so late results are ignored. */
     private var generation = 0L
@@ -147,9 +154,8 @@ public class VoiceSession internal constructor(
     /** Abandons whatever is running, telling the daemon if it has work. */
     public fun cancel() {
         val request = token
-        val daemonJob = _state.value.let {
-            it is VoiceState.Downloading || it is VoiceState.Transcribing
-        }
+        val daemonJob = _state.value !is VoiceState.Idle &&
+            _state.value !is VoiceState.NeedsModel
         reset()
         recorder?.cancel()
         recorder = null
@@ -184,6 +190,10 @@ public class VoiceSession internal constructor(
             }
             is VoiceEvent.Ready ->
                 if (_state.value is VoiceState.Downloading) beginRecording(generation)
+            is VoiceEvent.Partial ->
+                if (_state.value is VoiceState.Recording || _state.value is VoiceState.Transcribing) {
+                    _partial.value = event.text
+                }
             is VoiceEvent.Transcribed ->
                 if (_state.value is VoiceState.Transcribing) {
                     reset()
@@ -195,31 +205,68 @@ public class VoiceSession internal constructor(
     }
 
     private fun beginRecording(mark: Long) {
-        val active = recorders()
-        recorder = active
-        _state.value = VoiceState.Recording(nowMillis())
         scope.launch {
-            val pcm = try {
-                active.record()
+            val request = token ?: return@launch
+            try {
+                transport.startVoiceStream(request)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                fail(mark, error.message ?: "The microphone is not available")
+                fail(mark, error.message ?: "Could not start voice recognition")
                 return@launch
             }
+            if (mark != generation) return@launch
+
+            val active = recorders()
+            recorder = active
+            _partial.value = ""
+            _state.value = VoiceState.Recording(nowMillis())
+            val chunks = Channel<ByteArray>(Channel.UNLIMITED)
+            var uploadFailure: Throwable? = null
+            val uploader = launch {
+                try {
+                    for (chunk in chunks) {
+                        if (mark != generation) break
+                        transport.streamVoiceChunk(request, chunk)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    uploadFailure = error
+                    active.cancel()
+                }
+            }
+            val pcm = try {
+                active.record { chunk -> chunks.trySend(chunk) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                runCatching { transport.cancelVoice(request) }
+                fail(mark, error.message ?: "The microphone is not available")
+                return@launch
+            } finally {
+                chunks.close()
+            }
+            uploader.join()
             if (recorder === active) recorder = null
             if (mark != generation) return@launch
+            uploadFailure?.let {
+                runCatching { transport.cancelVoice(request) }
+                fail(mark, it.message ?: "Could not stream voice audio")
+                return@launch
+            }
             if (pcm.size < Wav.MIN_PCM_BYTES) {
+                runCatching { transport.cancelVoice(request) }
                 fail(mark, "That was too short to transcribe")
                 return@launch
             }
-            val request = token ?: return@launch
             _state.value = VoiceState.Transcribing
             try {
-                transport.transcribe(request, Wav.fromPcm16(pcm))
+                transport.finishVoiceStream(request, Wav.fromPcm16(pcm))
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                runCatching { transport.cancelVoice(request) }
                 fail(mark, error.message ?: "The recording could not be transcribed")
             }
         }
@@ -234,6 +281,7 @@ public class VoiceSession internal constructor(
     private fun reset() {
         generation++
         token = null
+        _partial.value = ""
         _state.value = VoiceState.Idle
     }
 }
