@@ -1,5 +1,6 @@
 require "http/client"
 require "json"
+require "openssl"
 require "uri"
 require "./environment"
 require "./executable"
@@ -16,6 +17,7 @@ module Xd
 
       MAX_JOBS         = 100
       CLI_TIMEOUT      = 5.seconds
+      TOKEN_TIMEOUT    = 2.seconds
       CLI_OUTPUT_LIMIT = 2 * 1024 * 1024
       CLI_READ_BUFFER  = 8 * 1024
 
@@ -23,6 +25,45 @@ module Xd
       end
 
       private class CliTimeoutError < StatusError
+      end
+
+      # Reading gh's stored credential can open a Secret Service connection.
+      # Keep the result in daemon memory so a workflow watcher does not ask the
+      # desktop keyring again on every refresh. A failed lookup is cached too:
+      # anonymous REST polling is safer than repeatedly stressing a broken
+      # keyring service.
+      class TokenCache
+        alias Resolver = Proc(String?)
+
+        def initialize(
+          @resolver : Resolver = -> { WorkflowRun.resolve_token },
+        )
+          @resolved = false
+          @token = nil.as(String?)
+          @mutex = Mutex.new
+        end
+
+        def fetch : String?
+          @mutex.synchronize do
+            unless @resolved
+              @resolved = true
+              @token = normalize(@resolver.call)
+            end
+            @token
+          end
+        rescue
+          # Do not put resolver errors in workflow replies: an implementation
+          # supplied by a caller could accidentally include credential text.
+          nil
+        end
+
+        private def normalize(token : String?) : String?
+          return unless token
+          value = token.strip
+          return if value.empty? || value.bytesize > 4096
+          return if value.each_char.any?(&.whitespace?)
+          value
+        end
       end
 
       record Job,
@@ -148,10 +189,14 @@ module Xd
           @clock : Proc(Time::Instant) = -> { Time.instant },
           @active_ttl : Time::Span? = nil,
           @failure_ttl : Time::Span = FAILURE_TTL,
+          token_resolver : TokenCache::Resolver? = nil,
         )
           @entries = {} of String => Entry
           @failures = {} of String => Time::Instant
           @mutex = Mutex.new
+          @tokens = TokenCache.new(
+            token_resolver || -> { WorkflowRun.resolve_token }
+          )
         end
 
         def fetch(run : Run) : Status
@@ -178,7 +223,7 @@ module Xd
               resolution = if resolver = @resolver
                              Resolution.new(resolver.call(run), true)
                            else
-                             WorkflowRun.fetch_resolution(run)
+                             WorkflowRun.fetch_resolution(run, @tokens.fetch)
                            end
               status = resolution.status
               ttl = @active_ttl || (
@@ -277,23 +322,54 @@ module Xd
           begin
             return Resolution.new(fetch_api_status(run, token), true)
           rescue StatusError | IO::Error | Socket::Error | URI::Error
-            return Resolution.new(fetch_cli_status(run), true)
+            return Resolution.new(
+              fetch_cli_status(run, token, CLI_TIMEOUT),
+              true
+            )
           end
         end
 
-        # A captured `gh run` command normally means the daemon already has an
-        # authenticated GitHub CLI. Prefer that single authenticated request
-        # to two anonymous REST requests with a very small shared quota.
-        begin
-          Resolution.new(fetch_cli_status(run), true)
-        rescue error : CliTimeoutError
-          # Falling through to two REST requests after an already stalled CLI
-          # can exceed the daemon request deadline. Let the status cache serve
-          # its last good value and retry later instead.
-          raise error
-        rescue StatusError
-          Resolution.new(fetch_api_status(run, nil), false)
+        # Do not launch an unauthenticated gh process here. Besides being
+        # redundant with REST, each invocation may reopen GNOME Keyring. The
+        # daemon's TokenCache already made its one bounded credential attempt.
+        Resolution.new(fetch_api_status(run, nil), false)
+      end
+
+      # Resolve gh's credential once through TokenCache. Output is captured,
+      # bounded, and never included in an exception or log message.
+      def resolve_token(timeout : Time::Span = TOKEN_TIMEOUT) : String?
+        if token = ENV["GH_TOKEN"]? || ENV["GITHUB_TOKEN"]?
+          return token
         end
+
+        executable = Executable.resolve("gh")
+        process = Process.new(
+          executable,
+          ["auth", "token"],
+          env: Environment.host,
+          clear_env: true,
+          input: Process::Redirect::Close,
+          output: Process::Redirect::Pipe,
+          error: Process::Redirect::Close
+        )
+        output_done = Channel(String).new(1)
+        status_done = Channel(Process::Status).new(1)
+        spawn drain_cli_output(process.output, output_done)
+        spawn { status_done.send(process.wait) }
+
+        status : Process::Status? = nil
+        select
+        when result = status_done.receive
+          status = result
+        when timeout(timeout)
+          terminate_cli(process, status_done)
+          process.output.close unless process.output.closed?
+        end
+        body = output_done.receive
+        return unless status.try(&.success?)
+        body
+      rescue File::Error | IO::Error
+        nil
       end
 
       private def fetch_api_status(
@@ -325,7 +401,7 @@ module Xd
           status.started_at,
           status.completed_at
         )
-      rescue error : IO::Error | Socket::Error | URI::Error
+      rescue error : IO::Error | OpenSSL::Error | Socket::Error | URI::Error
         raise StatusError.new(error.message || "Cannot reach GitHub.")
       end
 
@@ -433,9 +509,17 @@ module Xd
 
       def fetch_cli_status(
         run : Run,
+        token : String,
         timeout : Time::Span = CLI_TIMEOUT,
       ) : Status
+        if token.empty?
+          raise StatusError.new(
+            "GitHub CLI workflow polling requires an explicit token."
+          )
+        end
         executable = Executable.resolve("gh")
+        environment = Environment.host
+        environment["GH_TOKEN"] = token
         process = Process.new(
           executable,
           [
@@ -447,7 +531,7 @@ module Xd
             "--json",
             "name,status,conclusion,startedAt,updatedAt,jobs",
           ],
-          env: Environment.host,
+          env: environment,
           clear_env: true,
           input: Process::Redirect::Close,
           output: Process::Redirect::Pipe,
@@ -465,16 +549,7 @@ module Xd
           status = result
         when timeout(timeout)
           timed_out = true
-          begin
-            process.terminate(graceful: false)
-          rescue RuntimeError
-            # It exited between the timeout firing and the kill request.
-          end
-          select
-          when result = status_done.receive
-            status = result
-          when timeout(1.second)
-          end
+          status = terminate_cli(process, status_done)
           process.output.close unless process.output.closed?
         end
         body = output_done.receive
@@ -522,6 +597,23 @@ module Xd
       rescue IO::Error
       ensure
         done.send(output.to_s)
+      end
+
+      private def terminate_cli(
+        process : Process,
+        status_done : Channel(Process::Status),
+      ) : Process::Status?
+        begin
+          process.terminate(graceful: false)
+        rescue RuntimeError
+          # It exited between the timeout firing and the kill request.
+        end
+        select
+        when status = status_done.receive
+          status
+        when timeout(1.second)
+          nil
+        end
       end
 
       private def fetch_jobs(run : Run, token : String?) : Array(Job)
@@ -602,7 +694,12 @@ module Xd
           response = client.get(uri.request_target, headers)
           {response.status_code, response.body}
         ensure
-          client.close
+          begin
+            client.close
+          rescue IO::Error | OpenSSL::Error
+            # The response is already complete. Some peers answer TLS
+            # shutdown with EOF, which must not escape the polling fiber.
+          end
         end
       end
 

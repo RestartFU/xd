@@ -88,39 +88,55 @@ describe Xd::Agent::WorkflowRun do
     jobs[1].css_class.should eq("xd-workflow-success")
   end
 
-  it "prefers authenticated gh output without an explicit API token" do
+  it "caches gh credentials and injects them into every CLI fallback" do
     directory = File.join(
       Dir.tempdir,
       "xd-workflow-gh-#{Random::Secure.hex(12)}"
     )
     executable = File.join(directory, "gh")
     arguments = File.join(directory, "arguments")
+    auth_calls = File.join(directory, "auth-calls")
     Dir.mkdir_p(directory)
     File.write(executable, <<-'SH')
       #!/bin/sh
       set -eu
-      printf '%s\n' "$@" > "$XD_GH_ARGUMENTS"
-      printf '%s\n' '{"name":"nightly","status":"completed","conclusion":"success","startedAt":"2026-08-03T10:00:00Z","updatedAt":"2026-08-03T10:03:00Z","jobs":[{"databaseId":101,"name":"linux","status":"completed","conclusion":"success","startedAt":"2026-08-03T10:00:05Z","completedAt":"2026-08-03T10:02:05Z","steps":[{"name":"Publish","status":"completed","conclusion":"success"}]}]}'
+      if [ "$1" = auth ] && [ "$2" = token ]; then
+        printf 'call\n' >> "$XD_GH_AUTH_CALLS"
+        printf '%s\n' 'workflow-test-token'
+        exit 0
+      fi
+      test "${GH_TOKEN:-}" = 'workflow-test-token'
+      printf '%s\n' "$@" >> "$XD_GH_ARGUMENTS"
+      printf '%s\n' '{"name":"nightly","status":"in_progress","conclusion":null,"startedAt":"2026-08-03T10:00:00Z","updatedAt":"2026-08-03T10:03:00Z","jobs":[{"databaseId":101,"name":"linux","status":"in_progress","conclusion":null,"startedAt":"2026-08-03T10:00:05Z","completedAt":"0001-01-01T00:00:00Z","steps":[{"name":"Publish","status":"in_progress","conclusion":null}]}]}'
       SH
     File.chmod(executable, 0o700)
 
     old_executable = ENV["XD_GH_EXECUTABLE"]?
     old_arguments = ENV["XD_GH_ARGUMENTS"]?
+    old_auth_calls = ENV["XD_GH_AUTH_CALLS"]?
+    old_gh_token = ENV["GH_TOKEN"]?
+    old_github_token = ENV["GITHUB_TOKEN"]?
     begin
       ENV["XD_GH_EXECUTABLE"] = executable
       ENV["XD_GH_ARGUMENTS"] = arguments
+      ENV["XD_GH_AUTH_CALLS"] = auth_calls
+      ENV.delete("GH_TOKEN")
+      ENV.delete("GITHUB_TOKEN")
       run = Xd::Agent::WorkflowRun::Run.new(
         "123%",
         "owner/repo%",
         ""
       )
 
-      status = Xd::Agent::WorkflowRun.fetch_status(run)
-      status.label.should eq("nightly · Passed")
+      cache = Xd::Agent::WorkflowRun::StatusCache.new(active_ttl: 0.seconds)
+      status = cache.fetch(run)
+      status.label.should eq("nightly")
       status.jobs.first.id.should eq("101")
       status.jobs.first.log.should eq("Publish")
-      status.elapsed.should eq(3.minutes)
-      status.jobs.first.elapsed.should eq(2.minutes)
+      status.terminal?.should be_false
+      status.jobs.first.terminal?.should be_false
+      cache.fetch(run).should eq(status)
+      File.read(auth_calls).lines.size.should eq(1)
       File.read(arguments).lines.map(&.chomp).should eq([
         "run",
         "view",
@@ -129,7 +145,15 @@ describe Xd::Agent::WorkflowRun do
         "owner/repo%",
         "--json",
         "name,status,conclusion,startedAt,updatedAt,jobs",
+        "run",
+        "view",
+        "123%",
+        "--repo",
+        "owner/repo%",
+        "--json",
+        "name,status,conclusion,startedAt,updatedAt,jobs",
       ])
+      File.read(arguments).should_not contain("workflow-test-token")
     ensure
       if old_executable
         ENV["XD_GH_EXECUTABLE"] = old_executable
@@ -141,32 +165,180 @@ describe Xd::Agent::WorkflowRun do
       else
         ENV.delete("XD_GH_ARGUMENTS")
       end
+      if old_auth_calls
+        ENV["XD_GH_AUTH_CALLS"] = old_auth_calls
+      else
+        ENV.delete("XD_GH_AUTH_CALLS")
+      end
+      if old_gh_token
+        ENV["GH_TOKEN"] = old_gh_token
+      else
+        ENV.delete("GH_TOKEN")
+      end
+      if old_github_token
+        ENV["GITHUB_TOKEN"] = old_github_token
+      else
+        ENV.delete("GITHUB_TOKEN")
+      end
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
   end
 
-  it "reports a status error when gh cannot provide fallback data" do
+  it "does not expose failed gh credential output" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workflow-gh-token-error-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "gh")
+    Dir.mkdir_p(directory)
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      printf '%s\n' 'do-not-leak-this-token'
+      exit 1
+      SH
+    File.chmod(executable, 0o700)
+
+    old_executable = ENV["XD_GH_EXECUTABLE"]?
+    old_gh_token = ENV["GH_TOKEN"]?
+    old_github_token = ENV["GITHUB_TOKEN"]?
+    begin
+      ENV["XD_GH_EXECUTABLE"] = executable
+      ENV.delete("GH_TOKEN")
+      ENV.delete("GITHUB_TOKEN")
+      Xd::Agent::WorkflowRun.resolve_token.should be_nil
+    ensure
+      if old_executable
+        ENV["XD_GH_EXECUTABLE"] = old_executable
+      else
+        ENV.delete("XD_GH_EXECUTABLE")
+      end
+      if old_gh_token
+        ENV["GH_TOKEN"] = old_gh_token
+      else
+        ENV.delete("GH_TOKEN")
+      end
+      if old_github_token
+        ENV["GITHUB_TOKEN"] = old_github_token
+      else
+        ENV.delete("GITHUB_TOKEN")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "times out a gh credential lookup that stops responding" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workflow-gh-token-timeout-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "gh")
+    Dir.mkdir_p(directory)
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      printf '%s\n' 'do-not-leak-this-token'
+      exec sleep 60
+      SH
+    File.chmod(executable, 0o700)
+
+    old_executable = ENV["XD_GH_EXECUTABLE"]?
+    old_gh_token = ENV["GH_TOKEN"]?
+    old_github_token = ENV["GITHUB_TOKEN"]?
+    begin
+      ENV["XD_GH_EXECUTABLE"] = executable
+      ENV.delete("GH_TOKEN")
+      ENV.delete("GITHUB_TOKEN")
+      started = Time.instant
+      Xd::Agent::WorkflowRun.resolve_token(50.milliseconds).should be_nil
+      (Time.instant - started).should be < 2.seconds
+    ensure
+      if old_executable
+        ENV["XD_GH_EXECUTABLE"] = old_executable
+      else
+        ENV.delete("XD_GH_EXECUTABLE")
+      end
+      if old_gh_token
+        ENV["GH_TOKEN"] = old_gh_token
+      else
+        ENV.delete("GH_TOKEN")
+      end
+      if old_github_token
+        ENV["GITHUB_TOKEN"] = old_github_token
+      else
+        ENV.delete("GITHUB_TOKEN")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "caches a missing credential and never runs an unauthenticated gh poll" do
     directory = File.join(
       Dir.tempdir,
       "xd-workflow-gh-error-#{Random::Secure.hex(12)}"
     )
     executable = File.join(directory, "gh")
+    auth_calls = File.join(directory, "auth-calls")
+    unexpected_poll = File.join(directory, "unexpected-poll")
     Dir.mkdir_p(directory)
-    File.write(executable, "#!/bin/sh\nexit 1\n")
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      if [ "$1" = auth ] && [ "$2" = token ]; then
+        printf 'call\n' >> "$XD_GH_AUTH_CALLS"
+        printf '%s\n' 'do-not-leak-this-token'
+        exit 1
+      fi
+      : > "$XD_GH_UNEXPECTED_POLL"
+      exit 1
+      SH
     File.chmod(executable, 0o700)
 
     old_executable = ENV["XD_GH_EXECUTABLE"]?
+    old_auth_calls = ENV["XD_GH_AUTH_CALLS"]?
+    old_unexpected_poll = ENV["XD_GH_UNEXPECTED_POLL"]?
+    old_gh_token = ENV["GH_TOKEN"]?
+    old_github_token = ENV["GITHUB_TOKEN"]?
     begin
       ENV["XD_GH_EXECUTABLE"] = executable
-      run = Xd::Agent::WorkflowRun::Run.new("123%", "owner/repo%", "")
-      expect_raises(Xd::Agent::WorkflowRun::StatusError) do
-        Xd::Agent::WorkflowRun.fetch_status(run)
+      ENV["XD_GH_AUTH_CALLS"] = auth_calls
+      ENV["XD_GH_UNEXPECTED_POLL"] = unexpected_poll
+      ENV.delete("GH_TOKEN")
+      ENV.delete("GITHUB_TOKEN")
+      cache = Xd::Agent::WorkflowRun::StatusCache.new(failure_ttl: 0.seconds)
+      errors = ["123%", "124%"].map do |id|
+        run = Xd::Agent::WorkflowRun::Run.new(id, "owner/repo%", "")
+        expect_raises(Xd::Agent::WorkflowRun::StatusError) do
+          cache.fetch(run)
+        end
+      end
+      File.read(auth_calls).lines.size.should eq(1)
+      File.exists?(unexpected_poll).should be_false
+      errors.each do |error|
+        error.message.not_nil!.should_not contain("do-not-leak-this-token")
       end
     ensure
       if old_executable
         ENV["XD_GH_EXECUTABLE"] = old_executable
       else
         ENV.delete("XD_GH_EXECUTABLE")
+      end
+      if old_auth_calls
+        ENV["XD_GH_AUTH_CALLS"] = old_auth_calls
+      else
+        ENV.delete("XD_GH_AUTH_CALLS")
+      end
+      if old_unexpected_poll
+        ENV["XD_GH_UNEXPECTED_POLL"] = old_unexpected_poll
+      else
+        ENV.delete("XD_GH_UNEXPECTED_POLL")
+      end
+      if old_gh_token
+        ENV["GH_TOKEN"] = old_gh_token
+      else
+        ENV.delete("GH_TOKEN")
+      end
+      if old_github_token
+        ENV["GITHUB_TOKEN"] = old_github_token
+      else
+        ENV.delete("GITHUB_TOKEN")
       end
       FileUtils.rm_r(directory) if Dir.exists?(directory)
     end
@@ -221,7 +393,11 @@ describe Xd::Agent::WorkflowRun do
       run = Xd::Agent::WorkflowRun::Run.new("123", "owner/repo", "")
       started = Time.instant
       error = expect_raises(Xd::Agent::WorkflowRun::StatusError) do
-        Xd::Agent::WorkflowRun.fetch_cli_status(run, 50.milliseconds)
+        Xd::Agent::WorkflowRun.fetch_cli_status(
+          run,
+          "test-token",
+          50.milliseconds
+        )
       end
       error.message.not_nil!.should contain("timed out")
       (Time.instant - started).should be < 2.seconds
