@@ -2271,12 +2271,7 @@ module Xd
             row.try { |created| created.source = @stream_source }
           end
           if row
-            # A quiet stream is a complete snapshot even though another delta
-            # may extend it later. Render that snapshot now so links and other
-            # Markdown do not remain literal until a tool call, steer, or turn
-            # boundary finalizes the segment. A later delta switches the row
-            # back to the cheap streaming label while it is moving again.
-            row.set_text(@stream_buffer)
+            row.set_stream_text(@stream_buffer)
             keep_working_last
             scroll_to_bottom
           end
@@ -2477,10 +2472,7 @@ module Xd
             @stream_row = add_message("assistant", "")
             @stream_row.try do |message|
               message.source = @stream_source
-              # The recovered segment is already a stable snapshot. Rendering
-              # it also keeps reconnects from leaving Markdown literal until
-              # the next live event happens to arrive.
-              message.set_text(segment)
+              message.set_stream_text(segment)
             end
           end
 
