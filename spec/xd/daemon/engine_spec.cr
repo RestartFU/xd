@@ -68,6 +68,7 @@ private def with_daemon_engine(
   agent_authorizer : Xd::Agent::Manager::Authorizer? = ->(_provider : String) : String? { nil },
   voice_model_factory : Xd::Daemon::VoiceJobs::ModelFactory? = nil,
   voice_transcriber_factory : Xd::Daemon::VoiceJobs::TranscriberFactory? = nil,
+  workflow_status_resolver : Xd::Agent::WorkflowRun::StatusCache::Resolver? = nil,
   peer_host : Proc(String) = -> { "192.168.1.20" },
   & : Xd::Storage::Store, Xd::Daemon::Engine ->
 ) : Nil
@@ -87,6 +88,7 @@ private def with_daemon_engine(
     agent_authorizer: agent_authorizer,
     voice_model_factory: voice_model_factory,
     voice_transcriber_factory: voice_transcriber_factory,
+    workflow_status_resolver: workflow_status_resolver,
     peer_host: peer_host
   )
 
@@ -153,6 +155,48 @@ describe Xd::Daemon::Engine do
 
       response.success?.should be_false
       response["error"].as_s.should eq("Invalid workflow run marker.")
+    end
+  end
+
+  it "shares a completed workflow status across clients" do
+    calls = 0
+    job = Xd::Agent::WorkflowRun::Job.new(
+      "101",
+      "linux",
+      "completed",
+      "success",
+      "Publish"
+    )
+    status = Xd::Agent::WorkflowRun::Status.new(
+      "nightly",
+      "completed",
+      "success",
+      [job]
+    )
+    resolver = ->(_run : Xd::Agent::WorkflowRun::Run) {
+      calls += 1
+      status
+    }
+
+    with_daemon_engine(workflow_status_resolver: resolver) do |_store, engine|
+      marker = "workflow_run\n123\n" +
+               "https://github.com/owner/repo/actions/runs/123"
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      second_local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+
+      first = parse_response(engine.dispatch(local, {
+        "op"   => "workflow-status",
+        "text" => marker,
+      }.to_json))
+      second = parse_response(engine.dispatch(second_local, {
+        "op"   => "workflow-status",
+        "text" => marker,
+      }.to_json))
+
+      first["name"].as_s.should eq("nightly")
+      first["jobs"].as_a.first["log"].as_s.should eq("Publish")
+      second.should eq(first)
+      calls.should eq(1)
     end
   end
 

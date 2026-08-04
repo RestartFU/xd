@@ -1538,12 +1538,36 @@ module Xd
       private def add_workflow_message(
         workflow : Agent::WorkflowRun::Run,
       ) : Nil
+        page = @transcript_page || return
         return if @workflow_ids.includes?(workflow.id)
         @workflow_ids << workflow.id
 
-        card = WorkflowCard.new(workflow)
-        @transcript_page.try { |page| page.workflow_cards << card }
+        card = WorkflowCard.new(
+          workflow,
+          -> { workflow_status(page.endpoint, workflow) }
+        )
+        page.workflow_cards << card
         @transcript.append(card.widget)
+      end
+
+      private def workflow_status(
+        endpoint : Daemon::Endpoint,
+        workflow : Agent::WorkflowRun::Run,
+      ) : Agent::WorkflowRun::Status
+        response = endpoint.call({
+          "op"   => JSON::Any.new("workflow-status"),
+          "text" => JSON::Any.new(
+            "#{Agent::WorkflowRun::PREFIX}#{workflow.id}\n#{workflow.url}"
+          ),
+        })
+        Agent::WorkflowRun.parse_wire_status(response) ||
+          raise Agent::WorkflowRun::StatusError.new(
+            "Daemon returned an invalid workflow status."
+          )
+      rescue error : Daemon::Client::Error | IO::Error
+        raise Agent::WorkflowRun::StatusError.new(
+          error.message || "Workflow status unavailable."
+        )
       end
 
       # A keyed agent reporting again updates the card it already has. Only an

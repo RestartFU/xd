@@ -36,7 +36,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
 private const val WORKFLOW_POLL_MILLIS = 10_000L
-private const val WORKFLOW_RETRY_MILLIS = 60_000L
+private const val WORKFLOW_RETRY_MILLIS = 30_000L
 
 private data class PipelineSnapshot(
     val status: WorkflowStatusReply? = null,
@@ -62,7 +62,14 @@ internal fun PipelineCard(
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Throwable) {
-                value = PipelineSnapshot(error = true)
+                // Keep a last-known-good run and its jobs visible through a
+                // transient daemon or GitHub outage. Only a card that has
+                // never loaded successfully needs the unavailable state.
+                val previous = value.status
+                value = PipelineSnapshot(
+                    status = previous,
+                    error = previous == null,
+                )
                 delay(WORKFLOW_RETRY_MILLIS)
             }
         }

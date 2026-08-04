@@ -6,7 +6,7 @@ module Xd
   module UI
     class WorkflowCard
       POLL_INTERVAL  = 10.seconds
-      RETRY_INTERVAL = 1.minute
+      RETRY_INTERVAL = 30.seconds
       TICK_INTERVAL  = 1.second
       STATUS_CLASSES = {
         "xd-workflow-running",
@@ -117,11 +117,15 @@ module Xd
         generation : Int64,
       ) : Nil
         return if @closed || generation != @generation
-        @snapshot = snapshot
         if snapshot
+          @snapshot = snapshot
           set_status(snapshot)
           render_jobs(snapshot.jobs)
           schedule(POLL_INTERVAL) unless snapshot.terminal?
+        elsif existing = @snapshot
+          # A transient daemon or GitHub failure must not erase a useful
+          # running snapshot. Keep its jobs and clocks visible while retrying.
+          schedule(RETRY_INTERVAL) unless existing.terminal?
         else
           set_unavailable
           render_jobs([] of Agent::WorkflowRun::Job)

@@ -65,6 +65,7 @@ module Xd
         workspace_monitor_interval : Time::Span = WorkspaceMonitor::INTERVAL,
         voice_model_factory : VoiceJobs::ModelFactory? = nil,
         voice_transcriber_factory : VoiceJobs::TranscriberFactory? = nil,
+        workflow_status_resolver : Agent::WorkflowRun::StatusCache::Resolver? = nil,
         @peer_host : Proc(String) = -> { NetworkAddress.local },
       )
         @workspaces = workspaces || Workspace::Service.new(
@@ -85,6 +86,16 @@ module Xd
         @filesystem = Filesystem.new(@store, @workspaces)
         @images = Images.new
         @search = Search.new(@store)
+        @workflow_statuses = if resolver = workflow_status_resolver
+                               Agent::WorkflowRun::StatusCache.new(
+                                 resolver,
+                                 clock: @clock
+                               )
+                             else
+                               Agent::WorkflowRun::StatusCache.new(
+                                 clock: @clock
+                               )
+                             end
         @git_worktrees = Workspace::Worktrees.new(@store, @workspaces)
         @repository = Repository.new(@store, @workspaces, @filesystem)
         @repository_monitor = RepositoryMonitor.new(
@@ -791,7 +802,7 @@ module Xd
         run = Agent::WorkflowRun.parse(content)
         return Protocol::Response.error("Invalid workflow run marker.") unless run
 
-        status = Agent::WorkflowRun.fetch_status(run)
+        status = @workflow_statuses.fetch(run)
         jobs = status.jobs.map do |job|
           fields = {
             "id"    => JSON::Any.new(job.id),

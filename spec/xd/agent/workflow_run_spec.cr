@@ -88,7 +88,7 @@ describe Xd::Agent::WorkflowRun do
     jobs[1].css_class.should eq("xd-workflow-success")
   end
 
-  it "falls back to authenticated gh output when the API is unavailable" do
+  it "prefers authenticated gh output without an explicit API token" do
     directory = File.join(
       Dir.tempdir,
       "xd-workflow-gh-#{Random::Secure.hex(12)}"
@@ -222,5 +222,87 @@ describe Xd::Agent::WorkflowRun do
     Xd::Agent::WorkflowRun.parse_status(
       %({"name":"nightly","conclusion":null})
     ).should be_nil
+  end
+
+  it "parses the daemon workflow status format" do
+    fields = JSON.parse(%({
+      "name":"nightly","state":"completed","conclusion":"success",
+      "started_at":1785751200,"completed_at":1785751445,
+      "jobs":[{"id":"101","name":"linux","state":"completed",
+        "conclusion":"success","log":"Publish",
+        "started_at":1785751205,"completed_at":1785751325}]
+    })).as_h
+
+    status = Xd::Agent::WorkflowRun.parse_wire_status(fields).not_nil!
+    status.label.should eq("nightly · Passed")
+    status.elapsed.should eq(245.seconds)
+    status.jobs.first.id.should eq("101")
+    status.jobs.first.log.should eq("Publish")
+    status.jobs.first.elapsed.should eq(2.minutes)
+  end
+
+  it "shares active status and preserves it through transient failures" do
+    now = Time.instant
+    calls = 0
+    unavailable = false
+    status = Xd::Agent::WorkflowRun::Status.new(
+      "nightly",
+      "in_progress",
+      nil,
+      [] of Xd::Agent::WorkflowRun::Job
+    )
+    resolver = ->(_run : Xd::Agent::WorkflowRun::Run) : Xd::Agent::WorkflowRun::Status {
+      calls += 1
+      if unavailable
+        raise Xd::Agent::WorkflowRun::StatusError.new("temporary")
+      end
+      status
+    }
+    cache = Xd::Agent::WorkflowRun::StatusCache.new(
+      resolver,
+      clock: -> { now },
+      active_ttl: 10.seconds,
+      failure_ttl: 30.seconds
+    )
+    run = Xd::Agent::WorkflowRun::Run.new("123", "owner/repo", "")
+
+    cache.fetch(run).should eq(status)
+    cache.fetch(run).should eq(status)
+    calls.should eq(1)
+
+    now += 11.seconds
+    unavailable = true
+    cache.fetch(run).should eq(status)
+    calls.should eq(2)
+
+    now += 10.seconds
+    cache.fetch(run).should eq(status)
+    calls.should eq(2)
+  end
+
+  it "keeps terminal workflow status for the daemon lifetime" do
+    now = Time.instant
+    calls = 0
+    status = Xd::Agent::WorkflowRun::Status.new(
+      "nightly",
+      "completed",
+      "success",
+      [] of Xd::Agent::WorkflowRun::Job
+    )
+    resolver = ->(_run : Xd::Agent::WorkflowRun::Run) {
+      calls += 1
+      status
+    }
+    cache = Xd::Agent::WorkflowRun::StatusCache.new(
+      resolver,
+      clock: -> { now },
+      active_ttl: 1.second
+    )
+    run = Xd::Agent::WorkflowRun::Run.new("123", "owner/repo", "")
+
+    cache.fetch(run).should eq(status)
+    now += 1.day
+    cache.fetch(run).should eq(status)
+    calls.should eq(1)
   end
 end

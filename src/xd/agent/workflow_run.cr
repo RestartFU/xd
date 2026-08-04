@@ -118,6 +118,78 @@ module Xd
         end
       end
 
+      private record Resolution,
+        status : Status,
+        authenticated : Bool
+
+      # One daemon owns GitHub polling for every connected desktop and phone.
+      # Besides preventing duplicate requests, a last-known-good snapshot is
+      # more useful than replacing a running card with an outage message.
+      class StatusCache
+        AUTHENTICATED_TTL = 8.seconds
+        ANONYMOUS_TTL     = 3.minutes
+        FAILURE_TTL       = 30.seconds
+
+        alias Resolver = Proc(Run, Status)
+
+        private record Entry,
+          status : Status,
+          checked_at : Time::Instant,
+          active_ttl : Time::Span
+
+        def initialize(
+          @resolver : Resolver? = nil,
+          @clock : Proc(Time::Instant) = -> { Time.instant },
+          @active_ttl : Time::Span? = nil,
+          @failure_ttl : Time::Span = FAILURE_TTL,
+        )
+          @entries = {} of String => Entry
+          @failures = {} of String => Time::Instant
+          @mutex = Mutex.new
+        end
+
+        def fetch(run : Run) : Status
+          key = "#{run.repository}/#{run.id}"
+          @mutex.synchronize do
+            now = @clock.call
+            entry = @entries[key]?
+            if entry && (
+                 entry.status.terminal? ||
+                 now - entry.checked_at < entry.active_ttl
+               )
+              return entry.status
+            end
+            if failed_at = @failures[key]?
+              if now - failed_at < @failure_ttl
+                return entry.status if entry
+                raise StatusError.new(
+                  "Workflow status is temporarily unavailable."
+                )
+              end
+            end
+
+            begin
+              resolution = if resolver = @resolver
+                             Resolution.new(resolver.call(run), true)
+                           else
+                             WorkflowRun.fetch_resolution(run)
+                           end
+              status = resolution.status
+              ttl = @active_ttl || (
+                resolution.authenticated ? AUTHENTICATED_TTL : ANONYMOUS_TTL
+              )
+              @entries[key] = Entry.new(status, now, ttl)
+              @failures.delete(key)
+              status
+            rescue error : StatusError
+              @failures[key] = now
+              return entry.status if entry
+              raise error
+            end
+          end
+        end
+      end
+
       def capture(message : String, workdir : String) : String
         return message if message.starts_with?(PREFIX)
         return message unless message.starts_with?("$ ")
@@ -188,6 +260,35 @@ module Xd
         run : Run,
         token : String? = ENV["GH_TOKEN"]? || ENV["GITHUB_TOKEN"]?,
       ) : Status
+        fetch_resolution(run, token).status
+      end
+
+      def fetch_resolution(
+        run : Run,
+        token : String? = ENV["GH_TOKEN"]? || ENV["GITHUB_TOKEN"]?,
+      ) : Resolution
+        if token && !token.empty?
+          begin
+            return Resolution.new(fetch_api_status(run, token), true)
+          rescue StatusError | IO::Error | Socket::Error | URI::Error
+            return Resolution.new(fetch_cli_status(run), true)
+          end
+        end
+
+        # A captured `gh run` command normally means the daemon already has an
+        # authenticated GitHub CLI. Prefer that single authenticated request
+        # to two anonymous REST requests with a very small shared quota.
+        begin
+          Resolution.new(fetch_cli_status(run), true)
+        rescue StatusError
+          Resolution.new(fetch_api_status(run, nil), false)
+        end
+      end
+
+      private def fetch_api_status(
+        run : Run,
+        token : String?,
+      ) : Status
         uri = URI.parse(
           "https://api.github.com/repos/#{run.repository}/actions/runs/#{run.id}"
         )
@@ -213,8 +314,22 @@ module Xd
           status.started_at,
           status.completed_at
         )
-      rescue error : StatusError | IO::Error | Socket::Error | URI::Error
-        fetch_cli_status(run)
+      rescue error : IO::Error | Socket::Error | URI::Error
+        raise StatusError.new(error.message || "Cannot reach GitHub.")
+      end
+
+      def parse_wire_status(fields : Hash(String, JSON::Any)) : Status?
+        body = fields.to_json
+        status = parse_status(body) || return nil
+        jobs = parse_jobs(body) || return nil
+        Status.new(
+          status.name,
+          status.state,
+          status.conclusion,
+          jobs,
+          status.started_at,
+          status.completed_at
+        )
       end
 
       def parse_status(body : String?) : Status?
@@ -222,7 +337,7 @@ module Xd
         record = JSON.parse(body).as_h?
         return unless record
         name = record["name"]?.try(&.as_s?) || ""
-        state = record["status"]?.try(&.as_s?)
+        state = (record["status"]? || record["state"]?).try(&.as_s?)
         return unless state && !state.empty?
         return if name.bytesize > 160 || state.bytesize > 40
         conclusion = record["conclusion"]?.try(&.as_s?)
@@ -231,11 +346,15 @@ module Xd
         # neither reports a finish time: `updated_at` is the last write, which
         # for a completed run is the moment it completed.
         started_at = timestamp(
-          record["run_started_at"]? || record["startedAt"]? ||
+          record["run_started_at"]? || record["started_at"]? ||
+          record["startedAt"]? ||
           record["created_at"]? || record["createdAt"]?
         )
         completed_at = if state == "completed"
-                         timestamp(record["updated_at"]? || record["updatedAt"]?)
+                         timestamp(
+                           record["completed_at"]? ||
+                           record["updated_at"]? || record["updatedAt"]?
+                         )
                        end
         Status.new(
           name,
@@ -275,9 +394,10 @@ module Xd
         values.each do |value|
           item = value.as_h?
           next unless item
-          id_value = (item["id"]? || item["databaseId"]?).try(&.as_i64?).try(&.to_s)
+          id = item["id"]? || item["databaseId"]?
+          id_value = id.try(&.as_s?) || id.try(&.as_i64?).try(&.to_s)
           name_value = item["name"]?.try(&.as_s?)
-          state_value = item["status"]?.try(&.as_s?)
+          state_value = (item["status"]? || item["state"]?).try(&.as_s?)
           next unless id_value && name_value && state_value
           name = name_value.not_nil!
           state = state_value.not_nil!
@@ -289,7 +409,7 @@ module Xd
             name,
             state,
             conclusion,
-            latest_job_activity(item, state),
+            item["log"]?.try(&.as_s?) || latest_job_activity(item, state),
             timestamp(item["started_at"]? || item["startedAt"]?),
             timestamp(item["completed_at"]? || item["completedAt"]?)
           )
@@ -364,6 +484,10 @@ module Xd
       # The CLI writes a zero time rather than null for a job that has not
       # finished, so an unset clock arrives as year one rather than as absent.
       private def timestamp(value : JSON::Any?) : Time?
+        if seconds = value.try(&.as_i64?)
+          return if seconds <= 0
+          return Time.unix(seconds)
+        end
         text = value.try(&.as_s?)
         return if text.nil? || text.empty?
         moment = Time.parse_rfc3339(text)
