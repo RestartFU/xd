@@ -7,7 +7,11 @@ module Xd
     # One daemon-owned proxy serves every Claude-mode turn. It binds only to
     # loopback and starts lazily, so normal Codex users pay no process cost.
     class ClaudeProxy
-      START_TIMEOUT = 10.seconds
+      # The proxy discovers provider/model aliases before accepting requests.
+      # A cold Codex installation can make that take longer than ten seconds.
+      # Keep this below the daemon client's 30-second request timeout so a
+      # failed start still returns a useful error instead of timing out.
+      START_TIMEOUT = 25.seconds
       OUTPUT_LIMIT  = 8 * 1024
 
       class Error < Exception
@@ -90,7 +94,10 @@ module Xd
         @process = nil
         @port = nil
         suffix = detail.empty? ? "" : ": #{detail}"
-        raise Error.new("Claude mode proxy did not start#{suffix}")
+        raise Error.new(
+          "Claude mode proxy did not become reachable within " \
+          "#{START_TIMEOUT.total_seconds.to_i} seconds#{suffix}"
+        )
       rescue error : File::Error | IO::Error
         @process = nil
         @port = nil
