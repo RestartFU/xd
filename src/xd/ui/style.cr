@@ -202,7 +202,6 @@ module Xd
       row.entry, row.combo, row.action,
       preferencesgroup listview > row {
         background-color: alpha(#ffffff, 0.05);
-        border-radius: 10px;
       }
       row.entry:focus-within {
         background-color: alpha(#ffffff, 0.08);

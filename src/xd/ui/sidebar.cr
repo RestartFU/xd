@@ -1615,7 +1615,11 @@ module Xd
         pointing_to : Gdk::Rectangle? = nil,
       ) : Nil
         popover.has_arrow = false
+        # Both axes must opt out of Fill. GtkPopover otherwise honors the
+        # horizontal pointer rectangle but allocates vertically from the top of
+        # its parent, which made every sidebar menu appear at the top edge.
         popover.halign = :start
+        popover.valign = :start
         popover.parent = anchor
         popover.pointing_to = pointing_to if pointing_to
         @row_popover = popover

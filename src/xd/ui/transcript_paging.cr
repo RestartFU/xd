@@ -73,6 +73,23 @@ module Xd
         "Load #{count} earlier message#{suffix}"
       end
 
+      # A raw-message page can land in the middle of an assistant turn when it
+      # contains many tool calls. Grow it before rendering so the prompt that
+      # those calls answer is not hidden behind the history button.
+      def extend_to_turn_start(
+        total : Int64,
+        fetched : Int,
+        first_role : String?,
+      ) : Bool
+        return false if start(fetched) == 0
+        return false if hidden(total, fetched) == 0
+        return false if first_role == "user"
+
+        before = @limit
+        load_earlier
+        @limit > before
+      end
+
       def load_earlier : Int32
         @limit = Math.min(
           @limit.to_i64 + PAGE_SIZE,

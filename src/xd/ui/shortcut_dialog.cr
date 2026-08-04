@@ -183,7 +183,6 @@ module Xd
           true
         end
         keys = Gtk::EventControllerKey.new
-        keys.propagation_phase = :capture
         keys.key_pressed_signal.connect do |keyval, _keycode, _state|
           if keyval == Gdk::KEY_Escape
             window.destroy

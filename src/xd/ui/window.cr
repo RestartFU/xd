@@ -110,7 +110,6 @@ module Xd
       getter widget : Adw::ApplicationWindow
 
       @active_chat : String?
-      @chat_backend = "claude"
       @auth_state = "unknown"
       @stream_row : MessageRow?
       @working = false
@@ -1242,6 +1241,22 @@ module Xd
           return
         end
 
+        messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
+        total = response["total_messages"]?.try(&.as_i64?) ||
+                messages.size.to_i64
+        start = page.paging.start(messages.size)
+        first_role = messages[start]?.try do |message|
+          message["role"]?.try(&.as_s?)
+        end
+        if page.paging.extend_to_turn_start(
+             total,
+             messages.size,
+             first_role
+           )
+          load_messages(force: force)
+          return
+        end
+
         if @follow_bottom
           begin_bottom_jump
         end
@@ -1251,11 +1266,7 @@ module Xd
         remove_working_row(reset_started_at: false)
         page.clear_workflows
         replace_transcript(page, request)
-        messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
-        total = response["total_messages"]?.try(&.as_i64?) ||
-                messages.size.to_i64
         append_history_button(page, total, messages.size)
-        start = page.paging.start(messages.size)
         batch = TranscriptBatch(JSON::Any).new(messages, start)
         durations = turn_durations(messages)
         GLib.idle_add do
@@ -2649,7 +2660,6 @@ module Xd
         request : Int64,
       ) : Nil
         @controls.update(state)
-        @chat_backend = state["backend"]?.try(&.as_s?) || "claude"
         @auth_state = state["auth_state"]?.try(&.as_s?) || "unknown"
         update_auth_controls(state["auth_detail"]?.try(&.as_s?))
         if context = state["context"]?.try(&.as_s?)
@@ -3177,8 +3187,9 @@ module Xd
           )
         when "agent-auth-changed"
           return unless @client.same?(endpoint)
-          return unless event["provider"]?.try(&.as_s?) == @chat_backend
-          load_chat_state(recover_turn: false)
+          # Codex chats can authenticate through the distinct claude-mode
+          # provider, so let the daemon resolve the active chat's auth state.
+          load_chat_state(recover_turn: false) if @active_chat
         end
       end
 

@@ -22,6 +22,30 @@ describe Xd::UI::TranscriptPaging do
     )
   end
 
+  it "extends a raw page until the assistant turn has its prompt" do
+    paging = Xd::UI::TranscriptPaging.new
+
+    paging.extend_to_turn_start(205, 101, "tool").should be_true
+    paging.limit.should eq(200)
+    paging.extend_to_turn_start(205, 201, "assistant").should be_true
+    paging.limit.should eq(300)
+    paging.extend_to_turn_start(205, 205, "user").should be_false
+  end
+
+  it "keeps a page that already starts on a user message" do
+    paging = Xd::UI::TranscriptPaging.new
+
+    paging.extend_to_turn_start(205, 101, "user").should be_false
+    paging.limit.should eq(100)
+  end
+
+  it "does not extend when all available history is already fetched" do
+    paging = Xd::UI::TranscriptPaging.new
+
+    paging.extend_to_turn_start(80, 80, "tool").should be_false
+    paging.limit.should eq(100)
+  end
+
   it "uses singular copy and saturates its protocol limit" do
     paging = Xd::UI::TranscriptPaging.new(Int32::MAX - 50)
 
