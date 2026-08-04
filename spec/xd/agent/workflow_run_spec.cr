@@ -172,6 +172,69 @@ describe Xd::Agent::WorkflowRun do
     end
   end
 
+  it "reports a status error when gh is interrupted" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workflow-gh-signal-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "gh")
+    Dir.mkdir_p(directory)
+    File.write(executable, <<-'SH')
+      #!/bin/sh
+      trap - INT
+      kill -INT $$
+      exit 130
+      SH
+    File.chmod(executable, 0o700)
+
+    old_executable = ENV["XD_GH_EXECUTABLE"]?
+    begin
+      ENV["XD_GH_EXECUTABLE"] = executable
+      run = Xd::Agent::WorkflowRun::Run.new("123%", "owner/repo%", "")
+      error = expect_raises(Xd::Agent::WorkflowRun::StatusError) do
+        Xd::Agent::WorkflowRun.fetch_status(run, "test-token")
+      end
+      error.message.not_nil!.should contain("GitHub CLI returned status")
+    ensure
+      if old_executable
+        ENV["XD_GH_EXECUTABLE"] = old_executable
+      else
+        ENV.delete("XD_GH_EXECUTABLE")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
+  it "kills a GitHub CLI status request that stops responding" do
+    directory = File.join(
+      Dir.tempdir,
+      "xd-workflow-gh-timeout-#{Random::Secure.hex(12)}"
+    )
+    executable = File.join(directory, "gh")
+    Dir.mkdir_p(directory)
+    File.write(executable, "#!/bin/sh\nexec sleep 60\n")
+    File.chmod(executable, 0o700)
+
+    old_executable = ENV["XD_GH_EXECUTABLE"]?
+    begin
+      ENV["XD_GH_EXECUTABLE"] = executable
+      run = Xd::Agent::WorkflowRun::Run.new("123", "owner/repo", "")
+      started = Time.instant
+      error = expect_raises(Xd::Agent::WorkflowRun::StatusError) do
+        Xd::Agent::WorkflowRun.fetch_cli_status(run, 50.milliseconds)
+      end
+      error.message.not_nil!.should contain("timed out")
+      (Time.instant - started).should be < 2.seconds
+    ensure
+      if old_executable
+        ENV["XD_GH_EXECUTABLE"] = old_executable
+      else
+        ENV.delete("XD_GH_EXECUTABLE")
+      end
+      FileUtils.rm_r(directory) if Dir.exists?(directory)
+    end
+  end
+
   it "times runs and jobs from either GitHub spelling" do
     running = Xd::Agent::WorkflowRun.parse_status(
       %({"name":"nightly","status":"in_progress","conclusion":null,

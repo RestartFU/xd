@@ -14,9 +14,15 @@ module Xd
 
       record Run, id : String, repository : String, url : String
 
-      MAX_JOBS = 100
+      MAX_JOBS         = 100
+      CLI_TIMEOUT      = 5.seconds
+      CLI_OUTPUT_LIMIT = 2 * 1024 * 1024
+      CLI_READ_BUFFER  = 8 * 1024
 
       class StatusError < Exception
+      end
+
+      private class CliTimeoutError < StatusError
       end
 
       record Job,
@@ -280,6 +286,11 @@ module Xd
         # to two anonymous REST requests with a very small shared quota.
         begin
           Resolution.new(fetch_cli_status(run), true)
+        rescue error : CliTimeoutError
+          # Falling through to two REST requests after an already stalled CLI
+          # can exceed the daemon request deadline. Let the status cache serve
+          # its last good value and retry later instead.
+          raise error
         rescue StatusError
           Resolution.new(fetch_api_status(run, nil), false)
         end
@@ -420,10 +431,12 @@ module Xd
         nil
       end
 
-      private def fetch_cli_status(run : Run) : Status
-        output = IO::Memory.new
+      def fetch_cli_status(
+        run : Run,
+        timeout : Time::Span = CLI_TIMEOUT,
+      ) : Status
         executable = Executable.resolve("gh")
-        status = Process.run(
+        process = Process.new(
           executable,
           [
             "run",
@@ -437,16 +450,45 @@ module Xd
           env: Environment.host,
           clear_env: true,
           input: Process::Redirect::Close,
-          output: output,
+          output: Process::Redirect::Pipe,
           error: Process::Redirect::Close
         )
-        unless status.success?
+        output_done = Channel(String).new(1)
+        status_done = Channel(Process::Status).new(1)
+        spawn drain_cli_output(process.output, output_done)
+        spawn { status_done.send(process.wait) }
+
+        status : Process::Status? = nil
+        timed_out = false
+        select
+        when result = status_done.receive
+          status = result
+        when timeout(timeout)
+          timed_out = true
+          begin
+            process.terminate(graceful: false)
+          rescue RuntimeError
+            # It exited between the timeout firing and the kill request.
+          end
+          select
+          when result = status_done.receive
+            status = result
+          when timeout(1.second)
+          end
+          process.output.close unless process.output.closed?
+        end
+        body = output_done.receive
+        if timed_out
+          raise CliTimeoutError.new(
+            "GitHub CLI timed out after #{timeout.total_seconds} seconds."
+          )
+        end
+        unless status.try(&.success?)
           raise StatusError.new(
-            "GitHub CLI returned status #{status.exit_code}."
+            "GitHub CLI returned status #{status}."
           )
         end
 
-        body = output.to_s
         parsed = parse_status(body) || raise StatusError.new(
           "GitHub CLI returned an invalid workflow status."
         )
@@ -463,6 +505,23 @@ module Xd
         )
       rescue error : File::Error | IO::Error
         raise StatusError.new(error.message || "Cannot run GitHub CLI.")
+      end
+
+      private def drain_cli_output(
+        stream : IO,
+        done : Channel(String),
+      ) : Nil
+        output = IO::Memory.new
+        buffer = Bytes.new(CLI_READ_BUFFER)
+        while count = stream.read(buffer)
+          break if count == 0
+          remaining = CLI_OUTPUT_LIMIT - output.bytesize
+          output.write(buffer[0, Math.min(count, remaining)]) if remaining > 0
+          Fiber.yield
+        end
+      rescue IO::Error
+      ensure
+        done.send(output.to_s)
       end
 
       private def fetch_jobs(run : Run, token : String?) : Array(Job)
