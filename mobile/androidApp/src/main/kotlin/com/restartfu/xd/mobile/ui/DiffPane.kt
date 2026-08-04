@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,16 +12,25 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.DiffViewModel
+import com.restartfu.xd.syntax.CodeBlocks
+import com.restartfu.xd.syntax.DiffFile
 
 @Composable
 internal fun DiffPaneContent(model: DiffViewModel) {
@@ -65,15 +75,57 @@ internal fun DiffPaneContent(model: DiffViewModel) {
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
-            else -> DiffText(
-                state.patch,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 4.dp),
-            )
+            else -> {
+                val files = remember(state.patch) { CodeBlocks.diffFiles(state.patch) }
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp),
+                ) {
+                    files.forEach { file ->
+                        key(file.path) {
+                            DiffFileSection(
+                                file = file,
+                                collapsed = file.path in state.collapsedFiles,
+                                onToggle = { model.toggleFile(file.path) },
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun DiffFileSection(
+    file: DiffFile,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onToggle)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(if (collapsed) "▸" else "▾", color = MaterialTheme.colorScheme.outline)
+        Text(
+            file.path,
+            modifier = Modifier.weight(1f),
+            color = Color(0xFFFFBE6F),
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text("+${file.additions}", color = Color(0xFF57E389))
+        Text("−${file.deletions}", color = Color(0xFFF66151))
+    }
+    if (!collapsed) DiffText(file.lines, Modifier.fillMaxWidth())
+    HorizontalDivider()
 }
 
 @Composable

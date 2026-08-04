@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 public data class DiffPane(
     val branch: Boolean = false,
     val patch: String = "",
+    val collapsedFiles: Set<String> = emptySet(),
     val loading: Boolean = false,
     val error: String? = null,
 )
@@ -38,6 +39,13 @@ class DiffViewModel(
         if (_state.value.branch == branch) return
         _state.value = _state.value.copy(branch = branch, patch = "")
         refresh()
+    }
+
+    fun toggleFile(path: String) {
+        val collapsed = _state.value.collapsedFiles
+        _state.value = _state.value.copy(
+            collapsedFiles = if (path in collapsed) collapsed - path else collapsed + path,
+        )
     }
 
     fun refresh() {

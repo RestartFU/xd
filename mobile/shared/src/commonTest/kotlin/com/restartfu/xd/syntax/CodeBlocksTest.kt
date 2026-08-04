@@ -49,6 +49,51 @@ class CodeBlocksTest {
         assertEquals(SyntaxLanguage.NONE, lines.last().language)
     }
 
+    @Test
+    fun groupsFilesWithPathsAndChangeCounts() {
+        val patch = """
+            diff --git a/a.go b/a.go
+            --- a/a.go
+            +++ b/a.go
+            @@ -1 +1,2 @@
+            -old
+            +new
+            +another
+            diff --git a/readme.md b/readme.md
+            --- a/readme.md
+            +++ /dev/null
+            @@ -1 +0,0 @@
+            -gone
+        """.trimIndent()
+
+        val files = CodeBlocks.diffFiles(patch)
+
+        assertEquals(listOf("a.go", "readme.md"), files.map { it.path })
+        assertEquals(2, files[0].additions)
+        assertEquals(1, files[0].deletions)
+        assertEquals(0, files[1].additions)
+        assertEquals(1, files[1].deletions)
+        assertEquals("--- a/readme.md", files[1].lines.first().code)
+    }
+
+    @Test
+    fun supportsQuotedFilePaths() {
+        val file = CodeBlocks.diffFiles(
+            "diff --git \"a/a file.go\" \"b/a file.go\"\n+++ \"b/a file.go\"\n+package main",
+        ).single()
+
+        assertEquals("a file.go", file.path)
+    }
+
+    @Test
+    fun keepsHeaderlessPatchesInOneSection() {
+        val files = CodeBlocks.diffFiles("@@ -1 +1 @@\n-old\n+new")
+
+        assertEquals("Changes", files.single().path)
+        assertEquals(1, files.single().additions)
+        assertEquals(1, files.single().deletions)
+    }
+
     private companion object {
         val PATCH = """
             diff --git a/a.go b/a.go

@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.syntax.CodeBlocks
+import com.restartfu.xd.syntax.DiffLine
 import com.restartfu.xd.syntax.DiffKind
 import com.restartfu.xd.syntax.Syntax
 import com.restartfu.xd.syntax.SyntaxLanguage
@@ -58,12 +59,17 @@ internal fun CodeText(
 internal fun DiffText(
     patch: String,
     modifier: Modifier = Modifier,
+) = DiffText(CodeBlocks.diffLines(patch), modifier)
+
+@Composable
+internal fun DiffText(
+    lines: List<DiffLine>,
+    modifier: Modifier = Modifier,
 ) {
     val fallback = LocalContentColor.current
-    val lines = remember(patch) { CodeBlocks.diffLines(patch) }
     // One state per file: a hunk is not contiguous source, so carrying lexer
     // state across a hunk boundary would colour the rest of the file wrong.
-    val rendered = remember(patch, fallback) {
+    val rendered = remember(lines, fallback) {
         val state = SyntaxState()
         lines.map { line ->
             if (line.kind == DiffKind.META || line.kind == DiffKind.HUNK) state.reset()
