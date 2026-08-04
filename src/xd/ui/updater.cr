@@ -39,6 +39,7 @@ module Xd
         # coming down the button says how far in it is, and a 390 MB download
         # on a slow line is a long time to show nothing but a dimmed icon.
         @button_icon = Gtk::Image.new_from_icon_name(DOWNLOAD_ICON)
+        @button_icon.pixel_size = 24
         @button_label = Gtk::Label.new("")
         @button_label.visible = false
         @button_label.add_css_class("xd-update-progress")
