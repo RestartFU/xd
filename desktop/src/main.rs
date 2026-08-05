@@ -69,6 +69,7 @@ struct XdDesktop {
     queue_edit_input: Entity<ComposerInput>,
     sidebar_edit_input: Entity<ComposerInput>,
     workspace_create_input: Entity<ComposerInput>,
+    chat_create_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -80,6 +81,9 @@ struct XdDesktop {
     creating_workspace: bool,
     workspace_create_name: String,
     workspace_create_submitting: bool,
+    creating_chat_folder: Option<String>,
+    chat_create_title: String,
+    chat_create_submitting: bool,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -115,6 +119,12 @@ impl XdDesktop {
             ComposerEvent::Submit => this.save_workspace_create(cx),
         })
         .detach();
+        let chat_create_input = cx.new(|cx| ComposerInput::new(cx, "Chat title…"));
+        cx.subscribe(&chat_create_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.chat_create_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_chat_create(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -127,6 +137,7 @@ impl XdDesktop {
             queue_edit_input,
             sidebar_edit_input,
             workspace_create_input,
+            chat_create_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -138,6 +149,9 @@ impl XdDesktop {
             creating_workspace: false,
             workspace_create_name: String::new(),
             workspace_create_submitting: false,
+            creating_chat_folder: None,
+            chat_create_title: String::new(),
+            chat_create_submitting: false,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -188,6 +202,7 @@ impl XdDesktop {
                 self.model.connection_error = Some(message);
                 self.sending = false;
                 self.workspace_create_submitting = false;
+                self.chat_create_submitting = false;
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -229,6 +244,12 @@ impl XdDesktop {
                     if self.creating_workspace && self.workspace_create_name.trim() == name =>
                 {
                     self.workspace_create_submitting = false;
+                }
+                RequestKind::NewChat { folder_id, title }
+                    if self.creating_chat_folder.as_deref() == Some(folder_id)
+                        && self.chat_create_title.trim() == title =>
+                {
+                    self.chat_create_submitting = false;
                 }
                 RequestKind::EditQueue {
                     chat_id,
@@ -355,17 +376,21 @@ impl XdDesktop {
                     self.cancel_workspace_create(cx);
                 }
                 if let Some(daemon) = &self.daemon
-                    && let Err(error) = daemon.new_chat(folder_id)
+                    && let Err(error) = daemon.new_chat(folder_id, "New Chat")
                 {
                     self.model.connection_error = Some(error);
                 }
             }
-            RequestKind::NewChat { folder_id } => {
+            RequestKind::NewChat { folder_id, title } => {
                 let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
                     self.model.connection_error = Some("The daemon returned no chat id.".into());
                     return;
                 };
-                let _ = folder_id;
+                if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
+                    && self.chat_create_title.trim() == title
+                {
+                    self.cancel_chat_create(cx);
+                }
                 self.request_tree();
                 self.select_chat(chat_id.to_owned(), cx);
             }
@@ -671,12 +696,57 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn create_chat(&mut self, folder_id: &str) {
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.new_chat(folder_id)
-        {
-            self.model.connection_error = Some(error);
+    fn begin_chat_create(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        self.creating_chat_folder = Some(folder_id);
+        self.chat_create_title.clear();
+        self.chat_create_submitting = false;
+        self.chat_create_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    fn chat_create_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.creating_chat_folder.is_some() && !self.chat_create_submitting {
+            self.chat_create_title = text;
+            cx.notify();
         }
+    }
+
+    fn save_chat_create(&mut self, cx: &mut Context<Self>) {
+        let Some(folder_id) = self.creating_chat_folder.clone() else {
+            return;
+        };
+        if self.chat_create_submitting {
+            return;
+        }
+        let title = self.chat_create_title.trim();
+        if title.is_empty() {
+            self.model.connection_error = Some("A chat title cannot be empty.".into());
+            cx.notify();
+            return;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.new_chat(&folder_id, title));
+        match result {
+            Ok(()) => {
+                self.chat_create_title = title.to_owned();
+                self.chat_create_submitting = true;
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
+        self.creating_chat_folder = None;
+        self.chat_create_title.clear();
+        self.chat_create_submitting = false;
+        self.chat_create_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
     }
 
     fn begin_sidebar_edit(
@@ -1759,6 +1829,14 @@ impl Render for XdDesktop {
         let sidebar_delete_submitting = self.sidebar_delete_submitting;
         let sidebar_move = self.sidebar_move.clone();
         let sidebar_move_submitting = self.sidebar_move_submitting;
+        let creating_chat_folder = self.creating_chat_folder.clone();
+        let chat_create_submitting = self.chat_create_submitting;
+        let can_save_chat = creating_chat_folder.is_some()
+            && !chat_create_submitting
+            && !self.chat_create_title.trim().is_empty()
+            && self.model.connected;
+        let chat_create_input = self.chat_create_input.clone();
+        let chat_create_focus = self.chat_create_input.read(cx).focus_handle(cx);
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
@@ -1766,7 +1844,7 @@ impl Render for XdDesktop {
                 continue;
             }
             let indent = if folder.parent.is_some() { 22.0 } else { 12.0 };
-            let folder_id = folder.id.clone();
+            let new_chat_folder_id = folder.id.clone();
             let collapse_folder_id = folder.id.clone();
             let folder_name = folder.name.clone();
             let folder_collapsed = self.collapsed_folders.contains(&folder.id);
@@ -1891,9 +1969,14 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(SURFACE_HIGH)))
-                                .on_click(
-                                    cx.listener(move |this, _, _, _| this.create_chat(&folder_id)),
-                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if !chat_create_submitting {
+                                        this.begin_chat_create(new_chat_folder_id.clone(), cx);
+                                        let focus =
+                                            this.chat_create_input.read(cx).focus_handle(cx);
+                                        window.focus(&focus);
+                                    }
+                                }))
                                 .child("+"),
                         )
                         .child(
@@ -2032,6 +2115,89 @@ impl Render for XdDesktop {
                             .into_any_element(),
                     );
                 }
+            }
+            if creating_chat_folder.as_deref() == Some(folder.id.as_str()) {
+                tree_rows.push(
+                    div()
+                        .ml(px(indent + 18.0))
+                        .mr_2()
+                        .mb_1()
+                        .p_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded_md()
+                        .bg(rgb(0x1d222b))
+                        .child(
+                            div()
+                                .id(("chat-create-input", folder_row_index))
+                                .track_focus(&chat_create_focus)
+                                .h(px(30.0))
+                                .min_w_0()
+                                .flex_1()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if chat_create_focus.is_focused(window) {
+                                    ACCENT
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(BG))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus = this.chat_create_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(chat_create_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(("save-chat-create", folder_row_index))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if can_save_chat { TEXT } else { MUTED }))
+                                .when(can_save_chat, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if can_save_chat {
+                                        this.save_chat_create(cx);
+                                    }
+                                }))
+                                .child(if chat_create_submitting {
+                                    "Creating…"
+                                } else {
+                                    "Save"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id(("cancel-chat-create", folder_row_index))
+                                .px_1()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .when(!chat_create_submitting, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !chat_create_submitting {
+                                        this.cancel_chat_create(cx);
+                                    }
+                                }))
+                                .child("×"),
+                        )
+                        .into_any_element(),
+                );
             }
             if folder_collapsed {
                 continue;

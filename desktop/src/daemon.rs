@@ -29,6 +29,7 @@ pub enum RequestKind {
     },
     NewChat {
         folder_id: String,
+        title: String,
     },
     RenameFolder {
         folder_id: String,
@@ -288,12 +289,13 @@ impl DaemonHandle {
         )
     }
 
-    pub fn new_chat(&self, folder_id: &str) -> Result<(), String> {
+    pub fn new_chat(&self, folder_id: &str, title: &str) -> Result<(), String> {
         self.send(
             RequestKind::NewChat {
                 folder_id: folder_id.to_owned(),
+                title: title.to_owned(),
             },
-            json!({"op": "new-chat", "folder": folder_id}),
+            json!({"op": "new-chat", "folder": folder_id, "title": title}),
         )
     }
 
