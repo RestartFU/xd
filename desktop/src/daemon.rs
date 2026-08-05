@@ -41,6 +41,9 @@ pub enum RequestKind {
     QueueMutation {
         chat_id: String,
     },
+    Cancel {
+        chat_id: String,
+    },
     SetOption {
         chat_id: String,
     },
@@ -324,6 +327,15 @@ impl DaemonHandle {
                 chat_id: chat_id.to_owned(),
             },
             json!({"op": "steer-queue", "chat": chat_id, "index": index, "text": text}),
+        )
+    }
+
+    pub fn cancel(&self, chat_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::Cancel {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "cancel", "chat": chat_id}),
         )
     }
 

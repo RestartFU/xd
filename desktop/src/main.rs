@@ -253,6 +253,7 @@ impl XdDesktop {
             // Queue events carry the authoritative complete queue. Mutation
             // replies are acknowledgements only, so they never refetch chat.
             RequestKind::QueueMutation { chat_id } if self.chat_is_active(&chat_id) => {}
+            RequestKind::Cancel { chat_id } if self.chat_is_active(&chat_id) => {}
             RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
             }
@@ -693,6 +694,17 @@ impl XdDesktop {
         };
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.steer_queue(chat_id, index, text)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn cancel_turn(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.cancel(chat_id)
         {
             self.model.connection_error = Some(error);
         }
@@ -1556,13 +1568,25 @@ impl Render for XdDesktop {
                     )
                     .child(
                         div()
+                            .id("turn-status")
                             .px_3()
                             .py_1()
                             .rounded_full()
                             .bg(rgb(if working { 0x26354d } else { SURFACE_HIGH }))
                             .text_xs()
                             .text_color(rgb(if working { 0xaec0ff } else { MUTED }))
-                            .child(if working { "Working…" } else { "Ready" }),
+                            .when(working, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x31435f)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if working {
+                                    this.cancel_turn();
+                                    cx.notify();
+                                }
+                            }))
+                            .child(if working { "■ Stop turn" } else { "Ready" }),
                     ),
             );
 
