@@ -54,6 +54,38 @@ struct SearchPanel {
     loading: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffLineKind {
+    Header,
+    Hunk,
+    Added,
+    Removed,
+    Context,
+}
+
+#[derive(Clone, Debug)]
+struct DiffLine {
+    kind: DiffLineKind,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct DiffFile {
+    path: String,
+    additions: usize,
+    deletions: usize,
+    lines: Vec<DiffLine>,
+}
+
+#[derive(Clone, Default)]
+struct DiffPanel {
+    branch: bool,
+    loading: bool,
+    files: Vec<DiffFile>,
+    error: Option<String>,
+    truncated: bool,
+}
+
 struct PendingSend {
     text: String,
     attachments: Vec<Attachment>,
@@ -137,6 +169,9 @@ struct XdDesktop {
     workspace_defaults: Option<WorkspaceDefaults>,
     search: Option<SearchPanel>,
     search_generation: u64,
+    diff_panel: Option<DiffPanel>,
+    diff_generation: u64,
+    collapsed_diff_files: HashSet<String>,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -267,6 +302,9 @@ impl XdDesktop {
             workspace_defaults: None,
             search: None,
             search_generation: 0,
+            diff_panel: None,
+            diff_generation: 0,
+            collapsed_diff_files: HashSet::new(),
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -329,6 +367,9 @@ impl XdDesktop {
                 }
                 if let Some(search) = &mut self.search {
                     search.loading = false;
+                }
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.loading = false;
                 }
                 self.restore_pending_send(cx);
             }
@@ -422,6 +463,15 @@ impl XdDesktop {
                 {
                     if let Some(search) = &mut self.search {
                         search.loading = false;
+                    }
+                }
+                RequestKind::DiffRead { generation, .. } if *generation == self.diff_generation => {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.loading = false;
+                        diff.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
                     }
                 }
                 RequestKind::EditQueue {
@@ -575,6 +625,42 @@ impl XdDesktop {
                             }
                         }
                     }
+                }
+            }
+            RequestKind::DiffRead {
+                chat_id,
+                read,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                    || self.diff_panel.is_none()
+                {
+                    return;
+                }
+                let output = value
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if read == "base" {
+                    let base = output.trim();
+                    if base.is_empty() {
+                        if let Some(diff) = &mut self.diff_panel {
+                            diff.loading = false;
+                            diff.error = Some("No branch to compare against.".into());
+                        }
+                    } else if let Some(daemon) = &self.daemon
+                        && let Err(error) =
+                            daemon.diff_read(&chat_id, "branch-all", Some(base), generation)
+                    {
+                        if let Some(diff) = &mut self.diff_panel {
+                            diff.loading = false;
+                            diff.error = Some(error);
+                        }
+                    }
+                } else {
+                    self.prepare_diff(output, generation, cx);
                 }
             }
             RequestKind::Shortcuts { folder_id } => {
@@ -1387,6 +1473,106 @@ impl XdDesktop {
         self.select_chat(chat_id, cx);
     }
 
+    fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
+        if self.diff_panel.is_some() {
+            self.diff_generation = self.diff_generation.saturating_add(1);
+            self.diff_panel = None;
+            cx.notify();
+            return;
+        }
+        self.diff_panel = Some(DiffPanel::default());
+        self.refresh_diff(cx);
+    }
+
+    fn set_diff_mode(&mut self, branch: bool, cx: &mut Context<Self>) {
+        if self
+            .diff_panel
+            .as_ref()
+            .is_some_and(|diff| diff.branch == branch)
+        {
+            return;
+        }
+        if let Some(diff) = &mut self.diff_panel {
+            diff.branch = branch;
+        }
+        self.refresh_diff(cx);
+    }
+
+    fn refresh_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            if let Some(diff) = &mut self.diff_panel {
+                diff.loading = false;
+                diff.error = Some("Select a chat to inspect its changes.".into());
+            }
+            cx.notify();
+            return;
+        };
+        let branch = self.diff_panel.as_ref().is_some_and(|diff| diff.branch);
+        self.diff_generation = self.diff_generation.saturating_add(1);
+        let generation = self.diff_generation;
+        if let Some(diff) = &mut self.diff_panel {
+            diff.loading = true;
+            diff.files.clear();
+            diff.error = None;
+            diff.truncated = false;
+        } else {
+            return;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| {
+                daemon.diff_read(
+                    &chat_id,
+                    if branch { "base" } else { "working-all" },
+                    None,
+                    generation,
+                )
+            });
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.loading = false;
+            diff.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn prepare_diff(&mut self, output: String, generation: u64, cx: &mut Context<Self>) {
+        let prepare = cx
+            .background_executor()
+            .spawn(async move { parse_unified_diff(&output) });
+        cx.spawn(async move |this, cx| {
+            let result = prepare.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.diff_generation != generation {
+                    return;
+                }
+                if let Some(diff) = &mut this.diff_panel {
+                    diff.loading = false;
+                    match result {
+                        Ok((files, truncated)) => {
+                            diff.files = files;
+                            diff.truncated = truncated;
+                            diff.error = None;
+                        }
+                        Err(error) => diff.error = Some(error),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_diff_file(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.collapsed_diff_files.remove(&path) {
+            self.collapsed_diff_files.insert(path);
+        }
+        cx.notify();
+    }
+
     fn begin_sidebar_edit(
         &mut self,
         target: SidebarTarget,
@@ -1719,6 +1905,9 @@ impl XdDesktop {
         self.request_chat(&chat_id);
         self.request_messages(&chat_id);
         self.request_shortcuts();
+        if self.diff_panel.is_some() {
+            self.refresh_diff(cx);
+        }
         cx.notify();
     }
 
@@ -2401,6 +2590,8 @@ impl Render for XdDesktop {
         let queue_count = self.model.queue.len();
         let working = self.model.working;
         let selected = self.model.selected_summary().cloned();
+        let diff_open = self.diff_panel.is_some();
+        let can_open_diff = selected.is_some();
         let new_worktree = self.model.new_worktree;
         let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
         let can_cycle_workspace =
@@ -3792,6 +3983,28 @@ impl Render for XdDesktop {
                     )
                     .child(
                         div()
+                            .id("toggle-diff")
+                            .ml_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(if diff_open { 0x26354d } else { SURFACE_HIGH }))
+                            .text_xs()
+                            .text_color(rgb(if can_open_diff { TEXT } else { MUTED }))
+                            .when(can_open_diff, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_open_diff {
+                                    this.toggle_diff_panel(cx);
+                                }
+                            }))
+                            .child("Changes"),
+                    )
+                    .child(
+                        div()
                             .id("open-search")
                             .px_3()
                             .py_2()
@@ -4531,6 +4744,231 @@ impl Render for XdDesktop {
                     ),
             );
 
+        let diff_pane = self.diff_panel.as_ref().map(|diff| {
+            let branch_mode = diff.branch;
+            let loading = diff.loading;
+            let total_additions = diff.files.iter().map(|file| file.additions).sum::<usize>();
+            let total_deletions = diff.files.iter().map(|file| file.deletions).sum::<usize>();
+            let mut file_sections = Vec::new();
+            for (index, file) in diff.files.iter().enumerate() {
+                let collapsed = self.collapsed_diff_files.contains(&file.path);
+                let path = file.path.clone();
+                let mut lines = Vec::new();
+                if !collapsed {
+                    for (line_index, line) in file.lines.iter().enumerate() {
+                        let (background, color) = match line.kind {
+                            DiffLineKind::Added => (0x172b20, 0xa9d8b5),
+                            DiffLineKind::Removed => (0x332025, 0xf0a8b3),
+                            DiffLineKind::Hunk => (0x1d2940, 0xaec4ff),
+                            DiffLineKind::Header => (0x1d222b, 0xaab2c0),
+                            DiffLineKind::Context => (0x14171c, 0xc9ced8),
+                        };
+                        lines.push(
+                            div()
+                                .id(("diff-line", index * 10_000 + line_index))
+                                .w_full()
+                                .px_2()
+                                .py(px(1.0))
+                                .bg(rgb(background))
+                                .font_family("monospace")
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(rgb(color))
+                                .child(line.text.clone())
+                                .into_any_element(),
+                        );
+                    }
+                }
+                file_sections.push(
+                    div()
+                        .id(("diff-file", index))
+                        .w_full()
+                        .mb_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id(("toggle-diff-file", index))
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .bg(rgb(SURFACE_HIGH))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_diff_file(path.clone(), cx);
+                                }))
+                                .child(if collapsed { "▸" } else { "▾" })
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .child(file.path.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x78c995))
+                                        .child(format!("+{}", file.additions)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0xe88e9c))
+                                        .child(format!("−{}", file.deletions)),
+                                ),
+                        )
+                        .children(lines)
+                        .into_any_element(),
+                );
+            }
+            let message = diff.error.clone().unwrap_or_else(|| {
+                if loading {
+                    "Loading changes…".into()
+                } else {
+                    "No changes".into()
+                }
+            });
+            div()
+                .w(px(460.0))
+                .h_full()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(BG))
+                .child(
+                    div()
+                        .h(px(58.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(rgb(BORDER))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .child("Repository changes"),
+                                )
+                                .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                    "{} files  +{}  −{}",
+                                    diff.files.len(),
+                                    total_additions,
+                                    total_deletions
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .id("diff-working-mode")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(if !branch_mode { ACCENT } else { SURFACE_HIGH }))
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_diff_mode(false, cx);
+                                }))
+                                .child("Working"),
+                        )
+                        .child(
+                            div()
+                                .id("diff-branch-mode")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(if branch_mode { ACCENT } else { SURFACE_HIGH }))
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_diff_mode(true, cx);
+                                }))
+                                .child("Branch"),
+                        )
+                        .child(
+                            div()
+                                .id("refresh-diff")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_diff(cx);
+                                }))
+                                .child("↻"),
+                        )
+                        .child(
+                            div()
+                                .id("close-diff")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_diff_panel(cx);
+                                }))
+                                .child("×"),
+                        ),
+                )
+                .when(diff.truncated, |pane| {
+                    pane.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .bg(rgb(0x332d1c))
+                            .text_xs()
+                            .text_color(rgb(0xe0c178))
+                            .child("Large diff truncated for responsive rendering."),
+                    )
+                })
+                .child(
+                    div()
+                        .id("diff-files")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .when(file_sections.is_empty(), |body| {
+                            body.child(
+                                div()
+                                    .h(px(180.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(rgb(MUTED))
+                                    .child(message),
+                            )
+                        })
+                        .children(file_sections),
+                )
+                .into_any_element()
+        });
+
         let search_overlay = self.search.clone().map(|search| {
             let search_focus = self.search_input.read(cx).focus_handle(cx);
             let mut result_rows = Vec::new();
@@ -4694,6 +5132,7 @@ impl Render for XdDesktop {
                     .child(div().flex_1().min_h_0().child(transcript))
                     .child(composer),
             )
+            .when_some(diff_pane, |root, pane| root.child(pane))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
     }
 }
@@ -4729,6 +5168,86 @@ fn load_png_attachments(
         attachments.push(Attachment::from_png(name, bytes)?);
     }
     Ok(attachments)
+}
+
+fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
+    const MAX_FILES: usize = 500;
+    const MAX_LINES: usize = 1_600;
+    const MAX_LINE_CHARS: usize = 4_096;
+
+    let mut files = Vec::new();
+    let mut current: Option<DiffFile> = None;
+    let mut rendered_lines = 0_usize;
+    let mut truncated = false;
+    for line in output.lines() {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            if let Some(file) = current.take() {
+                files.push(file);
+            }
+            if files.len() >= MAX_FILES {
+                truncated = true;
+                break;
+            }
+            let path = header
+                .split_once(" b/")
+                .map(|(_, path)| path)
+                .or_else(|| header.split_whitespace().last())
+                .unwrap_or("changed file")
+                .trim_matches('"')
+                .trim_start_matches("b/")
+                .to_owned();
+            current = Some(DiffFile {
+                path,
+                additions: 0,
+                deletions: 0,
+                lines: Vec::new(),
+            });
+        }
+        let Some(file) = &mut current else {
+            continue;
+        };
+        if rendered_lines >= MAX_LINES {
+            truncated = true;
+            continue;
+        }
+        let kind = if line.starts_with("diff --git ")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("new file ")
+            || line.starts_with("deleted file ")
+            || line.starts_with("similarity index ")
+            || line.starts_with("rename from ")
+            || line.starts_with("rename to ")
+            || line.starts_with("Binary files ")
+        {
+            DiffLineKind::Header
+        } else if line.starts_with("@@") {
+            DiffLineKind::Hunk
+        } else if line.starts_with('+') {
+            file.additions = file.additions.saturating_add(1);
+            DiffLineKind::Added
+        } else if line.starts_with('-') {
+            file.deletions = file.deletions.saturating_add(1);
+            DiffLineKind::Removed
+        } else {
+            DiffLineKind::Context
+        };
+        let mut text = line.chars().take(MAX_LINE_CHARS).collect::<String>();
+        if line.chars().count() > MAX_LINE_CHARS {
+            text.push('…');
+            truncated = true;
+        }
+        file.lines.push(DiffLine { kind, text });
+        rendered_lines += 1;
+    }
+    if let Some(file) = current {
+        files.push(file);
+    }
+    if files.is_empty() && !output.trim().is_empty() {
+        return Err("Git returned a diff that xd-dev could not parse.".into());
+    }
+    Ok((files, truncated))
 }
 
 fn compact_label(value: &str, limit: usize) -> String {
@@ -4811,6 +5330,18 @@ mod tests {
     fn optional_workspace_repository_ignores_only_blank_input() {
         assert_eq!(optional_trimmed("  /tmp/repo  "), Some("/tmp/repo"));
         assert_eq!(optional_trimmed(" \n\t "), None);
+    }
+
+    #[test]
+    fn unified_diffs_are_split_into_bounded_collapsible_files() {
+        let patch = "diff --git a/one.go b/one.go\n--- a/one.go\n+++ b/one.go\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/two.rs b/two.rs\nnew file mode 100644\n--- /dev/null\n+++ b/two.rs\n@@ -0,0 +1 @@\n+ready\n";
+        let (files, truncated) = parse_unified_diff(patch).unwrap();
+        assert!(!truncated);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "one.go");
+        assert_eq!((files[0].additions, files[0].deletions), (1, 1));
+        assert_eq!(files[1].path, "two.rs");
+        assert_eq!((files[1].additions, files[1].deletions), (1, 0));
     }
 }
 

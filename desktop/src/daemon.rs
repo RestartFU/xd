@@ -24,6 +24,11 @@ pub enum RequestKind {
     Search {
         query: String,
     },
+    DiffRead {
+        chat_id: String,
+        read: String,
+        generation: u64,
+    },
     Shortcuts {
         folder_id: String,
     },
@@ -472,6 +477,27 @@ impl DaemonHandle {
                 query: query.to_owned(),
             },
             json!({"op": "search", "query": query}),
+        )
+    }
+
+    pub fn diff_read(
+        &self,
+        chat_id: &str,
+        read: &str,
+        base: Option<&str>,
+        generation: u64,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "diff-read", "chat": chat_id, "read": read});
+        if let Some(base) = base {
+            body["base"] = Value::String(base.to_owned());
+        }
+        self.send(
+            RequestKind::DiffRead {
+                chat_id: chat_id.to_owned(),
+                read: read.to_owned(),
+                generation,
+            },
+            body,
         )
     }
 

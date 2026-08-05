@@ -21,6 +21,7 @@ const MAX_MESSAGE_PAGE: i64 = 1_600;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_SEARCH_RESULTS: i64 = 40;
 const SEARCH_SNIPPET_CHARS: usize = 120;
+const EMPTY_GIT_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -1154,6 +1155,44 @@ impl StateStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"ok": true, "results": results}))
+    }
+
+    pub fn diff_read(&self, request: &Value) -> Result<Value, StorageError> {
+        let chat_id = required_string(request, "chat", "diff-read needs a chat and read type.")?;
+        let kind = required_string(request, "read", "diff-read needs a chat and read type.")?;
+        let workdir = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
+        };
+        let workdir = Path::new(&workdir);
+        git_repository_root(workdir.to_string_lossy().as_ref())?;
+        let output = match kind {
+            "base" => find_git_base(workdir)?,
+            "working-all" => working_tree_diff(workdir)?,
+            "branch-all" => {
+                let base = required_string(request, "base", "A valid base branch is required.")?;
+                validate_git_base(base)?;
+                checked_git(
+                    workdir,
+                    &[
+                        "--no-pager",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-color",
+                        &format!("{base}...HEAD"),
+                    ],
+                    &[],
+                )?
+            }
+            _ => {
+                return Err(StorageError::InvalidRequest(
+                    "No such diff read type.".into(),
+                ));
+            }
+        };
+        let output = String::from_utf8(output)
+            .map_err(|_| StorageError::InvalidRequest("Git returned invalid text.".into()))?;
+        Ok(json!({"ok": true, "output": output}))
     }
 
     pub fn set_draft(&self, request: &Value) -> Result<(Value, Value), StorageError> {
@@ -2454,6 +2493,34 @@ fn resolve_workdir(
     }
 }
 
+fn resolve_chat_workdir(
+    database: &Connection,
+    workspace_root: &Path,
+    chat_id: &str,
+) -> Result<String, StorageError> {
+    let (folder_id, workdir, original_workdir) = database
+        .query_row(
+            "SELECT folder_id, workdir, original_workdir FROM chats WHERE id = ?",
+            [chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.to_owned()))?;
+    resolve_workdir(
+        database,
+        workspace_root,
+        &folder_id,
+        workdir.as_deref(),
+        original_workdir.as_deref(),
+    )
+}
+
 fn create_worktree(
     transaction: &rusqlite::Transaction<'_>,
     workdir: &str,
@@ -2640,17 +2707,155 @@ fn run_git(
     workdir: &Path,
     arguments: &[&str],
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
-    let child = Command::new("git")
+    run_git_with_env(workdir, arguments, &[])
+}
+
+fn run_git_with_env(
+    workdir: &Path,
+    arguments: &[&str],
+    environment: &[(String, String)],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+    let mut command = Command::new("git");
+    command
         .args(arguments)
         .current_dir(workdir)
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| StorageError::Filesystem {
-            context: "Cannot run Git".into(),
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(|source| StorageError::Filesystem {
+        context: "Cannot run Git".into(),
+        source,
+    })?;
+    collect_git_output(child, GIT_TIMEOUT)
+}
+
+fn checked_git(
+    workdir: &Path,
+    arguments: &[&str],
+    environment: &[(String, String)],
+) -> Result<Vec<u8>, StorageError> {
+    let (status, stdout, stderr) = run_git_with_env(workdir, arguments, environment)?;
+    if status.success() {
+        return Ok(stdout);
+    }
+    let detail = String::from_utf8_lossy(&stderr);
+    let detail = detail
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()
+        .unwrap_or("Git could not read repository changes.")
+        .trim_start_matches("fatal: ");
+    Err(StorageError::InvalidRequest(
+        detail.chars().take(240).collect(),
+    ))
+}
+
+fn find_git_base(workdir: &Path) -> Result<Vec<u8>, StorageError> {
+    let symbolic = run_git(
+        workdir,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )?;
+    let mut candidates = Vec::new();
+    if symbolic.0.success() {
+        let value = String::from_utf8_lossy(&symbolic.1).trim().to_owned();
+        if !value.is_empty() {
+            candidates.push(value);
+        }
+    }
+    candidates.extend(
+        ["origin/main", "origin/master", "main", "master"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    for candidate in candidates {
+        if run_git(workdir, &["rev-parse", "--verify", "--quiet", &candidate])?
+            .0
+            .success()
+        {
+            return Ok(candidate.into_bytes());
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn validate_git_base(base: &str) -> Result<(), StorageError> {
+    if base.is_empty()
+        || base.len() > 256
+        || base.starts_with('-')
+        || base.contains("..")
+        || !base
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
+    {
+        return Err(StorageError::InvalidRequest(
+            "A valid base branch is required.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn working_tree_diff(workdir: &Path) -> Result<Vec<u8>, StorageError> {
+    let baseline = if run_git(workdir, &["rev-parse", "--verify", "--quiet", "HEAD"])?
+        .0
+        .success()
+    {
+        "HEAD"
+    } else {
+        EMPTY_GIT_TREE
+    };
+    let index = checked_git(workdir, &["rev-parse", "--git-path", "index"], &[])?;
+    let index = String::from_utf8(index)
+        .map_err(|_| StorageError::InvalidRequest("Git returned invalid index path.".into()))?;
+    let index = index.trim();
+    if index.is_empty() {
+        return Err(StorageError::InvalidRequest(
+            "Git could not locate the repository index.".into(),
+        ));
+    }
+    let index = if Path::new(index).is_absolute() {
+        PathBuf::from(index)
+    } else {
+        workdir.join(index)
+    };
+    let temporary = index.with_file_name(format!(".xd-diff-index-{}", Uuid::new_v4()));
+    if index.is_file() {
+        fs::copy(&index, &temporary).map_err(|source| StorageError::Filesystem {
+            context: "Cannot prepare the repository diff index".into(),
             source,
         })?;
-    collect_git_output(child, GIT_TIMEOUT)
+    }
+    let environment = vec![(
+        "GIT_INDEX_FILE".to_owned(),
+        temporary.to_string_lossy().into_owned(),
+    )];
+    let result = (|| {
+        if !temporary.exists() {
+            checked_git(workdir, &["read-tree", "--empty"], &environment)?;
+        }
+        checked_git(workdir, &["add", "--intent-to-add", "--all"], &environment)?;
+        checked_git(
+            workdir,
+            &[
+                "--no-pager",
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                baseline,
+            ],
+            &environment,
+        )
+    })();
+    let _ = fs::remove_file(&temporary);
+    let mut lock = temporary.into_os_string();
+    lock.push(".lock");
+    let _ = fs::remove_file(PathBuf::from(lock));
+    result
 }
 
 pub(crate) fn clone_repository(url: &str, destination: &Path) -> Result<(), StorageError> {
@@ -3165,6 +3370,71 @@ mod tests {
         fs::create_dir(&destination).unwrap();
         clone_repository(&format!("file://{}", source.display()), &destination).unwrap();
         assert!(destination.join("HEAD").exists() || destination.join(".git").exists());
+    }
+
+    #[test]
+    fn reads_bounded_working_and_branch_diffs() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        let git = |arguments: &[&str]| {
+            Command::new("git")
+                .args(arguments)
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init"]));
+        assert!(git(&["config", "user.email", "xd@example.com"]));
+        assert!(git(&["config", "user.name", "xd"]));
+        fs::write(repository.join("tracked.txt"), "before\n").unwrap();
+        assert!(git(&["add", "tracked.txt"]));
+        assert!(git(&["commit", "-m", "initial"]));
+        assert!(git(&["branch", "-M", "main"]));
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store
+            .new_folder(&json!({
+                "name": "Repository",
+                "repo": repository.to_string_lossy(),
+            }))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            store
+                .diff_read(&json!({"chat": chat, "read": "base"}))
+                .unwrap()["output"],
+            "main"
+        );
+
+        fs::write(repository.join("tracked.txt"), "after\n").unwrap();
+        fs::write(repository.join("untracked.txt"), "new\n").unwrap();
+        let working = store
+            .diff_read(&json!({"chat": chat, "read": "working-all"}))
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(working.contains("tracked.txt"));
+        assert!(working.contains("untracked.txt"));
+        assert!(
+            store
+                .diff_read(&json!({
+                    "chat": chat,
+                    "read": "branch-all",
+                    "base": "../bad",
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("valid base")
+        );
     }
 
     #[test]
