@@ -394,7 +394,7 @@ fn append_access(command: &mut Command, access: &str) {
     }
 }
 
-fn resolve_codex() -> PathBuf {
+pub(crate) fn resolve_codex() -> PathBuf {
     if let Some(configured) = env::var_os("XD_CODEX_EXECUTABLE").filter(|path| !path.is_empty()) {
         return configured.into();
     }
@@ -411,7 +411,7 @@ fn resolve_codex() -> PathBuf {
     PathBuf::from("codex")
 }
 
-fn resolve_claude() -> PathBuf {
+pub(crate) fn resolve_claude() -> PathBuf {
     if let Some(configured) = env::var_os("XD_CLAUDE_EXECUTABLE").filter(|path| !path.is_empty()) {
         return configured.into();
     }

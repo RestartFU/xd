@@ -338,6 +338,14 @@ impl XdDesktop {
             }
             "queued" if self.event_is_active(&body) => self.model.apply_event(name, &body),
             "shortcuts-changed" => self.request_shortcuts(),
+            "agent-auth-changed"
+                if body.get("provider").and_then(Value::as_str)
+                    == Some(self.model.backend.as_str()) =>
+            {
+                if let Some(chat_id) = self.model.selected_chat.clone() {
+                    self.request_chat(&chat_id);
+                }
+            }
             _ => {}
         }
         cx.notify();
@@ -1066,7 +1074,16 @@ impl Render for XdDesktop {
             .unwrap_or_else(|| "Select a chat".into());
         let context = selected
             .as_ref()
-            .map(|chat| chat.backend.clone())
+            .map(|chat| {
+                let state = match self.model.auth_state.as_str() {
+                    "signed-in" => "signed in",
+                    "signed-out" => "signed out",
+                    "checking" => "checking sign-in",
+                    "failed" => "sign-in check failed",
+                    _ => "sign-in unknown",
+                };
+                format!("{} · {state}", chat.backend)
+            })
             .unwrap_or_else(|| "xd daemon".into());
         let header = div()
             .h(px(102.0))

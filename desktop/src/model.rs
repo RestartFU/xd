@@ -113,6 +113,7 @@ pub struct AppModel {
     pub effort: String,
     pub access: String,
     pub plan: bool,
+    pub auth_state: String,
     pub global_shortcuts: Vec<String>,
     pub workspace_shortcuts: Vec<String>,
     pub shortcuts: Vec<String>,
@@ -161,6 +162,7 @@ impl AppModel {
             self.effort.clear();
             self.access.clear();
             self.plan = false;
+            self.auth_state.clear();
             self.global_shortcuts.clear();
             self.workspace_shortcuts.clear();
             self.shortcuts.clear();
@@ -185,6 +187,7 @@ impl AppModel {
         self.effort.clear();
         self.access.clear();
         self.plan = false;
+        self.auth_state.clear();
         self.global_shortcuts.clear();
         self.workspace_shortcuts.clear();
         self.shortcuts.clear();
@@ -225,6 +228,11 @@ impl AppModel {
             .unwrap_or("read-only")
             .to_owned();
         self.plan = body.get("plan").and_then(Value::as_bool).unwrap_or(false);
+        self.auth_state = body
+            .get("auth_state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
         if let Some(shortcuts) = body.get("shortcuts").and_then(Value::as_array) {
             self.shortcuts = string_array(shortcuts);
         }
@@ -445,6 +453,7 @@ impl AppModel {
             effort: "high".into(),
             access: "edit".into(),
             plan: false,
+            auth_state: "signed-in".into(),
             global_shortcuts: Vec::new(),
             workspace_shortcuts: Vec::new(),
             shortcuts: vec!["Review the current diff".into()],

@@ -19,9 +19,11 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub mod agent;
+mod auth;
 mod runtime;
 mod storage;
 
+use auth::AuthManager;
 pub use runtime::TurnRuntime;
 pub use storage::{SendDisposition, StateStore, StorageError};
 
@@ -63,6 +65,7 @@ pub struct Engine {
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
+    auth: AuthManager,
 }
 
 #[derive(Default)]
@@ -79,9 +82,11 @@ struct Subscriber {
 
 impl Engine {
     pub fn transport_only() -> Self {
+        let events = Arc::new(EventBus::default());
         Self {
             store: None,
-            events: Arc::default(),
+            auth: AuthManager::new(events.clone()),
+            events,
             runtime: None,
         }
     }
@@ -89,11 +94,15 @@ impl Engine {
     pub fn with_store(store: StateStore) -> Self {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::default());
-        Self {
+        let auth = AuthManager::new(events.clone());
+        let engine = Self {
             runtime: Some(TurnRuntime::new(store.clone(), events.clone())),
             store: Some(store),
+            auth,
             events,
-        }
+        };
+        engine.auth.refresh_all();
+        engine
     }
 
     pub fn dispatch(&self, request: Value) -> Value {
@@ -102,11 +111,23 @@ impl Engine {
             Some("ping") => json!({"ok": true}),
             Some("tree") => self.read(|store| store.tree()),
             Some("chat") => match required_string(&request, "chat", "chat needs a chat id") {
-                Ok(chat_id) => self.read(|store| store.chat(chat_id)),
+                Ok(chat_id) => self.chat(chat_id),
                 Err(error) => error_reply(error),
             },
             Some("messages") => self.read(|store| store.messages(&request)),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
+            Some("agent-auth") => self.auth.snapshots(),
+            Some("agent-auth-refresh") => {
+                let provider = request.get("provider").and_then(Value::as_str);
+                match provider {
+                    Some(provider) if self.auth.refresh(provider) => json!({"ok": true}),
+                    Some(_) => error_reply("No such assistant."),
+                    None => {
+                        self.auth.refresh_all();
+                        json!({"ok": true})
+                    }
+                }
+            }
             Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
             Some("set-draft") => self.event_mutation(|store| store.set_draft(&request)),
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
@@ -143,6 +164,19 @@ impl Engine {
             Some(store) => operation(store).unwrap_or_else(error_reply),
             None => error_reply("Rust daemon state storage is not configured."),
         }
+    }
+
+    fn chat(&self, chat_id: &str) -> Value {
+        let mut response = self.read(|store| store.chat(chat_id));
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            return response;
+        }
+        let provider = response
+            .get("backend")
+            .and_then(Value::as_str)
+            .unwrap_or("codex");
+        response["auth_state"] = Value::String(self.auth.state(provider));
+        response
     }
 
     fn tree_mutation(
