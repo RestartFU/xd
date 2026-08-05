@@ -5,6 +5,66 @@
 # GTK support data + launcher) so the result runs on any glibc-based x86_64
 # host, including NixOS where there is no /lib64 loader and no system GTK.
 
+# --- GPUI desktop prototype -----------------------------------------------
+#
+# The Rust frontend is intentionally built independently of the production
+# Crystal client while it reaches feature parity. Keep its toolchain and
+# system dependencies isolated so normal Crystal-only targets retain their
+# existing cache and build time.
+FROM rust:1.95-slim-trixie@sha256:28846ec5a6bcfcddb93f403ba7071bd579787852b2f2ac3839965620e8bd9456 AS gpui-toolchain
+
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+RUN rustup component add rustfmt \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      clang \
+      cmake \
+      g++ \
+      gcc \
+      git \
+      libasound2-dev \
+      libfontconfig-dev \
+      libglib2.0-dev \
+      libssl-dev \
+      libva-dev \
+      libvulkan1 \
+      libwayland-dev \
+      libx11-xcb-dev \
+      libxkbcommon-x11-dev \
+      libzstd-dev \
+      lld \
+      make \
+      pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM gpui-toolchain AS gpui-desktop-source
+
+WORKDIR /src/desktop
+COPY desktop/Cargo.toml desktop/Cargo.lock ./
+RUN mkdir -p src \
+ && touch src/lib.rs \
+ && cargo fetch --locked \
+ && rm -rf src
+COPY desktop/src ./src
+
+FROM gpui-desktop-source AS gpui-desktop-tests
+
+RUN cargo fmt --check \
+ && cargo test --locked \
+ && touch /gpui-tests-passed
+
+FROM gpui-desktop-source AS gpui-desktop-release
+
+RUN cargo build --locked --release \
+ && test -x target/release/xd-desktop
+
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS gpui-desktop-check
+
+COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
+COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
+
 # --- local speech engine ---------------------------------------------------
 #
 # whisper.cpp is built from pinned source because Debian does not package its
