@@ -28,6 +28,20 @@ pub enum RequestKind {
     NewChat {
         folder_id: String,
     },
+    RenameFolder {
+        folder_id: String,
+        name: String,
+    },
+    TrashFolder {
+        folder_id: String,
+    },
+    RenameChat {
+        chat_id: String,
+        title: String,
+    },
+    DeleteChat {
+        chat_id: String,
+    },
     Chat {
         chat_id: String,
     },
@@ -268,6 +282,44 @@ impl DaemonHandle {
                 folder_id: folder_id.to_owned(),
             },
             json!({"op": "new-chat", "folder": folder_id}),
+        )
+    }
+
+    pub fn rename_folder(&self, folder_id: &str, name: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::RenameFolder {
+                folder_id: folder_id.to_owned(),
+                name: name.to_owned(),
+            },
+            json!({"op": "rename-folder", "folder": folder_id, "name": name}),
+        )
+    }
+
+    pub fn trash_folder(&self, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::TrashFolder {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "trash-folder", "folder": folder_id}),
+        )
+    }
+
+    pub fn rename_chat(&self, chat_id: &str, title: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::RenameChat {
+                chat_id: chat_id.to_owned(),
+                title: title.to_owned(),
+            },
+            json!({"op": "rename-chat", "chat": chat_id, "title": title}),
+        )
+    }
+
+    pub fn delete_chat(&self, chat_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::DeleteChat {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "delete-chat", "chat": chat_id}),
         )
     }
 

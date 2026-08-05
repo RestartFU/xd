@@ -46,6 +46,20 @@ struct QueueEdit {
     submitting: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarTarget {
+    Folder(String),
+    Chat(String),
+}
+
+#[derive(Clone)]
+struct SidebarEdit {
+    target: SidebarTarget,
+    original: String,
+    text: String,
+    submitting: bool,
+}
+
 struct XdDesktop {
     model: AppModel,
     daemon: Option<DaemonHandle>,
@@ -53,8 +67,12 @@ struct XdDesktop {
     transcript: ListState,
     composer_input: Entity<ComposerInput>,
     queue_edit_input: Entity<ComposerInput>,
+    sidebar_edit_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
+    sidebar_edit: Option<SidebarEdit>,
+    pending_sidebar_delete: Option<SidebarTarget>,
+    sidebar_delete_submitting: bool,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -78,6 +96,12 @@ impl XdDesktop {
             ComposerEvent::Submit => this.save_queue_edit(cx),
         })
         .detach();
+        let sidebar_edit_input = cx.new(|cx| ComposerInput::new(cx, "Name…"));
+        cx.subscribe(&sidebar_edit_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.sidebar_edit_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_sidebar_edit(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -88,8 +112,12 @@ impl XdDesktop {
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             composer_input,
             queue_edit_input,
+            sidebar_edit_input,
             composer: String::new(),
             queue_edit: None,
+            sidebar_edit: None,
+            pending_sidebar_delete: None,
+            sidebar_delete_submitting: false,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -191,6 +219,34 @@ impl XdDesktop {
                         edit.submitting = None;
                     }
                 }
+                RequestKind::RenameFolder { folder_id, .. } => {
+                    if let Some(edit) = &mut self.sidebar_edit
+                        && edit.target == SidebarTarget::Folder(folder_id.clone())
+                    {
+                        edit.submitting = false;
+                    }
+                }
+                RequestKind::RenameChat { chat_id, .. } => {
+                    if let Some(edit) = &mut self.sidebar_edit
+                        && edit.target == SidebarTarget::Chat(chat_id.clone())
+                    {
+                        edit.submitting = false;
+                    }
+                }
+                RequestKind::TrashFolder { folder_id } => {
+                    if self.pending_sidebar_delete.as_ref()
+                        == Some(&SidebarTarget::Folder(folder_id.clone()))
+                    {
+                        self.sidebar_delete_submitting = false;
+                    }
+                }
+                RequestKind::DeleteChat { chat_id } => {
+                    if self.pending_sidebar_delete.as_ref()
+                        == Some(&SidebarTarget::Chat(chat_id.clone()))
+                    {
+                        self.sidebar_delete_submitting = false;
+                    }
+                }
                 _ => {}
             }
             return;
@@ -201,6 +257,21 @@ impl XdDesktop {
                 if let Err(error) = self.model.apply_tree(&value) {
                     self.model.connection_error = Some(format!("Invalid tree response: {error}"));
                     return;
+                }
+                if self
+                    .sidebar_edit
+                    .as_ref()
+                    .is_some_and(|edit| !self.sidebar_target_exists(&edit.target))
+                {
+                    self.cancel_sidebar_edit(cx);
+                }
+                if self
+                    .pending_sidebar_delete
+                    .as_ref()
+                    .is_some_and(|target| !self.sidebar_target_exists(target))
+                {
+                    self.pending_sidebar_delete = None;
+                    self.sidebar_delete_submitting = false;
                 }
                 if self.model.selected_chat.is_none() {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
@@ -243,6 +314,32 @@ impl XdDesktop {
                 let _ = folder_id;
                 self.request_tree();
                 self.select_chat(chat_id.to_owned(), cx);
+            }
+            RequestKind::RenameFolder { folder_id, name } => {
+                if self.sidebar_edit.as_ref().is_some_and(|edit| {
+                    edit.target == SidebarTarget::Folder(folder_id) && edit.text.trim() == name
+                }) {
+                    self.cancel_sidebar_edit(cx);
+                }
+            }
+            RequestKind::TrashFolder { folder_id } => {
+                if self.pending_sidebar_delete.as_ref() == Some(&SidebarTarget::Folder(folder_id)) {
+                    self.pending_sidebar_delete = None;
+                    self.sidebar_delete_submitting = false;
+                }
+            }
+            RequestKind::RenameChat { chat_id, title } => {
+                if self.sidebar_edit.as_ref().is_some_and(|edit| {
+                    edit.target == SidebarTarget::Chat(chat_id) && edit.text.trim() == title
+                }) {
+                    self.cancel_sidebar_edit(cx);
+                }
+            }
+            RequestKind::DeleteChat { chat_id } => {
+                if self.pending_sidebar_delete.as_ref() == Some(&SidebarTarget::Chat(chat_id)) {
+                    self.pending_sidebar_delete = None;
+                    self.sidebar_delete_submitting = false;
+                }
             }
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
                 let local_attachments = self
@@ -468,6 +565,103 @@ impl XdDesktop {
         {
             self.model.connection_error = Some(error);
         }
+    }
+
+    fn begin_sidebar_edit(
+        &mut self,
+        target: SidebarTarget,
+        current: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_sidebar_delete = None;
+        self.sidebar_delete_submitting = false;
+        self.sidebar_edit = Some(SidebarEdit {
+            target,
+            original: current.clone(),
+            text: current.clone(),
+            submitting: false,
+        });
+        self.sidebar_edit_input
+            .update(cx, |input, cx| input.set_text(current, cx));
+        cx.notify();
+    }
+
+    fn sidebar_edit_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.sidebar_edit
+            && !edit.submitting
+        {
+            edit.text = text;
+            cx.notify();
+        }
+    }
+
+    fn save_sidebar_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.sidebar_edit.clone() else {
+            return;
+        };
+        if edit.submitting {
+            return;
+        }
+        let text = edit.text.trim();
+        if text.is_empty() {
+            self.model.connection_error = Some("A name cannot be empty.".into());
+            cx.notify();
+            return;
+        }
+        if text == edit.original {
+            self.cancel_sidebar_edit(cx);
+            return;
+        }
+        let result = self.daemon.as_ref().map(|daemon| match &edit.target {
+            SidebarTarget::Folder(folder_id) => daemon.rename_folder(folder_id, text),
+            SidebarTarget::Chat(chat_id) => daemon.rename_chat(chat_id, text),
+        });
+        match result {
+            Some(Ok(())) => {
+                if let Some(active) = &mut self.sidebar_edit
+                    && active.target == edit.target
+                {
+                    active.text = text.to_owned();
+                    active.submitting = true;
+                }
+            }
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => {
+                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_sidebar_edit(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_edit = None;
+        self.sidebar_edit_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    fn delete_sidebar_item(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
+        if self.sidebar_delete_submitting {
+            return;
+        }
+        if self.pending_sidebar_delete.as_ref() != Some(&target) {
+            self.cancel_sidebar_edit(cx);
+            self.pending_sidebar_delete = Some(target);
+            cx.notify();
+            return;
+        }
+        let result = self.daemon.as_ref().map(|daemon| match &target {
+            SidebarTarget::Folder(folder_id) => daemon.trash_folder(folder_id),
+            SidebarTarget::Chat(chat_id) => daemon.delete_chat(chat_id),
+        });
+        match result {
+            Some(Ok(())) => self.sidebar_delete_submitting = true,
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => {
+                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
+            }
+        }
+        cx.notify();
     }
 
     fn toggle_new_worktree(&mut self) {
@@ -976,6 +1170,17 @@ impl XdDesktop {
         self.model.selected_chat.as_deref() == Some(chat_id)
     }
 
+    fn sidebar_target_exists(&self, target: &SidebarTarget) -> bool {
+        match target {
+            SidebarTarget::Folder(folder_id) => self
+                .model
+                .folders
+                .iter()
+                .any(|folder| &folder.id == folder_id),
+            SidebarTarget::Chat(chat_id) => self.model.chats.iter().any(|chat| &chat.id == chat_id),
+        }
+    }
+
     fn sync_transcript_count(&self, reset: bool) {
         let count = self.model.display_message_count();
         if reset {
@@ -1358,37 +1563,177 @@ impl Render for XdDesktop {
             0xe49a9a
         };
 
+        let sidebar_edit = self.sidebar_edit.clone();
+        let sidebar_edit_input = self.sidebar_edit_input.clone();
+        let sidebar_edit_focus = self.sidebar_edit_input.read(cx).focus_handle(cx);
+        let pending_sidebar_delete = self.pending_sidebar_delete.clone();
+        let sidebar_delete_submitting = self.sidebar_delete_submitting;
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
             let indent = if folder.parent.is_some() { 22.0 } else { 12.0 };
             let folder_id = folder.id.clone();
-            tree_rows.push(
-                div()
-                    .px_3()
-                    .ml(px(indent))
-                    .pt_2()
-                    .pb_1()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_sm()
-                    .text_color(rgb(TEXT))
-                    .child(format!("▾  {}", folder.name))
-                    .child(
-                        div()
-                            .id(("new-chat", folder_row_index))
-                            .px_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
-                            .on_click(
-                                cx.listener(move |this, _, _, _| this.create_chat(&folder_id)),
-                            )
-                            .child("+"),
-                    )
-                    .into_any_element(),
-            );
+            let folder_name = folder.name.clone();
+            let folder_target = SidebarTarget::Folder(folder.id.clone());
+            let editing_folder = sidebar_edit
+                .as_ref()
+                .is_some_and(|edit| edit.target == folder_target);
+            if editing_folder {
+                let can_save = sidebar_edit.as_ref().is_some_and(|edit| {
+                    !edit.submitting
+                        && !edit.text.trim().is_empty()
+                        && edit.text.trim() != edit.original
+                });
+                let saving = sidebar_edit.as_ref().is_some_and(|edit| edit.submitting);
+                tree_rows.push(
+                    div()
+                        .ml(px(indent))
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id(("folder-name-editor", folder_row_index))
+                                .track_focus(&sidebar_edit_focus)
+                                .h(px(30.0))
+                                .min_w_0()
+                                .flex_1()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if sidebar_edit_focus.is_focused(window) {
+                                    ACCENT
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(BG))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus = this.sidebar_edit_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(sidebar_edit_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(("save-folder-name", folder_row_index))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if can_save { TEXT } else { MUTED }))
+                                .when(can_save, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if can_save {
+                                        this.save_sidebar_edit(cx);
+                                    }
+                                }))
+                                .child(if saving { "…" } else { "Save" }),
+                        )
+                        .child(
+                            div()
+                                .id(("cancel-folder-name", folder_row_index))
+                                .px_1()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_sidebar_edit(cx);
+                                }))
+                                .child("×"),
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                let rename_target = folder_target.clone();
+                let delete_target = folder_target.clone();
+                let confirming_delete = pending_sidebar_delete.as_ref() == Some(&folder_target);
+                tree_rows.push(
+                    div()
+                        .px_3()
+                        .ml(px(indent))
+                        .pt_2()
+                        .pb_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(format!("▾  {folder_name}")),
+                        )
+                        .child(
+                            div()
+                                .id(("new-chat", folder_row_index))
+                                .px_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(
+                                    cx.listener(move |this, _, _, _| this.create_chat(&folder_id)),
+                                )
+                                .child("+"),
+                        )
+                        .child(
+                            div()
+                                .id(("rename-folder", folder_row_index))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.begin_sidebar_edit(
+                                        rename_target.clone(),
+                                        folder_name.clone(),
+                                        cx,
+                                    );
+                                    let focus = this.sidebar_edit_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child("Edit"),
+                        )
+                        .child(
+                            div()
+                                .id(("trash-folder", folder_row_index))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if confirming_delete { 0xefaaaa } else { MUTED }))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x3b282e)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.delete_sidebar_item(delete_target.clone(), cx);
+                                }))
+                                .child(if confirming_delete {
+                                    if sidebar_delete_submitting {
+                                        "…"
+                                    } else {
+                                        "Confirm"
+                                    }
+                                } else {
+                                    "Trash"
+                                }),
+                        )
+                        .into_any_element(),
+                );
+            }
             for chat in self
                 .model
                 .chats
@@ -1401,6 +1746,95 @@ impl Render for XdDesktop {
                 chat_row_index += 1;
                 let is_selected = self.model.selected_chat.as_deref() == Some(chat.id.as_str());
                 let title = chat.title.unwrap_or_else(|| "New Chat".into());
+                let chat_target = SidebarTarget::Chat(chat.id.clone());
+                let editing_chat = sidebar_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.target == chat_target);
+                if editing_chat {
+                    let can_save = sidebar_edit.as_ref().is_some_and(|edit| {
+                        !edit.submitting
+                            && !edit.text.trim().is_empty()
+                            && edit.text.trim() != edit.original
+                    });
+                    let saving = sidebar_edit.as_ref().is_some_and(|edit| edit.submitting);
+                    tree_rows.push(
+                        div()
+                            .mx_2()
+                            .ml(px(indent + 10.0))
+                            .mb_1()
+                            .p_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(rgb(SURFACE_HIGH))
+                            .child(
+                                div()
+                                    .id(("chat-title-editor", row_id))
+                                    .track_focus(&sidebar_edit_focus)
+                                    .h(px(30.0))
+                                    .min_w_0()
+                                    .flex_1()
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(if sidebar_edit_focus.is_focused(window) {
+                                        ACCENT
+                                    } else {
+                                        BORDER
+                                    }))
+                                    .bg(rgb(BG))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let focus =
+                                            this.sidebar_edit_input.read(cx).focus_handle(cx);
+                                        window.focus(&focus);
+                                    }))
+                                    .child(sidebar_edit_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(("save-chat-title", row_id))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(if can_save { TEXT } else { MUTED }))
+                                    .when(can_save, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x303c52)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_save {
+                                            this.save_sidebar_edit(cx);
+                                        }
+                                    }))
+                                    .child(if saving { "…" } else { "Save" }),
+                            )
+                            .child(
+                                div()
+                                    .id(("cancel-chat-title", row_id))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_sidebar_edit(cx);
+                                    }))
+                                    .child("×"),
+                            )
+                            .into_any_element(),
+                    );
+                    continue;
+                }
+                let rename_target = chat_target.clone();
+                let delete_target = chat_target.clone();
+                let confirming_delete = pending_sidebar_delete.as_ref() == Some(&chat_target);
                 tree_rows.push(
                     div()
                         .id(("chat", row_id))
@@ -1413,18 +1847,68 @@ impl Render for XdDesktop {
                         .bg(rgb(if is_selected { SURFACE_HIGH } else { SURFACE }))
                         .text_color(rgb(if is_selected { TEXT } else { MUTED }))
                         .text_sm()
-                        .cursor_pointer()
                         .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.select_chat(chat_id.clone(), cx)
-                            }),
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id(("select-chat", row_id))
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_chat(chat_id.clone(), cx)
+                                }))
+                                .child(if chat.working {
+                                    format!("●  {title}")
+                                } else {
+                                    format!("   {title}")
+                                }),
                         )
-                        .child(if chat.working {
-                            format!("●  {title}")
-                        } else {
-                            format!("   {title}")
-                        })
+                        .child(
+                            div()
+                                .id(("rename-chat", row_id))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.begin_sidebar_edit(
+                                        rename_target.clone(),
+                                        title.clone(),
+                                        cx,
+                                    );
+                                    let focus = this.sidebar_edit_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child("Edit"),
+                        )
+                        .child(
+                            div()
+                                .id(("delete-chat", row_id))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if confirming_delete { 0xefaaaa } else { MUTED }))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x3b282e)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.delete_sidebar_item(delete_target.clone(), cx);
+                                }))
+                                .child(if confirming_delete {
+                                    if sidebar_delete_submitting {
+                                        "…"
+                                    } else {
+                                        "Confirm"
+                                    }
+                                } else {
+                                    "Delete"
+                                }),
+                        )
                         .into_any_element(),
                 );
             }
