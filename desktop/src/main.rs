@@ -169,6 +169,22 @@ enum SidebarTarget {
     Chat(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerMenu {
+    Model,
+    Effort,
+    Access,
+    Workspace,
+}
+
+#[derive(Clone, Debug)]
+enum ComposerChoice {
+    Model { backend: String, model: String },
+    Effort(String),
+    Access(String),
+    Workspace(String),
+}
+
 #[derive(Clone)]
 struct SidebarEdit {
     target: SidebarTarget,
@@ -214,6 +230,7 @@ struct XdDesktop {
     terminal_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
+    composer_menu: Option<ComposerMenu>,
     sidebar_edit: Option<SidebarEdit>,
     sidebar_menu: Option<SidebarTarget>,
     pending_sidebar_delete: Option<SidebarTarget>,
@@ -388,6 +405,7 @@ impl XdDesktop {
             terminal_input,
             composer: String::new(),
             queue_edit: None,
+            composer_menu: None,
             sidebar_edit: None,
             sidebar_menu: None,
             pending_sidebar_delete: None,
@@ -1436,6 +1454,7 @@ impl XdDesktop {
                 }
             }
             "turn-started" if self.event_is_active(&body) => {
+                self.composer_menu = None;
                 self.model.apply_event(name, &body);
                 self.sync_transcript_count(false);
                 if let Some(chat_id) = self.model.selected_chat.clone() {
@@ -2547,90 +2566,80 @@ impl XdDesktop {
         }
     }
 
-    fn cycle_model(&mut self) {
-        let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
+    fn toggle_composer_menu(&mut self, menu: ComposerMenu, cx: &mut Context<Self>) {
+        self.composer_menu = if self.composer_menu == Some(menu) {
+            None
+        } else {
+            Some(menu)
         };
-        if self.model.working {
-            return;
-        }
-        let choices = self
-            .model
-            .agent_backends
-            .iter()
-            .flat_map(|backend| {
-                backend
-                    .models
-                    .iter()
-                    .map(|model| (backend.id.clone(), model.id.clone()))
-            })
-            .collect::<Vec<_>>();
-        if choices.is_empty() {
-            return;
-        }
-        let current = choices
-            .iter()
-            .position(|(backend, model)| {
-                backend == &self.model.backend
-                    && Some(model.as_str()) == self.model.model.as_deref()
-            })
-            .unwrap_or(choices.len() - 1);
-        let (backend, model) = &choices[(current + 1) % choices.len()];
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.set_model(&chat_id, backend, model)
-        {
-            self.model.connection_error = Some(error);
-        }
+        cx.notify();
     }
 
-    fn cycle_effort(&mut self) {
+    fn apply_composer_choice(&mut self, choice: ComposerChoice, cx: &mut Context<Self>) {
+        self.composer_menu = None;
         let Some(chat_id) = self.model.selected_chat.clone() else {
+            cx.notify();
             return;
         };
         if self.model.working {
+            cx.notify();
             return;
         }
-        let Some(backend) = self
-            .model
-            .agent_backends
-            .iter()
-            .find(|backend| backend.id == self.model.backend)
-        else {
-            return;
+        let result = match choice {
+            ComposerChoice::Model { backend, model }
+                if self.model.agent_backends.iter().any(|candidate| {
+                    candidate.id == backend
+                        && candidate
+                            .models
+                            .iter()
+                            .any(|candidate| candidate.id == model)
+                }) =>
+            {
+                self.daemon
+                    .as_ref()
+                    .map(|daemon| daemon.set_model(&chat_id, &backend, &model))
+            }
+            ComposerChoice::Effort(effort)
+                if self.model.agent_backends.iter().any(|backend| {
+                    backend.id == self.model.backend && backend.efforts.contains(&effort)
+                }) =>
+            {
+                self.daemon
+                    .as_ref()
+                    .map(|daemon| daemon.set_effort(&chat_id, &effort))
+            }
+            ComposerChoice::Access(access)
+                if matches!(access.as_str(), "read-only" | "edit" | "full") =>
+            {
+                self.daemon
+                    .as_ref()
+                    .map(|daemon| daemon.set_access(&chat_id, &access))
+            }
+            ComposerChoice::Workspace(path)
+                if !self.model.has_messages
+                    && self
+                        .model
+                        .worktrees
+                        .iter()
+                        .any(|worktree| worktree.path == path) =>
+            {
+                self.daemon
+                    .as_ref()
+                    .map(|daemon| daemon.set_workspace(&chat_id, &path))
+            }
+            _ => {
+                cx.notify();
+                return;
+            }
         };
-        if backend.efforts.is_empty() {
-            return;
+        match result {
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => {
+                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
+            }
+            Some(Ok(())) => {}
         }
-        let current = backend
-            .efforts
-            .iter()
-            .position(|effort| effort == &self.model.effort)
-            .unwrap_or(backend.efforts.len() - 1);
-        let effort = backend.efforts[(current + 1) % backend.efforts.len()].clone();
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.set_effort(&chat_id, &effort)
-        {
-            self.model.connection_error = Some(error);
-        }
-    }
-
-    fn cycle_access(&mut self) {
-        let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
-        };
-        if self.model.working {
-            return;
-        }
-        const ACCESS: [&str; 3] = ["read-only", "edit", "full"];
-        let current = ACCESS
-            .iter()
-            .position(|access| *access == self.model.access)
-            .unwrap_or(ACCESS.len() - 1);
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.set_access(&chat_id, ACCESS[(current + 1) % ACCESS.len()])
-        {
-            self.model.connection_error = Some(error);
-        }
+        cx.notify();
     }
 
     fn toggle_plan(&mut self) {
@@ -2642,27 +2651,6 @@ impl XdDesktop {
         }
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.set_plan(&chat_id, !self.model.plan)
-        {
-            self.model.connection_error = Some(error);
-        }
-    }
-
-    fn cycle_workspace(&mut self) {
-        let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
-        };
-        if self.model.has_messages || self.model.working || self.model.worktrees.len() < 2 {
-            return;
-        }
-        let current = self
-            .model
-            .worktrees
-            .iter()
-            .position(|worktree| worktree.current)
-            .unwrap_or(0);
-        let next = (current + 1) % self.model.worktrees.len();
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.set_workspace(&chat_id, &self.model.worktrees[next].path)
         {
             self.model.connection_error = Some(error);
         }
@@ -2711,6 +2699,7 @@ impl XdDesktop {
             return;
         }
         self.model.select_chat(chat_id.clone());
+        self.composer_menu = None;
         self.pending_speech = None;
         self.speech_output.stop();
         self.terminal_panel = None;
@@ -5023,6 +5012,182 @@ impl Render for XdDesktop {
                     ),
             );
 
+        let menu_desktop = cx.entity();
+        let composer_selector_menu = self.composer_menu.and_then(|menu| {
+            let (title, choices) = match menu {
+                ComposerMenu::Model if can_change_agent => {
+                    let multiple_backends = self.model.agent_backends.len() > 1;
+                    let mut choices = Vec::new();
+                    for backend in &self.model.agent_backends {
+                        for model in &backend.models {
+                            let label = if multiple_backends {
+                                format!("{} · {}", backend.name, model.name)
+                            } else {
+                                model.name.clone()
+                            };
+                            choices.push((
+                                label,
+                                backend.id == self.model.backend
+                                    && self.model.model.as_deref() == Some(model.id.as_str()),
+                                ComposerChoice::Model {
+                                    backend: backend.id.clone(),
+                                    model: model.id.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    ("Assistant", choices)
+                }
+                ComposerMenu::Effort if can_change_agent => {
+                    let choices = self
+                        .model
+                        .agent_backends
+                        .iter()
+                        .find(|backend| backend.id == self.model.backend)
+                        .map(|backend| {
+                            backend
+                                .efforts
+                                .iter()
+                                .map(|effort| {
+                                    (
+                                        effort.clone(),
+                                        effort == &self.model.effort,
+                                        ComposerChoice::Effort(effort.clone()),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    ("Reasoning effort", choices)
+                }
+                ComposerMenu::Access if can_change_agent => (
+                    "Access",
+                    [
+                        ("Read only", "read-only"),
+                        ("Edit", "edit"),
+                        ("Full access", "full"),
+                    ]
+                    .into_iter()
+                    .map(|(label, access)| {
+                        (
+                            label.to_owned(),
+                            self.model.access == access,
+                            ComposerChoice::Access(access.to_owned()),
+                        )
+                    })
+                    .collect(),
+                ),
+                ComposerMenu::Workspace if can_cycle_workspace => {
+                    let choices = self
+                        .model
+                        .worktrees
+                        .iter()
+                        .map(|worktree| {
+                            let name = worktree
+                                .branch
+                                .clone()
+                                .or_else(|| {
+                                    PathBuf::from(&worktree.path)
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .map(str::to_owned)
+                                })
+                                .unwrap_or_else(|| worktree.path.clone());
+                            let label = if worktree.main {
+                                format!("{name} · main")
+                            } else {
+                                name
+                            };
+                            (
+                                label,
+                                worktree.current,
+                                ComposerChoice::Workspace(worktree.path.clone()),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    ("Workspace", choices)
+                }
+                _ => return None,
+            };
+            if choices.is_empty() {
+                return None;
+            }
+            let choice_rows = choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, selected, choice))| {
+                    let desktop = menu_desktop.clone();
+                    div()
+                        .id(("composer-menu-choice", index))
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(if selected { 0x26354d } else { SURFACE_HIGH }))
+                        .text_xs()
+                        .text_color(rgb(if selected { TEXT } else { MUTED }))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
+                        .on_click(move |_, _, cx| {
+                            desktop.update(cx, |this, cx| {
+                                this.apply_composer_choice(choice.clone(), cx);
+                            });
+                        })
+                        .child(if selected {
+                            format!("✓  {label}")
+                        } else {
+                            label
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            Some(
+                div()
+                    .w_full()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(BG))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .id("close-composer-menu")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.composer_menu = None;
+                                        cx.notify();
+                                    }))
+                                    .child("×"),
+                            ),
+                    )
+                    .child(div().flex().flex_wrap().gap_2().children(choice_rows))
+                    .into_any_element(),
+            )
+        });
+
         let composer_controls = div()
             .h(px(42.0))
             .flex_shrink_0()
@@ -5034,7 +5199,7 @@ impl Render for XdDesktop {
             .border_color(rgb(BORDER))
             .child(
                 div()
-                    .id("assistant-cycle")
+                    .id("assistant-menu")
                     .px_3()
                     .py_1()
                     .rounded_full()
@@ -5046,16 +5211,16 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, _| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if can_change_agent {
-                            this.cycle_model();
+                            this.toggle_composer_menu(ComposerMenu::Model, cx);
                         }
                     }))
-                    .child(model_label),
+                    .child(format!("{model_label}  ▾")),
             )
             .child(
                 div()
-                    .id("effort-cycle")
+                    .id("effort-menu")
                     .px_3()
                     .py_1()
                     .rounded_full()
@@ -5067,16 +5232,16 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, _| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if can_change_agent {
-                            this.cycle_effort();
+                            this.toggle_composer_menu(ComposerMenu::Effort, cx);
                         }
                     }))
-                    .child(format!("Effort: {effort_label}")),
+                    .child(format!("Effort: {effort_label}  ▾")),
             )
             .child(
                 div()
-                    .id("access-cycle")
+                    .id("access-menu")
                     .px_3()
                     .py_1()
                     .rounded_full()
@@ -5088,12 +5253,12 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, _| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if can_change_agent {
-                            this.cycle_access();
+                            this.toggle_composer_menu(ComposerMenu::Access, cx);
                         }
                     }))
-                    .child(access_label),
+                    .child(format!("{access_label}  ▾")),
             )
             .child(
                 div()
@@ -5126,7 +5291,7 @@ impl Render for XdDesktop {
             )
             .child(
                 div()
-                    .id("workspace-cycle")
+                    .id("workspace-menu")
                     .px_3()
                     .py_1()
                     .rounded_full()
@@ -5138,12 +5303,12 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, _| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if can_cycle_workspace {
-                            this.cycle_workspace();
+                            this.toggle_composer_menu(ComposerMenu::Workspace, cx);
                         }
                     }))
-                    .child(format!("Workspace: {workspace_label}")),
+                    .child(format!("Workspace: {workspace_label}  ▾")),
             )
             .when(can_remove_worktree, |controls| {
                 controls.child(
@@ -5755,6 +5920,7 @@ impl Render for XdDesktop {
                     .border_color(rgb(BORDER))
                     .bg(rgb(SURFACE))
                     .overflow_hidden()
+                    .when_some(composer_selector_menu, |panel, menu| panel.child(menu))
                     .child(composer_controls),
             );
 
