@@ -17,6 +17,7 @@ Current milestone:
 - first-message generated/existing-worktree selection and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - global/workspace prompt shortcuts with send-or-queue buttons and inline management;
+- daemon-persisted assistant, model, effort, access, and plan controls;
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;

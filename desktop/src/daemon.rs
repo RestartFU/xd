@@ -381,6 +381,34 @@ impl DaemonHandle {
         )
     }
 
+    pub fn set_access(&self, chat_id: &str, access: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "access",
+                "value": access,
+            }),
+        )
+    }
+
+    pub fn set_plan(&self, chat_id: &str, enabled: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "plan",
+                "value": if enabled { "true" } else { "false" },
+            }),
+        )
+    }
+
     pub fn set_workspace(&self, chat_id: &str, path: &str) -> Result<(), String> {
         self.send(
             RequestKind::SetOption {

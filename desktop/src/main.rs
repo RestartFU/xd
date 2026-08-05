@@ -472,6 +472,39 @@ impl XdDesktop {
         }
     }
 
+    fn cycle_access(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.working {
+            return;
+        }
+        const ACCESS: [&str; 3] = ["read-only", "edit", "full"];
+        let current = ACCESS
+            .iter()
+            .position(|access| *access == self.model.access)
+            .unwrap_or(ACCESS.len() - 1);
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_access(&chat_id, ACCESS[(current + 1) % ACCESS.len()])
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn toggle_plan(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.working {
+            return;
+        }
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_plan(&chat_id, !self.model.plan)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     fn cycle_workspace(&mut self) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
@@ -882,6 +915,11 @@ impl Render for XdDesktop {
         .to_owned();
         let can_change_agent =
             selected.is_some() && !working && !self.model.agent_backends.is_empty();
+        let access_label = match self.model.access.as_str() {
+            "full" => "Full access",
+            "edit" => "Edit",
+            _ => "Read only",
+        };
         let status_text = if self.model.connected {
             "connected"
         } else {
@@ -1031,27 +1069,34 @@ impl Render for XdDesktop {
             .map(|chat| chat.backend.clone())
             .unwrap_or_else(|| "xd daemon".into());
         let header = div()
-            .h(px(58.0))
+            .h(px(102.0))
             .flex_shrink_0()
             .flex()
-            .items_center()
-            .justify_between()
-            .px_5()
+            .flex_col()
             .bg(rgb(SURFACE))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
                 div()
+                    .h(px(58.0))
+                    .flex_shrink_0()
                     .flex()
                     .flex_col()
+                    .justify_center()
+                    .px_5()
                     .child(div().text_sm().text_color(rgb(TEXT)).child(title))
                     .child(div().text_xs().text_color(rgb(MUTED)).child(context)),
             )
             .child(
                 div()
+                    .h(px(44.0))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .px_5()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
                     .child(
                         div()
                             .id("assistant-cycle")
@@ -1093,6 +1138,56 @@ impl Render for XdDesktop {
                                 }
                             }))
                             .child(format!("Effort: {effort_label}")),
+                    )
+                    .child(
+                        div()
+                            .id("access-cycle")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(SURFACE_HIGH))
+                            .text_xs()
+                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                            .when(can_change_agent, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if can_change_agent {
+                                    this.cycle_access();
+                                }
+                            }))
+                            .child(access_label),
+                    )
+                    .child(
+                        div()
+                            .id("plan-toggle")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(if self.model.plan {
+                                0x26354d
+                            } else {
+                                SURFACE_HIGH
+                            }))
+                            .text_xs()
+                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                            .when(can_change_agent, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if can_change_agent {
+                                    this.toggle_plan();
+                                }
+                            }))
+                            .child(if self.model.plan {
+                                "Plan: on"
+                            } else {
+                                "Plan: off"
+                            }),
                     )
                     .child(
                         div()

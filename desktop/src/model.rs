@@ -111,6 +111,8 @@ pub struct AppModel {
     pub backend: String,
     pub model: Option<String>,
     pub effort: String,
+    pub access: String,
+    pub plan: bool,
     pub global_shortcuts: Vec<String>,
     pub workspace_shortcuts: Vec<String>,
     pub shortcuts: Vec<String>,
@@ -157,6 +159,8 @@ impl AppModel {
             self.backend.clear();
             self.model = None;
             self.effort.clear();
+            self.access.clear();
+            self.plan = false;
             self.global_shortcuts.clear();
             self.workspace_shortcuts.clear();
             self.shortcuts.clear();
@@ -179,6 +183,8 @@ impl AppModel {
         self.backend.clear();
         self.model = None;
         self.effort.clear();
+        self.access.clear();
+        self.plan = false;
         self.global_shortcuts.clear();
         self.workspace_shortcuts.clear();
         self.shortcuts.clear();
@@ -213,6 +219,12 @@ impl AppModel {
             .and_then(Value::as_str)
             .unwrap_or("high")
             .to_owned();
+        self.access = body
+            .get("access")
+            .and_then(Value::as_str)
+            .unwrap_or("read-only")
+            .to_owned();
+        self.plan = body.get("plan").and_then(Value::as_bool).unwrap_or(false);
         if let Some(shortcuts) = body.get("shortcuts").and_then(Value::as_array) {
             self.shortcuts = string_array(shortcuts);
         }
@@ -431,6 +443,8 @@ impl AppModel {
             backend: "codex".into(),
             model: Some("gpt-5.6-sol".into()),
             effort: "high".into(),
+            access: "edit".into(),
+            plan: false,
             global_shortcuts: Vec::new(),
             workspace_shortcuts: Vec::new(),
             shortcuts: vec!["Review the current diff".into()],
@@ -562,13 +576,15 @@ mod tests {
             .unwrap();
         model.apply_chat(&json!({
             "backend": "claude", "model": "claude-opus-5", "effort": "high",
-            "queue": [], "working": false
+            "access": "edit", "plan": true, "queue": [], "working": false
         }));
 
         assert_eq!(model.backend, "claude");
         assert_eq!(model.selected_summary().unwrap().backend, "claude");
         assert_eq!(model.selected_model_name(), Some("Claude Opus 5"));
         assert_eq!(model.effort, "high");
+        assert_eq!(model.access, "edit");
+        assert!(model.plan);
     }
 
     #[test]
