@@ -22,12 +22,14 @@ pub mod agent;
 mod auth;
 mod runtime;
 mod storage;
+mod terminal;
 mod workflow;
 
 use auth::AuthManager;
 pub use runtime::TurnRuntime;
 use storage::clone_repository;
 pub use storage::{SendDisposition, StateStore, StorageError};
+use terminal::TerminalManager;
 use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
@@ -70,10 +72,11 @@ pub struct Engine {
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
     workflows: WorkflowStatuses,
+    terminals: TerminalManager,
 }
 
 #[derive(Default)]
-struct EventBus {
+pub(crate) struct EventBus {
     next_event: AtomicU64,
     next_subscriber: AtomicU64,
     subscribers: Mutex<HashMap<u64, Subscriber>>,
@@ -91,6 +94,7 @@ impl Engine {
             store: None,
             auth: AuthManager::new(events.clone()),
             workflows: WorkflowStatuses::new(),
+            terminals: TerminalManager::new(events.clone()),
             events,
             runtime: None,
         }
@@ -105,6 +109,7 @@ impl Engine {
             store: Some(store),
             auth,
             workflows: WorkflowStatuses::new(),
+            terminals: TerminalManager::new(events.clone()),
             events,
         };
         engine.auth.refresh_all();
@@ -169,6 +174,11 @@ impl Engine {
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
             Some("steer-queue") => self.steer_queue(&request),
             Some("workflow-status") => self.workflow_status(&request),
+            Some("terminal-list") => self.terminal_list(&request),
+            Some("terminal-open") => self.terminal_open(&request),
+            Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
+            Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
+            Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -211,6 +221,31 @@ impl Engine {
             Err(error) => return error_reply(error),
         };
         self.workflows.fetch(text).unwrap_or_else(error_reply)
+    }
+
+    fn terminal_list(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "terminal-list needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        self.terminals.list(chat_id)
+    }
+
+    fn terminal_open(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.terminal_workdir(chat_id) {
+            Ok(workdir) => self
+                .terminals
+                .open(request, &workdir)
+                .unwrap_or_else(error_reply),
+            Err(error) => error_reply(error),
+        }
     }
 
     fn tree_mutation(

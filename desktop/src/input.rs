@@ -29,10 +29,13 @@ actions!(
     ]
 );
 
+actions!(terminal_input, [Up, Down, Interrupt, Escape, Tab]);
+
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
     Changed(String),
     Submit,
+    Bytes(Vec<u8>),
 }
 
 pub struct ComposerInput {
@@ -45,6 +48,7 @@ pub struct ComposerInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    terminal: bool,
 }
 
 impl EventEmitter<ComposerEvent> for ComposerInput {}
@@ -61,6 +65,23 @@ impl ComposerInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            terminal: false,
+        }
+    }
+
+    pub fn terminal(cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(cx, "Type in terminal…");
+        input.terminal = true;
+        input
+    }
+
+    fn terminal_bytes(&self, bytes: impl Into<Vec<u8>>, cx: &mut Context<Self>) -> bool {
+        if self.terminal {
+            cx.emit(ComposerEvent::Bytes(bytes.into()));
+            cx.notify();
+            true
+        } else {
+            false
         }
     }
 
@@ -83,6 +104,9 @@ impl ComposerInput {
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1b[D".to_vec(), cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -91,6 +115,9 @@ impl ComposerInput {
     }
 
     fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1b[C".to_vec(), cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -112,14 +139,23 @@ impl ComposerInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1b[H".to_vec(), cx) {
+            return;
+        }
         self.move_to(0, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1b[F".to_vec(), cx) {
+            return;
+        }
         self.move_to(self.content.len(), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(vec![0x7f], cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
@@ -127,6 +163,9 @@ impl ComposerInput {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1b[3~".to_vec(), cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
@@ -134,7 +173,26 @@ impl ComposerInput {
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\r".to_vec(), cx) {
+            return;
+        }
         cx.emit(ComposerEvent::Submit);
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[A".to_vec(), cx);
+    }
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[B".to_vec(), cx);
+    }
+    fn interrupt(&mut self, _: &Interrupt, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![3], cx);
+    }
+    fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![27], cx);
+    }
+    fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![9], cx);
     }
 
     fn on_mouse_down(
@@ -174,6 +232,9 @@ impl ComposerInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if self.terminal_bytes(text.as_bytes().to_vec(), cx) {
+                return;
+            }
             self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
         }
     }
@@ -331,6 +392,10 @@ impl EntityInputHandler for ComposerInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.terminal {
+            self.terminal_bytes(new_text.as_bytes().to_vec(), cx);
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -585,6 +650,7 @@ impl Render for ComposerInput {
             .flex_1()
             .min_w_0()
             .key_context("ComposerInput")
+            .when(self.terminal, |input| input.key_context("TerminalInput"))
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
@@ -601,6 +667,11 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::interrupt))
+            .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

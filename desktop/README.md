@@ -24,6 +24,7 @@ Current milestone:
 - background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;
 - opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
+- shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - shared expandable activity cards for tools, subagents, and workflow runs;
 - bounded Markdown rendering with language-aware fenced-code highlighting;
 - variable-height virtualized transcript list;

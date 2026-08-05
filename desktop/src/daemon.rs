@@ -11,6 +11,7 @@ use std::{
 };
 
 use async_channel::{Receiver, Sender};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
@@ -50,6 +51,21 @@ pub enum RequestKind {
     GitPush {
         chat_id: String,
         generation: u64,
+    },
+    TerminalOpen {
+        chat_id: String,
+    },
+    TerminalList {
+        chat_id: String,
+    },
+    TerminalInput {
+        terminal_id: String,
+    },
+    TerminalResize {
+        terminal_id: String,
+    },
+    TerminalKill {
+        terminal_id: String,
     },
     Shortcuts {
         folder_id: String,
@@ -577,6 +593,52 @@ impl DaemonHandle {
                 generation,
             },
             json!({"op": "git-push", "chat": chat_id}),
+        )
+    }
+
+    pub fn terminal_open(&self, chat_id: &str, columns: usize, rows: usize) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalOpen { chat_id: chat_id.to_owned() },
+            json!({"op": "terminal-open", "chat": chat_id, "columns": columns, "rows": rows, "reuse": true}),
+        )
+    }
+
+    pub fn terminal_list(&self, chat_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalList {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "terminal-list", "chat": chat_id}),
+        )
+    }
+
+    pub fn terminal_input(&self, terminal_id: &str, data: &[u8]) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalInput {
+                terminal_id: terminal_id.to_owned(),
+            },
+            json!({"op": "terminal-input", "terminal": terminal_id, "data": STANDARD.encode(data)}),
+        )
+    }
+
+    pub fn terminal_resize(
+        &self,
+        terminal_id: &str,
+        columns: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalResize { terminal_id: terminal_id.to_owned() },
+            json!({"op": "terminal-resize", "terminal": terminal_id, "columns": columns, "rows": rows}),
+        )
+    }
+
+    pub fn terminal_kill(&self, terminal_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalKill {
+                terminal_id: terminal_id.to_owned(),
+            },
+            json!({"op": "terminal-kill", "terminal": terminal_id}),
         )
     }
 

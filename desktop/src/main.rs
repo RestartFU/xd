@@ -11,6 +11,7 @@ use std::{
     thread,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, Bounds, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
     KeyBinding, ListAlignment, ListState, ObjectFit, PathPromptOptions, Render, StyledText, Timer,
@@ -28,13 +29,15 @@ use xd_desktop::{
 mod input;
 mod settings;
 mod speech;
+mod terminal;
 
 use input::{
-    Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, End, Home, Left, Paste, Right,
-    SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit,
+    Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
+    Left, Paste, Right, SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit, Tab, Up,
 };
 use settings::{AccentPreset, AppSettings};
 use speech::SpeechOutput;
+use terminal::TerminalScreen;
 
 const BG: u32 = 0x111318;
 const SURFACE: u32 = 0x191c22;
@@ -109,6 +112,16 @@ struct DiffPanel {
     repo_files_truncated: bool,
     file_preview: Option<FilePreview>,
     file_loading: bool,
+}
+
+struct TerminalPanel {
+    chat_id: String,
+    terminal_id: Option<String>,
+    title: String,
+    screen: TerminalScreen,
+    loading: bool,
+    closed: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -192,6 +205,7 @@ struct XdDesktop {
     search_input: Entity<ComposerInput>,
     git_commit_input: Entity<ComposerInput>,
     repo_file_filter_input: Entity<ComposerInput>,
+    terminal_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -219,6 +233,7 @@ struct XdDesktop {
     search: Option<SearchPanel>,
     search_generation: u64,
     diff_panel: Option<DiffPanel>,
+    terminal_panel: Option<TerminalPanel>,
     diff_generation: u64,
     collapsed_diff_files: HashSet<String>,
     git_commit_message: String,
@@ -238,24 +253,28 @@ impl XdDesktop {
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.composer_changed(text.clone(), cx),
             ComposerEvent::Submit => this.send_composer(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let queue_edit_input = cx.new(|cx| ComposerInput::new(cx, "Edit queued message…"));
         cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_queue_edit(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let sidebar_edit_input = cx.new(|cx| ComposerInput::new(cx, "Name…"));
         cx.subscribe(&sidebar_edit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.sidebar_edit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_sidebar_edit(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Workspace name…"));
         cx.subscribe(&workspace_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_create_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let workspace_repo_input =
@@ -263,6 +282,7 @@ impl XdDesktop {
         cx.subscribe(&workspace_repo_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_repo_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let workspace_clone_input =
@@ -270,12 +290,14 @@ impl XdDesktop {
         cx.subscribe(&workspace_clone_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_clone_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let chat_create_input = cx.new(|cx| ComposerInput::new(cx, "Chat title…"));
         cx.subscribe(&chat_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.chat_create_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_chat_create(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let workspace_context_input =
@@ -283,6 +305,7 @@ impl XdDesktop {
         cx.subscribe(&workspace_context_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_context_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_context(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let workspace_workdir_input =
@@ -312,6 +335,7 @@ impl XdDesktop {
         cx.subscribe(&git_commit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.git_commit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.commit_changes(cx),
+            ComposerEvent::Bytes(_) => {}
         })
         .detach();
         let repo_file_filter_input = cx.new(|cx| ComposerInput::new(cx, "Filter files…"));
@@ -319,6 +343,13 @@ impl XdDesktop {
             if let ComposerEvent::Changed(text) = event {
                 this.repo_file_filter = text.clone();
                 cx.notify();
+            }
+        })
+        .detach();
+        let terminal_input = cx.new(ComposerInput::terminal);
+        cx.subscribe(&terminal_input, |this, _, event, cx| {
+            if let ComposerEvent::Bytes(bytes) = event {
+                this.send_terminal_input(bytes, cx);
             }
         })
         .detach();
@@ -347,6 +378,7 @@ impl XdDesktop {
             search_input,
             git_commit_input,
             repo_file_filter_input,
+            terminal_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -374,6 +406,7 @@ impl XdDesktop {
             search: None,
             search_generation: 0,
             diff_panel: None,
+            terminal_panel: None,
             diff_generation: 0,
             collapsed_diff_files: HashSet::new(),
             git_commit_message: String::new(),
@@ -449,6 +482,10 @@ impl XdDesktop {
                     diff.action = None;
                     diff.file_loading = false;
                 }
+                if let Some(panel) = &mut self.terminal_panel {
+                    panel.loading = false;
+                    panel.error = Some("Terminal disconnected.".into());
+                }
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -482,6 +519,11 @@ impl XdDesktop {
                     | RequestKind::RepositoryFile { .. }
                     | RequestKind::GitCommit { .. }
                     | RequestKind::GitPush { .. }
+                    | RequestKind::TerminalOpen { .. }
+                    | RequestKind::TerminalList { .. }
+                    | RequestKind::TerminalInput { .. }
+                    | RequestKind::TerminalResize { .. }
+                    | RequestKind::TerminalKill { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -610,6 +652,36 @@ impl XdDesktop {
                     if let Some(diff) = &mut self.diff_panel {
                         diff.action = None;
                         diff.action_error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::TerminalOpen { chat_id } | RequestKind::TerminalList { chat_id }
+                    if self
+                        .terminal_panel
+                        .as_ref()
+                        .is_some_and(|panel| &panel.chat_id == chat_id) =>
+                {
+                    if let Some(panel) = &mut self.terminal_panel {
+                        panel.loading = false;
+                        panel.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::TerminalInput { terminal_id }
+                | RequestKind::TerminalResize { terminal_id }
+                | RequestKind::TerminalKill { terminal_id }
+                    if self
+                        .terminal_panel
+                        .as_ref()
+                        .and_then(|panel| panel.terminal_id.as_ref())
+                        == Some(terminal_id) =>
+                {
+                    if let Some(panel) = &mut self.terminal_panel {
+                        panel.error = value
                             .get("error")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
@@ -1225,6 +1297,41 @@ impl XdDesktop {
                     self.attachments_dirty = false;
                 }
             }
+            RequestKind::TerminalOpen { chat_id }
+                if self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.chat_id == chat_id) =>
+            {
+                if let Some(panel) = &mut self.terminal_panel {
+                    panel.terminal_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                    panel.loading = true;
+                    panel.closed = false;
+                }
+                if let Some(daemon) = &self.daemon
+                    && let Err(error) = daemon.terminal_list(&chat_id)
+                    && let Some(panel) = &mut self.terminal_panel
+                {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
+            RequestKind::TerminalList { chat_id }
+                if self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.chat_id == chat_id) =>
+            {
+                self.apply_terminal_list(&value);
+            }
+            RequestKind::TerminalInput { .. } | RequestKind::TerminalResize { .. } => {}
+            RequestKind::TerminalKill { terminal_id } => {
+                if let Some(panel) = &mut self.terminal_panel
+                    && panel.terminal_id.as_deref() == Some(terminal_id.as_str())
+                {
+                    panel.closed = true;
+                }
+            }
             _ => {}
         }
     }
@@ -1251,6 +1358,47 @@ impl XdDesktop {
             self.request_tree();
         }
         match name {
+            "terminal-opened" if self.event_is_active(&body) => {
+                if let Some(panel) = &mut self.terminal_panel {
+                    panel.terminal_id = body
+                        .get("terminal")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    panel.title = body
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Terminal")
+                        .to_owned();
+                    panel.closed = false;
+                }
+            }
+            "terminal-output" if self.event_is_active(&body) => {
+                if let Some(panel) = &mut self.terminal_panel
+                    && panel.terminal_id.as_deref() == body.get("terminal").and_then(Value::as_str)
+                    && let Some(data) = body.get("data").and_then(Value::as_str)
+                    && let Ok(data) = STANDARD.decode(data)
+                {
+                    panel.screen.feed(&data);
+                }
+            }
+            "terminal-resized" if self.event_is_active(&body) => {
+                if let Some(panel) = &mut self.terminal_panel
+                    && panel.terminal_id.as_deref() == body.get("terminal").and_then(Value::as_str)
+                {
+                    let columns =
+                        body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
+                    let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
+                    panel.screen.resize(columns, rows);
+                }
+            }
+            "terminal-closed" if self.event_is_active(&body) => {
+                if let Some(panel) = &mut self.terminal_panel
+                    && panel.terminal_id.as_deref() == body.get("terminal").and_then(Value::as_str)
+                {
+                    panel.closed = true;
+                    panel.loading = false;
+                }
+            }
             "tree" => self.request_tree(),
             "changed" if self.event_is_active(&body) => {
                 if let Some(chat_id) = self.model.selected_chat.clone() {
@@ -1834,8 +1982,145 @@ impl XdDesktop {
             cx.notify();
             return;
         }
+        self.terminal_panel = None;
         self.diff_panel = Some(DiffPanel::default());
         self.refresh_diff(cx);
+    }
+
+    fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        if self.terminal_panel.is_some() {
+            self.terminal_panel = None;
+            cx.notify();
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.diff_generation = self.diff_generation.saturating_add(1);
+        self.diff_panel = None;
+        self.terminal_panel = Some(TerminalPanel {
+            chat_id: chat_id.clone(),
+            terminal_id: None,
+            title: "Terminal".into(),
+            screen: TerminalScreen::default(),
+            loading: true,
+            closed: false,
+            error: None,
+        });
+        if let Some(daemon) = &self.daemon {
+            if let Err(error) = daemon.terminal_open(&chat_id, 68, 32)
+                && let Some(panel) = &mut self.terminal_panel
+            {
+                panel.loading = false;
+                panel.error = Some(error);
+            }
+        } else if let Some(panel) = &mut self.terminal_panel {
+            panel.loading = false;
+            panel.error = Some("xd-dev is not connected to a daemon.".into());
+        }
+        cx.notify();
+    }
+
+    fn send_terminal_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let Some(terminal_id) = self
+            .terminal_panel
+            .as_ref()
+            .and_then(|panel| panel.terminal_id.clone())
+        else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.terminal_input(&terminal_id, bytes)
+            && let Some(panel) = &mut self.terminal_panel
+        {
+            panel.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn kill_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal_id) = self
+            .terminal_panel
+            .as_ref()
+            .and_then(|panel| panel.terminal_id.clone())
+        else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.terminal_kill(&terminal_id)
+            && let Some(panel) = &mut self.terminal_panel
+        {
+            panel.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn restart_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.terminal_panel else {
+            return;
+        };
+        panel.terminal_id = None;
+        panel.screen = TerminalScreen::new(68, 32);
+        panel.loading = true;
+        panel.closed = false;
+        panel.error = None;
+        let chat_id = panel.chat_id.clone();
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.terminal_open(&chat_id, 68, 32)
+            && let Some(panel) = &mut self.terminal_panel
+        {
+            panel.loading = false;
+            panel.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn apply_terminal_list(&mut self, value: &Value) {
+        let Some(panel) = &mut self.terminal_panel else {
+            return;
+        };
+        panel.loading = false;
+        let Some(terminal) = value
+            .get("terminals")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("id").and_then(Value::as_str) == panel.terminal_id.as_deref()
+                })
+            })
+        else {
+            panel.closed = true;
+            return;
+        };
+        panel.title = terminal
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Terminal")
+            .to_owned();
+        panel.screen = TerminalScreen::new(
+            terminal
+                .get("columns")
+                .and_then(Value::as_u64)
+                .unwrap_or(120) as usize,
+            terminal.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize,
+        );
+        if let Some(replay) = terminal.get("replay").and_then(Value::as_array) {
+            for frame in replay {
+                if let Some(data) = frame
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .and_then(|data| STANDARD.decode(data).ok())
+                {
+                    panel.screen.feed(&data);
+                } else if let (Some(columns), Some(rows)) = (
+                    frame.get("columns").and_then(Value::as_u64),
+                    frame.get("rows").and_then(Value::as_u64),
+                ) {
+                    panel.screen.resize(columns as usize, rows as usize);
+                }
+            }
+        }
+        panel.closed = false;
     }
 
     fn set_diff_mode(&mut self, branch: bool, cx: &mut Context<Self>) {
@@ -2399,6 +2684,7 @@ impl XdDesktop {
         self.model.select_chat(chat_id.clone());
         self.pending_speech = None;
         self.speech_output.stop();
+        self.terminal_panel = None;
         self.set_composer_text(String::new(), cx);
         self.draft_dirty = false;
         self.attachments_dirty = false;
@@ -3104,6 +3390,7 @@ impl Render for XdDesktop {
         let working = self.model.working;
         let selected = self.model.selected_summary().cloned();
         let diff_open = self.diff_panel.is_some();
+        let terminal_open = self.terminal_panel.is_some();
         let can_open_diff = selected.is_some();
         let new_worktree = self.model.new_worktree;
         let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
@@ -4545,6 +4832,32 @@ impl Render for XdDesktop {
                     )
                     .child(
                         div()
+                            .id("toggle-terminal")
+                            .ml_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(if terminal_open {
+                                0x26354d
+                            } else {
+                                SURFACE_HIGH
+                            }))
+                            .text_xs()
+                            .text_color(rgb(if can_open_diff { TEXT } else { MUTED }))
+                            .when(can_open_diff, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_open_diff {
+                                    this.toggle_terminal_panel(cx);
+                                }
+                            }))
+                            .child("Terminal"),
+                    )
+                    .child(
+                        div()
                             .id("open-search")
                             .px_3()
                             .py_2()
@@ -5920,6 +6233,146 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let terminal_input = self.terminal_input.clone();
+        let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
+        let terminal_pane = self.terminal_panel.as_ref().map(|panel| {
+            let output = panel.screen.text();
+            let active = panel.terminal_id.is_some() && !panel.closed && !panel.loading;
+            div()
+                .w(px(560.0))
+                .h_full()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(0x0d0f13))
+                .child(
+                    div()
+                        .h(px(50.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(rgb(BORDER))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(rgb(TEXT))
+                                .child(panel.title.clone()),
+                        )
+                        .when(panel.closed, |header| {
+                            header.child(
+                                div()
+                                    .id("restart-terminal")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(accent))
+                                    .text_xs()
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.restart_terminal(cx)),
+                                    )
+                                    .child("Restart"),
+                            )
+                        })
+                        .when(active, |header| {
+                            header.child(
+                                div()
+                                    .id("kill-terminal")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(0xf1b3ba))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x3c292d)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx)))
+                                    .child("Kill"),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("close-terminal")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.toggle_terminal_panel(cx)),
+                                )
+                                .child("×"),
+                        ),
+                )
+                .when(panel.loading, |pane| {
+                    pane.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(rgb(0xaec4ff))
+                            .child("Opening terminal…"),
+                    )
+                })
+                .when_some(panel.error.clone(), |pane, error| {
+                    pane.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(rgb(0xf0a8b3))
+                            .child(error),
+                    )
+                })
+                .child(
+                    div()
+                        .id("terminal-output")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .font_family("monospace")
+                        .text_size(px(13.0))
+                        .line_height(px(19.0))
+                        .text_color(rgb(0xd8dee9))
+                        .child(output),
+                )
+                .child(
+                    div()
+                        .id("terminal-input")
+                        .track_focus(&terminal_focus)
+                        .h(px(40.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .border_t_1()
+                        .border_color(rgb(if terminal_focus.is_focused(window) {
+                            accent
+                        } else {
+                            BORDER
+                        }))
+                        .bg(rgb(0x11141a))
+                        .when(active, |input| {
+                            input
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus = this.terminal_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                        })
+                        .child(terminal_input.clone()),
+                )
+                .into_any_element()
+        });
+
         let settings_overlay = self.settings_open.then(|| {
             let mut accent_buttons = Vec::new();
             for (index, preset) in AccentPreset::ALL.into_iter().enumerate() {
@@ -6273,6 +6726,7 @@ impl Render for XdDesktop {
                     .child(composer),
             )
             .when_some(diff_pane, |root, pane| root.child(pane))
+            .when_some(terminal_pane, |root, pane| root.child(pane))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
     }
@@ -6543,6 +6997,20 @@ fn main() {
                 ShowCharacterPalette,
                 Some("ComposerInput"),
             ),
+            KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
+            KeyBinding::new("delete", Delete, Some("TerminalInput")),
+            KeyBinding::new("left", Left, Some("TerminalInput")),
+            KeyBinding::new("right", Right, Some("TerminalInput")),
+            KeyBinding::new("up", Up, Some("TerminalInput")),
+            KeyBinding::new("down", Down, Some("TerminalInput")),
+            KeyBinding::new("home", Home, Some("TerminalInput")),
+            KeyBinding::new("end", End, Some("TerminalInput")),
+            KeyBinding::new("enter", Submit, Some("TerminalInput")),
+            KeyBinding::new("tab", Tab, Some("TerminalInput")),
+            KeyBinding::new("escape", Escape, Some("TerminalInput")),
+            KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
+            KeyBinding::new("ctrl-v", Paste, Some("TerminalInput")),
+            KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
         ]);
         let bounds = Bounds::centered(None, size(px(1180.0), px(780.0)), cx);
         cx.open_window(

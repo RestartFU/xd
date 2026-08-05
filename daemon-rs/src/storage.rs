@@ -418,6 +418,11 @@ impl StateStore {
         Ok(response)
     }
 
+    pub fn terminal_workdir(&self, chat_id: &str) -> Result<PathBuf, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        resolve_chat_workdir(&database, &self.workspace_root, chat_id).map(PathBuf::from)
+    }
+
     pub fn shortcuts(&self, request: &Value) -> Result<Value, StorageError> {
         let folder_id = if request.get("folder").is_some() {
             Some(required_string(
