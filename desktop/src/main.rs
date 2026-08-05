@@ -66,8 +66,8 @@ struct WorkspaceDefaults {
     backend: Option<String>,
     model: Option<String>,
     effective_backend: String,
-    workdir: Option<String>,
-    repo: Option<String>,
+    workdir: String,
+    repo: String,
     loading: bool,
     submitting: bool,
 }
@@ -84,6 +84,8 @@ struct XdDesktop {
     workspace_repo_input: Entity<ComposerInput>,
     chat_create_input: Entity<ComposerInput>,
     workspace_context_input: Entity<ComposerInput>,
+    workspace_workdir_input: Entity<ComposerInput>,
+    workspace_repo_default_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -159,6 +161,22 @@ impl XdDesktop {
             ComposerEvent::Submit => this.save_workspace_context(cx),
         })
         .detach();
+        let workspace_workdir_input =
+            cx.new(|cx| ComposerInput::new(cx, "Working directory (inherit when empty)…"));
+        cx.subscribe(&workspace_workdir_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.workspace_workdir_changed(text.clone(), cx);
+            }
+        })
+        .detach();
+        let workspace_repo_default_input =
+            cx.new(|cx| ComposerInput::new(cx, "Repository path (inherit when empty)…"));
+        cx.subscribe(&workspace_repo_default_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.workspace_repo_default_changed(text.clone(), cx);
+            }
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -174,6 +192,8 @@ impl XdDesktop {
             workspace_repo_input,
             chat_create_input,
             workspace_context_input,
+            workspace_workdir_input,
+            workspace_repo_default_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -495,6 +515,16 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|defaults| defaults.folder_id == folder_id)
                 {
+                    let workdir = value
+                        .get("workdir")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let repo = value
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
                     self.workspace_defaults = Some(WorkspaceDefaults {
                         folder_id,
                         backend: value
@@ -510,14 +540,15 @@ impl XdDesktop {
                             .and_then(Value::as_str)
                             .unwrap_or("claude")
                             .to_owned(),
-                        workdir: value
-                            .get("workdir")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        repo: value.get("repo").and_then(Value::as_str).map(str::to_owned),
+                        workdir: workdir.clone(),
+                        repo: repo.clone(),
                         loading: false,
                         submitting: false,
                     });
+                    self.workspace_workdir_input
+                        .update(cx, |input, cx| input.set_text(workdir, cx));
+                    self.workspace_repo_default_input
+                        .update(cx, |input, cx| input.set_text(repo, cx));
                 }
             }
             RequestKind::SetFolderSettings { folder_id } => {
@@ -994,21 +1025,28 @@ impl XdDesktop {
     }
 
     fn begin_workspace_defaults(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        let Some(daemon) = self.daemon.as_ref() else {
+            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            cx.notify();
+            return;
+        };
         self.workspace_defaults = Some(WorkspaceDefaults {
             folder_id: folder_id.clone(),
             backend: None,
             model: None,
             effective_backend: "claude".into(),
-            workdir: None,
-            repo: None,
+            workdir: String::new(),
+            repo: String::new(),
             loading: true,
             submitting: false,
         });
-        if let Some(daemon) = &self.daemon {
-            if let Err(error) = daemon.folder_settings(&folder_id) {
-                self.workspace_defaults = None;
-                self.model.connection_error = Some(error);
-            }
+        self.workspace_workdir_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.workspace_repo_default_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        if let Err(error) = daemon.folder_settings(&folder_id) {
+            self.workspace_defaults = None;
+            self.model.connection_error = Some(error);
         }
         cx.notify();
     }
@@ -1034,6 +1072,26 @@ impl XdDesktop {
         }
     }
 
+    fn workspace_workdir_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(defaults) = &mut self.workspace_defaults
+            && !defaults.loading
+            && !defaults.submitting
+        {
+            defaults.workdir = text;
+            cx.notify();
+        }
+    }
+
+    fn workspace_repo_default_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(defaults) = &mut self.workspace_defaults
+            && !defaults.loading
+            && !defaults.submitting
+        {
+            defaults.repo = text;
+            cx.notify();
+        }
+    }
+
     fn save_workspace_defaults(&mut self, cx: &mut Context<Self>) {
         let Some(defaults) = self.workspace_defaults.clone() else {
             return;
@@ -1050,8 +1108,8 @@ impl XdDesktop {
                     &defaults.folder_id,
                     defaults.backend.as_deref(),
                     defaults.model.as_deref(),
-                    defaults.workdir.as_deref(),
-                    defaults.repo.as_deref(),
+                    optional_trimmed(&defaults.workdir),
+                    optional_trimmed(&defaults.repo),
                 )
             });
         match result {
@@ -2158,6 +2216,11 @@ impl Render for XdDesktop {
         let workspace_context_submitting = self.workspace_context_submitting;
         let workspace_context_input = self.workspace_context_input.clone();
         let workspace_context_focus = self.workspace_context_input.read(cx).focus_handle(cx);
+        let workspace_workdir_input = self.workspace_workdir_input.clone();
+        let workspace_workdir_focus = self.workspace_workdir_input.read(cx).focus_handle(cx);
+        let workspace_repo_default_input = self.workspace_repo_default_input.clone();
+        let workspace_repo_default_focus =
+            self.workspace_repo_default_input.read(cx).focus_handle(cx);
         let can_save_context = workspace_context_folder.is_some()
             && !workspace_context_loading
             && !workspace_context_submitting
@@ -2727,6 +2790,71 @@ impl Render for XdDesktop {
                                 .child(div().flex().flex_wrap().gap_1().children(backend_buttons))
                                 .child("Model")
                                 .child(div().flex().flex_wrap().gap_1().children(model_buttons))
+                                .child("Working directory")
+                                .child(
+                                    div()
+                                        .id(("workspace-workdir-input", folder_row_index))
+                                        .track_focus(&workspace_workdir_focus)
+                                        .h(px(32.0))
+                                        .w_full()
+                                        .min_w_0()
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(
+                                            if workspace_workdir_focus.is_focused(window) {
+                                                ACCENT
+                                            } else {
+                                                BORDER
+                                            },
+                                        ))
+                                        .bg(rgb(BG))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus = this
+                                                .workspace_workdir_input
+                                                .read(cx)
+                                                .focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(workspace_workdir_input.clone()),
+                                )
+                                .child("Repository")
+                                .child(
+                                    div()
+                                        .id(("workspace-repo-default-input", folder_row_index))
+                                        .track_focus(&workspace_repo_default_focus)
+                                        .h(px(32.0))
+                                        .w_full()
+                                        .min_w_0()
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(
+                                            if workspace_repo_default_focus.is_focused(window) {
+                                                ACCENT
+                                            } else {
+                                                BORDER
+                                            },
+                                        ))
+                                        .bg(rgb(BG))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus = this
+                                                .workspace_repo_default_input
+                                                .read(cx)
+                                                .focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(workspace_repo_default_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(MUTED))
+                                        .child("Leave a path empty to inherit it."),
+                                )
                         })
                         .child(
                             div()
