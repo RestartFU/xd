@@ -36,20 +36,21 @@ jobs:
           test -f gpui-dist/gpui-tests-passed
           test -x gpui-dist/xd-desktop
 
-          install -d package/xd-gpui-dev
-          install -m0755 gpui-dist/xd-desktop package/xd-gpui-dev/xd-gpui
-          install -m0644 desktop/README.md package/xd-gpui-dev/README.md
+          install -d package/xd-dev
+          install -m0755 gpui-dist/xd-desktop package/xd-dev/xd-dev
+          install -m0644 desktop/README.md package/xd-dev/README.md
 
-          tar -C package -czf xd-gpui-dev-linux-x86_64.tar.gz xd-gpui-dev
-          sha256sum xd-gpui-dev-linux-x86_64.tar.gz \
-            > xd-gpui-dev-linux-x86_64.tar.gz.sha256
+          tar -C package -czf xd-dev-linux-x86_64.tar.gz xd-dev
+          sha256sum xd-dev-linux-x86_64.tar.gz \
+            > xd-dev-linux-x86_64.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: gpui-linux
           path: |
-            xd-gpui-dev-linux-x86_64.tar.gz
-            xd-gpui-dev-linux-x86_64.tar.gz.sha256
+            xd-dev-linux-x86_64.tar.gz
+            xd-dev-linux-x86_64.tar.gz.sha256
+            scripts/install-dev.sh
 
   publish:
     needs: linux
@@ -80,8 +81,14 @@ jobs:
           Run it:
 
           \`\`\`sh
-          tar -xzf xd-gpui-dev-linux-x86_64.tar.gz
-          ./xd-gpui-dev/xd-gpui
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/dev/install-dev.sh | sh
+          \`\`\`
+
+          Or unpack it without installing:
+
+          \`\`\`sh
+          tar -xzf xd-dev-linux-x86_64.tar.gz
+          ./xd-dev/xd-dev
           \`\`\`
           EOF
           )
@@ -92,5 +99,6 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "GPUI Dev $(date -u +%Y-%m-%d)" \
             --notes "$notes" \
-            xd-gpui-dev-linux-x86_64.tar.gz \
-            xd-gpui-dev-linux-x86_64.tar.gz.sha256
+            xd-dev-linux-x86_64.tar.gz \
+            xd-dev-linux-x86_64.tar.gz.sha256 \
+            scripts/install-dev.sh

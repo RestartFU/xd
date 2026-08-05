@@ -26,3 +26,9 @@ Every push to `feat/gpui-desktop` replaces the rolling `dev` GitHub
 prerelease with the tested Linux x86_64 prototype. This channel is deliberately
 separate from the production `nightly` release while daemon connectivity and
 feature parity are still in progress.
+
+Install it beside `xd` and `xd-nightly` as `xd-dev`:
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install-dev.sh | sh
+```
