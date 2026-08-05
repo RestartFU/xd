@@ -270,6 +270,7 @@ COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passe
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 COPY --from=agent-binaries /agents/codex-package /codex-package
 COPY --from=agent-binaries /agents/claude-bin /claude
+COPY --from=voice-build /voice /voice
 
 # --- bundle runtime closure ------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS bundle-tools

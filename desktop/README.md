@@ -20,6 +20,7 @@ Current milestone:
 - global/workspace prompt shortcuts with send-or-queue buttons and inline management;
 - daemon-persisted assistant, model, effort, access, and plan controls;
 - Rust-owned Codex/Claude account status, sign-in, cancellation, authorization-code input, and sign-out;
+- daemon-owned Whisper base.en download and bounded streaming transcription with live partial text;
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;
@@ -42,8 +43,8 @@ prerelease with the tested Linux x86_64 prototype. This channel is deliberately
 separate from the production `nightly` release while daemon connectivity and
 feature parity are still in progress.
 
-The archive carries `xd-daemon-dev`, a pinned Codex package, and the pinned
-Claude Code executable. The Rust daemon
+The archive carries `xd-daemon-dev`, a pinned Codex package, the pinned
+Claude Code executable, and a private pinned whisper.cpp runtime. The Rust daemon
 owns persisted workspaces, chats, messages, drafts, options, shortcuts, queue
 mutations, and Codex/Claude turn execution. The GPUI dev build does not require an
 installed Crystal daemon.

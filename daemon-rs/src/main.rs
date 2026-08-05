@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use xd_daemon::{Engine, LocalServer, StateStore};
 
@@ -13,8 +17,14 @@ fn main() -> ExitCode {
         Ok(options) => match StateStore::open(&options.database, &options.workspaces)
             .map_err(|error| error.to_string())
             .and_then(|store| {
-                LocalServer::bind_with_engine(&options.socket, Engine::with_store(store))
-                    .map_err(|error| error.to_string())
+                LocalServer::bind_with_engine(
+                    &options.socket,
+                    Engine::with_store_and_data(
+                        store,
+                        options.database.parent().map(Path::to_path_buf),
+                    ),
+                )
+                .map_err(|error| error.to_string())
             })
             .and_then(|server| server.run().map_err(|error| error.to_string()))
         {

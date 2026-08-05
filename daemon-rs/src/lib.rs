@@ -23,6 +23,7 @@ mod auth;
 mod runtime;
 mod storage;
 mod terminal;
+mod voice;
 mod workflow;
 
 use auth::AuthManager;
@@ -30,6 +31,7 @@ pub use runtime::TurnRuntime;
 use storage::clone_repository;
 pub use storage::{SendDisposition, StateStore, StorageError};
 use terminal::TerminalManager;
+use voice::VoiceService;
 use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
@@ -73,6 +75,7 @@ pub struct Engine {
     auth: AuthManager,
     workflows: WorkflowStatuses,
     terminals: TerminalManager,
+    voice: VoiceService,
 }
 
 #[derive(Default)]
@@ -95,12 +98,17 @@ impl Engine {
             auth: AuthManager::new(events.clone()),
             workflows: WorkflowStatuses::new(),
             terminals: TerminalManager::new(events.clone()),
+            voice: VoiceService::new(events.clone(), None),
             events,
             runtime: None,
         }
     }
 
     pub fn with_store(store: StateStore) -> Self {
+        Self::with_store_and_data(store, None)
+    }
+
+    pub fn with_store_and_data(store: StateStore, data_directory: Option<PathBuf>) -> Self {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::default());
         let auth = AuthManager::new(events.clone());
@@ -110,6 +118,7 @@ impl Engine {
             auth,
             workflows: WorkflowStatuses::new(),
             terminals: TerminalManager::new(events.clone()),
+            voice: VoiceService::new(events.clone(), data_directory),
             events,
         };
         engine.auth.refresh_all();
@@ -117,6 +126,10 @@ impl Engine {
     }
 
     pub fn dispatch(&self, request: Value) -> Value {
+        self.dispatch_for(0, request)
+    }
+
+    fn dispatch_for(&self, owner: u64, request: Value) -> Value {
         let request_id = request.get(REQUEST_ID).cloned();
         let mut reply = match request.get("op").and_then(Value::as_str) {
             Some("ping") => json!({"ok": true}),
@@ -192,6 +205,33 @@ impl Engine {
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
             Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
+            Some("voice-model") => self.voice_request(&request, "voice-model", || {
+                self.voice.model_available(&request)
+            }),
+            Some("voice-model-download") => {
+                self.voice_request(&request, "voice-model-download", || {
+                    self.voice.download(owner, &request)
+                })
+            }
+            Some("voice-stream-start") => {
+                self.voice_request(&request, "voice-stream-start", || {
+                    self.voice.start_stream(owner, &request)
+                })
+            }
+            Some("voice-stream-chunk") => {
+                self.voice_request(&request, "voice-stream-chunk", || {
+                    self.voice.append_stream(owner, &request)
+                })
+            }
+            Some("voice-stream-finish") => {
+                self.voice_request(&request, "voice-stream-finish", || {
+                    self.voice.finish_stream(owner, &request)
+                })
+            }
+            Some("voice-transcribe") => self.voice_request(&request, "voice-transcribe", || {
+                self.voice.transcribe(owner, &request)
+            }),
+            Some("voice-cancel") => self.voice.cancel(owner, &request),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -240,6 +280,26 @@ impl Engine {
         operation(&self.auth, provider, request)
             .map(|()| json!({"ok": true}))
             .unwrap_or_else(error_reply)
+    }
+
+    fn voice_request(
+        &self,
+        request: &Value,
+        operation: &str,
+        run: impl FnOnce() -> Value,
+    ) -> Value {
+        let chat_id =
+            match required_string(request, "chat", &format!("{operation} needs a chat id.")) {
+                Ok(chat_id) => chat_id,
+                Err(error) => return error_reply(error),
+            };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.chat(chat_id) {
+            Ok(_) => run(),
+            Err(error) => error_reply(error),
+        }
     }
 
     fn workflow_status(&self, request: &Value) -> Value {
@@ -429,6 +489,7 @@ impl Engine {
     }
 
     fn unsubscribe(&self, id: u64) {
+        self.voice.cancel_owner(id);
         self.events.unsubscribe(id);
     }
 }
@@ -466,6 +527,28 @@ impl EventBus {
                 }
             },
         );
+    }
+
+    fn publish_to(&self, subscriber_id: u64, mut event: Value) {
+        let id = self.next_event.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(event) = event.as_object_mut() {
+            event.insert("id".into(), id.into());
+        }
+        let Ok(mut subscribers) = self.subscribers.lock() else {
+            return;
+        };
+        let remove = subscribers
+            .get_mut(&subscriber_id)
+            .is_some_and(|subscriber| match subscriber.sender.try_send(event) {
+                Ok(()) => false,
+                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                    let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
+                    true
+                }
+            });
+        if remove {
+            subscribers.remove(&subscriber_id);
+        }
     }
 }
 
@@ -554,7 +637,7 @@ fn serve_connection_with_engine(stream: UnixStream, engine: Arc<Engine>) -> std:
     let writer = thread::Builder::new()
         .name("xd-rust-local-writer".into())
         .spawn(move || write_frames(writer_stream, frames))?;
-    let result = read_requests(&mut reader, &engine, &outbound);
+    let result = read_requests(&mut reader, &engine, subscriber, &outbound);
     engine.unsubscribe(subscriber);
     drop(outbound);
     let writer_result = writer
@@ -566,6 +649,7 @@ fn serve_connection_with_engine(stream: UnixStream, engine: Arc<Engine>) -> std:
 fn read_requests(
     reader: &mut BufReader<UnixStream>,
     engine: &Engine,
+    subscriber: u64,
     outbound: &SyncSender<Value>,
 ) -> std::io::Result<()> {
     loop {
@@ -591,7 +675,7 @@ fn read_requests(
         }
 
         let reply = match serde_json::from_slice::<Value>(&line) {
-            Ok(request) => engine.dispatch(request),
+            Ok(request) => engine.dispatch_for(subscriber, request),
             Err(error) => json!({"ok": false, "error": format!("Invalid JSON request: {error}")}),
         };
         outbound
@@ -721,6 +805,36 @@ mod tests {
             peer.write(b"probe").unwrap_err().kind(),
             std::io::ErrorKind::BrokenPipe
         );
+    }
+
+    #[test]
+    fn targeted_events_reach_only_the_requesting_connection() {
+        let bus = EventBus::default();
+        let (first_sender, first_receiver) = sync_channel(2);
+        let (first_connection, first_peer) = UnixStream::pair().unwrap();
+        let first = bus.subscribe(first_sender, first_connection).unwrap();
+        let (second_sender, second_receiver) = sync_channel(2);
+        let (second_connection, second_peer) = UnixStream::pair().unwrap();
+        let second = bus.subscribe(second_sender, second_connection).unwrap();
+
+        bus.publish_to(second, json!({"event": "voice", "request": "recording"}));
+
+        assert_eq!(second_receiver.recv().unwrap()["request"], "recording");
+        assert!(first_receiver.try_recv().is_err());
+        bus.unsubscribe(first);
+        bus.unsubscribe(second);
+        drop((first_peer, second_peer));
+    }
+
+    #[test]
+    fn voice_operations_require_a_chat_before_starting_work() {
+        let reply = dispatch(json!({
+            "op": "voice-model",
+            "_xd_request": 19,
+        }));
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["_xd_request"], 19);
+        assert_eq!(reply["error"], "voice-model needs a chat id.");
     }
 
     #[test]
