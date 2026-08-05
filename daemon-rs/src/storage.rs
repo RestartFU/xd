@@ -20,6 +20,21 @@ const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const CODEX_MODELS: &[(&str, &str, i64)] = &[
+    ("gpt-5.6-sol", "GPT-5.6 Sol", 272_000),
+    ("gpt-5.6-luna", "GPT-5.6 Luna", 272_000),
+    ("gpt-5.6-terra", "GPT-5.6 Terra", 272_000),
+    ("gpt-5.5", "GPT-5.5", 272_000),
+    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128_000),
+];
+const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
+    ("claude-opus-5", "Claude Opus 5", 0),
+    ("claude-fable-5", "Claude Fable 5", 0),
+    ("claude-sonnet-5", "Claude Sonnet 5", 0),
+    ("claude-haiku-4-5", "Claude Haiku 4.5", 0),
+    ("claude-opus-4-8", "Claude Opus 4.8", 0),
+];
+const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -269,6 +284,165 @@ impl StateStore {
         };
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         shortcut_fields(&database, &self.workspace_root, folder_id)
+    }
+
+    pub fn agent_catalog(&self) -> Result<Value, StorageError> {
+        let backends = [
+            catalog_backend(
+                "claude",
+                "Claude Code",
+                "claude-opus-5",
+                CLAUDE_MODELS,
+                "ultracode",
+            ),
+            catalog_backend("codex", "Codex", "gpt-5.6-sol", CODEX_MODELS, "ultra"),
+        ];
+        Ok(json!({"ok": true, "backends": backends}))
+    }
+
+    pub fn set_option(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let message = "set-option needs a chat and an option.";
+        let chat_id = required_string(request, "chat", message)?;
+        let option = required_string(request, "option", message)?;
+        let value = optional_string(request, "value")?;
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT backend, model, effort, fast, claude_mode FROM chats WHERE id = ?",
+                [chat_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let now = now_seconds();
+        let changed = match option {
+            "model" if request.get("backend").is_some() => {
+                let backend = required_string(request, "backend", "A backend value is required.")?;
+                let model = value.filter(|model| !model.is_empty()).ok_or_else(|| {
+                    StorageError::InvalidRequest("A model value is required.".into())
+                })?;
+                validate_model(backend, model)?;
+                let effort = previous
+                    .2
+                    .as_deref()
+                    .filter(|effort| effort_supported(backend, effort));
+                let changed = transaction.execute(
+                    "UPDATE chats SET backend = ?, model = ?, effort = ?, \
+                     fast = CASE WHEN ? = 'codex' THEN fast ELSE 0 END, \
+                     claude_mode = CASE WHEN ? = 'codex' THEN claude_mode ELSE 0 END, \
+                     updated_at = ? WHERE id = ?",
+                    params![backend, model, effort, backend, backend, now, chat_id],
+                )?;
+                if previous.0 != backend || previous.1.as_deref() != Some(model) {
+                    transaction.execute(
+                        "INSERT INTO messages (chat_id, role, content, created_at) \
+                         VALUES (?, 'event', ?, ?)",
+                        params![
+                            chat_id,
+                            format!("Switched to {}", model_label(backend, model)),
+                            now
+                        ],
+                    )?;
+                }
+                changed
+            }
+            "model" => transaction.execute(
+                "UPDATE chats SET model = ?, updated_at = ? WHERE id = ?",
+                params![value, now, chat_id],
+            )?,
+            "effort" => {
+                if let Some(effort) = value {
+                    if !effort_supported(&previous.0, effort) || (previous.4 && effort == "ultra") {
+                        return Err(StorageError::InvalidRequest(
+                            "That reasoning effort is not available for this assistant.".into(),
+                        ));
+                    }
+                }
+                transaction.execute(
+                    "UPDATE chats SET effort = ?, updated_at = ? WHERE id = ?",
+                    params![value, now, chat_id],
+                )?
+            }
+            "access" => transaction.execute(
+                "UPDATE chats SET access = ?, updated_at = ? WHERE id = ?",
+                params![value, now, chat_id],
+            )?,
+            "plan" => {
+                update_boolean_option(&transaction, chat_id, "plan", value == Some("true"), now)?
+            }
+            "fast" => {
+                let enabled = value == Some("true");
+                if enabled && previous.0 != "codex" {
+                    return Err(StorageError::InvalidRequest(
+                        "Fast mode is only available for Codex.".into(),
+                    ));
+                }
+                update_boolean_option(&transaction, chat_id, "fast", enabled, now)?
+            }
+            "claude-mode" => {
+                let enabled = value == Some("true");
+                if enabled && previous.0 != "codex" {
+                    return Err(StorageError::InvalidRequest(
+                        "Claude mode is only available for Codex.".into(),
+                    ));
+                }
+                let effort = if enabled && previous.2.as_deref() == Some("ultra") {
+                    Some("max")
+                } else {
+                    previous.2.as_deref()
+                };
+                transaction.execute(
+                    "UPDATE chats SET claude_mode = ?, effort = ?, updated_at = ? WHERE id = ?",
+                    params![enabled, effort, now, chat_id],
+                )?
+            }
+            "backend" => {
+                let backend = value.filter(|backend| !backend.is_empty()).ok_or_else(|| {
+                    StorageError::InvalidRequest("A backend value is required.".into())
+                })?;
+                validate_backend(backend)?;
+                transaction.execute(
+                    "UPDATE chats SET backend = ?, \
+                     fast = CASE WHEN ? = 'codex' THEN fast ELSE 0 END, \
+                     claude_mode = CASE WHEN ? = 'codex' THEN claude_mode ELSE 0 END, \
+                     updated_at = ? WHERE id = ?",
+                    params![backend, backend, backend, now, chat_id],
+                )?
+            }
+            "new-worktree" => transaction.execute(
+                "UPDATE chats SET new_worktree = ?, updated_at = ? WHERE id = ? \
+                 AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+                params![value == Some("true"), now, chat_id, chat_id],
+            )?,
+            "workspace" => {
+                return Err(StorageError::InvalidRequest(
+                    "Workspace selection is not implemented by the Rust daemon yet.".into(),
+                ));
+            }
+            _ => return Err(StorageError::InvalidRequest("No such option.".into())),
+        };
+        if changed != 1 {
+            if option == "new-worktree" {
+                return Err(StorageError::InvalidRequest(
+                    "The workspace can only be changed before the first message.".into(),
+                ));
+            }
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        transaction.commit()?;
+        Ok((
+            json!({"ok": true}),
+            json!({"event": "changed", "chat": chat_id}),
+        ))
     }
 
     pub fn set_shortcuts(&self, request: &Value) -> Result<(Value, Value), StorageError> {
@@ -902,6 +1076,83 @@ fn clean_shortcuts(value: &Value) -> Result<Vec<String>, StorageError> {
     Ok(cleaned)
 }
 
+fn catalog_backend(
+    id: &str,
+    name: &str,
+    default_model: &str,
+    models: &[(&str, &str, i64)],
+    extra_effort: &str,
+) -> Value {
+    let models = models
+        .iter()
+        .map(|(id, name, context_window)| {
+            json!({"id": id, "name": name, "context_window": context_window})
+        })
+        .collect::<Vec<_>>();
+    let mut efforts = BASE_EFFORTS.to_vec();
+    efforts.push(extra_effort);
+    json!({
+        "id": id,
+        "name": name,
+        "default_model": default_model,
+        "models": models,
+        "efforts": efforts,
+    })
+}
+
+fn validate_backend(backend: &str) -> Result<(), StorageError> {
+    if matches!(backend, "codex" | "claude") {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidRequest("No such assistant.".into()))
+    }
+}
+
+fn validate_model(backend: &str, model: &str) -> Result<(), StorageError> {
+    validate_backend(backend)?;
+    if backend_models(backend).iter().any(|known| known.0 == model) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidRequest("No such model.".into()))
+    }
+}
+
+fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)] {
+    match backend {
+        "codex" => CODEX_MODELS,
+        "claude" => CLAUDE_MODELS,
+        _ => &[],
+    }
+}
+
+fn model_label<'a>(backend: &str, model: &'a str) -> &'a str {
+    backend_models(backend)
+        .iter()
+        .find(|known| known.0 == model)
+        .map(|known| known.1)
+        .unwrap_or(model)
+}
+
+fn effort_supported(backend: &str, effort: &str) -> bool {
+    BASE_EFFORTS.contains(&effort)
+        || (backend == "codex" && effort == "ultra")
+        || (backend == "claude" && effort == "ultracode")
+}
+
+fn update_boolean_option(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+    column: &str,
+    enabled: bool,
+    now: i64,
+) -> Result<usize, StorageError> {
+    // The column is chosen only by the closed match in set_option.
+    Ok(transaction.execute(
+        &format!("UPDATE chats SET {column} = ?, updated_at = ? WHERE id = ?"),
+        params![enabled, now, chat_id],
+    )?)
+}
+
 fn required_string<'a>(
     request: &'a Value,
     key: &str,
@@ -1418,6 +1669,94 @@ mod tests {
             store.shortcuts(&json!({})).unwrap()["global"],
             json!(["Keep"])
         );
+    }
+
+    #[test]
+    fn publishes_the_same_models_that_atomic_selection_accepts() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        for backend in store.agent_catalog().unwrap()["backends"]
+            .as_array()
+            .unwrap()
+        {
+            for model in backend["models"].as_array().unwrap() {
+                store
+                    .set_option(&json!({
+                        "chat": "chat-1",
+                        "option": "model",
+                        "backend": backend["id"],
+                        "value": model["id"],
+                    }))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn validates_and_applies_chat_options_atomically() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        store
+            .set_option(&json!({
+                "chat": "chat-1", "option": "model", "backend": "codex", "value": "gpt-5.6-sol"
+            }))
+            .unwrap();
+        store
+            .set_option(&json!({"chat": "chat-1", "option": "effort", "value": "ultra"}))
+            .unwrap();
+        store
+            .set_option(&json!({"chat": "chat-1", "option": "claude-mode", "value": "true"}))
+            .unwrap();
+        let chat = store.chat("chat-1").unwrap();
+        assert_eq!(chat["backend"], "codex");
+        assert_eq!(chat["model"], "gpt-5.6-sol");
+        assert_eq!(chat["effort"], "max");
+        store
+            .set_option(&json!({"chat": "chat-1", "option": "backend", "value": "claude"}))
+            .unwrap();
+        let chat = store.chat("chat-1").unwrap();
+        assert_eq!(chat["backend"], "claude");
+        assert_eq!(chat["fast"], false);
+        assert_eq!(chat["claude_mode"], false);
+        let events = store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(events[0]["role"], "event");
+        assert_eq!(events[0]["content"], "Switched to GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn rejects_incompatible_effort_without_partial_option_changes() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_option(&json!({
+                "chat": "chat-1", "option": "backend", "value": "claude"
+            }))
+            .unwrap();
+
+        let error = store
+            .set_option(&json!({
+                "chat": "chat-1", "option": "effort", "value": "ultra"
+            }))
+            .unwrap_err();
+        assert!(error.to_string().contains("not available"));
+        assert_eq!(store.chat("chat-1").unwrap()["effort"], "high");
     }
 
     struct Fixture {
