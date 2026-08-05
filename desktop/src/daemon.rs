@@ -31,6 +31,12 @@ pub enum RequestKind {
         folder_id: String,
         context: Option<String>,
     },
+    FolderSettings {
+        folder_id: String,
+    },
+    SetFolderSettings {
+        folder_id: String,
+    },
     NewFolder {
         name: String,
         repo: Option<String>,
@@ -295,6 +301,38 @@ impl DaemonHandle {
                 "op": "set-folder-context",
                 "folder": folder_id,
                 "context": context,
+            }),
+        )
+    }
+
+    pub fn folder_settings(&self, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::FolderSettings {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "folder-settings", "folder": folder_id}),
+        )
+    }
+
+    pub fn set_folder_settings(
+        &self,
+        folder_id: &str,
+        backend: Option<&str>,
+        model: Option<&str>,
+        workdir: Option<&str>,
+        repo: Option<&str>,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::SetFolderSettings {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({
+                "op": "set-folder-settings",
+                "folder": folder_id,
+                "backend": backend,
+                "model": model,
+                "workdir": workdir,
+                "repo": repo,
             }),
         )
     }

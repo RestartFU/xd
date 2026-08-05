@@ -60,6 +60,18 @@ struct SidebarEdit {
     submitting: bool,
 }
 
+#[derive(Clone)]
+struct WorkspaceDefaults {
+    folder_id: String,
+    backend: Option<String>,
+    model: Option<String>,
+    effective_backend: String,
+    workdir: Option<String>,
+    repo: Option<String>,
+    loading: bool,
+    submitting: bool,
+}
+
 struct XdDesktop {
     model: AppModel,
     daemon: Option<DaemonHandle>,
@@ -91,6 +103,7 @@ struct XdDesktop {
     workspace_context_text: String,
     workspace_context_loading: bool,
     workspace_context_submitting: bool,
+    workspace_defaults: Option<WorkspaceDefaults>,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -180,6 +193,7 @@ impl XdDesktop {
             workspace_context_text: String::new(),
             workspace_context_loading: false,
             workspace_context_submitting: false,
+            workspace_defaults: None,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -233,6 +247,10 @@ impl XdDesktop {
                 self.chat_create_submitting = false;
                 self.workspace_context_loading = false;
                 self.workspace_context_submitting = false;
+                if let Some(defaults) = &mut self.workspace_defaults {
+                    defaults.loading = false;
+                    defaults.submitting = false;
+                }
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -292,6 +310,26 @@ impl XdDesktop {
                     if self.workspace_context_folder.as_deref() == Some(folder_id) =>
                 {
                     self.workspace_context_submitting = false;
+                }
+                RequestKind::FolderSettings { folder_id }
+                    if self
+                        .workspace_defaults
+                        .as_ref()
+                        .is_some_and(|defaults| &defaults.folder_id == folder_id) =>
+                {
+                    if let Some(defaults) = &mut self.workspace_defaults {
+                        defaults.loading = false;
+                    }
+                }
+                RequestKind::SetFolderSettings { folder_id }
+                    if self
+                        .workspace_defaults
+                        .as_ref()
+                        .is_some_and(|defaults| &defaults.folder_id == folder_id) =>
+                {
+                    if let Some(defaults) = &mut self.workspace_defaults {
+                        defaults.submitting = false;
+                    }
                 }
                 RequestKind::EditQueue {
                     chat_id,
@@ -400,6 +438,15 @@ impl XdDesktop {
                 {
                     self.cancel_workspace_context(cx);
                 }
+                if self.workspace_defaults.as_ref().is_some_and(|defaults| {
+                    !self
+                        .model
+                        .folders
+                        .iter()
+                        .any(|folder| folder.id == defaults.folder_id)
+                }) {
+                    self.workspace_defaults = None;
+                }
                 if self.model.selected_chat.is_none() {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
                         self.select_chat(chat_id, cx);
@@ -439,6 +486,47 @@ impl XdDesktop {
                     && optional_trimmed(&self.workspace_context_text) == context.as_deref()
                 {
                     self.cancel_workspace_context(cx);
+                }
+                self.request_tree();
+            }
+            RequestKind::FolderSettings { folder_id } => {
+                if self
+                    .workspace_defaults
+                    .as_ref()
+                    .is_some_and(|defaults| defaults.folder_id == folder_id)
+                {
+                    self.workspace_defaults = Some(WorkspaceDefaults {
+                        folder_id,
+                        backend: value
+                            .get("backend")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        model: value
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        effective_backend: value
+                            .get("effective_backend")
+                            .and_then(Value::as_str)
+                            .unwrap_or("claude")
+                            .to_owned(),
+                        workdir: value
+                            .get("workdir")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        repo: value.get("repo").and_then(Value::as_str).map(str::to_owned),
+                        loading: false,
+                        submitting: false,
+                    });
+                }
+            }
+            RequestKind::SetFolderSettings { folder_id } => {
+                if self
+                    .workspace_defaults
+                    .as_ref()
+                    .is_some_and(|defaults| defaults.folder_id == folder_id)
+                {
+                    self.workspace_defaults = None;
                 }
                 self.request_tree();
             }
@@ -902,6 +990,78 @@ impl XdDesktop {
         self.workspace_context_submitting = false;
         self.workspace_context_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    fn begin_workspace_defaults(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        self.workspace_defaults = Some(WorkspaceDefaults {
+            folder_id: folder_id.clone(),
+            backend: None,
+            model: None,
+            effective_backend: "claude".into(),
+            workdir: None,
+            repo: None,
+            loading: true,
+            submitting: false,
+        });
+        if let Some(daemon) = &self.daemon {
+            if let Err(error) = daemon.folder_settings(&folder_id) {
+                self.workspace_defaults = None;
+                self.model.connection_error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn select_workspace_backend(&mut self, backend: Option<String>, cx: &mut Context<Self>) {
+        if let Some(defaults) = &mut self.workspace_defaults
+            && !defaults.loading
+            && !defaults.submitting
+        {
+            defaults.backend = backend;
+            defaults.model = None;
+            cx.notify();
+        }
+    }
+
+    fn select_workspace_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        if let Some(defaults) = &mut self.workspace_defaults
+            && !defaults.loading
+            && !defaults.submitting
+        {
+            defaults.model = model;
+            cx.notify();
+        }
+    }
+
+    fn save_workspace_defaults(&mut self, cx: &mut Context<Self>) {
+        let Some(defaults) = self.workspace_defaults.clone() else {
+            return;
+        };
+        if defaults.loading || defaults.submitting {
+            return;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| {
+                daemon.set_folder_settings(
+                    &defaults.folder_id,
+                    defaults.backend.as_deref(),
+                    defaults.model.as_deref(),
+                    defaults.workdir.as_deref(),
+                    defaults.repo.as_deref(),
+                )
+            });
+        match result {
+            Ok(()) => {
+                if let Some(current) = &mut self.workspace_defaults {
+                    current.submitting = true;
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
         cx.notify();
     }
 
@@ -2002,6 +2162,7 @@ impl Render for XdDesktop {
             && !workspace_context_loading
             && !workspace_context_submitting
             && self.model.connected;
+        let workspace_defaults = self.workspace_defaults.clone();
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
@@ -2011,6 +2172,7 @@ impl Render for XdDesktop {
             let indent = if folder.parent.is_some() { 22.0 } else { 12.0 };
             let new_chat_folder_id = folder.id.clone();
             let context_folder_id = folder.id.clone();
+            let defaults_folder_id = folder.id.clone();
             let collapse_folder_id = folder.id.clone();
             let folder_name = folder.name.clone();
             let folder_collapsed = self.collapsed_folders.contains(&folder.id);
@@ -2103,6 +2265,9 @@ impl Render for XdDesktop {
                 let moving_folder = sidebar_move.as_ref() == Some(&folder_target);
                 let editing_context =
                     workspace_context_folder.as_deref() == Some(folder.id.as_str());
+                let editing_defaults = workspace_defaults
+                    .as_ref()
+                    .is_some_and(|defaults| defaults.folder_id == folder.id);
                 tree_rows.push(
                     div()
                         .px_3()
@@ -2183,6 +2348,20 @@ impl Render for XdDesktop {
                                     window.focus(&focus);
                                 }))
                                 .child("Context"),
+                        )
+                        .child(
+                            div()
+                                .id(("defaults-folder", folder_row_index))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if editing_defaults { TEXT } else { MUTED }))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.begin_workspace_defaults(defaults_folder_id.clone(), cx);
+                                }))
+                                .child("Agent"),
                         )
                         .child(
                             div()
@@ -2412,6 +2591,180 @@ impl Render for XdDesktop {
                                         } else {
                                             "Save"
                                         }),
+                                ),
+                        )
+                        .into_any_element(),
+                );
+            }
+            if let Some(defaults) = workspace_defaults
+                .as_ref()
+                .filter(|defaults| defaults.folder_id == folder.id)
+            {
+                let loading = defaults.loading;
+                let submitting = defaults.submitting;
+                let selected_backend = defaults
+                    .backend
+                    .as_deref()
+                    .unwrap_or(&defaults.effective_backend)
+                    .to_owned();
+                let mut backend_buttons = Vec::new();
+                for (index, (id, label)) in std::iter::once((None, "Inherit".to_owned()))
+                    .chain(
+                        self.model
+                            .agent_backends
+                            .iter()
+                            .map(|backend| (Some(backend.id.clone()), backend.name.clone())),
+                    )
+                    .enumerate()
+                {
+                    let selected = defaults.backend == id;
+                    let value = id.clone();
+                    backend_buttons.push(
+                        div()
+                            .id(("workspace-backend", index))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .bg(rgb(if selected { ACCENT } else { SURFACE_HIGH }))
+                            .text_color(rgb(if selected { 0xffffff } else { TEXT }))
+                            .when(!loading && !submitting, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x506dc7)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !loading && !submitting {
+                                    this.select_workspace_backend(value.clone(), cx);
+                                }
+                            }))
+                            .child(label)
+                            .into_any_element(),
+                    );
+                }
+                let mut model_buttons = Vec::new();
+                model_buttons.push(
+                    div()
+                        .id(("workspace-model", 0_usize))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .bg(rgb(if defaults.model.is_none() {
+                            ACCENT
+                        } else {
+                            SURFACE_HIGH
+                        }))
+                        .text_color(rgb(if defaults.model.is_none() {
+                            0xffffff
+                        } else {
+                            TEXT
+                        }))
+                        .when(!loading && !submitting, |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x506dc7)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !loading && !submitting {
+                                this.select_workspace_model(None, cx);
+                            }
+                        }))
+                        .child("Inherit")
+                        .into_any_element(),
+                );
+                if let Some(backend) = self
+                    .model
+                    .agent_backends
+                    .iter()
+                    .find(|backend| backend.id == selected_backend)
+                {
+                    for (index, model) in backend.models.iter().enumerate() {
+                        let id = model.id.clone();
+                        let selected = defaults.model.as_deref() == Some(id.as_str());
+                        model_buttons.push(
+                            div()
+                                .id(("workspace-model", index + 1))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .bg(rgb(if selected { ACCENT } else { SURFACE_HIGH }))
+                                .text_color(rgb(if selected { 0xffffff } else { TEXT }))
+                                .when(!loading && !submitting, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x506dc7)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !loading && !submitting {
+                                        this.select_workspace_model(Some(id.clone()), cx);
+                                    }
+                                }))
+                                .child(model.name.clone())
+                                .into_any_element(),
+                        );
+                    }
+                }
+                let can_save = !loading && !submitting && self.model.connected;
+                tree_rows.push(
+                    div()
+                        .ml(px(indent + 10.0))
+                        .mr_2()
+                        .mb_1()
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_md()
+                        .bg(rgb(0x1d222b))
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .when(loading, |panel| panel.child("Loading defaults…"))
+                        .when(!loading, |panel| {
+                            panel
+                                .child("Assistant")
+                                .child(div().flex().flex_wrap().gap_1().children(backend_buttons))
+                                .child("Model")
+                                .child(div().flex().flex_wrap().gap_1().children(model_buttons))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .id(("cancel-workspace-defaults", folder_row_index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_defaults = None;
+                                            cx.notify();
+                                        }))
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("save-workspace-defaults", folder_row_index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_color(rgb(if can_save { TEXT } else { MUTED }))
+                                        .when(can_save, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x303c52)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_save {
+                                                this.save_workspace_defaults(cx);
+                                            }
+                                        }))
+                                        .child(if submitting { "Saving…" } else { "Save" }),
                                 ),
                         )
                         .into_any_element(),
