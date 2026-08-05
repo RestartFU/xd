@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -32,6 +33,7 @@ mod input;
 mod settings;
 mod speech;
 mod terminal;
+mod voice_input;
 
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
@@ -40,6 +42,7 @@ use input::{
 use settings::{AccentPreset, AppSettings};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
+use voice_input::{CaptureEvent, VoiceRecorder};
 
 // Keep the GPUI shell visually continuous with the established Crystal app.
 // These are the same near-black surfaces and quiet separators used by its GTK
@@ -54,6 +57,7 @@ const MUTED: u32 = 0xa8a8ad;
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 gpui::actions!(xd, [OpenSearch, CloseSearch]);
 
@@ -85,6 +89,28 @@ struct AuthProvider {
     device_code: Option<String>,
     #[serde(default)]
     needs_input: bool,
+}
+
+#[derive(Default)]
+enum VoiceState {
+    #[default]
+    Idle,
+    Checking,
+    NeedsModel,
+    Downloading(i64),
+    Recording,
+    Transcribing,
+    Failed(String),
+}
+
+#[derive(Default)]
+struct VoiceInput {
+    state: VoiceState,
+    chat_id: String,
+    token: String,
+    base_text: String,
+    partial: String,
+    recorder: Option<VoiceRecorder>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +263,8 @@ struct XdDesktop {
     auth_open: bool,
     auth_providers: Vec<AuthProvider>,
     auth_input_text: String,
+    voice_input: VoiceInput,
+    voice_applying_text: bool,
     speech_output: SpeechOutput,
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
@@ -426,6 +454,8 @@ impl XdDesktop {
             auth_open: false,
             auth_providers: Vec::new(),
             auth_input_text: String::new(),
+            voice_input: VoiceInput::default(),
+            voice_applying_text: false,
             speech_output: SpeechOutput::default(),
             pending_speech: None,
             daemon: None,
@@ -538,6 +568,7 @@ impl XdDesktop {
                 self.workspace_clone_outcomes.clear();
                 self.pending_speech = None;
                 self.speech_output.stop();
+                self.cancel_voice(false, cx);
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
                     defaults.submitting = false;
@@ -594,6 +625,8 @@ impl XdDesktop {
                     | RequestKind::TerminalInput { .. }
                     | RequestKind::TerminalResize { .. }
                     | RequestKind::TerminalKill { .. }
+                    | RequestKind::VoiceModel { .. }
+                    | RequestKind::VoiceMutation { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -758,6 +791,29 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
+                RequestKind::VoiceModel { chat_id }
+                    if self.chat_is_active(chat_id)
+                        && matches!(self.voice_input.state, VoiceState::Checking) =>
+                {
+                    self.fail_voice(
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("The daemon could not check the speech model.")
+                            .to_owned(),
+                        cx,
+                    );
+                }
+                RequestKind::VoiceMutation { token, .. } if token == &self.voice_input.token => {
+                    self.fail_voice(
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("The daemon rejected voice input.")
+                            .to_owned(),
+                        cx,
+                    );
+                }
                 RequestKind::EditQueue {
                     chat_id,
                     index,
@@ -895,6 +951,17 @@ impl XdDesktop {
             }
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
+            RequestKind::VoiceModel { chat_id }
+                if self.chat_is_active(&chat_id)
+                    && matches!(self.voice_input.state, VoiceState::Checking) =>
+            {
+                if value.get("available").and_then(Value::as_bool) == Some(true) {
+                    self.start_voice_recording(cx);
+                } else {
+                    self.voice_input.state = VoiceState::NeedsModel;
+                }
+            }
+            RequestKind::VoiceMutation { .. } => {}
             RequestKind::Search { query } => {
                 if self
                     .search
@@ -1452,6 +1519,7 @@ impl XdDesktop {
             self.request_tree();
         }
         match name {
+            "voice" => self.handle_voice_event(&body, cx),
             "terminal-opened" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel {
                     panel.terminal_id = body
@@ -2121,6 +2189,226 @@ impl XdDesktop {
         self.auth_input_text.clear();
         self.auth_input
             .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn toggle_voice(&mut self, cx: &mut Context<Self>) {
+        match self.voice_input.state {
+            VoiceState::Idle | VoiceState::Failed(_) => self.check_voice_model(cx),
+            VoiceState::NeedsModel => self.download_voice_model(cx),
+            VoiceState::Recording => {
+                if let Some(recorder) = &self.voice_input.recorder {
+                    recorder.stop();
+                    self.voice_input.state = VoiceState::Transcribing;
+                    cx.notify();
+                }
+            }
+            VoiceState::Checking | VoiceState::Downloading(_) | VoiceState::Transcribing => {
+                self.cancel_voice(true, cx)
+            }
+        }
+    }
+
+    fn check_voice_model(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(daemon) = &self.daemon else {
+            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            return;
+        };
+        if let Err(error) = daemon.voice_model(&chat_id) {
+            self.model.connection_error = Some(error);
+            return;
+        }
+        self.voice_input = VoiceInput {
+            state: VoiceState::Checking,
+            chat_id,
+            token: voice_request_token(),
+            base_text: self.composer.clone(),
+            partial: String::new(),
+            recorder: None,
+        };
+        cx.notify();
+    }
+
+    fn download_voice_model(&mut self, cx: &mut Context<Self>) {
+        let VoiceInput { chat_id, token, .. } = &self.voice_input;
+        let Some(daemon) = &self.daemon else {
+            return;
+        };
+        if let Err(error) = daemon.voice_action("voice-model-download", chat_id, token, None) {
+            self.fail_voice(error, cx);
+            return;
+        }
+        self.voice_input.state = VoiceState::Downloading(-1);
+        cx.notify();
+    }
+
+    fn start_voice_recording(&mut self, cx: &mut Context<Self>) {
+        let chat_id = self.voice_input.chat_id.clone();
+        let token = self.voice_input.token.clone();
+        let Some(daemon) = &self.daemon else {
+            self.fail_voice("xd-dev is not connected to a daemon.".into(), cx);
+            return;
+        };
+        if let Err(error) = daemon.voice_action("voice-stream-start", &chat_id, &token, None) {
+            self.fail_voice(error, cx);
+            return;
+        }
+        let (recorder, events) = match VoiceRecorder::start() {
+            Ok(recording) => recording,
+            Err(error) => {
+                let _ = daemon.voice_action("voice-cancel", &chat_id, &token, None);
+                self.fail_voice(error, cx);
+                return;
+            }
+        };
+        self.voice_input.recorder = Some(recorder);
+        self.voice_input.partial.clear();
+        self.voice_input.state = VoiceState::Recording;
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv().await {
+                if this
+                    .update(cx, |this, cx| this.handle_capture_event(&token, event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn handle_capture_event(&mut self, token: &str, event: CaptureEvent, cx: &mut Context<Self>) {
+        if self.voice_input.token != token {
+            return;
+        }
+        let chat_id = self.voice_input.chat_id.clone();
+        let Some(daemon) = self.daemon.clone() else {
+            self.fail_voice("xd-dev is not connected to a daemon.".into(), cx);
+            return;
+        };
+        match event {
+            CaptureEvent::Chunk(audio)
+                if matches!(
+                    self.voice_input.state,
+                    VoiceState::Recording | VoiceState::Transcribing
+                ) =>
+            {
+                if let Err(error) =
+                    daemon.voice_action("voice-stream-chunk", &chat_id, token, Some(&audio))
+                {
+                    self.fail_voice(error, cx);
+                }
+            }
+            CaptureEvent::Finished(audio) => {
+                self.voice_input.recorder = None;
+                self.voice_input.state = VoiceState::Transcribing;
+                if let Err(error) =
+                    daemon.voice_action("voice-stream-finish", &chat_id, token, Some(&audio))
+                {
+                    self.fail_voice(error, cx);
+                }
+            }
+            CaptureEvent::Failed(error) => {
+                let _ = daemon.voice_action("voice-cancel", &chat_id, token, None);
+                self.fail_voice(error, cx);
+            }
+            CaptureEvent::Chunk(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn handle_voice_event(&mut self, body: &Value, cx: &mut Context<Self>) {
+        if body.get("request").and_then(Value::as_str) != Some(self.voice_input.token.as_str()) {
+            return;
+        }
+        match body.get("state").and_then(Value::as_str) {
+            Some("downloading") => {
+                let progress = body.get("progress").and_then(Value::as_i64).unwrap_or(-1);
+                self.voice_input.state = VoiceState::Downloading(progress);
+            }
+            Some("ready") => self.start_voice_recording(cx),
+            Some("partial") => {
+                let text = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                self.voice_input.partial = text.clone();
+                let composer = merge_dictation(&self.voice_input.base_text, &text);
+                self.apply_voice_text(composer, cx);
+            }
+            Some("transcribed") => {
+                let text = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let composer = merge_dictation(&self.voice_input.base_text, &text);
+                self.voice_input = VoiceInput::default();
+                self.apply_voice_text(composer, cx);
+            }
+            Some("cancelled") => self.cancel_voice(true, cx),
+            Some("error") => self.fail_voice(
+                body.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Voice recognition failed.")
+                    .to_owned(),
+                cx,
+            ),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn apply_voice_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.voice_applying_text = true;
+        self.set_composer_text(text, cx);
+        self.voice_applying_text = false;
+    }
+
+    fn fail_voice(&mut self, error: String, cx: &mut Context<Self>) {
+        let expected = merge_dictation(&self.voice_input.base_text, &self.voice_input.partial);
+        let base = self.voice_input.base_text.clone();
+        if let Some(recorder) = &self.voice_input.recorder {
+            recorder.cancel();
+        }
+        if self.composer == expected {
+            self.apply_voice_text(base, cx);
+        }
+        self.voice_input = VoiceInput {
+            state: VoiceState::Failed(error),
+            ..VoiceInput::default()
+        };
+        cx.notify();
+    }
+
+    fn cancel_voice(&mut self, restore: bool, cx: &mut Context<Self>) {
+        if matches!(self.voice_input.state, VoiceState::Idle) {
+            return;
+        }
+        let expected = merge_dictation(&self.voice_input.base_text, &self.voice_input.partial);
+        let base = self.voice_input.base_text.clone();
+        if let Some(recorder) = &self.voice_input.recorder {
+            recorder.cancel();
+        }
+        if let Some(daemon) = &self.daemon
+            && !self.voice_input.token.is_empty()
+        {
+            let _ = daemon.voice_action(
+                "voice-cancel",
+                &self.voice_input.chat_id,
+                &self.voice_input.token,
+                None,
+            );
+        }
+        self.voice_input = VoiceInput::default();
+        if restore && self.composer == expected {
+            self.apply_voice_text(base, cx);
+        }
         cx.notify();
     }
 
@@ -2874,6 +3162,7 @@ impl XdDesktop {
         self.composer_menu = None;
         self.pending_speech = None;
         self.speech_output.stop();
+        self.cancel_voice(false, cx);
         self.terminal_panel = None;
         self.set_composer_text(String::new(), cx);
         self.draft_dirty = false;
@@ -2901,6 +3190,9 @@ impl XdDesktop {
     fn send_composer(&mut self, cx: &mut Context<Self>) {
         if self.sending {
             return;
+        }
+        if !matches!(self.voice_input.state, VoiceState::Idle) {
+            self.cancel_voice(false, cx);
         }
         let text = self.composer.trim().to_owned();
         let attachments = self.model.draft_attachments.clone();
@@ -3165,6 +3457,9 @@ impl XdDesktop {
     }
 
     fn composer_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if !self.voice_applying_text && !matches!(self.voice_input.state, VoiceState::Idle) {
+            self.cancel_voice(false, cx);
+        }
         self.composer = text;
         self.draft_dirty = true;
         self.schedule_draft_sync(cx);
@@ -5583,6 +5878,19 @@ impl Render for XdDesktop {
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
+        let can_voice = self.model.selected_chat.is_some() && self.model.connected && !self.sending;
+        let (voice_label, voice_active, voice_error) = match &self.voice_input.state {
+            VoiceState::Idle => ("● Voice".to_owned(), false, None),
+            VoiceState::Checking => ("Checking…".to_owned(), true, None),
+            VoiceState::NeedsModel => ("Download base.en (141 MiB)".to_owned(), true, None),
+            VoiceState::Downloading(progress) if *progress >= 0 => {
+                (format!("Downloading {progress}%"), true, None)
+            }
+            VoiceState::Downloading(_) => ("Downloading…".to_owned(), true, None),
+            VoiceState::Recording => ("■ Stop".to_owned(), true, None),
+            VoiceState::Transcribing => ("Cancel voice".to_owned(), true, None),
+            VoiceState::Failed(error) => ("Retry voice".to_owned(), false, Some(error.clone())),
+        };
         let shortcuts_enabled =
             self.model.selected_chat.is_some() && self.model.connected && !self.sending;
         let shortcut_buttons = self
@@ -6025,6 +6333,22 @@ impl Render for XdDesktop {
                         .children(attachment_previews),
                 )
             })
+            .when_some(voice_error, |element, error| {
+                element.child(
+                    div()
+                        .w_full()
+                        .max_w(px(1040.0))
+                        .mx_auto()
+                        .mb_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x382126))
+                        .text_xs()
+                        .text_color(rgb(0xefb1b1))
+                        .child(error),
+                )
+            })
             .child(
                 div()
                     .id("composer")
@@ -6068,6 +6392,27 @@ impl Render for XdDesktop {
                                 }
                             }))
                             .child("+ Attach"),
+                    )
+                    .child(
+                        div()
+                            .id("voice-input")
+                            .px_2()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(if voice_active { 0x26354d } else { SURFACE }))
+                            .text_sm()
+                            .text_color(rgb(if can_voice { TEXT } else { MUTED }))
+                            .when(can_voice, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_voice {
+                                    this.toggle_voice(cx);
+                                }
+                            }))
+                            .child(voice_label),
                     )
                     .child(self.composer_input.clone())
                     .child(
@@ -7808,6 +8153,26 @@ fn auth_operation(state: &str) -> Option<&'static str> {
     }
 }
 
+fn voice_request_token() -> String {
+    format!(
+        "desktop-{}-{}",
+        std::process::id(),
+        NEXT_VOICE_REQUEST.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn merge_dictation(base: &str, spoken: &str) -> String {
+    let spoken = spoken.trim();
+    if spoken.is_empty() {
+        return base.to_owned();
+    }
+    if base.is_empty() || base.chars().last().is_some_and(char::is_whitespace) {
+        format!("{base}{spoken}")
+    } else {
+        format!("{base} {spoken}")
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn notify_turn_finished(title: &str) {
     let title = title
@@ -7888,6 +8253,19 @@ mod tests {
         assert_eq!(auth_operation("signing-in"), Some("agent-auth-cancel"));
         assert_eq!(auth_operation("checking"), None);
         assert_eq!(auth_operation("signing-out"), None);
+    }
+
+    #[test]
+    fn live_dictation_preserves_the_existing_composer_text() {
+        assert_eq!(merge_dictation("", "  open the diff  "), "open the diff");
+        assert_eq!(
+            merge_dictation("Please", "open the diff"),
+            "Please open the diff"
+        );
+        assert_eq!(
+            merge_dictation("Please\n", "open the diff"),
+            "Please\nopen the diff"
+        );
     }
 
     #[test]

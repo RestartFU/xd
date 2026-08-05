@@ -24,6 +24,14 @@ pub enum RequestKind {
     AgentCatalog,
     AgentAuth,
     AgentAuthMutation,
+    VoiceModel {
+        chat_id: String,
+    },
+    VoiceMutation {
+        chat_id: String,
+        token: String,
+        operation: String,
+    },
     Search {
         query: String,
     },
@@ -337,6 +345,39 @@ impl DaemonHandle {
             body["input"] = Value::String(input.to_owned());
         }
         self.send(RequestKind::AgentAuthMutation, body)
+    }
+
+    pub fn voice_model(&self, chat_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::VoiceModel {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "voice-model", "chat": chat_id}),
+        )
+    }
+
+    pub fn voice_action(
+        &self,
+        operation: &str,
+        chat_id: &str,
+        token: &str,
+        audio: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": operation, "request": token});
+        if operation != "voice-cancel" {
+            body["chat"] = Value::String(chat_id.to_owned());
+        }
+        if let Some(audio) = audio {
+            body["audio"] = Value::String(STANDARD.encode(audio));
+        }
+        self.send(
+            RequestKind::VoiceMutation {
+                chat_id: chat_id.to_owned(),
+                token: token.to_owned(),
+                operation: operation.to_owned(),
+            },
+            body,
+        )
     }
 
     pub fn shortcuts(&self, folder_id: &str) -> Result<(), String> {
@@ -1155,6 +1196,53 @@ mod tests {
                 },
                 ..
             } if chat_id == "chat-1" && old_text == "before" && new_text == "after"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn streams_voice_chunks_with_chat_and_request_identity() {
+        let directory = env::temp_dir().join(format!("xd-dev-voice-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "voice-stream-chunk");
+            assert_eq!(request["chat"], "chat-1");
+            assert_eq!(request["request"], "recording-1");
+            assert_eq!(request["audio"], "AAEC");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .voice_action(
+                "voice-stream-chunk",
+                "chat-1",
+                "recording-1",
+                Some(&[0, 1, 2]),
+            )
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::VoiceMutation { token, operation, .. },
+                ..
+            } if token == "recording-1" && operation == "voice-stream-chunk"
         ));
 
         server.join().unwrap();
