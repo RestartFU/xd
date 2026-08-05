@@ -26,11 +26,13 @@ use xd_desktop::{
 };
 
 mod input;
+mod settings;
 
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, End, Home, Left, Paste, Right,
     SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit,
 };
+use settings::{AccentPreset, AppSettings};
 
 const BG: u32 = 0x111318;
 const SURFACE: u32 = 0x191c22;
@@ -38,7 +40,6 @@ const SURFACE_HIGH: u32 = 0x232730;
 const BORDER: u32 = 0x303641;
 const TEXT: u32 = 0xe8eaf0;
 const MUTED: u32 = 0x969daa;
-const ACCENT: u32 = 0x6b8cff;
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -164,6 +165,8 @@ struct WorkspaceDefaults {
 
 struct XdDesktop {
     model: AppModel,
+    settings: AppSettings,
+    settings_open: bool,
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
@@ -315,6 +318,8 @@ impl XdDesktop {
                 draft_revision: -1,
                 ..Default::default()
             },
+            settings: AppSettings::load(),
+            settings_open: false,
             daemon: None,
             _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
@@ -1202,7 +1207,9 @@ impl XdDesktop {
                 .unwrap_or("Background chat")
                 .to_owned();
             self.model.apply_event(name, &body);
-            notify_turn_finished(&title);
+            if self.settings.notifications {
+                notify_turn_finished(&title);
+            }
             self.request_tree();
         }
         match name {
@@ -1664,6 +1671,7 @@ impl XdDesktop {
     }
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
         self.search_generation = self.search_generation.saturating_add(1);
         self.search = Some(SearchPanel::default());
         self.search_input
@@ -1729,6 +1737,34 @@ impl XdDesktop {
     fn activate_search_result(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.close_search(cx);
         self.select_chat(chat_id, cx);
+    }
+
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = !self.settings_open;
+        if self.settings_open {
+            self.search_generation = self.search_generation.saturating_add(1);
+            self.search = None;
+        }
+        cx.notify();
+    }
+
+    fn set_accent(&mut self, accent: AccentPreset, cx: &mut Context<Self>) {
+        if self.settings.accent == accent {
+            return;
+        }
+        self.settings.accent = accent;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        self.settings.notifications = !self.settings.notifications;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
     }
 
     fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
@@ -2999,6 +3035,8 @@ impl XdDesktop {
 
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let accent = self.settings.accent.color();
+        let accent_hover = self.settings.accent.hover_color();
         let messages = self.model.display_messages();
         let queue_count = self.model.queue.len();
         let working = self.model.working;
@@ -3140,7 +3178,7 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if sidebar_edit_focus.is_focused(window) {
-                                    ACCENT
+                                    accent
                                 } else {
                                     BORDER
                                 }))
@@ -3455,7 +3493,7 @@ impl Render for XdDesktop {
                                     .border_1()
                                     .border_color(rgb(
                                         if workspace_context_focus.is_focused(window) {
-                                            ACCENT
+                                            accent
                                         } else {
                                             BORDER
                                         },
@@ -3557,7 +3595,7 @@ impl Render for XdDesktop {
                             .py_1()
                             .rounded_md()
                             .text_xs()
-                            .bg(rgb(if selected { ACCENT } else { SURFACE_HIGH }))
+                            .bg(rgb(if selected { accent } else { SURFACE_HIGH }))
                             .text_color(rgb(if selected { 0xffffff } else { TEXT }))
                             .when(!loading && !submitting, |button| {
                                 button
@@ -3582,7 +3620,7 @@ impl Render for XdDesktop {
                         .rounded_md()
                         .text_xs()
                         .bg(rgb(if defaults.model.is_none() {
-                            ACCENT
+                            accent
                         } else {
                             SURFACE_HIGH
                         }))
@@ -3620,7 +3658,7 @@ impl Render for XdDesktop {
                                 .py_1()
                                 .rounded_md()
                                 .text_xs()
-                                .bg(rgb(if selected { ACCENT } else { SURFACE_HIGH }))
+                                .bg(rgb(if selected { accent } else { SURFACE_HIGH }))
                                 .text_color(rgb(if selected { 0xffffff } else { TEXT }))
                                 .when(!loading && !submitting, |button| {
                                     button
@@ -3673,7 +3711,7 @@ impl Render for XdDesktop {
                                         .border_1()
                                         .border_color(rgb(
                                             if workspace_workdir_focus.is_focused(window) {
-                                                ACCENT
+                                                accent
                                             } else {
                                                 BORDER
                                             },
@@ -3703,7 +3741,7 @@ impl Render for XdDesktop {
                                         .border_1()
                                         .border_color(rgb(
                                             if workspace_repo_default_focus.is_focused(window) {
-                                                ACCENT
+                                                accent
                                             } else {
                                                 BORDER
                                             },
@@ -3791,7 +3829,7 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if chat_create_focus.is_focused(window) {
-                                    ACCENT
+                                    accent
                                 } else {
                                     BORDER
                                 }))
@@ -3900,7 +3938,7 @@ impl Render for XdDesktop {
                                     .rounded_md()
                                     .border_1()
                                     .border_color(rgb(if sidebar_edit_focus.is_focused(window) {
-                                        ACCENT
+                                        accent
                                     } else {
                                         BORDER
                                     }))
@@ -4119,6 +4157,7 @@ impl Render for XdDesktop {
         let workspace_clone_input = self.workspace_clone_input.clone();
         let workspace_clone_focus = self.workspace_clone_input.read(cx).focus_handle(cx);
         let workspace_clone_status = self.workspace_clone_status.clone();
+        let settings_open = self.settings_open;
         let sidebar = div()
             .w(px(280.0))
             .h_full()
@@ -4140,9 +4179,33 @@ impl Render for XdDesktop {
                     .child(div().text_lg().text_color(rgb(TEXT)).child("xd-dev"))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(status_color))
-                            .child(status_text),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(status_color))
+                                    .child(status_text),
+                            )
+                            .child(
+                                div()
+                                    .id("app-settings")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(if settings_open { SURFACE_HIGH } else { SURFACE }))
+                                    .text_sm()
+                                    .text_color(rgb(if settings_open { TEXT } else { MUTED }))
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_settings(cx);
+                                    }))
+                                    .child("⚙"),
+                            ),
                     ),
             )
             .child(
@@ -4203,7 +4266,7 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if workspace_create_focus.is_focused(window) {
-                                    ACCENT
+                                    accent
                                 } else {
                                     BORDER
                                 }))
@@ -4228,7 +4291,7 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if workspace_repo_focus.is_focused(window) {
-                                    ACCENT
+                                    accent
                                 } else {
                                     BORDER
                                 }))
@@ -4258,7 +4321,7 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if workspace_clone_focus.is_focused(window) {
-                                    ACCENT
+                                    accent
                                 } else {
                                     BORDER
                                 }))
@@ -4304,7 +4367,7 @@ impl Render for XdDesktop {
                                         .rounded_md()
                                         .text_xs()
                                         .bg(rgb(if can_save_workspace {
-                                            ACCENT
+                                            accent
                                         } else {
                                             SURFACE_HIGH
                                         }))
@@ -4316,7 +4379,7 @@ impl Render for XdDesktop {
                                         .when(can_save_workspace, |button| {
                                             button
                                                 .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x7b98ff)))
+                                                .hover(|style| style.bg(rgb(accent_hover)))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if can_save_workspace {
@@ -4781,7 +4844,7 @@ impl Render for XdDesktop {
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if queue_edit_focus.is_focused(window) {
-                                    ACCENT
+                                    accent
                                 } else {
                                     BORDER
                                 }))
@@ -5106,7 +5169,7 @@ impl Render for XdDesktop {
                     .rounded_xl()
                     .border_1()
                     .border_color(rgb(if composer_focus.is_focused(window) {
-                        ACCENT
+                        accent
                     } else {
                         BORDER
                     }))
@@ -5142,13 +5205,13 @@ impl Render for XdDesktop {
                             .px_4()
                             .py_2()
                             .rounded_lg()
-                            .bg(rgb(if can_send { ACCENT } else { SURFACE_HIGH }))
+                            .bg(rgb(if can_send { accent } else { SURFACE_HIGH }))
                             .text_sm()
                             .text_color(rgb(if can_send { 0xffffff } else { MUTED }))
                             .when(can_send, |button| {
                                 button
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x7b98ff)))
+                                    .hover(|style| style.bg(rgb(accent_hover)))
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if can_send {
@@ -5428,7 +5491,7 @@ impl Render for XdDesktop {
                                         .border_1()
                                         .border_color(rgb(
                                             if repo_file_filter_focus.is_focused(window) {
-                                                ACCENT
+                                                accent
                                             } else {
                                                 BORDER
                                             },
@@ -5573,7 +5636,7 @@ impl Render for XdDesktop {
                                 .py_1()
                                 .rounded_md()
                                 .bg(rgb(if !files_mode && !branch_mode {
-                                    ACCENT
+                                    accent
                                 } else {
                                     SURFACE_HIGH
                                 }))
@@ -5592,7 +5655,7 @@ impl Render for XdDesktop {
                                 .py_1()
                                 .rounded_md()
                                 .bg(rgb(if !files_mode && branch_mode {
-                                    ACCENT
+                                    accent
                                 } else {
                                     SURFACE_HIGH
                                 }))
@@ -5610,7 +5673,7 @@ impl Render for XdDesktop {
                                 .px_2()
                                 .py_1()
                                 .rounded_md()
-                                .bg(rgb(if files_mode { ACCENT } else { SURFACE_HIGH }))
+                                .bg(rgb(if files_mode { accent } else { SURFACE_HIGH }))
                                 .text_xs()
                                 .text_color(rgb(TEXT))
                                 .cursor_pointer()
@@ -5734,7 +5797,7 @@ impl Render for XdDesktop {
                                         .rounded_lg()
                                         .border_1()
                                         .border_color(rgb(if git_commit_focus.is_focused(window) {
-                                            ACCENT
+                                            accent
                                         } else {
                                             BORDER
                                         }))
@@ -5752,13 +5815,13 @@ impl Render for XdDesktop {
                                         .px_3()
                                         .py_2()
                                         .rounded_lg()
-                                        .bg(rgb(if can_commit { ACCENT } else { SURFACE_HIGH }))
+                                        .bg(rgb(if can_commit { accent } else { SURFACE_HIGH }))
                                         .text_xs()
                                         .text_color(rgb(if can_commit { 0xffffff } else { MUTED }))
                                         .when(can_commit, |button| {
                                             button
                                                 .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x7b98ff)))
+                                                .hover(|style| style.bg(rgb(accent_hover)))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if can_commit {
@@ -5790,6 +5853,141 @@ impl Render for XdDesktop {
                                     }
                                 }))
                                 .child("Push branch"),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let settings_overlay = self.settings_open.then(|| {
+            let mut accent_buttons = Vec::new();
+            for (index, preset) in AccentPreset::ALL.into_iter().enumerate() {
+                let selected = self.settings.accent == preset;
+                accent_buttons.push(
+                    div()
+                        .id(("accent-preset", index))
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(if selected { preset.color() } else { BORDER }))
+                        .bg(rgb(if selected { SURFACE_HIGH } else { SURFACE }))
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_accent(preset, cx);
+                        }))
+                        .child(div().size(px(12.0)).rounded_full().bg(rgb(preset.color())))
+                        .child(preset.label())
+                        .into_any_element(),
+                );
+            }
+            let notifications = self.settings.notifications;
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(440.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_lg().text_color(rgb(TEXT)).child("App settings"))
+                                .child(
+                                    div()
+                                        .id("close-app-settings")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_settings(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(div().text_xs().text_color(rgb(MUTED)).child("ACCENT COLOR"))
+                                .child(div().flex().flex_wrap().gap_2().children(accent_buttons)),
+                        )
+                        .child(
+                            div()
+                                .id("toggle-notifications")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_notifications(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Background turn notifications"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child("Notify when another chat finishes."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(38.0))
+                                        .h(px(22.0))
+                                        .p(px(3.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_end()
+                                        .when(!notifications, |toggle| toggle.justify_start())
+                                        .rounded_full()
+                                        .bg(rgb(if notifications { accent } else { BORDER }))
+                                        .child(
+                                            div().size(px(16.0)).rounded_full().bg(rgb(0xffffff)),
+                                        ),
+                                ),
                         ),
                 )
                 .into_any_element()
@@ -5877,7 +6075,7 @@ impl Render for XdDesktop {
                                         .rounded_lg()
                                         .border_1()
                                         .border_color(rgb(if search_focus.is_focused(window) {
-                                            ACCENT
+                                            accent
                                         } else {
                                             BORDER
                                         }))
@@ -5942,7 +6140,12 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                this.close_search(cx);
+                if this.settings_open {
+                    this.settings_open = false;
+                    cx.notify();
+                } else {
+                    this.close_search(cx);
+                }
             }))
             .bg(rgb(BG))
             .font_family("Inter")
@@ -5959,6 +6162,7 @@ impl Render for XdDesktop {
                     .child(composer),
             )
             .when_some(diff_pane, |root, pane| root.child(pane))
+            .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
     }
 }
