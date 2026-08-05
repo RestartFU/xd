@@ -98,10 +98,21 @@ impl StateStore {
         workspace_root: impl Into<PathBuf>,
     ) -> Result<Self, StorageError> {
         let database_path = database_path.as_ref();
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| StorageError::Filesystem {
+                context: "Cannot create the xd state directory".into(),
+                source,
+            })?;
+        }
+        let workspace_root = workspace_root.into();
+        fs::create_dir_all(&workspace_root).map_err(|source| StorageError::Filesystem {
+            context: "Cannot create the workspace directory".into(),
+            source,
+        })?;
         Self::open_with_flags(
             database_path,
             workspace_root,
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )
     }
 
@@ -129,6 +140,9 @@ impl StateStore {
             }
         })?;
         database.pragma_update(None, "foreign_keys", true)?;
+        if !flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            initialize_schema(&database)?;
+        }
         Ok(Self {
             database: Mutex::new(database),
             workspace_root: workspace_root.into(),
@@ -1121,6 +1135,108 @@ impl StateStore {
     }
 }
 
+fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
+    let has_meta: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_meta {
+        let version = database
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|version| version.parse::<u32>().ok())
+            .unwrap_or(0);
+        if version > 24 {
+            return Err(StorageError::InvalidRequest(format!(
+                "The chat database requires a newer xd version (schema {version})."
+            )));
+        }
+        if version > 0 {
+            return Ok(());
+        }
+    }
+
+    let transaction = database.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); \
+         CREATE TABLE IF NOT EXISTS workspace_folders (id TEXT PRIMARY KEY, root_path TEXT NOT NULL, \
+           relative_path TEXT NOT NULL, backend TEXT, model TEXT, workdir TEXT, repo TEXT, \
+           instructions TEXT, shortcuts TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, \
+           updated_at INTEGER NOT NULL, UNIQUE(root_path, relative_path)); \
+         CREATE INDEX IF NOT EXISTS workspace_folders_root \
+           ON workspace_folders (root_path, relative_path); \
+         CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, title TEXT, \
+           backend TEXT NOT NULL, session_id TEXT, workdir TEXT, model TEXT, effort TEXT, access TEXT, \
+           plan INTEGER NOT NULL DEFAULT 0, fast INTEGER NOT NULL DEFAULT 0, \
+           claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, new_worktree INTEGER NOT NULL DEFAULT 0, \
+           terminal_open INTEGER NOT NULL DEFAULT 0, diff_open INTEGER NOT NULL DEFAULT 0, \
+           resume_after_restart INTEGER NOT NULL DEFAULT 0, original_workdir TEXT, \
+           daemon_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
+           draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
+           last_user_message_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, \
+           updated_at INTEGER NOT NULL, FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
+         CREATE INDEX IF NOT EXISTS chats_folder ON chats (folder_id, updated_at DESC); \
+         CREATE INDEX IF NOT EXISTS chats_folder_user_message \
+           ON chats (folder_id, last_user_message_at DESC); \
+         CREATE TABLE IF NOT EXISTS chat_sessions (chat_id TEXT NOT NULL, backend TEXT NOT NULL, \
+           session_id TEXT, last_message_id INTEGER NOT NULL DEFAULT 0, \
+           context_used INTEGER NOT NULL DEFAULT 0, context_window INTEGER NOT NULL DEFAULT 0, \
+           context_model TEXT, PRIMARY KEY(chat_id, backend), \
+           FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
+         CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+           chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, raw_json TEXT, \
+           created_at INTEGER NOT NULL, label TEXT, \
+           FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
+         CREATE INDEX IF NOT EXISTS messages_chat ON messages (chat_id, id); \
+         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 \
+           (content, content='messages', content_rowid='id'); \
+         CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN \
+           INSERT INTO messages_fts (rowid, content) VALUES (new.id, new.content); END; \
+         CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN \
+           INSERT INTO messages_fts (messages_fts, rowid, content) \
+           VALUES ('delete', old.id, old.content); END; \
+         CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN \
+           INSERT INTO messages_fts (messages_fts, rowid, content) \
+           VALUES ('delete', old.id, old.content); \
+           INSERT INTO messages_fts (rowid, content) VALUES (new.id, new.content); END; \
+         CREATE TABLE IF NOT EXISTS agent_defaults (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), \
+           backend TEXT NOT NULL, model TEXT, effort TEXT, access TEXT, plan INTEGER NOT NULL, \
+           fast INTEGER NOT NULL DEFAULT 0, claude_mode INTEGER NOT NULL DEFAULT 0); \
+         CREATE TABLE IF NOT EXISTS worktree_containers (path TEXT PRIMARY KEY, \
+           created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); \
+         CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, \
+           created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL); \
+         CREATE TRIGGER IF NOT EXISTS remember_agent_defaults \
+           AFTER UPDATE OF backend, model, effort, access, plan, fast, claude_mode ON chats \
+           WHEN OLD.backend IS NOT NEW.backend OR OLD.model IS NOT NEW.model \
+             OR OLD.effort IS NOT NEW.effort OR OLD.access IS NOT NEW.access \
+             OR OLD.plan IS NOT NEW.plan OR OLD.fast IS NOT NEW.fast \
+             OR OLD.claude_mode IS NOT NEW.claude_mode BEGIN \
+           INSERT OR REPLACE INTO agent_defaults \
+             (singleton, backend, model, effort, access, plan, fast, claude_mode) \
+           VALUES (1, NEW.backend, NEW.model, NEW.effort, NEW.access, NEW.plan, \
+             NEW.fast, NEW.claude_mode); END;",
+    )?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO agent_defaults \
+         (singleton, backend, model, effort, access, plan, fast, claude_mode) \
+         VALUES (1, 'codex', 'gpt-5.6-sol', 'high', 'edit', 0, 0, 0)",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', '24') \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn hidden_component(relative_path: &str) -> bool {
     Path::new(relative_path).components().any(|component| {
         component
@@ -1582,6 +1698,40 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn initializes_a_complete_database_on_first_run() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "First"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(store.chat(&chat).unwrap()["backend"], "codex");
+        let database = Connection::open(&fixture.database).unwrap();
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "24"
+        );
+        let fts_exists: bool = database
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'messages_fts')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(fts_exists);
+    }
 
     #[test]
     fn reads_visible_workspace_and_chat_snapshots() {
