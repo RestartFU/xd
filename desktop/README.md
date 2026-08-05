@@ -22,6 +22,8 @@ Current milestone:
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;
+- shared expandable activity cards for tools, subagents, and workflow runs;
+- bounded Markdown rendering with language-aware fenced-code highlighting;
 - variable-height virtualized transcript list;
 - bounded full-duplex protocol framing and request-id matching;
 - daemon snapshot/event state reducers with unit tests.

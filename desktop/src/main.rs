@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, time::Duration};
+use std::{collections::HashSet, fs, path::PathBuf, time::Duration};
 
 use gpui::{
     App, Application, Bounds, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -7,6 +7,7 @@ use gpui::{
 };
 use serde_json::Value;
 use xd_desktop::{
+    activity::{ActivityCard, ActivityKind},
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
     model::{AppModel, Attachment, Message},
@@ -49,6 +50,7 @@ struct XdDesktop {
     attachment_generation: u64,
     sending: bool,
     pending_send: Option<PendingSend>,
+    expanded_activity: HashSet<String>,
 }
 
 impl XdDesktop {
@@ -75,6 +77,7 @@ impl XdDesktop {
             attachment_generation: 0,
             sending: false,
             pending_send: None,
+            expanded_activity: HashSet::new(),
         };
         desktop.connect(cx);
         desktop
@@ -828,7 +831,12 @@ impl XdDesktop {
         }
     }
 
-    fn message_row(message: &Message) -> impl IntoElement {
+    fn message_row(
+        message: &Message,
+        index: usize,
+        expanded: bool,
+        desktop: Entity<Self>,
+    ) -> gpui::AnyElement {
         let is_user = message.role == "user";
         let is_tool = message.role == "tool";
         let label = message
@@ -841,36 +849,162 @@ impl XdDesktop {
                 role => role.to_owned(),
             });
 
-        div().w_full().px_6().py_2().child(
-            div()
-                .w_full()
-                .max_w(px(920.0))
-                .mx_auto()
-                .p_4()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(if is_user { 0x3c4b78 } else { BORDER }))
-                .bg(rgb(if is_user {
-                    0x202944
-                } else if is_tool {
-                    0x171a20
-                } else {
-                    SURFACE
-                }))
-                .text_color(rgb(TEXT))
-                .child(
+        if is_tool {
+            let key = message
+                .id
+                .map(|id| format!("message-{id}"))
+                .unwrap_or_else(|| format!("live-{index}"));
+            return Self::activity_card(
+                ActivityCard::parse(&message.content),
+                key,
+                index,
+                expanded,
+                desktop,
+            );
+        }
+
+        div()
+            .w_full()
+            .px_6()
+            .py_2()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(920.0))
+                    .mx_auto()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(if is_user { 0x3c4b78 } else { BORDER }))
+                    .bg(rgb(if is_user { 0x202944 } else { SURFACE }))
+                    .text_color(rgb(TEXT))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(if is_user { 0xaec0ff } else { MUTED }))
+                            .mb_2()
+                            .child(label),
+                    )
+                    .child(
+                        Self::markdown_content(message.markdown())
+                            .text_sm()
+                            .line_height(px(21.0)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn activity_card(
+        card: ActivityCard,
+        key: String,
+        index: usize,
+        expanded: bool,
+        desktop: Entity<Self>,
+    ) -> gpui::AnyElement {
+        let status_color = match card.kind {
+            ActivityKind::Running => 0x91a7ff,
+            ActivityKind::Success => 0x8bd5a0,
+            ActivityKind::Failure => 0xff8f8f,
+            ActivityKind::Finished => 0xaab2c0,
+        };
+        let toggle_key = key.clone();
+        let mut body = div()
+            .w_full()
+            .max_w(px(920.0))
+            .mx_auto()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x343b48))
+            .bg(rgb(0x171a20))
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(("activity-card", index))
+                    .w_full()
+                    .px_4()
+                    .py_3()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0x1d222b)))
+                    .on_click(move |_, _, cx| {
+                        desktop.update(cx, |this, cx| {
+                            if !this.expanded_activity.remove(&toggle_key) {
+                                this.expanded_activity.insert(toggle_key.clone());
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(MUTED))
+                                    .child(card.title.clone()),
+                            )
+                            .child(div().flex_1())
+                            .child(div().text_xs().text_color(rgb(MUTED)).child(if expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            })),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().text_color(rgb(status_color)).child("●"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(card.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(status_color))
+                                    .child(card.status.clone()),
+                            ),
+                    ),
+            );
+        if expanded {
+            body = body.child(
+                div()
+                    .w_full()
+                    .px_4()
+                    .pb_3()
+                    .pt_1()
+                    .border_t_1()
+                    .border_color(rgb(0x2a303b))
+                    .text_sm()
+                    .text_color(rgb(0xb8bfcc))
+                    .child(card.detail),
+            );
+            if let Some(footer) = card.footer {
+                body = body.child(
                     div()
+                        .px_4()
+                        .pb_3()
                         .text_xs()
-                        .text_color(rgb(if is_user { 0xaec0ff } else { MUTED }))
-                        .mb_2()
-                        .child(label),
-                )
-                .child(
-                    Self::markdown_content(message.markdown())
-                        .text_sm()
-                        .line_height(px(21.0)),
-                ),
-        )
+                        .text_color(rgb(MUTED))
+                        .child(footer),
+                );
+            }
+        }
+        div()
+            .w_full()
+            .px_6()
+            .py_2()
+            .text_color(rgb(TEXT))
+            .child(body)
+            .into_any_element()
     }
 
     fn markdown_content(document: std::sync::Arc<markdown::Document>) -> gpui::Div {
@@ -1407,8 +1541,20 @@ impl Render for XdDesktop {
                     ),
             );
 
+        let expanded_activity = self.expanded_activity.clone();
+        let desktop = cx.entity();
         let transcript = list(self.transcript.clone(), move |index, _window, _cx| {
-            Self::message_row(&messages[index]).into_any_element()
+            let message = &messages[index];
+            let key = message
+                .id
+                .map(|id| format!("message-{id}"))
+                .unwrap_or_else(|| format!("live-{index}"));
+            Self::message_row(
+                message,
+                index,
+                expanded_activity.contains(&key),
+                desktop.clone(),
+            )
         })
         .size_full();
 

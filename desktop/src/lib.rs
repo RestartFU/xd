@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod daemon;
 pub mod markdown;
 pub mod model;

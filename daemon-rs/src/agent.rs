@@ -434,6 +434,30 @@ pub(crate) fn resolve_claude() -> PathBuf {
 }
 
 fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
+    if let Some(workflow) = workflow_marker(arguments) {
+        return workflow;
+    }
+    if matches!(name, "Task" | "Agent") {
+        let mut identity = vec!["Claude".to_owned()];
+        for key in ["subagent_type", "model"] {
+            append_distinct(
+                &mut identity,
+                arguments
+                    .and_then(|arguments| arguments.get(key))
+                    .and_then(Value::as_str),
+            );
+        }
+        let mut task = Vec::new();
+        for key in ["description", "prompt"] {
+            append_distinct(
+                &mut task,
+                arguments
+                    .and_then(|arguments| arguments.get(key))
+                    .and_then(Value::as_str),
+            );
+        }
+        return subagent_marker(None, &identity.join(" · "), &task.join(" · "));
+    }
     for key in [
         "file_path",
         "path",
@@ -456,7 +480,35 @@ fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
 }
 
 fn tool_summary(item: &Value) -> String {
+    if let Some(workflow) = workflow_marker(Some(item)) {
+        return workflow;
+    }
     let kind = item.get("type").and_then(Value::as_str).unwrap_or("tool");
+    if matches!(kind, "collab_tool_call" | "collab_agent_tool_call")
+        && matches!(
+            item.get("tool").and_then(Value::as_str),
+            Some("spawn_agent" | "spawnAgent")
+        )
+    {
+        let receivers = item
+            .get("receiverThreadIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        let key = receivers.first().copied();
+        let mut identity = vec!["Codex".to_owned()];
+        for field in ["model", "reasoningEffort"] {
+            append_distinct(&mut identity, item.get(field).and_then(Value::as_str));
+        }
+        let mut detail = vec![codex_agent_status(item, &receivers).to_owned()];
+        append_distinct(&mut detail, item.get("prompt").and_then(Value::as_str));
+        if let Some(receiver) = key {
+            detail.push(format!("Agent {}", compact(receiver, 16)));
+        }
+        return subagent_marker(key, &identity.join(" · "), &detail.join(" · "));
+    }
     if kind == "command_execution"
         && let Some(command) = item.get("command").and_then(Value::as_str)
     {
@@ -477,6 +529,74 @@ fn tool_summary(item: &Value) -> String {
         }
     }
     kind.to_owned()
+}
+
+fn workflow_marker(arguments: Option<&Value>) -> Option<String> {
+    let url = arguments?
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| url.starts_with("https://github.com/") && url.contains("/actions/runs/"))?;
+    let id = url
+        .split("/actions/runs/")
+        .nth(1)?
+        .split(['/', '?', '#'])
+        .next()?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("workflow_run\n{id}\n{}", compact(url, 500)))
+}
+
+fn subagent_marker(key: Option<&str>, identity: &str, task: &str) -> String {
+    let key = key
+        .map(|key| format!("{}\n", compact(key, 120)))
+        .unwrap_or_default();
+    let identity = (!identity.trim().is_empty())
+        .then_some(identity)
+        .unwrap_or("Agent");
+    let task = (!task.trim().is_empty())
+        .then_some(task)
+        .unwrap_or("Delegated task");
+    format!(
+        "subagent\n{key}{}\n{}",
+        compact(identity, 80),
+        compact(task, 320)
+    )
+}
+
+fn append_distinct(parts: &mut Vec<String>, value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if value.is_empty() || parts.iter().any(|part| part.eq_ignore_ascii_case(&value)) {
+        return;
+    }
+    parts.push(value);
+}
+
+fn codex_agent_status<'a>(item: &'a Value, receivers: &[&str]) -> &'a str {
+    let states = item.get("agentsStates").and_then(Value::as_object);
+    let agent = states.and_then(|states| {
+        receivers
+            .iter()
+            .find_map(|receiver| states.get(*receiver).and_then(Value::as_object))
+            .or_else(|| states.values().find_map(Value::as_object))
+    });
+    let status = agent
+        .and_then(|agent| agent.get("status"))
+        .and_then(Value::as_str)
+        .or_else(|| item.get("status").and_then(Value::as_str));
+    match status {
+        Some("pendingInit" | "inProgress") => "Starting",
+        Some("running") => "Running",
+        Some("interrupted") => "Interrupted",
+        Some("completed") => "Completed",
+        Some("errored" | "failed") => "Failed",
+        Some("shutdown") => "Stopped",
+        Some("notFound") => "Not found",
+        _ => "Delegated",
+    }
 }
 
 fn compact(value: &str, limit: usize) -> String {
@@ -675,6 +795,50 @@ mod tests {
         assert_eq!(
             command.get_current_dir(),
             Some(std::path::Path::new("/workspace"))
+        );
+    }
+
+    #[test]
+    fn emits_stable_shared_card_records_for_subagents_and_workflows() {
+        let claude = claude_tool_summary(
+            "Task",
+            Some(&serde_json::json!({
+                "subagent_type": "Explore agent",
+                "model": "haiku",
+                "description": "Inspect the parser",
+                "prompt": "Trace every path"
+            })),
+        );
+        assert_eq!(
+            claude,
+            "subagent\nClaude · Explore agent · haiku\nInspect the parser · Trace every path"
+        );
+
+        let codex = tool_summary(&serde_json::json!({
+            "type": "collab_agent_tool_call",
+            "tool": "spawn_agent",
+            "receiverThreadIds": ["thread-agent-123456789"],
+            "model": "gpt-5.6-sol",
+            "reasoningEffort": "high",
+            "prompt": "Review the diff",
+            "agentsStates": {
+                "thread-agent-123456789": {"status": "running"}
+            }
+        }));
+        assert_eq!(
+            codex,
+            "subagent\nthread-agent-123456789\nCodex · gpt-5.6-sol · high\nRunning · Review the diff · Agent thread-agent-12…"
+        );
+
+        let workflow = claude_tool_summary(
+            "Workflow",
+            Some(&serde_json::json!({
+                "url": "https://github.com/RestartFU/xd/actions/runs/31028502744"
+            })),
+        );
+        assert_eq!(
+            workflow,
+            "workflow_run\n31028502744\nhttps://github.com/RestartFU/xd/actions/runs/31028502744"
         );
     }
 }
