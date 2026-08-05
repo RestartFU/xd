@@ -1,0 +1,96 @@
+# Rolling development build for the incremental Rust/GPUI desktop rewrite.
+# This is intentionally separate from nightly: the Crystal client remains the
+# production desktop until the GPUI client reaches feature parity.
+
+name: gpui-dev
+
+on:
+  push:
+    branches: [feat/gpui-desktop]
+  workflow_dispatch:
+
+concurrency:
+  group: gpui-dev
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: [self-hosted, linux, x64, xd]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test and build the GPUI desktop
+        run: >-
+          docker buildx build
+          --target gpui-desktop-check
+          --output type=local,dest=gpui-dist
+          .
+
+      - name: Pack the prototype
+        run: |
+          set -euo pipefail
+          test -f gpui-dist/gpui-tests-passed
+          test -x gpui-dist/xd-desktop
+
+          install -d package/xd-gpui-dev
+          install -m0755 gpui-dist/xd-desktop package/xd-gpui-dev/xd-gpui
+          install -m0644 desktop/README.md package/xd-gpui-dev/README.md
+
+          tar -C package -czf xd-gpui-dev-linux-x86_64.tar.gz xd-gpui-dev
+          sha256sum xd-gpui-dev-linux-x86_64.tar.gz \
+            > xd-gpui-dev-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpui-linux
+          path: |
+            xd-gpui-dev-linux-x86_64.tar.gz
+            xd-gpui-dev-linux-x86_64.tar.gz.sha256
+
+  publish:
+    needs: linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: .
+          merge-multiple: true
+
+      - name: Publish the rolling dev prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          subject=$(git log -1 --format=%s)
+          notes=$(cat <<EOF
+          Early GPUI desktop prototype built from \`${GITHUB_SHA:0:7}\` — $subject
+
+          This is a development shell, not the production xd desktop client.
+          It currently demonstrates the native GPUI layout, protocol/state
+          foundation, and virtualized transcript on Linux x86_64.
+
+          Run it:
+
+          \`\`\`sh
+          tar -xzf xd-gpui-dev-linux-x86_64.tar.gz
+          ./xd-gpui-dev/xd-gpui
+          \`\`\`
+          EOF
+          )
+
+          gh release delete dev --cleanup-tag --yes || true
+          gh release create dev \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "GPUI Dev $(date -u +%Y-%m-%d)" \
+            --notes "$notes" \
+            xd-gpui-dev-linux-x86_64.tar.gz \
+            xd-gpui-dev-linux-x86_64.tar.gz.sha256

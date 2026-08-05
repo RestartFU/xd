@@ -1,6 +1,7 @@
 /build/
 /dist/
 /lib/
+/desktop/target/
 /.payload-cache/
 *.o
 *.swp

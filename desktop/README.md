@@ -21,3 +21,8 @@ Build and test this crate through the repository Dockerfile:
 ```sh
 docker build --target gpui-desktop-check .
 ```
+
+Every push to `feat/gpui-desktop` replaces the rolling `dev` GitHub
+prerelease with the tested Linux x86_64 prototype. This channel is deliberately
+separate from the production `nightly` release while daemon connectivity and
+feature parity are still in progress.
