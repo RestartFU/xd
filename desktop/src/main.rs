@@ -37,13 +37,24 @@ struct PendingSend {
     restore: bool,
 }
 
+#[derive(Clone)]
+struct QueueEdit {
+    chat_id: String,
+    index: usize,
+    original: String,
+    text: String,
+    submitting: Option<String>,
+}
+
 struct XdDesktop {
     model: AppModel,
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
     composer_input: Entity<ComposerInput>,
+    queue_edit_input: Entity<ComposerInput>,
     composer: String,
+    queue_edit: Option<QueueEdit>,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -61,6 +72,12 @@ impl XdDesktop {
             ComposerEvent::Submit => this.send_composer(cx),
         })
         .detach();
+        let queue_edit_input = cx.new(|cx| ComposerInput::new(cx, "Edit queued message…"));
+        cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_queue_edit(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -70,7 +87,9 @@ impl XdDesktop {
             _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             composer_input,
+            queue_edit_input,
             composer: String::new(),
+            queue_edit: None,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -152,9 +171,27 @@ impl XdDesktop {
                     .unwrap_or("The xd daemon rejected the request.")
                     .to_owned(),
             );
-            if matches!(kind, RequestKind::Send { .. }) {
-                self.sending = false;
-                self.restore_pending_send(cx);
+            match &kind {
+                RequestKind::Send { .. } => {
+                    self.sending = false;
+                    self.restore_pending_send(cx);
+                }
+                RequestKind::EditQueue {
+                    chat_id,
+                    index,
+                    old_text,
+                    new_text,
+                } => {
+                    if let Some(edit) = &mut self.queue_edit
+                        && edit.chat_id == *chat_id
+                        && edit.index == *index
+                        && edit.original == *old_text
+                        && edit.submitting.as_deref() == Some(new_text.as_str())
+                    {
+                        edit.submitting = None;
+                    }
+                }
+                _ => {}
             }
             return;
         }
@@ -253,6 +290,21 @@ impl XdDesktop {
             // Queue events carry the authoritative complete queue. Mutation
             // replies are acknowledgements only, so they never refetch chat.
             RequestKind::QueueMutation { chat_id } if self.chat_is_active(&chat_id) => {}
+            RequestKind::EditQueue {
+                chat_id,
+                index,
+                old_text,
+                new_text,
+            } if self.chat_is_active(&chat_id) => {
+                if self.queue_edit.as_ref().is_some_and(|edit| {
+                    edit.chat_id == chat_id
+                        && edit.index == index
+                        && edit.original == old_text
+                        && edit.submitting.as_deref() == Some(new_text.as_str())
+                }) {
+                    self.cancel_queue_edit(cx);
+                }
+            }
             RequestKind::Cancel { chat_id } if self.chat_is_active(&chat_id) => {}
             RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
@@ -344,7 +396,18 @@ impl XdDesktop {
                     self.request_chat(&chat_id);
                 }
             }
-            "queued" if self.event_is_active(&body) => self.model.apply_event(name, &body),
+            "queued" if self.event_is_active(&body) => {
+                self.model.apply_event(name, &body);
+                let edit_is_stale = self.queue_edit.as_ref().is_some_and(|edit| {
+                    edit.submitting.is_none()
+                        && self.model.queue.get(edit.index) != Some(&edit.original)
+                });
+                if edit_is_stale {
+                    self.cancel_queue_edit(cx);
+                    self.model.connection_error =
+                        Some("That queued message changed on another client.".into());
+                }
+            }
             "shortcuts-changed" => self.request_shortcuts(),
             "agent-auth-changed"
                 if body.get("provider").and_then(Value::as_str)
@@ -589,6 +652,7 @@ impl XdDesktop {
         self.draft_dirty = false;
         self.attachments_dirty = false;
         self.pending_send = None;
+        self.cancel_queue_edit(cx);
         self.sending = false;
         self.transcript.reset(0);
         self.request_chat(&chat_id);
@@ -686,6 +750,65 @@ impl XdDesktop {
         {
             self.model.connection_error = Some(error);
         }
+    }
+
+    fn begin_queue_edit(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.queue_edit = Some(QueueEdit {
+            chat_id,
+            index,
+            original: prompt.clone(),
+            text: prompt.clone(),
+            submitting: None,
+        });
+        self.queue_edit_input
+            .update(cx, |input, cx| input.set_text(prompt, cx));
+        cx.notify();
+    }
+
+    fn queue_edit_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.queue_edit
+            && edit.submitting.is_none()
+        {
+            edit.text = text;
+            cx.notify();
+        }
+    }
+
+    fn save_queue_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.queue_edit.clone() else {
+            return;
+        };
+        let text = edit.text.trim();
+        if text.is_empty() {
+            self.model.connection_error = Some("A queued message cannot be empty.".into());
+            cx.notify();
+            return;
+        }
+        if text == edit.original {
+            self.cancel_queue_edit(cx);
+            return;
+        }
+        if let Some(daemon) = &self.daemon {
+            if let Err(error) = daemon.edit_queue(&edit.chat_id, edit.index, &edit.original, text) {
+                self.model.connection_error = Some(error);
+            } else if let Some(active) = &mut self.queue_edit
+                && active.chat_id == edit.chat_id
+                && active.index == edit.index
+                && active.original == edit.original
+            {
+                active.submitting = Some(text.to_owned());
+            }
+        }
+    }
+
+    fn cancel_queue_edit(&mut self, cx: &mut Context<Self>) {
+        self.queue_edit = None;
+        self.queue_edit_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
     }
 
     fn steer_queued(&mut self, index: usize, text: &str) {
@@ -1651,6 +1774,10 @@ impl Render for XdDesktop {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let queue_edit = self.queue_edit.clone();
+        let queue_edit_input = self.queue_edit_input.clone();
+        let queue_edit_focus = self.queue_edit_input.read(cx).focus_handle(cx);
+        let selected_chat_id = self.model.selected_chat.clone().unwrap_or_default();
         let queue_rows = self
             .model
             .queue
@@ -1658,7 +1785,105 @@ impl Render for XdDesktop {
             .cloned()
             .enumerate()
             .map(|(index, prompt)| {
+                let editing = queue_edit.as_ref().is_some_and(|edit| {
+                    edit.chat_id == selected_chat_id
+                        && edit.index == index
+                        && edit.original == prompt
+                });
+                if editing {
+                    let can_save = queue_edit.as_ref().is_some_and(|edit| {
+                        edit.submitting.is_none()
+                            && !edit.text.trim().is_empty()
+                            && edit.text.trim() != edit.original
+                    });
+                    let saving = queue_edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.submitting.is_some());
+                    return div()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x66557d))
+                        .bg(rgb(0x211c2a))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xc8b6e8))
+                                        .child(format!("Editing queued {}", index + 1)),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .id(("save-queue", index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(if can_save { 0xb9c7ff } else { MUTED }))
+                                        .when(can_save, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x302b3a)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_save {
+                                                this.save_queue_edit(cx);
+                                            }
+                                        }))
+                                        .child(if saving { "Saving…" } else { "Save" }),
+                                )
+                                .child(
+                                    div()
+                                        .id(("cancel-queue-edit", index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x302b3a)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_queue_edit(cx);
+                                        }))
+                                        .child("Cancel"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("queue-editor", index))
+                                .track_focus(&queue_edit_focus)
+                                .mt_2()
+                                .w_full()
+                                .h(px(36.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if queue_edit_focus.is_focused(window) {
+                                    ACCENT
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(SURFACE))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus = this.queue_edit_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(queue_edit_input.clone()),
+                        )
+                        .into_any_element();
+                }
                 let steer_prompt = prompt.clone();
+                let edit_prompt = prompt.clone();
                 div()
                     .w_full()
                     .px_3()
@@ -1680,6 +1905,23 @@ impl Render for XdDesktop {
                                     .child(format!("Queued {}", index + 1)),
                             )
                             .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(("edit-queue", index))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(0xd7cede))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x302b3a)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.begin_queue_edit(index, edit_prompt.clone(), cx);
+                                        let focus = this.queue_edit_input.read(cx).focus_handle(cx);
+                                        window.focus(&focus);
+                                    }))
+                                    .child("Edit"),
+                            )
                             .child(
                                 div()
                                     .id(("steer-queue", index))
