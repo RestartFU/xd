@@ -22,10 +22,12 @@ pub mod agent;
 mod auth;
 mod runtime;
 mod storage;
+mod workflow;
 
 use auth::AuthManager;
 pub use runtime::TurnRuntime;
 pub use storage::{SendDisposition, StateStore, StorageError};
+use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
 const REQUEST_ID: &str = "_xd_request";
@@ -66,6 +68,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
+    workflows: WorkflowStatuses,
 }
 
 #[derive(Default)]
@@ -86,6 +89,7 @@ impl Engine {
         Self {
             store: None,
             auth: AuthManager::new(events.clone()),
+            workflows: WorkflowStatuses::new(),
             events,
             runtime: None,
         }
@@ -99,6 +103,7 @@ impl Engine {
             runtime: Some(TurnRuntime::new(store.clone(), events.clone())),
             store: Some(store),
             auth,
+            workflows: WorkflowStatuses::new(),
             events,
         };
         engine.auth.refresh_all();
@@ -147,6 +152,7 @@ impl Engine {
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
             Some("steer-queue") => self.steer_queue(&request),
+            Some("workflow-status") => self.workflow_status(&request),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -177,6 +183,18 @@ impl Engine {
             .unwrap_or("codex");
         response["auth_state"] = Value::String(self.auth.state(provider));
         response
+    }
+
+    fn workflow_status(&self, request: &Value) -> Value {
+        let text = match required_string(
+            request,
+            "text",
+            "Workflow status needs the captured run marker.",
+        ) {
+            Ok(text) => text,
+            Err(error) => return error_reply(error),
+        };
+        self.workflows.fetch(text).unwrap_or_else(error_reply)
     }
 
     fn tree_mutation(
@@ -507,6 +525,18 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
         assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
+    }
+
+    #[test]
+    fn workflow_status_is_dispatched_and_validates_markers_before_networking() {
+        let reply = dispatch(json!({
+            "op": "workflow-status",
+            "text": "not a captured run",
+            "_xd_request": 8
+        }));
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["_xd_request"], 8);
+        assert_eq!(reply["error"], "Invalid workflow run marker.");
     }
 
     #[test]
