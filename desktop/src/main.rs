@@ -13,11 +13,11 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, CursorStyle, Decorations, Entity, Focusable,
-    FontStyle, FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState, MouseButton,
-    ObjectFit, PathPromptOptions, Render, ResizeEdge, SharedString, StyledText, TextRun, Timer,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas,
-    div, img, list, prelude::*, px, rgb, rgba, size,
+    App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations, Entity,
+    Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState,
+    MouseButton, ObjectFit, PathPromptOptions, Render, ResizeEdge, SharedString, StyledText,
+    TextRun, Timer, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, canvas, div, img, list, prelude::*, px, rgb, rgba, size,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -70,6 +70,21 @@ struct SearchPanel {
     query: String,
     results: Vec<SearchHit>,
     loading: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AuthProvider {
+    provider: String,
+    display_name: String,
+    state: String,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    login_url: Option<String>,
+    #[serde(default)]
+    device_code: Option<String>,
+    #[serde(default)]
+    needs_input: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +234,9 @@ struct XdDesktop {
     model: AppModel,
     settings: AppSettings,
     settings_open: bool,
+    auth_open: bool,
+    auth_providers: Vec<AuthProvider>,
+    auth_input_text: String,
     speech_output: SpeechOutput,
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
@@ -238,6 +256,7 @@ struct XdDesktop {
     git_commit_input: Entity<ComposerInput>,
     repo_file_filter_input: Entity<ComposerInput>,
     terminal_input: Entity<ComposerInput>,
+    auth_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     composer_menu: Option<ComposerMenu>,
@@ -387,6 +406,16 @@ impl XdDesktop {
             }
         })
         .detach();
+        let auth_input = cx.new(|cx| ComposerInput::new(cx, "Paste authorization code…"));
+        cx.subscribe(&auth_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                this.auth_input_text = text.clone();
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.submit_auth_input(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -394,6 +423,9 @@ impl XdDesktop {
             },
             settings: AppSettings::load(),
             settings_open: false,
+            auth_open: false,
+            auth_providers: Vec::new(),
+            auth_input_text: String::new(),
             speech_output: SpeechOutput::default(),
             pending_speech: None,
             daemon: None,
@@ -413,6 +445,7 @@ impl XdDesktop {
             git_commit_input,
             repo_file_filter_input,
             terminal_input,
+            auth_input,
             composer: String::new(),
             queue_edit: None,
             composer_menu: None,
@@ -860,6 +893,8 @@ impl XdDesktop {
                         Some(format!("Invalid assistant catalog response: {error}"));
                 }
             }
+            RequestKind::AgentAuth => self.apply_auth_providers(&value),
+            RequestKind::AgentAuthMutation => {}
             RequestKind::Search { query } => {
                 if self
                     .search
@@ -1583,14 +1618,7 @@ impl XdDesktop {
                     _ => {}
                 }
             }
-            "agent-auth-changed"
-                if body.get("provider").and_then(Value::as_str)
-                    == Some(self.model.backend.as_str()) =>
-            {
-                if let Some(chat_id) = self.model.selected_chat.clone() {
-                    self.request_chat(&chat_id);
-                }
-            }
+            "agent-auth-changed" => self.apply_auth_provider(&body),
             _ => {}
         }
         cx.notify();
@@ -1601,6 +1629,46 @@ impl XdDesktop {
             if let Err(error) = daemon.tree() {
                 self.model.connection_error = Some(error);
             }
+        }
+    }
+
+    fn apply_auth_providers(&mut self, value: &Value) {
+        match serde_json::from_value::<Vec<AuthProvider>>(
+            value.get("providers").cloned().unwrap_or_default(),
+        ) {
+            Ok(providers) => {
+                self.auth_providers = providers;
+                self.sync_active_auth_state();
+            }
+            Err(error) => {
+                self.model.connection_error = Some(format!("Invalid account response: {error}"));
+            }
+        }
+    }
+
+    fn apply_auth_provider(&mut self, value: &Value) {
+        let Ok(provider) = serde_json::from_value::<AuthProvider>(value.clone()) else {
+            return;
+        };
+        if let Some(existing) = self
+            .auth_providers
+            .iter_mut()
+            .find(|existing| existing.provider == provider.provider)
+        {
+            *existing = provider;
+        } else {
+            self.auth_providers.push(provider);
+        }
+        self.sync_active_auth_state();
+    }
+
+    fn sync_active_auth_state(&mut self) {
+        if let Some(provider) = self
+            .auth_providers
+            .iter()
+            .find(|provider| provider.provider == self.model.backend)
+        {
+            self.model.auth_state = provider.state.clone();
         }
     }
 
@@ -2002,6 +2070,57 @@ impl XdDesktop {
             self.search_generation = self.search_generation.saturating_add(1);
             self.search = None;
         }
+        cx.notify();
+    }
+
+    fn toggle_auth(&mut self, cx: &mut Context<Self>) {
+        self.auth_open = !self.auth_open;
+        if self.auth_open {
+            self.settings_open = false;
+            if let Some(daemon) = &self.daemon
+                && let Err(error) = daemon.agent_auth()
+            {
+                self.model.connection_error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn auth_action(&mut self, provider: &str, state: &str, cx: &mut Context<Self>) {
+        let Some(operation) = auth_operation(state) else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.agent_auth_action(operation, provider, None)
+        {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn submit_auth_input(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self
+            .auth_providers
+            .iter()
+            .find(|provider| provider.state == "signing-in" && provider.needs_input)
+            .map(|provider| provider.provider.clone())
+        else {
+            return;
+        };
+        let input = self.auth_input_text.trim().to_owned();
+        if input.is_empty() {
+            return;
+        }
+        if let Some(daemon) = &self.daemon
+            && let Err(error) =
+                daemon.agent_auth_action("agent-auth-input", &provider, Some(&input))
+        {
+            self.model.connection_error = Some(error);
+            return;
+        }
+        self.auth_input_text.clear();
+        self.auth_input
+            .update(cx, |input, cx| input.set_text("", cx));
         cx.notify();
     }
 
@@ -4997,7 +5116,18 @@ impl Render for XdDesktop {
                             .flex_col()
                             .justify_center()
                             .child(div().text_sm().text_color(rgb(TEXT)).child(title))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(context)),
+                            .child(
+                                div()
+                                    .id("open-assistant-accounts")
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_auth(cx);
+                                    }))
+                                    .child(context),
+                            ),
                     )
                     .child(
                         div()
@@ -6799,6 +6929,214 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let auth_input = self.auth_input.clone();
+        let auth_overlay = self.auth_open.then(|| {
+            let rows = self
+                .auth_providers
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    let action_label = match provider.state.as_str() {
+                        "signed-in" => "Sign Out",
+                        "signing-in" => "Cancel",
+                        "checking" => "Checking…",
+                        "signing-out" => "Signing Out…",
+                        _ => "Sign In",
+                    };
+                    let action_enabled = !matches!(provider.state.as_str(), "checking" | "signing-out");
+                    let action_provider = provider.provider.clone();
+                    let action_state = provider.state.clone();
+                    let login_url = provider.login_url.clone();
+                    let device_code = provider.device_code.clone();
+                    let needs_input = provider.needs_input;
+                    div()
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child(provider.display_name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(provider.detail.clone().unwrap_or_else(|| provider.state.clone())),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id(("auth-action", index))
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if action_enabled { SURFACE_HIGH } else { BG }))
+                                        .text_xs()
+                                        .text_color(rgb(if action_enabled { TEXT } else { MUTED }))
+                                        .when(action_enabled, |button| {
+                                            button.cursor_pointer().hover(|style| style.bg(rgb(0x242428)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if action_enabled {
+                                                this.auth_action(&action_provider, &action_state, cx);
+                                            }
+                                        }))
+                                        .child(action_label),
+                                ),
+                        )
+                        .when_some(login_url, |row, url| {
+                            let opened_url = url.clone();
+                            row.child(
+                                div()
+                                    .id(("open-auth-url", index))
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(0x26354d))
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x304462)))
+                                    .on_click(move |_, _, cx| cx.open_url(&opened_url))
+                                    .child(format!("Open sign-in page · {url}")),
+                            )
+                        })
+                        .when_some(device_code, |row, code| {
+                            let copied_code = code.clone();
+                            row.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .font_family("monospace")
+                                            .text_sm()
+                                            .text_color(rgb(TEXT))
+                                            .child(format!("One-time code: {code}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("copy-auth-code", index))
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(SURFACE_HIGH))
+                                            .text_xs()
+                                            .text_color(rgb(TEXT))
+                                            .cursor_pointer()
+                                            .on_click(move |_, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(copied_code.clone()));
+                                            })
+                                            .child("Copy"),
+                                    ),
+                            )
+                        })
+                        .when(needs_input, |row| {
+                            row.child(
+                                div()
+                                    .h(px(42.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(BG))
+                                    .child(auth_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(("submit-auth-code", index))
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(accent))
+                                    .text_xs()
+                                    .text_color(rgb(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| this.submit_auth_input(cx)))
+                                    .child("Finish sign-in"),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(560.0))
+                        .max_h(px(680.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(div().text_lg().text_color(rgb(TEXT)).child("Assistant Accounts"))
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child("Credentials stay on this machine and are used only by its Rust daemon.")),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-auth")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_auth(cx)))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("auth-accounts-list")
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .children(rows),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let settings_overlay = self.settings_open.then(|| {
             let mut accent_buttons = Vec::new();
             for (index, preset) in AccentPreset::ALL.into_iter().enumerate() {
@@ -7141,6 +7479,7 @@ impl Render for XdDesktop {
                     .when_some(terminal_pane, |column, pane| column.child(pane)),
             )
             .when_some(diff_pane, |root, pane| root.child(pane))
+            .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay));
 
@@ -7225,7 +7564,10 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                if this.settings_open {
+                if this.auth_open {
+                    this.auth_open = false;
+                    cx.notify();
+                } else if this.settings_open {
                     this.settings_open = false;
                     cx.notify();
                 } else {
@@ -7457,6 +7799,15 @@ fn compact_label(value: &str, limit: usize) -> String {
     shortened
 }
 
+fn auth_operation(state: &str) -> Option<&'static str> {
+    match state {
+        "signed-in" => Some("agent-auth-logout"),
+        "signing-in" => Some("agent-auth-cancel"),
+        "checking" | "signing-out" => None,
+        _ => Some("agent-auth-start"),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn notify_turn_finished(title: &str) {
     let title = title
@@ -7528,6 +7879,16 @@ fn folder_hidden_by_collapse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_account_states_choose_safe_actions() {
+        assert_eq!(auth_operation("signed-out"), Some("agent-auth-start"));
+        assert_eq!(auth_operation("failed"), Some("agent-auth-start"));
+        assert_eq!(auth_operation("signed-in"), Some("agent-auth-logout"));
+        assert_eq!(auth_operation("signing-in"), Some("agent-auth-cancel"));
+        assert_eq!(auth_operation("checking"), None);
+        assert_eq!(auth_operation("signing-out"), None);
+    }
 
     #[test]
     fn collapsed_workspaces_hide_every_nested_descendant() {

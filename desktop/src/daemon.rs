@@ -22,6 +22,8 @@ use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 pub enum RequestKind {
     Tree,
     AgentCatalog,
+    AgentAuth,
+    AgentAuthMutation,
     Search {
         query: String,
     },
@@ -318,6 +320,23 @@ impl DaemonHandle {
 
     pub fn agent_catalog(&self) -> Result<(), String> {
         self.send(RequestKind::AgentCatalog, json!({"op": "agent-catalog"}))
+    }
+
+    pub fn agent_auth(&self) -> Result<(), String> {
+        self.send(RequestKind::AgentAuth, json!({"op": "agent-auth"}))
+    }
+
+    pub fn agent_auth_action(
+        &self,
+        operation: &str,
+        provider: &str,
+        input: Option<&str>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": operation, "provider": provider});
+        if let Some(input) = input {
+            body["input"] = Value::String(input.to_owned());
+        }
+        self.send(RequestKind::AgentAuthMutation, body)
     }
 
     pub fn shortcuts(&self, folder_id: &str) -> Result<(), String> {
