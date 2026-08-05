@@ -38,6 +38,9 @@ pub enum RequestKind {
         chat_id: String,
         text: String,
     },
+    QueueMutation {
+        chat_id: String,
+    },
     SetOption {
         chat_id: String,
     },
@@ -303,6 +306,24 @@ impl DaemonHandle {
                 text: text.to_owned(),
             },
             body,
+        )
+    }
+
+    pub fn drop_queue(&self, chat_id: &str, index: usize) -> Result<(), String> {
+        self.send(
+            RequestKind::QueueMutation {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "drop-queue", "chat": chat_id, "index": index}),
+        )
+    }
+
+    pub fn steer_queue(&self, chat_id: &str, index: usize, text: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::QueueMutation {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "steer-queue", "chat": chat_id, "index": index, "text": text}),
         )
     }
 

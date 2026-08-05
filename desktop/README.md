@@ -16,6 +16,7 @@ Current milestone:
 - workspace and chat creation controls;
 - first-message generated/existing-worktree selection and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
+- bounded queued-message previews with send-now and remove controls;
 - global/workspace prompt shortcuts with send-or-queue buttons and inline management;
 - daemon-persisted assistant, model, effort, access, and plan controls;
 - automatic bounded Codex/Claude sign-in detection in the Rust daemon;

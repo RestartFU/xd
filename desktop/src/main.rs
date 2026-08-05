@@ -250,6 +250,9 @@ impl XdDesktop {
                 }
                 let _ = text;
             }
+            // Queue events carry the authoritative complete queue. Mutation
+            // replies are acknowledgements only, so they never refetch chat.
+            RequestKind::QueueMutation { chat_id } if self.chat_is_active(&chat_id) => {}
             RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
             }
@@ -671,6 +674,28 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
         });
+    }
+
+    fn drop_queued(&mut self, index: usize) {
+        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.drop_queue(chat_id, index)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn steer_queued(&mut self, index: usize, text: &str) {
+        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.steer_queue(chat_id, index, text)
+        {
+            self.model.connection_error = Some(error);
+        }
     }
 
     fn toggle_shortcut(&mut self, workspace: bool) {
@@ -1602,6 +1627,81 @@ impl Render for XdDesktop {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let queue_rows = self
+            .model
+            .queue
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, prompt)| {
+                let steer_prompt = prompt.clone();
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0x3a3348))
+                    .bg(rgb(0x1d1a25))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xc8b6e8))
+                                    .child(format!("Queued {}", index + 1)),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(("steer-queue", index))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(0xb9c7ff))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x302b3a)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.steer_queued(index, &steer_prompt);
+                                        cx.notify();
+                                    }))
+                                    .child("Send now"),
+                            )
+                            .child(
+                                div()
+                                    .id(("drop-queue", index))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(0xefaaaa))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x3b282e)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.drop_queued(index);
+                                        cx.notify();
+                                    }))
+                                    .child("Remove"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .max_h(px(63.0))
+                            .overflow_hidden()
+                            .text_sm()
+                            .line_height(px(21.0))
+                            .text_color(rgb(0xd7cede))
+                            .child(prompt),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let draft_prompt = self.composer.trim();
         let global_saved = !draft_prompt.is_empty()
             && self
@@ -1708,20 +1808,31 @@ impl Render for XdDesktop {
             .when(queue_count > 0, |element| {
                 element.child(
                     div()
+                        .id("queue-panel")
                         .w_full()
                         .max_w(px(920.0))
                         .mx_auto()
                         .mb_2()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
+                        .max_h(px(230.0))
+                        .overflow_y_scroll()
+                        .p_2()
+                        .rounded_lg()
                         .bg(rgb(0x24212f))
-                        .text_xs()
-                        .text_color(rgb(0xc8b6e8))
-                        .child(format!(
-                            "{queue_count} queued message{}",
-                            if queue_count == 1 { "" } else { "s" }
-                        )),
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .px_1()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xc8b6e8))
+                                .child(format!(
+                                    "{queue_count} queued message{}",
+                                    if queue_count == 1 { "" } else { "s" }
+                                )),
+                        )
+                        .children(queue_rows),
                 )
             })
             .when(!shortcut_buttons.is_empty(), |element| {
