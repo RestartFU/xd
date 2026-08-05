@@ -1,5 +1,6 @@
 require "gtk4"
 require "../agent/workflow_run"
+require "./run_card"
 require "./turn_timing"
 
 module Xd
@@ -8,13 +9,6 @@ module Xd
       POLL_INTERVAL  = 10.seconds
       RETRY_INTERVAL = 30.seconds
       TICK_INTERVAL  = 1.second
-      STATUS_CLASSES = {
-        "xd-workflow-running",
-        "xd-workflow-success",
-        "xd-workflow-failure",
-        "xd-workflow-finished",
-      }
-
       getter widget : Gtk::Box
 
       def initialize(
@@ -29,56 +23,21 @@ module Xd
         @snapshot = nil.as(Agent::WorkflowRun::Status?)
         @job_clocks = [] of Tuple(Agent::WorkflowRun::Job, Gtk::Label)
 
-        heading_text = Gtk::Label.new("GitHub Actions ·")
-        heading_text.xalign = 0_f32
-        heading_text.add_css_class("title")
         run_link = Gtk::LinkButton.new_with_label(@run.url, "##{@run.id}")
         run_link.add_css_class("flat")
         run_link.add_css_class("xd-workflow-run-link")
         run_link.tooltip_text = "Open run ##{@run.id} on GitHub"
-        heading = Gtk::Box.new(:horizontal, 4)
-        heading.append(heading_text)
-        heading.append(run_link)
-
-        @run_spinner = Gtk::Spinner.new
-        @run_spinner.visible = true
-        @run_spinner.spinning = true
-
-        @run_name = Gtk::Label.new("")
-        @run_name.xalign = 0_f32
-        @run_name.hexpand = true
-        @run_name.add_css_class("xd-workflow-name")
-
-        @run_elapsed = Gtk::Label.new("")
-        @run_elapsed.xalign = 1_f32
-        @run_elapsed.visible = false
-        @run_elapsed.add_css_class("xd-workflow-elapsed")
-
-        @run_status = Gtk::Label.new("")
-        @run_status.xalign = 1_f32
-        @run_status.visible = false
-        @run_status.add_css_class("xd-workflow-status")
-        @run_status.add_css_class("xd-workflow-running")
-
-        summary = Gtk::Box.new(:horizontal, 8)
-        summary.append(@run_spinner)
-        summary.append(@run_name)
-        summary.append(@run_elapsed)
-        summary.append(@run_status)
-
-        @jobs = Gtk::Box.new(:vertical, 6)
-        @jobs.add_css_class("xd-workflow-jobs")
-
-        repository = Gtk::Label.new(@run.repository)
-        repository.xalign = 0_f32
-        repository.add_css_class("dim-label")
-
-        @widget = Gtk::Box.new(:vertical, 7)
-        @widget.add_css_class("xd-workflow")
-        @widget.append(heading)
-        @widget.append(summary)
-        @widget.append(@jobs)
-        @widget.append(repository)
+        @card = RunCard.new(
+          "GitHub Actions ·",
+          footer: @run.repository,
+          heading_suffix: run_link
+        )
+        @widget = @card.widget
+        @run_spinner = @card.spinner
+        @run_name = @card.name
+        @run_elapsed = @card.elapsed
+        @run_status = @card.status
+        @jobs = @card.items
         check
       end
 
@@ -212,8 +171,7 @@ module Xd
       end
 
       private def apply_status_class(css_class : String) : Nil
-        STATUS_CLASSES.each { |name| @run_status.remove_css_class(name) }
-        @run_status.add_css_class(css_class)
+        @card.apply_status_class(css_class)
       end
 
       private def render_jobs(

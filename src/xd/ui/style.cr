@@ -344,18 +344,9 @@ module Xd
         font-family: "JetBrains Mono", monospace;
         font-size: 0.90em;
       }
-      .xd-subagent {
-        background-color: alpha(#a56de2, 0.07);
-        border: 1px solid alpha(#a56de2, 0.22);
-        border-left: 3px solid alpha(#a56de2, 0.72);
-        border-radius: 10px;
-      }
-      button.xd-subagent-toggle,
-      button.xd-subagent-toggle:hover,
-      button.xd-subagent-toggle:checked {
-        background: none;
-        border: none;
-        border-radius: 10px;
+      button.xd-run-card-toggle {
+        min-width: 24px;
+        min-height: 24px;
         padding: 0;
       }
       .xd-code label {
