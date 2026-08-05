@@ -32,6 +32,7 @@ pub struct AgentCommand<'a> {
     pub effort: &'a str,
     pub access: &'a str,
     pub session_id: Option<&'a str>,
+    pub environment: &'a [(String, String)],
 }
 
 pub enum AgentParser {
@@ -124,9 +125,16 @@ impl CodexParser {
 
 impl AgentCommand<'_> {
     pub fn build(&self) -> Command {
-        if self.backend == "claude" {
-            return self.build_claude();
-        }
+        let mut command = if self.backend == "claude" {
+            self.build_claude()
+        } else {
+            self.build_codex()
+        };
+        command.envs(self.environment.iter().map(|(name, value)| (name, value)));
+        command
+    }
+
+    fn build_codex(&self) -> Command {
         let mut command = Command::new(resolve_codex());
         command.arg("exec");
         append_system_prompt(&mut command, self.system_prompt);
@@ -689,6 +697,7 @@ mod tests {
             effort: "high",
             access: "edit",
             session_id: None,
+            environment: &[("API_TOKEN".into(), "private".into())],
         }
         .build();
         let args = new
@@ -704,6 +713,9 @@ mod tests {
             pair[0] == "-c" && pair[1] == "developer_instructions=\"Always test.\""
         }));
         assert_eq!(args.last().map(String::as_str), Some("hello"));
+        assert!(new.get_envs().any(|(name, value)| {
+            name == "API_TOKEN" && value.is_some_and(|value| value == "private")
+        }));
 
         let resumed = AgentCommand {
             session_id: Some("thread-1"),
@@ -717,6 +729,7 @@ mod tests {
                 effort: "max",
                 access: "full",
                 session_id: None,
+                environment: &[],
             }
         }
         .build();
@@ -739,6 +752,7 @@ mod tests {
                 effort: "high",
                 access: "read-only",
                 session_id: Some("thread-1"),
+                environment: &[],
             }
         }
         .build();
@@ -792,6 +806,7 @@ mod tests {
             effort: "xhigh",
             access: "edit",
             session_id: Some("session-1"),
+            environment: &[],
         }
         .build();
         let args = command

@@ -126,6 +126,7 @@ pub struct TurnSpec {
     pub access: String,
     pub session_id: Option<String>,
     pub label: String,
+    pub environment: Vec<(String, String)>,
 }
 
 pub enum SendDisposition {
@@ -307,6 +308,44 @@ impl StateStore {
             })
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
         Ok(json!({"ok": true, "folders": folders, "chats": chats}))
+    }
+
+    pub fn folder_lineage_for_chat(&self, chat_id: &str) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let folder_id = database
+            .query_row(
+                "SELECT folder_id FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let root = self.workspace_root.to_string_lossy();
+        let mut statement = database
+            .prepare("SELECT id, relative_path FROM workspace_folders WHERE root_path = ?")?;
+        let rows = statement
+            .query_map([root.as_ref()], |row| {
+                Ok(WorkspaceRow {
+                    id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let target = rows.iter().find(|row| row.id == folder_id).ok_or_else(|| {
+            StorageError::InvalidRequest("The chat workspace no longer exists.".into())
+        })?;
+        let by_path = rows
+            .iter()
+            .map(|row| (row.relative_path.as_str(), row.id.as_str()))
+            .collect::<HashMap<_, _>>();
+        let mut paths = ancestors(&target.relative_path).collect::<Vec<_>>();
+        paths.reverse();
+        let mut lineage = paths
+            .into_iter()
+            .filter_map(|path| by_path.get(path).map(|id| (*id).to_owned()))
+            .collect::<Vec<_>>();
+        lineage.push(folder_id);
+        Ok(lineage)
     }
 
     pub fn chat(&self, chat_id: &str) -> Result<Value, StorageError> {
@@ -3336,6 +3375,7 @@ fn prepare_turn(
             model_label(&chat.1, &model),
             effort_label(&effort)
         ),
+        environment: Vec::new(),
     })
 }
 

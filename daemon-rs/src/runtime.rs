@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use crate::{
     EventBus, StateStore,
     agent::{AgentCommand, AgentEvent, AgentParser},
+    secrets::SecretsStore,
     storage::TurnSpec,
 };
 
@@ -28,6 +29,7 @@ struct RuntimeInner {
     events: Arc<EventBus>,
     active: Mutex<HashMap<String, ActiveProcess>>,
     next_turn: AtomicU64,
+    secrets: Arc<SecretsStore>,
 }
 
 impl Drop for RuntimeInner {
@@ -50,18 +52,36 @@ struct ActiveProcess {
 }
 
 impl TurnRuntime {
-    pub(crate) fn new(store: Arc<StateStore>, events: Arc<EventBus>) -> Self {
+    pub(crate) fn new(
+        store: Arc<StateStore>,
+        events: Arc<EventBus>,
+        secrets: Arc<SecretsStore>,
+    ) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
                 store,
                 events,
                 active: Mutex::new(HashMap::new()),
                 next_turn: AtomicU64::new(0),
+                secrets,
             }),
         }
     }
 
-    pub fn start(&self, turn: TurnSpec) -> Result<(), String> {
+    pub fn start(&self, mut turn: TurnSpec) -> Result<(), String> {
+        let lineage = self
+            .inner
+            .store
+            .folder_lineage_for_chat(&turn.chat_id)
+            .map_err(|error| error.to_string())?;
+        let secrets = self.inner.secrets.effective(&lineage)?;
+        turn.environment = secrets.environment;
+        if let Some(secret_prompt) = secrets.prompt {
+            turn.system_prompt = Some(match turn.system_prompt.take() {
+                Some(prompt) if !prompt.is_empty() => format!("{prompt}\n\n{secret_prompt}"),
+                _ => secret_prompt,
+            });
+        }
         let mut command = AgentCommand {
             backend: &turn.backend,
             prompt: &turn.prompt,
@@ -71,6 +91,7 @@ impl TurnRuntime {
             effort: &turn.effort,
             access: &turn.access,
             session_id: turn.session_id.as_deref(),
+            environment: &turn.environment,
         }
         .build();
         let mut child = command

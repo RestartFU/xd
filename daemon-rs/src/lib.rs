@@ -21,6 +21,7 @@ use thiserror::Error;
 pub mod agent;
 mod auth;
 mod runtime;
+mod secrets;
 mod storage;
 mod terminal;
 mod voice;
@@ -28,6 +29,7 @@ mod workflow;
 
 use auth::AuthManager;
 pub use runtime::TurnRuntime;
+use secrets::SecretsStore;
 use storage::clone_repository;
 pub use storage::{SendDisposition, StateStore, StorageError};
 use terminal::TerminalManager;
@@ -76,6 +78,7 @@ pub struct Engine {
     workflows: WorkflowStatuses,
     terminals: TerminalManager,
     voice: VoiceService,
+    secrets: Arc<SecretsStore>,
 }
 
 #[derive(Default)]
@@ -93,12 +96,14 @@ struct Subscriber {
 impl Engine {
     pub fn transport_only() -> Self {
         let events = Arc::new(EventBus::default());
+        let secrets = Arc::new(SecretsStore::new(None));
         Self {
             store: None,
             auth: AuthManager::new(events.clone()),
             workflows: WorkflowStatuses::new(),
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), None),
+            secrets,
             events,
             runtime: None,
         }
@@ -112,13 +117,19 @@ impl Engine {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::default());
         let auth = AuthManager::new(events.clone());
+        let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let engine = Self {
-            runtime: Some(TurnRuntime::new(store.clone(), events.clone())),
+            runtime: Some(TurnRuntime::new(
+                store.clone(),
+                events.clone(),
+                secrets.clone(),
+            )),
             store: Some(store),
             auth,
             workflows: WorkflowStatuses::new(),
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), data_directory),
+            secrets,
             events,
         };
         engine.auth.refresh_all();
@@ -147,6 +158,25 @@ impl Engine {
             Some("git-commit") => self.read(|store| store.git_commit(&request)),
             Some("git-push") => self.read(|store| store.git_push(&request)),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
+            Some("agent-secrets") => match self.secret_folder(&request) {
+                Ok(folder) => self
+                    .secrets
+                    .names(folder.as_deref())
+                    .map(|names| json!({"ok": true, "names": names}))
+                    .unwrap_or_else(error_reply),
+                Err(error) => error_reply(error),
+            },
+            Some("set-agent-secrets") => {
+                match (self.secret_folder(&request), request.get("entries")) {
+                    (Ok(folder), Some(entries)) => self
+                        .secrets
+                        .set(folder.as_deref(), entries)
+                        .map(|()| json!({"ok": true}))
+                        .unwrap_or_else(error_reply),
+                    (Err(error), _) => error_reply(error),
+                    (_, None) => error_reply("set-agent-secrets needs an entries array."),
+                }
+            }
             Some("agent-auth") => self.auth.snapshots(),
             Some("agent-auth-refresh") => {
                 let provider = request.get("provider").and_then(Value::as_str);
@@ -280,6 +310,24 @@ impl Engine {
         operation(&self.auth, provider, request)
             .map(|()| json!({"ok": true}))
             .unwrap_or_else(error_reply)
+    }
+
+    fn secret_folder(&self, request: &Value) -> Result<Option<String>, String> {
+        let Some(folder) = request.get("folder") else {
+            return Ok(None);
+        };
+        let folder = folder
+            .as_str()
+            .filter(|folder| !folder.is_empty())
+            .ok_or_else(|| "Agent secrets need a valid folder id.".to_string())?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "Rust daemon state storage is not configured.".to_string())?;
+        store
+            .folder_path(folder)
+            .map_err(|error| error.to_string())?;
+        Ok(Some(folder.to_owned()))
     }
 
     fn voice_request(
