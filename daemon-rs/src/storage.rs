@@ -480,6 +480,77 @@ impl StateStore {
         Ok(json!({"ok": true}))
     }
 
+    pub fn folder_settings(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let chain = folder_setting_chain(&database, &self.workspace_root, folder_id)?;
+        let current = chain.last().expect("folder setting chain has current row");
+        let inherited = resolved_folder_values(&chain[..chain.len() - 1]);
+        let effective = resolved_folder_values(&chain);
+        let fallback = self.workspace_root.join(&current.relative);
+        Ok(json!({
+            "ok": true,
+            "backend": current.backend,
+            "model": current.model,
+            "workdir": current.workdir,
+            "repo": current.repo,
+            "effective_backend": effective.backend.as_deref().unwrap_or("claude"),
+            "effective_model": effective.model,
+            "effective_workdir": effective.workdir.or_else(|| effective.repo.clone())
+                .unwrap_or_else(|| fallback.to_string_lossy().into_owned()),
+            "effective_repo": effective.repo,
+            "inherited_backend": inherited.backend,
+            "inherited_model": inherited.model,
+            "inherited_workdir": inherited.workdir,
+            "inherited_repo": inherited.repo,
+            "inherited_backend_from": inherited.backend_from,
+            "inherited_model_from": inherited.model_from,
+            "inherited_workdir_from": inherited.workdir_from,
+            "inherited_repo_from": inherited.repo_from,
+        }))
+    }
+
+    pub fn set_folder_settings(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        for name in ["backend", "model", "workdir", "repo"] {
+            if request.get(name).is_none() {
+                return Err(StorageError::InvalidRequest(
+                    "set-folder-settings needs backend, model, workdir, and repo.".into(),
+                ));
+            }
+        }
+        let backend = nullable_setting(request, "backend")?;
+        let model = nullable_setting(request, "model")?;
+        let workdir = nullable_directory_setting(request, "workdir", "working directory")?;
+        let repo = nullable_directory_setting(request, "repo", "repository")?;
+        if let Some(backend) = backend.as_deref() {
+            validate_backend(backend)?;
+            if let Some(model) = model.as_deref() {
+                validate_model(backend, model)?;
+            }
+        }
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE workspace_folders SET backend = ?, model = ?, workdir = ?, repo = ?, \
+             updated_at = ? WHERE root_path = ? AND id = ?",
+            params![
+                backend,
+                model,
+                workdir,
+                repo,
+                now_seconds(),
+                self.workspace_root.to_string_lossy(),
+                folder_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidRequest(
+                "No such folder on the daemon.".into(),
+            ));
+        }
+        Ok(json!({"ok": true}))
+    }
+
     pub fn agent_catalog(&self) -> Result<Value, StorageError> {
         let backends = [
             catalog_backend(
@@ -1353,6 +1424,23 @@ impl StateStore {
             )
             .optional()?
             .unwrap_or_else(|| ("claude".into(), None, None, None, false, false, false));
+        let folder_values = resolved_folder_values(&folder_setting_chain(
+            &database,
+            &self.workspace_root,
+            folder_id,
+        )?);
+        let backend = folder_values.backend.unwrap_or(defaults.0);
+        let model = match folder_values.model {
+            Some(model)
+                if backend_models(&backend)
+                    .iter()
+                    .any(|known| known.0 == model) =>
+            {
+                Some(model)
+            }
+            Some(_) => None,
+            None => defaults.1,
+        };
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
         database.execute(
@@ -1364,8 +1452,8 @@ impl StateStore {
                 id,
                 folder_id,
                 title,
-                defaults.0,
-                defaults.1,
+                backend,
+                model,
                 defaults.2,
                 defaults.3,
                 defaults.4,
@@ -1879,6 +1967,120 @@ fn queue_from_column(stored: Option<&str>) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(stored)
         .map(|queue| queue.into_iter().filter(|item| !item.is_empty()).collect())
         .unwrap_or_else(|_| vec![stored.to_owned()])
+}
+
+#[derive(Clone)]
+struct FolderSettingRow {
+    id: String,
+    relative: String,
+    backend: Option<String>,
+    model: Option<String>,
+    workdir: Option<String>,
+    repo: Option<String>,
+}
+
+#[derive(Default)]
+struct ResolvedFolderValues {
+    backend: Option<String>,
+    model: Option<String>,
+    workdir: Option<String>,
+    repo: Option<String>,
+    backend_from: Option<String>,
+    model_from: Option<String>,
+    workdir_from: Option<String>,
+    repo_from: Option<String>,
+}
+
+fn folder_setting_chain(
+    database: &Connection,
+    root: &Path,
+    folder_id: &str,
+) -> Result<Vec<FolderSettingRow>, StorageError> {
+    let relative = database
+        .query_row(
+            "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
+            params![root.to_string_lossy(), folder_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+    let mut paths = ancestors(&relative).map(str::to_owned).collect::<Vec<_>>();
+    paths.reverse();
+    paths.push(relative);
+    paths
+        .into_iter()
+        .map(|path| {
+            database
+                .query_row(
+                    "SELECT id, relative_path, backend, model, workdir, repo \
+                     FROM workspace_folders WHERE root_path = ? AND relative_path = ?",
+                    params![root.to_string_lossy(), path],
+                    |row| {
+                        Ok(FolderSettingRow {
+                            id: row.get(0)?,
+                            relative: row.get(1)?,
+                            backend: row.get(2)?,
+                            model: row.get(3)?,
+                            workdir: row.get(4)?,
+                            repo: row.get(5)?,
+                        })
+                    },
+                )
+                .map_err(StorageError::Query)
+        })
+        .collect()
+}
+
+fn resolved_folder_values(rows: &[FolderSettingRow]) -> ResolvedFolderValues {
+    let mut values = ResolvedFolderValues::default();
+    for row in rows {
+        if let Some(value) = &row.backend {
+            values.backend = Some(value.clone());
+            values.backend_from = Some(row.id.clone());
+        }
+        if let Some(value) = &row.model {
+            values.model = Some(value.clone());
+            values.model_from = Some(row.id.clone());
+        }
+        if let Some(value) = &row.workdir {
+            values.workdir = Some(value.clone());
+            values.workdir_from = Some(row.id.clone());
+        }
+        if let Some(value) = &row.repo {
+            values.repo = Some(value.clone());
+            values.repo_from = Some(row.id.clone());
+        }
+    }
+    values
+}
+
+fn nullable_setting(request: &Value, name: &str) -> Result<Option<String>, StorageError> {
+    match request.get(name) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            Ok((!value.is_empty()).then(|| value.to_owned()))
+        }
+        _ => Err(StorageError::InvalidRequest(format!(
+            "{name} must be text or null."
+        ))),
+    }
+}
+
+fn nullable_directory_setting(
+    request: &Value,
+    name: &str,
+    label: &str,
+) -> Result<Option<String>, StorageError> {
+    let value = nullable_setting(request, name)?;
+    if let Some(value) = value.as_deref()
+        && !Path::new(value).is_dir()
+    {
+        return Err(StorageError::InvalidRequest(format!(
+            "The workspace {label} must be an existing directory on the daemon."
+        )));
+    }
+    Ok(value)
 }
 
 fn effective_instructions(
@@ -3418,6 +3620,81 @@ mod tests {
         assert_eq!(
             turn.system_prompt.as_deref(),
             Some("Parent rules\n\nChild rules")
+        );
+    }
+
+    #[test]
+    fn workspace_defaults_are_inherited_validated_and_used_for_new_chats() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("repository");
+        let workdir = fixture.root.join("workdir");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let parent = store.new_folder(&json!({"name": "Parent"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child = store
+            .new_folder(&json!({"name": "Child", "parent": parent}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        store
+            .set_folder_settings(&json!({
+                "folder": parent,
+                "backend": "codex",
+                "model": "gpt-5.6-sol",
+                "workdir": null,
+                "repo": repository.to_string_lossy(),
+            }))
+            .unwrap();
+        store
+            .set_folder_settings(&json!({
+                "folder": child,
+                "backend": null,
+                "model": null,
+                "workdir": workdir.to_string_lossy(),
+                "repo": null,
+            }))
+            .unwrap();
+        let settings = store.folder_settings(&json!({"folder": child})).unwrap();
+        assert_eq!(settings["backend"], Value::Null);
+        assert_eq!(settings["effective_backend"], "codex");
+        assert_eq!(settings["effective_model"], "gpt-5.6-sol");
+        assert_eq!(
+            settings["effective_repo"],
+            repository.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            settings["effective_workdir"],
+            workdir.to_string_lossy().as_ref()
+        );
+        assert_eq!(settings["inherited_backend_from"], parent);
+
+        let chat = store.new_chat(&json!({"folder": child})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store.chat(&chat).unwrap();
+        assert_eq!(chat["backend"], "codex");
+        assert_eq!(chat["model"], "gpt-5.6-sol");
+
+        let error = store
+            .set_folder_settings(&json!({
+                "folder": child,
+                "backend": null,
+                "model": null,
+                "workdir": fixture.root.join("missing").to_string_lossy(),
+                "repo": null,
+            }))
+            .unwrap_err();
+        assert!(error.to_string().contains("existing directory"));
+        assert_eq!(
+            store.folder_settings(&json!({"folder": child})).unwrap()["workdir"],
+            workdir.to_string_lossy().as_ref()
         );
     }
 
