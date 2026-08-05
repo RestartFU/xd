@@ -2,6 +2,7 @@
 /dist/
 /lib/
 /desktop/target/
+/daemon-rs/target/
 /.payload-cache/
 *.o
 *.swp
