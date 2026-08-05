@@ -4,7 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
     thread,
@@ -29,6 +29,8 @@ const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REPOSITORY_FILES: usize = 5_000;
+const MAX_FILE_PREVIEW_BYTES: usize = 128 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_CLONE_URL_BYTES: usize = 512;
@@ -1198,6 +1200,88 @@ impl StateStore {
     pub fn git_status(&self, request: &Value) -> Result<Value, StorageError> {
         let workdir = self.chat_repository(request, "git-status needs a chat.")?;
         repository_status(&workdir)
+    }
+
+    pub fn repository_files(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "repository-files needs a chat.")?;
+        let output = checked_git(
+            &workdir,
+            &["ls-files", "-co", "--exclude-standard", "-z"],
+            &[],
+        )?;
+        let output = String::from_utf8(output)
+            .map_err(|_| StorageError::InvalidRequest("Git returned invalid file names.".into()))?;
+        let mut files = output
+            .split('\0')
+            .filter(|path| !path.is_empty() && path.len() <= 4_096)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort_unstable();
+        files.dedup();
+        let truncated = files.len() > MAX_REPOSITORY_FILES;
+        files.truncate(MAX_REPOSITORY_FILES);
+        Ok(json!({"ok": true, "files": files, "truncated": truncated}))
+    }
+
+    pub fn repository_file(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "repository-file needs a chat and path.")?;
+        let relative = required_string(request, "path", "A repository file path is required.")?;
+        if relative.len() > 4_096 {
+            return Err(StorageError::InvalidRequest(
+                "The repository file path is too long.".into(),
+            ));
+        }
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(StorageError::InvalidRequest(
+                "A safe relative repository file path is required.".into(),
+            ));
+        }
+        let root = fs::canonicalize(&workdir).map_err(|source| StorageError::Filesystem {
+            context: "Cannot resolve the repository root".into(),
+            source,
+        })?;
+        let path = fs::canonicalize(root.join(relative_path)).map_err(|source| {
+            StorageError::Filesystem {
+                context: "Cannot resolve the repository file".into(),
+                source,
+            }
+        })?;
+        if !path.starts_with(&root) || !path.is_file() {
+            return Err(StorageError::InvalidRequest(
+                "The requested path is not a repository file.".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&path)
+            .and_then(|file| {
+                file.take((MAX_FILE_PREVIEW_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot read the repository file".into(),
+                source,
+            })?;
+        let truncated = bytes.len() > MAX_FILE_PREVIEW_BYTES;
+        bytes.truncate(MAX_FILE_PREVIEW_BYTES);
+        if bytes.contains(&0) {
+            return Err(StorageError::InvalidRequest(
+                "Binary files cannot be previewed.".into(),
+            ));
+        }
+        let content = String::from_utf8(bytes).map_err(|_| {
+            StorageError::InvalidRequest("Only UTF-8 text files can be previewed.".into())
+        })?;
+        Ok(json!({
+            "ok": true,
+            "path": relative,
+            "content": content,
+            "truncated": truncated,
+        }))
     }
 
     pub fn git_commit(&self, request: &Value) -> Result<Value, StorageError> {
@@ -3559,6 +3643,22 @@ mod tests {
             .to_owned();
         assert!(working.contains("tracked.txt"));
         assert!(working.contains("untracked.txt"));
+        let files = store.repository_files(&json!({"chat": chat})).unwrap();
+        assert_eq!(files["files"], json!(["tracked.txt", "untracked.txt"]));
+        assert_eq!(files["truncated"], false);
+        assert_eq!(
+            store
+                .repository_file(&json!({"chat": chat, "path": "untracked.txt"}))
+                .unwrap()["content"],
+            "new\n"
+        );
+        assert!(
+            store
+                .repository_file(&json!({"chat": chat, "path": "../tracked.txt"}))
+                .unwrap_err()
+                .to_string()
+                .contains("safe relative")
+        );
         let status = store.git_status(&json!({"chat": chat})).unwrap();
         assert_eq!(status["branch"], "main");
         assert_eq!(status["unstaged"], 1);

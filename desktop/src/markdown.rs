@@ -154,6 +154,23 @@ pub fn parse(source: &str) -> Document {
     Document { blocks, truncated }
 }
 
+pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> Document {
+    let (source, byte_truncated) = bounded_prefix(source, MAX_MARKDOWN_BYTES);
+    let language = language
+        .filter(|language| !language.is_empty())
+        .map(normalize_language);
+    let code = source.to_owned();
+    let spans = highlight_code(language.as_deref(), &code);
+    Document {
+        blocks: vec![Block::Code(CodeBlock {
+            language,
+            code,
+            spans,
+        })],
+        truncated: truncated || byte_truncated,
+    }
+}
+
 fn bounded_prefix(source: &str, limit: usize) -> (&str, bool) {
     if source.len() <= limit {
         return (source, false);

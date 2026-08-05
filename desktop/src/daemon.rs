@@ -33,6 +33,15 @@ pub enum RequestKind {
         chat_id: String,
         generation: u64,
     },
+    RepositoryFiles {
+        chat_id: String,
+        generation: u64,
+    },
+    RepositoryFile {
+        chat_id: String,
+        path: String,
+        generation: u64,
+    },
     GitCommit {
         chat_id: String,
         message: String,
@@ -521,6 +530,32 @@ impl DaemonHandle {
                 generation,
             },
             json!({"op": "git-status", "chat": chat_id}),
+        )
+    }
+
+    pub fn repository_files(&self, chat_id: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::RepositoryFiles {
+                chat_id: chat_id.to_owned(),
+                generation,
+            },
+            json!({"op": "repository-files", "chat": chat_id}),
+        )
+    }
+
+    pub fn repository_file(
+        &self,
+        chat_id: &str,
+        path: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::RepositoryFile {
+                chat_id: chat_id.to_owned(),
+                path: path.to_owned(),
+                generation,
+            },
+            json!({"op": "repository-file", "chat": chat_id, "path": path}),
         )
     }
 

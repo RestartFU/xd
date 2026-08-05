@@ -124,6 +124,8 @@ impl Engine {
             Some("search") => self.read(|store| store.search(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
+            Some("repository-files") => self.read(|store| store.repository_files(&request)),
+            Some("repository-file") => self.read(|store| store.repository_file(&request)),
             Some("git-commit") => self.read(|store| store.git_commit(&request)),
             Some("git-push") => self.read(|store| store.git_push(&request)),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
