@@ -177,6 +177,8 @@ module Xd
       @bottom_jump_page_size = -1.0
       @bottom_jump_stable_frames = 0
       @bottom_jump_frames = 0
+      @bottom_jump_masked = false
+      @masked_history_request : Int64?
       @history_restore_tick = 0_u32
       @history_restore_upper = -1.0
       @history_restore_page_size = -1.0
@@ -1155,9 +1157,9 @@ module Xd
         apply_panes(saved_panes)
         if changed
           activate_transcript_page(endpoint, id)
-          begin_bottom_jump
+          begin_bottom_jump(mask: true)
         end
-        load_messages
+        load_messages(mask_initial: changed)
         load_chat_state
         @entry.grab_focus
         update_presence
@@ -1249,15 +1251,20 @@ module Xd
         force = false,
         window_start : Int64? = nil,
         window_anchor : Symbol? = nil,
+        mask_initial = false,
       ) : Nil
         chat_id = @active_chat
         return unless chat_id
         page = @transcript_page
         return unless page
         endpoint = @client
+        previous_request = @history_request
         @messages_request += 1
         request = @messages_request
         @history_request = request
+        if mask_initial || @masked_history_request == previous_request
+          @masked_history_request = request
+        end
         if window_start
           page.window_loading = true
           page.window_anchor = window_anchor
@@ -1370,7 +1377,7 @@ module Xd
         end
 
         if @follow_bottom
-          begin_bottom_jump
+          begin_bottom_jump(mask: @masked_history_request == request)
         end
         retire_open_questions
         @live_turn_key = nil
@@ -1509,9 +1516,11 @@ module Xd
       end
 
       private def cancel_history_request : Nil
-        return unless @history_request
+        request = @history_request
+        return unless request
 
         @history_request = nil
+        @masked_history_request = nil if @masked_history_request == request
         if page = @transcript_page
           page.window_loading = false
           page.window_anchor = nil
@@ -1523,6 +1532,7 @@ module Xd
         return unless @history_request == request
 
         @history_request = nil
+        @masked_history_request = nil if @masked_history_request == request
         resume_turn_recovery
       end
 
@@ -3630,7 +3640,7 @@ module Xd
           @transcript_scroll.add_tick_callback(callback)
       end
 
-      private def begin_bottom_jump : Nil
+      private def begin_bottom_jump(mask = false) : Nil
         @follow_bottom = true
         @history_bottom_distance = -1.0
         set_working_animation(true)
@@ -3638,11 +3648,12 @@ module Xd
         @bottom_jump_page_size = -1.0
         @bottom_jump_stable_frames = 0
         @bottom_jump_frames = 0
-        # Keep the transcript visible while its adjustment settles. Hiding the
-        # whole scroll area makes a delayed or stalled history request look
-        # like an empty chat and leaves the client blank until the tick source
-        # happens to run.
-        @transcript_scroll.opacity = 1.0
+        # A newly joined chat mounts its bounded history over several frames.
+        # Keep that initial bottom seek out of view so the scrollbar does not
+        # visibly race through the conversation. Ordinary sends and bottom
+        # seeks remain visible.
+        @bottom_jump_masked ||= mask
+        @transcript_scroll.opacity = @bottom_jump_masked ? 0.0 : 1.0
         return unless @bottom_jump_tick == 0
 
         callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
@@ -3672,6 +3683,7 @@ module Xd
                      @bottom_jump_frames >= BOTTOM_JUMP_FRAME_LIMIT)
           if settled
             @bottom_jump_tick = 0_u32
+            @bottom_jump_masked = false
             @transcript_scroll.queue_draw
             @transcript_scroll.opacity = 1.0
             false
