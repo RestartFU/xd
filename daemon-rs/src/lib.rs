@@ -146,6 +146,19 @@ impl Engine {
                     }
                 }
             }
+            Some("agent-auth-start") => {
+                self.auth_mutation(&request, |auth, provider, _| auth.login(provider))
+            }
+            Some("agent-auth-input") => self.auth_mutation(&request, |auth, provider, request| {
+                let input = required_string(request, "input", "agent-auth-input needs text.")?;
+                auth.input(provider, input)
+            }),
+            Some("agent-auth-cancel") => {
+                self.auth_mutation(&request, |auth, provider, _| auth.cancel(provider))
+            }
+            Some("agent-auth-logout") => {
+                self.auth_mutation(&request, |auth, provider, _| auth.logout(provider))
+            }
             Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
             Some("folder-context") => self.read(|store| store.folder_context(&request)),
             Some("folder-settings") => self.read(|store| store.folder_settings(&request)),
@@ -209,6 +222,24 @@ impl Engine {
             .unwrap_or("codex");
         response["auth_state"] = Value::String(self.auth.state(provider));
         response
+    }
+
+    fn auth_mutation(
+        &self,
+        request: &Value,
+        operation: impl FnOnce(&AuthManager, &str, &Value) -> Result<(), String>,
+    ) -> Value {
+        let provider = match required_string(
+            request,
+            "provider",
+            "Agent authentication needs a provider.",
+        ) {
+            Ok(provider) => provider,
+            Err(error) => return error_reply(error),
+        };
+        operation(&self.auth, provider, request)
+            .map(|()| json!({"ok": true}))
+            .unwrap_or_else(error_reply)
     }
 
     fn workflow_status(&self, request: &Value) -> Value {
