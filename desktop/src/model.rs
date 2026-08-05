@@ -81,6 +81,21 @@ pub struct Worktree {
     pub current: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModel {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentBackend {
+    pub id: String,
+    pub name: String,
+    pub default_model: String,
+    pub models: Vec<AgentModel>,
+    pub efforts: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppModel {
     pub folders: Vec<Folder>,
@@ -92,6 +107,10 @@ pub struct AppModel {
     pub new_worktree: bool,
     pub has_messages: bool,
     pub worktrees: Vec<Worktree>,
+    pub agent_backends: Vec<AgentBackend>,
+    pub backend: String,
+    pub model: Option<String>,
+    pub effort: String,
     pub connected: bool,
     pub connection_error: Option<String>,
     pub draft: String,
@@ -132,6 +151,9 @@ impl AppModel {
             self.new_worktree = false;
             self.has_messages = false;
             self.worktrees.clear();
+            self.backend.clear();
+            self.model = None;
+            self.effort.clear();
             self.draft.clear();
             self.draft_attachments.clear();
             self.live_text.clear();
@@ -148,6 +170,9 @@ impl AppModel {
         self.new_worktree = false;
         self.has_messages = false;
         self.worktrees.clear();
+        self.backend.clear();
+        self.model = None;
+        self.effort.clear();
         self.draft.clear();
         self.draft_attachments.clear();
         self.draft_revision = -1;
@@ -156,6 +181,29 @@ impl AppModel {
     }
 
     pub fn apply_chat(&mut self, body: &Value) {
+        if let Some(backend) = body.get("backend").and_then(Value::as_str) {
+            self.backend = backend.to_owned();
+            if let Some(selected) = self.selected_chat.as_deref()
+                && let Some(summary) = self.chats.iter_mut().find(|chat| chat.id == selected)
+            {
+                summary.backend = backend.to_owned();
+            }
+        }
+        self.model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                self.agent_backends
+                    .iter()
+                    .find(|backend| backend.id == self.backend)
+                    .map(|backend| backend.default_model.clone())
+            });
+        self.effort = body
+            .get("effort")
+            .and_then(Value::as_str)
+            .unwrap_or("high")
+            .to_owned();
         self.queue = body
             .get("queue")
             .and_then(Value::as_array)
@@ -182,6 +230,32 @@ impl AppModel {
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
         self.apply_draft(body);
+    }
+
+    pub fn apply_agent_catalog(&mut self, body: &Value) -> Result<(), serde_json::Error> {
+        self.agent_backends = serde_json::from_value(
+            body.get("backends")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        )?;
+        if self.model.is_none() {
+            self.model = self
+                .agent_backends
+                .iter()
+                .find(|backend| backend.id == self.backend)
+                .map(|backend| backend.default_model.clone());
+        }
+        Ok(())
+    }
+
+    pub fn selected_model_name(&self) -> Option<&str> {
+        let model = self.model.as_deref()?;
+        self.agent_backends
+            .iter()
+            .flat_map(|backend| &backend.models)
+            .find(|candidate| candidate.id == model)
+            .map(|candidate| candidate.name.as_str())
+            .or(Some(model))
     }
 
     pub fn apply_messages(&mut self, body: &Value) -> Result<(), serde_json::Error> {
@@ -329,6 +403,10 @@ impl AppModel {
             new_worktree: false,
             has_messages: true,
             worktrees: Vec::new(),
+            agent_backends: Vec::new(),
+            backend: "codex".into(),
+            model: Some("gpt-5.6-sol".into()),
+            effort: "high".into(),
             connected: true,
             connection_error: None,
             draft: String::new(),
@@ -422,6 +500,40 @@ mod tests {
         }));
         assert!(!model.new_worktree);
         assert!(model.has_messages);
+    }
+
+    #[test]
+    fn catalog_and_chat_snapshots_resolve_assistant_labels() {
+        let mut model = AppModel {
+            selected_chat: Some("chat-1".into()),
+            chats: vec![ChatSummary {
+                id: "chat-1".into(),
+                folder: "folder-1".into(),
+                title: None,
+                backend: "codex".into(),
+                working: false,
+            }],
+            ..Default::default()
+        };
+        model
+            .apply_agent_catalog(&json!({
+                "backends": [{
+                    "id": "claude", "name": "Claude Code",
+                    "default_model": "claude-opus-5",
+                    "models": [{"id": "claude-opus-5", "name": "Claude Opus 5"}],
+                    "efforts": ["low", "high", "ultracode"]
+                }]
+            }))
+            .unwrap();
+        model.apply_chat(&json!({
+            "backend": "claude", "model": "claude-opus-5", "effort": "high",
+            "queue": [], "working": false
+        }));
+
+        assert_eq!(model.backend, "claude");
+        assert_eq!(model.selected_summary().unwrap().backend, "claude");
+        assert_eq!(model.selected_model_name(), Some("Claude Opus 5"));
+        assert_eq!(model.effort, "high");
     }
 
     #[test]

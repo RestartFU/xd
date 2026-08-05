@@ -109,6 +109,7 @@ impl XdDesktop {
                 self.model.connected = true;
                 self.model.connection_error = None;
                 self.request_tree();
+                self.request_agent_catalog();
             }
             DaemonUpdate::Disconnected { message } => {
                 self.model.connected = false;
@@ -163,6 +164,12 @@ impl XdDesktop {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
                         self.select_chat(chat_id, cx);
                     }
+                }
+            }
+            RequestKind::AgentCatalog => {
+                if let Err(error) = self.model.apply_agent_catalog(&value) {
+                    self.model.connection_error =
+                        Some(format!("Invalid assistant catalog response: {error}"));
                 }
             }
             RequestKind::NewFolder => {
@@ -330,6 +337,14 @@ impl XdDesktop {
         }
     }
 
+    fn request_agent_catalog(&mut self) {
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.agent_catalog()
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     fn create_workspace(&mut self) {
         let name = format!("Workspace {}", self.model.folders.len() + 1);
         if let Some(daemon) = &self.daemon
@@ -356,6 +371,73 @@ impl XdDesktop {
         }
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.set_new_worktree(&chat_id, !self.model.new_worktree)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn cycle_model(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.working {
+            return;
+        }
+        let choices = self
+            .model
+            .agent_backends
+            .iter()
+            .flat_map(|backend| {
+                backend
+                    .models
+                    .iter()
+                    .map(|model| (backend.id.clone(), model.id.clone()))
+            })
+            .collect::<Vec<_>>();
+        if choices.is_empty() {
+            return;
+        }
+        let current = choices
+            .iter()
+            .position(|(backend, model)| {
+                backend == &self.model.backend
+                    && Some(model.as_str()) == self.model.model.as_deref()
+            })
+            .unwrap_or(choices.len() - 1);
+        let (backend, model) = &choices[(current + 1) % choices.len()];
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_model(&chat_id, backend, model)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn cycle_effort(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.working {
+            return;
+        }
+        let Some(backend) = self
+            .model
+            .agent_backends
+            .iter()
+            .find(|backend| backend.id == self.model.backend)
+        else {
+            return;
+        };
+        if backend.efforts.is_empty() {
+            return;
+        }
+        let current = backend
+            .efforts
+            .iter()
+            .position(|effort| effort == &self.model.effort)
+            .unwrap_or(backend.efforts.len() - 1);
+        let effort = backend.efforts[(current + 1) % backend.efforts.len()].clone();
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_effort(&chat_id, &effort)
         {
             self.model.connection_error = Some(error);
         }
@@ -691,6 +773,23 @@ impl Render for XdDesktop {
                 })
             })
             .unwrap_or_else(|| "workspace".into());
+        let model_label = self
+            .model
+            .selected_model_name()
+            .unwrap_or(if self.model.backend.is_empty() {
+                "Assistant"
+            } else {
+                &self.model.backend
+            })
+            .to_owned();
+        let effort_label = if self.model.effort.is_empty() {
+            "high"
+        } else {
+            &self.model.effort
+        }
+        .to_owned();
+        let can_change_agent =
+            selected.is_some() && !working && !self.model.agent_backends.is_empty();
         let status_text = if self.model.connected {
             "connected"
         } else {
@@ -861,6 +960,48 @@ impl Render for XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(
+                        div()
+                            .id("assistant-cycle")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(SURFACE_HIGH))
+                            .text_xs()
+                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                            .when(can_change_agent, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if can_change_agent {
+                                    this.cycle_model();
+                                }
+                            }))
+                            .child(model_label),
+                    )
+                    .child(
+                        div()
+                            .id("effort-cycle")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(SURFACE_HIGH))
+                            .text_xs()
+                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                            .when(can_change_agent, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if can_change_agent {
+                                    this.cycle_effort();
+                                }
+                            }))
+                            .child(format!("Effort: {effort_label}")),
+                    )
                     .child(
                         div()
                             .id("workspace-cycle")

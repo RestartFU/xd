@@ -20,6 +20,7 @@ use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
+    AgentCatalog,
     NewFolder,
     NewChat {
         folder_id: String,
@@ -213,6 +214,10 @@ impl DaemonHandle {
         self.send(RequestKind::Tree, json!({"op": "tree"}))
     }
 
+    pub fn agent_catalog(&self) -> Result<(), String> {
+        self.send(RequestKind::AgentCatalog, json!({"op": "agent-catalog"}))
+    }
+
     pub fn new_folder(&self, name: &str) -> Result<(), String> {
         self.send(
             RequestKind::NewFolder,
@@ -318,6 +323,35 @@ impl DaemonHandle {
                 "chat": chat_id,
                 "option": "new-worktree",
                 "value": if enabled { "true" } else { "false" },
+            }),
+        )
+    }
+
+    pub fn set_model(&self, chat_id: &str, backend: &str, model: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "model",
+                "backend": backend,
+                "value": model,
+            }),
+        )
+    }
+
+    pub fn set_effort(&self, chat_id: &str, effort: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "effort",
+                "value": effort,
             }),
         )
     }
