@@ -10,7 +10,7 @@ use xd_desktop::{
     activity::{ActivityCard, ActivityKind},
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
-    model::{AppModel, Attachment, Message},
+    model::{AppModel, Attachment, Folder, Message},
 };
 
 mod input;
@@ -75,6 +75,7 @@ struct XdDesktop {
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
     sidebar_move_submitting: bool,
+    collapsed_folders: HashSet<String>,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -122,6 +123,7 @@ impl XdDesktop {
             sidebar_delete_submitting: false,
             sidebar_move: None,
             sidebar_move_submitting: false,
+            collapsed_folders: HashSet::new(),
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -296,6 +298,12 @@ impl XdDesktop {
                     self.sidebar_move = None;
                     self.sidebar_move_submitting = false;
                 }
+                self.collapsed_folders.retain(|folder_id| {
+                    self.model
+                        .folders
+                        .iter()
+                        .any(|folder| &folder.id == folder_id)
+                });
                 if self.model.selected_chat.is_none() {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
                         self.select_chat(chat_id, cx);
@@ -1287,6 +1295,17 @@ impl XdDesktop {
         true
     }
 
+    fn folder_hidden_by_collapse(&self, folder_id: &str) -> bool {
+        folder_hidden_by_collapse(&self.model.folders, &self.collapsed_folders, folder_id)
+    }
+
+    fn toggle_folder_collapsed(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        if !self.collapsed_folders.remove(&folder_id) {
+            self.collapsed_folders.insert(folder_id);
+        }
+        cx.notify();
+    }
+
     fn sync_transcript_count(&self, reset: bool) {
         let count = self.model.display_message_count();
         if reset {
@@ -1679,9 +1698,14 @@ impl Render for XdDesktop {
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
+            if self.folder_hidden_by_collapse(&folder.id) {
+                continue;
+            }
             let indent = if folder.parent.is_some() { 22.0 } else { 12.0 };
             let folder_id = folder.id.clone();
+            let collapse_folder_id = folder.id.clone();
             let folder_name = folder.name.clone();
+            let folder_collapsed = self.collapsed_folders.contains(&folder.id);
             let folder_target = SidebarTarget::Folder(folder.id.clone());
             let editing_folder = sidebar_edit
                 .as_ref()
@@ -1782,10 +1806,19 @@ impl Render for XdDesktop {
                         .text_color(rgb(TEXT))
                         .child(
                             div()
+                                .id(("collapse-folder", folder_row_index))
                                 .min_w_0()
                                 .flex_1()
                                 .overflow_hidden()
-                                .child(format!("▾  {folder_name}")),
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(rgb(0xb9c7ff)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_folder_collapsed(collapse_folder_id.clone(), cx);
+                                }))
+                                .child(format!(
+                                    "{}  {folder_name}",
+                                    if folder_collapsed { "▸" } else { "▾" }
+                                )),
                         )
                         .child(
                             div()
@@ -1935,6 +1968,9 @@ impl Render for XdDesktop {
                             .into_any_element(),
                     );
                 }
+            }
+            if folder_collapsed {
+                continue;
             }
             for chat in self
                 .model
@@ -3067,6 +3103,65 @@ fn compact_label(value: &str, limit: usize) -> String {
         .collect::<String>();
     shortened.push('…');
     shortened
+}
+
+fn folder_hidden_by_collapse(
+    folders: &[Folder],
+    collapsed: &HashSet<String>,
+    folder_id: &str,
+) -> bool {
+    let mut current = folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+        .and_then(|folder| folder.parent.as_deref());
+    for _ in 0..=folders.len() {
+        let Some(id) = current else {
+            return false;
+        };
+        if collapsed.contains(id) {
+            return true;
+        }
+        current = folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .and_then(|folder| folder.parent.as_deref());
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapsed_workspaces_hide_every_nested_descendant() {
+        let folders = vec![
+            Folder {
+                id: "root".into(),
+                name: "Root".into(),
+                parent: None,
+            },
+            Folder {
+                id: "child".into(),
+                name: "Child".into(),
+                parent: Some("root".into()),
+            },
+            Folder {
+                id: "grandchild".into(),
+                name: "Grandchild".into(),
+                parent: Some("child".into()),
+            },
+        ];
+        let collapsed = HashSet::from(["root".to_owned()]);
+
+        assert!(!folder_hidden_by_collapse(&folders, &collapsed, "root"));
+        assert!(folder_hidden_by_collapse(&folders, &collapsed, "child"));
+        assert!(folder_hidden_by_collapse(
+            &folders,
+            &collapsed,
+            "grandchild"
+        ));
+    }
 }
 
 fn main() {
