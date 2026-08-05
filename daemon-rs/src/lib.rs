@@ -6,11 +6,16 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
 };
 
 use serde_json::{Value, json};
 use thiserror::Error;
+
+mod storage;
+
+pub use storage::{StateStore, StorageError};
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
 const REQUEST_ID: &str = "_xd_request";
@@ -43,10 +48,61 @@ pub enum ServerError {
 pub struct LocalServer {
     listener: UnixListener,
     socket_path: PathBuf,
+    engine: Arc<Engine>,
+}
+
+pub struct Engine {
+    store: Option<StateStore>,
+}
+
+impl Engine {
+    pub fn transport_only() -> Self {
+        Self { store: None }
+    }
+
+    pub fn with_store(store: StateStore) -> Self {
+        Self { store: Some(store) }
+    }
+
+    pub fn dispatch(&self, request: Value) -> Value {
+        let request_id = request.get(REQUEST_ID).cloned();
+        let mut reply = match request.get("op").and_then(Value::as_str) {
+            Some("ping") => json!({"ok": true}),
+            Some("tree") => self.read(|store| store.tree()),
+            Some("chat") => match required_string(&request, "chat", "chat needs a chat id") {
+                Ok(chat_id) => self.read(|store| store.chat(chat_id)),
+                Err(error) => error_reply(error),
+            },
+            Some("messages") => self.read(|store| store.messages(&request)),
+            Some(operation) => json!({
+                "ok": false,
+                "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
+            }),
+            None => json!({"ok": false, "error": "Request must include a string op."}),
+        };
+        if let (Some(request_id), Some(reply)) = (request_id, reply.as_object_mut()) {
+            reply.insert(REQUEST_ID.into(), request_id);
+        }
+        reply
+    }
+
+    fn read(&self, operation: impl FnOnce(&StateStore) -> Result<Value, StorageError>) -> Value {
+        match self.store.as_ref() {
+            Some(store) => operation(store).unwrap_or_else(error_reply),
+            None => error_reply("Rust daemon state storage is not configured."),
+        }
+    }
 }
 
 impl LocalServer {
     pub fn bind(socket_path: impl Into<PathBuf>) -> Result<Self, ServerError> {
+        Self::bind_with_engine(socket_path, Engine::transport_only())
+    }
+
+    pub fn bind_with_engine(
+        socket_path: impl Into<PathBuf>,
+        engine: Engine,
+    ) -> Result<Self, ServerError> {
         let socket_path = socket_path.into();
         if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent).map_err(|source| ServerError::CreateDirectory {
@@ -80,16 +136,18 @@ impl LocalServer {
         Ok(Self {
             listener,
             socket_path,
+            engine: Arc::new(engine),
         })
     }
 
     pub fn run(self) -> Result<(), ServerError> {
         for connection in self.listener.incoming() {
             let stream = connection.map_err(ServerError::Accept)?;
+            let engine = self.engine.clone();
             thread::Builder::new()
                 .name("xd-rust-local-client".into())
                 .spawn(move || {
-                    let _ = serve_connection(stream);
+                    let _ = serve_connection_with_engine(stream, engine);
                 })
                 .map_err(ServerError::Accept)?;
         }
@@ -107,7 +165,14 @@ impl Drop for LocalServer {
     }
 }
 
-pub fn serve_connection(mut stream: UnixStream) -> std::io::Result<()> {
+pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
+    serve_connection_with_engine(stream, Arc::new(Engine::transport_only()))
+}
+
+fn serve_connection_with_engine(
+    mut stream: UnixStream,
+    engine: Arc<Engine>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
         let mut line = Vec::new();
@@ -132,7 +197,7 @@ pub fn serve_connection(mut stream: UnixStream) -> std::io::Result<()> {
         }
 
         let reply = match serde_json::from_slice::<Value>(&line) {
-            Ok(request) => dispatch(request),
+            Ok(request) => engine.dispatch(request),
             Err(error) => json!({"ok": false, "error": format!("Invalid JSON request: {error}")}),
         };
         serde_json::to_writer(&mut stream, &reply)?;
@@ -142,19 +207,19 @@ pub fn serve_connection(mut stream: UnixStream) -> std::io::Result<()> {
 }
 
 pub fn dispatch(request: Value) -> Value {
-    let request_id = request.get(REQUEST_ID).cloned();
-    let mut reply = match request.get("op").and_then(Value::as_str) {
-        Some("ping") => json!({"ok": true}),
-        Some(operation) => json!({
-            "ok": false,
-            "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
-        }),
-        None => json!({"ok": false, "error": "Request must include a string op."}),
-    };
-    if let (Some(request_id), Some(reply)) = (request_id, reply.as_object_mut()) {
-        reply.insert(REQUEST_ID.into(), request_id);
-    }
-    reply
+    Engine::transport_only().dispatch(request)
+}
+
+fn required_string<'a>(request: &'a Value, key: &str, message: &str) -> Result<&'a str, String> {
+    request
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| message.into())
+}
+
+fn error_reply(error: impl std::fmt::Display) -> Value {
+    json!({"ok": false, "error": error.to_string()})
 }
 
 #[cfg(test)]
@@ -179,10 +244,10 @@ mod tests {
 
     #[test]
     fn unknown_operations_are_explicit_and_correlated() {
-        let reply = dispatch(json!({"op": "tree", "_xd_request": 7}));
+        let reply = dispatch(json!({"op": "send", "_xd_request": 7}));
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
-        assert!(reply["error"].as_str().unwrap().contains("tree"));
+        assert!(reply["error"].as_str().unwrap().contains("send"));
     }
 
     #[test]
