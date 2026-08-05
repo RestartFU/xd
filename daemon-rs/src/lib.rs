@@ -123,6 +123,9 @@ impl Engine {
             Some("messages") => self.read(|store| store.messages(&request)),
             Some("search") => self.read(|store| store.search(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
+            Some("git-status") => self.read(|store| store.git_status(&request)),
+            Some("git-commit") => self.read(|store| store.git_commit(&request)),
+            Some("git-push") => self.read(|store| store.git_push(&request)),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
             Some("agent-auth") => self.auth.snapshots(),
             Some("agent-auth-refresh") => {

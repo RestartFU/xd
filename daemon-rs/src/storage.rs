@@ -1195,6 +1195,63 @@ impl StateStore {
         Ok(json!({"ok": true, "output": output}))
     }
 
+    pub fn git_status(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "git-status needs a chat.")?;
+        repository_status(&workdir)
+    }
+
+    pub fn git_commit(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "git-commit needs a chat and message.")?;
+        let message = required_string(request, "message", "A commit message is required.")?.trim();
+        if message.is_empty() || message.len() > 4_096 || message.contains('\0') {
+            return Err(StorageError::InvalidRequest(
+                "Commit messages must contain 1 to 4096 bytes.".into(),
+            ));
+        }
+        let environment = noninteractive_git_environment();
+        checked_git(&workdir, &["add", "--all"], &environment)?;
+        checked_git(&workdir, &["commit", "-m", message], &environment)?;
+        repository_status(&workdir)
+    }
+
+    pub fn git_push(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "git-push needs a chat.")?;
+        let status = repository_status(&workdir)?;
+        let branch = status
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if branch.is_empty() || branch == "(detached)" || branch == "(initial)" {
+            return Err(StorageError::InvalidRequest(
+                "A named branch is required before pushing.".into(),
+            ));
+        }
+        let environment = noninteractive_git_environment();
+        if status
+            .get("upstream")
+            .and_then(Value::as_str)
+            .is_some_and(|upstream| !upstream.is_empty())
+        {
+            checked_git(&workdir, &["push"], &environment)?;
+        } else {
+            checked_git(
+                &workdir,
+                &["push", "--set-upstream", "origin", "HEAD"],
+                &environment,
+            )?;
+        }
+        repository_status(&workdir)
+    }
+
+    fn chat_repository(&self, request: &Value, message: &str) -> Result<PathBuf, StorageError> {
+        let chat_id = required_string(request, "chat", message)?;
+        let workdir = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
+        };
+        git_repository_root(&workdir)
+    }
+
     pub fn set_draft(&self, request: &Value) -> Result<(Value, Value), StorageError> {
         let chat_id = required_string(request, "chat", "set-draft needs a chat and text.")?;
         let text =
@@ -2751,6 +2808,84 @@ fn checked_git(
     ))
 }
 
+fn noninteractive_git_environment() -> Vec<(String, String)> {
+    vec![
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ("GCM_INTERACTIVE".into(), "Never".into()),
+        ("GIT_ASKPASS".into(), "/bin/false".into()),
+        ("SSH_ASKPASS".into(), "/bin/false".into()),
+        ("GIT_EDITOR".into(), ":".into()),
+    ]
+}
+
+fn repository_status(workdir: &Path) -> Result<Value, StorageError> {
+    let output = checked_git(
+        workdir,
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=normal",
+        ],
+        &[],
+    )?;
+    let output = String::from_utf8(output)
+        .map_err(|_| StorageError::InvalidRequest("Git returned invalid text.".into()))?;
+    let mut branch = String::new();
+    let mut upstream = String::new();
+    let mut ahead = 0_u64;
+    let mut behind = 0_u64;
+    let mut staged = 0_u64;
+    let mut unstaged = 0_u64;
+    let mut untracked = 0_u64;
+    let mut conflicted = 0_u64;
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("# branch.head ") {
+            branch = if value == "(detached)" {
+                "(detached)".into()
+            } else if value == "(initial)" {
+                "(initial)".into()
+            } else {
+                value.to_owned()
+            };
+        } else if let Some(value) = line.strip_prefix("# branch.upstream ") {
+            upstream = value.to_owned();
+        } else if let Some(value) = line.strip_prefix("# branch.ab ") {
+            for part in value.split_whitespace() {
+                if let Some(value) = part.strip_prefix('+') {
+                    ahead = value.parse().unwrap_or(0);
+                } else if let Some(value) = part.strip_prefix('-') {
+                    behind = value.parse().unwrap_or(0);
+                }
+            }
+        } else if line.starts_with("? ") {
+            untracked = untracked.saturating_add(1);
+        } else if line.starts_with("u ") {
+            conflicted = conflicted.saturating_add(1);
+        } else if line.starts_with("1 ") || line.starts_with("2 ") {
+            let status = line.as_bytes().get(2..4).unwrap_or_default();
+            if status.first().is_some_and(|value| *value != b'.') {
+                staged = staged.saturating_add(1);
+            }
+            if status.get(1).is_some_and(|value| *value != b'.') {
+                unstaged = unstaged.saturating_add(1);
+            }
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "branch": branch,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "conflicted": conflicted,
+        "clean": staged == 0 && unstaged == 0 && untracked == 0 && conflicted == 0,
+    }))
+}
+
 fn find_git_base(workdir: &Path) -> Result<Vec<u8>, StorageError> {
     let symbolic = run_git(
         workdir,
@@ -3424,6 +3559,37 @@ mod tests {
             .to_owned();
         assert!(working.contains("tracked.txt"));
         assert!(working.contains("untracked.txt"));
+        let status = store.git_status(&json!({"chat": chat})).unwrap();
+        assert_eq!(status["branch"], "main");
+        assert_eq!(status["unstaged"], 1);
+        assert_eq!(status["untracked"], 1);
+        assert_eq!(status["clean"], false);
+        let committed = store
+            .git_commit(&json!({"chat": chat, "message": "save changes"}))
+            .unwrap();
+        assert_eq!(committed["clean"], true);
+
+        let remote = fixture.root.join("remote.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&remote)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["remote", "add", "origin"])
+                .arg(&remote)
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let pushed = store.git_push(&json!({"chat": chat})).unwrap();
+        assert_eq!(pushed["upstream"], "origin/main");
+        assert_eq!(pushed["ahead"], 0);
         assert!(
             store
                 .diff_read(&json!({

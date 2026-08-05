@@ -84,6 +84,23 @@ struct DiffPanel {
     files: Vec<DiffFile>,
     error: Option<String>,
     truncated: bool,
+    status: Option<GitStatus>,
+    status_loading: bool,
+    action: Option<String>,
+    action_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct GitStatus {
+    branch: String,
+    upstream: String,
+    ahead: u64,
+    behind: u64,
+    staged: u64,
+    unstaged: u64,
+    untracked: u64,
+    conflicted: u64,
+    clean: bool,
 }
 
 struct PendingSend {
@@ -143,6 +160,7 @@ struct XdDesktop {
     workspace_workdir_input: Entity<ComposerInput>,
     workspace_repo_default_input: Entity<ComposerInput>,
     search_input: Entity<ComposerInput>,
+    git_commit_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -172,6 +190,7 @@ struct XdDesktop {
     diff_panel: Option<DiffPanel>,
     diff_generation: u64,
     collapsed_diff_files: HashSet<String>,
+    git_commit_message: String,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -257,6 +276,12 @@ impl XdDesktop {
             }
         })
         .detach();
+        let git_commit_input = cx.new(|cx| ComposerInput::new(cx, "Commit message…"));
+        cx.subscribe(&git_commit_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.git_commit_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.commit_changes(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -276,6 +301,7 @@ impl XdDesktop {
             workspace_workdir_input,
             workspace_repo_default_input,
             search_input,
+            git_commit_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -305,6 +331,7 @@ impl XdDesktop {
             diff_panel: None,
             diff_generation: 0,
             collapsed_diff_files: HashSet::new(),
+            git_commit_message: String::new(),
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -370,6 +397,8 @@ impl XdDesktop {
                 }
                 if let Some(diff) = &mut self.diff_panel {
                     diff.loading = false;
+                    diff.status_loading = false;
+                    diff.action = None;
                 }
                 self.restore_pending_send(cx);
             }
@@ -396,13 +425,21 @@ impl XdDesktop {
     ) {
         let value = Value::Object(body);
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            self.model.connection_error = Some(
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("The xd daemon rejected the request.")
-                    .to_owned(),
-            );
+            if !matches!(
+                &kind,
+                RequestKind::DiffRead { .. }
+                    | RequestKind::GitStatus { .. }
+                    | RequestKind::GitCommit { .. }
+                    | RequestKind::GitPush { .. }
+            ) {
+                self.model.connection_error = Some(
+                    value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("The xd daemon rejected the request.")
+                        .to_owned(),
+                );
+            }
             match &kind {
                 RequestKind::Send { .. } => {
                     self.sending = false;
@@ -469,6 +506,29 @@ impl XdDesktop {
                     if let Some(diff) = &mut self.diff_panel {
                         diff.loading = false;
                         diff.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::GitStatus { generation, .. }
+                    if *generation == self.diff_generation =>
+                {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.status_loading = false;
+                        diff.action_error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::GitCommit { generation, .. }
+                | RequestKind::GitPush { generation, .. }
+                    if *generation == self.diff_generation =>
+                {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.action = None;
+                        diff.action_error = value
                             .get("error")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
@@ -662,6 +722,68 @@ impl XdDesktop {
                 } else {
                     self.prepare_diff(output, generation, cx);
                 }
+            }
+            RequestKind::GitStatus {
+                chat_id,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                match serde_json::from_value::<GitStatus>(value.clone()) {
+                    Ok(status) => {
+                        if let Some(diff) = &mut self.diff_panel {
+                            diff.status = Some(status);
+                            diff.status_loading = false;
+                            diff.action_error = None;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(diff) = &mut self.diff_panel {
+                            diff.status_loading = false;
+                            diff.action_error =
+                                Some(format!("Invalid Git status response: {error}"));
+                        }
+                    }
+                }
+            }
+            RequestKind::GitCommit {
+                chat_id,
+                message,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                if self.git_commit_message.trim() == message {
+                    self.git_commit_message.clear();
+                    self.git_commit_input
+                        .update(cx, |input, cx| input.set_text("", cx));
+                }
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.action = None;
+                    diff.action_error = None;
+                }
+                self.refresh_diff(cx);
+            }
+            RequestKind::GitPush {
+                chat_id,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.action = None;
+                    diff.action_error = None;
+                }
+                self.refresh_diff(cx);
             }
             RequestKind::Shortcuts { folder_id } => {
                 if self
@@ -1498,10 +1620,90 @@ impl XdDesktop {
         self.refresh_diff(cx);
     }
 
+    fn git_commit_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        self.git_commit_message = text;
+        cx.notify();
+    }
+
+    fn commit_changes(&mut self, cx: &mut Context<Self>) {
+        let message = self.git_commit_message.trim().to_owned();
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let can_commit = self.diff_panel.as_ref().is_some_and(|diff| {
+            diff.action.is_none()
+                && diff.status.as_ref().is_some_and(|status| {
+                    !status.clean && status.conflicted == 0 && !message.is_empty()
+                })
+        });
+        if !can_commit {
+            return;
+        }
+        let generation = self.diff_generation;
+        if let Some(diff) = &mut self.diff_panel {
+            diff.action = Some("Committing all changes…".into());
+            diff.action_error = None;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.git_commit(&chat_id, &message, generation));
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.action = None;
+            diff.action_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn push_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let can_push = self.diff_panel.as_ref().is_some_and(|diff| {
+            diff.action.is_none()
+                && diff.status.as_ref().is_some_and(|status| {
+                    !status.branch.is_empty()
+                        && status.branch != "(detached)"
+                        && status.branch != "(initial)"
+                })
+        });
+        if !can_push {
+            return;
+        }
+        let generation = self.diff_generation;
+        if let Some(diff) = &mut self.diff_panel {
+            diff.action = Some("Pushing branch…".into());
+            diff.action_error = None;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.git_push(&chat_id, generation));
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.action = None;
+            diff.action_error = Some(error);
+        }
+        cx.notify();
+    }
+
     fn refresh_diff(&mut self, cx: &mut Context<Self>) {
+        if self
+            .diff_panel
+            .as_ref()
+            .is_some_and(|diff| diff.action.is_some())
+        {
+            return;
+        }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             if let Some(diff) = &mut self.diff_panel {
                 diff.loading = false;
+                diff.status_loading = false;
                 diff.error = Some("Select a chat to inspect its changes.".into());
             }
             cx.notify();
@@ -1512,29 +1714,39 @@ impl XdDesktop {
         let generation = self.diff_generation;
         if let Some(diff) = &mut self.diff_panel {
             diff.loading = true;
+            diff.status_loading = true;
             diff.files.clear();
             diff.error = None;
             diff.truncated = false;
         } else {
             return;
         }
-        let result = self
-            .daemon
-            .as_ref()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
-            .and_then(|daemon| {
-                daemon.diff_read(
+        match self.daemon.as_ref() {
+            Some(daemon) => {
+                if let Err(error) = daemon.diff_read(
                     &chat_id,
                     if branch { "base" } else { "working-all" },
                     None,
                     generation,
-                )
-            });
-        if let Err(error) = result
-            && let Some(diff) = &mut self.diff_panel
-        {
-            diff.loading = false;
-            diff.error = Some(error);
+                ) && let Some(diff) = &mut self.diff_panel
+                {
+                    diff.loading = false;
+                    diff.error = Some(error);
+                }
+                if let Err(error) = daemon.git_status(&chat_id, generation)
+                    && let Some(diff) = &mut self.diff_panel
+                {
+                    diff.status_loading = false;
+                    diff.action_error = Some(error);
+                }
+            }
+            None => {
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.loading = false;
+                    diff.status_loading = false;
+                    diff.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
         }
         cx.notify();
     }
@@ -1906,6 +2118,10 @@ impl XdDesktop {
         self.request_messages(&chat_id);
         self.request_shortcuts();
         if self.diff_panel.is_some() {
+            if let Some(diff) = &mut self.diff_panel {
+                diff.action = None;
+                diff.action_error = None;
+            }
             self.refresh_diff(cx);
         }
         cx.notify();
@@ -4744,9 +4960,40 @@ impl Render for XdDesktop {
                     ),
             );
 
+        let git_commit_input = self.git_commit_input.clone();
+        let git_commit_focus = self.git_commit_input.read(cx).focus_handle(cx);
         let diff_pane = self.diff_panel.as_ref().map(|diff| {
             let branch_mode = diff.branch;
             let loading = diff.loading;
+            let action_running = diff.action.is_some();
+            let status = diff.status.as_ref();
+            let can_commit = !self.git_commit_message.trim().is_empty()
+                && !action_running
+                && status.is_some_and(|status| !status.clean && status.conflicted == 0);
+            let can_push = !action_running
+                && status.is_some_and(|status| {
+                    !status.branch.is_empty()
+                        && status.branch != "(detached)"
+                        && status.branch != "(initial)"
+                });
+            let status_label = status
+                .map(|status| {
+                    if status.clean {
+                        format!("{} · clean", status.branch)
+                    } else {
+                        format!(
+                            "{} · {} staged · {} modified · {} new",
+                            status.branch, status.staged, status.unstaged, status.untracked
+                        )
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if diff.status_loading {
+                        "Reading Git status…".into()
+                    } else {
+                        "Git status unavailable".into()
+                    }
+                });
             let total_additions = diff.files.iter().map(|file| file.additions).sum::<usize>();
             let total_deletions = diff.files.iter().map(|file| file.deletions).sum::<usize>();
             let mut file_sections = Vec::new();
@@ -4965,6 +5212,136 @@ impl Render for XdDesktop {
                             )
                         })
                         .children(file_sections),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(status_label),
+                                )
+                                .when_some(status, |row, status| {
+                                    row.child(div().text_xs().text_color(rgb(MUTED)).child(
+                                        if status.upstream.is_empty() {
+                                            "not published".into()
+                                        } else {
+                                            format!("↑{} ↓{}", status.ahead, status.behind)
+                                        },
+                                    ))
+                                }),
+                        )
+                        .when_some(
+                            status.and_then(|status| {
+                                (status.conflicted > 0).then(|| {
+                                    format!(
+                                        "Resolve {} conflicted file(s) before committing.",
+                                        status.conflicted
+                                    )
+                                })
+                            }),
+                            |footer, warning| {
+                                footer
+                                    .child(div().text_xs().text_color(rgb(0xe0c178)).child(warning))
+                            },
+                        )
+                        .when_some(diff.action_error.clone(), |footer, error| {
+                            footer.child(div().text_xs().text_color(rgb(0xf0a8b3)).child(error))
+                        })
+                        .when_some(diff.action.clone(), |footer, action| {
+                            footer.child(div().text_xs().text_color(rgb(0xaec4ff)).child(action))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("git-commit-input")
+                                        .track_focus(&git_commit_focus)
+                                        .h(px(36.0))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if git_commit_focus.is_focused(window) {
+                                            ACCENT
+                                        } else {
+                                            BORDER
+                                        }))
+                                        .bg(rgb(BG))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus =
+                                                this.git_commit_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(git_commit_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("git-commit-all")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_commit { ACCENT } else { SURFACE_HIGH }))
+                                        .text_xs()
+                                        .text_color(rgb(if can_commit { 0xffffff } else { MUTED }))
+                                        .when(can_commit, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x7b98ff)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_commit {
+                                                this.commit_changes(cx);
+                                            }
+                                        }))
+                                        .child("Commit all"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("git-push")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .bg(rgb(if can_push { SURFACE_HIGH } else { BG }))
+                                .text_xs()
+                                .text_color(rgb(if can_push { TEXT } else { MUTED }))
+                                .text_center()
+                                .when(can_push, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if can_push {
+                                        this.push_changes(cx);
+                                    }
+                                }))
+                                .child("Push branch"),
+                        ),
                 )
                 .into_any_element()
         });

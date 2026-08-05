@@ -29,6 +29,19 @@ pub enum RequestKind {
         read: String,
         generation: u64,
     },
+    GitStatus {
+        chat_id: String,
+        generation: u64,
+    },
+    GitCommit {
+        chat_id: String,
+        message: String,
+        generation: u64,
+    },
+    GitPush {
+        chat_id: String,
+        generation: u64,
+    },
     Shortcuts {
         folder_id: String,
     },
@@ -498,6 +511,37 @@ impl DaemonHandle {
                 generation,
             },
             body,
+        )
+    }
+
+    pub fn git_status(&self, chat_id: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::GitStatus {
+                chat_id: chat_id.to_owned(),
+                generation,
+            },
+            json!({"op": "git-status", "chat": chat_id}),
+        )
+    }
+
+    pub fn git_commit(&self, chat_id: &str, message: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::GitCommit {
+                chat_id: chat_id.to_owned(),
+                message: message.to_owned(),
+                generation,
+            },
+            json!({"op": "git-commit", "chat": chat_id, "message": message}),
+        )
+    }
+
+    pub fn git_push(&self, chat_id: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::GitPush {
+                chat_id: chat_id.to_owned(),
+                generation,
+            },
+            json!({"op": "git-push", "chat": chat_id}),
         )
     }
 
