@@ -13,7 +13,8 @@ pub struct Folder {
 pub struct ChatSummary {
     pub id: String,
     pub folder: String,
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
     pub backend: String,
     #[serde(default)]
     pub working: bool,
@@ -38,6 +39,11 @@ pub struct AppModel {
     pub queue: Vec<String>,
     pub working: bool,
     pub connected: bool,
+    pub connection_error: Option<String>,
+    pub draft: String,
+    pub draft_revision: i64,
+    pub live_text: String,
+    pub live_activity: Vec<Message>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +74,9 @@ impl AppModel {
             self.messages.clear();
             self.queue.clear();
             self.working = false;
+            self.draft.clear();
+            self.live_text.clear();
+            self.live_activity.clear();
         }
         Ok(())
     }
@@ -76,6 +85,11 @@ impl AppModel {
         self.selected_chat = Some(chat_id.into());
         self.messages.clear();
         self.queue.clear();
+        self.working = false;
+        self.draft.clear();
+        self.draft_revision = -1;
+        self.live_text.clear();
+        self.live_activity.clear();
     }
 
     pub fn apply_chat(&mut self, body: &Value) {
@@ -91,6 +105,7 @@ impl AppModel {
             .get("working")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        self.apply_draft(body);
     }
 
     pub fn apply_messages(&mut self, body: &Value) -> Result<(), serde_json::Error> {
@@ -110,10 +125,73 @@ impl AppModel {
                         .collect();
                 }
             }
-            "turn-started" if self.event_is_active(body) => self.working = true,
+            "draft" if self.event_is_active(body) => self.apply_draft(body),
+            "turn-started" if self.event_is_active(body) => {
+                self.working = true;
+                self.live_text.clear();
+                self.live_activity.clear();
+            }
+            "text" if self.event_is_active(body) => {
+                if let Some(text) = body.get("text").and_then(Value::as_str) {
+                    self.live_text.push_str(text);
+                }
+            }
+            "tool" if self.event_is_active(body) => {
+                self.live_activity.push(Message {
+                    id: None,
+                    role: "tool".into(),
+                    content: body
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Used a tool")
+                        .to_owned(),
+                    label: None,
+                });
+            }
             "turn-finished" if self.event_is_active(body) => self.working = false,
             _ => {}
         }
+    }
+
+    pub fn selected_summary(&self) -> Option<&ChatSummary> {
+        let selected = self.selected_chat.as_deref()?;
+        self.chats.iter().find(|chat| chat.id == selected)
+    }
+
+    pub fn display_messages(&self) -> Vec<Message> {
+        let mut messages = self.messages.clone();
+        if !self.live_text.is_empty() {
+            messages.push(Message {
+                id: None,
+                role: "assistant".into(),
+                content: self.live_text.clone(),
+                label: self.selected_summary().map(|chat| chat.backend.clone()),
+            });
+        }
+        messages.extend(self.live_activity.iter().cloned());
+        messages
+    }
+
+    pub fn display_message_count(&self) -> usize {
+        self.messages.len() + usize::from(!self.live_text.is_empty()) + self.live_activity.len()
+    }
+
+    pub fn apply_draft_snapshot(&mut self, body: &Value) {
+        self.apply_draft(body);
+    }
+
+    fn apply_draft(&mut self, body: &Value) {
+        let Some(revision) = body.get("draft_revision").and_then(Value::as_i64) else {
+            return;
+        };
+        if revision <= self.draft_revision {
+            return;
+        }
+        let Some(text) = body.get("draft").and_then(Value::as_str) else {
+            return;
+        };
+        self.draft_revision = revision;
+        self.draft = text.to_owned();
     }
 
     fn event_is_active(&self, body: &Value) -> bool {
@@ -131,14 +209,14 @@ impl AppModel {
                 ChatSummary {
                     id: "chat-gpui".into(),
                     folder: "workspace-xd".into(),
-                    title: "Rewrite desktop with GPUI".into(),
+                    title: Some("Rewrite desktop with GPUI".into()),
                     backend: "codex".into(),
                     working: true,
                 },
                 ChatSummary {
                     id: "chat-scroll".into(),
                     folder: "workspace-xd".into(),
-                    title: "Smooth transcript scrolling".into(),
+                    title: Some("Smooth transcript scrolling".into()),
                     backend: "codex".into(),
                     working: false,
                 },
@@ -167,6 +245,11 @@ impl AppModel {
             queue: vec!["Port workspace and chat shortcuts".into()],
             working: true,
             connected: true,
+            connection_error: None,
+            draft: String::new(),
+            draft_revision: 0,
+            live_text: String::new(),
+            live_activity: Vec::new(),
         }
     }
 }
@@ -232,5 +315,37 @@ mod tests {
         assert!(model.working);
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert!(!model.working);
+    }
+
+    #[test]
+    fn streaming_text_and_tools_are_live_rows_until_history_is_reloaded() {
+        let mut model = AppModel {
+            selected_chat: Some("chat-1".into()),
+            ..Default::default()
+        };
+        model.apply_event("turn-started", &json!({"chat":"chat-1"}));
+        model.apply_event("text", &json!({"chat":"chat-1", "text":"hello"}));
+        model.apply_event("text", &json!({"chat":"chat-1", "text":" world"}));
+        model.apply_event("tool", &json!({"chat":"chat-1", "text":"Read file"}));
+
+        assert_eq!(model.live_text, "hello world");
+        assert_eq!(model.display_message_count(), 2);
+        assert_eq!(model.display_messages()[1].content, "Read file");
+    }
+
+    #[test]
+    fn draft_replies_do_not_replace_queue_or_turn_state() {
+        let mut model = AppModel {
+            queue: vec!["next".into()],
+            working: true,
+            draft_revision: 2,
+            ..Default::default()
+        };
+
+        model.apply_draft_snapshot(&json!({"draft":"shared", "draft_revision":3}));
+
+        assert_eq!(model.draft, "shared");
+        assert_eq!(model.queue, ["next"]);
+        assert!(model.working);
     }
 }
