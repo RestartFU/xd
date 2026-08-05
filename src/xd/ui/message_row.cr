@@ -49,12 +49,16 @@ module Xd
     end
 
     class MessageRow
-      BUBBLE_MAX_WIDTH_CHARS = 60
-      RENDER_RETRY_INTERVAL  = 50.milliseconds
+      BUBBLE_MAX_WIDTH_CHARS   = 60
+      RENDER_RETRY_INTERVAL    = 50.milliseconds
+      PREPARED_RENDER_INTERVAL = 16.milliseconds
+      PREPARED_RENDER_BATCH    = 4
       alias LiteralPart = String | Gtk::Widget
 
       @@render_retries = RenderRetryQueue.new
       @@render_retry_source = 0_u32
+      @@prepared_renders = FrameRenderQueue.new
+      @@prepared_render_source = 0_u32
 
       getter widget : Adw::Bin
       getter kind : MessageKind
@@ -174,7 +178,7 @@ module Xd
         BackgroundWork.submit do
           parts = MessageContent.prepare(text)
           index = 0
-          GLib.idle_add do
+          self.class.enqueue_prepared_render do
             unless @render_generation == generation &&
                    @stream_label.nil?
               next false
@@ -200,6 +204,27 @@ module Xd
             index < parts.size
           end
           nil
+        end
+      end
+
+      # Prepared markdown can complete for many rows together. A separate
+      # repeating idle source per row lets all of them mutate GTK before the
+      # next paint. One shared queue instead applies a small global budget.
+      def self.enqueue_prepared_render(&render : -> Bool) : Nil
+        GLib.idle_add do
+          @@prepared_renders.push { render.call }
+          schedule_prepared_renders
+          false
+        end
+      end
+
+      private def self.schedule_prepared_renders : Nil
+        return unless @@prepared_render_source == 0
+
+        @@prepared_render_source = GLib.timeout(PREPARED_RENDER_INTERVAL) do
+          more = @@prepared_renders.drain(PREPARED_RENDER_BATCH)
+          @@prepared_render_source = 0_u32 unless more
+          more
         end
       end
 

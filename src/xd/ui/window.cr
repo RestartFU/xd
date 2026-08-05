@@ -95,6 +95,23 @@ module Xd
         end
       end
 
+      class OptimisticMessage
+        getter endpoint : Daemon::Endpoint
+        getter chat_id : String
+        getter row : MessageRow
+        property queued : Bool?
+        property started : Bool
+
+        def initialize(
+          @endpoint : Daemon::Endpoint,
+          @chat_id : String,
+          @row : MessageRow,
+        )
+          @queued = nil
+          @started = false
+        end
+      end
+
       record PreparedAttachment,
         name : String,
         data : String,
@@ -106,10 +123,14 @@ module Xd
       MAX_TOTAL_BYTES = 20 * 1024 * 1024
       # About a second and a half at 60Hz, after which a transcript is shown
       # whatever the daemon is or is not doing.
-      BOTTOM_JUMP_FRAME_LIMIT              =   90
-      QUEUE_RENDER_BATCH                   =    8
-      QUEUE_RETIRE_BATCH                   =    8
-      TRANSCRIPT_RENDER_BATCH              =   32
+      BOTTOM_JUMP_FRAME_LIMIT = 90
+      QUEUE_RENDER_BATCH      =  8
+      QUEUE_RETIRE_BATCH      =  8
+      # GTK layout and teardown share the frame with scrolling. Mount and
+      # retire only a few transcript rows per frame so a window swap cannot
+      # monopolize the main loop with one large burst.
+      TRANSCRIPT_RENDER_BATCH              =    4
+      TRANSCRIPT_RETIRE_BATCH              =    4
       TRANSCRIPT_WINDOW_SIZE               =  160
       TRANSCRIPT_WINDOW_EDGE               = 48.0
       TRANSCRIPT_WINDOW_TRIGGER            =  320
@@ -207,6 +228,7 @@ module Xd
       @turn_recovery_events =
         Deque({Daemon::Endpoint, Hash(String, JSON::Any)}).new
       @send_pending = false
+      @optimistic_messages = [] of OptimisticMessage
       @cancel_pending = false
       @draft_sync_source = 0_u32
       @draft_revision = -1_i64
@@ -1260,7 +1282,7 @@ module Xd
         }
         fields["offset"] = JSON::Any.new(window_start) if window_start
         fields["window"] = JSON::Any.new(true) if page.windowed &&
-                                                   window_start.nil?
+                                                  window_start.nil?
         call_async(endpoint, fields) do |response, error|
           active = request == @messages_request &&
                    @client.same?(endpoint) &&
@@ -1412,15 +1434,24 @@ module Xd
         durations : Hash(Int32, Int64),
       ) : Nil
         GLib.idle_add do
-          render_history_batch(
-            page,
-            request,
-            force,
-            revision,
-            messages,
-            batch,
-            durations
-          )
+          callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
+            render_history_batch(
+              page,
+              request,
+              force,
+              revision,
+              messages,
+              batch,
+              durations
+            )
+          }
+          @transcript_scroll.add_tick_callback(callback)
+          # Pin the seam while rows are being mounted. Waiting until the last
+          # batch lets every intermediate height change move the viewport.
+          if page.window_loading
+            queue_window_anchor(page.window_anchor)
+          end
+          false
         end
       end
 
@@ -1458,7 +1489,6 @@ module Xd
         return true unless batch.done?
 
         window_request = page.window_loading
-        window_anchor = page.window_anchor
         page.window_loading = false
         page.window_anchor = nil
         end_tool_group
@@ -1467,7 +1497,6 @@ module Xd
         set_working(@working)
         if window_request
           @follow_bottom = false
-          queue_window_anchor(window_anchor)
         else
           scroll_to_bottom
         end
@@ -1612,8 +1641,8 @@ module Xd
         return if @transcript_retirement_scheduled
 
         @transcript_retirement_scheduled = true
-        GLib.idle_add do
-          4.times do
+        callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
+          TRANSCRIPT_RETIRE_BATCH.times do
             retired = @retired_transcripts.first?
             break unless retired
 
@@ -1628,7 +1657,8 @@ module Xd
           more = !@retired_transcripts.empty?
           @transcript_retirement_scheduled = more
           more
-        end
+        }
+        @transcript_scroll.add_tick_callback(callback)
       end
 
       private def load_earlier_messages(page : TranscriptPage) : Nil
@@ -1887,6 +1917,69 @@ module Xd
         @transcript_page.try(&.choices_visible=(false))
       end
 
+      private def append_optimistic_message(
+        endpoint : Daemon::Endpoint,
+        chat_id : String,
+        text : String,
+      ) : OptimisticMessage?
+        row = add_message("user", text) || return
+        message = OptimisticMessage.new(endpoint, chat_id, row)
+        @optimistic_messages << message
+        keep_working_last
+        scroll_to_bottom
+        message
+      end
+
+      private def remove_optimistic_message(
+        message : OptimisticMessage,
+      ) : Nil
+        widget = message.row.widget
+        if parent = widget.parent.as?(Gtk::Box)
+          parent.remove(widget)
+        end
+        @optimistic_messages.delete(message)
+      end
+
+      private def pending_optimistic_message?(
+        endpoint : Daemon::Endpoint,
+        chat_id : String,
+      ) : Bool
+        @optimistic_messages.any? do |message|
+          message.endpoint.same?(endpoint) && message.chat_id == chat_id
+        end
+      end
+
+      private def begin_optimistic_turn(
+        endpoint : Daemon::Endpoint,
+        chat_id : String,
+      ) : Bool
+        message = @optimistic_messages.find do |candidate|
+          candidate.endpoint.same?(endpoint) &&
+            candidate.chat_id == chat_id &&
+            !candidate.started
+        end
+        return false unless message
+
+        message.started = true
+        true
+      end
+
+      private def finish_optimistic_turn(
+        endpoint : Daemon::Endpoint,
+        chat_id : String,
+      ) : Bool
+        message = @optimistic_messages.find do |candidate|
+          candidate.endpoint.same?(endpoint) &&
+            candidate.chat_id == chat_id &&
+            candidate.started &&
+            candidate.queued != true
+        end
+        return false unless message
+
+        @optimistic_messages.delete(message)
+        true
+      end
+
       private def send_message(explicit_text : String? = nil) : Nil
         chat_id = @active_chat
         return unless chat_id
@@ -1922,11 +2015,24 @@ module Xd
           request["attachments"] = JSON::Any.new(encoded)
         end
 
+        optimistic : OptimisticMessage? = nil
+        if attachments.empty? && !text.empty?
+          cancel_history_restore
+          if @history_request
+            @messages_request += 1
+            cancel_history_request
+          end
+          optimistic = append_optimistic_message(endpoint, chat_id, text)
+        end
+
         @send_pending = true
         update_send_button
         call_async(endpoint, request) do |response, error|
           @send_pending = false
           update_send_button
+          if error
+            remove_optimistic_message(optimistic) if optimistic
+          end
           unless @client.same?(endpoint) && @active_chat == chat_id
             next
           end
@@ -1936,6 +2042,7 @@ module Xd
           end
           if response
             @status.text = ""
+            optimistic.queued = response["queued"]?.try(&.as_bool?) if optimistic
             retire_open_questions
             unless explicit_text
               if @entry.buffer.text.strip == text
@@ -1945,7 +2052,7 @@ module Xd
               end
             end
             if QueuePresentation.reload_after_send?(response)
-              load_messages
+              load_messages unless optimistic
               load_chat_state
             else
               @status.text = "Message queued"
@@ -3307,7 +3414,9 @@ module Xd
           @working = true
           @waiting_for_input = false
           update_presence
-          load_messages
+          if !begin_optimistic_turn(endpoint, event["chat"].as_s)
+            load_messages
+          end
           # This event attaches us to a new turn before its ordered deltas.
           # The state call below may already see those deltas in the daemon;
           # recovering that snapshot and then consuming the queued events
@@ -3317,6 +3426,10 @@ module Xd
         when "turn-finished"
           if active_event?(endpoint, event)
             end_tool_group
+            optimistic_turn = finish_optimistic_turn(
+              endpoint,
+              event["chat"].as_s
+            )
             pending_messages = !@history_request.nil?
             pending_window_start : Int64? = nil
             if pending_messages && !@follow_bottom
@@ -3357,9 +3470,11 @@ module Xd
               scroll_to_bottom
             else
               # Compatibility with daemons predating finish metadata.
-              load_messages
+              load_messages unless optimistic_turn ||
+                                   pending_optimistic_message?(endpoint, event["chat"].as_s)
             end
-            if last_id && pending_messages
+            if last_id && pending_messages && !optimistic_turn &&
+               !pending_optimistic_message?(endpoint, event["chat"].as_s)
               if window_start = pending_window_start
                 load_messages(
                   force: true,
@@ -3381,7 +3496,10 @@ module Xd
           end
         when "changed"
           if active_event?(endpoint, event)
-            load_messages
+            chat_id = event["chat"].as_s
+            unless pending_optimistic_message?(endpoint, chat_id)
+              load_messages
+            end
             load_chat_state
           end
         when "shortcuts-changed"
@@ -3734,7 +3852,7 @@ module Xd
           adjustment.value = value if adjustment.value != value
         elsif adjustment.value >= bottom - 1.0 &&
               (!page || !page.windowed ||
-               page.window_end >= page.window_total)
+              page.window_end >= page.window_total)
           @follow_bottom = true
           @history_bottom_distance = -1.0
           set_working_animation(true)
