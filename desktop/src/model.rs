@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{Image, ImageFormat};
@@ -134,6 +134,7 @@ pub struct AppModel {
     pub folders: Vec<Folder>,
     pub chats: Vec<ChatSummary>,
     pub selected_chat: Option<String>,
+    pub unread_chats: HashSet<String>,
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
     pub working: bool,
@@ -177,6 +178,8 @@ impl AppModel {
         self.folders = snapshot.folders;
         self.chats = snapshot.chats;
         self.connected = true;
+        self.unread_chats
+            .retain(|chat_id| self.chats.iter().any(|chat| &chat.id == chat_id));
 
         if self
             .selected_chat
@@ -208,7 +211,9 @@ impl AppModel {
     }
 
     pub fn select_chat(&mut self, chat_id: impl Into<String>) {
-        self.selected_chat = Some(chat_id.into());
+        let chat_id = chat_id.into();
+        self.unread_chats.remove(&chat_id);
+        self.selected_chat = Some(chat_id);
         self.messages.clear();
         self.queue.clear();
         self.working = false;
@@ -346,6 +351,13 @@ impl AppModel {
     }
 
     pub fn apply_event(&mut self, name: &str, body: &Value) {
+        if name == "turn-finished"
+            && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
+            && self.selected_chat.as_deref() != Some(chat_id)
+        {
+            self.unread_chats.insert(chat_id.to_owned());
+            return;
+        }
         match name {
             "queued" if self.event_is_active(body) => {
                 if let Some(queue) = body.get("queue").and_then(Value::as_array) {
@@ -458,6 +470,7 @@ impl AppModel {
                 },
             ],
             selected_chat: Some("chat-gpui".into()),
+            unread_chats: HashSet::new(),
             messages: vec![
                 Message::new(
                     Some(1),
@@ -563,6 +576,20 @@ mod tests {
         assert!(model.working);
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert!(!model.working);
+    }
+
+    #[test]
+    fn background_turns_stay_unread_until_selected() {
+        let mut model = AppModel {
+            selected_chat: Some("chat-1".into()),
+            ..Default::default()
+        };
+        model.apply_event("turn-finished", &json!({"chat":"chat-2"}));
+        assert!(model.unread_chats.contains("chat-2"));
+        assert_eq!(model.selected_chat.as_deref(), Some("chat-1"));
+
+        model.select_chat("chat-2");
+        assert!(!model.unread_chats.contains("chat-2"));
     }
 
     #[test]

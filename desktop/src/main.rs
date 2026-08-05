@@ -5,6 +5,12 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "linux")]
+use std::{
+    process::{Command, Stdio},
+    thread,
+};
+
 use gpui::{
     App, Application, Bounds, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
     KeyBinding, ListAlignment, ListState, ObjectFit, PathPromptOptions, Render, StyledText, Timer,
@@ -1187,6 +1193,18 @@ impl XdDesktop {
         attachments: Option<Vec<Attachment>>,
         cx: &mut Context<Self>,
     ) {
+        if name == "turn-finished" && !self.event_is_active(&body) {
+            let title = body
+                .get("chat")
+                .and_then(Value::as_str)
+                .and_then(|chat_id| self.model.chats.iter().find(|chat| chat.id == chat_id))
+                .and_then(|chat| chat.title.as_deref())
+                .unwrap_or("Background chat")
+                .to_owned();
+            self.model.apply_event(name, &body);
+            notify_turn_finished(&title);
+            self.request_tree();
+        }
         match name {
             "tree" => self.request_tree(),
             "changed" if self.event_is_active(&body) => {
@@ -3845,6 +3863,7 @@ impl Render for XdDesktop {
                 let row_id = chat_row_index;
                 chat_row_index += 1;
                 let is_selected = self.model.selected_chat.as_deref() == Some(chat.id.as_str());
+                let unread = self.model.unread_chats.contains(&chat.id);
                 let title = chat.title.unwrap_or_else(|| "New Chat".into());
                 let chat_target = SidebarTarget::Chat(chat.id.clone());
                 let editing_chat = sidebar_edit
@@ -3947,8 +3966,9 @@ impl Render for XdDesktop {
                         .py_2()
                         .rounded_md()
                         .bg(rgb(if is_selected { SURFACE_HIGH } else { SURFACE }))
-                        .text_color(rgb(if is_selected { TEXT } else { MUTED }))
+                        .text_color(rgb(if is_selected || unread { TEXT } else { MUTED }))
                         .text_sm()
+                        .when(unread, |row| row.font_weight(FontWeight::BOLD))
                         .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
                         .flex()
                         .items_center()
@@ -3963,7 +3983,7 @@ impl Render for XdDesktop {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.select_chat(chat_id.clone(), cx)
                                 }))
-                                .child(if chat.working {
+                                .child(if chat.working || unread {
                                     format!("●  {title}")
                                 } else {
                                     format!("   {title}")
@@ -6068,6 +6088,33 @@ fn compact_label(value: &str, limit: usize) -> String {
     shortened.push('…');
     shortened
 }
+
+#[cfg(target_os = "linux")]
+fn notify_turn_finished(title: &str) {
+    let title = title
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(120)
+        .collect::<String>()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let body = format!("{title} finished");
+    if let Ok(mut child) = Command::new("notify-send")
+        .args(["--app-name=xd-dev", "--", "xd-dev", &body])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn notify_turn_finished(_: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
     let value = value.trim();
