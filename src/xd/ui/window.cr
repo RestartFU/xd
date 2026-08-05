@@ -2026,7 +2026,11 @@ module Xd
         end
 
         optimistic : OptimisticMessage? = nil
-        if attachments.empty? && !text.empty?
+        # A send made while a turn is active belongs to the queue, so do not
+        # draw it as a transcript message before the daemon acknowledges it.
+        # If the turn state races us, the queued response below reconciles the
+        # optimistic row immediately.
+        if !@working && attachments.empty? && !text.empty?
           cancel_history_restore
           if @history_request
             @messages_request += 1
@@ -2041,7 +2045,9 @@ module Xd
           @send_pending = false
           update_send_button
           if error
-            remove_optimistic_message(optimistic) if optimistic
+            if message = optimistic
+              remove_optimistic_message(message)
+            end
           end
           unless @client.same?(endpoint) && @active_chat == chat_id
             next
@@ -2052,7 +2058,13 @@ module Xd
           end
           if response
             @status.text = ""
-            optimistic.queued = response["queued"]?.try(&.as_bool?) if optimistic
+            if message = optimistic
+              message.queued = response["queued"]?.try(&.as_bool?)
+              if message.queued == true
+                remove_optimistic_message(message)
+                optimistic = nil
+              end
+            end
             retire_open_questions
             unless explicit_text
               if @entry.buffer.text.strip == text
