@@ -303,7 +303,7 @@ impl StateStore {
             .query_row(
                 "SELECT folder_id, title, backend, workdir, model, effort, access, plan, fast, \
                  claude_mode, queued, new_worktree, daemon_working, draft, draft_attachments, \
-                 draft_revision FROM chats WHERE id = ?",
+                 draft_revision, original_workdir FROM chats WHERE id = ?",
                 [chat_id],
                 |row| {
                     Ok((
@@ -323,6 +323,7 @@ impl StateStore {
                         row.get::<_, String>(13)?,
                         row.get::<_, String>(14)?,
                         row.get::<_, i64>(15)?,
+                        row.get::<_, Option<String>>(16)?,
                     ))
                 },
             )
@@ -358,8 +359,43 @@ impl StateStore {
         if let Some(first) = response["queue"].as_array().and_then(|queue| queue.first()) {
             response["queued"] = first.clone();
         }
-        if let Some(workdir) = row.3 {
-            response["workdir"] = Value::String(workdir);
+        if let Ok(workdir) = resolve_workdir(
+            &database,
+            &self.workspace_root,
+            &row.0,
+            row.3.as_deref(),
+            row.16.as_deref(),
+        ) {
+            response["workdir"] = Value::String(workdir.clone());
+            if let Ok(worktrees) = list_git_worktrees(Path::new(&workdir)) {
+                let current_path = normalize_existing_path(Path::new(&workdir));
+                let values = worktrees
+                    .iter()
+                    .enumerate()
+                    .map(|(index, worktree)| {
+                        let path = normalize_existing_path(&worktree.path);
+                        let current = path == current_path;
+                        let mut value = json!({
+                            "path": path,
+                            "detached": worktree.detached,
+                            "main": index == 0,
+                            "current": current,
+                        });
+                        if let Some(branch) = &worktree.branch {
+                            value["branch"] = Value::String(branch.clone());
+                        }
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                let linked = values
+                    .iter()
+                    .any(|worktree| worktree["current"] == true && worktree["main"] == false);
+                response["linked_worktree"] = Value::Bool(linked);
+                response["worktrees"] = Value::Array(values);
+                if !has_messages && !row.11 && row.16.is_some() && linked {
+                    response["selected_worktree"] = Value::String(workdir);
+                }
+            }
         }
         if let Some(model) = row.4 {
             response["model"] = Value::String(model);
@@ -522,14 +558,56 @@ impl StateStore {
                 params![value == Some("true"), now, chat_id, chat_id],
             )?,
             "workspace" => {
-                return Err(StorageError::InvalidRequest(
-                    "Workspace selection is not implemented by the Rust daemon yet.".into(),
-                ));
+                let requested = value.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    StorageError::InvalidRequest("An existing worktree path is required.".into())
+                })?;
+                if !Path::new(requested).is_absolute() {
+                    return Err(StorageError::InvalidRequest(
+                        "An existing worktree path is required.".into(),
+                    ));
+                }
+                let chat = transaction
+                    .query_row(
+                        "SELECT folder_id, workdir, original_workdir FROM chats WHERE id = ?",
+                        [chat_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+                let source = resolve_workdir(
+                    &transaction,
+                    &self.workspace_root,
+                    &chat.0,
+                    chat.1.as_deref(),
+                    chat.2.as_deref(),
+                )?;
+                let requested = normalize_existing_path(Path::new(requested));
+                let selected = list_git_worktrees(Path::new(&source))?
+                    .into_iter()
+                    .find(|worktree| normalize_existing_path(&worktree.path) == requested)
+                    .ok_or_else(|| {
+                        StorageError::InvalidRequest(
+                            "That path is not a worktree of this repository.".into(),
+                        )
+                    })?;
+                let selected = normalize_existing_path(&selected.path);
+                transaction.execute(
+                    "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
+                     new_worktree = 0, updated_at = ? WHERE id = ? \
+                     AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+                    params![selected, source, now, chat_id, chat_id],
+                )?
             }
             _ => return Err(StorageError::InvalidRequest("No such option.".into())),
         };
         if changed != 1 {
-            if option == "new-worktree" {
+            if option == "new-worktree" || option == "workspace" {
                 return Err(StorageError::InvalidRequest(
                     "The workspace can only be changed before the first message.".into(),
                 ));
@@ -1796,6 +1874,51 @@ fn update_boolean_option(
     )?)
 }
 
+fn resolve_workdir(
+    database: &Connection,
+    workspace_root: &Path,
+    folder_id: &str,
+    chat_workdir: Option<&str>,
+    original_workdir: Option<&str>,
+) -> Result<String, StorageError> {
+    if let Some(workdir) = chat_workdir.filter(|workdir| Path::new(workdir).is_dir()) {
+        return Ok(workdir.to_owned());
+    }
+    if let Some(original) = original_workdir.filter(|workdir| Path::new(workdir).is_dir()) {
+        return Ok(original.to_owned());
+    }
+    let relative = workspace_relative(
+        database,
+        workspace_root.to_string_lossy().as_ref(),
+        folder_id,
+    )?;
+    let mut current = Some(relative.as_str());
+    while let Some(path) = current {
+        if let Some(workdir) = database
+            .query_row(
+                "SELECT COALESCE(workdir, repo) FROM workspace_folders \
+                 WHERE root_path = ? AND relative_path = ?",
+                params![workspace_root.to_string_lossy(), path],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .filter(|workdir| Path::new(workdir).is_dir())
+        {
+            return Ok(workdir);
+        }
+        current = path.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    let fallback = workspace_root.join(relative).to_string_lossy().into_owned();
+    if Path::new(&fallback).is_dir() {
+        Ok(fallback)
+    } else {
+        Err(StorageError::InvalidRequest(format!(
+            "The chat working directory does not exist: {fallback}"
+        )))
+    }
+}
+
 fn create_worktree(
     transaction: &rusqlite::Transaction<'_>,
     workdir: &str,
@@ -2116,42 +2239,13 @@ fn prepare_turn(
             "The Rust daemon currently runs Codex chats only.".into(),
         ));
     }
-    let relative = transaction
-        .query_row(
-            "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
-            params![workspace_root.to_string_lossy(), chat.0],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
-    let mut inherited = None;
-    let mut current = Some(relative.as_str());
-    while inherited.is_none() {
-        let Some(path) = current else { break };
-        inherited = transaction
-            .query_row(
-                "SELECT COALESCE(workdir, repo) FROM workspace_folders \
-                 WHERE root_path = ? AND relative_path = ?",
-                params![workspace_root.to_string_lossy(), path],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten();
-        current = path.rsplit_once('/').map(|(parent, _)| parent);
-    }
-    let mut workdir = chat.2.unwrap_or_else(|| {
-        inherited.unwrap_or_else(|| workspace_root.join(relative).to_string_lossy().into_owned())
-    });
-    if !Path::new(&workdir).is_dir()
-        && let Some(original) = chat.8.filter(|original| Path::new(original).is_dir())
-    {
-        workdir = original;
-    }
-    if !Path::new(&workdir).is_dir() {
-        return Err(StorageError::InvalidRequest(format!(
-            "The chat working directory does not exist: {workdir}"
-        )));
-    }
+    let mut workdir = resolve_workdir(
+        transaction,
+        workspace_root,
+        &chat.0,
+        chat.2.as_deref(),
+        chat.8.as_deref(),
+    )?;
     if chat.7 {
         let source = workdir.clone();
         workdir = create_worktree(
@@ -3162,6 +3256,27 @@ mod tests {
                 .iter()
                 .all(|folder| folder["id"] != "generated")
         );
+        let database = Connection::open(&fixture.database).unwrap();
+        database
+            .execute(
+                "INSERT INTO chats (id, folder_id, title, backend, workdir) \
+                 VALUES ('chat-select', 'repo', 'Select', 'codex', ?)",
+                [repository.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        drop(database);
+        store
+            .set_option(&json!({
+                "chat": "chat-select", "option": "workspace", "value": expected
+            }))
+            .unwrap();
+        let selected = store.chat("chat-select").unwrap();
+        assert_eq!(
+            selected["selected_worktree"],
+            expected.to_string_lossy().as_ref()
+        );
+        assert_eq!(selected["linked_worktree"], true);
+        assert_eq!(selected["worktrees"].as_array().unwrap().len(), 2);
     }
 
     #[test]

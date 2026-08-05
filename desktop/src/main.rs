@@ -358,6 +358,27 @@ impl XdDesktop {
         }
     }
 
+    fn cycle_workspace(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.has_messages || self.model.working || self.model.worktrees.len() < 2 {
+            return;
+        }
+        let current = self
+            .model
+            .worktrees
+            .iter()
+            .position(|worktree| worktree.current)
+            .unwrap_or(0);
+        let next = (current + 1) % self.model.worktrees.len();
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_workspace(&chat_id, &self.model.worktrees[next].path)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     fn request_chat(&mut self, chat_id: &str) {
         if let Some(daemon) = &self.daemon {
             if let Err(error) = daemon.chat(chat_id) {
@@ -621,6 +642,23 @@ impl Render for XdDesktop {
         let selected = self.model.selected_summary().cloned();
         let new_worktree = self.model.new_worktree;
         let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
+        let can_cycle_workspace =
+            can_change_worktree && !new_worktree && self.model.worktrees.len() > 1;
+        let workspace_label = self
+            .model
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.current)
+            .map(|worktree| {
+                worktree.branch.clone().unwrap_or_else(|| {
+                    if worktree.main {
+                        "main checkout".into()
+                    } else {
+                        "detached worktree".into()
+                    }
+                })
+            })
+            .unwrap_or_else(|| "workspace".into());
         let status_text = if self.model.connected {
             "connected"
         } else {
@@ -791,6 +829,27 @@ impl Render for XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(
+                        div()
+                            .id("workspace-cycle")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(SURFACE_HIGH))
+                            .text_xs()
+                            .text_color(rgb(if can_cycle_workspace { TEXT } else { MUTED }))
+                            .when(can_cycle_workspace, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if can_cycle_workspace {
+                                    this.cycle_workspace();
+                                }
+                            }))
+                            .child(format!("Workspace: {workspace_label}")),
+                    )
                     .child(
                         div()
                             .id("new-worktree-toggle")

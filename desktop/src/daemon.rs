@@ -319,6 +319,20 @@ impl DaemonHandle {
         )
     }
 
+    pub fn set_workspace(&self, chat_id: &str, path: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "workspace",
+                "value": path,
+            }),
+        )
+    }
+
     fn send(&self, kind: RequestKind, body: Value) -> Result<(), String> {
         self.commands
             .send(Command { kind, body })

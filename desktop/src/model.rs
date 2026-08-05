@@ -71,6 +71,16 @@ pub struct Message {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktree {
+    pub path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub main: bool,
+    pub current: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppModel {
     pub folders: Vec<Folder>,
@@ -81,6 +91,7 @@ pub struct AppModel {
     pub working: bool,
     pub new_worktree: bool,
     pub has_messages: bool,
+    pub worktrees: Vec<Worktree>,
     pub connected: bool,
     pub connection_error: Option<String>,
     pub draft: String,
@@ -120,6 +131,7 @@ impl AppModel {
             self.working = false;
             self.new_worktree = false;
             self.has_messages = false;
+            self.worktrees.clear();
             self.draft.clear();
             self.draft_attachments.clear();
             self.live_text.clear();
@@ -135,6 +147,7 @@ impl AppModel {
         self.working = false;
         self.new_worktree = false;
         self.has_messages = false;
+        self.worktrees.clear();
         self.draft.clear();
         self.draft_attachments.clear();
         self.draft_revision = -1;
@@ -163,6 +176,11 @@ impl AppModel {
             .get("has_messages")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        self.worktrees = body
+            .get("worktrees")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
         self.apply_draft(body);
     }
 
@@ -310,6 +328,7 @@ impl AppModel {
             working: true,
             new_worktree: false,
             has_messages: true,
+            worktrees: Vec::new(),
             connected: true,
             connection_error: None,
             draft: String::new(),
@@ -388,10 +407,15 @@ mod tests {
     fn chat_snapshots_control_first_message_worktree_selection() {
         let mut model = AppModel::default();
         model.apply_chat(&json!({
-            "queue": [], "working": false, "new_worktree": true, "has_messages": false
+            "queue": [], "working": false, "new_worktree": true, "has_messages": false,
+            "worktrees": [{
+                "path": "/repo", "branch": "main", "detached": false,
+                "main": true, "current": true
+            }]
         }));
         assert!(model.new_worktree);
         assert!(!model.has_messages);
+        assert_eq!(model.worktrees[0].branch.as_deref(), Some("main"));
 
         model.apply_chat(&json!({
             "queue": [], "working": false, "new_worktree": false, "has_messages": true
