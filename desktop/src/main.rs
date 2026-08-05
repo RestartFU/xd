@@ -32,6 +32,7 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 struct PendingSend {
     text: String,
     attachments: Vec<Attachment>,
+    restore: bool,
 }
 
 struct XdDesktop {
@@ -172,6 +173,15 @@ impl XdDesktop {
                         Some(format!("Invalid assistant catalog response: {error}"));
                 }
             }
+            RequestKind::Shortcuts { folder_id } => {
+                if self
+                    .model
+                    .selected_summary()
+                    .is_some_and(|chat| chat.folder == folder_id)
+                {
+                    self.model.apply_shortcuts(&value);
+                }
+            }
             RequestKind::NewFolder => {
                 let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
                     self.model.connection_error =
@@ -239,6 +249,9 @@ impl XdDesktop {
             RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
             }
+            // The authoritative shortcuts-changed event follows this reply
+            // and refetches the active workspace's merged shortcut state.
+            RequestKind::SetShortcuts => {}
             RequestKind::RemoveWorktree { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
             }
@@ -324,6 +337,7 @@ impl XdDesktop {
                 }
             }
             "queued" if self.event_is_active(&body) => self.model.apply_event(name, &body),
+            "shortcuts-changed" => self.request_shortcuts(),
             _ => {}
         }
         cx.notify();
@@ -340,6 +354,21 @@ impl XdDesktop {
     fn request_agent_catalog(&mut self) {
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.agent_catalog()
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn request_shortcuts(&mut self) {
+        let Some(folder_id) = self
+            .model
+            .selected_summary()
+            .map(|chat| chat.folder.clone())
+        else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.shortcuts(&folder_id)
         {
             self.model.connection_error = Some(error);
         }
@@ -515,6 +544,7 @@ impl XdDesktop {
         self.transcript.reset(0);
         self.request_chat(&chat_id);
         self.request_messages(&chat_id);
+        self.request_shortcuts();
         cx.notify();
     }
 
@@ -540,7 +570,11 @@ impl XdDesktop {
         }
 
         self.sending = true;
-        self.pending_send = Some(PendingSend { text, attachments });
+        self.pending_send = Some(PendingSend {
+            text,
+            attachments,
+            restore: true,
+        });
         self.set_composer_text(String::new(), cx);
         self.model.draft_attachments.clear();
         self.draft_dirty = true;
@@ -555,6 +589,9 @@ impl XdDesktop {
         let Some(pending) = self.pending_send.take() else {
             return;
         };
+        if !pending.restore {
+            return;
+        }
         let restored = match (pending.text.is_empty(), self.composer.is_empty()) {
             (false, false) => format!("{}\n{}", pending.text, self.composer),
             (false, true) => pending.text,
@@ -566,6 +603,61 @@ impl XdDesktop {
         self.draft_dirty = true;
         self.attachments_dirty = true;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
+    }
+
+    fn send_shortcut(&mut self, prompt: String) {
+        if self.sending || prompt.trim().is_empty() {
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(daemon) = self.daemon.clone() else {
+            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            return;
+        };
+        if let Err(error) = daemon.send_message(&chat_id, &prompt, &[]) {
+            self.model.connection_error = Some(error);
+            return;
+        }
+        self.sending = true;
+        self.pending_send = Some(PendingSend {
+            text: prompt,
+            attachments: Vec::new(),
+            restore: false,
+        });
+    }
+
+    fn toggle_shortcut(&mut self, workspace: bool) {
+        let prompt = self.composer.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        let mut shortcuts = if workspace {
+            self.model.workspace_shortcuts.clone()
+        } else {
+            self.model.global_shortcuts.clone()
+        };
+        if let Some(index) = shortcuts.iter().position(|shortcut| shortcut == prompt) {
+            shortcuts.remove(index);
+        } else {
+            shortcuts.push(prompt.to_owned());
+        }
+        let folder_id = workspace
+            .then(|| {
+                self.model
+                    .selected_summary()
+                    .map(|chat| chat.folder.clone())
+            })
+            .flatten();
+        if workspace && folder_id.is_none() {
+            return;
+        }
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_shortcuts(folder_id.as_deref(), &shortcuts)
+        {
+            self.model.connection_error = Some(error);
+        }
     }
 
     fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1092,6 +1184,55 @@ impl Render for XdDesktop {
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
+        let shortcuts_enabled =
+            self.model.selected_chat.is_some() && self.model.connected && !self.sending;
+        let shortcut_buttons = self
+            .model
+            .shortcuts
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, prompt)| {
+                let label = compact_label(&prompt, 42);
+                div()
+                    .id(("shortcut", index))
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .text_xs()
+                    .text_color(rgb(if shortcuts_enabled { TEXT } else { MUTED }))
+                    .when(shortcuts_enabled, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if shortcuts_enabled {
+                            this.send_shortcut(prompt.clone());
+                            cx.notify();
+                        }
+                    }))
+                    .child(label)
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let draft_prompt = self.composer.trim();
+        let global_saved = !draft_prompt.is_empty()
+            && self
+                .model
+                .global_shortcuts
+                .iter()
+                .any(|prompt| prompt == draft_prompt);
+        let workspace_saved = !draft_prompt.is_empty()
+            && self
+                .model
+                .workspace_shortcuts
+                .iter()
+                .any(|prompt| prompt == draft_prompt);
+        let can_edit_shortcuts = !draft_prompt.is_empty() && selected.is_some();
         let send_label = if self.sending {
             "Sending…"
         } else if working {
@@ -1198,6 +1339,72 @@ impl Render for XdDesktop {
                             "{queue_count} queued message{}",
                             if queue_count == 1 { "" } else { "s" }
                         )),
+                )
+            })
+            .when(!shortcut_buttons.is_empty(), |element| {
+                element.child(
+                    div()
+                        .w_full()
+                        .max_w(px(920.0))
+                        .mx_auto()
+                        .mb_2()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(shortcut_buttons),
+                )
+            })
+            .when(can_edit_shortcuts, |element| {
+                element.child(
+                    div()
+                        .w_full()
+                        .max_w(px(920.0))
+                        .mx_auto()
+                        .mb_2()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("toggle-global-shortcut")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(SURFACE_HIGH))
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_shortcut(false);
+                                    cx.notify();
+                                }))
+                                .child(if global_saved {
+                                    "Remove global shortcut"
+                                } else {
+                                    "Save as global shortcut"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("toggle-workspace-shortcut")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(SURFACE_HIGH))
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_shortcut(true);
+                                    cx.notify();
+                                }))
+                                .child(if workspace_saved {
+                                    "Remove workspace shortcut"
+                                } else {
+                                    "Save as workspace shortcut"
+                                }),
+                        ),
                 )
             })
             .when(attachment_count > 0, |element| {
@@ -1331,6 +1538,19 @@ fn load_png_attachments(
         attachments.push(Attachment::from_png(name, bytes)?);
     }
     Ok(attachments)
+}
+
+fn compact_label(value: &str, limit: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= limit {
+        return compact;
+    }
+    let mut shortened = compact
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>();
+    shortened.push('…');
+    shortened
 }
 
 fn main() {

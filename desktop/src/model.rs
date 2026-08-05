@@ -111,6 +111,9 @@ pub struct AppModel {
     pub backend: String,
     pub model: Option<String>,
     pub effort: String,
+    pub global_shortcuts: Vec<String>,
+    pub workspace_shortcuts: Vec<String>,
+    pub shortcuts: Vec<String>,
     pub connected: bool,
     pub connection_error: Option<String>,
     pub draft: String,
@@ -154,6 +157,9 @@ impl AppModel {
             self.backend.clear();
             self.model = None;
             self.effort.clear();
+            self.global_shortcuts.clear();
+            self.workspace_shortcuts.clear();
+            self.shortcuts.clear();
             self.draft.clear();
             self.draft_attachments.clear();
             self.live_text.clear();
@@ -173,6 +179,9 @@ impl AppModel {
         self.backend.clear();
         self.model = None;
         self.effort.clear();
+        self.global_shortcuts.clear();
+        self.workspace_shortcuts.clear();
+        self.shortcuts.clear();
         self.draft.clear();
         self.draft_attachments.clear();
         self.draft_revision = -1;
@@ -204,6 +213,9 @@ impl AppModel {
             .and_then(Value::as_str)
             .unwrap_or("high")
             .to_owned();
+        if let Some(shortcuts) = body.get("shortcuts").and_then(Value::as_array) {
+            self.shortcuts = string_array(shortcuts);
+        }
         self.queue = body
             .get("queue")
             .and_then(Value::as_array)
@@ -256,6 +268,18 @@ impl AppModel {
             .find(|candidate| candidate.id == model)
             .map(|candidate| candidate.name.as_str())
             .or(Some(model))
+    }
+
+    pub fn apply_shortcuts(&mut self, body: &Value) {
+        if let Some(shortcuts) = body.get("global").and_then(Value::as_array) {
+            self.global_shortcuts = string_array(shortcuts);
+        }
+        if let Some(shortcuts) = body.get("workspace").and_then(Value::as_array) {
+            self.workspace_shortcuts = string_array(shortcuts);
+        }
+        if let Some(shortcuts) = body.get("effective").and_then(Value::as_array) {
+            self.shortcuts = string_array(shortcuts);
+        }
     }
 
     pub fn apply_messages(&mut self, body: &Value) -> Result<(), serde_json::Error> {
@@ -407,6 +431,9 @@ impl AppModel {
             backend: "codex".into(),
             model: Some("gpt-5.6-sol".into()),
             effort: "high".into(),
+            global_shortcuts: Vec::new(),
+            workspace_shortcuts: Vec::new(),
+            shortcuts: vec!["Review the current diff".into()],
             connected: true,
             connection_error: None,
             draft: String::new(),
@@ -416,6 +443,14 @@ impl AppModel {
             live_activity: Vec::new(),
         }
     }
+}
+
+fn string_array(values: &[Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
@@ -534,6 +569,25 @@ mod tests {
         assert_eq!(model.selected_summary().unwrap().backend, "claude");
         assert_eq!(model.selected_model_name(), Some("Claude Opus 5"));
         assert_eq!(model.effort, "high");
+    }
+
+    #[test]
+    fn shortcut_snapshots_keep_ownership_and_effective_order() {
+        let mut model = AppModel::default();
+        model.apply_shortcuts(&json!({
+            "global": ["Review"],
+            "workspace": ["Test"],
+            "effective": ["Review", "Test"]
+        }));
+        assert_eq!(model.global_shortcuts, ["Review"]);
+        assert_eq!(model.workspace_shortcuts, ["Test"]);
+        assert_eq!(model.shortcuts, ["Review", "Test"]);
+
+        model.apply_chat(&json!({
+            "queue": [], "working": true, "shortcuts": ["Review", "Test", "Deploy"]
+        }));
+        assert_eq!(model.shortcuts, ["Review", "Test", "Deploy"]);
+        assert_eq!(model.global_shortcuts, ["Review"]);
     }
 
     #[test]

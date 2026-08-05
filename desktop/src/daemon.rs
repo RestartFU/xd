@@ -21,6 +21,9 @@ use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 pub enum RequestKind {
     Tree,
     AgentCatalog,
+    Shortcuts {
+        folder_id: String,
+    },
     NewFolder,
     NewChat {
         folder_id: String,
@@ -38,6 +41,7 @@ pub enum RequestKind {
     SetOption {
         chat_id: String,
     },
+    SetShortcuts,
     RemoveWorktree {
         chat_id: String,
     },
@@ -216,6 +220,27 @@ impl DaemonHandle {
 
     pub fn agent_catalog(&self) -> Result<(), String> {
         self.send(RequestKind::AgentCatalog, json!({"op": "agent-catalog"}))
+    }
+
+    pub fn shortcuts(&self, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::Shortcuts {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "shortcuts", "folder": folder_id}),
+        )
+    }
+
+    pub fn set_shortcuts(
+        &self,
+        folder_id: Option<&str>,
+        shortcuts: &[String],
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "set-shortcuts", "shortcuts": shortcuts});
+        if let Some(folder_id) = folder_id {
+            body["folder"] = Value::String(folder_id.to_owned());
+        }
+        self.send(RequestKind::SetShortcuts, body)
     }
 
     pub fn new_folder(&self, name: &str) -> Result<(), String> {
