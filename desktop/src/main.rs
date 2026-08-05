@@ -15,9 +15,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, CursorStyle, Decorations, Entity, Focusable,
     FontStyle, FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState, MouseButton,
-    ObjectFit, PathPromptOptions, Render, ResizeEdge, StyledText, Timer, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, img, list,
-    prelude::*, px, rgb, rgba, size,
+    ObjectFit, PathPromptOptions, Render, ResizeEdge, SharedString, StyledText, TextRun, Timer,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas,
+    div, img, list, prelude::*, px, rgb, rgba, size,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -125,9 +125,19 @@ struct TerminalPanel {
     terminal_id: Option<String>,
     title: String,
     screen: TerminalScreen,
+    viewport: Option<(usize, usize)>,
+    opening: bool,
     loading: bool,
     closed: bool,
     error: Option<String>,
+}
+
+fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32) -> (usize, usize) {
+    let content_width = (width - 24.0).max(cell_width);
+    let content_height = (height - 24.0).max(line_height);
+    let columns = (content_width / cell_width.max(1.0)).floor() as usize;
+    let rows = (content_height / line_height.max(1.0)).floor() as usize;
+    (columns.clamp(20, 500), rows.clamp(4, 200))
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -510,6 +520,7 @@ impl XdDesktop {
                 }
                 if let Some(panel) = &mut self.terminal_panel {
                     panel.loading = false;
+                    panel.opening = false;
                     panel.error = Some("Terminal disconnected.".into());
                 }
                 self.restore_pending_send(cx);
@@ -691,6 +702,7 @@ impl XdDesktop {
                 {
                     if let Some(panel) = &mut self.terminal_panel {
                         panel.loading = false;
+                        panel.opening = false;
                         panel.error = value
                             .get("error")
                             .and_then(Value::as_str)
@@ -1336,17 +1348,31 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|panel| panel.chat_id == chat_id) =>
             {
+                let mut resize = None;
                 if let Some(panel) = &mut self.terminal_panel {
                     panel.terminal_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                    panel.opening = false;
                     panel.loading = true;
                     panel.closed = false;
+                    resize = panel
+                        .terminal_id
+                        .clone()
+                        .zip(panel.viewport)
+                        .map(|(terminal_id, (columns, rows))| (terminal_id, columns, rows));
                 }
-                if let Some(daemon) = &self.daemon
-                    && let Err(error) = daemon.terminal_list(&chat_id)
-                    && let Some(panel) = &mut self.terminal_panel
-                {
-                    panel.loading = false;
-                    panel.error = Some(error);
+                if let Some(daemon) = &self.daemon {
+                    let result = resize
+                        .map(|(terminal_id, columns, rows)| {
+                            daemon.terminal_resize(&terminal_id, columns, rows)
+                        })
+                        .transpose()
+                        .and_then(|_| daemon.terminal_list(&chat_id));
+                    if let Err(error) = result
+                        && let Some(panel) = &mut self.terminal_panel
+                    {
+                        panel.loading = false;
+                        panel.error = Some(error);
+                    }
                 }
             }
             RequestKind::TerminalList { chat_id }
@@ -1397,6 +1423,7 @@ impl XdDesktop {
                         .get("terminal")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
+                    panel.opening = false;
                     panel.title = body
                         .get("title")
                         .and_then(Value::as_str)
@@ -2037,20 +2064,51 @@ impl XdDesktop {
             terminal_id: None,
             title: "Terminal".into(),
             screen: TerminalScreen::default(),
+            viewport: None,
+            opening: false,
             loading: true,
             closed: false,
             error: None,
         });
-        if let Some(daemon) = &self.daemon {
-            if let Err(error) = daemon.terminal_open(&chat_id, 68, 32)
-                && let Some(panel) = &mut self.terminal_panel
-            {
-                panel.loading = false;
-                panel.error = Some(error);
+        cx.notify();
+    }
+
+    fn resize_terminal_viewport(&mut self, columns: usize, rows: usize, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.terminal_panel else {
+            return;
+        };
+        let geometry = (columns, rows);
+        if panel.viewport == Some(geometry) {
+            return;
+        }
+        panel.viewport = Some(geometry);
+        if panel.screen.geometry() != geometry {
+            panel.screen.resize(columns, rows);
+        }
+        let terminal_id = panel.terminal_id.clone();
+        let should_open = terminal_id.is_none() && panel.loading && !panel.opening && !panel.closed;
+        let chat_id = panel.chat_id.clone();
+        if should_open {
+            panel.opening = true;
+        }
+
+        let result = if let Some(daemon) = &self.daemon {
+            if let Some(terminal_id) = terminal_id {
+                daemon.terminal_resize(&terminal_id, columns, rows)
+            } else if should_open {
+                daemon.terminal_open(&chat_id, columns, rows)
+            } else {
+                Ok(())
             }
-        } else if let Some(panel) = &mut self.terminal_panel {
+        } else {
+            Err("xd-dev is not connected to a daemon.".into())
+        };
+        if let Err(error) = result
+            && let Some(panel) = &mut self.terminal_panel
+        {
             panel.loading = false;
-            panel.error = Some("xd-dev is not connected to a daemon.".into());
+            panel.opening = false;
+            panel.error = Some(error);
         }
         cx.notify();
     }
@@ -2093,19 +2151,14 @@ impl XdDesktop {
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
+        let (columns, rows) = panel.viewport.unwrap_or_else(|| panel.screen.geometry());
         panel.terminal_id = None;
-        panel.screen = TerminalScreen::new(68, 32);
+        panel.screen = TerminalScreen::new(columns, rows);
+        panel.viewport = None;
+        panel.opening = false;
         panel.loading = true;
         panel.closed = false;
         panel.error = None;
-        let chat_id = panel.chat_id.clone();
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.terminal_open(&chat_id, 68, 32)
-            && let Some(panel) = &mut self.terminal_panel
-        {
-            panel.loading = false;
-            panel.error = Some(error);
-        }
         cx.notify();
     }
 
@@ -6562,6 +6615,7 @@ impl Render for XdDesktop {
 
         let terminal_input = self.terminal_input.clone();
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
+        let terminal_desktop = cx.entity();
         let terminal_pane = self.terminal_panel.as_ref().map(|panel| {
             let output = panel.screen.text();
             let active = panel.terminal_id.is_some() && !panel.closed && !panel.loading;
@@ -6662,6 +6716,7 @@ impl Render for XdDesktop {
                 .child(
                     div()
                         .id("terminal-output")
+                        .relative()
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
@@ -6670,6 +6725,50 @@ impl Render for XdDesktop {
                         .text_size(px(13.0))
                         .line_height(px(19.0))
                         .text_color(rgb(0xd8dee9))
+                        .child(
+                            canvas(
+                                {
+                                    let desktop = terminal_desktop.clone();
+                                    move |bounds, window, cx| {
+                                        const SAMPLE: &str =
+                                            "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM";
+                                        let style = window.text_style();
+                                        let run = TextRun {
+                                            len: SAMPLE.len(),
+                                            font: style.font(),
+                                            color: style.color,
+                                            background_color: None,
+                                            underline: None,
+                                            strikethrough: None,
+                                        };
+                                        let line = window.text_system().shape_line(
+                                            SharedString::from(SAMPLE),
+                                            style.font_size.to_pixels(window.rem_size()),
+                                            &[run],
+                                            None,
+                                        );
+                                        let cell_width =
+                                            f32::from(line.width) / SAMPLE.len() as f32;
+                                        let geometry = terminal_geometry(
+                                            f32::from(bounds.size.width),
+                                            f32::from(bounds.size.height),
+                                            cell_width,
+                                            19.0,
+                                        );
+                                        window.defer(cx, move |_, cx| {
+                                            desktop.update(cx, |this, cx| {
+                                                this.resize_terminal_viewport(
+                                                    geometry.0, geometry.1, cx,
+                                                );
+                                            });
+                                        });
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
                         .child(output),
                 )
                 .child(
@@ -7478,6 +7577,16 @@ mod tests {
             Some("Worked for 1h 01m")
         );
         assert_eq!(turn_duration_label("not-a-duration"), None);
+    }
+
+    #[test]
+    fn terminal_geometry_tracks_the_visible_pane_and_stays_bounded() {
+        assert_eq!(terminal_geometry(824.0, 252.0, 8.0, 19.0), (100, 12));
+        assert_eq!(terminal_geometry(1.0, 1.0, 8.0, 19.0), (20, 4));
+        assert_eq!(
+            terminal_geometry(100_000.0, 100_000.0, 8.0, 19.0),
+            (500, 200)
+        );
     }
 
     #[test]

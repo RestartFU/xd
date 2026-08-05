@@ -61,6 +61,10 @@ impl TerminalScreen {
         self.trim_scrollback();
     }
 
+    pub fn geometry(&self) -> (usize, usize) {
+        (self.columns, self.rows)
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             match &mut self.parser {
