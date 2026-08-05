@@ -69,6 +69,7 @@ RUN mkdir -p src \
  && cargo fetch --locked \
  && rm -rf src
 COPY daemon-rs/src ./src
+COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl /src/tests/fixtures/
 
 FROM rust-daemon-source AS rust-daemon-tests
 

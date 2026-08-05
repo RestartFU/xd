@@ -18,6 +18,7 @@ use std::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
+pub mod agent;
 mod storage;
 
 pub use storage::{StateStore, StorageError};
