@@ -935,11 +935,7 @@ impl StateStore {
             "name",
             "A folder name cannot be empty or hidden, or contain a path separator.",
         )?;
-        if name.starts_with('.') || name == ".." || name.contains('/') || name.contains('\\') {
-            return Err(StorageError::InvalidRequest(
-                "A folder name cannot be empty or hidden, or contain a path separator.".into(),
-            ));
-        }
+        validate_workspace_name(name)?;
         let parent_id = optional_string(request, "parent")?;
         let repo = optional_string(request, "repo")?;
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
@@ -1009,6 +1005,134 @@ impl StateStore {
             return Err(StorageError::Query(error));
         }
         Ok(json!({"ok": true, "id": id}))
+    }
+
+    pub fn rename_folder(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let name = required_string(
+            request,
+            "name",
+            "A folder name cannot be empty or hidden, or contain a path separator.",
+        )?;
+        validate_workspace_name(name)?;
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let relative = workspace_relative(&database, root.as_ref(), folder_id)?;
+        let source = self.workspace_root.join(&relative);
+        let destination = source.parent().unwrap_or(&self.workspace_root).join(name);
+        if destination == source {
+            return Ok(json!({"ok": true}));
+        }
+        if destination.exists() {
+            return Err(StorageError::InvalidRequest(
+                "There is already a folder of that name there.".into(),
+            ));
+        }
+        fs::rename(&source, &destination).map_err(|source| StorageError::Filesystem {
+            context: "Cannot rename folder".into(),
+            source,
+        })?;
+        let destination_relative = relative_from_root(&self.workspace_root, &destination)?;
+        if let Err(error) = relocate_workspace_subtree(
+            &mut database,
+            root.as_ref(),
+            &relative,
+            &destination_relative,
+        ) {
+            let _ = fs::rename(&destination, &source);
+            return Err(error);
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn move_folder(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let parent_id = optional_string(request, "parent")?;
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let relative = workspace_relative(&database, root.as_ref(), folder_id)?;
+        let parent_relative = match parent_id {
+            Some(parent_id) => workspace_relative(&database, root.as_ref(), parent_id)?,
+            None => String::new(),
+        };
+        if parent_relative == relative || parent_relative.starts_with(&format!("{relative}/")) {
+            return Err(StorageError::InvalidRequest(
+                "A folder cannot be moved inside itself.".into(),
+            ));
+        }
+        let source = self.workspace_root.join(&relative);
+        let parent = self.workspace_root.join(&parent_relative);
+        if source.parent() == Some(parent.as_path()) {
+            return Ok(json!({"ok": true}));
+        }
+        if parent.join(".git").exists() {
+            return Err(StorageError::InvalidRequest(
+                "A folder cannot be moved inside a repository.".into(),
+            ));
+        }
+        let name = source
+            .file_name()
+            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+        let destination = parent.join(name);
+        if destination.exists() {
+            return Err(StorageError::InvalidRequest(
+                "There is already a folder of that name there.".into(),
+            ));
+        }
+        fs::rename(&source, &destination).map_err(|source| StorageError::Filesystem {
+            context: "Cannot move folder".into(),
+            source,
+        })?;
+        let destination_relative = relative_from_root(&self.workspace_root, &destination)?;
+        if let Err(error) = relocate_workspace_subtree(
+            &mut database,
+            root.as_ref(),
+            &relative,
+            &destination_relative,
+        ) {
+            let _ = fs::rename(&destination, &source);
+            return Err(error);
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn trash_folder(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let relative = workspace_relative(&database, root.as_ref(), folder_id)?;
+        let source = self.workspace_root.join(&relative);
+        let trash = self.workspace_root.join(".Trash");
+        fs::create_dir_all(&trash).map_err(|source| StorageError::Filesystem {
+            context: "Cannot prepare workspace trash".into(),
+            source,
+        })?;
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            StorageError::Filesystem {
+                context: "Cannot secure workspace trash".into(),
+                source,
+            }
+        })?;
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace");
+        let destination = trash.join(format!("{}-{}-{name}", now_seconds(), Uuid::new_v4()));
+        fs::rename(&source, &destination).map_err(|source| StorageError::Filesystem {
+            context: "Cannot trash folder".into(),
+            source,
+        })?;
+        let destination_relative = relative_from_root(&self.workspace_root, &destination)?;
+        if let Err(error) = relocate_workspace_subtree(
+            &mut database,
+            root.as_ref(),
+            &relative,
+            &destination_relative,
+        ) {
+            let _ = fs::rename(&destination, &source);
+            return Err(error);
+        }
+        Ok(json!({"ok": true}))
     }
 
     pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
@@ -1367,6 +1491,80 @@ fn parent_workspace<'a>(
     rows: &'a HashMap<String, WorkspaceRow>,
 ) -> Option<&'a WorkspaceRow> {
     ancestors(relative_path).find_map(|ancestor| rows.get(ancestor))
+}
+
+fn validate_workspace_name(name: &str) -> Result<(), StorageError> {
+    if name.starts_with('.') || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(StorageError::InvalidRequest(
+            "A folder name cannot be empty or hidden, or contain a path separator.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_relative(
+    database: &Connection,
+    root: &str,
+    folder_id: &str,
+) -> Result<String, StorageError> {
+    database
+        .query_row(
+            "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
+            params![root, folder_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))
+}
+
+fn relative_from_root(root: &Path, path: &Path) -> Result<String, StorageError> {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))
+}
+
+fn relocate_workspace_subtree(
+    database: &mut Connection,
+    root: &str,
+    old_relative: &str,
+    new_relative: &str,
+) -> Result<(), StorageError> {
+    if old_relative == new_relative {
+        return Ok(());
+    }
+    let transaction = database.transaction()?;
+    let rows = {
+        let mut statement = transaction
+            .prepare("SELECT id, relative_path FROM workspace_folders WHERE root_path = ?")?;
+        statement
+            .query_map([root], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|result| match result {
+                Ok((id, relative))
+                    if relative == old_relative
+                        || relative.starts_with(&format!("{old_relative}/")) =>
+                {
+                    Some(Ok((id, relative)))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?
+    };
+    let now = now_seconds();
+    for (id, relative) in rows {
+        let suffix = relative.strip_prefix(old_relative).unwrap_or_default();
+        transaction.execute(
+            "UPDATE workspace_folders SET relative_path = ?, updated_at = ? \
+             WHERE id = ? AND root_path = ?",
+            params![format!("{new_relative}{suffix}"), now, id, root],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn queue_from_column(stored: Option<&str>) -> Vec<String> {
@@ -2068,6 +2266,118 @@ mod tests {
                 .unwrap()["parent"],
             existing
         );
+    }
+
+    #[test]
+    fn renames_moves_and_recovers_workspace_subtrees_through_trash() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("Source/Child/Grandchild")).unwrap();
+        fs::create_dir_all(fixture.workspaces.join("Target")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for (id, relative) in [
+            ("source", "Source"),
+            ("child", "Source/Child"),
+            ("grandchild", "Source/Child/Grandchild"),
+            ("target", "Target"),
+        ] {
+            database
+                .execute(
+                    "INSERT INTO workspace_folders \
+                     (id, root_path, relative_path, shortcuts, created_at, updated_at) \
+                     VALUES (?, ?, ?, '[]', 0, 0)",
+                    params![id, fixture.workspaces.to_string_lossy(), relative],
+                )
+                .unwrap();
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        store
+            .rename_folder(&json!({"folder": "source", "name": "Renamed"}))
+            .unwrap();
+        assert!(fixture.workspaces.join("Renamed/Child/Grandchild").is_dir());
+        store
+            .move_folder(&json!({"folder": "child", "parent": "target"}))
+            .unwrap();
+        assert!(fixture.workspaces.join("Target/Child/Grandchild").is_dir());
+        let tree = store.tree().unwrap();
+        assert_eq!(
+            tree["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|folder| folder["id"] == "child")
+                .unwrap()["parent"],
+            "target"
+        );
+        assert!(
+            store
+                .move_folder(&json!({"folder": "target", "parent": "grandchild"}))
+                .unwrap_err()
+                .to_string()
+                .contains("inside itself")
+        );
+
+        store.trash_folder(&json!({"folder": "target"})).unwrap();
+        assert_eq!(
+            store.tree().unwrap()["folders"].as_array().unwrap().len(),
+            1
+        );
+        let database = Connection::open(&fixture.database).unwrap();
+        let child_relative: String = database
+            .query_row(
+                "SELECT relative_path FROM workspace_folders WHERE id = 'child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(child_relative.starts_with(".Trash/"));
+        assert!(child_relative.ends_with("/Child"));
+    }
+
+    #[test]
+    fn workspace_moves_reject_collisions_and_repository_parents() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("One/Same")).unwrap();
+        fs::create_dir_all(fixture.workspaces.join("Two/Same")).unwrap();
+        fs::create_dir_all(fixture.workspaces.join("Repo/.git")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for (id, relative) in [
+            ("one", "One"),
+            ("same-one", "One/Same"),
+            ("two", "Two"),
+            ("same-two", "Two/Same"),
+            ("repo", "Repo"),
+        ] {
+            database
+                .execute(
+                    "INSERT INTO workspace_folders \
+                     (id, root_path, relative_path, shortcuts, created_at, updated_at) \
+                     VALUES (?, ?, ?, '[]', 0, 0)",
+                    params![id, fixture.workspaces.to_string_lossy(), relative],
+                )
+                .unwrap();
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        assert!(
+            store
+                .move_folder(&json!({"folder": "same-one", "parent": "two"}))
+                .unwrap_err()
+                .to_string()
+                .contains("already a folder")
+        );
+        assert!(
+            store
+                .move_folder(&json!({"folder": "same-one", "parent": "repo"}))
+                .unwrap_err()
+                .to_string()
+                .contains("repository")
+        );
+        assert!(fixture.workspaces.join("One/Same").is_dir());
     }
 
     #[test]
