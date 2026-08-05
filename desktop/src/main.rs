@@ -68,6 +68,7 @@ struct XdDesktop {
     composer_input: Entity<ComposerInput>,
     queue_edit_input: Entity<ComposerInput>,
     sidebar_edit_input: Entity<ComposerInput>,
+    workspace_create_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -76,6 +77,9 @@ struct XdDesktop {
     sidebar_move: Option<SidebarTarget>,
     sidebar_move_submitting: bool,
     collapsed_folders: HashSet<String>,
+    creating_workspace: bool,
+    workspace_create_name: String,
+    workspace_create_submitting: bool,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -105,6 +109,12 @@ impl XdDesktop {
             ComposerEvent::Submit => this.save_sidebar_edit(cx),
         })
         .detach();
+        let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Workspace name…"));
+        cx.subscribe(&workspace_create_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.workspace_create_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_workspace_create(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -116,6 +126,7 @@ impl XdDesktop {
             composer_input,
             queue_edit_input,
             sidebar_edit_input,
+            workspace_create_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -124,6 +135,9 @@ impl XdDesktop {
             sidebar_move: None,
             sidebar_move_submitting: false,
             collapsed_folders: HashSet::new(),
+            creating_workspace: false,
+            workspace_create_name: String::new(),
+            workspace_create_submitting: false,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -173,6 +187,7 @@ impl XdDesktop {
                 self.model.connected = false;
                 self.model.connection_error = Some(message);
                 self.sending = false;
+                self.workspace_create_submitting = false;
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -209,6 +224,11 @@ impl XdDesktop {
                 RequestKind::Send { .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
+                }
+                RequestKind::NewFolder { name }
+                    if self.creating_workspace && self.workspace_create_name.trim() == name =>
+                {
+                    self.workspace_create_submitting = false;
                 }
                 RequestKind::EditQueue {
                     chat_id,
@@ -325,12 +345,15 @@ impl XdDesktop {
                     self.model.apply_shortcuts(&value);
                 }
             }
-            RequestKind::NewFolder => {
+            RequestKind::NewFolder { name } => {
                 let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
                     self.model.connection_error =
                         Some("The daemon returned no workspace id.".into());
                     return;
                 };
+                if self.creating_workspace && self.workspace_create_name.trim() == name {
+                    self.cancel_workspace_create(cx);
+                }
                 if let Some(daemon) = &self.daemon
                     && let Err(error) = daemon.new_chat(folder_id)
                 {
@@ -598,13 +621,54 @@ impl XdDesktop {
         }
     }
 
-    fn create_workspace(&mut self) {
-        let name = format!("Workspace {}", self.model.folders.len() + 1);
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.new_folder(&name)
-        {
-            self.model.connection_error = Some(error);
+    fn begin_workspace_create(&mut self, cx: &mut Context<Self>) {
+        self.creating_workspace = true;
+        self.workspace_create_submitting = false;
+        self.workspace_create_name.clear();
+        self.workspace_create_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    fn workspace_create_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.creating_workspace && !self.workspace_create_submitting {
+            self.workspace_create_name = text;
+            cx.notify();
         }
+    }
+
+    fn save_workspace_create(&mut self, cx: &mut Context<Self>) {
+        if !self.creating_workspace || self.workspace_create_submitting {
+            return;
+        }
+        let name = self.workspace_create_name.trim();
+        if name.is_empty() {
+            self.model.connection_error = Some("A workspace name cannot be empty.".into());
+            cx.notify();
+            return;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.new_folder(name));
+        match result {
+            Ok(()) => {
+                self.workspace_create_name = name.to_owned();
+                self.workspace_create_submitting = true;
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn cancel_workspace_create(&mut self, cx: &mut Context<Self>) {
+        self.creating_workspace = false;
+        self.workspace_create_submitting = false;
+        self.workspace_create_name.clear();
+        self.workspace_create_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
     }
 
     fn create_chat(&mut self, folder_id: &str) {
@@ -2222,6 +2286,14 @@ impl Render for XdDesktop {
             }
         }
 
+        let creating_workspace = self.creating_workspace;
+        let workspace_create_submitting = self.workspace_create_submitting;
+        let can_save_workspace = creating_workspace
+            && !workspace_create_submitting
+            && !self.workspace_create_name.trim().is_empty()
+            && self.model.connected;
+        let workspace_create_input = self.workspace_create_input.clone();
+        let workspace_create_focus = self.workspace_create_input.read(cx).focus_handle(cx);
         let sidebar = div()
             .w(px(280.0))
             .h_full()
@@ -2265,12 +2337,105 @@ impl Render for XdDesktop {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                            .on_click(cx.listener(|this, _, _, _| this.create_workspace()))
+                            .text_color(rgb(if creating_workspace { MUTED } else { TEXT }))
+                            .when(!creating_workspace, |button| {
+                                button.cursor_pointer().hover(|style| {
+                                    style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                })
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if !creating_workspace {
+                                    this.begin_workspace_create(cx);
+                                    let focus =
+                                        this.workspace_create_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }
+                            }))
                             .child("+ New"),
                     ),
             )
+            .when(creating_workspace, |sidebar| {
+                sidebar.child(
+                    div()
+                        .mx_3()
+                        .mb_2()
+                        .p_2()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded_md()
+                        .bg(rgb(0x1d222b))
+                        .child(
+                            div()
+                                .id("workspace-create-input")
+                                .track_focus(&workspace_create_focus)
+                                .h(px(32.0))
+                                .min_w_0()
+                                .flex_1()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if workspace_create_focus.is_focused(window) {
+                                    ACCENT
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(BG))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus =
+                                        this.workspace_create_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(workspace_create_input),
+                        )
+                        .child(
+                            div()
+                                .id("save-workspace-create")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if can_save_workspace { TEXT } else { MUTED }))
+                                .when(can_save_workspace, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if can_save_workspace {
+                                        this.save_workspace_create(cx);
+                                    }
+                                }))
+                                .child(if workspace_create_submitting {
+                                    "Creating…"
+                                } else {
+                                    "Save"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("cancel-workspace-create")
+                                .px_1()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .when(!workspace_create_submitting, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !workspace_create_submitting {
+                                        this.cancel_workspace_create(cx);
+                                    }
+                                }))
+                                .child("×"),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("workspace-tree")

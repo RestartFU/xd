@@ -24,7 +24,9 @@ pub enum RequestKind {
     Shortcuts {
         folder_id: String,
     },
-    NewFolder,
+    NewFolder {
+        name: String,
+    },
     NewChat {
         folder_id: String,
     },
@@ -279,7 +281,9 @@ impl DaemonHandle {
 
     pub fn new_folder(&self, name: &str) -> Result<(), String> {
         self.send(
-            RequestKind::NewFolder,
+            RequestKind::NewFolder {
+                name: name.to_owned(),
+            },
             json!({"op": "new-folder", "name": name}),
         )
     }
