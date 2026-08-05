@@ -1,16 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use thiserror::Error;
-
-#[cfg(test)]
-use std::fs;
+use uuid::Uuid;
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
@@ -34,6 +34,11 @@ pub enum StorageError {
     NoChat(String),
     #[error("{0}")]
     InvalidRequest(String),
+    #[error("{context}: {source}")]
+    Filesystem {
+        context: String,
+        source: std::io::Error,
+    },
 }
 
 pub struct StateStore {
@@ -83,6 +88,7 @@ impl StateStore {
                 source,
             }
         })?;
+        database.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             database: Mutex::new(database),
             workspace_root: workspace_root.into(),
@@ -376,6 +382,199 @@ impl StateStore {
         }
         Ok((reply, event))
     }
+
+    pub fn new_folder(&self, request: &Value) -> Result<Value, StorageError> {
+        let name = required_string(
+            request,
+            "name",
+            "A folder name cannot be empty or hidden, or contain a path separator.",
+        )?;
+        if name.starts_with('.') || name == ".." || name.contains('/') || name.contains('\\') {
+            return Err(StorageError::InvalidRequest(
+                "A folder name cannot be empty or hidden, or contain a path separator.".into(),
+            ));
+        }
+        let parent_id = optional_string(request, "parent")?;
+        let repo = optional_string(request, "repo")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let parent_relative = match parent_id {
+            Some(parent_id) => database
+                .query_row(
+                    "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
+                    params![root.as_ref(), parent_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("No such folder on the daemon.".into())
+                })?,
+            None => String::new(),
+        };
+        let relative = if parent_relative.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent_relative}/{name}")
+        };
+        if let Some(id) = database
+            .query_row(
+                "SELECT id FROM workspace_folders WHERE root_path = ? AND relative_path = ?",
+                params![root.as_ref(), &relative],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(json!({"ok": true, "id": id}));
+        }
+        let path = self.workspace_root.join(&relative);
+        let created = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => false,
+            Ok(_) => {
+                return Err(StorageError::InvalidRequest(
+                    "There is already something of that name there.".into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&path).map_err(|source| StorageError::Filesystem {
+                    context: "Cannot create folder".into(),
+                    source,
+                })?;
+                true
+            }
+            Err(source) => {
+                return Err(StorageError::Filesystem {
+                    context: "Cannot inspect folder".into(),
+                    source,
+                });
+            }
+        };
+        let id = Uuid::new_v4().to_string();
+        let now = now_seconds();
+        let inserted = database.execute(
+            "INSERT INTO workspace_folders \
+             (id, root_path, relative_path, backend, model, workdir, repo, instructions, \
+              shortcuts, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, NULL, ?, NULL, '[]', ?, ?)",
+            params![id, root.as_ref(), relative, repo, now, now],
+        );
+        if let Err(error) = inserted {
+            if created {
+                let _ = fs::remove_dir(&path);
+            }
+            return Err(StorageError::Query(error));
+        }
+        Ok(json!({"ok": true, "id": id}))
+    }
+
+    pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let title = optional_string(request, "title")?.unwrap_or("New Chat");
+        let workdir = optional_string(request, "workdir")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let folder_exists: bool = database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_folders WHERE root_path = ? AND id = ?)",
+            params![root.as_ref(), folder_id],
+            |row| row.get(0),
+        )?;
+        if !folder_exists {
+            return Err(StorageError::InvalidRequest(
+                "No such folder on the daemon.".into(),
+            ));
+        }
+        let defaults = database
+            .query_row(
+                "SELECT backend, model, effort, access, plan, fast, claude_mode \
+                 FROM agent_defaults WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, bool>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .unwrap_or_else(|| ("claude".into(), None, None, None, false, false, false));
+        let id = Uuid::new_v4().to_string();
+        let now = now_seconds();
+        database.execute(
+            "INSERT INTO chats \
+             (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
+              workdir, created_at, updated_at, last_user_message_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                folder_id,
+                title,
+                defaults.0,
+                defaults.1,
+                defaults.2,
+                defaults.3,
+                defaults.4,
+                defaults.5,
+                defaults.6,
+                workdir,
+                now,
+                now,
+                now * 1_000_000,
+            ],
+        )?;
+        Ok(json!({"ok": true, "id": id}))
+    }
+
+    pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
+        let chat_id = required_string(request, "chat", "A chat needs an id and a title.")?;
+        let title = required_string(request, "title", "A chat needs an id and a title.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?",
+            params![title, now_seconds(), chat_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn move_chat(&self, request: &Value) -> Result<Value, StorageError> {
+        let chat_id = required_string(request, "chat", "move-chat needs a chat id")?;
+        let folder_id = required_string(request, "folder", "move-chat needs a folder")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let folder_exists: bool = database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_folders WHERE root_path = ? AND id = ?)",
+            params![root.as_ref(), folder_id],
+            |row| row.get(0),
+        )?;
+        if !folder_exists {
+            return Err(StorageError::InvalidRequest(
+                "No such folder on the daemon.".into(),
+            ));
+        }
+        let changed = database.execute(
+            "UPDATE chats SET folder_id = ?, updated_at = ? WHERE id = ?",
+            params![folder_id, now_seconds(), chat_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn delete_chat(&self, request: &Value) -> Result<Value, StorageError> {
+        let chat_id = required_string(request, "chat", "delete-chat needs a chat id")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute("DELETE FROM chats WHERE id = ?", [chat_id])?;
+        if changed != 1 {
+            return Err(StorageError::NoChat(chat_id.into()));
+        }
+        Ok(json!({"ok": true}))
+    }
 }
 
 fn hidden_component(relative_path: &str) -> bool {
@@ -486,6 +685,23 @@ fn optional_integer(request: &Value, key: &str) -> Result<Option<i64>, StorageEr
             .map(Some)
             .ok_or_else(|| StorageError::InvalidRequest(format!("{key} must be an integer"))),
     }
+}
+
+fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>, StorageError> {
+    match request.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| StorageError::InvalidRequest(format!("{key} must be text"))),
+    }
+}
+
+fn now_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn validate_attachments(value: &Value) -> Result<Vec<Value>, StorageError> {
@@ -737,6 +953,94 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["draft"], "");
     }
 
+    #[test]
+    fn adopts_existing_directories_and_creates_nested_workspaces() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("Existing")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let existing = store.new_folder(&json!({"name": "Existing"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child = store
+            .new_folder(&json!({"name": "Child", "parent": existing}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(fixture.workspaces.join("Existing/Child").is_dir());
+        let tree = store.tree().unwrap();
+        assert_eq!(tree["folders"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            tree["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|folder| folder["id"] == child)
+                .unwrap()["parent"],
+            existing
+        );
+    }
+
+    #[test]
+    fn creates_renames_moves_and_deletes_chats() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("One")).unwrap();
+        fs::create_dir_all(fixture.workspaces.join("Two")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for (id, relative) in [("one", "One"), ("two", "Two")] {
+            database
+                .execute(
+                    "INSERT INTO workspace_folders \
+                     (id, root_path, relative_path, shortcuts, created_at, updated_at) \
+                     VALUES (?, ?, ?, '[]', 0, 0)",
+                    params![id, fixture.workspaces.to_string_lossy(), relative],
+                )
+                .unwrap();
+        }
+        database
+            .execute(
+                "INSERT INTO agent_defaults \
+                 (singleton, backend, model, effort, access, plan, fast, claude_mode) \
+                 VALUES (1, 'codex', 'gpt-5', 'high', 'workspace-write', 0, 1, 0)",
+                [],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let chat_id = store
+            .new_chat(&json!({"folder": "one", "title": "Original"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(store.chat(&chat_id).unwrap()["backend"], "codex");
+        assert_eq!(store.chat(&chat_id).unwrap()["model"], "gpt-5");
+        store
+            .rename_chat(&json!({"chat": chat_id, "title": "Renamed"}))
+            .unwrap();
+        store
+            .move_chat(&json!({"chat": chat_id, "folder": "two"}))
+            .unwrap();
+        let tree = store.tree().unwrap();
+        let chat = tree["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["id"] == chat_id)
+            .unwrap();
+        assert_eq!(chat["title"], "Renamed");
+        assert_eq!(chat["folder"], "two");
+        store.delete_chat(&json!({"chat": chat_id})).unwrap();
+        assert!(matches!(store.chat(&chat_id), Err(StorageError::NoChat(_))));
+    }
+
     struct Fixture {
         root: PathBuf,
         database: PathBuf,
@@ -765,7 +1069,9 @@ mod tests {
                 .execute_batch(
                     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); \
                      CREATE TABLE workspace_folders (id TEXT PRIMARY KEY, root_path TEXT NOT NULL, \
-                       relative_path TEXT NOT NULL, shortcuts TEXT NOT NULL); \
+                       relative_path TEXT NOT NULL, backend TEXT, model TEXT, workdir TEXT, repo TEXT, \
+                       instructions TEXT, shortcuts TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, \
+                       updated_at INTEGER NOT NULL DEFAULT 0, UNIQUE(root_path, relative_path)); \
                      CREATE TABLE chats (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, title TEXT, \
                        backend TEXT NOT NULL, workdir TEXT, model TEXT, effort TEXT, access TEXT, \
                        plan INTEGER NOT NULL DEFAULT 0, fast INTEGER NOT NULL DEFAULT 0, \
@@ -773,14 +1079,26 @@ mod tests {
                        new_worktree INTEGER NOT NULL DEFAULT 0, daemon_working INTEGER NOT NULL DEFAULT 0, \
                        draft TEXT NOT NULL DEFAULT '', draft_attachments TEXT NOT NULL DEFAULT '[]', \
                        draft_revision INTEGER NOT NULL DEFAULT 0, last_user_message_at INTEGER NOT NULL DEFAULT 0, \
-                       created_at INTEGER NOT NULL DEFAULT 0); \
+                       created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, \
+                       FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
                      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, \
-                       role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, label TEXT);",
+                       role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, label TEXT, \
+                       FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
+                     CREATE TABLE agent_defaults (singleton INTEGER PRIMARY KEY, backend TEXT NOT NULL, \
+                       model TEXT, effort TEXT, access TEXT, plan INTEGER NOT NULL, fast INTEGER NOT NULL, \
+                       claude_mode INTEGER NOT NULL);",
                 )
                 .unwrap();
         }
 
         fn insert_chat(&self, database: &Connection, id: &str, folder: &str) {
+            database
+                .execute(
+                    "INSERT OR IGNORE INTO workspace_folders \
+                     (id, root_path, relative_path, shortcuts) VALUES (?, ?, ?, '[]')",
+                    params![folder, self.workspaces.to_string_lossy(), folder],
+                )
+                .unwrap();
             database
                 .execute(
                     "INSERT INTO chats (id, folder_id, title, backend) VALUES (?, ?, 'A chat', 'codex')",

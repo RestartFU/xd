@@ -99,6 +99,11 @@ impl Engine {
             },
             Some("messages") => self.read(|store| store.messages(&request)),
             Some("set-draft") => self.set_draft(&request),
+            Some("new-folder") => self.tree_mutation(|store| store.new_folder(&request)),
+            Some("new-chat") => self.tree_mutation(|store| store.new_chat(&request)),
+            Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
+            Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
+            Some("delete-chat") => self.tree_mutation(|store| store.delete_chat(&request)),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -125,6 +130,22 @@ impl Engine {
         match store.set_draft(request) {
             Ok((reply, event)) => {
                 self.events.publish(event);
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn tree_mutation(
+        &self,
+        operation: impl FnOnce(&StateStore) -> Result<Value, StorageError>,
+    ) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match operation(store) {
+            Ok(reply) => {
+                self.events.publish(json!({"event": "tree"}));
                 reply
             }
             Err(error) => error_reply(error),
