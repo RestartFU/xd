@@ -1,13 +1,20 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, KeyDownEvent, ListAlignment, ListState, Render,
-    Timer, Window, WindowBounds, WindowOptions, div, list, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState,
+    Render, Timer, Window, WindowBounds, WindowOptions, div, list, prelude::*, px, rgb, size,
 };
 use serde_json::Value;
 use xd_desktop::{
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     model::{AppModel, Message},
+};
+
+mod input;
+
+use input::{
+    Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, End, Home, Left, Paste, Right,
+    SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit,
 };
 
 const BG: u32 = 0x111318;
@@ -23,7 +30,7 @@ struct XdDesktop {
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
-    composer_focus: FocusHandle,
+    composer_input: Entity<ComposerInput>,
     composer: String,
     draft_generation: u64,
     draft_dirty: bool,
@@ -33,6 +40,12 @@ struct XdDesktop {
 
 impl XdDesktop {
     fn new(cx: &mut Context<Self>) -> Self {
+        let composer_input = cx.new(|cx| ComposerInput::new(cx, "Message xd…"));
+        cx.subscribe(&composer_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.composer_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.send_composer(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -41,7 +54,7 @@ impl XdDesktop {
             daemon: None,
             _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
-            composer_focus: cx.focus_handle(),
+            composer_input,
             composer: String::new(),
             draft_generation: 0,
             draft_dirty: false,
@@ -88,7 +101,7 @@ impl XdDesktop {
                 self.model.connected = false;
                 self.model.connection_error = Some(message);
                 self.sending = false;
-                self.restore_pending_send();
+                self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply { kind, body } => self.handle_reply(kind, body, cx),
             DaemonUpdate::Event { name, body } => self.handle_event(&name, Value::Object(body), cx),
@@ -113,7 +126,7 @@ impl XdDesktop {
             );
             if matches!(kind, RequestKind::Send { .. }) {
                 self.sending = false;
-                self.restore_pending_send();
+                self.restore_pending_send(cx);
             }
             return;
         }
@@ -133,7 +146,8 @@ impl XdDesktop {
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
                 self.model.apply_chat(&value);
                 if !self.draft_dirty {
-                    self.composer.clone_from(&self.model.draft);
+                    let draft = self.model.draft.clone();
+                    self.set_composer_text(draft, cx);
                 }
             }
             RequestKind::Messages { chat_id } if self.chat_is_active(&chat_id) => {
@@ -185,7 +199,8 @@ impl XdDesktop {
             "draft" if self.event_is_active(&body) => {
                 self.model.apply_event(name, &body);
                 if !self.draft_dirty {
-                    self.composer.clone_from(&self.model.draft);
+                    let draft = self.model.draft.clone();
+                    self.set_composer_text(draft, cx);
                 }
             }
             "turn-started" if self.event_is_active(&body) => {
@@ -249,7 +264,7 @@ impl XdDesktop {
             return;
         }
         self.model.select_chat(chat_id.clone());
-        self.composer.clear();
+        self.set_composer_text(String::new(), cx);
         self.draft_dirty = false;
         self.pending_send = None;
         self.sending = false;
@@ -270,7 +285,7 @@ impl XdDesktop {
         if text.is_empty() {
             return;
         }
-        let Some(daemon) = &self.daemon else {
+        let Some(daemon) = self.daemon.clone() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return;
         };
@@ -281,27 +296,34 @@ impl XdDesktop {
 
         self.sending = true;
         self.pending_send = Some(text);
-        self.composer.clear();
+        self.set_composer_text(String::new(), cx);
         self.draft_dirty = true;
         self.draft_generation = self.draft_generation.saturating_add(1);
         let _ = daemon.set_draft(&chat_id, "");
         cx.notify();
     }
 
-    fn restore_pending_send(&mut self) {
+    fn restore_pending_send(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.pending_send.take() else {
             return;
         };
-        if self.composer.is_empty() {
-            self.composer = text;
+        let restored = if self.composer.is_empty() {
+            text
         } else {
-            self.composer = format!("{text}\n{}", self.composer);
-        }
+            format!("{text}\n{}", self.composer)
+        };
+        self.set_composer_text(restored, cx);
         self.draft_dirty = true;
     }
 
-    fn edit_composer(&mut self, edit: impl FnOnce(&mut String), cx: &mut Context<Self>) {
-        edit(&mut self.composer);
+    fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.composer.clone_from(&text);
+        self.composer_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    fn composer_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        self.composer = text;
         self.draft_dirty = true;
         self.draft_generation = self.draft_generation.saturating_add(1);
         let generation = self.draft_generation;
@@ -327,53 +349,6 @@ impl XdDesktop {
         if let Some(daemon) = &self.daemon {
             if let Err(error) = daemon.set_draft(&chat_id, &self.composer) {
                 self.model.connection_error = Some(error);
-            }
-        }
-    }
-
-    fn on_composer_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let keystroke = &event.keystroke;
-        if keystroke.key == "enter" && !keystroke.modifiers.shift {
-            cx.stop_propagation();
-            self.send_composer(cx);
-            return;
-        }
-        if keystroke.key == "enter" {
-            cx.stop_propagation();
-            self.edit_composer(|text| text.push('\n'), cx);
-            return;
-        }
-        if keystroke.key == "backspace" {
-            cx.stop_propagation();
-            self.edit_composer(
-                |text| {
-                    text.pop();
-                },
-                cx,
-            );
-            return;
-        }
-        if (keystroke.modifiers.platform || keystroke.modifiers.control)
-            && keystroke.key.eq_ignore_ascii_case("v")
-        {
-            cx.stop_propagation();
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.edit_composer(|composer| composer.push_str(&text), cx);
-            }
-            return;
-        }
-        if keystroke.modifiers.platform || keystroke.modifiers.control {
-            return;
-        }
-        if let Some(text) = &keystroke.key_char {
-            if !text.chars().any(char::is_control) {
-                cx.stop_propagation();
-                self.edit_composer(|composer| composer.push_str(text), cx);
             }
         }
     }
@@ -605,17 +580,7 @@ impl Render for XdDesktop {
         })
         .size_full();
 
-        let composer_text = if self.composer.is_empty() {
-            "Message xd…".to_owned()
-        } else {
-            self.composer.clone()
-        };
-        let composer_color = if self.composer.is_empty() {
-            MUTED
-        } else {
-            TEXT
-        };
-        let composer_focus = self.composer_focus.clone();
+        let composer_focus = self.composer_input.read(cx).focus_handle(cx);
         let can_send = !self.composer.trim().is_empty()
             && self.model.selected_chat.is_some()
             && self.model.connected
@@ -689,17 +654,11 @@ impl Render for XdDesktop {
                         BORDER
                     }))
                     .bg(rgb(SURFACE))
-                    .on_click(cx.listener(|this, _, window, _| window.focus(&this.composer_focus)))
-                    .on_key_down(cx.listener(Self::on_composer_key_down))
-                    .child(
-                        div()
-                            .flex_1()
-                            .whitespace_normal()
-                            .text_sm()
-                            .line_height(px(21.0))
-                            .text_color(rgb(composer_color))
-                            .child(composer_text),
-                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let focus = this.composer_input.read(cx).focus_handle(cx);
+                        window.focus(&focus);
+                    }))
+                    .child(self.composer_input.clone())
                     .child(
                         div()
                             .id("send")
@@ -745,6 +704,30 @@ impl Render for XdDesktop {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        cx.bind_keys([
+            KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
+            KeyBinding::new("delete", Delete, Some("ComposerInput")),
+            KeyBinding::new("left", Left, Some("ComposerInput")),
+            KeyBinding::new("right", Right, Some("ComposerInput")),
+            KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
+            KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
+            KeyBinding::new("home", Home, Some("ComposerInput")),
+            KeyBinding::new("end", End, Some("ComposerInput")),
+            KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
+            KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
+            KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
+            KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
+            KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
+            KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
+            KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
+            KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
+            KeyBinding::new("enter", Submit, Some("ComposerInput")),
+            KeyBinding::new(
+                "ctrl-cmd-space",
+                ShowCharacterPalette,
+                Some("ComposerInput"),
+            ),
+        ]);
         let bounds = Bounds::centered(None, size(px(1180.0), px(780.0)), cx);
         cx.open_window(
             WindowOptions {
