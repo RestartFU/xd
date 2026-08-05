@@ -73,6 +73,8 @@ struct XdDesktop {
     sidebar_edit: Option<SidebarEdit>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
+    sidebar_move: Option<SidebarTarget>,
+    sidebar_move_submitting: bool,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -118,6 +120,8 @@ impl XdDesktop {
             sidebar_edit: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
+            sidebar_move: None,
+            sidebar_move_submitting: false,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -226,11 +230,22 @@ impl XdDesktop {
                         edit.submitting = false;
                     }
                 }
+                RequestKind::MoveFolder { folder_id, .. } => {
+                    if self.sidebar_move.as_ref() == Some(&SidebarTarget::Folder(folder_id.clone()))
+                    {
+                        self.sidebar_move_submitting = false;
+                    }
+                }
                 RequestKind::RenameChat { chat_id, .. } => {
                     if let Some(edit) = &mut self.sidebar_edit
                         && edit.target == SidebarTarget::Chat(chat_id.clone())
                     {
                         edit.submitting = false;
+                    }
+                }
+                RequestKind::MoveChat { chat_id, .. } => {
+                    if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id.clone())) {
+                        self.sidebar_move_submitting = false;
                     }
                 }
                 RequestKind::TrashFolder { folder_id } => {
@@ -272,6 +287,14 @@ impl XdDesktop {
                 {
                     self.pending_sidebar_delete = None;
                     self.sidebar_delete_submitting = false;
+                }
+                if self
+                    .sidebar_move
+                    .as_ref()
+                    .is_some_and(|target| !self.sidebar_target_exists(target))
+                {
+                    self.sidebar_move = None;
+                    self.sidebar_move_submitting = false;
                 }
                 if self.model.selected_chat.is_none() {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
@@ -322,6 +345,16 @@ impl XdDesktop {
                     self.cancel_sidebar_edit(cx);
                 }
             }
+            RequestKind::MoveFolder {
+                folder_id,
+                parent_id,
+            } => {
+                if self.sidebar_move.as_ref() == Some(&SidebarTarget::Folder(folder_id)) {
+                    self.sidebar_move = None;
+                    self.sidebar_move_submitting = false;
+                }
+                let _ = parent_id;
+            }
             RequestKind::TrashFolder { folder_id } => {
                 if self.pending_sidebar_delete.as_ref() == Some(&SidebarTarget::Folder(folder_id)) {
                     self.pending_sidebar_delete = None;
@@ -334,6 +367,13 @@ impl XdDesktop {
                 }) {
                     self.cancel_sidebar_edit(cx);
                 }
+            }
+            RequestKind::MoveChat { chat_id, folder_id } => {
+                if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id)) {
+                    self.sidebar_move = None;
+                    self.sidebar_move_submitting = false;
+                }
+                let _ = folder_id;
             }
             RequestKind::DeleteChat { chat_id } => {
                 if self.pending_sidebar_delete.as_ref() == Some(&SidebarTarget::Chat(chat_id)) {
@@ -575,6 +615,8 @@ impl XdDesktop {
     ) {
         self.pending_sidebar_delete = None;
         self.sidebar_delete_submitting = false;
+        self.sidebar_move = None;
+        self.sidebar_move_submitting = false;
         self.sidebar_edit = Some(SidebarEdit {
             target,
             original: current.clone(),
@@ -646,6 +688,8 @@ impl XdDesktop {
         }
         if self.pending_sidebar_delete.as_ref() != Some(&target) {
             self.cancel_sidebar_edit(cx);
+            self.sidebar_move = None;
+            self.sidebar_move_submitting = false;
             self.pending_sidebar_delete = Some(target);
             cx.notify();
             return;
@@ -656,6 +700,49 @@ impl XdDesktop {
         });
         match result {
             Some(Ok(())) => self.sidebar_delete_submitting = true,
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => {
+                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_sidebar_move(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
+        if self.sidebar_move_submitting {
+            return;
+        }
+        self.cancel_sidebar_edit(cx);
+        self.pending_sidebar_delete = None;
+        self.sidebar_delete_submitting = false;
+        if self.sidebar_move.as_ref() == Some(&target) {
+            self.sidebar_move = None;
+        } else {
+            self.sidebar_move = Some(target);
+        }
+        cx.notify();
+    }
+
+    fn move_sidebar_item(
+        &mut self,
+        target: SidebarTarget,
+        destination: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_move_submitting || self.sidebar_move.as_ref() != Some(&target) {
+            return;
+        }
+        let result = self.daemon.as_ref().map(|daemon| match &target {
+            SidebarTarget::Folder(folder_id) => {
+                daemon.move_folder(folder_id, destination.as_deref())
+            }
+            SidebarTarget::Chat(chat_id) => destination
+                .as_deref()
+                .ok_or_else(|| "A chat needs a destination workspace.".to_owned())
+                .and_then(|folder_id| daemon.move_chat(chat_id, folder_id)),
+        });
+        match result {
+            Some(Ok(())) => self.sidebar_move_submitting = true,
             Some(Err(error)) => self.model.connection_error = Some(error),
             None => {
                 self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
@@ -1181,6 +1268,25 @@ impl XdDesktop {
         }
     }
 
+    fn folder_is_descendant_of(&self, candidate_id: &str, ancestor_id: &str) -> bool {
+        let mut current = Some(candidate_id);
+        for _ in 0..=self.model.folders.len() {
+            let Some(id) = current else {
+                return false;
+            };
+            if id == ancestor_id {
+                return true;
+            }
+            current = self
+                .model
+                .folders
+                .iter()
+                .find(|folder| folder.id == id)
+                .and_then(|folder| folder.parent.as_deref());
+        }
+        true
+    }
+
     fn sync_transcript_count(&self, reset: bool) {
         let count = self.model.display_message_count();
         if reset {
@@ -1568,6 +1674,8 @@ impl Render for XdDesktop {
         let sidebar_edit_focus = self.sidebar_edit_input.read(cx).focus_handle(cx);
         let pending_sidebar_delete = self.pending_sidebar_delete.clone();
         let sidebar_delete_submitting = self.sidebar_delete_submitting;
+        let sidebar_move = self.sidebar_move.clone();
+        let sidebar_move_submitting = self.sidebar_move_submitting;
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
@@ -1657,8 +1765,10 @@ impl Render for XdDesktop {
                 );
             } else {
                 let rename_target = folder_target.clone();
+                let move_target = folder_target.clone();
                 let delete_target = folder_target.clone();
                 let confirming_delete = pending_sidebar_delete.as_ref() == Some(&folder_target);
+                let moving_folder = sidebar_move.as_ref() == Some(&folder_target);
                 tree_rows.push(
                     div()
                         .px_3()
@@ -1711,6 +1821,20 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .id(("move-folder", folder_row_index))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if moving_folder { TEXT } else { MUTED }))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_sidebar_move(move_target.clone(), cx);
+                                }))
+                                .child("Move"),
+                        )
+                        .child(
+                            div()
                                 .id(("trash-folder", folder_row_index))
                                 .px_1()
                                 .rounded_md()
@@ -1733,6 +1857,84 @@ impl Render for XdDesktop {
                         )
                         .into_any_element(),
                 );
+                if moving_folder {
+                    let mut destinations = Vec::new();
+                    if folder.parent.is_some() {
+                        let target = folder_target.clone();
+                        destinations.push(
+                            div()
+                                .id(("move-folder-root", folder_row_index))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.move_sidebar_item(target.clone(), None, cx);
+                                }))
+                                .child("Workspace root")
+                                .into_any_element(),
+                        );
+                    }
+                    for (destination_index, destination) in self
+                        .model
+                        .folders
+                        .iter()
+                        .filter(|destination| {
+                            folder.parent.as_deref() != Some(destination.id.as_str())
+                                && !self.folder_is_descendant_of(&destination.id, &folder.id)
+                        })
+                        .enumerate()
+                    {
+                        let target = folder_target.clone();
+                        let destination_id = destination.id.clone();
+                        destinations.push(
+                            div()
+                                .id(("move-folder-destination", destination_index))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.move_sidebar_item(
+                                        target.clone(),
+                                        Some(destination_id.clone()),
+                                        cx,
+                                    );
+                                }))
+                                .child(destination.name.clone())
+                                .into_any_element(),
+                        );
+                    }
+                    tree_rows.push(
+                        div()
+                            .ml(px(indent + 10.0))
+                            .mr_2()
+                            .mb_1()
+                            .p_2()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(rgb(0x1d222b))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .when(sidebar_move_submitting, |panel| panel.child("Moving…"))
+                            .when(
+                                !sidebar_move_submitting && destinations.is_empty(),
+                                |panel| panel.child("No other destination"),
+                            )
+                            .when(!sidebar_move_submitting, |panel| {
+                                panel.children(destinations)
+                            })
+                            .into_any_element(),
+                    );
+                }
             }
             for chat in self
                 .model
@@ -1833,8 +2035,10 @@ impl Render for XdDesktop {
                     continue;
                 }
                 let rename_target = chat_target.clone();
+                let move_target = chat_target.clone();
                 let delete_target = chat_target.clone();
                 let confirming_delete = pending_sidebar_delete.as_ref() == Some(&chat_target);
+                let moving_chat = sidebar_move.as_ref() == Some(&chat_target);
                 tree_rows.push(
                     div()
                         .id(("chat", row_id))
@@ -1889,6 +2093,20 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .id(("move-chat", row_id))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if moving_chat { TEXT } else { MUTED }))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_sidebar_move(move_target.clone(), cx);
+                                }))
+                                .child("Move"),
+                        )
+                        .child(
+                            div()
                                 .id(("delete-chat", row_id))
                                 .px_1()
                                 .rounded_md()
@@ -1911,6 +2129,60 @@ impl Render for XdDesktop {
                         )
                         .into_any_element(),
                 );
+                if moving_chat {
+                    let destinations = self
+                        .model
+                        .folders
+                        .iter()
+                        .filter(|destination| destination.id != folder.id)
+                        .enumerate()
+                        .map(|(destination_index, destination)| {
+                            let target = chat_target.clone();
+                            let destination_id = destination.id.clone();
+                            div()
+                                .id(("move-chat-destination", destination_index))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.move_sidebar_item(
+                                        target.clone(),
+                                        Some(destination_id.clone()),
+                                        cx,
+                                    );
+                                }))
+                                .child(destination.name.clone())
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>();
+                    tree_rows.push(
+                        div()
+                            .ml(px(indent + 22.0))
+                            .mr_2()
+                            .mb_1()
+                            .p_2()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(rgb(0x1d222b))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .when(sidebar_move_submitting, |panel| panel.child("Moving…"))
+                            .when(
+                                !sidebar_move_submitting && destinations.is_empty(),
+                                |panel| panel.child("No other workspace"),
+                            )
+                            .when(!sidebar_move_submitting, |panel| {
+                                panel.children(destinations)
+                            })
+                            .into_any_element(),
+                    );
+                }
             }
         }
 

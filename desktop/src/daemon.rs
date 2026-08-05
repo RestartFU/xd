@@ -32,12 +32,20 @@ pub enum RequestKind {
         folder_id: String,
         name: String,
     },
+    MoveFolder {
+        folder_id: String,
+        parent_id: Option<String>,
+    },
     TrashFolder {
         folder_id: String,
     },
     RenameChat {
         chat_id: String,
         title: String,
+    },
+    MoveChat {
+        chat_id: String,
+        folder_id: String,
     },
     DeleteChat {
         chat_id: String,
@@ -295,6 +303,20 @@ impl DaemonHandle {
         )
     }
 
+    pub fn move_folder(&self, folder_id: &str, parent_id: Option<&str>) -> Result<(), String> {
+        let mut body = json!({"op": "move-folder", "folder": folder_id});
+        if let Some(parent_id) = parent_id {
+            body["parent"] = Value::String(parent_id.to_owned());
+        }
+        self.send(
+            RequestKind::MoveFolder {
+                folder_id: folder_id.to_owned(),
+                parent_id: parent_id.map(str::to_owned),
+            },
+            body,
+        )
+    }
+
     pub fn trash_folder(&self, folder_id: &str) -> Result<(), String> {
         self.send(
             RequestKind::TrashFolder {
@@ -311,6 +333,16 @@ impl DaemonHandle {
                 title: title.to_owned(),
             },
             json!({"op": "rename-chat", "chat": chat_id, "title": title}),
+        )
+    }
+
+    pub fn move_chat(&self, chat_id: &str, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::MoveChat {
+                chat_id: chat_id.to_owned(),
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "move-chat", "chat": chat_id, "folder": folder_id}),
         )
     }
 
