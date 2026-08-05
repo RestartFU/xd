@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -21,6 +23,8 @@ const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const CODEX_MODELS: &[(&str, &str, i64)] = &[
     ("gpt-5.6-sol", "GPT-5.6 Sol", 272_000),
@@ -76,6 +80,12 @@ struct MaterializedMessage {
     prompt: String,
     paths: Vec<PathBuf>,
     keep: bool,
+}
+
+struct GitWorktree {
+    path: PathBuf,
+    branch: Option<String>,
+    detached: bool,
 }
 
 impl MaterializedMessage {
@@ -203,6 +213,15 @@ impl StateStore {
             .iter()
             .map(|row| (row.relative_path.clone(), row.clone()))
             .collect::<HashMap<_, _>>();
+        let registered_containers = {
+            let mut statement = database.prepare("SELECT path FROM worktree_containers")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        };
         let mut visible = Vec::new();
         for row in stored {
             if row.relative_path.is_empty() {
@@ -210,6 +229,13 @@ impl StateStore {
             }
             let path = self.workspace_root.join(&row.relative_path);
             if !path.is_dir() || hidden_component(&row.relative_path) {
+                continue;
+            }
+            let normalized = PathBuf::from(normalize_existing_path(&path));
+            if registered_containers
+                .iter()
+                .any(|container| normalized == *container || normalized.starts_with(container))
+            {
                 continue;
             }
             if ancestors(&row.relative_path).any(|ancestor| {
@@ -524,6 +550,7 @@ impl StateStore {
             "A message needs a chat and something to say.",
         )?;
         let text = optional_string(request, "text")?.unwrap_or("");
+        let worktree_name = optional_string(request, "worktree_name")?;
         if text.is_empty() && request.get("attachments").is_none() {
             return Err(StorageError::InvalidRequest(
                 "A message needs a chat and something to say.".into(),
@@ -564,7 +591,13 @@ impl StateStore {
                 event,
             });
         }
-        let turn = prepare_turn(&transaction, &self.workspace_root, chat_id, &message.prompt)?;
+        let turn = prepare_turn(
+            &transaction,
+            &self.workspace_root,
+            chat_id,
+            &message.prompt,
+            worktree_name,
+        )?;
         transaction.execute(
             "UPDATE chats SET daemon_working = 1, draft = '', draft_attachments = '[]', \
              draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
@@ -718,7 +751,7 @@ impl StateStore {
         )?;
         let next = next_text
             .as_deref()
-            .map(|text| prepare_turn(&transaction, &self.workspace_root, chat_id, text))
+            .map(|text| prepare_turn(&transaction, &self.workspace_root, chat_id, text, None))
             .transpose()?;
         transaction.commit()?;
         Ok(TurnFinish {
@@ -1763,15 +1796,304 @@ fn update_boolean_option(
     )?)
 }
 
+fn create_worktree(
+    transaction: &rusqlite::Transaction<'_>,
+    workdir: &str,
+    chat_id: &str,
+    name_hint: Option<&str>,
+) -> Result<String, StorageError> {
+    let root = git_repository_root(workdir)?;
+    let worktrees = list_git_worktrees(&root)?;
+    let main = worktrees
+        .first()
+        .ok_or_else(|| StorageError::InvalidRequest("Git returned no worktrees.".into()))?;
+    let repository_parent = main.path.parent().ok_or_else(|| {
+        StorageError::InvalidRequest("Worktree selection needs a Git working directory.".into())
+    })?;
+    let repository_name = main
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            StorageError::InvalidRequest("Worktree selection needs a Git working directory.".into())
+        })?;
+    let container = repository_parent.join("worktrees");
+    register_worktree_container(transaction, &container)?;
+
+    let slug = worktree_slug(name_hint);
+    let branch = format!("xd/{slug}-{}", glib_hash(chat_id));
+    let legacy_branch = format!("xd/{chat_id}");
+    if let Some(existing) = worktrees.iter().find(|worktree| {
+        !worktree.detached
+            && worktree
+                .branch
+                .as_deref()
+                .is_some_and(|candidate| candidate == branch || candidate == legacy_branch)
+    }) {
+        return Ok(normalize_existing_path(&existing.path));
+    }
+
+    for suffix in 1..=10_000_u32 {
+        let worktree_name = if suffix == 1 {
+            slug.clone()
+        } else {
+            format!("{slug}-{suffix}")
+        };
+        let parent = container.join(repository_name).join(&worktree_name);
+        let target = parent.join(repository_name);
+        if !target.exists() {
+            fs::create_dir_all(&parent).map_err(|source| StorageError::Filesystem {
+                context: "Cannot prepare the generated worktree directory".into(),
+                source,
+            })?;
+            let reference = format!("refs/heads/{branch}");
+            let branch_exists = run_git(&root, &["show-ref", "--verify", "--quiet", &reference])?
+                .0
+                .success();
+            let target = target.to_str().ok_or_else(|| {
+                StorageError::InvalidRequest(
+                    "The generated worktree path is not valid text.".into(),
+                )
+            })?;
+            let result = if branch_exists {
+                run_git(&root, &["worktree", "add", target, &branch])?
+            } else {
+                run_git(&root, &["worktree", "add", "-b", &branch, target, "HEAD"])?
+            };
+            if !result.0.success() {
+                let message = String::from_utf8_lossy(&result.2).trim().to_owned();
+                return Err(StorageError::InvalidRequest(if message.is_empty() {
+                    "git worktree add failed".into()
+                } else {
+                    message
+                }));
+            }
+            return Ok(normalize_existing_path(Path::new(target)));
+        }
+    }
+    Err(StorageError::InvalidRequest(
+        "Too many generated worktree folders use that name.".into(),
+    ))
+}
+
+fn register_worktree_container(
+    transaction: &rusqlite::Transaction<'_>,
+    container: &Path,
+) -> Result<(), StorageError> {
+    let existed = container.exists();
+    fs::create_dir_all(container).map_err(|source| StorageError::Filesystem {
+        context: "Cannot create the generated worktree container".into(),
+        source,
+    })?;
+    if !existed {
+        fs::set_permissions(container, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            StorageError::Filesystem {
+                context: "Cannot secure the generated worktree container".into(),
+                source,
+            }
+        })?;
+    }
+    let normalized = normalize_existing_path(container);
+    transaction.execute(
+        "INSERT INTO worktree_containers (path, created_at, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT(path) DO UPDATE SET updated_at = excluded.updated_at",
+        params![normalized, now_seconds(), now_seconds()],
+    )?;
+    Ok(())
+}
+
+fn git_repository_root(workdir: &str) -> Result<PathBuf, StorageError> {
+    let result = run_git(Path::new(workdir), &["rev-parse", "--show-toplevel"])?;
+    if !result.0.success() {
+        return Err(StorageError::InvalidRequest(
+            "Worktree selection needs a Git working directory.".into(),
+        ));
+    }
+    let root = String::from_utf8(result.1)
+        .map_err(|_| StorageError::InvalidRequest("Git returned invalid text.".into()))?;
+    let root = root.trim();
+    if root.is_empty() {
+        return Err(StorageError::InvalidRequest(
+            "Worktree selection needs a Git working directory.".into(),
+        ));
+    }
+    Ok(PathBuf::from(normalize_existing_path(Path::new(root))))
+}
+
+fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
+    let result = run_git(root, &["worktree", "list", "--porcelain", "-z"])?;
+    if !result.0.success() {
+        let message = String::from_utf8_lossy(&result.2).trim().to_owned();
+        return Err(StorageError::InvalidRequest(if message.is_empty() {
+            "git worktree list failed".into()
+        } else {
+            message
+        }));
+    }
+    let output = String::from_utf8(result.1)
+        .map_err(|_| StorageError::InvalidRequest("Git returned invalid text.".into()))?;
+    let mut worktrees = Vec::new();
+    let mut path = None;
+    let mut branch = None;
+    let mut detached = false;
+    let mut prunable = false;
+    for token in output.split('\0') {
+        if token.is_empty() {
+            if let Some(path) = path.take() {
+                if !prunable {
+                    worktrees.push(GitWorktree {
+                        path,
+                        branch: branch.take(),
+                        detached,
+                    });
+                }
+            }
+            branch = None;
+            detached = false;
+            prunable = false;
+        } else if let Some(value) = token.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(value));
+        } else if let Some(value) = token.strip_prefix("branch refs/heads/") {
+            branch = Some(value.to_owned());
+        } else if token == "detached" {
+            detached = true;
+        } else if token.starts_with("prunable") {
+            prunable = true;
+        }
+    }
+    if let Some(path) = path
+        && !prunable
+    {
+        worktrees.push(GitWorktree {
+            path,
+            branch,
+            detached,
+        });
+    }
+    if worktrees.is_empty() {
+        return Err(StorageError::InvalidRequest(
+            "Git returned no worktrees.".into(),
+        ));
+    }
+    Ok(worktrees)
+}
+
+fn run_git(
+    workdir: &Path,
+    arguments: &[&str],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+    let mut child = Command::new("git")
+        .args(arguments)
+        .current_dir(workdir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| StorageError::Filesystem {
+            context: "Cannot run Git".into(),
+            source,
+        })?;
+    let stdout = child.stdout.take().expect("piped git stdout");
+    let stderr = child.stderr.take().expect("piped git stderr");
+    let stdout = thread::spawn(move || read_bounded_output(stdout));
+    let stderr = thread::spawn(move || read_bounded_output(stderr));
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot wait for Git".into(),
+                source,
+            })?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout.join();
+            let _ = stderr.join();
+            return Err(StorageError::InvalidRequest("Git timed out.".into()));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout
+        .join()
+        .map_err(|_| StorageError::InvalidRequest("Cannot read Git output.".into()))??;
+    let stderr = stderr
+        .join()
+        .map_err(|_| StorageError::InvalidRequest("Cannot read Git output.".into()))??;
+    if stdout.len() > MAX_GIT_OUTPUT_BYTES || stderr.len() > MAX_GIT_OUTPUT_BYTES {
+        return Err(StorageError::InvalidRequest(
+            "Git returned too much worktree data.".into(),
+        ));
+    }
+    Ok((status, stdout, stderr))
+}
+
+fn read_bounded_output(mut stream: impl Read) -> Result<Vec<u8>, StorageError> {
+    let mut output = Vec::new();
+    stream
+        .by_ref()
+        .take((MAX_GIT_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut output)
+        .map_err(|source| StorageError::Filesystem {
+            context: "Cannot read Git output".into(),
+            source,
+        })?;
+    Ok(output)
+}
+
+fn worktree_slug(hint: Option<&str>) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    let mut characters = 0;
+    for character in hint.unwrap_or_default().chars() {
+        if !character.is_alphanumeric() {
+            separator = !slug.is_empty();
+            continue;
+        }
+        if separator {
+            slug.push('-');
+            separator = false;
+        }
+        slug.extend(character.to_lowercase());
+        characters += 1;
+        if characters == 40 {
+            break;
+        }
+    }
+    if slug.is_empty() {
+        "worktree".into()
+    } else {
+        slug
+    }
+}
+
+fn glib_hash(value: &str) -> String {
+    let hash = value.bytes().fold(5381_u32, |hash, byte| {
+        hash.wrapping_mul(33).wrapping_add(byte.into())
+    });
+    format!("{hash:08x}")
+}
+
+fn normalize_existing_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_owned())
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn prepare_turn(
     transaction: &rusqlite::Transaction<'_>,
     workspace_root: &Path,
     chat_id: &str,
     text: &str,
+    worktree_name: Option<&str>,
 ) -> Result<TurnSpec, StorageError> {
     let chat = transaction
         .query_row(
-            "SELECT folder_id, backend, workdir, model, effort, access, plan FROM chats WHERE id = ?",
+            "SELECT folder_id, backend, workdir, model, effort, access, plan, new_worktree, \
+             original_workdir FROM chats WHERE id = ?",
             [chat_id],
             |row| {
                 Ok((
@@ -1782,6 +2104,8 @@ fn prepare_turn(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, bool>(6)?,
+                    row.get::<_, bool>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )
@@ -1815,13 +2139,38 @@ fn prepare_turn(
             .flatten();
         current = path.rsplit_once('/').map(|(parent, _)| parent);
     }
-    let workdir = chat.2.unwrap_or_else(|| {
+    let mut workdir = chat.2.unwrap_or_else(|| {
         inherited.unwrap_or_else(|| workspace_root.join(relative).to_string_lossy().into_owned())
     });
+    if !Path::new(&workdir).is_dir()
+        && let Some(original) = chat.8.filter(|original| Path::new(original).is_dir())
+    {
+        workdir = original;
+    }
     if !Path::new(&workdir).is_dir() {
         return Err(StorageError::InvalidRequest(format!(
             "The chat working directory does not exist: {workdir}"
         )));
+    }
+    if chat.7 {
+        let source = workdir.clone();
+        workdir = create_worktree(
+            transaction,
+            &source,
+            chat_id,
+            worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty())),
+        )?;
+        let changed = transaction.execute(
+            "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
+             new_worktree = 0, updated_at = ? WHERE id = ? AND new_worktree = 1 \
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+            params![workdir, source, now_seconds(), chat_id, chat_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidRequest(
+                "The workspace changed before the worktree was ready.".into(),
+            ));
+        }
     }
     let model = chat.3.unwrap_or_else(|| "gpt-5.6-sol".into());
     let effort = chat.4.unwrap_or_else(|| "high".into());
@@ -2703,6 +3052,119 @@ mod tests {
     }
 
     #[test]
+    fn first_send_creates_and_persists_a_named_git_worktree() {
+        let fixture = Fixture::new();
+        let repository = fixture.workspaces.join("Repo");
+        fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "xd test"],
+            vec!["config", "user.email", "xd@example.test"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(repository.join("README.md"), "ready\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "initial"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let adopted_parent = fixture.workspaces.join("worktrees/Repo/review-autofarm-pr");
+        fs::create_dir_all(&adopted_parent).unwrap();
+        fs::write(adopted_parent.join("keep.txt"), "keep\n").unwrap();
+
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, repo, shortcuts) VALUES ('repo', ?, 'Repo', ?, '[]')",
+                params![
+                    fixture.workspaces.to_string_lossy(),
+                    repository.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO chats (id, folder_id, title, backend, new_worktree) \
+                 VALUES ('chat-worktree', 'repo', 'Worktree', 'codex', 1)",
+                [],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let turn = match store
+            .prepare_send(&json!({
+                "chat": "chat-worktree",
+                "text": "review it",
+                "worktree_name": "Review autofarm PR"
+            }))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("first send unexpectedly queued"),
+        };
+        let expected = adopted_parent.join("Repo");
+        assert_eq!(Path::new(&turn.workdir), expected);
+        assert!(expected.join(".git").exists());
+        assert!(adopted_parent.join("keep.txt").is_file());
+        let chat = store.chat("chat-worktree").unwrap();
+        assert_eq!(chat["new_worktree"], false);
+        assert_eq!(chat["workdir"], expected.to_string_lossy().as_ref());
+        let database = Connection::open(&fixture.database).unwrap();
+        let original: String = database
+            .query_row(
+                "SELECT original_workdir FROM chats WHERE id = 'chat-worktree'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(original, repository.to_string_lossy());
+        let registered: String = database
+            .query_row("SELECT path FROM worktree_containers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            registered,
+            fixture.workspaces.join("worktrees").to_string_lossy()
+        );
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, shortcuts) VALUES ('generated', ?, 'worktrees', '[]')",
+                [fixture.workspaces.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        drop(database);
+        assert!(
+            store.tree().unwrap()["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|folder| folder["id"] != "generated")
+        );
+    }
+
+    #[test]
     fn materializes_sent_images_for_immediate_and_queued_turns() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
@@ -2798,6 +3260,7 @@ mod tests {
                        new_worktree INTEGER NOT NULL DEFAULT 0, daemon_working INTEGER NOT NULL DEFAULT 0, \
                        draft TEXT NOT NULL DEFAULT '', draft_attachments TEXT NOT NULL DEFAULT '[]', \
                        draft_revision INTEGER NOT NULL DEFAULT 0, last_user_message_at INTEGER NOT NULL DEFAULT 0, \
+                       original_workdir TEXT, \
                        created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, \
                        FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
                      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, \
@@ -2809,7 +3272,9 @@ mod tests {
                        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
                      CREATE TABLE agent_defaults (singleton INTEGER PRIMARY KEY, backend TEXT NOT NULL, \
                        model TEXT, effort TEXT, access TEXT, plan INTEGER NOT NULL, fast INTEGER NOT NULL, \
-                       claude_mode INTEGER NOT NULL);",
+                       claude_mode INTEGER NOT NULL); \
+                     CREATE TABLE worktree_containers (path TEXT PRIMARY KEY, created_at INTEGER NOT NULL, \
+                       updated_at INTEGER NOT NULL);",
                 )
                 .unwrap();
         }

@@ -14,6 +14,7 @@ Current milestone:
 - an isolated, app-owned Rust daemon and first-run state initialization;
 - clickable workspace/chat sidebar backed by real daemon tree data;
 - workspace and chat creation controls;
+- first-message generated-worktree selection and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
@@ -44,8 +45,9 @@ The app connects to `XD_SOCKET` when set. Otherwise it uses
 owns that process for the lifetime of the GPUI app. Its database and Workspaces
 directory live beside that socket, separate from `xd` and `xd-nightly`.
 
-This is still a development channel. Claude turns, worktrees, and several
-production-client management surfaces have not yet been ported.
+This is still a development channel. Claude turns, existing-worktree
+selection/removal, and several production-client management surfaces have not
+yet been ported.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 

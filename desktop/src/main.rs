@@ -229,6 +229,9 @@ impl XdDesktop {
                 }
                 let _ = text;
             }
+            RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
+                self.request_chat(&chat_id);
+            }
             RequestKind::SetDraft {
                 chat_id,
                 text,
@@ -336,6 +339,20 @@ impl XdDesktop {
     fn create_chat(&mut self, folder_id: &str) {
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.new_chat(folder_id)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn toggle_new_worktree(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.has_messages || self.model.working {
+            return;
+        }
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_new_worktree(&chat_id, !self.model.new_worktree)
         {
             self.model.connection_error = Some(error);
         }
@@ -602,6 +619,8 @@ impl Render for XdDesktop {
         let queue_count = self.model.queue.len();
         let working = self.model.working;
         let selected = self.model.selected_summary().cloned();
+        let new_worktree = self.model.new_worktree;
+        let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
         let status_text = if self.model.connected {
             "connected"
         } else {
@@ -769,13 +788,44 @@ impl Render for XdDesktop {
             )
             .child(
                 div()
-                    .px_3()
-                    .py_1()
-                    .rounded_full()
-                    .bg(rgb(if working { 0x26354d } else { SURFACE_HIGH }))
-                    .text_xs()
-                    .text_color(rgb(if working { 0xaec0ff } else { MUTED }))
-                    .child(if working { "Working…" } else { "Ready" }),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("new-worktree-toggle")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(if new_worktree { 0x26354d } else { SURFACE_HIGH }))
+                            .text_xs()
+                            .text_color(rgb(if can_change_worktree { TEXT } else { MUTED }))
+                            .when(can_change_worktree, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x303c52)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                if can_change_worktree {
+                                    this.toggle_new_worktree();
+                                }
+                            }))
+                            .child(if new_worktree {
+                                "New worktree: on"
+                            } else {
+                                "New worktree: off"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(if working { 0x26354d } else { SURFACE_HIGH }))
+                            .text_xs()
+                            .text_color(rgb(if working { 0xaec0ff } else { MUTED }))
+                            .child(if working { "Working…" } else { "Ready" }),
+                    ),
             );
 
         let transcript = list(self.transcript.clone(), move |index, _window, _cx| {

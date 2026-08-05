@@ -79,6 +79,8 @@ pub struct AppModel {
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
     pub working: bool,
+    pub new_worktree: bool,
+    pub has_messages: bool,
     pub connected: bool,
     pub connection_error: Option<String>,
     pub draft: String,
@@ -116,6 +118,8 @@ impl AppModel {
             self.messages.clear();
             self.queue.clear();
             self.working = false;
+            self.new_worktree = false;
+            self.has_messages = false;
             self.draft.clear();
             self.draft_attachments.clear();
             self.live_text.clear();
@@ -129,6 +133,8 @@ impl AppModel {
         self.messages.clear();
         self.queue.clear();
         self.working = false;
+        self.new_worktree = false;
+        self.has_messages = false;
         self.draft.clear();
         self.draft_attachments.clear();
         self.draft_revision = -1;
@@ -147,6 +153,14 @@ impl AppModel {
             .collect();
         self.working = body
             .get("working")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.new_worktree = body
+            .get("new_worktree")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.has_messages = body
+            .get("has_messages")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         self.apply_draft(body);
@@ -294,6 +308,8 @@ impl AppModel {
             ],
             queue: vec!["Port workspace and chat shortcuts".into()],
             working: true,
+            new_worktree: false,
+            has_messages: true,
             connected: true,
             connection_error: None,
             draft: String::new(),
@@ -366,6 +382,22 @@ mod tests {
         assert!(model.working);
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert!(!model.working);
+    }
+
+    #[test]
+    fn chat_snapshots_control_first_message_worktree_selection() {
+        let mut model = AppModel::default();
+        model.apply_chat(&json!({
+            "queue": [], "working": false, "new_worktree": true, "has_messages": false
+        }));
+        assert!(model.new_worktree);
+        assert!(!model.has_messages);
+
+        model.apply_chat(&json!({
+            "queue": [], "working": false, "new_worktree": false, "has_messages": true
+        }));
+        assert!(!model.new_worktree);
+        assert!(model.has_messages);
     }
 
     #[test]

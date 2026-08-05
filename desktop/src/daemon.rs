@@ -34,6 +34,9 @@ pub enum RequestKind {
         chat_id: String,
         text: String,
     },
+    SetOption {
+        chat_id: String,
+    },
     SetDraft {
         chat_id: String,
         text: String,
@@ -299,6 +302,20 @@ impl DaemonHandle {
                 attachment_generation,
             },
             body,
+        )
+    }
+
+    pub fn set_new_worktree(&self, chat_id: &str, enabled: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "set-option",
+                "chat": chat_id,
+                "option": "new-worktree",
+                "value": if enabled { "true" } else { "false" },
+            }),
         )
     }
 
