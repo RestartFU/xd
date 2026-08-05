@@ -98,16 +98,18 @@ impl Engine {
                 Err(error) => error_reply(error),
             },
             Some("messages") => self.read(|store| store.messages(&request)),
-            Some("set-draft") => self.set_draft(&request),
+            Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
+            Some("set-draft") => self.event_mutation(|store| store.set_draft(&request)),
+            Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
             Some("new-folder") => self.tree_mutation(|store| store.new_folder(&request)),
             Some("new-chat") => self.tree_mutation(|store| store.new_chat(&request)),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.tree_mutation(|store| store.delete_chat(&request)),
-            Some("queue") => self.queue_mutation(|store| store.queue(&request)),
-            Some("drop-queue") => self.queue_mutation(|store| store.drop_queue(&request)),
-            Some("edit-queue") => self.queue_mutation(|store| store.edit_queue(&request)),
-            Some("steer-queue") => self.queue_mutation(|store| store.steer_queue(&request)),
+            Some("queue") => self.event_mutation(|store| store.queue(&request)),
+            Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
+            Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
+            Some("steer-queue") => self.event_mutation(|store| store.steer_queue(&request)),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -127,19 +129,6 @@ impl Engine {
         }
     }
 
-    fn set_draft(&self, request: &Value) -> Value {
-        let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
-        };
-        match store.set_draft(request) {
-            Ok((reply, event)) => {
-                self.events.publish(event);
-                reply
-            }
-            Err(error) => error_reply(error),
-        }
-    }
-
     fn tree_mutation(
         &self,
         operation: impl FnOnce(&StateStore) -> Result<Value, StorageError>,
@@ -156,7 +145,7 @@ impl Engine {
         }
     }
 
-    fn queue_mutation(
+    fn event_mutation(
         &self,
         operation: impl FnOnce(&StateStore) -> Result<(Value, Value), StorageError>,
     ) -> Value {

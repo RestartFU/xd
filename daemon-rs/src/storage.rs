@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
+const MAX_SHORTCUTS: usize = 24;
+const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -253,6 +255,66 @@ impl StateStore {
             response["access"] = Value::String(access);
         }
         Ok(response)
+    }
+
+    pub fn shortcuts(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = if request.get("folder").is_some() {
+            Some(required_string(
+                request,
+                "folder",
+                "folder must be a workspace id.",
+            )?)
+        } else {
+            None
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        shortcut_fields(&database, &self.workspace_root, folder_id)
+    }
+
+    pub fn set_shortcuts(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let prompts = clean_shortcuts(request.get("shortcuts").ok_or_else(|| {
+            StorageError::InvalidRequest("set-shortcuts needs a shortcuts array.".into())
+        })?)?;
+        let folder_id = if request.get("folder").is_some() {
+            Some(required_string(request, "folder", "folder must be a workspace id.")?.to_owned())
+        } else {
+            None
+        };
+        let encoded = serde_json::to_string(&prompts)
+            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        match folder_id.as_deref() {
+            Some(folder_id) => {
+                let changed = database.execute(
+                    "UPDATE workspace_folders SET shortcuts = ?, updated_at = ? \
+                     WHERE root_path = ? AND id = ?",
+                    params![
+                        encoded,
+                        now_seconds(),
+                        self.workspace_root.to_string_lossy(),
+                        folder_id
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(StorageError::InvalidRequest(
+                        "No such folder on the daemon.".into(),
+                    ));
+                }
+            }
+            None => {
+                database.execute(
+                    "INSERT INTO meta (key, value) VALUES ('global_shortcuts', ?) \
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    [encoded],
+                )?;
+            }
+        }
+        let reply = shortcut_fields(&database, &self.workspace_root, folder_id.as_deref())?;
+        let mut event = json!({"event": "shortcuts-changed"});
+        if let Some(folder_id) = folder_id {
+            event["folder"] = Value::String(folder_id);
+        }
+        Ok((reply, event))
     }
 
     pub fn messages(&self, request: &Value) -> Result<Value, StorageError> {
@@ -773,6 +835,73 @@ fn effective_shortcuts(
     Ok(values)
 }
 
+fn shortcut_fields(
+    database: &Connection,
+    root: &Path,
+    folder_id: Option<&str>,
+) -> Result<Value, StorageError> {
+    let global = database
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'global_shortcuts'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|stored| serde_json::from_str::<Vec<String>>(&stored).ok())
+        .unwrap_or_default();
+    let workspace = match folder_id {
+        Some(folder_id) => database
+            .query_row(
+                "SELECT shortcuts FROM workspace_folders WHERE root_path = ? AND id = ?",
+                params![root.to_string_lossy(), folder_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))
+            .map(|stored| serde_json::from_str::<Vec<String>>(&stored).unwrap_or_default())?,
+        None => Vec::new(),
+    };
+    let effective = match folder_id {
+        Some(folder_id) => effective_shortcuts(database, root, folder_id)?,
+        None => global.clone(),
+    };
+    Ok(json!({
+        "ok": true,
+        "global": global,
+        "workspace": workspace,
+        "effective": effective,
+    }))
+}
+
+fn clean_shortcuts(value: &Value) -> Result<Vec<String>, StorageError> {
+    let prompts = value.as_array().ok_or_else(|| {
+        StorageError::InvalidRequest("set-shortcuts needs a shortcuts array.".into())
+    })?;
+    if prompts.len() > MAX_SHORTCUTS {
+        return Err(StorageError::InvalidRequest(format!(
+            "A shortcut list can contain at most {MAX_SHORTCUTS} prompts."
+        )));
+    }
+    let mut cleaned = Vec::new();
+    let mut seen = HashSet::new();
+    for prompt in prompts {
+        let prompt = prompt.as_str().ok_or_else(|| {
+            StorageError::InvalidRequest("Every shortcut must be a text prompt.".into())
+        })?;
+        let prompt = prompt.trim();
+        if prompt.is_empty() || !seen.insert(prompt.to_owned()) {
+            continue;
+        }
+        if prompt.len() > MAX_SHORTCUT_BYTES {
+            return Err(StorageError::InvalidRequest(format!(
+                "A shortcut prompt can contain at most {MAX_SHORTCUT_BYTES} bytes."
+            )));
+        }
+        cleaned.push(prompt.to_owned());
+    }
+    Ok(cleaned)
+}
+
 fn required_string<'a>(
     request: &'a Value,
     key: &str,
@@ -1225,6 +1354,70 @@ mod tests {
             .queue(&json!({"chat": "chat-1", "text": "new"}))
             .unwrap();
         assert_eq!(event["queue"], json!(["legacy", "new"]));
+    }
+
+    #[test]
+    fn persists_clean_global_and_inherited_workspace_shortcuts() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("Group/Child")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for (id, relative) in [("group", "Group"), ("child", "Group/Child")] {
+            database
+                .execute(
+                    "INSERT INTO workspace_folders \
+                     (id, root_path, relative_path, shortcuts) VALUES (?, ?, ?, '[]')",
+                    params![id, fixture.workspaces.to_string_lossy(), relative],
+                )
+                .unwrap();
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let (global, global_event) = store
+            .set_shortcuts(&json!({
+                "shortcuts": ["  Review diff  ", "", "Review diff", "Run tests"]
+            }))
+            .unwrap();
+        assert_eq!(global["global"], json!(["Review diff", "Run tests"]));
+        assert_eq!(global["effective"], global["global"]);
+        assert!(global_event.get("folder").is_none());
+        store
+            .set_shortcuts(&json!({"folder": "group", "shortcuts": ["Parent"]}))
+            .unwrap();
+        let (child, child_event) = store
+            .set_shortcuts(&json!({
+                "folder": "child", "shortcuts": ["Child", "Review diff"]
+            }))
+            .unwrap();
+        assert_eq!(child["workspace"], json!(["Child", "Review diff"]));
+        assert_eq!(
+            child["effective"],
+            json!(["Review diff", "Run tests", "Parent", "Child"])
+        );
+        assert_eq!(child_event["folder"], "child");
+        assert_eq!(store.shortcuts(&json!({"folder": "child"})).unwrap(), child);
+    }
+
+    #[test]
+    fn rejects_invalid_shortcuts_without_replacing_existing_values() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_shortcuts(&json!({"shortcuts": ["Keep"]}))
+            .unwrap();
+
+        let error = store
+            .set_shortcuts(&json!({"shortcuts": ["valid", 42]}))
+            .unwrap_err();
+        assert!(error.to_string().contains("text prompt"));
+        assert_eq!(
+            store.shortcuts(&json!({})).unwrap()["global"],
+            json!(["Keep"])
+        );
     }
 
     struct Fixture {
