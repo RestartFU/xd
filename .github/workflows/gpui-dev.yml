@@ -74,9 +74,10 @@ jobs:
           notes=$(cat <<EOF
           Early GPUI desktop prototype built from \`${GITHUB_SHA:0:7}\` — $subject
 
-          This is a development shell, not the production xd desktop client.
-          It currently demonstrates the native GPUI layout, protocol/state
-          foundation, and virtualized transcript on Linux x86_64.
+          This is the in-progress GPUI desktop client, separate from production
+          xd. It connects to the existing daemon protocol, can start an installed
+          xd daemon headlessly, and supports live chats and composer queueing on
+          Linux x86_64.
 
           Run it:
 

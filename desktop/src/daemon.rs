@@ -4,8 +4,10 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
+    process::{Child, Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread,
+    time::Duration,
 };
 
 use async_channel::{Receiver, Sender};
@@ -50,6 +52,8 @@ pub enum ConnectError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("could not start an installed xd daemon ({0})")]
+    Start(String),
 }
 
 struct Command {
@@ -62,23 +66,97 @@ pub struct DaemonHandle {
     commands: mpsc::Sender<Command>,
 }
 
+pub struct StartedDaemon {
+    child: Child,
+}
+
+impl Drop for StartedDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl DaemonHandle {
+    pub fn connect_or_start()
+    -> Result<(Self, Receiver<DaemonUpdate>, Option<StartedDaemon>), ConnectError> {
+        if let Ok((daemon, updates)) = Self::connect_discovered() {
+            return Ok((daemon, updates, None));
+        }
+
+        let mut failures = Vec::new();
+        for (path, launcher) in startup_candidates() {
+            let socket = path.to_string_lossy().into_owned();
+            let mut child = match ProcessCommand::new(&launcher)
+                .args(["serve", "--port", "0", "--socket", &socket])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    failures.push(format!("{launcher} is not installed"));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!("cannot launch {launcher}: {error}"));
+                    continue;
+                }
+            };
+
+            for _ in 0..50 {
+                if let Ok((daemon, updates)) = Self::connect(path.clone()) {
+                    return Ok((daemon, updates, Some(StartedDaemon { child })));
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        failures.push(format!("{launcher} exited with {status}"));
+                        break;
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(error) => {
+                        failures.push(format!("cannot inspect {launcher}: {error}"));
+                        break;
+                    }
+                }
+            }
+
+            if let Ok((daemon, updates)) = Self::connect(path.clone()) {
+                return Ok((daemon, updates, Some(StartedDaemon { child })));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            failures.push(format!(
+                "{launcher} did not open {} within five seconds",
+                path.display()
+            ));
+        }
+
+        Err(ConnectError::Start(failures.join("; ")))
+    }
+
     pub fn connect_discovered() -> Result<(Self, Receiver<DaemonUpdate>), ConnectError> {
         let candidates = socket_candidates();
-        let path = candidates
-            .iter()
-            .find(|candidate| is_socket(candidate))
-            .cloned()
-            .ok_or_else(|| {
-                ConnectError::NotFound(
-                    candidates
-                        .iter()
-                        .map(|candidate| candidate.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
-            })?;
-        Self::connect(path)
+        let mut last_error = None;
+        for path in &candidates {
+            if !is_socket(path) {
+                continue;
+            }
+            match Self::connect(path.clone()) {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            ConnectError::NotFound(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        }))
     }
 
     pub fn connect(path: PathBuf) -> Result<(Self, Receiver<DaemonUpdate>), ConnectError> {
@@ -287,6 +365,25 @@ pub fn socket_candidates() -> Vec<PathBuf> {
         data_home.join("xd-nightly/daemon.sock"),
         data_home.join("xd/daemon.sock"),
     ]
+}
+
+fn startup_candidates() -> Vec<(PathBuf, String)> {
+    let sockets = socket_candidates();
+    if env::var_os("XD_SOCKET").is_some() || env::var_os("XD_DATA_NAME").is_some() {
+        return sockets
+            .into_iter()
+            .flat_map(|path| {
+                ["xd-nightly", "xd"]
+                    .into_iter()
+                    .map(move |launcher| (path.clone(), launcher.to_owned()))
+            })
+            .collect();
+    }
+
+    sockets
+        .into_iter()
+        .zip(["xd-nightly".to_owned(), "xd".to_owned()])
+        .collect()
 }
 
 #[cfg(test)]

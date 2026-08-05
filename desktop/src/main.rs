@@ -6,7 +6,7 @@ use gpui::{
 };
 use serde_json::Value;
 use xd_desktop::{
-    daemon::{DaemonHandle, DaemonUpdate, RequestKind},
+    daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     model::{AppModel, Message},
 };
 
@@ -21,6 +21,7 @@ const ACCENT: u32 = 0x6b8cff;
 struct XdDesktop {
     model: AppModel,
     daemon: Option<DaemonHandle>,
+    _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
     composer_focus: FocusHandle,
     composer: String,
@@ -38,6 +39,7 @@ impl XdDesktop {
                 ..Default::default()
             },
             daemon: None,
+            _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             composer_focus: cx.focus_handle(),
             composer: String::new(),
@@ -51,9 +53,10 @@ impl XdDesktop {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        match DaemonHandle::connect_discovered() {
-            Ok((daemon, updates)) => {
+        match DaemonHandle::connect_or_start() {
+            Ok((daemon, updates, started_daemon)) => {
                 self.daemon = Some(daemon);
+                self._started_daemon = started_daemon;
                 self.model.connection_error = None;
                 cx.spawn(async move |this, cx| {
                     while let Ok(update) = updates.recv().await {

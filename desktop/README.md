@@ -32,8 +32,10 @@ separate from the production `nightly` release while daemon connectivity and
 feature parity are still in progress.
 
 The prototype connects to `XD_SOCKET` when set, otherwise it checks the local
-`xd-nightly` and `xd` daemon sockets in that order. Start one of the production
-clients first so its daemon is available.
+`xd-nightly` and `xd` daemon sockets in that order. When neither is running, it
+starts an installed `xd-nightly` or `xd` in headless `serve` mode and owns that
+process for the lifetime of the GPUI app. The old GTK window does not need to
+be opened.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 
