@@ -120,6 +120,7 @@ impl Engine {
                 Err(error) => error_reply(error),
             },
             Some("messages") => self.read(|store| store.messages(&request)),
+            Some("search") => self.read(|store| store.search(&request)),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
             Some("agent-auth") => self.auth.snapshots(),
             Some("agent-auth-refresh") => {

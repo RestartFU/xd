@@ -3,8 +3,9 @@ use std::{collections::HashSet, fs, path::PathBuf, time::Duration};
 use gpui::{
     App, Application, Bounds, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
     KeyBinding, ListAlignment, ListState, ObjectFit, PathPromptOptions, Render, StyledText, Timer,
-    Window, WindowBounds, WindowOptions, div, img, list, prelude::*, px, rgb, size,
+    Window, WindowBounds, WindowOptions, div, img, list, prelude::*, px, rgb, rgba, size,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
     activity::{ActivityCard, ActivityKind},
@@ -30,6 +31,23 @@ const ACCENT: u32 = 0x6b8cff;
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+
+gpui::actions!(xd, [OpenSearch, CloseSearch]);
+
+#[derive(Clone, Debug, Deserialize)]
+struct SearchHit {
+    chat: String,
+    title: String,
+    role: String,
+    snippet: String,
+}
+
+#[derive(Clone, Default)]
+struct SearchPanel {
+    query: String,
+    results: Vec<SearchHit>,
+    loading: bool,
+}
 
 struct PendingSend {
     text: String,
@@ -86,6 +104,7 @@ struct XdDesktop {
     workspace_context_input: Entity<ComposerInput>,
     workspace_workdir_input: Entity<ComposerInput>,
     workspace_repo_default_input: Entity<ComposerInput>,
+    search_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -106,6 +125,8 @@ struct XdDesktop {
     workspace_context_loading: bool,
     workspace_context_submitting: bool,
     workspace_defaults: Option<WorkspaceDefaults>,
+    search: Option<SearchPanel>,
+    search_generation: u64,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -177,6 +198,13 @@ impl XdDesktop {
             }
         })
         .detach();
+        let search_input = cx.new(|cx| ComposerInput::new(cx, "Search conversations…"));
+        cx.subscribe(&search_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.search_changed(text.clone(), cx);
+            }
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -194,6 +222,7 @@ impl XdDesktop {
             workspace_context_input,
             workspace_workdir_input,
             workspace_repo_default_input,
+            search_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -214,6 +243,8 @@ impl XdDesktop {
             workspace_context_loading: false,
             workspace_context_submitting: false,
             workspace_defaults: None,
+            search: None,
+            search_generation: 0,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -270,6 +301,9 @@ impl XdDesktop {
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
                     defaults.submitting = false;
+                }
+                if let Some(search) = &mut self.search {
+                    search.loading = false;
                 }
                 self.restore_pending_send(cx);
             }
@@ -349,6 +383,16 @@ impl XdDesktop {
                 {
                     if let Some(defaults) = &mut self.workspace_defaults {
                         defaults.submitting = false;
+                    }
+                }
+                RequestKind::Search { query }
+                    if self
+                        .search
+                        .as_ref()
+                        .is_some_and(|search| search.query == *query) =>
+                {
+                    if let Some(search) = &mut self.search {
+                        search.loading = false;
                     }
                 }
                 RequestKind::EditQueue {
@@ -477,6 +521,31 @@ impl XdDesktop {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
                     self.model.connection_error =
                         Some(format!("Invalid assistant catalog response: {error}"));
+                }
+            }
+            RequestKind::Search { query } => {
+                if self
+                    .search
+                    .as_ref()
+                    .is_some_and(|search| search.query == query)
+                {
+                    match serde_json::from_value::<Vec<SearchHit>>(
+                        value.get("results").cloned().unwrap_or_default(),
+                    ) {
+                        Ok(results) => {
+                            if let Some(search) = &mut self.search {
+                                search.results = results;
+                                search.loading = false;
+                            }
+                        }
+                        Err(error) => {
+                            self.model.connection_error =
+                                Some(format!("Invalid search response: {error}"));
+                            if let Some(search) = &mut self.search {
+                                search.loading = false;
+                            }
+                        }
+                    }
                 }
             }
             RequestKind::Shortcuts { folder_id } => {
@@ -1121,6 +1190,74 @@ impl XdDesktop {
             Err(error) => self.model.connection_error = Some(error),
         }
         cx.notify();
+    }
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.saturating_add(1);
+        self.search = Some(SearchPanel::default());
+        self.search_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        let focus = self.search_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.saturating_add(1);
+        self.search = None;
+        cx.notify();
+    }
+
+    fn search_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        search.query = text;
+        search.results.clear();
+        self.search_generation = self.search_generation.saturating_add(1);
+        let generation = self.search_generation;
+        if search.query.trim().is_empty() {
+            search.loading = false;
+            cx.notify();
+            return;
+        }
+        search.loading = true;
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(150)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                let Some(query) = this.search.as_ref().map(|search| search.query.clone()) else {
+                    return;
+                };
+                match this.daemon.as_ref() {
+                    Some(daemon) => {
+                        if let Err(error) = daemon.search(query.trim()) {
+                            this.model.connection_error = Some(error);
+                            if let Some(search) = &mut this.search {
+                                search.loading = false;
+                            }
+                        }
+                    }
+                    None => {
+                        this.model.connection_error =
+                            Some("xd-dev is not connected to a daemon.".into());
+                        if let Some(search) = &mut this.search {
+                            search.loading = false;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn activate_search_result(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.close_search(cx);
+        self.select_chat(chat_id, cx);
     }
 
     fn begin_sidebar_edit(
@@ -3464,11 +3601,34 @@ impl Render for XdDesktop {
                     .h(px(58.0))
                     .flex_shrink_0()
                     .flex()
-                    .flex_col()
-                    .justify_center()
+                    .items_center()
                     .px_5()
-                    .child(div().text_sm().text_color(rgb(TEXT)).child(title))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(context)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .child(div().text_sm().text_color(rgb(TEXT)).child(title))
+                            .child(div().text_xs().text_color(rgb(MUTED)).child(context)),
+                    )
+                    .child(
+                        div()
+                            .id("open-search")
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(SURFACE_HIGH))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x303c52)).text_color(rgb(TEXT)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_search(window, cx);
+                            }))
+                            .child("Search  Ctrl K"),
+                    ),
             )
             .child(
                 div()
@@ -4194,9 +4354,155 @@ impl Render for XdDesktop {
                     ),
             );
 
+        let search_overlay = self.search.clone().map(|search| {
+            let search_focus = self.search_input.read(cx).focus_handle(cx);
+            let mut result_rows = Vec::new();
+            for (index, hit) in search.results.into_iter().enumerate() {
+                let chat_id = hit.chat.clone();
+                result_rows.push(
+                    div()
+                        .id(("search-result", index))
+                        .w_full()
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_lg()
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.activate_search_result(chat_id.clone(), cx);
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().text_sm().text_color(rgb(TEXT)).child(hit.title))
+                                .child(div().text_xs().text_color(rgb(MUTED)).child(hit.role)),
+                        )
+                        .child(div().text_xs().text_color(rgb(MUTED)).child(hit.snippet))
+                        .into_any_element(),
+                );
+            }
+            let has_query = !search.query.trim().is_empty();
+            let empty_label = if search.loading {
+                "Searching…"
+            } else if has_query {
+                "No matching conversations"
+            } else {
+                "Find a conversation by something said in it"
+            };
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(76.0))
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(620.0))
+                        .max_h(px(560.0))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("search-input")
+                                        .track_focus(&search_focus)
+                                        .h(px(40.0))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if search_focus.is_focused(window) {
+                                            ACCENT
+                                        } else {
+                                            BORDER
+                                        }))
+                                        .bg(rgb(SURFACE))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus = this.search_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(self.search_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-search")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_search(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("search-results")
+                                .flex_1()
+                                .min_h(px(120.0))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .when(result_rows.is_empty(), |results| {
+                                    results.child(
+                                        div()
+                                            .h(px(120.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child(empty_label),
+                                    )
+                                })
+                                .children(result_rows),
+                        ),
+                )
+                .into_any_element()
+        });
+
         div()
             .size_full()
             .flex()
+            .relative()
+            .key_context("XdDesktop")
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| {
+                this.open_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
+                this.close_search(cx);
+            }))
             .bg(rgb(BG))
             .font_family("Inter")
             .child(sidebar)
@@ -4211,6 +4517,7 @@ impl Render for XdDesktop {
                     .child(div().flex_1().min_h_0().child(transcript))
                     .child(composer),
             )
+            .when_some(search_overlay, |root, overlay| root.child(overlay))
     }
 }
 
@@ -4333,6 +4640,11 @@ mod tests {
 fn main() {
     Application::new().run(|cx: &mut App| {
         cx.bind_keys([
+            KeyBinding::new("ctrl-k", OpenSearch, Some("XdDesktop")),
+            KeyBinding::new("ctrl-f", OpenSearch, Some("XdDesktop")),
+            KeyBinding::new("cmd-k", OpenSearch, Some("XdDesktop")),
+            KeyBinding::new("cmd-f", OpenSearch, Some("XdDesktop")),
+            KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
             KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
             KeyBinding::new("delete", Delete, Some("ComposerInput")),
             KeyBinding::new("left", Left, Some("ComposerInput")),

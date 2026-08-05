@@ -21,6 +21,9 @@ use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 pub enum RequestKind {
     Tree,
     AgentCatalog,
+    Search {
+        query: String,
+    },
     Shortcuts {
         folder_id: String,
     },
@@ -450,6 +453,15 @@ impl DaemonHandle {
                 chat_id: chat_id.to_owned(),
             },
             json!({"op": "messages", "chat": chat_id, "limit": 400}),
+        )
+    }
+
+    pub fn search(&self, query: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::Search {
+                query: query.to_owned(),
+            },
+            json!({"op": "search", "query": query}),
         )
     }
 

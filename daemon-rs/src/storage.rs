@@ -17,6 +17,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
+const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
+const MAX_SEARCH_RESULTS: i64 = 40;
+const SEARCH_SNIPPET_CHARS: usize = 120;
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -1108,6 +1111,46 @@ impl StateStore {
             "messages": messages,
             "turn_start": null,
         }))
+    }
+
+    pub fn search(&self, request: &Value) -> Result<Value, StorageError> {
+        let text = request
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.len() > MAX_SEARCH_QUERY_BYTES {
+            return Err(StorageError::InvalidRequest(
+                "Search queries must be 1024 bytes or smaller.".into(),
+            ));
+        }
+        let Some(query) = search_query(text) else {
+            return Ok(json!({"ok": true, "results": []}));
+        };
+
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT m.id, m.chat_id, COALESCE(NULLIF(c.title, ''), 'Untitled'), \
+                    m.role, m.content \
+               FROM messages_fts f \
+               JOIN messages m ON m.id = f.rowid \
+               JOIN chats c ON c.id = m.chat_id \
+              WHERE f.messages_fts MATCH ? \
+              ORDER BY f.rank \
+              LIMIT ?",
+        )?;
+        let results = statement
+            .query_map(params![query, MAX_SEARCH_RESULTS], |row| {
+                let content: String = row.get(4)?;
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "chat": row.get::<_, String>(1)?,
+                    "title": row.get::<_, String>(2)?,
+                    "role": row.get::<_, String>(3)?,
+                    "snippet": search_snippet(&content),
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({"ok": true, "results": results}))
     }
 
     pub fn set_draft(&self, request: &Value) -> Result<(Value, Value), StorageError> {
@@ -2801,6 +2844,28 @@ fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>,
     }
 }
 
+fn search_query(text: &str) -> Option<String> {
+    let terms = text
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+fn search_snippet(content: &str) -> String {
+    let flattened = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= SEARCH_SNIPPET_CHARS {
+        return flattened;
+    }
+    let mut snippet = flattened
+        .chars()
+        .take(SEARCH_SNIPPET_CHARS)
+        .collect::<String>();
+    snippet.push('…');
+    snippet
+}
+
 fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2891,6 +2956,57 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn search_terms_are_escaped_and_snippets_are_bounded() {
+        assert_eq!(
+            search_query("alpha quoted\"word"),
+            Some("\"alpha\"* \"quoted\"\"word\"*".into())
+        );
+        assert_eq!(search_query(" \n\t "), None);
+        let snippet = search_snippet(&format!("{}\nrest", "x".repeat(125)));
+        assert_eq!(snippet.chars().count(), SEARCH_SNIPPET_CHARS + 1);
+        assert!(snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn searches_messages_with_titles_and_safe_snippets() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Search"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "title": "Needle chat"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let database = Connection::open(&fixture.database).unwrap();
+        database
+            .execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) \
+                 VALUES (?, 'assistant', ?, 1)",
+                params![chat, format!("needle\n{}", "x".repeat(140))],
+            )
+            .unwrap();
+        drop(database);
+
+        let reply = store.search(&json!({"query": "need"})).unwrap();
+        assert_eq!(reply["results"][0]["title"], "Needle chat");
+        assert_eq!(reply["results"][0]["role"], "assistant");
+        assert!(
+            reply["results"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .ends_with('…')
+        );
+        assert_eq!(
+            store.search(&json!({"query": "  "})).unwrap()["results"],
+            json!([])
+        );
+    }
 
     #[test]
     fn initializes_a_complete_database_on_first_run() {
