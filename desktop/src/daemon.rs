@@ -24,6 +24,13 @@ pub enum RequestKind {
     Shortcuts {
         folder_id: String,
     },
+    FolderContext {
+        folder_id: String,
+    },
+    SetFolderContext {
+        folder_id: String,
+        context: Option<String>,
+    },
     NewFolder {
         name: String,
         repo: Option<String>,
@@ -266,6 +273,29 @@ impl DaemonHandle {
                 folder_id: folder_id.to_owned(),
             },
             json!({"op": "shortcuts", "folder": folder_id}),
+        )
+    }
+
+    pub fn folder_context(&self, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::FolderContext {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "folder-context", "folder": folder_id}),
+        )
+    }
+
+    pub fn set_folder_context(&self, folder_id: &str, context: Option<&str>) -> Result<(), String> {
+        self.send(
+            RequestKind::SetFolderContext {
+                folder_id: folder_id.to_owned(),
+                context: context.map(str::to_owned),
+            },
+            json!({
+                "op": "set-folder-context",
+                "folder": folder_id,
+                "context": context,
+            }),
         )
     }
 

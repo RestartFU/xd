@@ -65,6 +65,7 @@ impl TurnRuntime {
         let mut command = AgentCommand {
             backend: &turn.backend,
             prompt: &turn.prompt,
+            system_prompt: turn.system_prompt.as_deref(),
             workdir: &turn.workdir,
             model: &turn.model,
             effort: &turn.effort,

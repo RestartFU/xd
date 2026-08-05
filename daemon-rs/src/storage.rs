@@ -109,6 +109,7 @@ pub struct TurnSpec {
     pub chat_id: String,
     pub backend: String,
     pub prompt: String,
+    pub system_prompt: Option<String>,
     pub workdir: String,
     pub model: String,
     pub effort: String,
@@ -419,6 +420,64 @@ impl StateStore {
         };
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         shortcut_fields(&database, &self.workspace_root, folder_id)
+    }
+
+    pub fn folder_context(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let context = database
+            .query_row(
+                "SELECT instructions FROM workspace_folders WHERE root_path = ? AND id = ?",
+                params![self.workspace_root.to_string_lossy(), folder_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+        Ok(json!({"ok": true, "context": context}))
+    }
+
+    pub fn set_folder_context(&self, request: &Value) -> Result<Value, StorageError> {
+        const MAX_CONTEXT_BYTES: usize = 256 * 1024;
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let context = match request.get("context") {
+            Some(Value::Null) => None,
+            Some(Value::String(context)) => {
+                let context = context.trim();
+                if context.len() > MAX_CONTEXT_BYTES {
+                    return Err(StorageError::InvalidRequest(
+                        "Workspace context must be 256 KiB or smaller.".into(),
+                    ));
+                }
+                (!context.is_empty()).then(|| context.to_owned())
+            }
+            Some(_) => {
+                return Err(StorageError::InvalidRequest(
+                    "Folder context must be text or null.".into(),
+                ));
+            }
+            None => {
+                return Err(StorageError::InvalidRequest(
+                    "set-folder-context needs context.".into(),
+                ));
+            }
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE workspace_folders SET instructions = ?, updated_at = ? \
+             WHERE root_path = ? AND id = ?",
+            params![
+                context,
+                now_seconds(),
+                self.workspace_root.to_string_lossy(),
+                folder_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidRequest(
+                "No such folder on the daemon.".into(),
+            ));
+        }
+        Ok(json!({"ok": true}))
     }
 
     pub fn agent_catalog(&self) -> Result<Value, StorageError> {
@@ -1822,6 +1881,41 @@ fn queue_from_column(stored: Option<&str>) -> Vec<String> {
         .unwrap_or_else(|_| vec![stored.to_owned()])
 }
 
+fn effective_instructions(
+    database: &Connection,
+    root: &Path,
+    folder_id: &str,
+) -> Result<Option<String>, StorageError> {
+    let relative = database
+        .query_row(
+            "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
+            params![root.to_string_lossy(), folder_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+    let mut paths = ancestors(&relative).map(str::to_owned).collect::<Vec<_>>();
+    paths.reverse();
+    paths.push(relative);
+    let mut instructions = Vec::new();
+    for path in paths {
+        if let Some(context) = database
+            .query_row(
+                "SELECT instructions FROM workspace_folders \
+                 WHERE root_path = ? AND relative_path = ?",
+                params![root.to_string_lossy(), path],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .filter(|context| !context.is_empty())
+        {
+            instructions.push(context);
+        }
+    }
+    Ok((!instructions.is_empty()).then(|| instructions.join("\n\n")))
+}
+
 fn effective_shortcuts(
     database: &Connection,
     root: &Path,
@@ -2415,6 +2509,7 @@ fn prepare_turn(
         )
         .optional()?
         .flatten();
+    let system_prompt = effective_instructions(transaction, workspace_root, &chat.0)?;
     let now = now_seconds();
     transaction.execute(
         "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
@@ -2428,6 +2523,7 @@ fn prepare_turn(
         chat_id: chat_id.into(),
         backend: chat.1.clone(),
         prompt: text.into(),
+        system_prompt,
         workdir,
         model: model.clone(),
         effort: effort.clone(),
@@ -3282,6 +3378,47 @@ mod tests {
             .clone();
         assert_eq!(events[0]["role"], "event");
         assert_eq!(events[0]["content"], "Switched to GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn workspace_context_is_trimmed_inherited_and_passed_as_system_prompt() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let parent = store.new_folder(&json!({"name": "Parent"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child = store
+            .new_folder(&json!({"name": "Child", "parent": parent}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store.new_chat(&json!({"folder": child})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        store
+            .set_folder_context(&json!({"folder": parent, "context": "  Parent rules  "}))
+            .unwrap();
+        store
+            .set_folder_context(&json!({"folder": child, "context": "Child rules"}))
+            .unwrap();
+        assert_eq!(
+            store.folder_context(&json!({"folder": child})).unwrap()["context"],
+            "Child rules"
+        );
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": chat, "text": "hello"}))
+            .unwrap()
+        else {
+            panic!("first message unexpectedly queued");
+        };
+        assert_eq!(
+            turn.system_prompt.as_deref(),
+            Some("Parent rules\n\nChild rules")
+        );
     }
 
     #[test]

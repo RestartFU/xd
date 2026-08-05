@@ -71,6 +71,7 @@ struct XdDesktop {
     workspace_create_input: Entity<ComposerInput>,
     workspace_repo_input: Entity<ComposerInput>,
     chat_create_input: Entity<ComposerInput>,
+    workspace_context_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
@@ -86,6 +87,10 @@ struct XdDesktop {
     creating_chat_folder: Option<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
+    workspace_context_folder: Option<String>,
+    workspace_context_text: String,
+    workspace_context_loading: bool,
+    workspace_context_submitting: bool,
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
@@ -134,6 +139,13 @@ impl XdDesktop {
             ComposerEvent::Submit => this.save_chat_create(cx),
         })
         .detach();
+        let workspace_context_input =
+            cx.new(|cx| ComposerInput::new(cx, "Instructions inherited by this workspace…"));
+        cx.subscribe(&workspace_context_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.workspace_context_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_workspace_context(cx),
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -148,6 +160,7 @@ impl XdDesktop {
             workspace_create_input,
             workspace_repo_input,
             chat_create_input,
+            workspace_context_input,
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
@@ -163,6 +176,10 @@ impl XdDesktop {
             creating_chat_folder: None,
             chat_create_title: String::new(),
             chat_create_submitting: false,
+            workspace_context_folder: None,
+            workspace_context_text: String::new(),
+            workspace_context_loading: false,
+            workspace_context_submitting: false,
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
@@ -214,6 +231,8 @@ impl XdDesktop {
                 self.sending = false;
                 self.workspace_create_submitting = false;
                 self.chat_create_submitting = false;
+                self.workspace_context_loading = false;
+                self.workspace_context_submitting = false;
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -263,6 +282,16 @@ impl XdDesktop {
                         && self.chat_create_title.trim() == title =>
                 {
                     self.chat_create_submitting = false;
+                }
+                RequestKind::FolderContext { folder_id }
+                    if self.workspace_context_folder.as_deref() == Some(folder_id) =>
+                {
+                    self.workspace_context_loading = false;
+                }
+                RequestKind::SetFolderContext { folder_id, .. }
+                    if self.workspace_context_folder.as_deref() == Some(folder_id) =>
+                {
+                    self.workspace_context_submitting = false;
                 }
                 RequestKind::EditQueue {
                     chat_id,
@@ -358,6 +387,19 @@ impl XdDesktop {
                         .iter()
                         .any(|folder| &folder.id == folder_id)
                 });
+                if self
+                    .workspace_context_folder
+                    .as_ref()
+                    .is_some_and(|folder_id| {
+                        !self
+                            .model
+                            .folders
+                            .iter()
+                            .any(|folder| &folder.id == folder_id)
+                    })
+                {
+                    self.cancel_workspace_context(cx);
+                }
                 if self.model.selected_chat.is_none() {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
                         self.select_chat(chat_id, cx);
@@ -378,6 +420,27 @@ impl XdDesktop {
                 {
                     self.model.apply_shortcuts(&value);
                 }
+            }
+            RequestKind::FolderContext { folder_id } => {
+                if self.workspace_context_folder.as_deref() == Some(folder_id.as_str()) {
+                    self.workspace_context_loading = false;
+                    self.workspace_context_text = value
+                        .get("context")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let text = self.workspace_context_text.clone();
+                    self.workspace_context_input
+                        .update(cx, |input, cx| input.set_text(text, cx));
+                }
+            }
+            RequestKind::SetFolderContext { folder_id, context } => {
+                if self.workspace_context_folder.as_deref() == Some(folder_id.as_str())
+                    && optional_trimmed(&self.workspace_context_text) == context.as_deref()
+                {
+                    self.cancel_workspace_context(cx);
+                }
+                self.request_tree();
             }
             RequestKind::NewFolder { name, repo } => {
                 let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
@@ -776,6 +839,68 @@ impl XdDesktop {
         self.chat_create_title.clear();
         self.chat_create_submitting = false;
         self.chat_create_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    fn begin_workspace_context(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        self.workspace_context_folder = Some(folder_id.clone());
+        self.workspace_context_text.clear();
+        self.workspace_context_loading = true;
+        self.workspace_context_submitting = false;
+        self.workspace_context_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        if let Some(daemon) = &self.daemon {
+            if let Err(error) = daemon.folder_context(&folder_id) {
+                self.workspace_context_loading = false;
+                self.model.connection_error = Some(error);
+            }
+        } else {
+            self.workspace_context_loading = false;
+            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+        }
+        cx.notify();
+    }
+
+    fn workspace_context_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.workspace_context_folder.is_some()
+            && !self.workspace_context_loading
+            && !self.workspace_context_submitting
+        {
+            self.workspace_context_text = text;
+            cx.notify();
+        }
+    }
+
+    fn save_workspace_context(&mut self, cx: &mut Context<Self>) {
+        let Some(folder_id) = self.workspace_context_folder.clone() else {
+            return;
+        };
+        if self.workspace_context_loading || self.workspace_context_submitting {
+            return;
+        }
+        let context = optional_trimmed(&self.workspace_context_text).map(str::to_owned);
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.set_folder_context(&folder_id, context.as_deref()));
+        match result {
+            Ok(()) => {
+                self.workspace_context_text = context.unwrap_or_default();
+                self.workspace_context_submitting = true;
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn cancel_workspace_context(&mut self, cx: &mut Context<Self>) {
+        self.workspace_context_folder = None;
+        self.workspace_context_text.clear();
+        self.workspace_context_loading = false;
+        self.workspace_context_submitting = false;
+        self.workspace_context_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         cx.notify();
     }
@@ -1868,6 +1993,15 @@ impl Render for XdDesktop {
             && self.model.connected;
         let chat_create_input = self.chat_create_input.clone();
         let chat_create_focus = self.chat_create_input.read(cx).focus_handle(cx);
+        let workspace_context_folder = self.workspace_context_folder.clone();
+        let workspace_context_loading = self.workspace_context_loading;
+        let workspace_context_submitting = self.workspace_context_submitting;
+        let workspace_context_input = self.workspace_context_input.clone();
+        let workspace_context_focus = self.workspace_context_input.read(cx).focus_handle(cx);
+        let can_save_context = workspace_context_folder.is_some()
+            && !workspace_context_loading
+            && !workspace_context_submitting
+            && self.model.connected;
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
@@ -1876,6 +2010,7 @@ impl Render for XdDesktop {
             }
             let indent = if folder.parent.is_some() { 22.0 } else { 12.0 };
             let new_chat_folder_id = folder.id.clone();
+            let context_folder_id = folder.id.clone();
             let collapse_folder_id = folder.id.clone();
             let folder_name = folder.name.clone();
             let folder_collapsed = self.collapsed_folders.contains(&folder.id);
@@ -1966,6 +2101,8 @@ impl Render for XdDesktop {
                 let delete_target = folder_target.clone();
                 let confirming_delete = pending_sidebar_delete.as_ref() == Some(&folder_target);
                 let moving_folder = sidebar_move.as_ref() == Some(&folder_target);
+                let editing_context =
+                    workspace_context_folder.as_deref() == Some(folder.id.as_str());
                 tree_rows.push(
                     div()
                         .px_3()
@@ -2029,6 +2166,23 @@ impl Render for XdDesktop {
                                     window.focus(&focus);
                                 }))
                                 .child("Edit"),
+                        )
+                        .child(
+                            div()
+                                .id(("context-folder", folder_row_index))
+                                .px_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(if editing_context { TEXT } else { MUTED }))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.begin_workspace_context(context_folder_id.clone(), cx);
+                                    let focus =
+                                        this.workspace_context_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child("Context"),
                         )
                         .child(
                             div()
@@ -2146,6 +2300,122 @@ impl Render for XdDesktop {
                             .into_any_element(),
                     );
                 }
+            }
+            if workspace_context_folder.as_deref() == Some(folder.id.as_str()) {
+                tree_rows.push(
+                    div()
+                        .ml(px(indent + 10.0))
+                        .mr_2()
+                        .mb_1()
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_md()
+                        .bg(rgb(0x1d222b))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child("Workspace instructions inherited by chats"),
+                        )
+                        .when(workspace_context_loading, |panel| {
+                            panel.child(
+                                div()
+                                    .h(px(38.0))
+                                    .flex()
+                                    .items_center()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child("Loading context…"),
+                            )
+                        })
+                        .when(!workspace_context_loading, |panel| {
+                            panel.child(
+                                div()
+                                    .id(("workspace-context-input", folder_row_index))
+                                    .track_focus(&workspace_context_focus)
+                                    .h(px(42.0))
+                                    .w_full()
+                                    .min_w_0()
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(
+                                        if workspace_context_focus.is_focused(window) {
+                                            ACCENT
+                                        } else {
+                                            BORDER
+                                        },
+                                    ))
+                                    .bg(rgb(BG))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let focus =
+                                            this.workspace_context_input.read(cx).focus_handle(cx);
+                                        window.focus(&focus);
+                                    }))
+                                    .child(workspace_context_input.clone()),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .id(("cancel-workspace-context", folder_row_index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .when(!workspace_context_submitting, |button| {
+                                            button.cursor_pointer().hover(|style| {
+                                                style.bg(rgb(0x303c52)).text_color(rgb(TEXT))
+                                            })
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if !workspace_context_submitting {
+                                                this.cancel_workspace_context(cx);
+                                            }
+                                        }))
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("save-workspace-context", folder_row_index))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(if can_save_context {
+                                            TEXT
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .when(can_save_context, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x303c52)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_save_context {
+                                                this.save_workspace_context(cx);
+                                            }
+                                        }))
+                                        .child(if workspace_context_submitting {
+                                            "Saving…"
+                                        } else {
+                                            "Save"
+                                        }),
+                                ),
+                        )
+                        .into_any_element(),
+                );
             }
             if creating_chat_folder.as_deref() == Some(folder.id.as_str()) {
                 tree_rows.push(

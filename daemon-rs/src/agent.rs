@@ -26,6 +26,7 @@ pub struct CodexParser {
 pub struct AgentCommand<'a> {
     pub backend: &'a str,
     pub prompt: &'a str,
+    pub system_prompt: Option<&'a str>,
     pub workdir: &'a str,
     pub model: &'a str,
     pub effort: &'a str,
@@ -128,6 +129,7 @@ impl AgentCommand<'_> {
         }
         let mut command = Command::new(resolve_codex());
         command.arg("exec");
+        append_system_prompt(&mut command, self.system_prompt);
         if let Some(session_id) = self.session_id {
             command.args(["resume", "--json", "--skip-git-repo-check"]);
             append_model_and_effort(&mut command, self.model, self.effort);
@@ -182,8 +184,18 @@ impl AgentCommand<'_> {
                 _ => "manual",
             },
         ]);
+        if let Some(system_prompt) = self.system_prompt.filter(|prompt| !prompt.is_empty()) {
+            command.args(["--append-system-prompt", system_prompt]);
+        }
         command.current_dir(self.workdir);
         command
+    }
+}
+
+fn append_system_prompt(command: &mut Command, prompt: Option<&str>) {
+    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+        let encoded = serde_json::to_string(prompt).expect("serialize developer instructions");
+        command.args(["-c", &format!("developer_instructions={encoded}")]);
     }
 }
 
@@ -671,6 +683,7 @@ mod tests {
         let new = AgentCommand {
             backend: "codex",
             prompt: "hello",
+            system_prompt: Some("Always test."),
             workdir: "/workspace",
             model: "gpt-5.6-sol",
             effort: "high",
@@ -687,6 +700,9 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-s", "workspace-write"])
         );
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-c" && pair[1] == "developer_instructions=\"Always test.\""
+        }));
         assert_eq!(args.last().map(String::as_str), Some("hello"));
 
         let resumed = AgentCommand {
@@ -695,6 +711,7 @@ mod tests {
             ..AgentCommand {
                 backend: "codex",
                 prompt: "continue",
+                system_prompt: None,
                 workdir: "/workspace",
                 model: "gpt-5.6-sol",
                 effort: "max",
@@ -716,6 +733,7 @@ mod tests {
             ..AgentCommand {
                 backend: "codex",
                 prompt: "continue",
+                system_prompt: None,
                 workdir: "/workspace",
                 model: "gpt-5.6-sol",
                 effort: "high",
@@ -768,6 +786,7 @@ mod tests {
         let command = AgentCommand {
             backend: "claude",
             prompt: "continue",
+            system_prompt: Some("Stay concise."),
             workdir: "/workspace",
             model: "claude-opus-5",
             effort: "xhigh",
@@ -791,6 +810,10 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--permission-mode", "acceptEdits"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--append-system-prompt", "Stay concise."])
         );
         assert_eq!(
             command.get_current_dir(),

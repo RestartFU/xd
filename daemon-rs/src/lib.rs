@@ -134,12 +134,16 @@ impl Engine {
                 }
             }
             Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
+            Some("folder-context") => self.read(|store| store.folder_context(&request)),
             Some("set-draft") => self.event_mutation(|store| store.set_draft(&request)),
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
             Some("send") => self.send_message(&request),
             Some("cancel") => self.cancel(&request),
             Some("new-folder") => self.tree_mutation(|store| store.new_folder(&request)),
+            Some("set-folder-context") => {
+                self.tree_mutation(|store| store.set_folder_context(&request))
+            }
             Some("rename-folder") => self.tree_mutation(|store| store.rename_folder(&request)),
             Some("move-folder") => self.tree_mutation(|store| store.move_folder(&request)),
             Some("trash-folder") => self.tree_mutation(|store| store.trash_folder(&request)),
