@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+    time::Duration,
+};
 
 use gpui::{
     App, Application, Bounds, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -100,6 +105,7 @@ struct XdDesktop {
     sidebar_edit_input: Entity<ComposerInput>,
     workspace_create_input: Entity<ComposerInput>,
     workspace_repo_input: Entity<ComposerInput>,
+    workspace_clone_input: Entity<ComposerInput>,
     chat_create_input: Entity<ComposerInput>,
     workspace_context_input: Entity<ComposerInput>,
     workspace_workdir_input: Entity<ComposerInput>,
@@ -116,7 +122,11 @@ struct XdDesktop {
     creating_workspace: bool,
     workspace_create_name: String,
     workspace_create_repo: String,
+    workspace_create_clone: String,
     workspace_create_submitting: bool,
+    workspace_clone_status: Option<String>,
+    pending_clone_chats: HashSet<String>,
+    workspace_clone_outcomes: HashMap<String, Option<String>>,
     creating_chat_folder: Option<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
@@ -169,6 +179,13 @@ impl XdDesktop {
             ComposerEvent::Submit => this.save_workspace_create(cx),
         })
         .detach();
+        let workspace_clone_input =
+            cx.new(|cx| ComposerInput::new(cx, "Git clone URL (optional)…"));
+        cx.subscribe(&workspace_clone_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.workspace_clone_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_workspace_create(cx),
+        })
+        .detach();
         let chat_create_input = cx.new(|cx| ComposerInput::new(cx, "Chat title…"));
         cx.subscribe(&chat_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.chat_create_changed(text.clone(), cx),
@@ -218,6 +235,7 @@ impl XdDesktop {
             sidebar_edit_input,
             workspace_create_input,
             workspace_repo_input,
+            workspace_clone_input,
             chat_create_input,
             workspace_context_input,
             workspace_workdir_input,
@@ -234,7 +252,11 @@ impl XdDesktop {
             creating_workspace: false,
             workspace_create_name: String::new(),
             workspace_create_repo: String::new(),
+            workspace_create_clone: String::new(),
             workspace_create_submitting: false,
+            workspace_clone_status: None,
+            pending_clone_chats: HashSet::new(),
+            workspace_clone_outcomes: HashMap::new(),
             creating_chat_folder: None,
             chat_create_title: String::new(),
             chat_create_submitting: false,
@@ -298,6 +320,9 @@ impl XdDesktop {
                 self.chat_create_submitting = false;
                 self.workspace_context_loading = false;
                 self.workspace_context_submitting = false;
+                self.workspace_clone_status = None;
+                self.pending_clone_chats.clear();
+                self.workspace_clone_outcomes.clear();
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
                     defaults.submitting = false;
@@ -342,10 +367,14 @@ impl XdDesktop {
                     self.sending = false;
                     self.restore_pending_send(cx);
                 }
-                RequestKind::NewFolder { name, repo }
-                    if self.creating_workspace
-                        && self.workspace_create_name.trim() == name
-                        && optional_trimmed(&self.workspace_create_repo) == repo.as_deref() =>
+                RequestKind::NewFolder {
+                    name,
+                    repo,
+                    repo_url,
+                } if self.creating_workspace
+                    && self.workspace_create_name.trim() == name
+                    && optional_trimmed(&self.workspace_create_repo) == repo.as_deref()
+                    && optional_trimmed(&self.workspace_create_clone) == repo_url.as_deref() =>
                 {
                     self.workspace_create_submitting = false;
                 }
@@ -630,7 +659,11 @@ impl XdDesktop {
                 }
                 self.request_tree();
             }
-            RequestKind::NewFolder { name, repo } => {
+            RequestKind::NewFolder {
+                name,
+                repo,
+                repo_url,
+            } => {
                 let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
                     self.model.connection_error =
                         Some("The daemon returned no workspace id.".into());
@@ -639,10 +672,30 @@ impl XdDesktop {
                 if self.creating_workspace
                     && self.workspace_create_name.trim() == name
                     && optional_trimmed(&self.workspace_create_repo) == repo.as_deref()
+                    && optional_trimmed(&self.workspace_create_clone) == repo_url.as_deref()
                 {
                     self.cancel_workspace_create(cx);
                 }
-                if let Some(daemon) = &self.daemon
+                if value.get("cloning").and_then(Value::as_str).is_some() {
+                    match self.workspace_clone_outcomes.remove(folder_id) {
+                        Some(None) => {
+                            self.workspace_clone_status = Some("Repository cloned".into());
+                            if let Some(daemon) = &self.daemon
+                                && let Err(error) = daemon.new_chat(folder_id, "New Chat")
+                            {
+                                self.model.connection_error = Some(error);
+                            }
+                        }
+                        Some(Some(error)) => {
+                            self.workspace_clone_status = None;
+                            self.model.connection_error = Some(error);
+                        }
+                        None => {
+                            self.pending_clone_chats.insert(folder_id.to_owned());
+                            self.workspace_clone_status = Some("Cloning repository…".into());
+                        }
+                    }
+                } else if let Some(daemon) = &self.daemon
                     && let Err(error) = daemon.new_chat(folder_id, "New Chat")
                 {
                     self.model.connection_error = Some(error);
@@ -869,6 +922,59 @@ impl XdDesktop {
                 }
             }
             "shortcuts-changed" => self.request_shortcuts(),
+            "folder-clone" => {
+                let folder_id = body.get("folder").and_then(Value::as_str);
+                let preserve_outcome = folder_id
+                    .is_some_and(|folder_id| self.pending_clone_chats.contains(folder_id))
+                    || (self.workspace_create_submitting
+                        && optional_trimmed(&self.workspace_create_clone)
+                            == body.get("url").and_then(Value::as_str));
+                match body.get("state").and_then(Value::as_str) {
+                    Some("cloning") => {
+                        self.workspace_clone_status = Some("Cloning repository…".into());
+                    }
+                    Some("ready") => {
+                        self.workspace_clone_status = Some("Repository cloned".into());
+                        if preserve_outcome && let Some(folder_id) = folder_id {
+                            self.workspace_clone_outcomes
+                                .insert(folder_id.to_owned(), None);
+                        }
+                        if folder_id
+                            .is_some_and(|folder_id| self.pending_clone_chats.remove(folder_id))
+                        {
+                            if let (Some(daemon), Some(folder_id)) = (&self.daemon, folder_id)
+                                && let Err(error) = daemon.new_chat(folder_id, "New Chat")
+                            {
+                                self.model.connection_error = Some(error);
+                            }
+                            if let Some(folder_id) = folder_id {
+                                self.workspace_clone_outcomes.remove(folder_id);
+                            }
+                        }
+                    }
+                    Some("failed") => {
+                        let error = body
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Git could not clone that repository.")
+                            .to_owned();
+                        if preserve_outcome && let Some(folder_id) = folder_id {
+                            self.workspace_clone_outcomes
+                                .insert(folder_id.to_owned(), Some(error.clone()));
+                        }
+                        if folder_id
+                            .is_some_and(|folder_id| self.pending_clone_chats.remove(folder_id))
+                        {
+                            if let Some(folder_id) = folder_id {
+                                self.workspace_clone_outcomes.remove(folder_id);
+                            }
+                        }
+                        self.workspace_clone_status = None;
+                        self.model.connection_error = Some(error);
+                    }
+                    _ => {}
+                }
+            }
             "agent-auth-changed"
                 if body.get("provider").and_then(Value::as_str)
                     == Some(self.model.backend.as_str()) =>
@@ -918,9 +1024,12 @@ impl XdDesktop {
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
         self.workspace_create_repo.clear();
+        self.workspace_create_clone.clear();
         self.workspace_create_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.workspace_repo_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.workspace_clone_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         cx.notify();
     }
@@ -939,6 +1048,13 @@ impl XdDesktop {
         }
     }
 
+    fn workspace_clone_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.creating_workspace && !self.workspace_create_submitting {
+            self.workspace_create_clone = text;
+            cx.notify();
+        }
+    }
+
     fn save_workspace_create(&mut self, cx: &mut Context<Self>) {
         if !self.creating_workspace || self.workspace_create_submitting {
             return;
@@ -950,15 +1066,23 @@ impl XdDesktop {
             return;
         }
         let repo = optional_trimmed(&self.workspace_create_repo).map(str::to_owned);
+        let repo_url = optional_trimmed(&self.workspace_create_clone).map(str::to_owned);
+        if repo.is_some() && repo_url.is_some() {
+            self.model.connection_error =
+                Some("Choose either an existing repository path or a clone URL.".into());
+            cx.notify();
+            return;
+        }
         let result = self
             .daemon
             .as_ref()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
-            .and_then(|daemon| daemon.new_folder(name, repo.as_deref()));
+            .and_then(|daemon| daemon.new_folder(name, repo.as_deref(), repo_url.as_deref()));
         match result {
             Ok(()) => {
                 self.workspace_create_name = name.to_owned();
                 self.workspace_create_repo = repo.unwrap_or_default();
+                self.workspace_create_clone = repo_url.unwrap_or_default();
                 self.workspace_create_submitting = true;
             }
             Err(error) => self.model.connection_error = Some(error),
@@ -971,9 +1095,12 @@ impl XdDesktop {
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
         self.workspace_create_repo.clear();
+        self.workspace_create_clone.clear();
         self.workspace_create_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.workspace_repo_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.workspace_clone_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         cx.notify();
     }
@@ -3376,11 +3503,16 @@ impl Render for XdDesktop {
         let can_save_workspace = creating_workspace
             && !workspace_create_submitting
             && !self.workspace_create_name.trim().is_empty()
+            && (self.workspace_create_repo.trim().is_empty()
+                || self.workspace_create_clone.trim().is_empty())
             && self.model.connected;
         let workspace_create_input = self.workspace_create_input.clone();
         let workspace_create_focus = self.workspace_create_input.read(cx).focus_handle(cx);
         let workspace_repo_input = self.workspace_repo_input.clone();
         let workspace_repo_focus = self.workspace_repo_input.read(cx).focus_handle(cx);
+        let workspace_clone_input = self.workspace_clone_input.clone();
+        let workspace_clone_focus = self.workspace_clone_input.read(cx).focus_handle(cx);
+        let workspace_clone_status = self.workspace_clone_status.clone();
         let sidebar = div()
             .w(px(280.0))
             .h_full()
@@ -3503,6 +3635,37 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child("or clone a remote repository"),
+                        )
+                        .child(
+                            div()
+                                .id("workspace-clone-input")
+                                .track_focus(&workspace_clone_focus)
+                                .h(px(32.0))
+                                .w_full()
+                                .min_w_0()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if workspace_clone_focus.is_focused(window) {
+                                    ACCENT
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(BG))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus =
+                                        this.workspace_clone_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(workspace_clone_input),
+                        )
+                        .child(
+                            div()
                                 .flex()
                                 .items_center()
                                 .justify_end()
@@ -3561,6 +3724,20 @@ impl Render for XdDesktop {
                                         }),
                                 ),
                         ),
+                )
+            })
+            .when_some(workspace_clone_status, |sidebar, status| {
+                sidebar.child(
+                    div()
+                        .mx_3()
+                        .mb_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(0x1d2a22))
+                        .text_xs()
+                        .text_color(rgb(0xa9d8b5))
+                        .child(status),
                 )
             })
             .child(

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    env,
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -28,6 +29,8 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MAX_CLONE_URL_BYTES: usize = 512;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const CODEX_MODELS: &[(&str, &str, i64)] = &[
     ("gpt-5.6-sol", "GPT-5.6 Sol", 272_000),
@@ -1228,6 +1231,14 @@ impl StateStore {
         validate_workspace_name(name)?;
         let parent_id = optional_string(request, "parent")?;
         let repo = optional_string(request, "repo")?;
+        let repo_url = optional_string(request, "repo_url")?
+            .map(normalize_clone_url)
+            .transpose()?;
+        if repo.is_some() && repo_url.is_some() {
+            return Err(StorageError::InvalidRequest(
+                "Choose either an existing repository path or a clone address.".into(),
+            ));
+        }
         if let Some(repo) = repo
             && !Path::new(repo).is_dir()
         {
@@ -1263,7 +1274,11 @@ impl StateStore {
             )
             .optional()?
         {
-            return Ok(json!({"ok": true, "id": id}));
+            let mut reply = json!({"ok": true, "id": id});
+            if let Some(repo_url) = repo_url {
+                reply["cloning"] = Value::String(repo_url);
+            }
+            return Ok(reply);
         }
         let path = self.workspace_root.join(&relative);
         let created = match fs::symlink_metadata(&path) {
@@ -1301,7 +1316,53 @@ impl StateStore {
             }
             return Err(StorageError::Query(error));
         }
-        Ok(json!({"ok": true, "id": id}))
+        let mut reply = json!({"ok": true, "id": id});
+        if let Some(repo_url) = repo_url {
+            reply["cloning"] = Value::String(repo_url);
+        }
+        Ok(reply)
+    }
+
+    pub fn folder_path(&self, folder_id: &str) -> Result<PathBuf, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let relative = database
+            .query_row(
+                "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
+                params![self.workspace_root.to_string_lossy(), folder_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("No such workspace on the daemon.".into())
+            })?;
+        Ok(self.workspace_root.join(relative))
+    }
+
+    pub fn finish_folder_clone(
+        &self,
+        folder_id: &str,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        if !destination.is_dir() {
+            return Err(StorageError::InvalidRequest(
+                "The cloned repository folder disappeared.".into(),
+            ));
+        }
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE workspace_folders SET repo = ?, updated_at = ? WHERE id = ?",
+            params![
+                normalize_existing_path(destination),
+                now_seconds(),
+                folder_id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::InvalidRequest(
+                "The workspace was removed while Git was cloning.".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn rename_folder(&self, request: &Value) -> Result<Value, StorageError> {
@@ -2579,7 +2640,7 @@ fn run_git(
     workdir: &Path,
     arguments: &[&str],
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
-    let mut child = Command::new("git")
+    let child = Command::new("git")
         .args(arguments)
         .current_dir(workdir)
         .stdout(Stdio::piped())
@@ -2589,11 +2650,75 @@ fn run_git(
             context: "Cannot run Git".into(),
             source,
         })?;
+    collect_git_output(child, GIT_TIMEOUT)
+}
+
+pub(crate) fn clone_repository(url: &str, destination: &Path) -> Result<(), StorageError> {
+    if !destination.is_dir() {
+        return Err(StorageError::InvalidRequest(
+            "The workspace folder is no longer there.".into(),
+        ));
+    }
+    if destination
+        .read_dir()
+        .map_err(|source| StorageError::Filesystem {
+            context: "Cannot inspect the workspace folder".into(),
+            source,
+        })?
+        .next()
+        .is_some()
+    {
+        return Err(StorageError::InvalidRequest(
+            "That workspace folder already has something in it.".into(),
+        ));
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        StorageError::InvalidRequest("The workspace folder has no parent directory.".into())
+    })?;
+    let mut command = Command::new("git");
+    command
+        .args(["clone", "--", url])
+        .arg(destination)
+        .current_dir(parent)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if env::var_os("GIT_SSH_COMMAND").is_none() {
+        command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    let child = command.spawn().map_err(|source| StorageError::Filesystem {
+        context: "Cannot run Git".into(),
+        source,
+    })?;
+    let (status, _, stderr) = collect_git_output(child, GIT_CLONE_TIMEOUT)?;
+    if status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&stderr);
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()
+        .unwrap_or("Git could not clone that repository.")
+        .trim_start_matches("fatal: ");
+    let truncated = detail.chars().count() > 200;
+    let mut detail = detail.chars().take(200).collect::<String>();
+    if truncated {
+        detail.push('…');
+    }
+    Err(StorageError::InvalidRequest(detail))
+}
+
+fn collect_git_output(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
     let stdout = child.stdout.take().expect("piped git stdout");
     let stderr = child.stderr.take().expect("piped git stderr");
     let stdout = thread::spawn(move || read_bounded_output(stdout));
     let stderr = thread::spawn(move || read_bounded_output(stderr));
-    let deadline = Instant::now() + GIT_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child
             .try_wait()
@@ -2866,6 +2991,52 @@ fn search_snippet(content: &str) -> String {
     snippet
 }
 
+fn normalize_clone_url(value: &str) -> Result<String, StorageError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_CLONE_URL_BYTES
+        || value.starts_with('-')
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(StorageError::InvalidRequest(
+            "Clone from an http, https, ssh, git or file address, or from user@host:path.".into(),
+        ));
+    }
+    let scp_like = value.split_once(':').is_some_and(|(host, path)| {
+        !path.is_empty()
+            && host.split_once('@').is_some_and(|(user, host)| {
+                !user.is_empty()
+                    && !host.is_empty()
+                    && user.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "._~-".contains(character)
+                    })
+                    && host.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "._-".contains(character)
+                    })
+            })
+    });
+    let supported_url = ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .any(|scheme| {
+            value.strip_prefix(scheme).is_some_and(|rest| {
+                rest.split(['/', ':'])
+                    .next()
+                    .is_some_and(|host| !host.is_empty())
+            })
+        })
+        || value
+            .strip_prefix("file://")
+            .is_some_and(|path| !path.is_empty());
+    if !scp_like && !supported_url {
+        return Err(StorageError::InvalidRequest(
+            "Clone from an http, https, ssh, git or file address, or from user@host:path.".into(),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2967,6 +3138,33 @@ mod tests {
         let snippet = search_snippet(&format!("{}\nrest", "x".repeat(125)));
         assert_eq!(snippet.chars().count(), SEARCH_SNIPPET_CHARS + 1);
         assert!(snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn clone_addresses_are_validated_and_cloned_without_prompts() {
+        assert_eq!(
+            normalize_clone_url("https://example.com/repo.git").unwrap(),
+            "https://example.com/repo.git"
+        );
+        assert!(normalize_clone_url("git@example.com:repo.git").is_ok());
+        assert!(normalize_clone_url("--upload-pack=bad").is_err());
+        assert!(normalize_clone_url("https://example.com/a repo").is_err());
+
+        let fixture = Fixture::new();
+        fs::create_dir_all(&fixture.root).unwrap();
+        let source = fixture.root.join("source.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let destination = fixture.root.join("clone");
+        fs::create_dir(&destination).unwrap();
+        clone_repository(&format!("file://{}", source.display()), &destination).unwrap();
+        assert!(destination.join("HEAD").exists() || destination.join(".git").exists());
     }
 
     #[test]
@@ -3333,6 +3531,31 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("existing directory"));
         assert!(!fixture.workspaces.join("Missing").exists());
+
+        let clone = store
+            .new_folder(&json!({
+                "name": "Cloned",
+                "repo_url": "https://example.com/repository.git",
+            }))
+            .unwrap();
+        assert_eq!(clone["cloning"], "https://example.com/repository.git");
+        assert!(
+            store
+                .folder_path(clone["id"].as_str().unwrap())
+                .unwrap()
+                .is_dir()
+        );
+        assert!(
+            store
+                .new_folder(&json!({
+                    "name": "Both",
+                    "repo": repository.to_string_lossy(),
+                    "repo_url": "https://example.com/repository.git",
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("either")
+        );
     }
 
     #[test]

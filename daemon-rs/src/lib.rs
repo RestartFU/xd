@@ -26,6 +26,7 @@ mod workflow;
 
 use auth::AuthManager;
 pub use runtime::TurnRuntime;
+use storage::clone_repository;
 pub use storage::{SendDisposition, StateStore, StorageError};
 use workflow::WorkflowStatuses;
 
@@ -142,7 +143,7 @@ impl Engine {
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
             Some("send") => self.send_message(&request),
             Some("cancel") => self.cancel(&request),
-            Some("new-folder") => self.tree_mutation(|store| store.new_folder(&request)),
+            Some("new-folder") => self.new_folder(&request),
             Some("set-folder-context") => {
                 self.tree_mutation(|store| store.set_folder_context(&request))
             }
@@ -220,6 +221,53 @@ impl Engine {
             }
             Err(error) => error_reply(error),
         }
+    }
+
+    fn new_folder(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        let reply = match store.new_folder(request) {
+            Ok(reply) => reply,
+            Err(error) => return error_reply(error),
+        };
+        self.events.publish(json!({"event": "tree"}));
+        let (Some(folder_id), Some(url)) = (
+            reply.get("id").and_then(Value::as_str),
+            reply.get("cloning").and_then(Value::as_str),
+        ) else {
+            return reply;
+        };
+        let destination = match store.folder_path(folder_id) {
+            Ok(destination) => destination,
+            Err(error) => return error_reply(error),
+        };
+        let folder_id = folder_id.to_owned();
+        let url = url.to_owned();
+        let store = store.clone();
+        let events = self.events.clone();
+        events.publish(json!({
+            "event": "folder-clone",
+            "folder": folder_id.clone(),
+            "url": url.clone(),
+            "state": "cloning",
+        }));
+        thread::spawn(move || {
+            let result = clone_repository(&url, &destination)
+                .and_then(|_| store.finish_folder_clone(&folder_id, &destination));
+            let mut event = json!({
+                "event": "folder-clone",
+                "folder": folder_id,
+                "url": url,
+                "state": if result.is_ok() { "ready" } else { "failed" },
+            });
+            if let Err(error) = result {
+                event["error"] = Value::String(error.to_string());
+            }
+            events.publish(event);
+            events.publish(json!({"event": "tree"}));
+        });
+        reply
     }
 
     fn event_mutation(
