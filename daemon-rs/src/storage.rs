@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -61,6 +63,35 @@ pub enum StorageError {
 pub struct StateStore {
     database: Mutex<Connection>,
     workspace_root: PathBuf,
+    paste_root: PathBuf,
+}
+
+struct ValidatedAttachment {
+    name: String,
+    encoded: String,
+    data: Vec<u8>,
+}
+
+struct MaterializedMessage {
+    prompt: String,
+    paths: Vec<PathBuf>,
+    keep: bool,
+}
+
+impl MaterializedMessage {
+    fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for MaterializedMessage {
+    fn drop(&mut self) {
+        if !self.keep {
+            for path in &self.paths {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +177,10 @@ impl StateStore {
         Ok(Self {
             database: Mutex::new(database),
             workspace_root: workspace_root.into(),
+            paste_root: database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("remote-pasted"),
         })
     }
 
@@ -489,12 +524,12 @@ impl StateStore {
             "A message needs a chat and something to say.",
         )?;
         let text = optional_string(request, "text")?.unwrap_or("");
-        if text.is_empty() || request.get("attachments").is_some() {
+        if text.is_empty() && request.get("attachments").is_none() {
             return Err(StorageError::InvalidRequest(
-                "The Rust daemon currently accepts non-empty text messages without attachments."
-                    .into(),
+                "A message needs a chat and something to say.".into(),
             ));
         }
+        let mut message = self.materialize_message(request, text)?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let working = transaction
@@ -512,7 +547,7 @@ impl StateStore {
                 |row| row.get::<_, String>(0),
             )?;
             let mut queue = queue_from_column(Some(&stored));
-            queue.push(text.to_owned());
+            queue.push(message.prompt.clone());
             transaction.execute(
                 "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?",
                 params![
@@ -522,23 +557,83 @@ impl StateStore {
                 ],
             )?;
             transaction.commit()?;
+            message.keep();
             let event = queued_event(chat_id, &queue);
             return Ok(SendDisposition::Queued {
                 reply: json!({"ok": true, "queued": true}),
                 event,
             });
         }
-        let turn = prepare_turn(&transaction, &self.workspace_root, chat_id, text)?;
+        let turn = prepare_turn(&transaction, &self.workspace_root, chat_id, &message.prompt)?;
         transaction.execute(
             "UPDATE chats SET daemon_working = 1, draft = '', draft_attachments = '[]', \
              draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
             params![now_seconds(), chat_id],
         )?;
         transaction.commit()?;
+        message.keep();
         Ok(SendDisposition::Start {
             reply: json!({"ok": true, "queued": false}),
             turn,
         })
+    }
+
+    fn materialize_message(
+        &self,
+        request: &Value,
+        text: &str,
+    ) -> Result<MaterializedMessage, StorageError> {
+        let Some(value) = request.get("attachments") else {
+            return Ok(MaterializedMessage {
+                prompt: text.to_owned(),
+                paths: Vec::new(),
+                keep: true,
+            });
+        };
+        let attachments = validate_attachments(value, false)?;
+        fs::create_dir_all(&self.paste_root).map_err(|source| StorageError::Filesystem {
+            context: "Cannot create the remote image cache".into(),
+            source,
+        })?;
+        fs::set_permissions(&self.paste_root, fs::Permissions::from_mode(0o700)).map_err(
+            |source| StorageError::Filesystem {
+                context: "Cannot secure the remote image cache".into(),
+                source,
+            },
+        )?;
+
+        let mut materialized = MaterializedMessage {
+            prompt: text.to_owned(),
+            paths: Vec::with_capacity(attachments.len()),
+            keep: false,
+        };
+        for attachment in attachments {
+            let path = self
+                .paste_root
+                .join(format!("paste-{}.png", Uuid::new_v4()));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot create a remote image".into(),
+                    source,
+                })?;
+            materialized.paths.push(path.clone());
+            file.write_all(&attachment.data)
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot write a remote image".into(),
+                    source,
+                })?;
+            if !materialized.prompt.is_empty() {
+                materialized.prompt.push('\n');
+            }
+            materialized
+                .prompt
+                .push_str(&format!("[image: {}]", path.display()));
+        }
+        Ok(materialized)
     }
 
     pub fn append_turn_message(
@@ -779,11 +874,23 @@ impl StateStore {
         }
         let attachments = request
             .get("attachments")
-            .map(validate_attachments)
+            .map(|value| validate_attachments(value, true))
             .transpose()?;
         let attachments_json = attachments
             .as_ref()
-            .map(serde_json::to_string)
+            .map(|attachments| {
+                let normalized = attachments
+                    .iter()
+                    .map(|attachment| {
+                        json!({
+                            "name": attachment.name,
+                            "mime": "image/png",
+                            "data": attachment.encoded,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string(&normalized)
+            })
             .transpose()
             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
@@ -1635,13 +1742,21 @@ fn now_microseconds() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn validate_attachments(value: &Value) -> Result<Vec<Value>, StorageError> {
+fn validate_attachments(
+    value: &Value,
+    allow_empty: bool,
+) -> Result<Vec<ValidatedAttachment>, StorageError> {
     let attachments = value.as_array().ok_or_else(|| {
         StorageError::InvalidRequest("Message attachments must be an array.".into())
     })?;
-    if attachments.len() > MAX_IMAGES {
+    if attachments.len() > MAX_IMAGES || (!allow_empty && attachments.is_empty()) {
         return Err(StorageError::InvalidRequest(
-            "A draft can contain at most 4 images.".into(),
+            if allow_empty {
+                "A draft can contain at most 4 images."
+            } else {
+                "A message can contain between 1 and 4 images."
+            }
+            .into(),
         ));
     }
     let mut total = 0_usize;
@@ -1684,7 +1799,11 @@ fn validate_attachments(value: &Value) -> Result<Vec<Value>, StorageError> {
             if name.is_empty() || name.len() > 255 {
                 name = "image.png";
             }
-            Ok(json!({"name": name, "mime": "image/png", "data": encoded}))
+            Ok(ValidatedAttachment {
+                name: name.to_owned(),
+                encoded: encoded.to_owned(),
+                data,
+            })
         })
         .collect()
 }
@@ -2271,6 +2390,64 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn materializes_sent_images_for_immediate_and_queued_turns() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let encoded = STANDARD.encode(PNG_SIGNATURE);
+
+        let first = store
+            .prepare_send(&json!({
+                "chat": "chat-1",
+                "text": "inspect this",
+                "attachments": [{
+                    "name": "../screen.png",
+                    "mime": "image/png",
+                    "data": encoded.clone(),
+                }],
+            }))
+            .unwrap();
+        let SendDisposition::Start { turn, .. } = first else {
+            panic!("idle image send should start");
+        };
+        let first_path = turn
+            .prompt
+            .lines()
+            .nth(1)
+            .and_then(|line| line.strip_prefix("[image: "))
+            .and_then(|line| line.strip_suffix(']'))
+            .map(PathBuf::from)
+            .expect("materialized image reference");
+        assert!(first_path.starts_with(fixture.root.join("remote-pasted")));
+        assert_eq!(fs::read(&first_path).unwrap(), PNG_SIGNATURE);
+        assert_eq!(
+            fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let second = store
+            .prepare_send(&json!({
+                "chat": "chat-1",
+                "attachments": [{"mime": "image/png", "data": encoded}],
+            }))
+            .unwrap();
+        let SendDisposition::Queued { event, .. } = second else {
+            panic!("working image send should queue");
+        };
+        assert!(event["queue"][0].as_str().unwrap().starts_with("[image: "));
+        let next = store
+            .finish_turn("chat-1", true, None, 1, false)
+            .unwrap()
+            .next
+            .expect("queued image turn");
+        assert_eq!(next.prompt, event["queue"][0]);
     }
 
     struct Fixture {
