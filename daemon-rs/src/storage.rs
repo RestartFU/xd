@@ -107,6 +107,7 @@ impl Drop for MaterializedMessage {
 #[derive(Debug, Clone)]
 pub struct TurnSpec {
     pub chat_id: String,
+    pub backend: String,
     pub prompt: String,
     pub workdir: String,
     pub model: String,
@@ -762,12 +763,17 @@ impl StateStore {
         Ok(database.last_insert_rowid())
     }
 
-    pub fn set_session(&self, chat_id: &str, session_id: &str) -> Result<(), StorageError> {
+    pub fn set_session(
+        &self,
+        chat_id: &str,
+        backend: &str,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         database.execute(
-            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, 'codex', ?) \
+            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
              ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
-            params![chat_id, session_id],
+            params![chat_id, backend, session_id],
         )?;
         Ok(())
     }
@@ -2356,11 +2362,7 @@ fn prepare_turn(
         )
         .optional()?
         .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-    if chat.1 != "codex" {
-        return Err(StorageError::InvalidRequest(
-            "The Rust daemon currently runs Codex chats only.".into(),
-        ));
-    }
+    validate_backend(&chat.1)?;
     let mut workdir = resolve_workdir(
         transaction,
         workspace_root,
@@ -2388,17 +2390,20 @@ fn prepare_turn(
             ));
         }
     }
-    let model = chat.3.unwrap_or_else(|| "gpt-5.6-sol".into());
+    let model = chat.3.unwrap_or_else(|| match chat.1.as_str() {
+        "claude" => "claude-opus-5".into(),
+        _ => "gpt-5.6-sol".into(),
+    });
     let effort = chat.4.unwrap_or_else(|| "high".into());
     let access = if chat.6 {
-        "read-only".into()
+        "plan".into()
     } else {
         chat.5.unwrap_or_else(|| "read-only".into())
     };
     let session_id = transaction
         .query_row(
-            "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = 'codex'",
-            [chat_id],
+            "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
+            params![chat_id, chat.1],
             |row| row.get::<_, Option<String>>(0),
         )
         .optional()?
@@ -2414,6 +2419,7 @@ fn prepare_turn(
     )?;
     Ok(TurnSpec {
         chat_id: chat_id.into(),
+        backend: chat.1.clone(),
         prompt: text.into(),
         workdir,
         model: model.clone(),
@@ -2422,7 +2428,7 @@ fn prepare_turn(
         session_id,
         label: format!(
             "{} · {}",
-            model_label("codex", &model),
+            model_label(&chat.1, &model),
             effort_label(&effort)
         ),
     })
@@ -2613,6 +2619,44 @@ mod tests {
             )
             .unwrap();
         assert!(fts_exists);
+    }
+
+    #[test]
+    fn prepares_claude_turns_and_keeps_sessions_backend_specific() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        database
+            .execute(
+                "UPDATE chats SET backend = 'claude', model = 'claude-opus-5', \
+                 effort = 'xhigh', access = 'edit' WHERE id = 'chat-1'",
+                [],
+            )
+            .unwrap();
+        drop(database);
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_session("chat-1", "codex", "codex-session")
+            .unwrap();
+        store
+            .set_session("chat-1", "claude", "claude-session")
+            .unwrap();
+        let turn = match store
+            .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("first send unexpectedly queued"),
+        };
+        assert_eq!(turn.backend, "claude");
+        assert_eq!(turn.model, "claude-opus-5");
+        assert_eq!(turn.effort, "xhigh");
+        assert_eq!(turn.access, "edit");
+        assert_eq!(turn.session_id.as_deref(), Some("claude-session"));
+        assert_eq!(turn.label, "Claude Opus 5 · Extra high");
     }
 
     #[test]

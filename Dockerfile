@@ -69,7 +69,7 @@ RUN mkdir -p src \
  && cargo fetch --locked \
  && rm -rf src
 COPY daemon-rs/src ./src
-COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl /src/tests/fixtures/
+COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl /src/tests/fixtures/
 
 FROM rust-daemon-source AS rust-daemon-tests
 
@@ -269,6 +269,7 @@ COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desk
 COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 COPY --from=agent-binaries /agents/codex-package /codex-package
+COPY --from=agent-binaries /agents/claude-bin /claude
 
 # --- bundle runtime closure ------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS bundle-tools

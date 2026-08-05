@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus, StateStore,
-    agent::{CodexCommand, CodexEvent, CodexParser},
+    agent::{AgentCommand, AgentEvent, AgentParser},
     storage::TurnSpec,
 };
 
@@ -62,7 +62,8 @@ impl TurnRuntime {
     }
 
     pub fn start(&self, turn: TurnSpec) -> Result<(), String> {
-        let mut command = CodexCommand {
+        let mut command = AgentCommand {
+            backend: &turn.backend,
             prompt: &turn.prompt,
             workdir: &turn.workdir,
             model: &turn.model,
@@ -76,15 +77,15 @@ impl TurnRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("Cannot start Codex: {error}"))?;
+            .map_err(|error| format!("Cannot start {}: {error}", turn.backend))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "Cannot read Codex output.".to_string())?;
+            .ok_or_else(|| format!("Cannot read {} output.", turn.backend))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| "Cannot read Codex errors.".to_string())?;
+            .ok_or_else(|| format!("Cannot read {} errors.", turn.backend))?;
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
         let child = Arc::new(Mutex::new(child));
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -111,9 +112,10 @@ impl TurnRuntime {
         }
         let chat_id = turn.chat_id.clone();
         let label = turn.label.clone();
+        let backend = turn.backend.clone();
         let runtime = self.clone();
         if let Err(error) = thread::Builder::new()
-            .name(format!("xd-codex-turn-{turn_id}"))
+            .name(format!("xd-agent-turn-{turn_id}"))
             .spawn({
                 let child = child.clone();
                 let cancelled = cancelled.clone();
@@ -127,7 +129,7 @@ impl TurnRuntime {
             if let Ok(mut child) = child.lock() {
                 let _ = child.kill();
             }
-            return Err(format!("Cannot supervise Codex: {error}"));
+            return Err(format!("Cannot supervise {backend}: {error}"));
         }
         self.inner.events.publish(json!({
             "event": "turn-started",
@@ -171,25 +173,36 @@ impl TurnRuntime {
                 .read_to_string(&mut output);
             output
         });
-        let mut parser = CodexParser::default();
+        let mut parser = match AgentParser::new(&turn.backend) {
+            Ok(parser) => parser,
+            Err(error) => {
+                self.finish(turn, turn_id, 0, false, Some(error), 0, true);
+                return;
+            }
+        };
         let mut completed = false;
         let mut latest_error = None;
         let mut sequence = 0_u64;
         let mut had_activity = false;
+        let mut streamed_text = String::new();
 
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else {
-                latest_error = Some("Cannot read Codex output.".to_string());
+                latest_error = Some(format!("Cannot read {} output.", turn.backend));
                 break;
             };
             for event in parser.feed(&line) {
                 match event {
-                    CodexEvent::Session(session) => {
-                        if let Err(error) = self.inner.store.set_session(&turn.chat_id, &session) {
+                    AgentEvent::Session(session) => {
+                        if let Err(error) =
+                            self.inner
+                                .store
+                                .set_session(&turn.chat_id, &turn.backend, &session)
+                        {
                             latest_error = Some(error.to_string());
                         }
                     }
-                    CodexEvent::Text(text) => {
+                    AgentEvent::Text(text) => {
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
                             "assistant",
@@ -210,7 +223,18 @@ impl TurnRuntime {
                             Err(error) => latest_error = Some(error.to_string()),
                         }
                     }
-                    CodexEvent::Tool(text) => {
+                    AgentEvent::TextDelta(text) => {
+                        streamed_text.push_str(&text);
+                        sequence += 1;
+                        self.publish_sequenced(
+                            "text",
+                            &turn,
+                            turn_id,
+                            sequence,
+                            json!({"text": text}),
+                        );
+                    }
+                    AgentEvent::Tool(text) => {
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
                             "tool",
@@ -235,13 +259,25 @@ impl TurnRuntime {
                             Err(error) => latest_error = Some(error.to_string()),
                         }
                     }
-                    CodexEvent::Completed => {
+                    AgentEvent::Completed => {
                         completed = true;
                         latest_error = None;
                     }
-                    CodexEvent::Error(error) => latest_error = Some(error),
-                    CodexEvent::Usage { .. } => {}
+                    AgentEvent::Error(error) => latest_error = Some(error),
+                    AgentEvent::Usage { .. } => {}
                 }
+            }
+        }
+
+        if !streamed_text.is_empty() {
+            match self.inner.store.append_turn_message(
+                &turn.chat_id,
+                "assistant",
+                &streamed_text,
+                Some(&turn.label),
+            ) {
+                Ok(_) => had_activity = true,
+                Err(error) => latest_error = Some(error.to_string()),
             }
         }
 
@@ -255,7 +291,7 @@ impl TurnRuntime {
             latest_error.or_else(|| {
                 let stderr = stderr.trim();
                 Some(if stderr.is_empty() {
-                    "Codex stopped unexpectedly.".into()
+                    format!("{} stopped unexpectedly.", turn.backend)
                 } else {
                     stderr.into()
                 })

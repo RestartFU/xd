@@ -34,9 +34,10 @@ prerelease with the tested Linux x86_64 prototype. This channel is deliberately
 separate from the production `nightly` release while daemon connectivity and
 feature parity are still in progress.
 
-The archive carries `xd-daemon-dev` and a pinned Codex package. The Rust daemon
+The archive carries `xd-daemon-dev`, a pinned Codex package, and the pinned
+Claude Code executable. The Rust daemon
 owns persisted workspaces, chats, messages, drafts, options, shortcuts, queue
-mutations, and Codex turn execution. The GPUI dev build does not require an
+mutations, and Codex/Claude turn execution. The GPUI dev build does not require an
 installed Crystal daemon.
 
 The app connects to `XD_SOCKET` when set. Otherwise it uses
@@ -45,8 +46,8 @@ The app connects to `XD_SOCKET` when set. Otherwise it uses
 owns that process for the lifetime of the GPUI app. Its database and Workspaces
 directory live beside that socket, separate from `xd` and `xd-nightly`.
 
-This is still a development channel. Claude turns and several production-client
-management surfaces have not yet been ported.
+This is still a development channel. Several production-client management
+surfaces have not yet been ported.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 
