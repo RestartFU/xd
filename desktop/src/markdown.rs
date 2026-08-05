@@ -171,6 +171,97 @@ pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> D
     }
 }
 
+pub fn display_text(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut fenced = false;
+    for segment in source.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if fence_marker(line) {
+            fenced = !fenced;
+            output.push_str(segment);
+        } else if fenced {
+            output.push_str(segment);
+        } else {
+            output.push_str(&line.replace("<speak>", "").replace("</speak>", ""));
+            if segment.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+    }
+    output
+}
+
+pub fn spoken_text(source: &str) -> Option<String> {
+    const MAX_SPEECH_CHARS: usize = 4_000;
+    let mut fenced = false;
+    let mut collecting = false;
+    let mut invalid = false;
+    let mut current = String::new();
+    let mut snippets = Vec::new();
+    for segment in source.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if fence_marker(line) {
+            if collecting {
+                invalid = true;
+            }
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let mut rest = line;
+        loop {
+            if collecting {
+                let closing = rest.find("</speak>");
+                let nested = rest.find("<speak>");
+                if nested.is_some_and(|nested| closing.is_none_or(|closing| nested < closing)) {
+                    invalid = true;
+                    rest = &rest[nested.unwrap_or_default() + "<speak>".len()..];
+                    continue;
+                }
+                if let Some(closing) = closing {
+                    current.push_str(&rest[..closing]);
+                    if !invalid {
+                        let text = current.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if !text.is_empty() {
+                            snippets.push(text);
+                        }
+                    }
+                    current.clear();
+                    collecting = false;
+                    invalid = false;
+                    rest = &rest[closing + "</speak>".len()..];
+                    continue;
+                }
+                current.push_str(rest);
+                current.push('\n');
+                if current.chars().count() > MAX_SPEECH_CHARS {
+                    invalid = true;
+                }
+                break;
+            }
+            let Some(opening) = rest.find("<speak>") else {
+                break;
+            };
+            collecting = true;
+            invalid = false;
+            rest = &rest[opening + "<speak>".len()..];
+        }
+    }
+    let spoken = snippets.join(" ");
+    if spoken.is_empty() {
+        None
+    } else {
+        Some(spoken.chars().take(MAX_SPEECH_CHARS).collect())
+    }
+}
+
+fn fence_marker(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("```") || line.starts_with("~~~")
+}
+
 fn bounded_prefix(source: &str, limit: usize) -> (&str, bool) {
     if source.len() <= limit {
         return (source, false);
@@ -729,5 +820,17 @@ mod tests {
         let source = "é".repeat(MAX_MARKDOWN_BYTES);
         let document = parse(&source);
         assert!(document.truncated);
+    }
+
+    #[test]
+    fn speak_tags_are_hidden_and_only_valid_non_code_content_is_selected() {
+        let source = "Visible <speak>Say this</speak>.\n```html\n<speak>not this</speak>\n```";
+        assert_eq!(
+            display_text(source),
+            "Visible Say this.\n```html\n<speak>not this</speak>\n```"
+        );
+        assert_eq!(spoken_text(source).as_deref(), Some("Say this"));
+        assert_eq!(spoken_text("<speak>bad <speak>nest</speak>"), None);
+        assert_eq!(spoken_text("ordinary reply"), None);
     }
 }

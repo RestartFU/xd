@@ -23,6 +23,7 @@ Current milestone:
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;
+- opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
 - shared expandable activity cards for tools, subagents, and workflow runs;
 - bounded Markdown rendering with language-aware fenced-code highlighting;
 - variable-height virtualized transcript list;
@@ -54,6 +55,10 @@ directory live beside that socket, separate from `xd` and `xd-nightly`.
 
 This is still a development channel. Several production-client management
 surfaces have not yet been ported.
+
+Selective spoken replies are disabled by default. On Linux, install
+`espeak-ng` (or the older `espeak`) to enable local text-to-speech; no text is
+sent to a speech service.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 

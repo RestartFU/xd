@@ -68,6 +68,7 @@ impl AccentPreset {
 pub struct AppSettings {
     pub accent: AccentPreset,
     pub notifications: bool,
+    pub speech: bool,
 }
 
 impl Default for AppSettings {
@@ -75,6 +76,7 @@ impl Default for AppSettings {
         Self {
             accent: AccentPreset::Blue,
             notifications: true,
+            speech: false,
         }
     }
 }
@@ -164,6 +166,7 @@ mod tests {
         let settings = AppSettings {
             accent: AccentPreset::Purple,
             notifications: false,
+            speech: true,
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);

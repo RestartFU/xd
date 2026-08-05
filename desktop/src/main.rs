@@ -27,12 +27,14 @@ use xd_desktop::{
 
 mod input;
 mod settings;
+mod speech;
 
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, End, Home, Left, Paste, Right,
     SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit,
 };
 use settings::{AccentPreset, AppSettings};
+use speech::SpeechOutput;
 
 const BG: u32 = 0x111318;
 const SURFACE: u32 = 0x191c22;
@@ -128,6 +130,11 @@ struct PendingSend {
     restore: bool,
 }
 
+struct PendingSpeech {
+    chat_id: String,
+    previous_assistant_id: Option<i64>,
+}
+
 #[derive(Clone)]
 struct QueueEdit {
     chat_id: String,
@@ -167,6 +174,8 @@ struct XdDesktop {
     model: AppModel,
     settings: AppSettings,
     settings_open: bool,
+    speech_output: SpeechOutput,
+    pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
@@ -320,6 +329,8 @@ impl XdDesktop {
             },
             settings: AppSettings::load(),
             settings_open: false,
+            speech_output: SpeechOutput::default(),
+            pending_speech: None,
             daemon: None,
             _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
@@ -423,6 +434,8 @@ impl XdDesktop {
                 self.workspace_clone_status = None;
                 self.pending_clone_chats.clear();
                 self.workspace_clone_outcomes.clear();
+                self.pending_speech = None;
+                self.speech_output.stop();
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
                     defaults.submitting = false;
@@ -482,6 +495,14 @@ impl XdDesktop {
                 RequestKind::Send { .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
+                }
+                RequestKind::Messages { chat_id }
+                    if self
+                        .pending_speech
+                        .as_ref()
+                        .is_some_and(|pending| pending.chat_id == *chat_id) =>
+                {
+                    self.pending_speech = None;
                 }
                 RequestKind::NewFolder {
                     name,
@@ -1119,6 +1140,23 @@ impl XdDesktop {
                     self.model.live_text.clear();
                     self.model.live_activity.clear();
                 }
+                if self
+                    .pending_speech
+                    .as_ref()
+                    .is_some_and(|pending| pending.chat_id == chat_id)
+                    && let Some(pending) = self.pending_speech.take()
+                {
+                    if self.settings.speech
+                        && let Some(message) = self.model.messages.iter().rev().find(|message| {
+                            message.role == "assistant"
+                                && message.id.is_some()
+                                && message.id != pending.previous_assistant_id
+                        })
+                        && let Some(text) = markdown::spoken_text(&message.content)
+                    {
+                        self.speech_output.speak(&text);
+                    }
+                }
                 self.transcript.reset(self.model.display_message_count());
             }
             RequestKind::Send { chat_id, text } if self.chat_is_active(&chat_id) => {
@@ -1256,6 +1294,16 @@ impl XdDesktop {
             "turn-finished" if self.event_is_active(&body) => {
                 self.model.apply_event(name, &body);
                 if let Some(chat_id) = self.model.selected_chat.clone() {
+                    self.pending_speech = self.settings.speech.then(|| PendingSpeech {
+                        chat_id: chat_id.clone(),
+                        previous_assistant_id: self
+                            .model
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.role == "assistant")
+                            .and_then(|message| message.id),
+                    });
                     self.request_messages(&chat_id);
                     self.request_chat(&chat_id);
                 }
@@ -1761,6 +1809,18 @@ impl XdDesktop {
 
     fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
         self.settings.notifications = !self.settings.notifications;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn toggle_speech(&mut self, cx: &mut Context<Self>) {
+        self.settings.speech = !self.settings.speech;
+        if !self.settings.speech {
+            self.pending_speech = None;
+            self.speech_output.stop();
+        }
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
         }
@@ -2337,6 +2397,8 @@ impl XdDesktop {
             return;
         }
         self.model.select_chat(chat_id.clone());
+        self.pending_speech = None;
+        self.speech_output.stop();
         self.set_composer_text(String::new(), cx);
         self.draft_dirty = false;
         self.attachments_dirty = false;
@@ -5887,6 +5949,7 @@ impl Render for XdDesktop {
                 );
             }
             let notifications = self.settings.notifications;
+            let speech = self.settings.speech;
             div()
                 .absolute()
                 .inset_0()
@@ -5984,6 +6047,54 @@ impl Render for XdDesktop {
                                         .when(!notifications, |toggle| toggle.justify_start())
                                         .rounded_full()
                                         .bg(rgb(if notifications { accent } else { BORDER }))
+                                        .child(
+                                            div().size(px(16.0)).rounded_full().bg(rgb(0xffffff)),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("toggle-speech")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_speech(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Selective spoken replies"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Speak only completed <speak> sections locally.",
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(38.0))
+                                        .h(px(22.0))
+                                        .p(px(3.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_end()
+                                        .when(!speech, |toggle| toggle.justify_start())
+                                        .rounded_full()
+                                        .bg(rgb(if speech { accent } else { BORDER }))
                                         .child(
                                             div().size(px(16.0)).rounded_full().bg(rgb(0xffffff)),
                                         ),

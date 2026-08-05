@@ -83,7 +83,7 @@ impl Message {
         label: Option<String>,
     ) -> Self {
         let content = content.into();
-        let markdown = Some(Arc::new(markdown::parse(&content)));
+        let markdown = Some(Arc::new(markdown::parse(&markdown::display_text(&content))));
         Self {
             id,
             role: role.into(),
@@ -96,11 +96,13 @@ impl Message {
     pub fn markdown(&self) -> Arc<Document> {
         self.markdown
             .clone()
-            .unwrap_or_else(|| Arc::new(markdown::parse(&self.content)))
+            .unwrap_or_else(|| Arc::new(markdown::parse(&markdown::display_text(&self.content))))
     }
 
     fn cache_markdown(&mut self) {
-        self.markdown = Some(Arc::new(markdown::parse(&self.content)));
+        self.markdown = Some(Arc::new(markdown::parse(&markdown::display_text(
+            &self.content,
+        ))));
     }
 }
 

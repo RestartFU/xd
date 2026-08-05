@@ -1,0 +1,88 @@
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::{
+        process::{Child, Command, Stdio},
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration,
+    };
+
+    #[derive(Default)]
+    pub struct SpeechOutput {
+        current: Arc<Mutex<Option<Child>>>,
+    }
+
+    impl SpeechOutput {
+        pub fn speak(&self, text: &str) {
+            self.stop();
+            let child = ["espeak-ng", "espeak"].into_iter().find_map(|program| {
+                Command::new(program)
+                    .arg(text)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok()
+            });
+            let Some(child) = child else {
+                return;
+            };
+            let id = child.id();
+            if let Ok(mut current) = self.current.lock() {
+                *current = Some(child);
+            } else {
+                return;
+            }
+            let current = self.current.clone();
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_millis(50));
+                    let Ok(mut child) = current.lock() else {
+                        return;
+                    };
+                    let Some(active) = child.as_mut() else {
+                        return;
+                    };
+                    if active.id() != id {
+                        return;
+                    }
+                    match active.try_wait() {
+                        Ok(Some(_)) | Err(_) => {
+                            child.take();
+                            return;
+                        }
+                        Ok(None) => {}
+                    }
+                }
+            });
+        }
+
+        pub fn stop(&self) {
+            if let Ok(mut current) = self.current.lock()
+                && let Some(mut child) = current.take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl Drop for SpeechOutput {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod platform {
+    #[derive(Default)]
+    pub struct SpeechOutput;
+
+    impl SpeechOutput {
+        pub fn speak(&self, _: &str) {}
+        pub fn stop(&self) {}
+    }
+}
+
+pub use platform::SpeechOutput;
