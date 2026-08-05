@@ -26,6 +26,7 @@ pub enum RequestKind {
     },
     NewFolder {
         name: String,
+        repo: Option<String>,
     },
     NewChat {
         folder_id: String,
@@ -280,12 +281,17 @@ impl DaemonHandle {
         self.send(RequestKind::SetShortcuts, body)
     }
 
-    pub fn new_folder(&self, name: &str) -> Result<(), String> {
+    pub fn new_folder(&self, name: &str, repo: Option<&str>) -> Result<(), String> {
+        let mut body = json!({"op": "new-folder", "name": name});
+        if let Some(repo) = repo {
+            body["repo"] = Value::String(repo.to_owned());
+        }
         self.send(
             RequestKind::NewFolder {
                 name: name.to_owned(),
+                repo: repo.map(str::to_owned),
             },
-            json!({"op": "new-folder", "name": name}),
+            body,
         )
     }
 

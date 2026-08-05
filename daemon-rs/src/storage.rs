@@ -1055,6 +1055,13 @@ impl StateStore {
         validate_workspace_name(name)?;
         let parent_id = optional_string(request, "parent")?;
         let repo = optional_string(request, "repo")?;
+        if let Some(repo) = repo
+            && !Path::new(repo).is_dir()
+        {
+            return Err(StorageError::InvalidRequest(
+                "The repository path must be an existing directory on the daemon.".into(),
+            ));
+        }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let root = self.workspace_root.to_string_lossy();
         let parent_relative = match parent_id {
@@ -2875,6 +2882,43 @@ mod tests {
                 .unwrap()["parent"],
             existing
         );
+    }
+
+    #[test]
+    fn repository_backed_workspaces_require_an_existing_directory() {
+        let fixture = Fixture::new();
+        let repository = fixture.root.join("existing-repository");
+        fs::create_dir_all(&repository).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let folder = store
+            .new_folder(&json!({
+                "name": "Linked",
+                "repo": repository.to_string_lossy(),
+            }))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let database = Connection::open(&fixture.database).unwrap();
+        let stored: String = database
+            .query_row(
+                "SELECT repo FROM workspace_folders WHERE id = ?",
+                [&folder],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, repository.to_string_lossy());
+
+        let missing = fixture.root.join("missing-repository");
+        let error = store
+            .new_folder(&json!({
+                "name": "Missing",
+                "repo": missing.to_string_lossy(),
+            }))
+            .unwrap_err();
+        assert!(error.to_string().contains("existing directory"));
+        assert!(!fixture.workspaces.join("Missing").exists());
     }
 
     #[test]
