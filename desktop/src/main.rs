@@ -39,12 +39,16 @@ use settings::{AccentPreset, AppSettings};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 
-const BG: u32 = 0x111318;
-const SURFACE: u32 = 0x191c22;
-const SURFACE_HIGH: u32 = 0x232730;
-const BORDER: u32 = 0x303641;
-const TEXT: u32 = 0xe8eaf0;
-const MUTED: u32 = 0x969daa;
+// Keep the GPUI shell visually continuous with the established Crystal app.
+// These are the same near-black surfaces and quiet separators used by its GTK
+// stylesheet; the configurable accent remains reserved for active controls.
+const BG: u32 = 0x0a0a0c;
+const SIDEBAR: u32 = 0x060607;
+const SURFACE: u32 = 0x101013;
+const SURFACE_HIGH: u32 = 0x1a1a1e;
+const BORDER: u32 = 0x2a2a2d;
+const TEXT: u32 = 0xf2f2f4;
+const MUTED: u32 = 0xa8a8ad;
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -3087,16 +3091,6 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let is_user = message.role == "user";
         let is_tool = message.role == "tool";
-        let label = message
-            .label
-            .clone()
-            .unwrap_or_else(|| match message.role.as_str() {
-                "user" => "You".into(),
-                "assistant" => "Assistant".into(),
-                "tool" => "Activity".into(),
-                role => role.to_owned(),
-            });
-
         if is_tool {
             let key = message
                 .id
@@ -3113,26 +3107,23 @@ impl XdDesktop {
 
         div()
             .w_full()
-            .px_6()
+            .px_4()
             .py_2()
+            .flex()
+            .when(is_user, |row| row.justify_end())
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(920.0))
-                    .mx_auto()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(if is_user { 0x3c4b78 } else { BORDER }))
-                    .bg(rgb(if is_user { 0x202944 } else { SURFACE }))
+                    .when(!is_user, |body| body.w_full().max_w(px(1040.0)).mx_auto())
+                    .when(is_user, |body| {
+                        body.max_w(px(680.0))
+                            .px_4()
+                            .py_3()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(rgb(0x242428))
+                            .bg(rgb(SURFACE_HIGH))
+                    })
                     .text_color(rgb(TEXT))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(if is_user { 0xaec0ff } else { MUTED }))
-                            .mb_2()
-                            .child(label),
-                    )
                     .child(
                         Self::markdown_content(message.markdown())
                             .text_sm()
@@ -3162,8 +3153,8 @@ impl XdDesktop {
             .mx_auto()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x343b48))
-            .bg(rgb(0x171a20))
+            .border_color(rgb(BORDER))
+            .bg(rgb(SURFACE))
             .overflow_hidden()
             .child(
                 div()
@@ -3172,7 +3163,7 @@ impl XdDesktop {
                     .px_4()
                     .py_3()
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x1d222b)))
+                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                     .on_click(move |_, _, cx| {
                         desktop.update(cx, |this, cx| {
                             if !this.expanded_activity.remove(&toggle_key) {
@@ -3230,9 +3221,9 @@ impl XdDesktop {
                     .pb_3()
                     .pt_1()
                     .border_t_1()
-                    .border_color(rgb(0x2a303b))
+                    .border_color(rgb(BORDER))
                     .text_sm()
-                    .text_color(rgb(0xb8bfcc))
+                    .text_color(rgb(MUTED))
                     .child(card.detail),
             );
             if let Some(footer) = card.footer {
@@ -3280,7 +3271,7 @@ impl XdDesktop {
                     .py_1()
                     .border_l_2()
                     .border_color(rgb(0x59647a))
-                    .text_color(rgb(0xb8bfcc))
+                    .text_color(rgb(MUTED))
                     .child(Self::inline_text(content))
                     .into_any_element(),
                 Block::ListItem { ordered, content } => div()
@@ -3323,17 +3314,17 @@ impl XdDesktop {
                         .w_full()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(0x343b48))
-                        .bg(rgb(0x11141a))
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
                         .overflow_hidden()
                         .child(
                             div()
                                 .w_full()
                                 .px_3()
                                 .py_1()
-                                .bg(rgb(0x1d222b))
+                                .bg(rgb(SURFACE_HIGH))
                                 .text_xs()
-                                .text_color(rgb(0xaab2c0))
+                                .text_color(rgb(MUTED))
                                 .child(language),
                         )
                         .child(
@@ -3732,7 +3723,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(TEXT))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.move_sidebar_item(target.clone(), None, cx);
                                 }))
@@ -3761,7 +3752,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(TEXT))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.move_sidebar_item(
                                         target.clone(),
@@ -3783,7 +3774,7 @@ impl Render for XdDesktop {
                             .flex_wrap()
                             .gap_1()
                             .rounded_md()
-                            .bg(rgb(0x1d222b))
+                            .bg(rgb(SURFACE_HIGH))
                             .text_xs()
                             .text_color(rgb(MUTED))
                             .when(sidebar_move_submitting, |panel| panel.child("Moving…"))
@@ -3809,7 +3800,7 @@ impl Render for XdDesktop {
                         .flex_col()
                         .gap_1()
                         .rounded_md()
-                        .bg(rgb(0x1d222b))
+                        .bg(rgb(SURFACE_HIGH))
                         .child(
                             div()
                                 .text_xs()
@@ -3872,7 +3863,7 @@ impl Render for XdDesktop {
                                         .text_color(rgb(MUTED))
                                         .when(!workspace_context_submitting, |button| {
                                             button.cursor_pointer().hover(|style| {
-                                                style.bg(rgb(0x303c52)).text_color(rgb(TEXT))
+                                                style.bg(rgb(0x242428)).text_color(rgb(TEXT))
                                             })
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -3897,7 +3888,7 @@ impl Render for XdDesktop {
                                         .when(can_save_context, |button| {
                                             button
                                                 .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x303c52)))
+                                                .hover(|style| style.bg(rgb(0x242428)))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if can_save_context {
@@ -4035,7 +4026,7 @@ impl Render for XdDesktop {
                         .flex_col()
                         .gap_2()
                         .rounded_md()
-                        .bg(rgb(0x1d222b))
+                        .bg(rgb(SURFACE_HIGH))
                         .text_xs()
                         .text_color(rgb(MUTED))
                         .when(loading, |panel| panel.child("Loading defaults…"))
@@ -4123,7 +4114,7 @@ impl Render for XdDesktop {
                                         .py_1()
                                         .rounded_md()
                                         .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                        .hover(|style| style.bg(rgb(0x242428)))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.workspace_defaults = None;
                                             cx.notify();
@@ -4140,7 +4131,7 @@ impl Render for XdDesktop {
                                         .when(can_save, |button| {
                                             button
                                                 .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x303c52)))
+                                                .hover(|style| style.bg(rgb(0x242428)))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if can_save {
@@ -4164,7 +4155,7 @@ impl Render for XdDesktop {
                         .items_center()
                         .gap_1()
                         .rounded_md()
-                        .bg(rgb(0x1d222b))
+                        .bg(rgb(SURFACE_HIGH))
                         .child(
                             div()
                                 .id(("chat-create-input", folder_row_index))
@@ -4200,7 +4191,7 @@ impl Render for XdDesktop {
                                 .when(can_save_chat, |button| {
                                     button
                                         .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                        .hover(|style| style.bg(rgb(0x242428)))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if can_save_chat {
@@ -4224,7 +4215,7 @@ impl Render for XdDesktop {
                                 .when(!chat_create_submitting, |button| {
                                     button
                                         .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                        .hover(|style| style.bg(rgb(0x242428)))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !chat_create_submitting {
@@ -4310,7 +4301,7 @@ impl Render for XdDesktop {
                                     .when(can_save, |button| {
                                         button
                                             .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(0x303c52)))
+                                            .hover(|style| style.bg(rgb(0x242428)))
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if can_save {
@@ -4328,7 +4319,7 @@ impl Render for XdDesktop {
                                     .text_xs()
                                     .text_color(rgb(MUTED))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
+                                    .hover(|style| style.bg(rgb(0x242428)))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cancel_sidebar_edit(cx);
                                     }))
@@ -4352,7 +4343,7 @@ impl Render for XdDesktop {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(if is_selected { SURFACE_HIGH } else { SURFACE }))
+                        .bg(rgb(if is_selected { SURFACE_HIGH } else { SIDEBAR }))
                         .text_color(rgb(if is_selected || unread { TEXT } else { MUTED }))
                         .text_sm()
                         .when(unread, |row| row.font_weight(FontWeight::BOLD))
@@ -4384,7 +4375,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(MUTED))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)).text_color(rgb(TEXT)))
+                                .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.begin_sidebar_edit(
                                         rename_target.clone(),
@@ -4404,7 +4395,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(if moving_chat { TEXT } else { MUTED }))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)).text_color(rgb(TEXT)))
+                                .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle_sidebar_move(move_target.clone(), cx);
                                 }))
@@ -4452,7 +4443,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(TEXT))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.move_sidebar_item(
                                         target.clone(),
@@ -4474,7 +4465,7 @@ impl Render for XdDesktop {
                             .flex_wrap()
                             .gap_1()
                             .rounded_md()
-                            .bg(rgb(0x1d222b))
+                            .bg(rgb(SURFACE_HIGH))
                             .text_xs()
                             .text_color(rgb(MUTED))
                             .when(sidebar_move_submitting, |panel| panel.child("Moving…"))
@@ -4508,24 +4499,24 @@ impl Render for XdDesktop {
         let workspace_clone_status = self.workspace_clone_status.clone();
         let settings_open = self.settings_open;
         let sidebar = div()
-            .w(px(280.0))
+            .w(px(272.0))
             .h_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(rgb(SURFACE))
+            .bg(rgb(SIDEBAR))
             .border_r_1()
             .border_color(rgb(BORDER))
             .child(
                 div()
-                    .h(px(58.0))
+                    .h(px(52.0))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px_4()
+                    .px_3()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(div().text_lg().text_color(rgb(TEXT)).child("xd-dev"))
+                    .child(div().text_sm().text_color(rgb(TEXT)).child("Workspaces"))
                     .child(
                         div()
                             .flex()
@@ -4543,7 +4534,7 @@ impl Render for XdDesktop {
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(if settings_open { SURFACE_HIGH } else { SURFACE }))
+                                    .bg(rgb(if settings_open { SURFACE_HIGH } else { SIDEBAR }))
                                     .text_sm()
                                     .text_color(rgb(if settings_open { TEXT } else { MUTED }))
                                     .cursor_pointer()
@@ -4559,15 +4550,15 @@ impl Render for XdDesktop {
             )
             .child(
                 div()
-                    .px_4()
-                    .pt_4()
+                    .px_3()
+                    .pt_3()
                     .pb_2()
                     .flex()
                     .items_center()
                     .justify_between()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("WORKSPACES")
+                    .child("LOCAL")
                     .child(
                         div()
                             .id("new-workspace")
@@ -4601,7 +4592,7 @@ impl Render for XdDesktop {
                         .flex_col()
                         .gap_1()
                         .rounded_md()
-                        .bg(rgb(0x1d222b))
+                        .bg(rgb(SURFACE_HIGH))
                         .child(
                             div()
                                 .id("workspace-create-input")
@@ -4698,7 +4689,7 @@ impl Render for XdDesktop {
                                         .text_color(rgb(MUTED))
                                         .when(!workspace_create_submitting, |button| {
                                             button.cursor_pointer().hover(|style| {
-                                                style.bg(rgb(0x303c52)).text_color(rgb(TEXT))
+                                                style.bg(rgb(0x242428)).text_color(rgb(TEXT))
                                             })
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -4784,20 +4775,20 @@ impl Render for XdDesktop {
             })
             .unwrap_or_else(|| "xd daemon".into());
         let header = div()
-            .h(px(102.0))
+            .h(px(52.0))
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(rgb(SURFACE))
+            .bg(rgb(BG))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
                 div()
-                    .h(px(58.0))
+                    .h(px(52.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .px_5()
+                    .px_4()
                     .child(
                         div()
                             .min_w_0()
@@ -4821,7 +4812,7 @@ impl Render for XdDesktop {
                             .when(can_open_diff, |button| {
                                 button
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
+                                    .hover(|style| style.bg(rgb(0x242428)))
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if can_open_diff {
@@ -4847,7 +4838,7 @@ impl Render for XdDesktop {
                             .when(can_open_diff, |button| {
                                 button
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
+                                    .hover(|style| style.bg(rgb(0x242428)))
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if can_open_diff {
@@ -4866,201 +4857,198 @@ impl Render for XdDesktop {
                             .text_xs()
                             .text_color(rgb(MUTED))
                             .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0x303c52)).text_color(rgb(TEXT)))
+                            .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_search(window, cx);
                             }))
                             .child("Search  Ctrl K"),
                     ),
+            );
+
+        let composer_controls = div()
+            .h(px(42.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .id("assistant-cycle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(SURFACE_HIGH))
+                    .text_xs()
+                    .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                    .when(can_change_agent, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if can_change_agent {
+                            this.cycle_model();
+                        }
+                    }))
+                    .child(model_label),
             )
             .child(
                 div()
-                    .h(px(44.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_5()
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .id("assistant-cycle")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(SURFACE_HIGH))
-                            .text_xs()
-                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
-                            .when(can_change_agent, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if can_change_agent {
-                                    this.cycle_model();
-                                }
-                            }))
-                            .child(model_label),
-                    )
-                    .child(
-                        div()
-                            .id("effort-cycle")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(SURFACE_HIGH))
-                            .text_xs()
-                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
-                            .when(can_change_agent, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if can_change_agent {
-                                    this.cycle_effort();
-                                }
-                            }))
-                            .child(format!("Effort: {effort_label}")),
-                    )
-                    .child(
-                        div()
-                            .id("access-cycle")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(SURFACE_HIGH))
-                            .text_xs()
-                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
-                            .when(can_change_agent, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if can_change_agent {
-                                    this.cycle_access();
-                                }
-                            }))
-                            .child(access_label),
-                    )
-                    .child(
-                        div()
-                            .id("plan-toggle")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(if self.model.plan {
-                                0x26354d
-                            } else {
-                                SURFACE_HIGH
-                            }))
-                            .text_xs()
-                            .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
-                            .when(can_change_agent, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if can_change_agent {
-                                    this.toggle_plan();
-                                }
-                            }))
-                            .child(if self.model.plan {
-                                "Plan: on"
-                            } else {
-                                "Plan: off"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("workspace-cycle")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(SURFACE_HIGH))
-                            .text_xs()
-                            .text_color(rgb(if can_cycle_workspace { TEXT } else { MUTED }))
-                            .when(can_cycle_workspace, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if can_cycle_workspace {
-                                    this.cycle_workspace();
-                                }
-                            }))
-                            .child(format!("Workspace: {workspace_label}")),
-                    )
-                    .when(can_remove_worktree, |controls| {
-                        controls.child(
-                            div()
-                                .id("remove-worktree")
-                                .px_3()
-                                .py_1()
-                                .rounded_full()
-                                .bg(rgb(0x3c292d))
-                                .text_xs()
-                                .text_color(rgb(0xf1b3ba))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x513038)))
-                                .on_click(
-                                    cx.listener(|this, _, _, _| this.remove_selected_worktree()),
-                                )
-                                .child("Remove worktree"),
-                        )
+                    .id("effort-cycle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(SURFACE_HIGH))
+                    .text_xs()
+                    .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                    .when(can_change_agent, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .child(
-                        div()
-                            .id("new-worktree-toggle")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(if new_worktree { 0x26354d } else { SURFACE_HIGH }))
-                            .text_xs()
-                            .text_color(rgb(if can_change_worktree { TEXT } else { MUTED }))
-                            .when(can_change_worktree, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x303c52)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if can_change_worktree {
-                                    this.toggle_new_worktree();
-                                }
-                            }))
-                            .child(if new_worktree {
-                                "New worktree: on"
-                            } else {
-                                "New worktree: off"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("turn-status")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(rgb(if working { 0x26354d } else { SURFACE_HIGH }))
-                            .text_xs()
-                            .text_color(rgb(if working { 0xaec0ff } else { MUTED }))
-                            .when(working, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x31435f)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if working {
-                                    this.cancel_turn();
-                                    cx.notify();
-                                }
-                            }))
-                            .child(if working { "■ Stop turn" } else { "Ready" }),
-                    ),
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if can_change_agent {
+                            this.cycle_effort();
+                        }
+                    }))
+                    .child(format!("Effort: {effort_label}")),
+            )
+            .child(
+                div()
+                    .id("access-cycle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(SURFACE_HIGH))
+                    .text_xs()
+                    .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                    .when(can_change_agent, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if can_change_agent {
+                            this.cycle_access();
+                        }
+                    }))
+                    .child(access_label),
+            )
+            .child(
+                div()
+                    .id("plan-toggle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(if self.model.plan {
+                        0x26354d
+                    } else {
+                        SURFACE_HIGH
+                    }))
+                    .text_xs()
+                    .text_color(rgb(if can_change_agent { TEXT } else { MUTED }))
+                    .when(can_change_agent, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if can_change_agent {
+                            this.toggle_plan();
+                        }
+                    }))
+                    .child(if self.model.plan {
+                        "Plan: on"
+                    } else {
+                        "Plan: off"
+                    }),
+            )
+            .child(
+                div()
+                    .id("workspace-cycle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(SURFACE_HIGH))
+                    .text_xs()
+                    .text_color(rgb(if can_cycle_workspace { TEXT } else { MUTED }))
+                    .when(can_cycle_workspace, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if can_cycle_workspace {
+                            this.cycle_workspace();
+                        }
+                    }))
+                    .child(format!("Workspace: {workspace_label}")),
+            )
+            .when(can_remove_worktree, |controls| {
+                controls.child(
+                    div()
+                        .id("remove-worktree")
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .bg(rgb(0x3c292d))
+                        .text_xs()
+                        .text_color(rgb(0xf1b3ba))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x513038)))
+                        .on_click(cx.listener(|this, _, _, _| this.remove_selected_worktree()))
+                        .child("Remove worktree"),
+                )
+            })
+            .child(
+                div()
+                    .id("new-worktree-toggle")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(if new_worktree { 0x26354d } else { SURFACE_HIGH }))
+                    .text_xs()
+                    .text_color(rgb(if can_change_worktree { TEXT } else { MUTED }))
+                    .when(can_change_worktree, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        if can_change_worktree {
+                            this.toggle_new_worktree();
+                        }
+                    }))
+                    .child(if new_worktree {
+                        "New worktree: on"
+                    } else {
+                        "New worktree: off"
+                    }),
+            )
+            .child(
+                div()
+                    .id("turn-status")
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(if working { 0x26354d } else { SURFACE_HIGH }))
+                    .text_xs()
+                    .text_color(rgb(if working { 0xaec0ff } else { MUTED }))
+                    .when(working, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x31435f)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if working {
+                            this.cancel_turn();
+                            cx.notify();
+                        }
+                    }))
+                    .child(if working { "■ Stop turn" } else { "Ready" }),
             );
 
         let expanded_activity = self.expanded_activity.clone();
@@ -5401,15 +5389,15 @@ impl Render for XdDesktop {
 
         let composer = div()
             .flex_shrink_0()
-            .px_5()
+            .px_3()
             .pt_2()
-            .pb_4()
+            .pb_3()
             .bg(rgb(BG))
             .when_some(self.model.connection_error.clone(), |element, error| {
                 element.child(
                     div()
                         .w_full()
-                        .max_w(px(920.0))
+                        .max_w(px(1040.0))
                         .mx_auto()
                         .mb_2()
                         .px_3()
@@ -5426,14 +5414,16 @@ impl Render for XdDesktop {
                     div()
                         .id("queue-panel")
                         .w_full()
-                        .max_w(px(920.0))
+                        .max_w(px(1040.0))
                         .mx_auto()
                         .mb_2()
-                        .max_h(px(230.0))
+                        .max_h(px(160.0))
                         .overflow_y_scroll()
                         .p_2()
                         .rounded_lg()
-                        .bg(rgb(0x24212f))
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(BORDER))
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -5442,7 +5432,7 @@ impl Render for XdDesktop {
                                 .px_1()
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xc8b6e8))
+                                .text_color(rgb(MUTED))
                                 .child(format!(
                                     "{queue_count} queued message{}",
                                     if queue_count == 1 { "" } else { "s" }
@@ -5455,7 +5445,7 @@ impl Render for XdDesktop {
                 element.child(
                     div()
                         .w_full()
-                        .max_w(px(920.0))
+                        .max_w(px(1040.0))
                         .mx_auto()
                         .mb_2()
                         .flex()
@@ -5468,7 +5458,7 @@ impl Render for XdDesktop {
                 element.child(
                     div()
                         .w_full()
-                        .max_w(px(920.0))
+                        .max_w(px(1040.0))
                         .mx_auto()
                         .mb_2()
                         .flex()
@@ -5483,7 +5473,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(TEXT))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_shortcut(false);
                                     cx.notify();
@@ -5504,7 +5494,7 @@ impl Render for XdDesktop {
                                 .text_xs()
                                 .text_color(rgb(TEXT))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_shortcut(true);
                                     cx.notify();
@@ -5521,7 +5511,7 @@ impl Render for XdDesktop {
                 element.child(
                     div()
                         .w_full()
-                        .max_w(px(920.0))
+                        .max_w(px(1040.0))
                         .mx_auto()
                         .mb_2()
                         .flex()
@@ -5534,9 +5524,9 @@ impl Render for XdDesktop {
                     .id("composer")
                     .track_focus(&composer_focus)
                     .w_full()
-                    .max_w(px(920.0))
+                    .max_w(px(1040.0))
                     .mx_auto()
-                    .min_h(px(74.0))
+                    .min_h(px(64.0))
                     .flex()
                     .items_center()
                     .gap_3()
@@ -5595,6 +5585,19 @@ impl Render for XdDesktop {
                             }))
                             .child(send_label),
                     ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(1040.0))
+                    .mx_auto()
+                    .mt_1()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .overflow_hidden()
+                    .child(composer_controls),
             );
 
         let git_commit_input = self.git_commit_input.clone();
@@ -5687,7 +5690,7 @@ impl Render for XdDesktop {
                                 .gap_2()
                                 .bg(rgb(SURFACE_HIGH))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x303c52)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle_diff_file(path.clone(), cx);
                                 }))
@@ -6220,7 +6223,7 @@ impl Render for XdDesktop {
                                 .when(can_push, |button| {
                                     button
                                         .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0x303c52)))
+                                        .hover(|style| style.bg(rgb(0x242428)))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if can_push {
@@ -6239,17 +6242,17 @@ impl Render for XdDesktop {
             let output = panel.screen.text();
             let active = panel.terminal_id.is_some() && !panel.closed && !panel.loading;
             div()
-                .w(px(560.0))
-                .h_full()
+                .w_full()
+                .h(px(320.0))
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
-                .border_l_1()
+                .border_t_1()
                 .border_color(rgb(BORDER))
-                .bg(rgb(0x0d0f13))
+                .bg(rgb(BG))
                 .child(
                     div()
-                        .h(px(50.0))
+                        .h(px(40.0))
                         .px_3()
                         .flex()
                         .items_center()
@@ -6359,7 +6362,7 @@ impl Render for XdDesktop {
                         } else {
                             BORDER
                         }))
-                        .bg(rgb(0x11141a))
+                        .bg(rgb(BG))
                         .when(active, |input| {
                             input
                                 .cursor_pointer()
@@ -6723,10 +6726,10 @@ impl Render for XdDesktop {
                     .flex_col()
                     .child(header)
                     .child(div().flex_1().min_h_0().child(transcript))
-                    .child(composer),
+                    .child(composer)
+                    .when_some(terminal_pane, |column, pane| column.child(pane)),
             )
             .when_some(diff_pane, |root, pane| root.child(pane))
-            .when_some(terminal_pane, |root, pane| root.child(pane))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
     }
