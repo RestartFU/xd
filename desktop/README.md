@@ -16,6 +16,7 @@ Current milestone:
 - workspace and chat creation controls;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - cross-device text draft synchronization with a short local debounce;
+- background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;
 - variable-height virtualized transcript list;
 - bounded full-duplex protocol framing and request-id matching;
@@ -43,8 +44,8 @@ The app connects to `XD_SOCKET` when set. Otherwise it uses
 owns that process for the lifetime of the GPUI app. Its database and Workspaces
 directory live beside that socket, separate from `xd` and `xd-nightly`.
 
-This is still a development channel. Attachments, Claude turns, worktrees, and
-several production-client management surfaces have not yet been ported.
+This is still a development channel. Claude turns, worktrees, and several
+production-client management surfaces have not yet been ported.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 

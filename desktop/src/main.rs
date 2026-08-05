@@ -1,13 +1,14 @@
-use std::time::Duration;
+use std::{fs, path::PathBuf, time::Duration};
 
 use gpui::{
     App, Application, Bounds, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState,
-    Render, Timer, Window, WindowBounds, WindowOptions, div, list, prelude::*, px, rgb, size,
+    ObjectFit, PathPromptOptions, Render, Timer, Window, WindowBounds, WindowOptions, div, img,
+    list, prelude::*, px, rgb, size,
 };
 use serde_json::Value;
 use xd_desktop::{
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
-    model::{AppModel, Message},
+    model::{AppModel, Attachment, Message},
 };
 
 mod input;
@@ -24,6 +25,14 @@ const BORDER: u32 = 0x303641;
 const TEXT: u32 = 0xe8eaf0;
 const MUTED: u32 = 0x969daa;
 const ACCENT: u32 = 0x6b8cff;
+const MAX_ATTACHMENTS: usize = 4;
+const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+
+struct PendingSend {
+    text: String,
+    attachments: Vec<Attachment>,
+}
 
 struct XdDesktop {
     model: AppModel,
@@ -34,8 +43,10 @@ struct XdDesktop {
     composer: String,
     draft_generation: u64,
     draft_dirty: bool,
+    attachments_dirty: bool,
+    attachment_generation: u64,
     sending: bool,
-    pending_send: Option<String>,
+    pending_send: Option<PendingSend>,
 }
 
 impl XdDesktop {
@@ -58,6 +69,8 @@ impl XdDesktop {
             composer: String::new(),
             draft_generation: 0,
             draft_dirty: false,
+            attachments_dirty: false,
+            attachment_generation: 0,
             sending: false,
             pending_send: None,
         };
@@ -103,8 +116,16 @@ impl XdDesktop {
                 self.sending = false;
                 self.restore_pending_send(cx);
             }
-            DaemonUpdate::Reply { kind, body } => self.handle_reply(kind, body, cx),
-            DaemonUpdate::Event { name, body } => self.handle_event(&name, Value::Object(body), cx),
+            DaemonUpdate::Reply {
+                kind,
+                body,
+                attachments,
+            } => self.handle_reply(kind, body, attachments, cx),
+            DaemonUpdate::Event {
+                name,
+                body,
+                attachments,
+            } => self.handle_event(&name, Value::Object(body), attachments, cx),
         }
         cx.notify();
     }
@@ -113,6 +134,7 @@ impl XdDesktop {
         &mut self,
         kind: RequestKind,
         body: serde_json::Map<String, Value>,
+        attachments: Option<Vec<Attachment>>,
         cx: &mut Context<Self>,
     ) {
         let value = Value::Object(body);
@@ -165,7 +187,15 @@ impl XdDesktop {
                 self.select_chat(chat_id.to_owned(), cx);
             }
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
+                let local_attachments = self
+                    .attachments_dirty
+                    .then(|| self.model.draft_attachments.clone());
                 self.model.apply_chat(&value);
+                if let Some(local_attachments) = local_attachments {
+                    self.model.draft_attachments = local_attachments;
+                } else if let Some(attachments) = attachments {
+                    self.model.draft_attachments = attachments;
+                }
                 if !self.draft_dirty {
                     let draft = self.model.draft.clone();
                     self.set_composer_text(draft, cx);
@@ -199,17 +229,39 @@ impl XdDesktop {
                 }
                 let _ = text;
             }
-            RequestKind::SetDraft { chat_id, text } if self.chat_is_active(&chat_id) => {
+            RequestKind::SetDraft {
+                chat_id,
+                text,
+                attachment_generation,
+            } if self.chat_is_active(&chat_id) => {
+                let attachment_reply_is_current = attachment_generation
+                    .is_some_and(|generation| generation == self.attachment_generation);
+                let local_attachments = (!attachment_reply_is_current && self.attachments_dirty)
+                    .then(|| self.model.draft_attachments.clone());
                 self.model.apply_draft_snapshot(&value);
+                if let Some(local_attachments) = local_attachments {
+                    self.model.draft_attachments = local_attachments;
+                } else if attachment_reply_is_current && let Some(attachments) = attachments {
+                    self.model.draft_attachments = attachments;
+                }
                 if self.composer == text {
                     self.draft_dirty = false;
+                }
+                if attachment_reply_is_current {
+                    self.attachments_dirty = false;
                 }
             }
             _ => {}
         }
     }
 
-    fn handle_event(&mut self, name: &str, body: Value, cx: &mut Context<Self>) {
+    fn handle_event(
+        &mut self,
+        name: &str,
+        body: Value,
+        attachments: Option<Vec<Attachment>>,
+        cx: &mut Context<Self>,
+    ) {
         match name {
             "tree" => self.request_tree(),
             "changed" if self.event_is_active(&body) => {
@@ -218,7 +270,15 @@ impl XdDesktop {
                 }
             }
             "draft" if self.event_is_active(&body) => {
+                let local_attachments = self
+                    .attachments_dirty
+                    .then(|| self.model.draft_attachments.clone());
                 self.model.apply_event(name, &body);
+                if let Some(local_attachments) = local_attachments {
+                    self.model.draft_attachments = local_attachments;
+                } else if let Some(attachments) = attachments {
+                    self.model.draft_attachments = attachments;
+                }
                 if !self.draft_dirty {
                     let draft = self.model.draft.clone();
                     self.set_composer_text(draft, cx);
@@ -304,6 +364,7 @@ impl XdDesktop {
         self.model.select_chat(chat_id.clone());
         self.set_composer_text(String::new(), cx);
         self.draft_dirty = false;
+        self.attachments_dirty = false;
         self.pending_send = None;
         self.sending = false;
         self.transcript.reset(0);
@@ -317,41 +378,49 @@ impl XdDesktop {
             return;
         }
         let text = self.composer.trim().to_owned();
+        let attachments = self.model.draft_attachments.clone();
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if text.is_empty() {
+        if text.is_empty() && attachments.is_empty() {
             return;
         }
         let Some(daemon) = self.daemon.clone() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return;
         };
-        if let Err(error) = daemon.send_message(&chat_id, &text) {
+        if let Err(error) = daemon.send_message(&chat_id, &text, &attachments) {
             self.model.connection_error = Some(error);
             return;
         }
 
         self.sending = true;
-        self.pending_send = Some(text);
+        self.pending_send = Some(PendingSend { text, attachments });
         self.set_composer_text(String::new(), cx);
+        self.model.draft_attachments.clear();
         self.draft_dirty = true;
+        self.attachments_dirty = true;
+        self.attachment_generation = self.attachment_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
-        let _ = daemon.set_draft(&chat_id, "");
+        let _ = daemon.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
         cx.notify();
     }
 
     fn restore_pending_send(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = self.pending_send.take() else {
+        let Some(pending) = self.pending_send.take() else {
             return;
         };
-        let restored = if self.composer.is_empty() {
-            text
-        } else {
-            format!("{text}\n{}", self.composer)
+        let restored = match (pending.text.is_empty(), self.composer.is_empty()) {
+            (false, false) => format!("{}\n{}", pending.text, self.composer),
+            (false, true) => pending.text,
+            (true, false) => self.composer.clone(),
+            (true, true) => String::new(),
         };
         self.set_composer_text(restored, cx);
+        self.model.draft_attachments = pending.attachments;
         self.draft_dirty = true;
+        self.attachments_dirty = true;
+        self.attachment_generation = self.attachment_generation.saturating_add(1);
     }
 
     fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -360,9 +429,70 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text(text, cx));
     }
 
+    fn attach_images(&mut self, cx: &mut Context<Self>) {
+        let available = MAX_ATTACHMENTS.saturating_sub(self.model.draft_attachments.len());
+        if available == 0 || self.model.selected_chat.is_none() {
+            return;
+        }
+        let existing_bytes = self
+            .model
+            .draft_attachments
+            .iter()
+            .map(|attachment| attachment.preview.bytes.len())
+            .sum();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach PNG images".into()),
+        });
+        let load = cx.background_executor().spawn(async move {
+            match receiver.await {
+                Ok(Ok(Some(paths))) => load_png_attachments(paths, available, existing_bytes),
+                Ok(Ok(None)) => Ok(Vec::new()),
+                Ok(Err(error)) => Err(format!("Cannot open the image picker: {error}")),
+                Err(_) => Err("The image picker closed unexpectedly.".into()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = load.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(attachments) if !attachments.is_empty() => {
+                    this.model.draft_attachments.extend(attachments);
+                    this.attachments_dirty = true;
+                    this.attachment_generation = this.attachment_generation.saturating_add(1);
+                    this.schedule_draft_sync(cx);
+                    cx.notify();
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    this.model.connection_error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.model.draft_attachments.len() {
+            return;
+        }
+        self.model.draft_attachments.remove(index);
+        self.attachments_dirty = true;
+        self.attachment_generation = self.attachment_generation.saturating_add(1);
+        self.schedule_draft_sync(cx);
+        cx.notify();
+    }
+
     fn composer_changed(&mut self, text: String, cx: &mut Context<Self>) {
         self.composer = text;
         self.draft_dirty = true;
+        self.schedule_draft_sync(cx);
+        cx.notify();
+    }
+
+    fn schedule_draft_sync(&mut self, cx: &mut Context<Self>) {
         self.draft_generation = self.draft_generation.saturating_add(1);
         let generation = self.draft_generation;
         cx.spawn(async move |this, cx| {
@@ -374,18 +504,23 @@ impl XdDesktop {
             });
         })
         .detach();
-        cx.notify();
     }
 
     fn sync_draft(&mut self) {
-        if !self.draft_dirty {
+        if !self.draft_dirty && !self.attachments_dirty {
             return;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
         if let Some(daemon) = &self.daemon {
-            if let Err(error) = daemon.set_draft(&chat_id, &self.composer) {
+            let attachments = self
+                .attachments_dirty
+                .then_some(self.model.draft_attachments.as_slice());
+            let attachment_generation = attachments.map(|_| self.attachment_generation);
+            if let Err(error) =
+                daemon.set_draft(&chat_id, &self.composer, attachments, attachment_generation)
+            {
                 self.model.connection_error = Some(error);
             }
         }
@@ -649,7 +784,11 @@ impl Render for XdDesktop {
         .size_full();
 
         let composer_focus = self.composer_input.read(cx).focus_handle(cx);
-        let can_send = !self.composer.trim().is_empty()
+        let attachment_count = self.model.draft_attachments.len();
+        let can_attach = attachment_count < MAX_ATTACHMENTS
+            && self.model.selected_chat.is_some()
+            && self.model.connected;
+        let can_send = (!self.composer.trim().is_empty() || attachment_count > 0)
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
@@ -660,6 +799,65 @@ impl Render for XdDesktop {
         } else {
             "Send"
         };
+        let attachment_previews = self
+            .model
+            .draft_attachments
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, attachment)| {
+                div()
+                    .w(px(88.0))
+                    .p_1()
+                    .rounded_lg()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .relative()
+                            .h(px(60.0))
+                            .overflow_hidden()
+                            .rounded_md()
+                            .bg(rgb(SURFACE_HIGH))
+                            .child(
+                                img(attachment.preview)
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain),
+                            )
+                            .child(
+                                div()
+                                    .id(("remove-attachment", index))
+                                    .absolute()
+                                    .top_1()
+                                    .right_1()
+                                    .size(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(0x1a1d24))
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_attachment(index, cx)
+                                    }))
+                                    .child("×"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .px_1()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .overflow_hidden()
+                            .child(attachment.name),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
 
         let composer = div()
             .flex_shrink_0()
@@ -702,6 +900,18 @@ impl Render for XdDesktop {
                         )),
                 )
             })
+            .when(attachment_count > 0, |element| {
+                element.child(
+                    div()
+                        .w_full()
+                        .max_w(px(920.0))
+                        .mx_auto()
+                        .mb_2()
+                        .flex()
+                        .gap_2()
+                        .children(attachment_previews),
+                )
+            })
             .child(
                 div()
                     .id("composer")
@@ -726,6 +936,26 @@ impl Render for XdDesktop {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
                         window.focus(&focus);
                     }))
+                    .child(
+                        div()
+                            .id("attach")
+                            .px_2()
+                            .py_2()
+                            .rounded_lg()
+                            .text_sm()
+                            .text_color(rgb(if can_attach { TEXT } else { MUTED }))
+                            .when(can_attach, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_attach {
+                                    this.attach_images(cx);
+                                }
+                            }))
+                            .child("+ Attach"),
+                    )
                     .child(self.composer_input.clone())
                     .child(
                         div()
@@ -768,6 +998,39 @@ impl Render for XdDesktop {
                     .child(composer),
             )
     }
+}
+
+fn load_png_attachments(
+    paths: Vec<PathBuf>,
+    available: usize,
+    mut total_bytes: usize,
+) -> Result<Vec<Attachment>, String> {
+    if paths.len() > available {
+        return Err(format!(
+            "A message can contain at most {MAX_ATTACHMENTS} images."
+        ));
+    }
+    let mut attachments = Vec::with_capacity(paths.len());
+    for path in paths {
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+            return Err("Each PNG must be 10 MiB or smaller.".into());
+        }
+        let bytes =
+            fs::read(&path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES.saturating_sub(bytes.len()) {
+            return Err("Attached images must stay under 20 MiB total.".into());
+        }
+        total_bytes += bytes.len();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image.png")
+            .to_owned();
+        attachments.push(Attachment::from_png(name, bytes)?);
+    }
+    Ok(attachments)
 }
 
 fn main() {

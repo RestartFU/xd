@@ -14,17 +14,31 @@ use async_channel::{Receiver, Sender};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
     NewFolder,
-    NewChat { folder_id: String },
-    Chat { chat_id: String },
-    Messages { chat_id: String },
-    Send { chat_id: String, text: String },
-    SetDraft { chat_id: String, text: String },
+    NewChat {
+        folder_id: String,
+    },
+    Chat {
+        chat_id: String,
+    },
+    Messages {
+        chat_id: String,
+    },
+    Send {
+        chat_id: String,
+        text: String,
+    },
+    SetDraft {
+        chat_id: String,
+        text: String,
+        attachment_generation: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,10 +49,12 @@ pub enum DaemonUpdate {
     Reply {
         kind: RequestKind,
         body: Map<String, Value>,
+        attachments: Option<Vec<Attachment>>,
     },
     Event {
         name: String,
         body: Map<String, Value>,
+        attachments: Option<Vec<Attachment>>,
     },
     Disconnected {
         message: String,
@@ -225,23 +241,64 @@ impl DaemonHandle {
         )
     }
 
-    pub fn send_message(&self, chat_id: &str, text: &str) -> Result<(), String> {
+    pub fn send_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<(), String> {
+        let attachments = attachments
+            .iter()
+            .map(|attachment| {
+                json!({
+                    "name": attachment.name,
+                    "mime": attachment.mime,
+                    "data": attachment.data,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut body = json!({"op": "send", "chat": chat_id, "text": text});
+        if !attachments.is_empty() {
+            body["attachments"] = Value::Array(attachments);
+        }
         self.send(
             RequestKind::Send {
                 chat_id: chat_id.to_owned(),
                 text: text.to_owned(),
             },
-            json!({"op": "send", "chat": chat_id, "text": text}),
+            body,
         )
     }
 
-    pub fn set_draft(&self, chat_id: &str, text: &str) -> Result<(), String> {
+    pub fn set_draft(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Option<&[Attachment]>,
+        attachment_generation: Option<u64>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "set-draft", "chat": chat_id, "text": text});
+        if let Some(attachments) = attachments {
+            body["attachments"] = Value::Array(
+                attachments
+                    .iter()
+                    .map(|attachment| {
+                        json!({
+                            "name": attachment.name,
+                            "mime": attachment.mime,
+                            "data": attachment.data,
+                        })
+                    })
+                    .collect(),
+            );
+        }
         self.send(
             RequestKind::SetDraft {
                 chat_id: chat_id.to_owned(),
                 text: text.to_owned(),
+                attachment_generation,
             },
-            json!({"op": "set-draft", "chat": chat_id, "text": text}),
+            body,
         )
     }
 
@@ -324,10 +381,17 @@ fn spawn_reader(
                     }
                 };
                 let update = match frame {
-                    Frame::Event { name, body } => DaemonUpdate::Event { name, body },
+                    Frame::Event { name, mut body } => {
+                        let attachments = take_draft_attachments(&mut body);
+                        DaemonUpdate::Event {
+                            name,
+                            body,
+                            attachments,
+                        }
+                    }
                     Frame::Reply {
                         request_id: Some(request_id),
-                        body,
+                        mut body,
                     } => {
                         let kind = pending
                             .lock()
@@ -336,7 +400,12 @@ fn spawn_reader(
                         let Some(kind) = kind else {
                             continue;
                         };
-                        DaemonUpdate::Reply { kind, body }
+                        let attachments = take_draft_attachments(&mut body);
+                        DaemonUpdate::Reply {
+                            kind,
+                            body,
+                            attachments,
+                        }
                     }
                     Frame::Reply {
                         request_id: None, ..
@@ -348,6 +417,12 @@ fn spawn_reader(
             }
         })
         .expect("spawn xd daemon reader");
+}
+
+fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachment>> {
+    let value = body.remove("draft_attachments")?;
+    let values = value.as_array()?;
+    Some(values.iter().filter_map(Attachment::from_value).collect())
 }
 
 fn disconnect(updates: &Sender<DaemonUpdate>, message: String) {
@@ -493,5 +568,25 @@ mod tests {
             socket_candidates_for(PathBuf::from("/data"), None, Some("preview".into())),
             vec![PathBuf::from("/data/preview/daemon.sock")]
         );
+    }
+
+    #[test]
+    fn decodes_synchronized_previews_before_the_ui_thread() {
+        let mut body = json!({
+            "draft": "look",
+            "draft_attachments": [{
+                "name": "screen.png",
+                "mime": "image/png",
+                "data": "iVBORw0KGgo="
+            }]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let attachments = take_draft_attachments(&mut body).unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].preview.bytes, b"\x89PNG\r\n\x1a\n");
+        assert!(!body.contains_key("draft_attachments"));
     }
 }

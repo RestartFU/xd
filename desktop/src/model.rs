@@ -1,5 +1,46 @@
+use std::sync::Arc;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use gpui::{Image, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub data: String,
+    pub preview: Arc<Image>,
+}
+
+impl Attachment {
+    pub fn from_png(name: impl Into<String>, bytes: Vec<u8>) -> Result<Self, String> {
+        if !bytes.starts_with(PNG_SIGNATURE) {
+            return Err("Only PNG images can be attached.".into());
+        }
+        Ok(Self {
+            name: name.into(),
+            mime: "image/png".into(),
+            data: STANDARD.encode(&bytes),
+            preview: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+        })
+    }
+
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
+        let name = value.get("name").and_then(Value::as_str)?;
+        let mime = value.get("mime").and_then(Value::as_str)?;
+        let data = value.get("data").and_then(Value::as_str)?;
+        if mime != "image/png" {
+            return None;
+        }
+        let bytes = STANDARD.decode(data).ok()?;
+        let mut attachment = Self::from_png(name, bytes).ok()?;
+        attachment.data = data.to_owned();
+        Some(attachment)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Folder {
@@ -41,6 +82,7 @@ pub struct AppModel {
     pub connected: bool,
     pub connection_error: Option<String>,
     pub draft: String,
+    pub draft_attachments: Vec<Attachment>,
     pub draft_revision: i64,
     pub live_text: String,
     pub live_activity: Vec<Message>,
@@ -75,6 +117,7 @@ impl AppModel {
             self.queue.clear();
             self.working = false;
             self.draft.clear();
+            self.draft_attachments.clear();
             self.live_text.clear();
             self.live_activity.clear();
         }
@@ -87,6 +130,7 @@ impl AppModel {
         self.queue.clear();
         self.working = false;
         self.draft.clear();
+        self.draft_attachments.clear();
         self.draft_revision = -1;
         self.live_text.clear();
         self.live_activity.clear();
@@ -192,6 +236,12 @@ impl AppModel {
         };
         self.draft_revision = revision;
         self.draft = text.to_owned();
+        if let Some(attachments) = body.get("draft_attachments").and_then(Value::as_array) {
+            self.draft_attachments = attachments
+                .iter()
+                .filter_map(Attachment::from_value)
+                .collect();
+        }
     }
 
     fn event_is_active(&self, body: &Value) -> bool {
@@ -247,6 +297,7 @@ impl AppModel {
             connected: true,
             connection_error: None,
             draft: String::new(),
+            draft_attachments: Vec::new(),
             draft_revision: 0,
             live_text: String::new(),
             live_activity: Vec::new(),
@@ -347,5 +398,32 @@ mod tests {
         assert_eq!(model.draft, "shared");
         assert_eq!(model.queue, ["next"]);
         assert!(model.working);
+    }
+
+    #[test]
+    fn synchronized_attachment_previews_replace_only_when_present() {
+        let mut model = AppModel::default();
+        model.apply_draft_snapshot(&json!({
+            "draft": "look",
+            "draft_revision": 1,
+            "draft_attachments": [{
+                "name": "screen.png",
+                "mime": "image/png",
+                "data": "iVBORw0KGgo="
+            }]
+        }));
+        assert_eq!(model.draft_attachments.len(), 1);
+        assert_eq!(model.draft_attachments[0].name, "screen.png");
+        assert_eq!(model.draft_attachments[0].preview.bytes, PNG_SIGNATURE);
+
+        model.apply_draft_snapshot(&json!({"draft":"typing", "draft_revision":2}));
+        assert_eq!(model.draft_attachments.len(), 1);
+
+        model.apply_draft_snapshot(&json!({
+            "draft": "",
+            "draft_revision": 3,
+            "draft_attachments": []
+        }));
+        assert!(model.draft_attachments.is_empty());
     }
 }
