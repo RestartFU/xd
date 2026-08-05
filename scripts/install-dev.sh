@@ -1,11 +1,12 @@
 #!/bin/sh
 #
-# Install the rolling Linux GPUI prototype as `xd-dev`:
+# Install the rolling Linux GPUI/Rust build as `xd-dev`:
 #
 #   curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install-dev.sh | sh
 #
-# This channel is intentionally separate from xd and xd-nightly. It installs
-# only the early GPUI desktop executable and does not replace either client.
+# This channel is intentionally separate from xd and xd-nightly. Its archive
+# contains the GPUI desktop, Rust daemon, and Codex CLI and replaces neither
+# production client.
 
 set -eu
 

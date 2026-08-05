@@ -54,7 +54,7 @@ pub enum ConnectError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("could not start an installed xd daemon ({0})")]
+    #[error("could not start the xd-dev Rust daemon ({0})")]
     Start(String),
 }
 
@@ -90,7 +90,7 @@ impl DaemonHandle {
         for (path, launcher) in startup_candidates() {
             let socket = path.to_string_lossy().into_owned();
             let mut child = match ProcessCommand::new(&launcher)
-                .args(["serve", "--port", "0", "--socket", &socket])
+                .args(["serve", "--socket", &socket])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -98,11 +98,11 @@ impl DaemonHandle {
             {
                 Ok(child) => child,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    failures.push(format!("{launcher} is not installed"));
+                    failures.push(format!("{} is not installed", launcher.display()));
                     continue;
                 }
                 Err(error) => {
-                    failures.push(format!("cannot launch {launcher}: {error}"));
+                    failures.push(format!("cannot launch {}: {error}", launcher.display()));
                     continue;
                 }
             };
@@ -113,12 +113,12 @@ impl DaemonHandle {
                 }
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        failures.push(format!("{launcher} exited with {status}"));
+                        failures.push(format!("{} exited with {status}", launcher.display()));
                         break;
                     }
                     Ok(None) => thread::sleep(Duration::from_millis(100)),
                     Err(error) => {
-                        failures.push(format!("cannot inspect {launcher}: {error}"));
+                        failures.push(format!("cannot inspect {}: {error}", launcher.display()));
                         break;
                     }
                 }
@@ -130,7 +130,8 @@ impl DaemonHandle {
             let _ = child.kill();
             let _ = child.wait();
             failures.push(format!(
-                "{launcher} did not open {} within five seconds",
+                "{} did not open {} within five seconds",
+                launcher.display(),
                 path.display()
             ));
         }
@@ -375,33 +376,53 @@ pub fn socket_candidates() -> Vec<PathBuf> {
         })
         .unwrap_or_else(|| PathBuf::from(".local/share"));
 
-    if let Some(data_name) = env::var_os("XD_DATA_NAME").filter(|name| !name.is_empty()) {
-        return vec![data_home.join(data_name).join("daemon.sock")];
-    }
-
-    vec![
-        data_home.join("xd-nightly/daemon.sock"),
-        data_home.join("xd/daemon.sock"),
-    ]
+    socket_candidates_for(
+        data_home,
+        None,
+        env::var_os("XD_DATA_NAME").filter(|name| !name.is_empty()),
+    )
 }
 
-fn startup_candidates() -> Vec<(PathBuf, String)> {
-    let sockets = socket_candidates();
-    if env::var_os("XD_SOCKET").is_some() || env::var_os("XD_DATA_NAME").is_some() {
-        return sockets
-            .into_iter()
-            .flat_map(|path| {
-                ["xd-nightly", "xd"]
-                    .into_iter()
-                    .map(move |launcher| (path.clone(), launcher.to_owned()))
-            })
-            .collect();
+fn socket_candidates_for(
+    data_home: PathBuf,
+    explicit_socket: Option<std::ffi::OsString>,
+    data_name: Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    if let Some(socket) = explicit_socket.filter(|path| !path.is_empty()) {
+        return vec![PathBuf::from(socket)];
     }
+    let data_name = data_name.unwrap_or_else(|| "xd-dev".into());
+    vec![data_home.join(data_name).join("daemon.sock")]
+}
 
-    sockets
+fn startup_candidates() -> Vec<(PathBuf, PathBuf)> {
+    let launchers = launcher_candidates();
+    socket_candidates()
         .into_iter()
-        .zip(["xd-nightly".to_owned(), "xd".to_owned()])
+        .flat_map(|path| {
+            launchers
+                .iter()
+                .cloned()
+                .map(move |launcher| (path.clone(), launcher))
+        })
         .collect()
+}
+
+fn launcher_candidates() -> Vec<PathBuf> {
+    if let Some(path) = env::var_os("XD_DAEMON_EXECUTABLE").filter(|path| !path.is_empty()) {
+        return vec![PathBuf::from(path)];
+    }
+    let mut candidates = Vec::new();
+    if let Ok(current) = env::current_exe()
+        && let Some(parent) = current.parent()
+    {
+        let sibling = parent.join("xd-daemon-dev");
+        if sibling.is_file() {
+            candidates.push(sibling);
+        }
+    }
+    candidates.push(PathBuf::from("xd-daemon-dev"));
+    candidates
 }
 
 #[cfg(test)]
@@ -452,5 +473,25 @@ mod tests {
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn dev_socket_is_isolated_from_production_state() {
+        assert_eq!(
+            socket_candidates_for(PathBuf::from("/data"), None, None),
+            vec![PathBuf::from("/data/xd-dev/daemon.sock")]
+        );
+        assert_eq!(
+            socket_candidates_for(
+                PathBuf::from("/data"),
+                Some("/run/custom.sock".into()),
+                None,
+            ),
+            vec![PathBuf::from("/run/custom.sock")]
+        );
+        assert_eq!(
+            socket_candidates_for(PathBuf::from("/data"), None, Some("preview".into())),
+            vec![PathBuf::from("/data/preview/daemon.sock")]
+        );
     }
 }

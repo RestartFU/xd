@@ -1,8 +1,8 @@
 # xd desktop (GPUI)
 
 This is the incremental Rust/GPUI replacement for xd's GTK desktop client.
-It deliberately reuses the existing daemon and its documented JSON Lines
-protocol; the Crystal desktop remains the production client until this crate
+The dev package runs its own Rust daemon using the documented JSON Lines
+protocol; the Crystal desktop remains the production client until this path
 reaches feature parity.
 
 GPUI is pinned because it is pre-1.0. Only the published Apache-2.0 `gpui`
@@ -11,8 +11,9 @@ crate is used. Zed's GPL component library is not a dependency.
 Current milestone:
 
 - native GPUI application shell;
-- live UNIX-socket connection to an existing `xd` or `xd-nightly` daemon;
+- an isolated, app-owned Rust daemon and first-run state initialization;
 - clickable workspace/chat sidebar backed by real daemon tree data;
+- workspace and chat creation controls;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - cross-device text draft synchronization with a short local debounce;
 - live assistant text, activity, turn state, and queue event handling;
@@ -31,17 +32,19 @@ prerelease with the tested Linux x86_64 prototype. This channel is deliberately
 separate from the production `nightly` release while daemon connectivity and
 feature parity are still in progress.
 
-The dev archive also carries `xd-daemon-dev`, the incremental Rust daemon
-rewrite. It currently implements local protocol transport, persisted tree/chat
-and transcript reads, and synchronized drafts with attachment previews. The
-GPUI app deliberately continues using the installed Crystal daemon until agent
-execution and the remaining mutation operations have been ported.
+The archive carries `xd-daemon-dev` and a pinned Codex package. The Rust daemon
+owns persisted workspaces, chats, messages, drafts, options, shortcuts, queue
+mutations, and Codex turn execution. The GPUI dev build does not require an
+installed Crystal daemon.
 
-The prototype connects to `XD_SOCKET` when set, otherwise it checks the local
-`xd-nightly` and `xd` daemon sockets in that order. When neither is running, it
-starts an installed `xd-nightly` or `xd` in headless `serve` mode and owns that
-process for the lifetime of the GPUI app. The old GTK window does not need to
-be opened.
+The app connects to `XD_SOCKET` when set. Otherwise it uses
+`$XDG_DATA_HOME/xd-dev/daemon.sock` (normally
+`~/.local/share/xd-dev/daemon.sock`), starts its sibling `xd-daemon-dev`, and
+owns that process for the lifetime of the GPUI app. Its database and Workspaces
+directory live beside that socket, separate from `xd` and `xd-nightly`.
+
+This is still a development channel. Attachments, Claude turns, worktrees, and
+several production-client management surfaces have not yet been ported.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 

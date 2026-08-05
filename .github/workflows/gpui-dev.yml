@@ -37,10 +37,12 @@ jobs:
           test -f gpui-dist/rust-daemon-tests-passed
           test -x gpui-dist/xd-desktop
           test -x gpui-dist/xd-daemon
+          test -x gpui-dist/codex-package/bin/codex
 
           install -d package/xd-dev
           install -m0755 gpui-dist/xd-desktop package/xd-dev/xd-dev
           install -m0755 gpui-dist/xd-daemon package/xd-dev/xd-daemon-dev
+          cp -a gpui-dist/codex-package package/xd-dev/codex-package
           install -m0644 desktop/README.md package/xd-dev/README.md
 
           tar -C package -czf xd-dev-linux-x86_64.tar.gz xd-dev
@@ -75,14 +77,13 @@ jobs:
 
           subject=$(git log -1 --format=%s)
           notes=$(cat <<EOF
-          Early GPUI desktop prototype built from \`${GITHUB_SHA:0:7}\` — $subject
+          GPUI/Rust development build from \`${GITHUB_SHA:0:7}\` — $subject
 
           This is the in-progress GPUI desktop client, separate from production
-          xd. It connects to the existing daemon protocol, can start an installed
-          xd daemon headlessly, and supports live chats and composer queueing on
-          Linux x86_64. The archive also includes the experimental Rust daemon
-          transport as `xd-daemon-dev`; it is not selected until the required
-          state and agent operations have been ported.
+          xd. It runs the bundled Rust daemon against isolated xd-dev state and
+          uses the bundled Codex CLI for turns. No Crystal xd installation is
+          required. The current Linux x86_64 build supports persisted workspaces,
+          chats, drafts, queueing, options, shortcuts, and live Codex turns.
 
           Run it:
 

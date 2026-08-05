@@ -82,13 +82,6 @@ FROM rust-daemon-source AS rust-daemon-release
 RUN cargo build --locked --release \
  && test -x target/release/xd-daemon
 
-FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS gpui-desktop-check
-
-COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
-COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
-COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
-COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
-
 # --- local speech engine ---------------------------------------------------
 #
 # whisper.cpp is built from pinned source because Debian does not package its
@@ -268,6 +261,14 @@ RUN set -eux; \
     /agents/claude-bin --version | grep -F "$CLAUDE_VERSION"; \
     /agents/claude-code-proxy --version | grep -F "$CLAUDE_PROXY_VERSION"; \
     rm -rf /downloads
+
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS gpui-desktop-check
+
+COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
+COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
+COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
+COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
+COPY --from=agent-binaries /agents/codex-package /codex-package
 
 # --- bundle runtime closure ------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS bundle-tools
