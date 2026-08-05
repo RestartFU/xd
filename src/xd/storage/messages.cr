@@ -3,7 +3,7 @@ require "./chats"
 module Xd
   module Storage
     MESSAGE_COLUMNS = \
-      "id, chat_id, role, content, raw_json, created_at, label"
+       "id, chat_id, role, content, raw_json, created_at, label"
 
     record RecentMessages, messages : Array(Message), total : Int64
 
@@ -136,31 +136,95 @@ module Xd
         raise ArgumentError.new("limit must be positive") unless limit > 0
 
         database_error("Cannot read recent conversation") do
-          total = @database.query_one(
-            <<-SQL,
-              SELECT COUNT(*)
-                FROM messages
-               WHERE chat_id = ? AND id <= ?
-              SQL
-            chat_id,
-            through_id,
-            as: Int64
-          )
+          @database.transaction do |transaction|
+            connection = transaction.connection
+            total = connection.query_one(
+              <<-SQL,
+                SELECT COUNT(*)
+                  FROM messages
+                 WHERE chat_id = ? AND id <= ?
+                SQL
+              chat_id,
+              through_id,
+              as: Int64
+            )
 
-          messages = @database.query_all(
+            messages = connection.query_all(
+              <<-SQL,
+                SELECT id, chat_id, role, content, NULL, created_at, label
+                  FROM messages
+                 WHERE chat_id = ? AND id <= ?
+                 ORDER BY id DESC
+                 LIMIT ?
+                SQL
+              chat_id,
+              through_id,
+              limit
+            ) { |row| message_from_row(row) }
+
+            RecentMessages.new(messages.reverse!, total)
+          end.not_nil!
+        end
+      end
+
+      def list_messages_slice_through(
+        chat_id : String,
+        through_id : Int64,
+        offset : Int,
+        limit : Int,
+      ) : RecentMessages
+        raise ArgumentError.new("offset must not be negative") if offset < 0
+        raise ArgumentError.new("limit must be positive") unless limit > 0
+
+        database_error("Cannot read conversation page") do
+          @database.transaction do |transaction|
+            connection = transaction.connection
+            total = connection.query_one(
+              <<-SQL,
+                SELECT COUNT(*)
+                  FROM messages
+                 WHERE chat_id = ? AND id <= ?
+                SQL
+              chat_id,
+              through_id,
+              as: Int64
+            )
+
+            messages = connection.query_all(
+              <<-SQL,
+                SELECT id, chat_id, role, content, NULL, created_at, label
+                  FROM messages
+                 WHERE chat_id = ? AND id <= ?
+                 ORDER BY id
+                 LIMIT ? OFFSET ?
+                SQL
+              chat_id,
+              through_id,
+              limit,
+              offset
+            ) { |row| message_from_row(row) }
+
+            RecentMessages.new(messages, total)
+          end.not_nil!
+        end
+      end
+
+      def preceding_user_message(
+        chat_id : String,
+        before_id : Int64,
+      ) : Message?
+        database_error("Cannot read conversation turn start") do
+          @database.query_all(
             <<-SQL,
               SELECT id, chat_id, role, content, NULL, created_at, label
                 FROM messages
-               WHERE chat_id = ? AND id <= ?
+               WHERE chat_id = ? AND id < ? AND role = 'user'
                ORDER BY id DESC
-               LIMIT ?
+               LIMIT 1
               SQL
             chat_id,
-            through_id,
-            limit
-          ) { |row| message_from_row(row) }
-
-          RecentMessages.new(messages.reverse!, total)
+            before_id
+          ) { |row| message_from_row(row) }.first?
         end
       end
 

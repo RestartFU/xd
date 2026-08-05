@@ -265,13 +265,19 @@ running.
 ```
 
 `chat` is required. A positive `limit` returns at most that many recent
-messages; zero or omission returns all messages when no turn is active.
+messages; zero or omission returns all messages when no turn is active. An
+optional nonnegative `offset` changes the request to a zero-based, oldest-first
+slice through the active transcript boundary. Offset requests require a
+positive limit and return the actual clamped offset in the response;
+`turn_start` may still identify the preceding user message when a slice begins
+in the middle of a turn.
 
 ```json
 {
   "ok": true,
   "total_messages": 2,
   "last_message_id": 42,
+  "offset": 0,
   "messages": [
     {"role":"user","content":"Hello","at":1753700000},
     {"role":"assistant","content":"Hi","at":1753700001,"label":"Codex"}
@@ -284,7 +290,9 @@ and `label` is optional. Roles include `user`, `assistant`, `tool`, `event`,
 `error`, and `duration`; render an unknown role as system text. `duration` rows
 carry an elapsed-seconds string and are normally hidden.
 
-`total_messages` greater than the returned count means older messages exist.
+For recent requests, `total_messages` greater than the returned count means
+older messages exist. Offset slices may have both older and newer messages
+outside the returned range.
 During a turn the response is bounded at that turn's persisted transcript id;
 live items come from `chat` and events. `last_message_id` identifies that
 boundary, not an event cursor.
@@ -383,6 +391,13 @@ Attachments are PNG only:
 ```
 
 At most 4 images, each at most 10 MiB, 20 MiB in total.
+
+Desktop clients may provide `worktree_name`, `worktree_backend`, and
+`worktree_model` when the chat is configured to create a new worktree. The
+name is used directly as the hint when supplied; otherwise the daemon uses that
+configured Git-writing assistant to choose a short worktree name before the
+first turn. Older or other clients may omit them and the daemon falls back to
+a prompt slug.
 
 ### `set-draft`
 

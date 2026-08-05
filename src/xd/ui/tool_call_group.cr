@@ -8,19 +8,52 @@ module Xd
     # less information than the command itself, in the same space. A run of them
     # collapses, because that is where the transcript actually gets buried.
     #
-    # Text-only while collapsed. Hidden tool calls create no label/layout work.
+    # Activity is collected without touching GTK. The widget is built only when
+    # the group is finally committed to the transcript; delegated status rows
+    # can therefore hand their activity to a card without creating and removing
+    # a widget for every update.
     class ToolCallGroup
       MAX_RENDERED_CALLS = 48
       MAX_RENDERED_CHARS = 12 * 1024
 
-      getter widget : Gtk::Box
+      # Keeps the latest useful activity without allowing a long delegated turn
+      # to retain every tool payload for the lifetime of its transcript page.
+      class ActivityBuffer
+        getter count = 0_i64
+        getter summaries = [] of String
+        getter characters = 0
 
-      # The subagent card binds its own toggle to this, so it needs the
-      # expander rather than the container.
-      getter expander : Gtk::Expander
+        def append(summary : String) : Nil
+          @count += 1
+          store(summary)
+        end
 
-      @summaries = [] of String
-      @single : Gtk::Label
+        def merge(other : ActivityBuffer) : Nil
+          @count += other.count
+          other.summaries.each { |summary| store(summary) }
+        end
+
+        private def store(summary : String) : Nil
+          retained = if summary.size > MAX_RENDERED_CHARS
+                       "#{summary[0, MAX_RENDERED_CHARS - 1]}…"
+                     else
+                       summary
+                     end
+          @summaries << retained
+          @characters += retained.size
+
+          while @summaries.size > MAX_RENDERED_CALLS ||
+                @characters > MAX_RENDERED_CHARS
+            removed = @summaries.shift
+            @characters -= removed.size
+          end
+        end
+      end
+
+      @activity = ActivityBuffer.new
+      @widget : Gtk::Box?
+      @expander : Gtk::Expander?
+      @single : Gtk::Label?
       @render_source = 0_u32
       @count_source = 0_u32
 
@@ -34,7 +67,10 @@ module Xd
         count == 1 ? "1 tool call" : "#{count} tool calls"
       end
 
-      def self.rendered_label(summaries : Array(String)) : String
+      def self.rendered_label(
+        summaries : Array(String),
+        total : Int64 = summaries.size.to_i64,
+      ) : String
         return "" if summaries.empty?
 
         shown = [] of String
@@ -58,69 +94,43 @@ module Xd
         end
         shown.reverse!
 
-        if index >= 0
-          "… #{index + 1} earlier tool calls …\n#{shown.join('\n')}"
+        hidden = Math.max(total - shown.size, 0_i64)
+        if hidden > 0
+          "… #{hidden} earlier tool calls …\n#{shown.join('\n')}"
         else
           shown.join('\n')
         end
       end
 
       def initialize
-        @widget = Gtk::Box.new(:vertical, 0)
-        @widget.margin_top = 4
-        @widget.margin_bottom = 4
-        @widget.margin_start = 24
-        @widget.margin_end = 24
+      end
 
-        @single = summary_label
-        @single.visible = false
-        @widget.append(@single)
+      # GTK is deliberately lazy. Most groups are consumed by a subagent card
+      # before they need a visible widget, and constructing a box/expander for
+      # those short-lived groups was enough to make a busy transcript crawl.
+      def widget : Gtk::Box
+        @widget ||= build_widget
+      end
 
-        @expander = Gtk::Expander.new(nil)
-        @expander.expanded = false
-        @expander.add_css_class("dim-label")
-        @expander.visible = false
-        @expander.notify_signal["expanded"].connect do |_property|
-          if @expander.expanded?
-            schedule_render
-          else
-            @expander.child = nil
-          end
-        end
-        @widget.append(@expander)
+      def mounted? : Bool
+        !!(@widget && @widget.not_nil!.parent)
+      end
+
+      def empty? : Bool
+        @activity.count == 0
       end
 
       def append(summary : String) : Nil
-        @summaries << summary
-
-        unless self.class.collapse?(@summaries.size)
-          @single.text = summary
-          @single.visible = true
-          @expander.visible = false
-          return
-        end
-
-        # The second call is what turns the run into something worth hiding.
-        @single.visible = false
-        @expander.visible = true
-        schedule_count
-        schedule_render if @expander.expanded?
+        @activity.append(summary)
+        refresh
       end
 
-      # Hands the run to a subagent card, which supplies the disclosure.
-      #
-      # The expander becomes the content either way: a lone call is revealed by
-      # the subagent's own toggle, so showing it inline as well would put the
-      # same command in two places.
-      def absorb : Nil
-        # A subagent card has its own header, so the single-call label is no
-        # longer visible. Remove it instead of keeping a needless Pango child
-        # in every collapsed card.
-        @widget.remove(@single)
-        @single.visible = false
-        @expander.visible = true
-        schedule_count
-        schedule_render if @expander.expanded?
+      # Transfers the bounded data without forcing the caller to construct GTK.
+      def take_activity : ActivityBuffer
+        cancel_pending
+        activity = @activity
+        @activity = ActivityBuffer.new
+        activity
       end
 
       # A count that changes is a resize, and a resize in the transcript box is
@@ -132,8 +142,11 @@ module Xd
 
         @count_source = GLib.idle_add do
           @count_source = 0_u32
-          label = self.class.collapsed_label(@summaries.size)
-          @expander.label = label unless @expander.label == label
+          expander = @expander
+          if expander
+            label = self.class.collapsed_label(@activity.count)
+            expander.label = label unless expander.label == label
+          end
           false
         end
       end
@@ -143,23 +156,86 @@ module Xd
 
         @render_source = GLib.idle_add do
           @render_source = 0_u32
-          render if @expander.expanded?
+          render if @expander.try(&.expanded?)
           false
         end
       end
 
-      private def render : Nil
-        label = @expander.child.as?(Gtk::Label)
-        unless label
-          label = summary_label
-          label.margin_top = 4
-          label.margin_start = 12
-          @expander.child = label
+      private def refresh : Nil
+        single = @single
+        expander = @expander
+        return unless single && expander
+
+        if !self.class.collapse?(@activity.count)
+          single.text = @activity.summaries.last? || ""
+          single.visible = true
+          expander.visible = false
+          return
         end
-        label.text = self.class.rendered_label(@summaries)
+
+        single.visible = false
+        expander.visible = true
+        schedule_count
+        schedule_render if expander.expanded?
       end
 
-      private def summary_label : Gtk::Label
+      private def render : Nil
+        expander = @expander || return
+        label = expander.child.as?(Gtk::Label)
+        unless label
+          label = self.class.summary_label
+          label.margin_top = 4
+          label.margin_start = 12
+          expander.child = label
+        end
+        label.text = self.class.rendered_label(
+          @activity.summaries,
+          @activity.count
+        )
+      end
+
+      private def build_widget : Gtk::Box
+        box = Gtk::Box.new(:vertical, 0)
+        box.margin_top = 4
+        box.margin_bottom = 4
+        box.margin_start = 24
+        box.margin_end = 24
+
+        single = self.class.summary_label
+        single.visible = false
+        box.append(single)
+        @single = single
+
+        expander = Gtk::Expander.new(nil)
+        expander.expanded = false
+        expander.add_css_class("dim-label")
+        expander.visible = false
+        expander.notify_signal["expanded"].connect do |_property|
+          if expander.expanded?
+            schedule_render
+          else
+            expander.child = nil
+          end
+        end
+        box.append(expander)
+        @expander = expander
+        @widget = box
+        refresh
+        box
+      end
+
+      private def cancel_pending : Nil
+        unless @count_source == 0
+          GLib.source_remove(@count_source)
+          @count_source = 0_u32
+        end
+        unless @render_source == 0
+          GLib.source_remove(@render_source)
+          @render_source = 0_u32
+        end
+      end
+
+      def self.summary_label : Gtk::Label
         label = Gtk::Label.new("")
         label.xalign = 0_f32
         label.ellipsize = :middle

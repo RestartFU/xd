@@ -37,16 +37,22 @@ module Xd
     end
 
     class TranscriptPaging
-      PAGE_SIZE = 100
+      PAGE_SIZE     = 100
+      # Embedded desktop daemons share the Crystal scheduler with the GTK
+      # client. Keep one response below the point where socket backpressure can
+      # stall both sides.
+      MAX_PAGE_SIZE = 1600
 
       getter limit : Int32
 
-      def initialize(@limit = PAGE_SIZE)
-        raise ArgumentError.new("limit must be positive") unless @limit > 0
+      def initialize(limit = PAGE_SIZE)
+        raise ArgumentError.new("limit must be positive") unless limit > 0
+
+        @limit = Math.min(limit, MAX_PAGE_SIZE).to_i32
       end
 
       def query_limit : Int32
-        @limit < Int32::MAX ? @limit + 1 : @limit
+        @limit + 1
       end
 
       def start(fetched : Int) : Int32
@@ -63,6 +69,10 @@ module Xd
 
       def earlier_count(total : Int64, fetched : Int) : Int32
         Math.min(hidden(total, fetched), PAGE_SIZE).to_i32
+      end
+
+      def at_limit? : Bool
+        @limit >= MAX_PAGE_SIZE
       end
 
       def earlier_label(total : Int64, fetched : Int) : String?
@@ -92,8 +102,8 @@ module Xd
 
       def load_earlier : Int32
         @limit = Math.min(
-          @limit.to_i64 + PAGE_SIZE,
-          Int32::MAX.to_i64
+          @limit.to_i64 * 2,
+          MAX_PAGE_SIZE.to_i64
         ).to_i32
       end
     end

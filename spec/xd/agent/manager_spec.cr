@@ -150,6 +150,59 @@ describe Xd::Agent::Manager do
     end
   end
 
+  it "uses the configured Git-writing assistant for a new worktree name" do
+    with_agent_manager do |manager, store, workspaces, folder_id, launcher, _events|
+      repository = workspaces.find_folder(folder_id)
+      manager_git(repository, "init", "-q", "-b", "main")
+      manager_git(repository, "config", "user.email", "test@example.com")
+      manager_git(repository, "config", "user.name", "Test")
+      File.write(File.join(repository, "tracked.txt"), "initial\n")
+      manager_git(repository, "add", "tracked.txt")
+      manager_git(repository, "commit", "-q", "-m", "initial")
+
+      chat_id = store.create_chat(folder_id, "New Chat", "claude")
+      store.set_new_worktree(chat_id, true)
+      finished = Channel(Exception?).new(1)
+      spawn do
+        begin
+          manager.send(
+            chat_id,
+            "Please fix the autofarm parser",
+            worktree_backend: "codex",
+            worktree_model: "gpt-5.6-terra"
+          )
+          finished.send(nil)
+        rescue error
+          finished.send(error)
+        end
+      end
+
+      deadline = Time.instant + 2.seconds
+      while launcher.specs.empty? && Time.instant < deadline
+        sleep 10.milliseconds
+      end
+      fail("worktree name generation did not start") if launcher.specs.empty?
+      launcher.specs.first.prompt.should contain("Choose a concise name")
+      launcher.emit(0, Xd::Agent::Event.new(
+        Xd::Agent::EventType::TextDelta,
+        text: %({"name":"autofarm parser"})
+      ))
+      launcher.finish(0, true)
+
+      select
+      when error = finished.receive
+        raise error if error
+      when timeout(2.seconds)
+        fail("turn did not start after naming")
+      end
+      launcher.specs.size.should eq(2)
+      launcher.specs.last.workdir.not_nil!.should contain(
+        "autofarm-parser"
+      )
+      launcher.finish(1, true)
+    end
+  end
+
   it "rejects unsigned assistants before storing or launching a turn" do
     checked = [] of String
     authorizer = ->(provider : String) : String? {

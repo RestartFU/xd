@@ -53,6 +53,12 @@ module Xd
         property revision = -1_i64
         property choices_visible = false
         property tool_group : ToolCallGroup?
+        property windowed = false
+        property window_start = 0_i64
+        property window_end = 0_i64
+        property window_total = 0_i64
+        property window_loading = false
+        property window_anchor : Symbol?
 
         def initialize(
           @key : String,
@@ -69,6 +75,7 @@ module Xd
           @workflow_ids.clear
           # Cards belong to the transcript that is about to be replaced; the
           # rebuild makes them again from the same records.
+          @subagent_cards.each_value { |card| card.close }
           @subagent_cards.clear
         end
       end
@@ -99,13 +106,18 @@ module Xd
       MAX_TOTAL_BYTES = 20 * 1024 * 1024
       # About a second and a half at 60Hz, after which a transcript is shown
       # whatever the daemon is or is not doing.
-      BOTTOM_JUMP_FRAME_LIMIT   =  90
-      QUEUE_RENDER_BATCH        =   8
-      QUEUE_RETIRE_BATCH        =   8
-      TURN_RECOVERY_EVENT_BATCH =  32
-      TURN_RECOVERY_EVENT_LIMIT = 512
-      DRAFT_SYNC_DELAY          = 250.milliseconds
-      RENDER_SAFE_MODE          = ENV["XD_RENDER_SAFE_MODE"]? == "1"
+      BOTTOM_JUMP_FRAME_LIMIT              =   90
+      QUEUE_RENDER_BATCH                   =    8
+      QUEUE_RETIRE_BATCH                   =    8
+      TRANSCRIPT_RENDER_BATCH              =   32
+      TRANSCRIPT_WINDOW_SIZE               =  160
+      TRANSCRIPT_WINDOW_EDGE               = 48.0
+      TRANSCRIPT_WINDOW_TRIGGER            =  320
+      TRANSCRIPT_WINDOW_ANCHOR_FRAME_LIMIT =   90
+      TURN_RECOVERY_EVENT_BATCH            =   32
+      TURN_RECOVERY_EVENT_LIMIT            =  512
+      DRAFT_SYNC_DELAY                     = 250.milliseconds
+      RENDER_SAFE_MODE                     = ENV["XD_RENDER_SAFE_MODE"]? == "1"
 
       getter widget : Adw::ApplicationWindow
 
@@ -148,6 +160,15 @@ module Xd
       @history_restore_upper = -1.0
       @history_restore_page_size = -1.0
       @history_restore_stable_frames = 0
+      @window_anchor_tick = 0_u32
+      @window_anchor_upper = -1.0
+      @window_anchor_page_size = -1.0
+      @window_anchor_stable_frames = 0
+      @window_anchor_frames = 0
+      @window_anchor_suppressed = false
+      @window_scroll_direction = 0.0
+      @window_last_adjustment_value = -1.0
+      @window_last_adjustment_upper = -1.0
       @working_row : Gtk::Box?
       @working_label : Gtk::Label?
       @working_dots : Dots?
@@ -335,7 +356,6 @@ module Xd
         transcript_clamp.margin_top = 12
         transcript_clamp.margin_bottom = 12
         @transcript_scroll.child = transcript_clamp
-        install_transcript_scrolling
 
         @entry = Gtk::TextView.new
         @entry.hexpand = true
@@ -612,6 +632,7 @@ module Xd
           false
         end
         install_window_actions(application)
+        install_transcript_scrolling
 
         subscribe(@local_client)
         subscribe(@remote)
@@ -1075,6 +1096,7 @@ module Xd
           clear_queue
           @follow_bottom = true
           @history_bottom_distance = -1.0
+          cancel_window_anchor
           @controls.sensitive = false
         end
         remember_panes
@@ -1201,7 +1223,11 @@ module Xd
         end
       end
 
-      private def load_messages(force = false) : Nil
+      private def load_messages(
+        force = false,
+        window_start : Int64? = nil,
+        window_anchor : Symbol? = nil,
+      ) : Nil
         chat_id = @active_chat
         return unless chat_id
         page = @transcript_page
@@ -1210,22 +1236,58 @@ module Xd
         @messages_request += 1
         request = @messages_request
         @history_request = request
+        if window_start
+          page.window_loading = true
+          page.window_anchor = window_anchor
+        else
+          cancel_window_anchor
+          page.window_loading = false
+          page.window_anchor = nil
+        end
 
-        call_async(endpoint, {
+        fields = {
           "op"    => JSON::Any.new("messages"),
           "chat"  => JSON::Any.new(chat_id),
-          "limit" => JSON::Any.new(page.paging.query_limit.to_i64),
-        }) do |response, error|
-          next unless request == @messages_request &&
-                      @client.same?(endpoint) &&
-                      @active_chat == chat_id &&
-                      @transcript_page.same?(page)
+          "limit" => JSON::Any.new(
+            (
+              if window_start || page.windowed
+                TRANSCRIPT_WINDOW_SIZE
+              else
+                page.paging.query_limit
+              end
+            ).to_i64
+          ),
+        }
+        fields["offset"] = JSON::Any.new(window_start) if window_start
+        fields["window"] = JSON::Any.new(true) if page.windowed &&
+                                                   window_start.nil?
+        call_async(endpoint, fields) do |response, error|
+          active = request == @messages_request &&
+                   @client.same?(endpoint) &&
+                   @active_chat == chat_id &&
+                   @transcript_page.same?(page)
+          unless active
+            if request == @history_request
+              page.window_loading = false
+              page.window_anchor = nil
+              finish_history_request(request)
+            end
+            next
+          end
           if error
+            page.window_loading = false
+            page.window_anchor = nil
             @status.text = error
             finish_history_request(request)
             next
           end
-          apply_messages(response.not_nil!, page, force, request)
+          apply_messages(
+            response.not_nil!,
+            page,
+            force,
+            request,
+            window_start
+          )
         end
       end
 
@@ -1234,9 +1296,17 @@ module Xd
         page : TranscriptPage,
         force : Bool,
         request : Int64,
+        requested_window_start : Int64? = nil,
       ) : Nil
+        window_request = page.window_loading
+        offset_supported = response.has_key?("offset")
+        unless offset_supported
+          window_request = false
+          page.window_loading = false
+          page.window_anchor = nil
+        end
         revision = response["last_message_id"]?.try(&.as_i64?) || 0_i64
-        if !force && page.revision == revision
+        if !force && !window_request && page.revision == revision
           finish_history_request(request)
           return
         end
@@ -1244,17 +1314,37 @@ module Xd
         messages = response["messages"]?.try(&.as_a?) || [] of JSON::Any
         total = response["total_messages"]?.try(&.as_i64?) ||
                 messages.size.to_i64
-        start = page.paging.start(messages.size)
+        turn_start = response["turn_start"]?.try(&.as_h?)
+        window_page = window_request || (page.windowed && offset_supported)
+        window_mode = offset_supported &&
+                      (window_page || total > TRANSCRIPT_WINDOW_TRIGGER)
+        start = window_page ? 0 : page.paging.start(messages.size)
         first_role = messages[start]?.try do |message|
           message["role"]?.try(&.as_s?)
         end
-        if page.paging.extend_to_turn_start(
-             total,
-             messages.size,
-             first_role
-           )
-          load_messages(force: force)
-          return
+        unless window_page || response.has_key?("turn_start")
+          if page.paging.extend_to_turn_start(
+               total,
+               messages.size,
+               first_role
+             )
+            load_messages(force: force)
+            return
+          end
+        end
+
+        if window_mode
+          page.windowed = true
+          response_offset = response["offset"]?.try(&.as_i64?) ||
+                            requested_window_start || 0_i64
+          page.window_start = response_offset + start
+          page.window_end = page.window_start + (messages.size - start).to_i64
+          page.window_total = total
+        else
+          page.windowed = false
+          page.window_start = 0_i64
+          page.window_end = 0_i64
+          page.window_total = 0_i64
         end
 
         if @follow_bottom
@@ -1264,51 +1354,140 @@ module Xd
         @live_turn_key = nil
         reset_stream_segment
         remove_working_row(reset_started_at: false)
+        # A reload can arrive while the live turn has accumulated tool data but
+        # before its next subagent report. Mount it on the retired transcript
+        # before replacing the page so the lazy buffer is not discarded.
+        end_tool_group
         page.clear_workflows
         replace_transcript(page, request)
         append_history_button(page, total, messages.size)
-        batch = TranscriptBatch(JSON::Any).new(messages, start)
-        durations = turn_durations(messages)
-        GLib.idle_add do
-          active = !@closed &&
-                   request == @messages_request &&
-                   @transcript_page.same?(page) &&
-                   @client.same?(page.endpoint) &&
-                   @active_chat == page.chat_id
-          if active
-            batch.next_batch.each do |entry|
-              index, message = entry
-              if seconds = durations[index]?
-                append_worked_for(seconds)
-              end
-              next if message["role"].as_s == "duration"
-
-              add_message(
-                message["role"].as_s,
-                message["content"].as_s,
-                message["label"]?.try(&.as_s?),
-                reply_answerable?(messages, index)
-              )
-            end
-
-            if batch.done?
-              page.revision = revision
-              @stream_row = nil
-              set_working(@working)
-              scroll_to_bottom
-              if force && !@follow_bottom &&
-                 @history_bottom_distance >= 0
-                queue_history_restore
-              end
-              finish_history_request(request)
-              false
-            else
-              true
-            end
-          else
-            false
-          end
+        if turn_start
+          add_message(
+            turn_start["role"].as_s,
+            turn_start["content"].as_s,
+            turn_start["label"]?.try(&.as_s?)
+          )
         end
+        batch = TranscriptBatch(JSON::Any).new(
+          messages,
+          start,
+          batch_size: TRANSCRIPT_RENDER_BATCH
+        )
+        queued = if messages.size >= TRANSCRIPT_RENDER_BATCH
+                   BackgroundWork.submit do
+                     durations = turn_durations(messages)
+                     schedule_history_render(
+                       page,
+                       request,
+                       force,
+                       revision,
+                       messages,
+                       batch,
+                       durations
+                     )
+                   end
+                 else
+                   false
+                 end
+        unless queued
+          schedule_history_render(
+            page,
+            request,
+            force,
+            revision,
+            messages,
+            batch,
+            turn_durations(messages)
+          )
+        end
+      end
+
+      private def schedule_history_render(
+        page : TranscriptPage,
+        request : Int64,
+        force : Bool,
+        revision : Int64,
+        messages : Array(JSON::Any),
+        batch : TranscriptBatch(JSON::Any),
+        durations : Hash(Int32, Int64),
+      ) : Nil
+        GLib.idle_add do
+          render_history_batch(
+            page,
+            request,
+            force,
+            revision,
+            messages,
+            batch,
+            durations
+          )
+        end
+      end
+
+      private def render_history_batch(
+        page : TranscriptPage,
+        request : Int64,
+        force : Bool,
+        revision : Int64,
+        messages : Array(JSON::Any),
+        batch : TranscriptBatch(JSON::Any),
+        durations : Hash(Int32, Int64),
+      ) : Bool
+        active = !@closed &&
+                 request == @messages_request &&
+                 @transcript_page.same?(page) &&
+                 @client.same?(page.endpoint) &&
+                 @active_chat == page.chat_id
+        return false unless active
+
+        batch.next_batch.each do |entry|
+          index, message = entry
+          if seconds = durations[index]?
+            append_worked_for(seconds)
+          end
+          next if message["role"].as_s == "duration"
+
+          add_message(
+            message["role"].as_s,
+            message["content"].as_s,
+            message["label"]?.try(&.as_s?),
+            reply_answerable?(messages, index)
+          )
+        end
+
+        return true unless batch.done?
+
+        window_request = page.window_loading
+        window_anchor = page.window_anchor
+        page.window_loading = false
+        page.window_anchor = nil
+        end_tool_group
+        page.revision = revision
+        @stream_row = nil
+        set_working(@working)
+        if window_request
+          @follow_bottom = false
+          queue_window_anchor(window_anchor)
+        else
+          scroll_to_bottom
+        end
+        if !window_request && force && !@follow_bottom &&
+           @history_bottom_distance >= 0
+          queue_history_restore
+        end
+        finish_history_request(request)
+        false
+      end
+
+      private def cancel_history_request : Nil
+        return unless @history_request
+
+        @history_request = nil
+        if page = @transcript_page
+          page.window_loading = false
+          page.window_anchor = nil
+        end
+        resume_turn_recovery
       end
 
       private def finish_history_request(request : Int64) : Nil
@@ -1377,6 +1556,22 @@ module Xd
         total : Int64,
         fetched : Int,
       ) : Nil
+        return if page.windowed
+
+        if page.paging.at_limit?
+          return if page.paging.hidden(total, fetched) == 0
+
+          notice = Gtk::Label.new(
+            "Earlier messages omitted to keep the chat responsive"
+          )
+          notice.xalign = 0.5_f32
+          notice.add_css_class("caption")
+          notice.add_css_class("dim-label")
+          notice.margin_bottom = 8
+          @transcript.append(notice)
+          return
+        end
+
         label = page.paging.earlier_label(total, fetched)
         return unless label
 
@@ -1455,6 +1650,7 @@ module Xd
         answerable : Bool = false,
       ) : MessageRow?
         if role == "duration"
+          end_tool_group
           @status.text = "Finished in #{content}s"
           return
         end
@@ -1471,8 +1667,7 @@ module Xd
             return
           end
           if subagent = Agent::SubagentTool.parse(content)
-            activity = @transcript_page.try(&.tool_group)
-            end_tool_group
+            activity = take_tool_group
             add_subagent_message(subagent, activity)
             return
           end
@@ -1525,16 +1720,27 @@ module Xd
         return unless page
 
         group = page.tool_group
-        unless group && group.widget.parent
+        unless group
           group = ToolCallGroup.new
           page.tool_group = group
-          @transcript.append(group.widget)
         end
         group.append(summary)
       end
 
+      private def take_tool_group : ToolCallGroup?
+        page = @transcript_page || return
+        group = page.tool_group
+        page.tool_group = nil
+        group
+      end
+
       private def end_tool_group : Nil
-        @transcript_page.try(&.tool_group=(nil))
+        group = take_tool_group
+        return unless group && !group.empty?
+
+        # Keep tool activity as data while it might still be absorbed by the
+        # next keyed subagent report. Only mount it once the run is complete.
+        @transcript.append(group.widget)
       end
 
       private def add_diff_message(patch : String) : MessageRow
@@ -1701,6 +1907,10 @@ module Xd
           "chat" => JSON::Any.new(chat_id),
           "text" => JSON::Any.new(text),
         }
+        worktree_backend = @settings.string("git-writing-backend")
+        worktree_model = @settings.string("git-writing-model")
+        request["worktree_backend"] = JSON::Any.new(worktree_backend) unless worktree_backend.empty?
+        request["worktree_model"] = JSON::Any.new(worktree_model) unless worktree_model.empty?
         unless attachments.empty?
           encoded = attachments.map do |attachment|
             JSON::Any.new({
@@ -2476,7 +2686,10 @@ module Xd
         @live_turn_key = page.key
         turn_id = state["turn_id"]?.try(&.as_i64?)
         sequence = state["turn_sequence"]?.try(&.as_i64?)
-        batch = TranscriptBatch(JSON::Any).new(items)
+        batch = TranscriptBatch(JSON::Any).new(
+          items,
+          batch_size: TRANSCRIPT_RENDER_BATCH
+        )
         GLib.idle_add do
           active = !@closed &&
                    @turn_recovery_request == request &&
@@ -2516,6 +2729,7 @@ module Xd
 
           keep_working_last
           scroll_to_bottom
+          end_tool_group
           finish_turn_recovery(request, turn_id, sequence)
           false
         end
@@ -3103,7 +3317,15 @@ module Xd
         when "turn-finished"
           if active_event?(endpoint, event)
             end_tool_group
+            pending_messages = !@history_request.nil?
+            pending_window_start : Int64? = nil
+            if pending_messages && !@follow_bottom
+              if page = @transcript_page
+                pending_window_start = page.window_start if page.windowed
+              end
+            end
             @messages_request += 1
+            cancel_history_request
             finish_stream_segment
             set_working(false)
             if last_id = event["last_message_id"]?.try(&.as_i64?)
@@ -3136,6 +3358,17 @@ module Xd
             else
               # Compatibility with daemons predating finish metadata.
               load_messages
+            end
+            if last_id && pending_messages
+              if window_start = pending_window_start
+                load_messages(
+                  force: true,
+                  window_start: window_start,
+                  window_anchor: :top
+                )
+              else
+                load_messages(force: true)
+              end
             end
             # A queued turn may already be running in the daemon while its
             # ordered start/text events are still waiting in this GTK idle
@@ -3287,7 +3520,11 @@ module Xd
         @bottom_jump_page_size = -1.0
         @bottom_jump_stable_frames = 0
         @bottom_jump_frames = 0
-        @transcript_scroll.opacity = 0.0
+        # Keep the transcript visible while its adjustment settles. Hiding the
+        # whole scroll area makes a delayed or stalled history request look
+        # like an empty chat and leaves the client blank until the tick source
+        # happens to run.
+        @transcript_scroll.opacity = 1.0
         return unless @bottom_jump_tick == 0
 
         callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
@@ -3328,15 +3565,164 @@ module Xd
           @transcript_scroll.add_tick_callback(callback)
       end
 
-      private def on_scroll_adjustment_changed(
+      private def maybe_load_transcript_window(
         adjustment : Gtk::Adjustment,
-      ) : Nil
-        return if @programmatic_scroll
+      ) : Bool
+        page = @transcript_page
+        return false unless page
+        return false unless page.windowed
+        return false if @working
+        return false unless @turn_recovery_request.nil?
+        return false if page.window_loading
+        return false unless @history_request.nil?
+        return false if @window_anchor_suppressed
+
+        total = page.window_total
+        return false if total <= 0
 
         bottom = Math.max(
           adjustment.lower,
           adjustment.upper - adjustment.page_size
         )
+        at_top = adjustment.value <=
+                 adjustment.lower + TRANSCRIPT_WINDOW_EDGE
+        at_bottom = adjustment.value >=
+                    bottom - TRANSCRIPT_WINDOW_EDGE
+        direction = @window_scroll_direction
+        window_start : Int64
+        anchor : Symbol
+
+        if at_top && page.window_start > 0 && direction <= 0.0
+          window_start = Math.max(
+            page.window_start - TRANSCRIPT_WINDOW_SIZE.to_i64,
+            0_i64
+          )
+          anchor = :bottom
+        elsif at_bottom && page.window_end < total && direction >= 0.0
+          window_start = page.window_end
+          anchor = :top
+        else
+          return false
+        end
+
+        @window_scroll_direction = 0.0
+        @follow_bottom = false
+        @history_bottom_distance = -1.0
+        set_working_animation(false)
+        load_messages(
+          force: true,
+          window_start: window_start,
+          window_anchor: anchor
+        )
+        true
+      end
+
+      private def cancel_window_anchor : Nil
+        if @window_anchor_tick != 0
+          @transcript_scroll.remove_tick_callback(@window_anchor_tick)
+          @window_anchor_tick = 0_u32
+        end
+        @window_anchor_suppressed = false
+        @window_scroll_direction = 0.0
+        @window_last_adjustment_value = -1.0
+        @window_last_adjustment_upper = -1.0
+      end
+
+      private def queue_window_anchor(anchor : Symbol?) : Nil
+        return unless anchor
+
+        if @window_anchor_tick != 0
+          @transcript_scroll.remove_tick_callback(@window_anchor_tick)
+          @window_anchor_tick = 0_u32
+        end
+        @window_anchor_suppressed = true
+        @window_scroll_direction = 0.0
+        @window_anchor_upper = -1.0
+        @window_anchor_page_size = -1.0
+        @window_anchor_stable_frames = 0
+        @window_anchor_frames = 0
+        callback = ->(_widget : Gtk::Widget, _clock : Gdk::FrameClock) {
+          adjustment = @transcript_scroll.vadjustment
+          upper = adjustment.upper
+          page_size = adjustment.page_size
+          value = if anchor == :bottom
+                    Math.max(
+                      adjustment.lower,
+                      upper - page_size
+                    )
+                  else
+                    adjustment.lower
+                  end
+          value_held = adjustment.value == value
+          set_scroll_value(adjustment, value) unless value_held
+
+          if upper == @window_anchor_upper &&
+             page_size == @window_anchor_page_size &&
+             value_held
+            @window_anchor_stable_frames += 1
+          else
+            @window_anchor_stable_frames = 0
+          end
+          @window_anchor_upper = upper
+          @window_anchor_page_size = page_size
+          @window_anchor_frames += 1
+
+          if @window_anchor_stable_frames >= 2 ||
+             @window_anchor_frames >= TRANSCRIPT_WINDOW_ANCHOR_FRAME_LIMIT
+            @window_anchor_tick = 0_u32
+            @transcript_scroll.queue_draw
+            false
+          else
+            true
+          end
+        }
+        @window_anchor_tick =
+          @transcript_scroll.add_tick_callback(callback)
+      end
+
+      private def on_scroll_adjustment_changed(
+        adjustment : Gtk::Adjustment,
+      ) : Nil
+        page = @transcript_page
+        value = adjustment.value
+        upper = adjustment.upper
+        previous = @window_last_adjustment_value
+        previous_upper = @window_last_adjustment_upper
+        @window_last_adjustment_value = value
+        @window_last_adjustment_upper = upper
+        return if @programmatic_scroll
+
+        if @window_scroll_direction == 0.0 &&
+           previous >= 0.0 && value != previous
+          @window_scroll_direction = value > previous ? 1.0 : -1.0
+        end
+        if @window_anchor_tick != 0
+          if previous >= 0.0 && value != previous &&
+             previous_upper >= 0.0 && upper == previous_upper
+            direction = value > previous ? 1.0 : -1.0
+            cancel_window_anchor
+            @window_scroll_direction = direction
+          else
+            return
+          end
+        end
+        if @window_anchor_suppressed
+          @window_anchor_suppressed = false
+          @window_scroll_direction = 0.0
+          user_adjustment = previous >= 0.0 && value != previous &&
+                            previous_upper >= 0.0 && upper == previous_upper
+          if user_adjustment
+            return if maybe_load_transcript_window(adjustment)
+          else
+            return
+          end
+        end
+
+        bottom = Math.max(
+          adjustment.lower,
+          adjustment.upper - adjustment.page_size
+        )
+        return if maybe_load_transcript_window(adjustment)
 
         if @follow_bottom
           queue_bottom_pin unless @bottom_jump_tick != 0
@@ -3346,7 +3732,9 @@ module Xd
             adjustment.upper - @history_bottom_distance
           )
           adjustment.value = value if adjustment.value != value
-        elsif adjustment.value >= bottom - 1.0
+        elsif adjustment.value >= bottom - 1.0 &&
+              (!page || !page.windowed ||
+               page.window_end >= page.window_total)
           @follow_bottom = true
           @history_bottom_distance = -1.0
           set_working_animation(true)
@@ -3356,11 +3744,16 @@ module Xd
       private def on_transcript_scrolled(dy : Float64) : Nil
         adjustment = @transcript_scroll.vadjustment
         cancel_history_restore if dy != 0
+        if dy != 0
+          cancel_window_anchor
+          @window_scroll_direction = dy
+        end
         if dy < 0 && adjustment.value > adjustment.lower
           @follow_bottom = false
           @history_bottom_distance = -1.0
           set_working_animation(false)
         end
+        maybe_load_transcript_window(adjustment) if dy != 0
       end
 
       private def queue_history_restore : Nil

@@ -28,4 +28,34 @@ describe Xd::UI::ToolCallGroup do
     rendered.should contain("tool-59")
     rendered.size.should be <= Xd::UI::ToolCallGroup::MAX_RENDERED_CHARS + 64
   end
+
+  it "bounds stored activity through long delegated runs" do
+    buffer = Xd::UI::ToolCallGroup::ActivityBuffer.new
+    10_000.times do |index|
+      buffer.append("tool-#{index} #{"x" * 300}")
+    end
+
+    buffer.count.should eq(10_000)
+    buffer.summaries.size.should be <= Xd::UI::ToolCallGroup::MAX_RENDERED_CALLS
+    buffer.characters.should be <= Xd::UI::ToolCallGroup::MAX_RENDERED_CHARS
+    buffer.summaries.last.should contain("tool-9999")
+    Xd::UI::ToolCallGroup.rendered_label(
+      buffer.summaries,
+      buffer.count
+    ).should contain("earlier tool calls")
+  end
+
+  it "merges repeated agent activity without unbounded storage" do
+    current = Xd::UI::ToolCallGroup::ActivityBuffer.new
+    update = Xd::UI::ToolCallGroup::ActivityBuffer.new
+    500.times { |index| current.append("first-#{index}") }
+    700.times { |index| update.append("update-#{index}") }
+
+    current.merge(update)
+
+    current.count.should eq(1_200)
+    current.summaries.size.should be <= Xd::UI::ToolCallGroup::MAX_RENDERED_CALLS
+    current.characters.should be <= Xd::UI::ToolCallGroup::MAX_RENDERED_CHARS
+    current.summaries.last.should eq("update-699")
+  end
 end

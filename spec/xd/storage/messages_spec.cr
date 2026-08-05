@@ -84,7 +84,30 @@ describe Xd::Storage::Store do
       store.list_messages_since(chat_id, ids[2]).map(&.content).should eq(
         ["message-3", "message-4"]
       )
+      store.preceding_user_message(chat_id, ids[3]).not_nil!.content
+        .should eq("message-2")
       store.last_message_id(chat_id).should eq(ids.last)
+    end
+  end
+
+  it "pages ordered message slices without loading the full transcript" do
+    with_message_store do |store, tick|
+      chat_id = store.create_chat("folder", "Chat", "claude")
+      5.times do |index|
+        tick.call
+        store.append_message(chat_id, "event", "message-#{index}")
+      end
+
+      page = store.list_messages_slice_through(chat_id, Int64::MAX, 1, 2)
+      page.total.should eq(5)
+      page.messages.map(&.content).should eq(["message-1", "message-2"])
+
+      expect_raises(ArgumentError) do
+        store.list_messages_slice_through(chat_id, Int64::MAX, -1, 2)
+      end
+      expect_raises(ArgumentError) do
+        store.list_messages_slice_through(chat_id, Int64::MAX, 0, 0)
+      end
     end
   end
 

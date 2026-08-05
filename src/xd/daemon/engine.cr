@@ -26,9 +26,10 @@ require "./workspace_monitor"
 
 module Xd
   module Daemon
-    PROTOCOL_VERSION = 1_i64
-    MAX_DRAFT_BYTES  = 1024 * 1024
-    PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    PROTOCOL_VERSION      = 1_i64
+    MAX_DRAFT_BYTES       = 1024 * 1024
+    MAX_MESSAGE_PAGE_SIZE = 1600
+    PAIRING_ALPHABET      = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
     private record Pairing,
       code : String,
@@ -1192,29 +1193,78 @@ module Xd
       private def messages(request : Protocol::Request) : Protocol::Response
         chat_id = request.string("chat", "messages needs a chat id")
         requested = request.int?("limit") || 0_i64
+        requested_offset = request.int?("offset")
+        exact_window = request.member?("window")
         transcript_id = @agents.transcript_message_id(chat_id)
+        revision_id = transcript_id || @store.last_message_id(chat_id)
+        through_id = revision_id
+        actual_offset = 0_i64
 
-        if transcript_id || requested > 0
-          limit = requested > 0 ? Math.min(requested, Int32::MAX).to_i : Int32::MAX
-          page = @store.list_recent_messages_through(
+        if requested_offset
+          offset = requested_offset.not_nil!
+          raise Protocol::Error.new(
+            "offset must not be negative"
+          ) if offset < 0
+          raise Protocol::Error.new(
+            "offset requests need a positive limit"
+          ) unless requested > 0
+
+          limit = Math.min(
+            requested,
+            MAX_MESSAGE_PAGE_SIZE.to_i64
+          ).to_i
+          page = @store.list_messages_slice_through(
             chat_id,
-            transcript_id || Int64::MAX,
+            through_id,
+            offset.to_i,
             limit
           )
           rows = page.messages
           total = page.total
+          actual_offset = Math.min(offset, total)
+        elsif transcript_id || requested > 0
+          limit = requested > 0 ? Math.min(requested, Int32::MAX).to_i : Int32::MAX
+          page = @store.list_recent_messages_through(
+            chat_id,
+            through_id,
+            limit
+          )
+          rows = page.messages
+          total = page.total
+          actual_offset = Math.max(total - rows.size, 0_i64)
         else
-          rows = @store.list_messages(chat_id)
-          total = rows.size.to_i64
+          page = @store.list_recent_messages_through(
+            chat_id,
+            through_id,
+            Int32::MAX
+          )
+          rows = page.messages
+          total = page.total
+          actual_offset = Math.max(total - rows.size, 0_i64)
         end
 
-        Protocol::Response.ok({
+        turn_start = rows.first?.try do |first|
+          overfetched = requested_offset.nil? &&
+                        !exact_window &&
+                        requested > 0 &&
+                        requested < Int32::MAX &&
+                        rows.size == requested
+          if overfetched && first.role == "user"
+            first
+          elsif first.role == "user"
+            nil
+          else
+            @store.preceding_user_message(chat_id, first.id)
+          end
+        end
+        fields = {
           "total_messages"  => JSON::Any.new(total),
-          "last_message_id" => JSON::Any.new(
-            transcript_id || @store.last_message_id(chat_id)
-          ),
-          "messages" => messages_json(rows),
-        })
+          "last_message_id" => JSON::Any.new(revision_id),
+          "offset"          => JSON::Any.new(actual_offset),
+          "messages"        => messages_json(rows),
+        }
+        fields["turn_start"] = turn_start ? message_json(turn_start.not_nil!) : JSON::Any.new(nil)
+        Protocol::Response.ok(fields)
       end
 
       private def list_dir(
@@ -1614,7 +1664,13 @@ module Xd
         end
 
         message = @images.materialize(request.body, text)
-        result = @agents.send(chat_id, message)
+        result = @agents.send(
+          chat_id,
+          message,
+          request.string?("worktree_name"),
+          request.string?("worktree_backend"),
+          request.string?("worktree_model")
+        )
         Protocol::Response.ok({
           "queued" => JSON::Any.new(result.queued?),
         })
@@ -2077,17 +2133,23 @@ module Xd
         rows : Array(Storage::Message),
       ) : JSON::Any
         values = rows.map do |message|
-          fields = {
-            "role"    => JSON::Any.new(message.role),
-            "content" => JSON::Any.new(message.content),
-            "at"      => JSON::Any.new(message.created_at),
-          }
-          if label = message.label
-            fields["label"] = JSON::Any.new(label)
-          end
-          JSON::Any.new(fields)
+          message_json(message)
         end
         JSON::Any.new(values)
+      end
+
+      private def message_json(
+        message : Storage::Message,
+      ) : JSON::Any
+        fields = {
+          "role"    => JSON::Any.new(message.role),
+          "content" => JSON::Any.new(message.content),
+          "at"      => JSON::Any.new(message.created_at),
+        }
+        if label = message.label
+          fields["label"] = JSON::Any.new(label)
+        end
+        JSON::Any.new(fields)
       end
 
       private def worktrees_json(

@@ -28,7 +28,7 @@ describe Xd::UI::TranscriptPaging do
     paging.extend_to_turn_start(205, 101, "tool").should be_true
     paging.limit.should eq(200)
     paging.extend_to_turn_start(205, 201, "assistant").should be_true
-    paging.limit.should eq(300)
+    paging.limit.should eq(400)
     paging.extend_to_turn_start(205, 205, "user").should be_false
   end
 
@@ -46,12 +46,12 @@ describe Xd::UI::TranscriptPaging do
     paging.limit.should eq(100)
   end
 
-  it "uses singular copy and saturates its protocol limit" do
-    paging = Xd::UI::TranscriptPaging.new(Int32::MAX - 50)
+  it "caps history pages before the embedded daemon can block" do
+    paging = Xd::UI::TranscriptPaging.new(Int32::MAX)
 
-    paging.earlier_label(2, 1).should eq("Load 1 earlier message")
-    paging.load_earlier.should eq(Int32::MAX)
-    paging.query_limit.should eq(Int32::MAX)
+    paging.limit.should eq(Xd::UI::TranscriptPaging::MAX_PAGE_SIZE)
+    paging.at_limit?.should be_true
+    paging.load_earlier.should eq(Xd::UI::TranscriptPaging::MAX_PAGE_SIZE)
   end
 end
 

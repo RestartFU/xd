@@ -14,6 +14,7 @@ require "./git_diff_tracker"
 require "./git_draft"
 require "./ask"
 require "./secrets"
+require "./worktree_name"
 require "./workflow_run"
 require "./workspace_block"
 
@@ -172,8 +173,9 @@ module Xd
       items : Array(TurnItem)
 
     class Manager
-      MAX_GENERATIONS    = 4
-      GENERATION_TIMEOUT = 90.seconds
+      MAX_GENERATIONS        = 4
+      GENERATION_TIMEOUT     = 90.seconds
+      WORKTREE_NAME_TIMEOUT  = 15.seconds
 
       class Error < Exception
       end
@@ -262,7 +264,13 @@ module Xd
                             Workspace::Worktrees.new(@store, @workspaces)
       end
 
-      def send(chat_id : String, text : String) : SendResult
+      def send(
+        chat_id : String,
+        text : String,
+        worktree_name : String? = nil,
+        worktree_backend : String? = nil,
+        worktree_model : String? = nil,
+      ) : SendResult
         if text.empty?
           raise Error.new("A message needs a chat and something to say.")
         end
@@ -284,7 +292,13 @@ module Xd
           return SendResult::Queued
         end
 
-        start_turn(chat_id, text)
+        start_turn(
+          chat_id,
+          text,
+          worktree_name: worktree_name,
+          worktree_backend: worktree_backend,
+          worktree_model: worktree_model
+        )
         SendResult::Started
       rescue error : Error
         raise error
@@ -395,6 +409,7 @@ module Xd
         model_id : String?,
         prompt : String,
         system_prompt : String,
+        timeout : Time::Span = GENERATION_TIMEOUT,
         &complete : Bool, String?, String? -> Nil
       ) : Nil
         chat = @store.get_chat(chat_id)
@@ -468,7 +483,7 @@ module Xd
           handle.cancel if cancel
           if active
             spawn do
-              sleep GENERATION_TIMEOUT
+              sleep timeout
               timeout_generation(generation, complete)
             end
           end
@@ -604,11 +619,53 @@ module Xd
         STDERR.puts "xd: Git draft timeout callback failed: #{error.message}"
       end
 
+      private def generated_worktree_name(
+        chat_id : String,
+        prompt : String,
+        backend_id : String?,
+        model_id : String?,
+      ) : String?
+        completed = Channel({Bool, String?, String?}).new(1)
+        begin
+          generate(
+            chat_id,
+            backend_id,
+            model_id,
+            WorktreeNames.prompt(prompt),
+            WorktreeNames::SYSTEM_PROMPT,
+            timeout: WORKTREE_NAME_TIMEOUT
+          ) do |success, text, error|
+            completed.send({success, text, error})
+          end
+        rescue error
+          STDERR.puts(
+            "xd: cannot start AI worktree naming: #{error.message}"
+          )
+          return
+        end
+
+        result = select
+        when value = completed.receive
+          value
+        when timeout(WORKTREE_NAME_TIMEOUT + 5.seconds)
+          return
+        end
+        return unless result[0]
+
+        WorktreeNames.parse(result[1] || "")
+      rescue error : WorktreeNames::Error
+        STDERR.puts("xd: invalid AI worktree name: #{error.message}")
+        nil
+      end
+
       private def start_turn(
         chat_id : String,
         text : String,
         user_submitted : Bool = true,
         retry_attempt : Bool = false,
+        worktree_name : String? = nil,
+        worktree_backend : String? = nil,
+        worktree_model : String? = nil,
       ) : Nil
         input_stored = !user_submitted
         begin
@@ -634,10 +691,18 @@ module Xd
             publish("tree")
           end
 
-          workdir = @worktree_service.prepare(
-            chat,
-            Conversation.title(text)
-          )
+          name_hint = worktree_name
+          if chat.new_worktree && name_hint.nil? &&
+             (worktree_backend || worktree_model)
+            name_hint = generated_worktree_name(
+              chat_id,
+              text,
+              worktree_backend,
+              worktree_model
+            )
+          end
+          name_hint ||= Conversation.title(text)
+          workdir = @worktree_service.prepare(chat, name_hint)
           if user_submitted
             @store.append_message(chat_id, "user", text)
             input_stored = true

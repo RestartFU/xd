@@ -928,6 +928,17 @@ describe Xd::Daemon::Engine do
       page["messages"].as_a.size.should eq(101)
       page["messages"].as_a.first["content"].as_s.should eq("history-1")
 
+      slice = engine.dispatch(local, {
+        "op"     => "messages",
+        "chat"   => chat,
+        "limit"  => 3,
+        "offset" => 40,
+      }.to_json)
+      slice["total_messages"].as_i64.should eq(102)
+      slice["offset"].as_i64.should eq(40)
+      slice["messages"].as_a.map { |row| row["content"].as_s }
+        .should eq(["history-40", "history-41", "history-42"])
+
       engine.dispatch(local, {
         "op"   => "send",
         "chat" => chat,
@@ -946,6 +957,34 @@ describe Xd::Daemon::Engine do
       live["messages"].as_a.map { |row| row["content"].as_s }
         .should_not contain("live row")
       live["messages"].as_a.last["content"].as_s.should eq("keep going")
+    end
+  end
+
+  it "returns the user turn start beside a bounded tool page" do
+    with_daemon_engine do |store, engine|
+      local = Xd::Daemon::Connection.new(Xd::Daemon::Transport::Local)
+      folder = engine.dispatch(local, {
+        "op"   => "new-folder",
+        "name" => "Bounded transcript",
+      }.to_json)["id"].as_s
+      chat = engine.dispatch(local, {
+        "op"     => "new-chat",
+        "folder" => folder,
+      }.to_json)["id"].as_s
+
+      store.append_message(chat, "user", "the original prompt")
+      101.times do |index|
+        store.append_message(chat, "tool", "tool-#{index}")
+      end
+
+      page = engine.dispatch(local, {
+        "op"    => "messages",
+        "chat"  => chat,
+        "limit" => 101,
+      }.to_json)
+      page["messages"].as_a.size.should eq(101)
+      page["messages"].as_a.first["content"].as_s.should eq("tool-0")
+      page["turn_start"]["content"].as_s.should eq("the original prompt")
     end
   end
 
