@@ -1,13 +1,14 @@
 use std::{fs, path::PathBuf, time::Duration};
 
 use gpui::{
-    App, Application, Bounds, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState,
-    ObjectFit, PathPromptOptions, Render, Timer, Window, WindowBounds, WindowOptions, div, img,
-    list, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
+    KeyBinding, ListAlignment, ListState, ObjectFit, PathPromptOptions, Render, StyledText, Timer,
+    Window, WindowBounds, WindowOptions, div, img, list, prelude::*, px, rgb, size,
 };
 use serde_json::Value;
 use xd_desktop::{
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
+    markdown::{self, Block, CodeKind, InlineKind, InlineText},
     model::{AppModel, Attachment, Message},
 };
 
@@ -865,12 +866,136 @@ impl XdDesktop {
                         .child(label),
                 )
                 .child(
-                    div()
+                    Self::markdown_content(message.markdown())
                         .text_sm()
-                        .line_height(px(21.0))
-                        .child(message.content.clone()),
+                        .line_height(px(21.0)),
                 ),
         )
+    }
+
+    fn markdown_content(document: std::sync::Arc<markdown::Document>) -> gpui::Div {
+        let mut content = div().w_full().flex().flex_col().gap_2();
+        for block in document.blocks.iter().cloned() {
+            let element = match block {
+                Block::Heading { level, content } => {
+                    let heading = div()
+                        .mt_1()
+                        .font_weight(FontWeight::BOLD)
+                        .child(Self::inline_text(content));
+                    match level {
+                        1 => heading.text_xl().line_height(px(30.0)),
+                        2 => heading.text_lg().line_height(px(27.0)),
+                        _ => heading.text_base().line_height(px(24.0)),
+                    }
+                    .into_any_element()
+                }
+                Block::Paragraph(content) => div()
+                    .whitespace_normal()
+                    .child(Self::inline_text(content))
+                    .into_any_element(),
+                Block::Quote(content) => div()
+                    .pl_3()
+                    .py_1()
+                    .border_l_2()
+                    .border_color(rgb(0x59647a))
+                    .text_color(rgb(0xb8bfcc))
+                    .child(Self::inline_text(content))
+                    .into_any_element(),
+                Block::ListItem { ordered, content } => div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .flex_none()
+                            .text_color(rgb(MUTED))
+                            .child(if ordered { "1." } else { "•" }),
+                    )
+                    .child(div().flex_1().child(Self::inline_text(content)))
+                    .into_any_element(),
+                Block::Rule => div()
+                    .w_full()
+                    .h(px(1.0))
+                    .my_2()
+                    .bg(rgb(BORDER))
+                    .into_any_element(),
+                Block::Code(code) => {
+                    let language = code.language.unwrap_or_else(|| "text".into());
+                    let highlights = code.spans.into_iter().map(|span| {
+                        let color = match span.kind {
+                            CodeKind::Keyword => 0xc792ea,
+                            CodeKind::String => 0xc3e88d,
+                            CodeKind::Comment => 0x758195,
+                            CodeKind::Number => 0xf78c6c,
+                        };
+                        (
+                            span.range,
+                            HighlightStyle {
+                                color: Some(rgb(color).into()),
+                                ..Default::default()
+                            },
+                        )
+                    });
+                    div()
+                        .w_full()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x343b48))
+                        .bg(rgb(0x11141a))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .w_full()
+                                .px_3()
+                                .py_1()
+                                .bg(rgb(0x1d222b))
+                                .text_xs()
+                                .text_color(rgb(0xaab2c0))
+                                .child(language),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .p_3()
+                                .font_family("monospace")
+                                .text_sm()
+                                .line_height(px(20.0))
+                                .whitespace_normal()
+                                .child(StyledText::new(code.code).with_highlights(highlights)),
+                        )
+                        .into_any_element()
+                }
+            };
+            content = content.child(element);
+        }
+        content
+    }
+
+    fn inline_text(content: InlineText) -> StyledText {
+        let highlights = content.spans.into_iter().map(|span| {
+            let style = match span.kind {
+                InlineKind::Strong => HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+                InlineKind::Emphasis => HighlightStyle {
+                    font_style: Some(FontStyle::Italic),
+                    ..Default::default()
+                },
+                InlineKind::Code => HighlightStyle {
+                    color: Some(rgb(0xd8b4fe).into()),
+                    background_color: Some(rgb(0x292331).into()),
+                    ..Default::default()
+                },
+                InlineKind::Link => HighlightStyle {
+                    color: Some(rgb(0x91a7ff).into()),
+                    ..Default::default()
+                },
+            };
+            (span.range, style)
+        });
+        StyledText::new(content.text).with_highlights(highlights)
     }
 }
 

@@ -5,6 +5,8 @@ use gpui::{Image, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::markdown::{self, Document};
+
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,37 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(skip)]
+    markdown: Option<Arc<Document>>,
+}
+
+impl Message {
+    pub fn new(
+        id: Option<i64>,
+        role: impl Into<String>,
+        content: impl Into<String>,
+        label: Option<String>,
+    ) -> Self {
+        let content = content.into();
+        let markdown = Some(Arc::new(markdown::parse(&content)));
+        Self {
+            id,
+            role: role.into(),
+            content,
+            label,
+            markdown,
+        }
+    }
+
+    pub fn markdown(&self) -> Arc<Document> {
+        self.markdown
+            .clone()
+            .unwrap_or_else(|| Arc::new(markdown::parse(&self.content)))
+    }
+
+    fn cache_markdown(&mut self) {
+        self.markdown = Some(Arc::new(markdown::parse(&self.content)));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,7 +336,11 @@ impl AppModel {
     }
 
     pub fn apply_messages(&mut self, body: &Value) -> Result<(), serde_json::Error> {
-        let snapshot: MessagesSnapshot = serde_json::from_value(body.clone())?;
+        let mut snapshot: MessagesSnapshot = serde_json::from_value(body.clone())?;
+        snapshot
+            .messages
+            .iter_mut()
+            .for_each(Message::cache_markdown);
         self.messages = snapshot.messages;
         Ok(())
     }
@@ -331,16 +368,15 @@ impl AppModel {
                 }
             }
             "tool" if self.event_is_active(body) => {
-                self.live_activity.push(Message {
-                    id: None,
-                    role: "tool".into(),
-                    content: body
-                        .get("text")
+                self.live_activity.push(Message::new(
+                    None,
+                    "tool",
+                    body.get("text")
                         .and_then(Value::as_str)
                         .unwrap_or("Used a tool")
                         .to_owned(),
-                    label: None,
-                });
+                    None,
+                ));
             }
             "turn-finished" if self.event_is_active(body) => self.working = false,
             _ => {}
@@ -355,12 +391,12 @@ impl AppModel {
     pub fn display_messages(&self) -> Vec<Message> {
         let mut messages = self.messages.clone();
         if !self.live_text.is_empty() {
-            messages.push(Message {
-                id: None,
-                role: "assistant".into(),
-                content: self.live_text.clone(),
-                label: self.selected_summary().map(|chat| chat.backend.clone()),
-            });
+            messages.push(Message::new(
+                None,
+                "assistant",
+                self.live_text.clone(),
+                self.selected_summary().map(|chat| chat.backend.clone()),
+            ));
         }
         messages.extend(self.live_activity.iter().cloned());
         messages
@@ -423,24 +459,19 @@ impl AppModel {
             ],
             selected_chat: Some("chat-gpui".into()),
             messages: vec![
-                Message {
-                    id: Some(1),
-                    role: "user".into(),
-                    content: "Rewrite xd's desktop UI using GPUI, but keep the daemon.".into(),
-                    label: None,
-                },
-                Message {
-                    id: Some(2),
-                    role: "assistant".into(),
-                    content: "The new frontend is connected through the existing JSON Lines protocol. Transcript rows are virtualized from the first milestone.".into(),
-                    label: Some("Codex".into()),
-                },
-                Message {
-                    id: Some(3),
-                    role: "tool".into(),
-                    content: "Building the Rust desktop shell".into(),
-                    label: None,
-                },
+                Message::new(
+                    Some(1),
+                    "user",
+                    "Rewrite xd's desktop UI using GPUI, but keep the daemon.",
+                    None,
+                ),
+                Message::new(
+                    Some(2),
+                    "assistant",
+                    "The new frontend is connected through the existing JSON Lines protocol. Transcript rows are virtualized from the first milestone.",
+                    Some("Codex".into()),
+                ),
+                Message::new(Some(3), "tool", "Building the Rust desktop shell", None),
             ],
             queue: vec!["Port workspace and chat shortcuts".into()],
             working: true,
@@ -485,12 +516,7 @@ mod tests {
     fn applies_complete_tree_snapshots_and_retires_deleted_selection() {
         let mut model = AppModel {
             selected_chat: Some("deleted".into()),
-            messages: vec![Message {
-                id: Some(1),
-                role: "user".into(),
-                content: "stale".into(),
-                label: None,
-            }],
+            messages: vec![Message::new(Some(1), "user", "stale", None)],
             ..Default::default()
         };
 
