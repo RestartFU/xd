@@ -63,6 +63,29 @@ pub struct StateStore {
     workspace_root: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct TurnSpec {
+    pub chat_id: String,
+    pub prompt: String,
+    pub workdir: String,
+    pub model: String,
+    pub effort: String,
+    pub access: String,
+    pub session_id: Option<String>,
+    pub label: String,
+}
+
+pub enum SendDisposition {
+    Queued { reply: Value, event: Value },
+    Start { reply: Value, turn: TurnSpec },
+}
+
+pub struct TurnFinish {
+    pub last_message_id: i64,
+    pub next: Option<TurnSpec>,
+    pub queue_event: Option<Value>,
+}
+
 #[derive(Clone)]
 struct WorkspaceRow {
     id: String,
@@ -443,6 +466,172 @@ impl StateStore {
             json!({"ok": true}),
             json!({"event": "changed", "chat": chat_id}),
         ))
+    }
+
+    pub fn prepare_send(&self, request: &Value) -> Result<SendDisposition, StorageError> {
+        let chat_id = required_string(
+            request,
+            "chat",
+            "A message needs a chat and something to say.",
+        )?;
+        let text = optional_string(request, "text")?.unwrap_or("");
+        if text.is_empty() || request.get("attachments").is_some() {
+            return Err(StorageError::InvalidRequest(
+                "The Rust daemon currently accepts non-empty text messages without attachments."
+                    .into(),
+            ));
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let working = transaction
+            .query_row(
+                "SELECT daemon_working FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if working {
+            let stored = transaction.query_row(
+                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            let mut queue = queue_from_column(Some(&stored));
+            queue.push(text.to_owned());
+            transaction.execute(
+                "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?",
+                params![
+                    serde_json::to_string(&queue).unwrap(),
+                    now_seconds(),
+                    chat_id
+                ],
+            )?;
+            transaction.commit()?;
+            let event = queued_event(chat_id, &queue);
+            return Ok(SendDisposition::Queued {
+                reply: json!({"ok": true, "queued": true}),
+                event,
+            });
+        }
+        let turn = prepare_turn(&transaction, &self.workspace_root, chat_id, text)?;
+        transaction.execute(
+            "UPDATE chats SET daemon_working = 1, draft = '', draft_attachments = '[]', \
+             draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
+            params![now_seconds(), chat_id],
+        )?;
+        transaction.commit()?;
+        Ok(SendDisposition::Start {
+            reply: json!({"ok": true, "queued": false}),
+            turn,
+        })
+    }
+
+    pub fn append_turn_message(
+        &self,
+        chat_id: &str,
+        role: &str,
+        content: &str,
+        label: Option<&str>,
+    ) -> Result<i64, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO messages (chat_id, role, content, created_at, label) VALUES (?, ?, ?, ?, ?)",
+            params![chat_id, role, content, now_seconds(), label],
+        )?;
+        Ok(database.last_insert_rowid())
+    }
+
+    pub fn set_session(&self, chat_id: &str, session_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, 'codex', ?) \
+             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
+            params![chat_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_turn(
+        &self,
+        chat_id: &str,
+        success: bool,
+        error: Option<&str>,
+        duration: u64,
+        silent: bool,
+    ) -> Result<TurnFinish, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        if success && silent {
+            transaction.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) \
+                 VALUES (?, 'assistant', '(no reply)', ?)",
+                params![chat_id, now_seconds()],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'duration', ?, ?)",
+            params![chat_id, duration.to_string(), now_seconds()],
+        )?;
+        if let Some(error) = error.filter(|error| !error.is_empty()) {
+            transaction.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
+                params![chat_id, error, now_seconds()],
+            )?;
+        }
+        let stored = transaction
+            .query_row(
+                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let mut queue = queue_from_column(Some(&stored));
+        let next_text = if queue.is_empty() {
+            None
+        } else {
+            Some(queue.remove(0))
+        };
+        let encoded = if queue.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&queue).unwrap())
+        };
+        transaction.execute(
+            "UPDATE chats SET queued = ?, daemon_working = ?, updated_at = ? WHERE id = ?",
+            params![encoded, next_text.is_some(), now_seconds(), chat_id],
+        )?;
+        let last_message_id = transaction.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?",
+            [chat_id],
+            |row| row.get(0),
+        )?;
+        let next = next_text
+            .as_deref()
+            .map(|text| prepare_turn(&transaction, &self.workspace_root, chat_id, text))
+            .transpose()?;
+        transaction.commit()?;
+        Ok(TurnFinish {
+            last_message_id,
+            next,
+            queue_event: next_text.map(|_| queued_event(chat_id, &queue)),
+        })
+    }
+
+    pub fn abort_turn_start(&self, chat_id: &str, error: &str) -> Result<(), StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        transaction.execute(
+            "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
+            params![chat_id, error, now_seconds()],
+        )?;
+        transaction.execute(
+            "UPDATE chats SET daemon_working = 0, updated_at = ? WHERE id = ?",
+            params![now_seconds(), chat_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn set_shortcuts(&self, request: &Value) -> Result<(Value, Value), StorageError> {
@@ -1153,6 +1342,125 @@ fn update_boolean_option(
     )?)
 }
 
+fn prepare_turn(
+    transaction: &rusqlite::Transaction<'_>,
+    workspace_root: &Path,
+    chat_id: &str,
+    text: &str,
+) -> Result<TurnSpec, StorageError> {
+    let chat = transaction
+        .query_row(
+            "SELECT folder_id, backend, workdir, model, effort, access, plan FROM chats WHERE id = ?",
+            [chat_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, bool>(6)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    if chat.1 != "codex" {
+        return Err(StorageError::InvalidRequest(
+            "The Rust daemon currently runs Codex chats only.".into(),
+        ));
+    }
+    let relative = transaction
+        .query_row(
+            "SELECT relative_path FROM workspace_folders WHERE root_path = ? AND id = ?",
+            params![workspace_root.to_string_lossy(), chat.0],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+    let mut inherited = None;
+    let mut current = Some(relative.as_str());
+    while inherited.is_none() {
+        let Some(path) = current else { break };
+        inherited = transaction
+            .query_row(
+                "SELECT COALESCE(workdir, repo) FROM workspace_folders \
+                 WHERE root_path = ? AND relative_path = ?",
+                params![workspace_root.to_string_lossy(), path],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        current = path.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    let workdir = chat.2.unwrap_or_else(|| {
+        inherited.unwrap_or_else(|| workspace_root.join(relative).to_string_lossy().into_owned())
+    });
+    if !Path::new(&workdir).is_dir() {
+        return Err(StorageError::InvalidRequest(format!(
+            "The chat working directory does not exist: {workdir}"
+        )));
+    }
+    let model = chat.3.unwrap_or_else(|| "gpt-5.6-sol".into());
+    let effort = chat.4.unwrap_or_else(|| "high".into());
+    let access = if chat.6 {
+        "read-only".into()
+    } else {
+        chat.5.unwrap_or_else(|| "read-only".into())
+    };
+    let session_id = transaction
+        .query_row(
+            "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = 'codex'",
+            [chat_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let now = now_seconds();
+    transaction.execute(
+        "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+        params![chat_id, text, now],
+    )?;
+    transaction.execute(
+        "UPDATE chats SET updated_at = ?, last_user_message_at = ? WHERE id = ?",
+        params![now, now_microseconds(), chat_id],
+    )?;
+    Ok(TurnSpec {
+        chat_id: chat_id.into(),
+        prompt: text.into(),
+        workdir,
+        model: model.clone(),
+        effort: effort.clone(),
+        access,
+        session_id,
+        label: format!(
+            "{} · {}",
+            model_label("codex", &model),
+            effort_label(&effort)
+        ),
+    })
+}
+
+fn effort_label(effort: &str) -> &str {
+    match effort {
+        "low" => "Low",
+        "medium" => "Medium",
+        "xhigh" => "Extra high",
+        "max" => "Max",
+        "ultra" => "Ultra",
+        _ => "High",
+    }
+}
+
+fn queued_event(chat_id: &str, queue: &[String]) -> Value {
+    let mut event = json!({"event": "queued", "chat": chat_id, "queue": queue});
+    if let Some(first) = queue.first() {
+        event["text"] = Value::String(first.clone());
+    }
+    event
+}
+
 fn required_string<'a>(
     request: &'a Value,
     key: &str,
@@ -1201,6 +1509,14 @@ fn now_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn now_microseconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(i64::MAX as u128) as i64
 }
 
 fn validate_attachments(value: &Value) -> Result<Vec<Value>, StorageError> {
@@ -1759,6 +2075,54 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["effort"], "high");
     }
 
+    #[test]
+    fn send_starts_once_then_hands_queued_text_to_the_next_turn() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let first = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "first"}))
+            .unwrap();
+        let SendDisposition::Start { reply, turn } = first else {
+            panic!("idle send should start");
+        };
+        assert_eq!(reply["queued"], false);
+        assert_eq!(turn.prompt, "first");
+        assert_eq!(
+            turn.workdir,
+            fixture.workspaces.join("folder").to_string_lossy()
+        );
+
+        let second = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "second"}))
+            .unwrap();
+        let SendDisposition::Queued { reply, event } = second else {
+            panic!("working send should queue");
+        };
+        assert_eq!(reply["queued"], true);
+        assert_eq!(event["queue"], json!(["second"]));
+        assert_eq!(
+            store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let finish = store.finish_turn("chat-1", true, None, 2, false).unwrap();
+        let next = finish.next.expect("queued turn");
+        assert_eq!(next.prompt, "second");
+        assert_eq!(finish.queue_event.unwrap()["queue"], json!([]));
+        assert_eq!(store.chat("chat-1").unwrap()["working"], true);
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
     struct Fixture {
         root: PathBuf,
         database: PathBuf,
@@ -1801,6 +2165,10 @@ mod tests {
                        FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
                      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, \
                        role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, label TEXT, \
+                       FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
+                     CREATE TABLE chat_sessions (chat_id TEXT NOT NULL, backend TEXT NOT NULL, \
+                       session_id TEXT, last_message_id INTEGER NOT NULL DEFAULT 0, \
+                       PRIMARY KEY(chat_id, backend), \
                        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
                      CREATE TABLE agent_defaults (singleton INTEGER PRIMARY KEY, backend TEXT NOT NULL, \
                        model TEXT, effort TEXT, access TEXT, plan INTEGER NOT NULL, fast INTEGER NOT NULL, \

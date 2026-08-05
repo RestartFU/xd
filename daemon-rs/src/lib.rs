@@ -19,9 +19,11 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub mod agent;
+mod runtime;
 mod storage;
 
-pub use storage::{StateStore, StorageError};
+pub use runtime::TurnRuntime;
+pub use storage::{SendDisposition, StateStore, StorageError};
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
 const REQUEST_ID: &str = "_xd_request";
@@ -58,8 +60,9 @@ pub struct LocalServer {
 }
 
 pub struct Engine {
-    store: Option<StateStore>,
+    store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
+    runtime: Option<TurnRuntime>,
 }
 
 #[derive(Default)]
@@ -79,13 +82,17 @@ impl Engine {
         Self {
             store: None,
             events: Arc::default(),
+            runtime: None,
         }
     }
 
     pub fn with_store(store: StateStore) -> Self {
+        let store = Arc::new(store);
+        let events = Arc::new(EventBus::default());
         Self {
+            runtime: Some(TurnRuntime::new(store.clone(), events.clone())),
             store: Some(store),
-            events: Arc::default(),
+            events,
         }
     }
 
@@ -104,6 +111,8 @@ impl Engine {
             Some("set-draft") => self.event_mutation(|store| store.set_draft(&request)),
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
+            Some("send") => self.send_message(&request),
+            Some("cancel") => self.cancel(&request),
             Some("new-folder") => self.tree_mutation(|store| store.new_folder(&request)),
             Some("new-chat") => self.tree_mutation(|store| store.new_chat(&request)),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
@@ -112,7 +121,7 @@ impl Engine {
             Some("queue") => self.event_mutation(|store| store.queue(&request)),
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
-            Some("steer-queue") => self.event_mutation(|store| store.steer_queue(&request)),
+            Some("steer-queue") => self.steer_queue(&request),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -158,6 +167,55 @@ impl Engine {
         match operation(store) {
             Ok((reply, event)) => {
                 self.events.publish(event);
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn send_message(&self, request: &Value) -> Value {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.prepare_send(request) {
+            Ok(SendDisposition::Queued { reply, event }) => {
+                self.events.publish(event);
+                reply
+            }
+            Ok(SendDisposition::Start { reply, turn }) => match runtime.start(turn.clone()) {
+                Ok(()) => reply,
+                Err(error) => {
+                    let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    error_reply(error)
+                }
+            },
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn cancel(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "cancel needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        if let Some(runtime) = &self.runtime {
+            runtime.cancel(chat_id);
+        }
+        json!({"ok": true})
+    }
+
+    fn steer_queue(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.steer_queue(request) {
+            Ok((reply, event)) => {
+                self.events.publish(event);
+                if let Some(chat_id) = request.get("chat").and_then(Value::as_str)
+                    && let Some(runtime) = &self.runtime
+                {
+                    runtime.cancel(chat_id);
+                }
                 reply
             }
             Err(error) => error_reply(error),
@@ -390,10 +448,10 @@ mod tests {
 
     #[test]
     fn unknown_operations_are_explicit_and_correlated() {
-        let reply = dispatch(json!({"op": "send", "_xd_request": 7}));
+        let reply = dispatch(json!({"op": "terminal-open", "_xd_request": 7}));
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
-        assert!(reply["error"].as_str().unwrap().contains("send"));
+        assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
     }
 
     #[test]

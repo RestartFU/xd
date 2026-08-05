@@ -101,6 +101,13 @@ impl CodexCommand<'_> {
             append_model_and_effort(&mut command, self.model, self.effort);
             if self.access == "full" {
                 command.arg("--dangerously-bypass-approvals-and-sandbox");
+            } else {
+                let sandbox = if self.access == "edit" {
+                    "workspace-write"
+                } else {
+                    "read-only"
+                };
+                command.args(["-c", &format!("sandbox_mode=\"{sandbox}\"")]);
             }
             command.args([session_id, self.prompt]);
         } else {
@@ -289,5 +296,26 @@ mod tests {
         assert_eq!(&args[..3], ["exec", "resume", "--json"]);
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
         assert_eq!(&args[args.len() - 2..], ["thread-1", "continue"]);
+
+        let resumed_read_only = CodexCommand {
+            access: "read-only",
+            ..CodexCommand {
+                prompt: "continue",
+                workdir: "/workspace",
+                model: "gpt-5.6-sol",
+                effort: "high",
+                access: "read-only",
+                session_id: Some("thread-1"),
+            }
+        }
+        .build();
+        let args = resumed_read_only
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""])
+        );
     }
 }
