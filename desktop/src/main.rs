@@ -143,6 +143,27 @@ impl XdDesktop {
                     }
                 }
             }
+            RequestKind::NewFolder => {
+                let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
+                    self.model.connection_error =
+                        Some("The daemon returned no workspace id.".into());
+                    return;
+                };
+                if let Some(daemon) = &self.daemon
+                    && let Err(error) = daemon.new_chat(folder_id)
+                {
+                    self.model.connection_error = Some(error);
+                }
+            }
+            RequestKind::NewChat { folder_id } => {
+                let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
+                    self.model.connection_error = Some("The daemon returned no chat id.".into());
+                    return;
+                };
+                let _ = folder_id;
+                self.request_tree();
+                self.select_chat(chat_id.to_owned(), cx);
+            }
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
                 self.model.apply_chat(&value);
                 if !self.draft_dirty {
@@ -240,6 +261,23 @@ impl XdDesktop {
             if let Err(error) = daemon.tree() {
                 self.model.connection_error = Some(error);
             }
+        }
+    }
+
+    fn create_workspace(&mut self) {
+        let name = format!("Workspace {}", self.model.folders.len() + 1);
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.new_folder(&name)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn create_chat(&mut self, folder_id: &str) {
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.new_chat(folder_id)
+        {
+            self.model.connection_error = Some(error);
         }
     }
 
@@ -442,17 +480,33 @@ impl Render for XdDesktop {
 
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
-        for folder in self.model.folders.clone() {
+        for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
             let indent = if folder.parent.is_some() { 22.0 } else { 12.0 };
+            let folder_id = folder.id.clone();
             tree_rows.push(
                 div()
                     .px_3()
                     .ml(px(indent))
                     .pt_2()
                     .pb_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .text_sm()
                     .text_color(rgb(TEXT))
                     .child(format!("▾  {}", folder.name))
+                    .child(
+                        div()
+                            .id(("new-chat", folder_row_index))
+                            .px_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                            .on_click(
+                                cx.listener(move |this, _, _, _| this.create_chat(&folder_id)),
+                            )
+                            .child("+"),
+                    )
                     .into_any_element(),
             );
             for chat in self
@@ -527,9 +581,23 @@ impl Render for XdDesktop {
                     .px_4()
                     .pt_4()
                     .pb_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("WORKSPACES"),
+                    .child("WORKSPACES")
+                    .child(
+                        div()
+                            .id("new-workspace")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                            .on_click(cx.listener(|this, _, _, _| this.create_workspace()))
+                            .child("+ New"),
+                    ),
             )
             .child(
                 div()

@@ -19,6 +19,8 @@ use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
+    NewFolder,
+    NewChat { folder_id: String },
     Chat { chat_id: String },
     Messages { chat_id: String },
     Send { chat_id: String, text: String },
@@ -186,6 +188,22 @@ impl DaemonHandle {
 
     pub fn tree(&self) -> Result<(), String> {
         self.send(RequestKind::Tree, json!({"op": "tree"}))
+    }
+
+    pub fn new_folder(&self, name: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::NewFolder,
+            json!({"op": "new-folder", "name": name}),
+        )
+    }
+
+    pub fn new_chat(&self, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::NewChat {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "new-chat", "folder": folder_id}),
+        )
     }
 
     pub fn chat(&self, chat_id: &str) -> Result<(), String> {
