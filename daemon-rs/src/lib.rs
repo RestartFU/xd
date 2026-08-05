@@ -104,6 +104,10 @@ impl Engine {
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.tree_mutation(|store| store.delete_chat(&request)),
+            Some("queue") => self.queue_mutation(|store| store.queue(&request)),
+            Some("drop-queue") => self.queue_mutation(|store| store.drop_queue(&request)),
+            Some("edit-queue") => self.queue_mutation(|store| store.edit_queue(&request)),
+            Some("steer-queue") => self.queue_mutation(|store| store.steer_queue(&request)),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -146,6 +150,22 @@ impl Engine {
         match operation(store) {
             Ok(reply) => {
                 self.events.publish(json!({"event": "tree"}));
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn queue_mutation(
+        &self,
+        operation: impl FnOnce(&StateStore) -> Result<(Value, Value), StorageError>,
+    ) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match operation(store) {
+            Ok((reply, event)) => {
+                self.events.publish(event);
                 reply
             }
             Err(error) => error_reply(error),

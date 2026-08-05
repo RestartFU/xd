@@ -575,6 +575,125 @@ impl StateStore {
         }
         Ok(json!({"ok": true}))
     }
+
+    pub fn queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let message = "A queued message needs a chat and text.";
+        let chat_id = required_string(request, "chat", message)?;
+        let text = required_string(request, "text", message)?.to_owned();
+        self.mutate_queue(chat_id, move |queue| {
+            queue.push(text);
+            Ok(true)
+        })
+    }
+
+    pub fn drop_queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let chat_id = required_string(request, "chat", "drop-queue needs a chat id")?;
+        let index = if request.get("index").is_some() {
+            Some(optional_integer(request, "index")?.unwrap_or(0))
+        } else {
+            None
+        };
+        self.mutate_queue(chat_id, move |queue| match index {
+            Some(index) if index >= 0 && (index as usize) < queue.len() => {
+                queue.remove(index as usize);
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+            None => {
+                let changed = !queue.is_empty();
+                queue.clear();
+                Ok(changed)
+            }
+        })
+    }
+
+    pub fn edit_queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let message = "edit-queue needs a chat id, queue index, and text.";
+        let chat_id = required_string(request, "chat", message)?;
+        let old_text = required_string_allow_empty(request, "old-text", message)?.to_owned();
+        let text = required_string(request, "text", message)?.to_owned();
+        let index = optional_integer(request, "index")?
+            .filter(|index| *index >= 0)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
+            as usize;
+        self.mutate_queue(chat_id, move |queue| {
+            if queue.get(index) != Some(&old_text) {
+                return Err(StorageError::InvalidRequest(
+                    "That queued message changed; try again.".into(),
+                ));
+            }
+            queue[index] = text;
+            Ok(true)
+        })
+    }
+
+    pub fn steer_queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let message = "steer-queue needs a chat id, queue index, and text.";
+        let chat_id = required_string(request, "chat", message)?;
+        let text = required_string_allow_empty(request, "text", message)?.to_owned();
+        let index = optional_integer(request, "index")?
+            .filter(|index| *index >= 0)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
+            as usize;
+        self.mutate_queue(chat_id, move |queue| {
+            if queue.get(index) != Some(&text) {
+                return Err(StorageError::InvalidRequest(
+                    "That queued message changed; try again.".into(),
+                ));
+            }
+            if index == 0 {
+                return Ok(false);
+            }
+            let selected = queue.remove(index);
+            queue.insert(0, selected);
+            Ok(true)
+        })
+    }
+
+    fn mutate_queue(
+        &self,
+        chat_id: &str,
+        mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
+    ) -> Result<(Value, Value), StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let stored = transaction
+            .query_row(
+                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let mut queue = queue_from_column(Some(&stored));
+        if mutate(&mut queue)? {
+            let encoded = if queue.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&queue).map_err(|error| {
+                    StorageError::InvalidRequest(format!("Cannot encode the queue: {error}"))
+                })?)
+            };
+            let changed = transaction.execute(
+                "UPDATE chats SET queued = ?, updated_at = ? WHERE id = ?",
+                params![encoded, now_seconds(), chat_id],
+            )?;
+            if changed != 1 {
+                return Err(StorageError::NoChat(chat_id.into()));
+            }
+        }
+        transaction.commit()?;
+
+        let mut event = json!({
+            "event": "queued",
+            "chat": chat_id,
+            "queue": queue,
+        });
+        if let Some(first) = event["queue"].as_array().and_then(|queue| queue.first()) {
+            event["text"] = first.clone();
+        }
+        Ok((json!({"ok": true}), event))
+    }
 }
 
 fn hidden_component(relative_path: &str) -> bool {
@@ -1039,6 +1158,73 @@ mod tests {
         assert_eq!(chat["folder"], "two");
         store.delete_chat(&json!({"chat": chat_id})).unwrap();
         assert!(matches!(store.chat(&chat_id), Err(StorageError::NoChat(_))));
+    }
+
+    #[test]
+    fn mutates_queues_transactionally_and_emits_complete_state() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let (_, event) = store
+            .queue(&json!({"chat": "chat-1", "text": "first"}))
+            .unwrap();
+        assert_eq!(
+            event,
+            json!({
+                "event": "queued", "chat": "chat-1", "queue": ["first"], "text": "first"
+            })
+        );
+        store
+            .queue(&json!({"chat": "chat-1", "text": "second"}))
+            .unwrap();
+
+        let (_, event) = store
+            .edit_queue(&json!({
+                "chat": "chat-1", "index": 1, "old-text": "second", "text": "edited"
+            }))
+            .unwrap();
+        assert_eq!(event["queue"], json!(["first", "edited"]));
+        let conflict = store
+            .edit_queue(&json!({
+                "chat": "chat-1", "index": 1, "old-text": "second", "text": "lost update"
+            }))
+            .unwrap_err();
+        assert!(conflict.to_string().contains("changed; try again"));
+
+        let (_, event) = store
+            .steer_queue(&json!({"chat": "chat-1", "index": 1, "text": "edited"}))
+            .unwrap();
+        assert_eq!(event["queue"], json!(["edited", "first"]));
+        let (_, event) = store
+            .drop_queue(&json!({"chat": "chat-1", "index": 0}))
+            .unwrap();
+        assert_eq!(event["queue"], json!(["first"]));
+        let (_, event) = store.drop_queue(&json!({"chat": "chat-1"})).unwrap();
+        assert_eq!(event["queue"], json!([]));
+        assert!(event.get("text").is_none());
+        assert_eq!(store.chat("chat-1").unwrap()["queue"], json!([]));
+    }
+
+    #[test]
+    fn queue_mutations_upgrade_legacy_single_message_storage() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        database
+            .execute("UPDATE chats SET queued = 'legacy' WHERE id = 'chat-1'", [])
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let (_, event) = store
+            .queue(&json!({"chat": "chat-1", "text": "new"}))
+            .unwrap();
+        assert_eq!(event["queue"], json!(["legacy", "new"]));
     }
 
     struct Fixture {
