@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
     os::unix::{
@@ -6,7 +7,11 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{SyncSender, TrySendError, sync_channel},
+    },
     thread,
 };
 
@@ -53,15 +58,34 @@ pub struct LocalServer {
 
 pub struct Engine {
     store: Option<StateStore>,
+    events: Arc<EventBus>,
+}
+
+#[derive(Default)]
+struct EventBus {
+    next_event: AtomicU64,
+    next_subscriber: AtomicU64,
+    subscribers: Mutex<HashMap<u64, Subscriber>>,
+}
+
+struct Subscriber {
+    sender: SyncSender<Value>,
+    connection: UnixStream,
 }
 
 impl Engine {
     pub fn transport_only() -> Self {
-        Self { store: None }
+        Self {
+            store: None,
+            events: Arc::default(),
+        }
     }
 
     pub fn with_store(store: StateStore) -> Self {
-        Self { store: Some(store) }
+        Self {
+            store: Some(store),
+            events: Arc::default(),
+        }
     }
 
     pub fn dispatch(&self, request: Value) -> Value {
@@ -74,6 +98,7 @@ impl Engine {
                 Err(error) => error_reply(error),
             },
             Some("messages") => self.read(|store| store.messages(&request)),
+            Some("set-draft") => self.set_draft(&request),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -91,6 +116,63 @@ impl Engine {
             Some(store) => operation(store).unwrap_or_else(error_reply),
             None => error_reply("Rust daemon state storage is not configured."),
         }
+    }
+
+    fn set_draft(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.set_draft(request) {
+            Ok((reply, event)) => {
+                self.events.publish(event);
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
+        self.events.subscribe(sender, connection)
+    }
+
+    fn unsubscribe(&self, id: u64) {
+        self.events.unsubscribe(id);
+    }
+}
+
+impl EventBus {
+    fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
+        let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        self.subscribers
+            .lock()
+            .map_err(|_| "daemon event state is unavailable".to_string())?
+            .insert(id, Subscriber { sender, connection });
+        Ok(id)
+    }
+
+    fn unsubscribe(&self, id: u64) {
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers.remove(&id);
+        }
+    }
+
+    fn publish(&self, mut event: Value) {
+        let id = self.next_event.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(event) = event.as_object_mut() {
+            event.insert("id".into(), id.into());
+        }
+        let Ok(mut subscribers) = self.subscribers.lock() else {
+            return;
+        };
+        subscribers.retain(
+            |_, subscriber| match subscriber.sender.try_send(event.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                    let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
+                    false
+                }
+            },
+        );
     }
 }
 
@@ -169,11 +251,30 @@ pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
     serve_connection_with_engine(stream, Arc::new(Engine::transport_only()))
 }
 
-fn serve_connection_with_engine(
-    mut stream: UnixStream,
-    engine: Arc<Engine>,
-) -> std::io::Result<()> {
+fn serve_connection_with_engine(stream: UnixStream, engine: Arc<Engine>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
+    let writer_stream = stream.try_clone()?;
+    let (outbound, frames) = sync_channel(256);
+    let subscriber = engine
+        .subscribe(outbound.clone(), stream.try_clone()?)
+        .map_err(std::io::Error::other)?;
+    let writer = thread::Builder::new()
+        .name("xd-rust-local-writer".into())
+        .spawn(move || write_frames(writer_stream, frames))?;
+    let result = read_requests(&mut reader, &engine, &outbound);
+    engine.unsubscribe(subscriber);
+    drop(outbound);
+    let writer_result = writer
+        .join()
+        .map_err(|_| std::io::Error::other("daemon writer panicked"))?;
+    result.and(writer_result)
+}
+
+fn read_requests(
+    reader: &mut BufReader<UnixStream>,
+    engine: &Engine,
+    outbound: &SyncSender<Value>,
+) -> std::io::Result<()> {
     loop {
         let mut line = Vec::new();
         let count = reader
@@ -200,10 +301,22 @@ fn serve_connection_with_engine(
             Ok(request) => engine.dispatch(request),
             Err(error) => json!({"ok": false, "error": format!("Invalid JSON request: {error}")}),
         };
-        serde_json::to_writer(&mut stream, &reply)?;
+        outbound
+            .send(reply)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client closed"))?;
+    }
+}
+
+fn write_frames(
+    mut stream: UnixStream,
+    frames: std::sync::mpsc::Receiver<Value>,
+) -> std::io::Result<()> {
+    while let Ok(frame) = frames.recv() {
+        serde_json::to_writer(&mut stream, &frame)?;
         stream.write_all(b"\n")?;
         stream.flush()?;
     }
+    Ok(())
 }
 
 pub fn dispatch(request: Value) -> Value {
@@ -274,6 +387,35 @@ mod tests {
             2
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn event_bus_broadcasts_monotonic_events() {
+        let bus = EventBus::default();
+        let (sender, receiver) = sync_channel(2);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let subscriber = bus.subscribe(sender, connection).unwrap();
+        bus.publish(json!({"event": "draft", "chat": "chat-1"}));
+        bus.publish(json!({"event": "tree"}));
+        assert_eq!(receiver.recv().unwrap()["id"], 1);
+        assert_eq!(receiver.recv().unwrap()["id"], 2);
+        bus.unsubscribe(subscriber);
+        drop(peer);
+    }
+
+    #[test]
+    fn event_bus_disconnects_a_client_that_stops_draining() {
+        let bus = EventBus::default();
+        let (sender, _receiver) = sync_channel(1);
+        let (connection, mut peer) = UnixStream::pair().unwrap();
+        bus.subscribe(sender, connection).unwrap();
+        bus.publish(json!({"event": "tree"}));
+        bus.publish(json!({"event": "tree"}));
+        assert!(bus.subscribers.lock().unwrap().is_empty());
+        assert_eq!(
+            peer.write(b"probe").unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
     }
 
     #[test]

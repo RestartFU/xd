@@ -4,6 +4,7 @@ use std::{
     sync::Mutex,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -12,6 +13,11 @@ use thiserror::Error;
 use std::fs;
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
+const MAX_DRAFT_BYTES: usize = 1024 * 1024;
+const MAX_IMAGES: usize = 4;
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -47,11 +53,36 @@ impl StateStore {
         workspace_root: impl Into<PathBuf>,
     ) -> Result<Self, StorageError> {
         let database_path = database_path.as_ref();
-        let database = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|source| StorageError::Open {
+        Self::open_with_flags(
+            database_path,
+            workspace_root,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+    }
+
+    pub fn open_read_only(
+        database_path: impl AsRef<Path>,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Result<Self, StorageError> {
+        Self::open_with_flags(
+            database_path.as_ref(),
+            workspace_root,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+    }
+
+    fn open_with_flags(
+        database_path: impl AsRef<Path>,
+        workspace_root: impl Into<PathBuf>,
+        flags: OpenFlags,
+    ) -> Result<Self, StorageError> {
+        let database_path = database_path.as_ref();
+        let database = Connection::open_with_flags(database_path, flags).map_err(|source| {
+            StorageError::Open {
                 path: database_path.to_owned(),
                 source,
-            })?;
+            }
+        })?;
         Ok(Self {
             database: Mutex::new(database),
             workspace_root: workspace_root.into(),
@@ -291,6 +322,60 @@ impl StateStore {
             "turn_start": null,
         }))
     }
+
+    pub fn set_draft(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let chat_id = required_string(request, "chat", "set-draft needs a chat and text.")?;
+        let text =
+            required_string_allow_empty(request, "text", "set-draft needs a chat and text.")?;
+        if text.len() > MAX_DRAFT_BYTES {
+            return Err(StorageError::InvalidRequest(
+                "A message draft is too large.".into(),
+            ));
+        }
+        let attachments = request
+            .get("attachments")
+            .map(validate_attachments)
+            .transpose()?;
+        let attachments_json = attachments
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let state = database
+            .query_row(
+                "UPDATE chats SET draft = ?, draft_attachments = COALESCE(?, draft_attachments), \
+                 draft_revision = draft_revision + 1 WHERE id = ? \
+                 RETURNING draft, draft_attachments, draft_revision",
+                params![text, attachments_json, chat_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let mut reply = json!({
+            "ok": true,
+            "draft": state.0,
+            "draft_revision": state.2,
+        });
+        let mut event = json!({
+            "event": "draft",
+            "chat": chat_id,
+            "draft": state.0,
+            "draft_revision": state.2,
+        });
+        if attachments.is_some() {
+            let attachments = serde_json::from_str::<Value>(&state.1).unwrap_or_else(|_| json!([]));
+            reply["draft_attachments"] = attachments.clone();
+            event["draft_attachments"] = attachments;
+        }
+        Ok((reply, event))
+    }
 }
 
 fn hidden_component(relative_path: &str) -> bool {
@@ -382,6 +467,17 @@ fn required_string<'a>(
         .ok_or_else(|| StorageError::InvalidRequest(message.into()))
 }
 
+fn required_string_allow_empty<'a>(
+    request: &'a Value,
+    key: &str,
+    message: &str,
+) -> Result<&'a str, StorageError> {
+    request
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| StorageError::InvalidRequest(message.into()))
+}
+
 fn optional_integer(request: &Value, key: &str) -> Result<Option<i64>, StorageError> {
     match request.get(key) {
         None => Ok(None),
@@ -390,6 +486,60 @@ fn optional_integer(request: &Value, key: &str) -> Result<Option<i64>, StorageEr
             .map(Some)
             .ok_or_else(|| StorageError::InvalidRequest(format!("{key} must be an integer"))),
     }
+}
+
+fn validate_attachments(value: &Value) -> Result<Vec<Value>, StorageError> {
+    let attachments = value.as_array().ok_or_else(|| {
+        StorageError::InvalidRequest("Message attachments must be an array.".into())
+    })?;
+    if attachments.len() > MAX_IMAGES {
+        return Err(StorageError::InvalidRequest(
+            "A draft can contain at most 4 images.".into(),
+        ));
+    }
+    let mut total = 0_usize;
+    attachments
+        .iter()
+        .map(|attachment| {
+            let object = attachment.as_object().ok_or_else(|| {
+                StorageError::InvalidRequest("Only PNG images up to 10 MiB can be sent.".into())
+            })?;
+            let mime = object.get("mime").and_then(Value::as_str);
+            let encoded = object.get("data").and_then(Value::as_str).ok_or_else(|| {
+                StorageError::InvalidRequest("Only PNG images up to 10 MiB can be sent.".into())
+            })?;
+            let encoded_limit = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+            if mime != Some("image/png") || encoded.len() > encoded_limit {
+                return Err(StorageError::InvalidRequest(
+                    "Only PNG images up to 10 MiB can be sent.".into(),
+                ));
+            }
+            let data = STANDARD.decode(encoded).map_err(|_| {
+                StorageError::InvalidRequest("The attached images are invalid or too large.".into())
+            })?;
+            if data.len() > MAX_IMAGE_BYTES
+                || !data.starts_with(PNG_SIGNATURE)
+                || total > MAX_TOTAL_IMAGE_BYTES.saturating_sub(data.len())
+            {
+                return Err(StorageError::InvalidRequest(
+                    "The attached images are invalid or too large.".into(),
+                ));
+            }
+            total += data.len();
+            let supplied = object
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("image.png");
+            let mut name = Path::new(supplied)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image.png");
+            if name.is_empty() || name.len() > 255 {
+                name = "image.png";
+            }
+            Ok(json!({"name": name, "mime": "image/png", "data": encoded}))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -528,6 +678,63 @@ mod tests {
         assert_eq!(messages["messages"][0]["content"], "two");
         assert_eq!(messages["messages"][0]["label"], "Codex");
         assert_eq!(messages["messages"][1]["content"], "three");
+    }
+
+    #[test]
+    fn writes_drafts_and_normalizes_synced_attachment_previews() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let (reply, event) = store
+            .set_draft(&json!({
+                "chat": "chat-1",
+                "text": "shared input",
+                "attachments": [{
+                    "name": "../preview.png",
+                    "mime": "image/png",
+                    "data": "iVBORw0KGgo="
+                }]
+            }))
+            .unwrap();
+        assert_eq!(reply["draft"], "shared input");
+        assert_eq!(reply["draft_revision"], 1);
+        assert_eq!(reply["draft_attachments"][0]["name"], "preview.png");
+        assert_eq!(event["event"], "draft");
+        assert_eq!(event["chat"], "chat-1");
+        assert_eq!(event["draft_attachments"], reply["draft_attachments"]);
+
+        let snapshot = store.chat("chat-1").unwrap();
+        assert_eq!(snapshot["draft"], "shared input");
+        assert_eq!(snapshot["draft_revision"], 1);
+        assert_eq!(snapshot["draft_attachments"], reply["draft_attachments"]);
+    }
+
+    #[test]
+    fn rejects_non_png_draft_attachments_without_mutating_the_draft() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let error = store
+            .set_draft(&json!({
+                "chat": "chat-1",
+                "text": "must not persist",
+                "attachments": [{
+                    "name": "bad.png",
+                    "mime": "image/png",
+                    "data": "bm90IGEgcG5n"
+                }]
+            }))
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid or too large"));
+        assert_eq!(store.chat("chat-1").unwrap()["draft"], "");
     }
 
     struct Fixture {
