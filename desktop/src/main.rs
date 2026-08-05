@@ -3114,6 +3114,27 @@ impl XdDesktop {
         expanded: bool,
         desktop: Entity<Self>,
     ) -> gpui::AnyElement {
+        if message.role == "duration" {
+            return turn_duration_label(&message.content)
+                .map(|label| {
+                    div()
+                        .w_full()
+                        .px_4()
+                        .pt_1()
+                        .pb_2()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(1040.0))
+                                .mx_auto()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(label),
+                        )
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| div().into_any_element());
+        }
         let is_user = message.role == "user";
         let is_tool = message.role == "tool";
         if is_tool {
@@ -7203,6 +7224,18 @@ fn optional_trimmed(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn turn_duration_label(value: &str) -> Option<String> {
+    let seconds = value.trim().parse::<u64>().ok()?;
+    let duration = if seconds >= 3_600 {
+        format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    };
+    Some(format!("Worked for {duration}"))
+}
+
 fn folder_hidden_by_collapse(
     folders: &[Folder],
     collapsed: &HashSet<String>,
@@ -7265,6 +7298,20 @@ mod tests {
     fn optional_workspace_repository_ignores_only_blank_input() {
         assert_eq!(optional_trimmed("  /tmp/repo  "), Some("/tmp/repo"));
         assert_eq!(optional_trimmed(" \n\t "), None);
+    }
+
+    #[test]
+    fn transcript_durations_are_labeled_with_units() {
+        assert_eq!(turn_duration_label("5").as_deref(), Some("Worked for 5s"));
+        assert_eq!(
+            turn_duration_label("65").as_deref(),
+            Some("Worked for 1m 05s")
+        );
+        assert_eq!(
+            turn_duration_label("3661").as_deref(),
+            Some("Worked for 1h 01m")
+        );
+        assert_eq!(turn_duration_label("not-a-duration"), None);
     }
 
     #[test]
