@@ -31,6 +31,11 @@ prerelease with the tested Linux x86_64 prototype. This channel is deliberately
 separate from the production `nightly` release while daemon connectivity and
 feature parity are still in progress.
 
+The dev archive also carries `xd-daemon-dev`, the incremental Rust daemon
+rewrite. It currently implements the local protocol transport and `ping` only,
+so the GPUI app deliberately continues using the installed Crystal daemon
+until the remaining state and agent operations have been ported.
+
 The prototype connects to `XD_SOCKET` when set, otherwise it checks the local
 `xd-nightly` and `xd` daemon sockets in that order. When neither is running, it
 starts an installed `xd-nightly` or `xd` in headless `serve` mode and owns that

@@ -60,10 +60,33 @@ FROM gpui-desktop-source AS gpui-desktop-release
 RUN cargo build --locked --release \
  && test -x target/release/xd-desktop
 
+FROM gpui-toolchain AS rust-daemon-source
+
+WORKDIR /src/daemon-rs
+COPY daemon-rs/Cargo.toml daemon-rs/Cargo.lock ./
+RUN mkdir -p src \
+ && touch src/lib.rs \
+ && cargo fetch --locked \
+ && rm -rf src
+COPY daemon-rs/src ./src
+
+FROM rust-daemon-source AS rust-daemon-tests
+
+RUN cargo fmt --check \
+ && cargo test --locked \
+ && touch /rust-daemon-tests-passed
+
+FROM rust-daemon-source AS rust-daemon-release
+
+RUN cargo build --locked --release \
+ && test -x target/release/xd-daemon
+
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS gpui-desktop-check
 
 COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
+COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
+COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 
 # --- local speech engine ---------------------------------------------------
 #
