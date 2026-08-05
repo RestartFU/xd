@@ -45,8 +45,8 @@ The app connects to `XD_SOCKET` when set. Otherwise it uses
 owns that process for the lifetime of the GPUI app. Its database and Workspaces
 directory live beside that socket, separate from `xd` and `xd-nightly`.
 
-This is still a development channel. Claude turns, worktree removal, and
-several production-client management surfaces have not yet been ported.
+This is still a development channel. Claude turns and several production-client
+management surfaces have not yet been ported.
 
 Install it beside `xd` and `xd-nightly` as `xd-dev`:
 

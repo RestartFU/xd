@@ -232,6 +232,9 @@ impl XdDesktop {
             RequestKind::SetOption { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
             }
+            RequestKind::RemoveWorktree { chat_id } if self.chat_is_active(&chat_id) => {
+                self.request_chat(&chat_id);
+            }
             RequestKind::SetDraft {
                 chat_id,
                 text,
@@ -374,6 +377,28 @@ impl XdDesktop {
         let next = (current + 1) % self.model.worktrees.len();
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.set_workspace(&chat_id, &self.model.worktrees[next].path)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn remove_selected_worktree(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.has_messages || self.model.working {
+            return;
+        }
+        let Some(worktree) = self
+            .model
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.current && !worktree.main)
+        else {
+            return;
+        };
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.remove_worktree(&chat_id, &worktree.path)
         {
             self.model.connection_error = Some(error);
         }
@@ -644,6 +669,13 @@ impl Render for XdDesktop {
         let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
         let can_cycle_workspace =
             can_change_worktree && !new_worktree && self.model.worktrees.len() > 1;
+        let can_remove_worktree = can_change_worktree
+            && !new_worktree
+            && self
+                .model
+                .worktrees
+                .iter()
+                .any(|worktree| worktree.current && !worktree.main);
         let workspace_label = self
             .model
             .worktrees
@@ -850,6 +882,24 @@ impl Render for XdDesktop {
                             }))
                             .child(format!("Workspace: {workspace_label}")),
                     )
+                    .when(can_remove_worktree, |controls| {
+                        controls.child(
+                            div()
+                                .id("remove-worktree")
+                                .px_3()
+                                .py_1()
+                                .rounded_full()
+                                .bg(rgb(0x3c292d))
+                                .text_xs()
+                                .text_color(rgb(0xf1b3ba))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x513038)))
+                                .on_click(
+                                    cx.listener(|this, _, _, _| this.remove_selected_worktree()),
+                                )
+                                .child("Remove worktree"),
+                        )
+                    })
                     .child(
                         div()
                             .id("new-worktree-toggle")

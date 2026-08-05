@@ -1357,6 +1357,128 @@ impl StateStore {
         Ok(json!({"ok": true}))
     }
 
+    pub fn remove_worktree(&self, request: &Value) -> Result<Value, StorageError> {
+        let message = "remove-worktree needs a chat and worktree path.";
+        let chat_id = required_string(request, "chat", message)?;
+        let requested = required_string(request, "worktree", message)?;
+        if !Path::new(requested).is_absolute() {
+            return Err(StorageError::InvalidRequest(
+                "An absolute worktree path is required.".into(),
+            ));
+        }
+        let requested = normalize_existing_path(Path::new(requested));
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let chat = transaction
+            .query_row(
+                "SELECT workdir, original_workdir, new_worktree FROM chats WHERE id = ?",
+                [chat_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let selected = chat
+            .0
+            .as_deref()
+            .map(|path| normalize_existing_path(Path::new(path)))
+            .filter(|path| path == &requested)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("That worktree is no longer selected.".into())
+            })?;
+        let original = chat.1.ok_or_else(|| {
+            StorageError::InvalidRequest("That chat is not using a removable worktree.".into())
+        })?;
+        if chat.2 {
+            return Err(StorageError::InvalidRequest(
+                "The chat has not selected an existing worktree.".into(),
+            ));
+        }
+        let has_messages: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ?)",
+            [chat_id],
+            |row| row.get(0),
+        )?;
+        if has_messages {
+            return Err(StorageError::InvalidRequest(
+                "A worktree cannot be removed after the first message.".into(),
+            ));
+        }
+        let worktrees = list_git_worktrees(Path::new(&original))?;
+        let target_index = worktrees
+            .iter()
+            .position(|worktree| normalize_existing_path(&worktree.path) == requested)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest(
+                    "That path is not a worktree of this repository.".into(),
+                )
+            })?;
+        if target_index == 0 {
+            return Err(StorageError::InvalidRequest(
+                "The main checkout cannot be removed.".into(),
+            ));
+        }
+        let references = {
+            let mut statement = transaction
+                .prepare("SELECT workdir FROM chats WHERE id != ? AND workdir IS NOT NULL")?;
+            statement
+                .query_map([chat_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if references
+            .iter()
+            .any(|path| normalize_existing_path(Path::new(path)) == requested)
+        {
+            return Err(StorageError::InvalidRequest(
+                "Another chat is still using that worktree.".into(),
+            ));
+        }
+        let status = run_git(
+            Path::new(&selected),
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        if !status.0.success() {
+            let message = String::from_utf8_lossy(&status.2).trim().to_owned();
+            return Err(StorageError::InvalidRequest(if message.is_empty() {
+                "Cannot inspect the worktree.".into()
+            } else {
+                message
+            }));
+        }
+        if !status.1.is_empty() {
+            return Err(StorageError::InvalidRequest(
+                "The worktree must be clean before it is removed.".into(),
+            ));
+        }
+        let removed = run_git(Path::new(&original), &["worktree", "remove", &selected])?;
+        if !removed.0.success() {
+            let message = String::from_utf8_lossy(&removed.2).trim().to_owned();
+            return Err(StorageError::InvalidRequest(if message.is_empty() {
+                "git worktree remove failed".into()
+            } else {
+                message
+            }));
+        }
+        let changed = transaction.execute(
+            "UPDATE chats SET workdir = ?, original_workdir = NULL, new_worktree = 0, updated_at = ? \
+             WHERE id = ? AND workdir = ? AND original_workdir = ? \
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+            params![original, now_seconds(), chat_id, selected, original, chat_id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidRequest(
+                "The workspace changed before the worktree was removed.".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(json!({"ok": true}))
+    }
+
     pub fn queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
         let message = "A queued message needs a chat and text.";
         let chat_id = required_string(request, "chat", message)?;
@@ -3277,6 +3399,24 @@ mod tests {
         );
         assert_eq!(selected["linked_worktree"], true);
         assert_eq!(selected["worktrees"].as_array().unwrap().len(), 2);
+        assert!(
+            store
+                .remove_worktree(&json!({"chat": "chat-select", "worktree": expected}))
+                .unwrap_err()
+                .to_string()
+                .contains("Another chat")
+        );
+        store
+            .delete_chat(&json!({"chat": "chat-worktree"}))
+            .unwrap();
+        store
+            .remove_worktree(&json!({"chat": "chat-select", "worktree": expected}))
+            .unwrap();
+        assert!(!expected.exists());
+        let restored = store.chat("chat-select").unwrap();
+        assert_eq!(restored["workdir"], repository.to_string_lossy().as_ref());
+        assert!(restored.get("selected_worktree").is_none());
+        assert_eq!(restored["worktrees"].as_array().unwrap().len(), 1);
     }
 
     #[test]

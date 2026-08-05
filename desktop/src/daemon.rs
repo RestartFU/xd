@@ -37,6 +37,9 @@ pub enum RequestKind {
     SetOption {
         chat_id: String,
     },
+    RemoveWorktree {
+        chat_id: String,
+    },
     SetDraft {
         chat_id: String,
         text: String,
@@ -330,6 +333,15 @@ impl DaemonHandle {
                 "option": "workspace",
                 "value": path,
             }),
+        )
+    }
+
+    pub fn remove_worktree(&self, chat_id: &str, path: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::RemoveWorktree {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "remove-worktree", "chat": chat_id, "worktree": path}),
         )
     }
 
