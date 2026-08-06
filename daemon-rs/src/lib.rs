@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread,
@@ -24,6 +24,7 @@ mod auth;
 mod claude_proxy;
 mod cli_versions;
 mod git_draft;
+mod pairing;
 mod runtime;
 mod secrets;
 mod self_update;
@@ -36,11 +37,12 @@ mod worktree_name;
 use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
+use pairing::{PairingService, Transport, generate_token, token_hash};
 pub use runtime::TurnRuntime;
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
-use storage::clone_repository;
 pub use storage::{SendDisposition, StateStore, StorageError};
+use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
 use voice::VoiceService;
 use workflow::WorkflowStatuses;
@@ -91,6 +93,7 @@ pub struct Engine {
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     self_update: SelfUpdate,
+    pairing: PairingService,
 }
 
 #[derive(Default)]
@@ -103,6 +106,7 @@ pub(crate) struct EventBus {
 struct Subscriber {
     sender: SyncSender<Value>,
     connection: UnixStream,
+    authenticated: Arc<AtomicBool>,
 }
 
 impl Engine {
@@ -120,6 +124,7 @@ impl Engine {
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             self_update,
+            pairing: PairingService::default(),
             events,
             runtime: None,
         }
@@ -152,6 +157,7 @@ impl Engine {
             secrets,
             git_drafts,
             self_update,
+            pairing: PairingService::default(),
             events,
         };
         engine.auth.refresh_all();
@@ -164,12 +170,28 @@ impl Engine {
 
     fn dispatch_for(&self, owner: u64, request: Value) -> Value {
         let request_id = request.get(REQUEST_ID).cloned();
-        let mut reply = match request.get("op").and_then(Value::as_str) {
+        let operation = request.get("op").and_then(Value::as_str);
+        let authorization = operation
+            .map(|operation| self.pairing.authorize(owner, operation))
+            .transpose();
+        if let Err(error) = authorization {
+            let mut reply = error_reply(error);
+            if let (Some(request_id), Some(reply)) = (request_id, reply.as_object_mut()) {
+                reply.insert(REQUEST_ID.into(), request_id);
+            }
+            return reply;
+        }
+        let mut reply = match operation {
             Some("ping") => json!({"ok": true}),
+            Some("pair") => self.pair(owner, &request),
+            Some("hello") => self.hello(owner, &request),
+            Some("peer-pairing") if !self.pairing.is_local(owner) => {
+                error_reply("Pairing codes can only be created on the daemon machine.")
+            }
             Some("tree") => self.read(|store| store.tree()),
-            Some("devices") => self.read(|store| store.devices()),
+            Some("devices") => self.devices(),
             Some("rename-device") => self.read(|store| store.rename_device(&request)),
-            Some("revoke-device") => self.read(|store| store.revoke_device(&request)),
+            Some("revoke-device") => self.revoke_device(&request),
             Some("chat") => match required_string(&request, "chat", "chat needs a chat id") {
                 Ok(chat_id) => self.chat(chat_id),
                 Err(error) => error_reply(error),
@@ -313,6 +335,83 @@ impl Engine {
         };
         if let (Some(request_id), Some(reply)) = (request_id, reply.as_object_mut()) {
             reply.insert(REQUEST_ID.into(), request_id);
+        }
+        reply
+    }
+
+    pub fn arm_pairing(&self, ttl: std::time::Duration) -> String {
+        self.pairing.arm(ttl)
+    }
+
+    fn pair(&self, owner: u64, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        let name = match required_string(request, "name", "pair needs a device name.") {
+            Ok(name) => match normalize_device_name(name) {
+                Ok(name) => name,
+                Err(error) => return error_reply(error),
+            },
+            Err(error) => return error_reply(error),
+        };
+        let code = request
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !self.pairing.consume(code) {
+            return error_reply("No such pairing code. Run the server with --pair.");
+        }
+        let token = generate_token();
+        let hash = token_hash(&token);
+        let name = match store.add_device(&hash, name) {
+            Ok(name) => name,
+            Err(error) => return error_reply(error),
+        };
+        if let Err(error) = self.pairing.authenticate(owner, hash) {
+            return error_reply(error);
+        }
+        json!({"ok": true, "token": token, "device": name})
+    }
+
+    fn hello(&self, owner: u64, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        let token = match required_string(request, "token", "hello needs a token") {
+            Ok(token) => token,
+            Err(error) => return error_reply(error),
+        };
+        let hash = token_hash(token);
+        let name = match store.authenticate_device(&hash) {
+            Ok(Some(name)) => name,
+            Ok(None) => return error_reply("Unknown device. Pair first."),
+            Err(error) => return error_reply(error),
+        };
+        if let Err(error) = self.pairing.authenticate(owner, hash) {
+            return error_reply(error);
+        }
+        json!({"ok": true, "device": name, "version": 1})
+    }
+
+    fn devices(&self) -> Value {
+        let connected = self.pairing.connected_devices();
+        self.read(|store| store.devices_with_connected(&connected))
+    }
+
+    fn revoke_device(&self, request: &Value) -> Value {
+        let device = request
+            .get("device")
+            .or_else(|| request.get("id"))
+            .and_then(Value::as_str)
+            .filter(|device| !device.is_empty());
+        let Some(device) = device else {
+            return error_reply("revoke-device needs a device id.");
+        };
+        let reply = self.read(|store| store.revoke_device(request));
+        if reply.get("ok").and_then(Value::as_bool) == Some(true) {
+            for owner in self.pairing.connections_for_device(device) {
+                self.events.disconnect(owner);
+            }
         }
         reply
     }
@@ -599,22 +698,58 @@ impl Engine {
     }
 
     fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
-        self.events.subscribe(sender, connection)
+        self.subscribe_transport(sender, connection, Transport::Local)
+    }
+
+    fn subscribe_transport(
+        &self,
+        sender: SyncSender<Value>,
+        connection: UnixStream,
+        transport: Transport,
+    ) -> Result<u64, String> {
+        let authenticated = Arc::new(AtomicBool::new(transport == Transport::Local));
+        let owner = self
+            .events
+            .subscribe_with_auth(sender, connection, authenticated.clone())?;
+        if let Err(error) = self.pairing.register(owner, transport, authenticated) {
+            self.events.unsubscribe(owner);
+            return Err(error);
+        }
+        Ok(owner)
     }
 
     fn unsubscribe(&self, id: u64) {
         self.voice.cancel_owner(id);
+        self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
 }
 
 impl EventBus {
+    #[cfg(test)]
     fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
-        let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        self.subscribe_with_auth(sender, connection, Arc::new(AtomicBool::new(true)))
+    }
+
+    fn subscribe_with_auth(
+        &self,
+        sender: SyncSender<Value>,
+        connection: UnixStream,
+        authenticated: Arc<AtomicBool>,
+    ) -> Result<u64, String> {
+        // Zero is reserved for direct/local dispatches that do not own a socket.
+        let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed) + 1;
         self.subscribers
             .lock()
             .map_err(|_| "daemon event state is unavailable".to_string())?
-            .insert(id, Subscriber { sender, connection });
+            .insert(
+                id,
+                Subscriber {
+                    sender,
+                    connection,
+                    authenticated,
+                },
+            );
         Ok(id)
     }
 
@@ -632,15 +767,19 @@ impl EventBus {
         let Ok(mut subscribers) = self.subscribers.lock() else {
             return;
         };
-        subscribers.retain(
-            |_, subscriber| match subscriber.sender.try_send(event.clone()) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                    let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
-                    false
+        subscribers.retain(|_, subscriber| {
+            if !subscriber.authenticated.load(Ordering::Acquire) {
+                true
+            } else {
+                match subscriber.sender.try_send(event.clone()) {
+                    Ok(()) => true,
+                    Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                        let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
+                        false
+                    }
                 }
-            },
-        );
+            }
+        });
     }
 
     fn publish_to(&self, subscriber_id: u64, mut event: Value) {
@@ -662,6 +801,15 @@ impl EventBus {
             });
         if remove {
             subscribers.remove(&subscriber_id);
+        }
+    }
+
+    fn disconnect(&self, subscriber_id: u64) {
+        if let Ok(mut subscribers) = self.subscribers.lock()
+            && let Some(subscriber) = subscribers.remove(&subscriber_id)
+        {
+            subscriber.authenticated.store(false, Ordering::Release);
+            let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
         }
     }
 }
@@ -938,6 +1086,84 @@ mod tests {
         bus.unsubscribe(first);
         bus.unsubscribe(second);
         drop((first_peer, second_peer));
+    }
+
+    #[test]
+    fn remote_sessions_pair_resume_and_are_revoked_immediately() {
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+
+        let (sender, _receiver) = sync_channel(8);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let owner = engine
+            .subscribe_transport(sender, connection, Transport::Remote)
+            .unwrap();
+        assert_eq!(
+            engine.dispatch_for(owner, json!({"op": "tree"}))["error"],
+            "Not authenticated. Say hello first."
+        );
+
+        let code = engine.arm_pairing(std::time::Duration::from_secs(60));
+        let invalid =
+            engine.dispatch_for(owner, json!({"op": "pair", "code": code, "name": "   "}));
+        assert_eq!(invalid["ok"], false);
+        let paired = engine.dispatch_for(
+            owner,
+            json!({"op": "pair", "code": code, "name": "  Phone  "}),
+        );
+        assert_eq!(paired["ok"], true);
+        assert_eq!(paired["device"], "Phone");
+        let token = paired["token"].as_str().unwrap().to_owned();
+        assert_eq!(
+            engine.dispatch_for(owner, json!({"op": "tree"}))["ok"],
+            true
+        );
+        engine.unsubscribe(owner);
+        drop(peer);
+
+        let (sender, _receiver) = sync_channel(8);
+        let (connection, mut peer) = UnixStream::pair().unwrap();
+        let resumed = engine
+            .subscribe_transport(sender, connection, Transport::Remote)
+            .unwrap();
+        let hello = engine.dispatch_for(resumed, json!({"op": "hello", "token": token}));
+        assert_eq!(hello["ok"], true);
+        assert_eq!(hello["device"], "Phone");
+        assert_eq!(hello["version"], 1);
+        assert_eq!(
+            engine.dispatch_for(resumed, json!({"op": "devices"}))["error"],
+            "Device management is only available on the daemon machine."
+        );
+
+        let devices = engine.dispatch(json!({"op": "devices"}));
+        let device = devices["devices"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(devices["devices"][0]["connected"], true);
+        assert_eq!(
+            engine.dispatch(json!({"op": "revoke-device", "device": device}))["ok"],
+            true
+        );
+        assert_eq!(
+            peer.write(b"probe").unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        engine.unsubscribe(resumed);
+        drop(engine);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unauthenticated_remote_sessions_do_not_receive_events() {
+        let engine = Engine::transport_only();
+        let (sender, receiver) = sync_channel(2);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let owner = engine
+            .subscribe_transport(sender, connection, Transport::Remote)
+            .unwrap();
+        engine.events.publish(json!({"event": "tree"}));
+        assert!(receiver.try_recv().is_err());
+        engine.unsubscribe(owner);
+        drop(peer);
     }
 
     #[test]

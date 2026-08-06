@@ -246,6 +246,13 @@ impl StateStore {
     }
 
     pub fn devices(&self) -> Result<Value, StorageError> {
+        self.devices_with_connected(&HashSet::new())
+    }
+
+    pub(crate) fn devices_with_connected(
+        &self,
+        connected: &HashSet<String>,
+    ) -> Result<Value, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let mut statement = database.prepare(
             "SELECT token_hash, name, created_at, last_seen FROM devices \
@@ -253,17 +260,44 @@ impl StateStore {
         )?;
         let devices = statement
             .query_map([], |row| {
+                let id = row.get::<_, String>(0)?;
+                let is_connected = connected.contains(&id);
                 Ok(json!({
-                    "id": row.get::<_, String>(0)?,
+                    "id": id,
                     "name": row.get::<_, String>(1)?,
                     "created_at": row.get::<_, i64>(2)?,
                     "last_seen": row.get::<_, i64>(3)?,
-                    // The Rust daemon currently accepts local Unix-socket clients only.
-                    "connected": false,
+                    "connected": is_connected,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"ok": true, "devices": devices}))
+    }
+
+    pub(crate) fn add_device(&self, token_hash: &str, name: &str) -> Result<String, StorageError> {
+        let name = normalize_device_name(name)?.to_owned();
+        let now = now_seconds();
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO devices (token_hash, name, created_at, last_seen) VALUES (?, ?, ?, ?)",
+            params![token_hash, name, now, now],
+        )?;
+        Ok(name)
+    }
+
+    pub(crate) fn authenticate_device(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database
+            .query_row(
+                "UPDATE devices SET last_seen = ? WHERE token_hash = ? RETURNING name",
+                params![now_seconds(), token_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
     }
 
     pub fn rename_device(&self, request: &Value) -> Result<Value, StorageError> {
@@ -4232,7 +4266,7 @@ fn device_id<'a>(request: &'a Value, message: &str) -> Result<&'a str, StorageEr
         .ok_or_else(|| StorageError::InvalidRequest(message.into()))
 }
 
-fn normalize_device_name(name: &str) -> Result<&str, StorageError> {
+pub(crate) fn normalize_device_name(name: &str) -> Result<&str, StorageError> {
     if name.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
         return Err(StorageError::InvalidRequest(
             "A device name cannot contain control characters.".into(),
