@@ -8230,6 +8230,7 @@ impl XdDesktop {
         message: &Message,
         index: usize,
         expanded: bool,
+        expanded_sections: &HashSet<String>,
         workflow_status: Option<&Value>,
         workflow_pending: bool,
         desktop: Entity<Self>,
@@ -8270,7 +8271,7 @@ impl XdDesktop {
                 key,
                 index,
                 expanded,
-                desktop,
+                desktop.clone(),
             );
         }
         let markdown_scope = message
@@ -8323,9 +8324,15 @@ impl XdDesktop {
                                     .flex_col()
                                     .gap_2()
                                     .child(
-                                        Self::markdown_content(message.markdown(), &markdown_scope)
-                                            .text_sm()
-                                            .line_height(px(21.0)),
+                                        Self::markdown_content(
+                                            message.markdown(),
+                                            &markdown_scope,
+                                            Some(expanded_sections),
+                                            Some(desktop.clone()),
+                                            Some(index),
+                                        )
+                                        .text_sm()
+                                        .line_height(px(21.0)),
                                     )
                                     .children(images),
                             ),
@@ -8517,7 +8524,13 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    fn markdown_content(document: std::sync::Arc<markdown::Document>, scope: &str) -> gpui::Div {
+    fn markdown_content(
+        document: std::sync::Arc<markdown::Document>,
+        scope: &str,
+        expanded_sections: Option<&HashSet<String>>,
+        desktop: Option<Entity<Self>>,
+        transcript_index: Option<usize>,
+    ) -> gpui::Div {
         let mut content = div().w_full().flex().flex_col().gap_2();
         for (block_index, block) in document.blocks.iter().cloned().enumerate() {
             let block_id = scoped_element_id(scope, block_index);
@@ -8634,6 +8647,70 @@ impl XdDesktop {
                                 .child(StyledText::new(source).with_highlights(highlights)),
                         )
                         .into_any_element()
+                }
+                Block::Analysis(blocks) => {
+                    let section_key = format!("{scope}-analysis-{block_index}");
+                    let is_expanded =
+                        expanded_sections.is_some_and(|expanded| expanded.contains(&section_key));
+                    let toggle_desktop = desktop.clone();
+                    let toggle_key = section_key.clone();
+                    let mut disclosure = div()
+                        .w_full()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id(("toggle-analysis", block_id))
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .when(toggle_desktop.is_some(), |header| {
+                                    header
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                })
+                                .on_click(move |_, _, cx| {
+                                    let Some(desktop) = toggle_desktop.as_ref() else {
+                                        return;
+                                    };
+                                    desktop.update(cx, |this, cx| {
+                                        let expanded = Arc::make_mut(&mut this.expanded_activity);
+                                        if !expanded.remove(&toggle_key) {
+                                            expanded.insert(toggle_key.clone());
+                                        }
+                                        if let Some(index) = transcript_index {
+                                            let anchor = this.transcript.logical_scroll_top();
+                                            this.transcript.splice(index..index + 1, 1);
+                                            this.transcript.scroll_to(anchor);
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .child(if is_expanded { "▾" } else { "▸" })
+                                .child("Analysis"),
+                        );
+                    if is_expanded {
+                        let nested = std::sync::Arc::new(markdown::Document {
+                            blocks,
+                            truncated: false,
+                        });
+                        disclosure =
+                            disclosure.child(div().px_3().pb_3().child(Self::markdown_content(
+                                nested,
+                                &section_key,
+                                expanded_sections,
+                                desktop.clone(),
+                                transcript_index,
+                            )));
+                    }
+                    disclosure.into_any_element()
                 }
             };
             content = content.child(element);
@@ -11458,6 +11535,7 @@ impl Render for XdDesktop {
                     message,
                     index,
                     expanded_activity.contains(&key),
+                    &expanded_activity,
                     workflow_statuses.get(&message.content),
                     workflow_pending.contains(&message.content),
                     desktop.clone(),
@@ -12603,7 +12681,13 @@ impl Render for XdDesktop {
                                 .min_h_0()
                                 .overflow_y_scroll()
                                 .p_3()
-                                .child(Self::markdown_content(document, &markdown_scope))
+                                .child(Self::markdown_content(
+                                    document,
+                                    &markdown_scope,
+                                    None,
+                                    None,
+                                    None,
+                                ))
                                 .into_any_element()
                         } else {
                             div()

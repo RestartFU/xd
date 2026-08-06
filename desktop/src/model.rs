@@ -87,7 +87,11 @@ impl Message {
         let content = content.into();
         let role = role.into();
         let (shown, image_paths) = message_content(&role, &content);
-        let markdown = Some(Arc::new(markdown::parse(&markdown::display_text(&shown))));
+        let markdown = Some(Arc::new(if role == "assistant" {
+            markdown::parse_assistant(&shown)
+        } else {
+            markdown::parse(&shown)
+        }));
         Self {
             id,
             role,
@@ -130,7 +134,11 @@ impl Message {
 
     fn cache_markdown(&mut self) {
         let (shown, image_paths) = message_content(&self.role, &self.content);
-        self.markdown = Some(Arc::new(markdown::parse(&markdown::display_text(&shown))));
+        self.markdown = Some(Arc::new(if self.role == "assistant" {
+            markdown::parse_assistant(&shown)
+        } else {
+            markdown::parse(&shown)
+        }));
         self.image_paths = image_paths;
     }
 }

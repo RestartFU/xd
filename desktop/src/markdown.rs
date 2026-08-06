@@ -18,6 +18,7 @@ pub enum Block {
     ListItem { ordered: bool, content: InlineText },
     Rule,
     Code(CodeBlock),
+    Analysis(Vec<Block>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,13 +64,58 @@ pub enum CodeKind {
 }
 
 pub fn parse(source: &str) -> Document {
-    let (source, byte_truncated) = bounded_prefix(source, MAX_MARKDOWN_BYTES);
+    parse_document(source, false)
+}
+
+pub fn parse_assistant(source: &str) -> Document {
+    parse_document(source, true)
+}
+
+fn parse_document(source: &str, assistant: bool) -> Document {
+    let source = final_display_text(source);
+    let (source, byte_truncated) = bounded_prefix(&source, MAX_MARKDOWN_BYTES);
+    let sections = if assistant {
+        assistant_sections(source)
+    } else {
+        vec![AssistantSection {
+            analysis: false,
+            text: source.to_owned(),
+        }]
+    };
+    let mut blocks = Vec::new();
+    let mut truncated = byte_truncated;
+    let mut block_budget = MAX_MARKDOWN_BLOCKS;
+    for section in sections {
+        if block_budget == 0 {
+            truncated = true;
+            break;
+        }
+        let content_budget = block_budget.saturating_sub(usize::from(section.analysis));
+        let (section_blocks, section_truncated) = parse_blocks(&section.text, content_budget);
+        truncated |= section_truncated;
+        let used = section_blocks.len() + usize::from(section.analysis);
+        block_budget = block_budget.saturating_sub(used);
+        if section.analysis {
+            blocks.push(Block::Analysis(section_blocks));
+        } else {
+            blocks.extend(section_blocks);
+        }
+    }
+    if truncated && block_budget > 0 {
+        blocks.push(Block::Paragraph(parse_inline(
+            "[Message shortened to keep rendering responsive]",
+        )));
+    }
+    Document { blocks, truncated }
+}
+
+fn parse_blocks(source: &str, block_limit: usize) -> (Vec<Block>, bool) {
     let lines = source.lines().collect::<Vec<_>>();
     let mut blocks = Vec::new();
     let mut paragraph = Vec::new();
     let mut index = 0;
 
-    while index < lines.len() && blocks.len() < MAX_MARKDOWN_BLOCKS {
+    while index < lines.len() && blocks.len() < block_limit {
         let line = lines[index];
         if line.trim().is_empty() {
             flush_paragraph(&mut blocks, &mut paragraph);
@@ -145,14 +191,14 @@ pub fn parse(source: &str) -> Document {
         index += 1;
     }
 
-    flush_paragraph(&mut blocks, &mut paragraph);
-    let truncated = byte_truncated || index < lines.len();
-    if truncated && blocks.len() < MAX_MARKDOWN_BLOCKS {
-        blocks.push(Block::Paragraph(parse_inline(
-            "[Message shortened to keep rendering responsive]",
-        )));
+    let pending_paragraph = !paragraph.is_empty();
+    if blocks.len() < block_limit {
+        flush_paragraph(&mut blocks, &mut paragraph);
     }
-    Document { blocks, truncated }
+    (
+        blocks,
+        index < lines.len() || (pending_paragraph && !paragraph.is_empty()),
+    )
 }
 
 pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> Document {
@@ -185,6 +231,10 @@ pub fn plain_document(source: &str) -> Document {
 }
 
 pub fn display_text(source: &str) -> String {
+    stream_assistant_sections(&final_display_text(source))
+}
+
+fn final_display_text(source: &str) -> String {
     let source = display_without_ask_blocks(source);
     let mut output = String::with_capacity(source.len());
     let mut fenced = false;
@@ -203,6 +253,136 @@ pub fn display_text(source: &str) -> String {
         }
     }
     output
+}
+
+#[derive(Debug)]
+struct AssistantSection {
+    analysis: bool,
+    text: String,
+}
+
+fn assistant_sections(source: &str) -> Vec<AssistantSection> {
+    let lines = source.split('\n').collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut active: Option<(usize, bool)> = None;
+    let mut fenced = false;
+    for (index, line) in lines.iter().enumerate() {
+        let marker = line.trim_end_matches('\r').trim();
+        if marker.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        match marker {
+            "<analysis>" | "<summary>" => {
+                if active.is_some() {
+                    active = None;
+                } else {
+                    active = Some((index, marker == "<analysis>"));
+                }
+            }
+            "</analysis>" => {
+                if let Some((start, true)) = active {
+                    blocks.push((start, index, true));
+                }
+                active = None;
+            }
+            "</summary>" => {
+                if let Some((start, false)) = active {
+                    blocks.push((start, index, false));
+                }
+                active = None;
+            }
+            _ => {}
+        }
+    }
+    if blocks.is_empty() {
+        return vec![AssistantSection {
+            analysis: false,
+            text: source.to_owned(),
+        }];
+    }
+    blocks.sort_by_key(|block| block.0);
+    let mut sections = Vec::new();
+    let mut cursor = 0;
+    for (start, finish, analysis) in blocks {
+        if start < cursor {
+            continue;
+        }
+        push_normal_section(&mut sections, lines[cursor..start].join("\n"));
+        sections.push(AssistantSection {
+            analysis,
+            text: lines[start + 1..finish].join("\n"),
+        });
+        cursor = finish + 1;
+    }
+    if cursor <= lines.len() {
+        push_normal_section(&mut sections, lines[cursor..].join("\n"));
+    }
+    sections
+}
+
+fn push_normal_section(sections: &mut Vec<AssistantSection>, text: String) {
+    let text = text.trim();
+    if !text.is_empty() {
+        sections.push(AssistantSection {
+            analysis: false,
+            text: text.to_owned(),
+        });
+    }
+}
+
+fn stream_assistant_sections(source: &str) -> String {
+    const TAGS: [&str; 4] = ["<analysis>", "</analysis>", "<summary>", "</summary>"];
+    let lines = source.split('\n').collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut mode = 0_u8;
+    let mut fenced = false;
+    for (index, line) in lines.iter().enumerate() {
+        let marker = line.trim_end_matches('\r').trim();
+        if marker.starts_with("```") {
+            fenced = !fenced;
+            if mode != 1 {
+                output.push(*line);
+            }
+            continue;
+        }
+        if !fenced {
+            if index + 1 == lines.len()
+                && !marker.is_empty()
+                && TAGS.iter().any(|tag| tag.starts_with(marker))
+            {
+                continue;
+            }
+            match mode {
+                0 if marker == "<analysis>" => {
+                    mode = 1;
+                    continue;
+                }
+                0 if marker == "<summary>" => {
+                    mode = 2;
+                    continue;
+                }
+                1 => {
+                    if marker == "</analysis>" {
+                        mode = 0;
+                    }
+                    continue;
+                }
+                2 if marker == "</summary>" => {
+                    mode = 0;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if mode != 1 {
+            output.push(*line);
+        }
+    }
+    output.join("\n")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -990,6 +1170,67 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn assistant_sections_collapse_analysis_and_unwrap_summary() {
+        let source = "Before\n<analysis>\nprivate reasoning\n</analysis>\n<summary>\nVisible result\n</summary>";
+        let document = parse_assistant(source);
+        assert_eq!(document.blocks.len(), 3);
+        assert!(matches!(document.blocks[0], Block::Paragraph(_)));
+        let Block::Analysis(blocks) = &document.blocks[1] else {
+            panic!("analysis")
+        };
+        let Block::Paragraph(reasoning) = &blocks[0] else {
+            panic!("analysis paragraph")
+        };
+        assert_eq!(reasoning.text, "private reasoning");
+        let Block::Paragraph(summary) = &document.blocks[2] else {
+            panic!("summary")
+        };
+        assert_eq!(summary.text, "Visible result");
+        assert_eq!(display_text(source), "Before\nVisible result");
+    }
+
+    #[test]
+    fn assistant_section_tags_in_fences_and_user_text_stay_literal() {
+        let fenced = "```xml\n<analysis>\nliteral\n</analysis>\n```";
+        let document = parse_assistant(fenced);
+        assert!(matches!(document.blocks[0], Block::Code(_)));
+        let user = parse("<analysis>\nuser example\n</analysis>");
+        assert!(
+            user.blocks
+                .iter()
+                .all(|block| !matches!(block, Block::Analysis(_)))
+        );
+    }
+
+    #[test]
+    fn streaming_hides_analysis_and_partial_wrapper_tags() {
+        assert_eq!(
+            display_text("Visible\n<analysis>\nhidden\n</analysis>\n<summary>\nDone\n</summary>"),
+            "Visible\nDone"
+        );
+        assert_eq!(display_text("Visible\n<anal"), "Visible");
+    }
+
+    #[test]
+    fn analysis_sections_share_the_global_block_budget() {
+        let source = (0..3_000)
+            .map(|index| format!("<analysis>\npart {index}\n</analysis>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let document = parse_assistant(&source);
+        let rendered_blocks = document
+            .blocks
+            .iter()
+            .map(|block| match block {
+                Block::Analysis(blocks) => 1 + blocks.len(),
+                _ => 1,
+            })
+            .sum::<usize>();
+        assert!(document.truncated);
+        assert!(rendered_blocks <= MAX_MARKDOWN_BLOCKS);
     }
 
     #[test]
