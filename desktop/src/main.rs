@@ -92,7 +92,12 @@ gpui::actions!(
         SelectModel6,
         SelectModel7,
         SelectModel8,
-        SelectModel9
+        SelectModel9,
+        DirectoryPrevious,
+        DirectoryNext,
+        DirectoryOpen,
+        DirectoryParent,
+        DirectoryChoose
     ]
 );
 
@@ -4160,6 +4165,29 @@ impl XdDesktop {
             browser.selected = Some(index);
             cx.notify();
         }
+    }
+
+    fn move_directory_selection(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let Some(browser) = &mut self.directory_browser else {
+            return;
+        };
+        let next = next_directory_selection(browser.selected, browser.entries.len(), direction);
+        if next != browser.selected {
+            browser.selected = next;
+            cx.notify();
+        }
+    }
+
+    fn open_selected_directory(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .directory_browser
+            .as_ref()
+            .filter(|browser| !browser.loading)
+            .and_then(|browser| browser.selected)
+        else {
+            return;
+        };
+        self.descend_directory(index, cx);
     }
 
     fn descend_directory(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -15811,7 +15839,7 @@ impl Render for XdDesktop {
                                 .border_color(rgb(BORDER))
                                 .text_xs()
                                 .text_color(rgb(MUTED))
-                                .child("Double-click a folder to open it")
+                                .child("↑↓ Select · Enter Open · Ctrl+Enter Work here")
                                 .child(
                                     div()
                                         .id("close-directory-browser")
@@ -16291,6 +16319,25 @@ impl Render for XdDesktop {
             .on_action(
                 cx.listener(|this, _: &SelectModel9, _, cx| this.select_model_shortcut(8, cx)),
             )
+            .on_action(cx.listener(|this, _: &DirectoryPrevious, _, cx| {
+                this.move_directory_selection(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DirectoryNext, _, cx| {
+                this.move_directory_selection(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DirectoryOpen, _, cx| {
+                this.open_selected_directory(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DirectoryParent, _, cx| {
+                if this.directory_browser.is_some() {
+                    this.ascend_directory(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DirectoryChoose, _, cx| {
+                if this.directory_browser.is_some() {
+                    this.choose_current_directory(cx);
+                }
+            }))
             .bg(rgb(BG))
             .font_family("Inter")
             .when(client_decorations, |root| root.child(titlebar))
@@ -16824,6 +16871,22 @@ fn directory_parent_path(path: &str) -> Option<String> {
     let path = std::path::Path::new(path);
     let parent = path.parent()?;
     (parent != path).then(|| parent.to_string_lossy().into_owned())
+}
+
+fn next_directory_selection(
+    selected: Option<usize>,
+    entry_count: usize,
+    direction: isize,
+) -> Option<usize> {
+    if entry_count == 0 {
+        return None;
+    }
+    match (selected, direction.signum()) {
+        (None, -1) => Some(entry_count - 1),
+        (None, _) => Some(0),
+        (Some(index), -1) => Some(index.saturating_sub(1)),
+        (Some(index), _) => Some(index.saturating_add(1).min(entry_count - 1)),
+    }
 }
 
 fn filtered_models(
@@ -17523,6 +17586,12 @@ mod tests {
         );
         assert_eq!(directory_parent_path("/home/danick"), Some("/home".into()));
         assert_eq!(directory_parent_path("/"), None);
+        assert_eq!(next_directory_selection(None, 0, 1), None);
+        assert_eq!(next_directory_selection(None, 3, 1), Some(0));
+        assert_eq!(next_directory_selection(None, 3, -1), Some(2));
+        assert_eq!(next_directory_selection(Some(0), 3, -1), Some(0));
+        assert_eq!(next_directory_selection(Some(1), 3, 1), Some(2));
+        assert_eq!(next_directory_selection(Some(2), 3, 1), Some(2));
     }
 
     #[test]
@@ -17805,6 +17874,12 @@ fn main() {
             KeyBinding::new("ctrl-7", SelectModel7, Some("XdDesktop")),
             KeyBinding::new("ctrl-8", SelectModel8, Some("XdDesktop")),
             KeyBinding::new("ctrl-9", SelectModel9, Some("XdDesktop")),
+            KeyBinding::new("up", DirectoryPrevious, Some("XdDesktop")),
+            KeyBinding::new("down", DirectoryNext, Some("XdDesktop")),
+            KeyBinding::new("enter", DirectoryOpen, Some("XdDesktop")),
+            KeyBinding::new("backspace", DirectoryParent, Some("XdDesktop")),
+            KeyBinding::new("ctrl-enter", DirectoryChoose, Some("XdDesktop")),
+            KeyBinding::new("cmd-enter", DirectoryChoose, Some("XdDesktop")),
             KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
             KeyBinding::new("delete", Delete, Some("ComposerInput")),
             KeyBinding::new("left", Left, Some("ComposerInput")),
