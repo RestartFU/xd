@@ -78,16 +78,17 @@ pub enum RequestKind {
         chat_id: String,
         generation: u64,
     },
-    RepositoryFiles {
-        chat_id: String,
-        generation: u64,
-    },
-    RepositoryFile {
+    FileBrowseList {
         chat_id: String,
         path: String,
         generation: u64,
     },
-    RepositoryFileWrite {
+    FileBrowseRead {
+        chat_id: String,
+        path: String,
+        generation: u64,
+    },
+    FileBrowseWrite {
         chat_id: String,
         path: String,
         content: String,
@@ -793,33 +794,39 @@ impl DaemonHandle {
         )
     }
 
-    pub fn repository_files(&self, chat_id: &str, generation: u64) -> Result<(), String> {
-        self.send(
-            RequestKind::RepositoryFiles {
-                chat_id: chat_id.to_owned(),
-                generation,
-            },
-            json!({"op": "repository-files", "chat": chat_id}),
-        )
-    }
-
-    pub fn repository_file(
+    pub fn file_browse_list(
         &self,
         chat_id: &str,
         path: &str,
         generation: u64,
     ) -> Result<(), String> {
         self.send(
-            RequestKind::RepositoryFile {
+            RequestKind::FileBrowseList {
                 chat_id: chat_id.to_owned(),
                 path: path.to_owned(),
                 generation,
             },
-            json!({"op": "repository-file", "chat": chat_id, "path": path}),
+            json!({"op": "file-browse", "chat": chat_id, "action": "list", "path": path}),
         )
     }
 
-    pub fn write_repository_file(
+    pub fn file_browse_read(
+        &self,
+        chat_id: &str,
+        path: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::FileBrowseRead {
+                chat_id: chat_id.to_owned(),
+                path: path.to_owned(),
+                generation,
+            },
+            json!({"op": "file-browse", "chat": chat_id, "action": "read", "path": path}),
+        )
+    }
+
+    pub fn file_browse_write(
         &self,
         chat_id: &str,
         path: &str,
@@ -828,15 +835,16 @@ impl DaemonHandle {
         generation: u64,
     ) -> Result<(), String> {
         self.send(
-            RequestKind::RepositoryFileWrite {
+            RequestKind::FileBrowseWrite {
                 chat_id: chat_id.to_owned(),
                 path: path.to_owned(),
                 content: content.to_owned(),
                 generation,
             },
             json!({
-                "op": "repository-file-write",
+                "op": "file-browse",
                 "chat": chat_id,
+                "action": "write",
                 "path": path,
                 "original": original,
                 "content": content,
@@ -1493,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn sends_conflict_guarded_repository_file_writes() {
+    fn sends_conflict_guarded_workspace_file_writes() {
         let directory = env::temp_dir().join(format!("xd-dev-file-write-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
@@ -1506,7 +1514,8 @@ mod tests {
                 .read_line(&mut request)
                 .unwrap();
             let request: Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["op"], "repository-file-write");
+            assert_eq!(request["op"], "file-browse");
+            assert_eq!(request["action"], "write");
             assert_eq!(request["chat"], "chat-1");
             assert_eq!(request["path"], "src/main.rs");
             assert_eq!(request["original"], "before\n");
@@ -1521,12 +1530,12 @@ mod tests {
             DaemonUpdate::Connected { .. }
         ));
         daemon
-            .write_repository_file("chat-1", "src/main.rs", "before\n", "after\n", 12)
+            .file_browse_write("chat-1", "src/main.rs", "before\n", "after\n", 12)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             DaemonUpdate::Reply {
-                kind: RequestKind::RepositoryFileWrite {
+                kind: RequestKind::FileBrowseWrite {
                     chat_id,
                     path,
                     content,

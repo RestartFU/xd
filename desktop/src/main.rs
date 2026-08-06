@@ -170,6 +170,12 @@ struct FilePreview {
     saving: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct BrowseEntry {
+    name: String,
+    directory: bool,
+}
+
 #[derive(Clone, Default)]
 struct DiffPanel {
     branch: bool,
@@ -182,8 +188,8 @@ struct DiffPanel {
     status_loading: bool,
     action: Option<String>,
     action_error: Option<String>,
-    repo_files: Vec<String>,
-    repo_files_truncated: bool,
+    browse_path: String,
+    browse_entries: Vec<BrowseEntry>,
     file_preview: Option<FilePreview>,
     file_loading: bool,
     pr_url: Option<String>,
@@ -1150,9 +1156,9 @@ impl XdDesktop {
                     | RequestKind::GitDraft { .. }
                     | RequestKind::GitPullRequestStatus { .. }
                     | RequestKind::GitPullRequestCreate { .. }
-                    | RequestKind::RepositoryFiles { .. }
-                    | RequestKind::RepositoryFile { .. }
-                    | RequestKind::RepositoryFileWrite { .. }
+                    | RequestKind::FileBrowseList { .. }
+                    | RequestKind::FileBrowseRead { .. }
+                    | RequestKind::FileBrowseWrite { .. }
                     | RequestKind::GitCommit { .. }
                     | RequestKind::GitPush { .. }
                     | RequestKind::TerminalOpen { .. }
@@ -1284,7 +1290,7 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
-                RequestKind::RepositoryFiles { generation, .. }
+                RequestKind::FileBrowseList { generation, .. }
                     if *generation == self.diff_generation =>
                 {
                     if let Some(diff) = &mut self.diff_panel {
@@ -1295,7 +1301,7 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
-                RequestKind::RepositoryFile { generation, .. }
+                RequestKind::FileBrowseRead { generation, .. }
                     if *generation == self.diff_generation =>
                 {
                     if let Some(diff) = &mut self.diff_panel {
@@ -1306,7 +1312,7 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
-                RequestKind::RepositoryFileWrite { generation, .. }
+                RequestKind::FileBrowseWrite { generation, .. }
                     if *generation == self.diff_generation =>
                 {
                     if let Some(diff) = &mut self.diff_panel {
@@ -1875,40 +1881,7 @@ impl XdDesktop {
                     }
                 }
             }
-            RequestKind::RepositoryFiles {
-                chat_id,
-                generation,
-            } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                    || !self.diff_panel.as_ref().is_some_and(|diff| diff.files_mode)
-                {
-                    return;
-                }
-                match serde_json::from_value::<Vec<String>>(
-                    value.get("files").cloned().unwrap_or_default(),
-                ) {
-                    Ok(files) => {
-                        if let Some(diff) = &mut self.diff_panel {
-                            diff.repo_files = files;
-                            diff.repo_files_truncated = value
-                                .get("truncated")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false);
-                            diff.file_preview = None;
-                            diff.loading = false;
-                            diff.error = None;
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(diff) = &mut self.diff_panel {
-                            diff.loading = false;
-                            diff.error = Some(format!("Invalid repository file list: {error}"));
-                        }
-                    }
-                }
-            }
-            RequestKind::RepositoryFile {
+            RequestKind::FileBrowseList {
                 chat_id,
                 path,
                 generation,
@@ -1919,15 +1892,42 @@ impl XdDesktop {
                 {
                     return;
                 }
-                let response_path = value
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                match serde_json::from_value::<Vec<BrowseEntry>>(
+                    value.get("entries").cloned().unwrap_or_default(),
+                ) {
+                    Ok(entries) => {
+                        if let Some(diff) = &mut self.diff_panel {
+                            diff.browse_path = path;
+                            diff.browse_entries = entries;
+                            diff.file_preview = None;
+                            diff.loading = false;
+                            diff.error = None;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(diff) = &mut self.diff_panel {
+                            diff.loading = false;
+                            diff.error = Some(format!("Invalid directory listing: {error}"));
+                        }
+                    }
+                }
+            }
+            RequestKind::FileBrowseRead {
+                chat_id,
+                path,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                    || !self.diff_panel.as_ref().is_some_and(|diff| diff.files_mode)
+                {
+                    return;
+                }
                 let content = value.get("content").and_then(Value::as_str);
-                if response_path != path || content.is_none() {
+                if content.is_none() {
                     if let Some(diff) = &mut self.diff_panel {
                         diff.file_loading = false;
-                        diff.error = Some("Invalid repository file response.".into());
+                        diff.error = Some("Invalid file response.".into());
                     }
                     return;
                 }
@@ -1937,10 +1937,7 @@ impl XdDesktop {
                         path,
                         original: content.clone(),
                         content: content.clone(),
-                        truncated: value
-                            .get("truncated")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
+                        truncated: false,
                         saving: false,
                     });
                     diff.file_loading = false;
@@ -1949,7 +1946,7 @@ impl XdDesktop {
                         .update(cx, |editor, cx| editor.set_text(content, cx));
                 }
             }
-            RequestKind::RepositoryFileWrite {
+            RequestKind::FileBrowseWrite {
                 chat_id,
                 path,
                 content,
@@ -1973,7 +1970,13 @@ impl XdDesktop {
                         diff.error = None;
                     }
                 }
-                self.refresh_git_status();
+                if self
+                    .diff_panel
+                    .as_ref()
+                    .is_some_and(|diff| diff.status.is_some())
+                {
+                    self.refresh_git_status();
+                }
             }
             RequestKind::GitCommit {
                 chat_id,
@@ -4146,11 +4149,94 @@ impl XdDesktop {
         if let Some(diff) = &mut self.diff_panel {
             diff.files_mode = true;
             diff.file_preview = None;
+            diff.browse_path.clear();
+            diff.browse_entries.clear();
+            diff.action_error = None;
         }
         self.refresh_diff(cx);
     }
 
-    fn read_repository_file(&mut self, path: String, cx: &mut Context<Self>) {
+    fn load_browse_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self
+            .diff_panel
+            .as_ref()
+            .and_then(|panel| panel.file_preview.as_ref())
+            .is_some_and(|preview| preview.content != preview.original)
+        {
+            if let Some(diff) = &mut self.diff_panel {
+                diff.error = Some("Save or discard the file changes before navigating.".into());
+            }
+            cx.notify();
+            return;
+        }
+        self.diff_generation = self.diff_generation.saturating_add(1);
+        let generation = self.diff_generation;
+        let path_changed = self
+            .diff_panel
+            .as_ref()
+            .is_some_and(|diff| diff.browse_path != path);
+        if let Some(diff) = &mut self.diff_panel {
+            if !diff.files_mode {
+                return;
+            }
+            diff.loading = true;
+            diff.file_loading = false;
+            diff.file_preview = None;
+            diff.error = None;
+        } else {
+            return;
+        }
+        if path_changed {
+            self.repo_file_filter.clear();
+            self.repo_file_filter_input
+                .update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.file_browse_list(&chat_id, &path, generation));
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.loading = false;
+            diff.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn browse_up(&mut self, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff_panel.as_ref() else {
+            return;
+        };
+        if diff.file_preview.is_some() {
+            self.close_file_preview(cx);
+            return;
+        }
+        if diff.browse_path.is_empty() {
+            return;
+        }
+        self.load_browse_directory(parent_browse_path(&diff.browse_path), cx);
+    }
+
+    fn activate_browse_entry(&mut self, entry: BrowseEntry, cx: &mut Context<Self>) {
+        let base = self
+            .diff_panel
+            .as_ref()
+            .map(|diff| diff.browse_path.as_str())
+            .unwrap_or_default();
+        let path = join_browse_path(base, &entry.name);
+        if entry.directory {
+            self.load_browse_directory(path, cx);
+        } else {
+            self.read_browse_file(path, cx);
+        }
+    }
+
+    fn read_browse_file(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -4168,7 +4254,7 @@ impl XdDesktop {
             .daemon
             .as_ref()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
-            .and_then(|daemon| daemon.repository_file(&chat_id, &path, generation));
+            .and_then(|daemon| daemon.file_browse_read(&chat_id, &path, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
         {
@@ -4199,7 +4285,7 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn save_repository_file(&mut self, cx: &mut Context<Self>) {
+    fn save_browse_file(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -4231,7 +4317,7 @@ impl XdDesktop {
             .as_ref()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
-                daemon.write_repository_file(&chat_id, &path, &original, &content, generation)
+                daemon.file_browse_write(&chat_id, &path, &original, &content, generation)
             });
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -4265,7 +4351,7 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn refresh_repository_file(&mut self, cx: &mut Context<Self>) {
+    fn refresh_browse_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
             .diff_panel
             .as_ref()
@@ -4281,7 +4367,7 @@ impl XdDesktop {
             return;
         };
         match path {
-            Ok(path) => self.read_repository_file(path, cx),
+            Ok(path) => self.read_browse_file(path, cx),
             Err(()) => {
                 if let Some(diff) = &mut self.diff_panel {
                     diff.error = Some("Discard local file changes before refreshing.".into());
@@ -4534,7 +4620,7 @@ impl XdDesktop {
         let generation = self.diff_generation;
         if let Some(diff) = &mut self.diff_panel {
             diff.loading = true;
-            diff.status_loading = true;
+            diff.status_loading = !files_mode;
             diff.files.clear();
             diff.file_preview = None;
             diff.file_loading = false;
@@ -4547,7 +4633,12 @@ impl XdDesktop {
         match self.daemon.as_ref() {
             Some(daemon) => {
                 let content = if files_mode {
-                    daemon.repository_files(&chat_id, generation)
+                    let path = self
+                        .diff_panel
+                        .as_ref()
+                        .map(|diff| diff.browse_path.as_str())
+                        .unwrap_or_default();
+                    daemon.file_browse_list(&chat_id, path, generation)
                 } else {
                     daemon.diff_read(
                         &chat_id,
@@ -4562,11 +4653,13 @@ impl XdDesktop {
                     diff.loading = false;
                     diff.error = Some(error);
                 }
-                if let Err(error) = daemon.git_status(&chat_id, generation)
-                    && let Some(diff) = &mut self.diff_panel
-                {
-                    diff.status_loading = false;
-                    diff.action_error = Some(error);
+                if !files_mode {
+                    if let Err(error) = daemon.git_status(&chat_id, generation)
+                        && let Some(diff) = &mut self.diff_panel
+                    {
+                        diff.status_loading = false;
+                        diff.action_error = Some(error);
+                    }
                 }
             }
             None => {
@@ -9202,8 +9295,8 @@ impl Render for XdDesktop {
                 && diff.pr_url.is_none();
             let has_pr_draft = diff.pr_title.is_some();
             let pr_url = diff.pr_url.clone();
-            let pr_enabled = !action_running
-                && (pr_url.is_some() || (can_prepare_pr && !diff.pr_loading));
+            let pr_enabled =
+                !action_running && (pr_url.is_some() || (can_prepare_pr && !diff.pr_loading));
             let pr_label = if pr_url.is_some() {
                 "View pull request"
             } else if diff.pr_loading {
@@ -9361,7 +9454,7 @@ impl Render for XdDesktop {
                 if let Some(preview) = diff.file_preview.clone() {
                     let modified = preview.content != preview.original;
                     let saving = preview.saving;
-                    let markdown_scope = format!("repository-{}", preview.path);
+                    let markdown_scope = format!("workspace-{}", preview.path);
                     let language = preview
                         .path
                         .rsplit_once('.')
@@ -9389,7 +9482,7 @@ impl Render for XdDesktop {
                                 .border_color(rgb(BORDER))
                                 .child(
                                     div()
-                                        .id("back-to-repository-files")
+                                        .id("back-to-workspace-files")
                                         .px_2()
                                         .py_1()
                                         .rounded_md()
@@ -9412,7 +9505,7 @@ impl Render for XdDesktop {
                                 )
                                 .child(
                                     div()
-                                        .id("refresh-repository-file")
+                                        .id("refresh-workspace-file")
                                         .px_2()
                                         .py_1()
                                         .rounded_md()
@@ -9421,7 +9514,7 @@ impl Render for XdDesktop {
                                         .text_color(rgb(MUTED))
                                         .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.refresh_repository_file(cx);
+                                            this.refresh_browse_file(cx);
                                         }))
                                         .child("Refresh"),
                                 )
@@ -9461,7 +9554,7 @@ impl Render for XdDesktop {
                                             MUTED
                                         }))
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.save_repository_file(cx);
+                                            this.save_browse_file(cx);
                                         }))
                                         .child(if saving { "Saving…" } else { "Save" }),
                                 ),
@@ -9474,12 +9567,14 @@ impl Render for XdDesktop {
                                     .bg(rgb(0x332d1c))
                                     .text_xs()
                                     .text_color(rgb(0xe0c178))
-                                    .child("Large file preview truncated for responsive rendering."),
+                                    .child(
+                                        "Large file preview truncated for responsive rendering.",
+                                    ),
                             )
                         })
                         .child(if preview.truncated {
                             div()
-                                .id("repository-file-preview")
+                                .id("workspace-file-preview")
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_y_scroll()
@@ -9488,7 +9583,7 @@ impl Render for XdDesktop {
                                 .into_any_element()
                         } else {
                             div()
-                                .id("repository-file-editor")
+                                .id("workspace-file-editor")
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_scroll()
@@ -9501,27 +9596,35 @@ impl Render for XdDesktop {
                 } else {
                     let filter = self.repo_file_filter.trim().to_ascii_lowercase();
                     let matching = diff
-                        .repo_files
+                        .browse_entries
                         .iter()
-                        .filter(|path| filter.is_empty() || path.to_ascii_lowercase().contains(&filter))
+                        .filter(|entry| {
+                            filter.is_empty() || entry.name.to_ascii_lowercase().contains(&filter)
+                        })
                         .count();
                     let mut rows = Vec::new();
-                    for (index, path) in diff
-                        .repo_files
+                    for (index, entry) in diff
+                        .browse_entries
                         .iter()
-                        .filter(|path| filter.is_empty() || path.to_ascii_lowercase().contains(&filter))
+                        .filter(|entry| {
+                            filter.is_empty() || entry.name.to_ascii_lowercase().contains(&filter)
+                        })
                         .take(400)
                         .cloned()
                         .enumerate()
                     {
-                        let selected_path = path.clone();
+                        let label = entry.name.clone();
+                        let directory = entry.directory;
                         let desktop = desktop_entity.clone();
                         rows.push(
                             div()
-                                .id(("repository-file", index))
+                                .id(("workspace-entry", index))
                                 .w_full()
                                 .px_3()
                                 .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .rounded_md()
                                 .text_xs()
                                 .text_color(rgb(TEXT))
@@ -9529,22 +9632,29 @@ impl Render for XdDesktop {
                                 .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                                 .on_click(move |_, _, cx| {
                                     desktop.update(cx, |this, cx| {
-                                        this.read_repository_file(selected_path.clone(), cx);
+                                        this.activate_browse_entry(entry.clone(), cx);
                                     });
                                 })
-                                .child(path)
+                                .child(if directory { "▸" } else { " " })
+                                .child(label)
                                 .into_any_element(),
                         );
                     }
                     let list_message = diff.error.clone().unwrap_or_else(|| {
                         if loading {
-                            "Loading repository files…".into()
+                            "Loading directory…".into()
                         } else if self.repo_file_filter.trim().is_empty() {
-                            "No repository files".into()
+                            "Empty directory".into()
                         } else {
                             "No matching files".into()
                         }
                     });
+                    let at_root = diff.browse_path.is_empty();
+                    let browse_label = if at_root {
+                        "working directory".to_owned()
+                    } else {
+                        diff.browse_path.clone()
+                    };
                     div()
                         .flex_1()
                         .min_h_0()
@@ -9555,9 +9665,44 @@ impl Render for XdDesktop {
                                 .p_3()
                                 .border_b_1()
                                 .border_color(rgb(BORDER))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .id("repository-file-filter")
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("workspace-files-up")
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .text_xs()
+                                                .text_color(rgb(if at_root { MUTED } else { TEXT }))
+                                                .when(!at_root, |button| {
+                                                    button
+                                                        .cursor_pointer()
+                                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.browse_up(cx);
+                                                }))
+                                                .child("↑ Up"),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(browse_label),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("workspace-file-filter")
                                         .track_focus(&repo_file_filter_focus)
                                         .h(px(36.0))
                                         .w_full()
@@ -9604,23 +9749,19 @@ impl Render for XdDesktop {
                                     .child(error),
                             )
                         })
-                        .when(diff.repo_files_truncated || matching > 400, |body| {
+                        .when(matching > 400, |body| {
                             body.child(
                                 div()
                                     .px_3()
                                     .py_2()
                                     .text_xs()
                                     .text_color(rgb(0xe0c178))
-                                    .child(if diff.repo_files_truncated {
-                                        "Showing a bounded repository file set. Filter to narrow it."
-                                    } else {
-                                        "Showing the first 400 matches. Filter to narrow it."
-                                    }),
+                                    .child("Showing the first 400 matches. Filter to narrow it."),
                             )
                         })
                         .child(
                             div()
-                                .id("repository-files")
+                                .id("workspace-files")
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_y_scroll()
@@ -9687,15 +9828,14 @@ impl Render for XdDesktop {
                                 .flex_1()
                                 .flex()
                                 .flex_col()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(TEXT))
-                                        .child("Repository changes"),
-                                )
+                                .child(div().text_sm().text_color(rgb(TEXT)).child(if files_mode {
+                                    "Workspace files"
+                                } else {
+                                    "Repository changes"
+                                }))
                                 .child(div().text_xs().text_color(rgb(MUTED)).child(
                                     if files_mode {
-                                        format!("{} repository files", diff.repo_files.len())
+                                        format!("{} entries", diff.browse_entries.len())
                                     } else {
                                         format!(
                                             "{} files  +{}  −{}",
@@ -9802,214 +9942,224 @@ impl Render for XdDesktop {
                     )
                 })
                 .child(pane_content)
-                .child(
-                    div()
-                        .w_full()
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .border_t_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(SURFACE))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(status_label),
-                                )
-                                .when_some(status, |row, status| {
-                                    row.child(div().text_xs().text_color(rgb(MUTED)).child(
-                                        if status.upstream.is_empty() {
-                                            "not published".into()
-                                        } else {
-                                            format!("↑{} ↓{}", status.ahead, status.behind)
-                                        },
-                                    ))
-                                }),
-                        )
-                        .when_some(
-                            status.and_then(|status| {
-                                (status.conflicted > 0).then(|| {
-                                    format!(
-                                        "Resolve {} conflicted file(s) before committing.",
-                                        status.conflicted
-                                    )
-                                })
-                            }),
-                            |footer, warning| {
-                                footer
-                                    .child(div().text_xs().text_color(rgb(0xe0c178)).child(warning))
-                            },
-                        )
-                        .when_some(diff.action_error.clone(), |footer, error| {
-                            footer.child(div().text_xs().text_color(rgb(0xf0a8b3)).child(error))
-                        })
-                        .when_some(diff.action.clone(), |footer, action| {
-                            footer.child(div().text_xs().text_color(rgb(0xaec4ff)).child(action))
-                        })
-                        .when_some(diff.pr_title.clone(), |footer, title| {
-                            footer.child(
+                .when(!files_mode, |pane| {
+                    pane.child(
+                        div()
+                            .w_full()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(SURFACE))
+                            .child(
                                 div()
-                                    .w_full()
-                                    .p_3()
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
+                                    .justify_between()
                                     .gap_2()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .bg(rgb(BG))
                                     .child(
                                         div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .text_sm()
-                                                    .text_color(rgb(TEXT))
-                                                    .child(title),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("discard-pr-draft")
-                                                    .px_2()
-                                                    .py_1()
-                                                    .rounded_md()
-                                                    .text_xs()
-                                                    .text_color(rgb(MUTED))
-                                                    .cursor_pointer()
-                                                    .hover(|style| {
-                                                        style
-                                                            .bg(rgb(SURFACE_HIGH))
-                                                            .text_color(rgb(TEXT))
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.discard_pull_request_draft(cx);
-                                                    }))
-                                                    .child("Discard"),
-                                            ),
+                                            .min_w_0()
+                                            .flex_1()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(status_label),
                                     )
-                                    .when(!pr_body_preview.is_empty(), |review| {
-                                        review.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(MUTED))
-                                                .child(pr_body_preview),
-                                        )
+                                    .when_some(status, |row, status| {
+                                        row.child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            if status.upstream.is_empty() {
+                                                "not published".into()
+                                            } else {
+                                                format!("↑{} ↓{}", status.ahead, status.behind)
+                                            },
+                                        ))
                                     }),
                             )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
+                            .when_some(
+                                status.and_then(|status| {
+                                    (status.conflicted > 0).then(|| {
+                                        format!(
+                                            "Resolve {} conflicted file(s) before committing.",
+                                            status.conflicted
+                                        )
+                                    })
+                                }),
+                                |footer, warning| {
+                                    footer.child(
+                                        div().text_xs().text_color(rgb(0xe0c178)).child(warning),
+                                    )
+                                },
+                            )
+                            .when_some(diff.action_error.clone(), |footer, error| {
+                                footer.child(div().text_xs().text_color(rgb(0xf0a8b3)).child(error))
+                            })
+                            .when_some(diff.action.clone(), |footer, action| {
+                                footer
+                                    .child(div().text_xs().text_color(rgb(0xaec4ff)).child(action))
+                            })
+                            .when_some(diff.pr_title.clone(), |footer, title| {
+                                footer.child(
                                     div()
-                                        .id("git-commit-input")
-                                        .track_focus(&git_commit_focus)
-                                        .h(px(36.0))
-                                        .min_w_0()
-                                        .flex_1()
-                                        .px_3()
+                                        .w_full()
+                                        .p_3()
                                         .flex()
-                                        .items_center()
+                                        .flex_col()
+                                        .gap_2()
                                         .rounded_lg()
                                         .border_1()
-                                        .border_color(rgb(if git_commit_focus.is_focused(window) {
-                                            accent
-                                        } else {
-                                            BORDER
-                                        }))
+                                        .border_color(rgb(BORDER))
                                         .bg(rgb(BG))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            let focus =
-                                                this.git_commit_input.read(cx).focus_handle(cx);
-                                            window.focus(&focus);
-                                        }))
-                                        .child(git_commit_input.clone()),
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .flex_1()
+                                                        .text_sm()
+                                                        .text_color(rgb(TEXT))
+                                                        .child(title),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("discard-pr-draft")
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .text_xs()
+                                                        .text_color(rgb(MUTED))
+                                                        .cursor_pointer()
+                                                        .hover(|style| {
+                                                            style
+                                                                .bg(rgb(SURFACE_HIGH))
+                                                                .text_color(rgb(TEXT))
+                                                        })
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.discard_pull_request_draft(cx);
+                                                        }))
+                                                        .child("Discard"),
+                                                ),
+                                        )
+                                        .when(!pr_body_preview.is_empty(), |review| {
+                                            review.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MUTED))
+                                                    .child(pr_body_preview),
+                                            )
+                                        }),
                                 )
-                                .child(
-                                    div()
-                                        .id("git-draft-commit")
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_lg()
-                                        .bg(rgb(if can_draft { SURFACE_HIGH } else { BG }))
-                                        .text_xs()
-                                        .text_color(rgb(if can_draft { TEXT } else { MUTED }))
-                                        .when(can_draft, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x242428)))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_draft {
-                                                this.draft_commit_message(cx);
-                                            }
-                                        }))
-                                        .child("Draft"),
-                                )
-                                .child(
-                                    div()
-                                        .id("git-commit-all")
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_lg()
-                                        .bg(rgb(if can_commit { accent } else { SURFACE_HIGH }))
-                                        .text_xs()
-                                        .text_color(rgb(if can_commit { 0xffffff } else { MUTED }))
-                                        .when(can_commit, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(accent_hover)))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_commit {
-                                                this.commit_changes(cx);
-                                            }
-                                        }))
-                                        .child("Commit all"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("git-push")
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .rounded_lg()
-                                .bg(rgb(if can_push { SURFACE_HIGH } else { BG }))
-                                .text_xs()
-                                .text_color(rgb(if can_push { TEXT } else { MUTED }))
-                                .text_center()
-                                .when(can_push, |button| {
-                                    button
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0x242428)))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if can_push {
-                                        this.push_changes(cx);
-                                    }
-                                }))
-                                .child("Push branch"),
-                        )
-                        .child(pr_button),
-                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("git-commit-input")
+                                            .track_focus(&git_commit_focus)
+                                            .h(px(36.0))
+                                            .min_w_0()
+                                            .flex_1()
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_lg()
+                                            .border_1()
+                                            .border_color(rgb(
+                                                if git_commit_focus.is_focused(window) {
+                                                    accent
+                                                } else {
+                                                    BORDER
+                                                },
+                                            ))
+                                            .bg(rgb(BG))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let focus =
+                                                    this.git_commit_input.read(cx).focus_handle(cx);
+                                                window.focus(&focus);
+                                            }))
+                                            .child(git_commit_input.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("git-draft-commit")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(if can_draft { SURFACE_HIGH } else { BG }))
+                                            .text_xs()
+                                            .text_color(rgb(if can_draft { TEXT } else { MUTED }))
+                                            .when(can_draft, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(0x242428)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if can_draft {
+                                                    this.draft_commit_message(cx);
+                                                }
+                                            }))
+                                            .child("Draft"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("git-commit-all")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(if can_commit { accent } else { SURFACE_HIGH }))
+                                            .text_xs()
+                                            .text_color(rgb(if can_commit {
+                                                0xffffff
+                                            } else {
+                                                MUTED
+                                            }))
+                                            .when(can_commit, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(accent_hover)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if can_commit {
+                                                    this.commit_changes(cx);
+                                                }
+                                            }))
+                                            .child("Commit all"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("git-push")
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(if can_push { SURFACE_HIGH } else { BG }))
+                                    .text_xs()
+                                    .text_color(rgb(if can_push { TEXT } else { MUTED }))
+                                    .text_center()
+                                    .when(can_push, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x242428)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_push {
+                                            this.push_changes(cx);
+                                        }
+                                    }))
+                                    .child("Push branch"),
+                            )
+                            .child(pr_button),
+                    )
+                })
                 .into_any_element()
         });
 
@@ -12129,6 +12279,20 @@ fn load_png_attachments(
     Ok(attachments)
 }
 
+fn join_browse_path(base: &str, name: &str) -> String {
+    if base.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{base}/{name}")
+    }
+}
+
+fn parent_browse_path(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent.to_owned())
+        .unwrap_or_default()
+}
+
 fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
     const MAX_FILES: usize = 500;
     const MAX_LINES: usize = 1_600;
@@ -12483,6 +12647,15 @@ fn folder_hidden_by_collapse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_file_navigation_stays_relative_to_the_chat() {
+        assert_eq!(join_browse_path("", "src"), "src");
+        assert_eq!(join_browse_path("src", "main.rs"), "src/main.rs");
+        assert_eq!(parent_browse_path("src/main.rs"), "src");
+        assert_eq!(parent_browse_path("src"), "");
+        assert_eq!(parent_browse_path(""), "");
+    }
 
     #[test]
     fn structured_question_events_are_bounded_and_validated() {

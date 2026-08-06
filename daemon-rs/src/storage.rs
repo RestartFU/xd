@@ -591,7 +591,8 @@ impl StateStore {
                     .ok_or_else(|| {
                         StorageError::InvalidRequest("file-browse write needs content.".into())
                     })?;
-                write_browsable_file(&path, content)?;
+                let original = optional_string(request, "original")?;
+                write_browsable_file(&path, original, content)?;
                 Ok(json!({"ok": true}))
             }
             _ => Err(StorageError::InvalidRequest(
@@ -3973,7 +3974,11 @@ fn read_browsable_file(path: &Path) -> Result<String, StorageError> {
     })
 }
 
-fn write_browsable_file(path: &Path, content: &str) -> Result<(), StorageError> {
+fn write_browsable_file(
+    path: &Path,
+    original: Option<&str>,
+    content: &str,
+) -> Result<(), StorageError> {
     if content.len() > MAX_FILE_BROWSE_BYTES || content.contains('\0') {
         return Err(StorageError::InvalidRequest(
             "Files larger than 1 MB cannot be saved here.".into(),
@@ -3987,6 +3992,18 @@ fn write_browsable_file(path: &Path, content: &str) -> Result<(), StorageError> 
         return Err(StorageError::InvalidRequest(
             "Only regular files can be edited.".into(),
         ));
+    }
+    if let Some(original) = original {
+        if original.len() > MAX_FILE_BROWSE_BYTES || original.contains('\0') {
+            return Err(StorageError::InvalidRequest(
+                "The original file content is invalid.".into(),
+            ));
+        }
+        if read_browsable_file(path)? != original {
+            return Err(StorageError::InvalidRequest(
+                "The file changed outside xd. Refresh before saving.".into(),
+            ));
+        }
     }
     OpenOptions::new()
         .write(true)
@@ -4472,12 +4489,26 @@ mod tests {
                 "chat": chat,
                 "action": "write",
                 "path": "hello.txt",
+                "original": "hello\n",
                 "content": "saved\n",
             }))
             .unwrap();
         assert_eq!(
             fs::read_to_string(workdir.join("hello.txt")).unwrap(),
             "saved\n"
+        );
+        assert!(
+            store
+                .file_browse(&json!({
+                    "chat": chat,
+                    "action": "write",
+                    "path": "hello.txt",
+                    "original": "hello\n",
+                    "content": "stale\n",
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("changed outside xd")
         );
         for (path, expected) in [
             ("binary.bin", "Binary files"),

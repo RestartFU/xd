@@ -35,7 +35,7 @@ Current milestone:
 - opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
 - shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - simultaneously visible repository and terminal panes with draggable, persisted dividers;
-- conflict-guarded UTF-8 repository file editing with atomic daemon-owned saves;
+- workdir-relative directory browsing and conflict-guarded UTF-8 file editing for Git and non-Git chats;
 - shared expandable activity cards for tools, subagents, and live workflow runs
   with non-blocking, last-good status refresh;
 - bounded Markdown rendering with language-aware fenced-code highlighting;
