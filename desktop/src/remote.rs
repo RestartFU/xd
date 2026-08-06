@@ -17,7 +17,10 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use thiserror::Error;
+
+use crate::daemon::{DaemonHandle, DaemonUpdate, RequestKind};
 
 const CREDENTIALS_VERSION: u32 = 1;
 const STARTUP_LIMIT: usize = 4 * 1024;
@@ -112,8 +115,11 @@ pub enum RemoteError {
     ClearCredentials(String),
     #[error("Cannot start the secure remote connection: {0}")]
     Bridge(String),
+    #[error("Cannot authenticate with the remote machine: {0}")]
+    Authentication(String),
 }
 
+#[derive(Clone)]
 pub struct CredentialsFile {
     path: PathBuf,
 }
@@ -241,6 +247,182 @@ pub struct RemoteBridge {
     child: Child,
     socket: PathBuf,
     directory: PathBuf,
+}
+
+pub struct RemoteSession {
+    daemon: DaemonHandle,
+    updates: async_channel::Receiver<DaemonUpdate>,
+    bridge: RemoteBridge,
+}
+
+impl RemoteSession {
+    pub fn into_parts(
+        self,
+    ) -> (
+        DaemonHandle,
+        async_channel::Receiver<DaemonUpdate>,
+        RemoteBridge,
+    ) {
+        (self.daemon, self.updates, self.bridge)
+    }
+}
+
+pub fn connect(credentials: &RemoteCredentials) -> Result<RemoteSession, RemoteError> {
+    credentials.validate()?;
+    let (bridge, startup) = RemoteBridge::launch(
+        &credentials.host,
+        credentials.port,
+        Some(&credentials.fingerprint),
+    )?;
+    if startup.fingerprint != credentials.fingerprint {
+        return Err(RemoteError::Authentication(
+            "the remote certificate changed".into(),
+        ));
+    }
+    let (daemon, updates) = DaemonHandle::connect(bridge.socket().to_owned())
+        .map_err(|error| RemoteError::Bridge(error.to_string()))?;
+    wait_until(&updates, |update| {
+        matches!(update, DaemonUpdate::Connected { .. })
+    })?;
+    daemon
+        .hello_remote(&credentials.token)
+        .map_err(RemoteError::Authentication)?;
+    let reply = wait_for_reply(&updates, RequestKind::HelloRemote)?;
+    require_success(&reply)?;
+    Ok(RemoteSession {
+        daemon,
+        updates,
+        bridge,
+    })
+}
+
+pub fn pair(
+    host: &str,
+    port: u16,
+    code: &str,
+    name: &str,
+) -> Result<(RemoteCredentials, RemoteSession), RemoteError> {
+    let host = host.trim();
+    let code = code
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    let name = name.trim();
+    if host.is_empty() {
+        return Err(RemoteError::Credentials(
+            "Remote host cannot be empty.".into(),
+        ));
+    }
+    if port == 0 {
+        return Err(RemoteError::Credentials(
+            "Remote port must be from 1 to 65535.".into(),
+        ));
+    }
+    if code.is_empty() {
+        return Err(RemoteError::Authentication(
+            "Pairing code cannot be empty.".into(),
+        ));
+    }
+    if name.is_empty() {
+        return Err(RemoteError::Authentication(
+            "Device name cannot be empty.".into(),
+        ));
+    }
+    let (bridge, startup) = RemoteBridge::launch(host, port, None)?;
+    let (daemon, updates) = DaemonHandle::connect(bridge.socket().to_owned())
+        .map_err(|error| RemoteError::Bridge(error.to_string()))?;
+    wait_until(&updates, |update| {
+        matches!(update, DaemonUpdate::Connected { .. })
+    })?;
+    daemon
+        .pair_remote(&code, name)
+        .map_err(RemoteError::Authentication)?;
+    let reply = wait_for_reply(&updates, RequestKind::PairRemote)?;
+    require_success(&reply)?;
+    let token = reply
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| RemoteError::Authentication("Pairing returned no device token.".into()))?;
+    let credentials = RemoteCredentials::new(host, port, token, startup.fingerprint)?;
+    Ok((
+        credentials,
+        RemoteSession {
+            daemon,
+            updates,
+            bridge,
+        },
+    ))
+}
+
+fn wait_for_reply(
+    updates: &async_channel::Receiver<DaemonUpdate>,
+    expected: RequestKind,
+) -> Result<Map<String, Value>, RemoteError> {
+    let update = wait_until(
+        updates,
+        move |update| matches!(update, DaemonUpdate::Reply { kind, .. } if *kind == expected),
+    )?;
+    match update {
+        DaemonUpdate::Reply { body, .. } => Ok(body),
+        _ => unreachable!("wait predicate accepted only a reply"),
+    }
+}
+
+fn wait_until(
+    updates: &async_channel::Receiver<DaemonUpdate>,
+    predicate: impl Fn(&DaemonUpdate) -> bool + Send + 'static,
+) -> Result<DaemonUpdate, RemoteError> {
+    let updates = updates.clone();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("xd-remote-authentication".into())
+        .spawn(move || {
+            loop {
+                match updates.recv_blocking() {
+                    Ok(update) if predicate(&update) => {
+                        let _ = sender.send(Ok(update));
+                        break;
+                    }
+                    Ok(DaemonUpdate::Disconnected { message }) => {
+                        let _ = sender.send(Err(message));
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        let _ = sender.send(Err("the remote connection closed".into()));
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|error| {
+            RemoteError::Authentication(format!("cannot monitor authentication: {error}"))
+        })?;
+    match receiver.recv_timeout(STARTUP_TIMEOUT) {
+        Ok(Ok(update)) => Ok(update),
+        Ok(Err(error)) => Err(RemoteError::Authentication(error)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(RemoteError::Authentication(
+            "remote authentication timed out".into(),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(RemoteError::Authentication(
+            "remote authentication ended unexpectedly".into(),
+        )),
+    }
+}
+
+fn require_success(reply: &Map<String, Value>) -> Result<(), RemoteError> {
+    if reply.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    Err(RemoteError::Authentication(
+        reply
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the remote daemon rejected authentication")
+            .to_owned(),
+    ))
 }
 
 impl RemoteBridge {
@@ -615,5 +797,29 @@ mod tests {
         );
         assert!(read_startup(b"{}\n".as_slice()).is_err());
         assert!(read_startup(vec![b'x'; STARTUP_LIMIT + 1].as_slice()).is_err());
+    }
+
+    #[test]
+    fn authentication_replies_never_accept_missing_tokens_or_errors() {
+        let success = serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+            "ok": true,
+            "token": "private"
+        }))
+        .unwrap();
+        assert!(require_success(&success).is_ok());
+        assert_eq!(
+            success.get("token").and_then(Value::as_str),
+            Some("private")
+        );
+
+        let rejected = serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+            "ok": false,
+            "error": "No such pairing code."
+        }))
+        .unwrap();
+        assert_eq!(
+            require_success(&rejected).unwrap_err().to_string(),
+            "Cannot authenticate with the remote machine: No such pairing code."
+        );
     }
 }

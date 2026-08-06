@@ -32,6 +32,7 @@ use xd_desktop::{
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
     model::{AppModel, Attachment, Folder, Message},
+    remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
 };
 
 mod editor;
@@ -511,6 +512,25 @@ struct SharePanel {
     error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RemoteState {
+    #[default]
+    Unconfigured,
+    Connecting,
+    Connected,
+    Offline,
+}
+
+#[derive(Clone, Default)]
+struct RemotePanel {
+    host: String,
+    port: String,
+    code: String,
+    name: String,
+    submitting: bool,
+    error: Option<String>,
+}
+
 #[derive(Clone)]
 enum MessageImageState {
     Loading,
@@ -601,6 +621,7 @@ impl MessageImageCache {
 
 struct XdDesktop {
     model: AppModel,
+    remote_model: AppModel,
     settings: AppSettings,
     settings_open: bool,
     settings_menu: Option<SettingsMenu>,
@@ -608,6 +629,7 @@ struct XdDesktop {
     secrets_panel: Option<SecretsPanel>,
     devices_panel: Option<DevicesPanel>,
     share_panel: Option<SharePanel>,
+    remote_panel: Option<RemotePanel>,
     self_update_panel: Option<SelfUpdatePanel>,
     auth_providers: Vec<AuthProvider>,
     cli_versions: Vec<CliVersion>,
@@ -624,6 +646,14 @@ struct XdDesktop {
     reconnect_attempt: u32,
     connecting: bool,
     connection_in_flight: bool,
+    remote_credentials_file: Option<CredentialsFile>,
+    remote_credentials: Option<RemoteCredentials>,
+    remote_daemon: Option<DaemonHandle>,
+    remote_bridge: Option<RemoteBridge>,
+    remote_state: RemoteState,
+    remote_error: Option<String>,
+    remote_generation: u64,
+    remote_reconnect_attempt: u32,
     message_images: Arc<Mutex<MessageImageCache>>,
     message_image_viewer: Option<MessageImageViewer>,
     transcript: ListState,
@@ -648,6 +678,10 @@ struct XdDesktop {
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
     device_name_input: Entity<ComposerInput>,
+    remote_host_input: Entity<ComposerInput>,
+    remote_port_input: Entity<ComposerInput>,
+    remote_code_input: Entity<ComposerInput>,
+    remote_name_input: Entity<ComposerInput>,
     question_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
@@ -874,6 +908,58 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) => {}
         })
         .detach();
+        let remote_host_input = cx.new(|cx| ComposerInput::new(cx, "Machine address…"));
+        cx.subscribe(&remote_host_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.remote_panel {
+                    panel.host = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.pair_remote_machine(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
+        let remote_port_input = cx.new(|cx| ComposerInput::new(cx, "Port…"));
+        cx.subscribe(&remote_port_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.remote_panel {
+                    panel.port = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.pair_remote_machine(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
+        let remote_code_input = cx.new(|cx| ComposerInput::new(cx, "Pairing code…"));
+        cx.subscribe(&remote_code_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.remote_panel {
+                    panel.code = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.pair_remote_machine(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
+        let remote_name_input = cx.new(|cx| ComposerInput::new(cx, "This device name…"));
+        cx.subscribe(&remote_name_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.remote_panel {
+                    panel.name = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.pair_remote_machine(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
         let question_input = cx.new(|cx| ComposerInput::new(cx, "Type your answer…"));
         cx.subscribe(&question_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -886,8 +972,23 @@ impl XdDesktop {
         .detach();
         let settings = AppSettings::load();
         let collapsed_folders = settings.collapsed_folders.iter().cloned().collect();
+        let (remote_credentials_file, remote_credentials, remote_error) =
+            match CredentialsFile::default_path() {
+                Ok(path) => {
+                    let file = CredentialsFile::new(path);
+                    match file.load() {
+                        Ok(credentials) => (Some(file), credentials, None),
+                        Err(error) => (Some(file), None, Some(error.to_string())),
+                    }
+                }
+                Err(error) => (None, None, Some(error.to_string())),
+            };
         let mut desktop = Self {
             model: AppModel {
+                draft_revision: -1,
+                ..Default::default()
+            },
+            remote_model: AppModel {
                 draft_revision: -1,
                 ..Default::default()
             },
@@ -898,6 +999,7 @@ impl XdDesktop {
             secrets_panel: None,
             devices_panel: None,
             share_panel: None,
+            remote_panel: None,
             self_update_panel: None,
             auth_providers: Vec::new(),
             cli_versions: Vec::new(),
@@ -914,6 +1016,14 @@ impl XdDesktop {
             reconnect_attempt: 0,
             connecting: false,
             connection_in_flight: false,
+            remote_credentials_file,
+            remote_credentials,
+            remote_daemon: None,
+            remote_bridge: None,
+            remote_state: RemoteState::Unconfigured,
+            remote_error,
+            remote_generation: 0,
+            remote_reconnect_attempt: 0,
             message_images: Arc::new(Mutex::new(MessageImageCache::default())),
             message_image_viewer: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
@@ -938,6 +1048,10 @@ impl XdDesktop {
             secret_name_input,
             secret_value_input,
             device_name_input,
+            remote_host_input,
+            remote_port_input,
+            remote_code_input,
+            remote_name_input,
             question_input,
             composer: String::new(),
             queue_edit: None,
@@ -991,6 +1105,9 @@ impl XdDesktop {
             pane_resize: None,
         };
         desktop.schedule_connect(Duration::ZERO, cx);
+        if desktop.remote_credentials.is_some() {
+            desktop.schedule_remote_connect(Duration::ZERO, cx);
+        }
         desktop
     }
 
@@ -1087,6 +1204,181 @@ impl XdDesktop {
         self.reconnect_attempt = 0;
         self.model.connection_error = Some("Reconnecting to xd-dev…".into());
         self.schedule_connect(Duration::ZERO, cx);
+        cx.notify();
+    }
+
+    fn schedule_remote_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.remote_credentials.is_none()
+            || matches!(
+                self.remote_state,
+                RemoteState::Connecting | RemoteState::Connected
+            )
+        {
+            return;
+        }
+        self.remote_state = RemoteState::Connecting;
+        self.remote_generation = self.remote_generation.saturating_add(1);
+        let generation = self.remote_generation;
+        cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                Timer::after(delay).await;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.begin_remote_connect(generation, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn begin_remote_connect(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.remote_generation != generation || self.remote_state != RemoteState::Connecting {
+            return;
+        }
+        let Some(credentials) = self.remote_credentials.clone() else {
+            self.remote_state = RemoteState::Unconfigured;
+            return;
+        };
+        let connection = cx
+            .background_executor()
+            .spawn(async move { remote::connect(&credentials) });
+        cx.spawn(async move |this, cx| {
+            let result = connection.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.remote_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(session) => this.install_remote_session(session, generation, cx),
+                    Err(error) => this.remote_connection_failed(error, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn install_remote_session(
+        &mut self,
+        session: RemoteSession,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let (daemon, updates, bridge) = session.into_parts();
+        self.remote_daemon = Some(daemon);
+        self.remote_bridge = Some(bridge);
+        self.remote_state = RemoteState::Connected;
+        self.remote_error = None;
+        self.remote_reconnect_attempt = 0;
+        self.remote_model.connected = true;
+        if let Some(panel) = &mut self.remote_panel {
+            panel.submitting = false;
+            panel.error = None;
+        }
+        self.listen_for_remote(updates, generation, cx);
+        if let Some(daemon) = &self.remote_daemon
+            && let Err(error) = daemon.tree()
+        {
+            self.remote_error = Some(error);
+        }
+    }
+
+    fn listen_for_remote(
+        &mut self,
+        updates: async_channel::Receiver<DaemonUpdate>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Ok(update) = updates.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.remote_generation == generation {
+                            this.handle_remote_update(update, generation, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn handle_remote_update(
+        &mut self,
+        update: DaemonUpdate,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        match update {
+            DaemonUpdate::Connected { .. } => {}
+            DaemonUpdate::Disconnected { message } => {
+                if self.remote_generation != generation {
+                    return;
+                }
+                self.remote_daemon = None;
+                self.remote_bridge = None;
+                self.remote_model.connected = false;
+                self.remote_state = RemoteState::Offline;
+                self.remote_error = Some(format!("{message} Reconnecting…"));
+                if let Some(panel) = &mut self.remote_panel {
+                    panel.submitting = false;
+                    panel.error = self.remote_error.clone();
+                }
+                self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
+                self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
+            }
+            DaemonUpdate::Reply { kind, body, .. } if kind == RequestKind::Tree => {
+                if let Err(error) = self.remote_model.apply_tree(&Value::Object(body)) {
+                    self.remote_error = Some(format!("Invalid remote tree response: {error}"));
+                }
+            }
+            DaemonUpdate::Event { name, body, .. } if name == "tree" => {
+                if let Err(error) = self.remote_model.apply_tree(&Value::Object(body)) {
+                    self.remote_error = Some(format!("Invalid remote tree event: {error}"));
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn remote_connection_failed(&mut self, error: RemoteError, cx: &mut Context<Self>) {
+        let message = error.to_string();
+        self.remote_daemon = None;
+        self.remote_bridge = None;
+        self.remote_model.connected = false;
+        if message.contains("Unknown device. Pair first.") {
+            if let Some(file) = &self.remote_credentials_file {
+                let _ = file.clear();
+            }
+            self.remote_credentials = None;
+            self.remote_state = RemoteState::Unconfigured;
+            self.remote_error = Some("This machine revoked the saved device. Pair again.".into());
+        } else {
+            self.remote_state = RemoteState::Offline;
+            self.remote_error = Some(format!("{message} Retrying automatically…"));
+            self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
+            self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
+        }
+        if let Some(panel) = &mut self.remote_panel {
+            panel.submitting = false;
+            panel.error = self.remote_error.clone();
+        }
+    }
+
+    fn retry_remote_connection(&mut self, cx: &mut Context<Self>) {
+        if self.remote_credentials.is_none() || self.remote_state == RemoteState::Connecting {
+            return;
+        }
+        self.remote_generation = self.remote_generation.saturating_add(1);
+        self.remote_daemon = None;
+        self.remote_bridge = None;
+        self.remote_state = RemoteState::Offline;
+        self.remote_reconnect_attempt = 0;
+        self.remote_error = None;
+        self.schedule_remote_connect(Duration::ZERO, cx);
         cx.notify();
     }
 
@@ -3539,6 +3831,191 @@ impl XdDesktop {
     fn open_share(&mut self, cx: &mut Context<Self>) {
         self.settings_open = false;
         self.share_panel = Some(SharePanel::default());
+        cx.notify();
+    }
+
+    fn open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        let host = self
+            .remote_credentials
+            .as_ref()
+            .map(|credentials| credentials.host.clone())
+            .unwrap_or_default();
+        let port = self
+            .remote_credentials
+            .as_ref()
+            .map(|credentials| credentials.port.to_string())
+            .unwrap_or_else(|| "4001".into());
+        let name = std::env::var("HOSTNAME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Desktop".into());
+        self.remote_panel = Some(RemotePanel {
+            host: host.clone(),
+            port: port.clone(),
+            code: String::new(),
+            name: name.clone(),
+            submitting: false,
+            error: self.remote_error.clone(),
+        });
+        self.remote_host_input
+            .update(cx, |input, cx| input.set_text(host, cx));
+        self.remote_port_input
+            .update(cx, |input, cx| input.set_text(port, cx));
+        self.remote_code_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.remote_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        let focus = self.remote_host_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn close_remote(&mut self, cx: &mut Context<Self>) {
+        let canceled_pairing = self
+            .remote_panel
+            .as_ref()
+            .is_some_and(|panel| panel.submitting);
+        if canceled_pairing {
+            self.remote_generation = self.remote_generation.saturating_add(1);
+            self.remote_state = if self.remote_credentials.is_some() {
+                RemoteState::Offline
+            } else {
+                RemoteState::Unconfigured
+            };
+        }
+        self.remote_panel = None;
+        if canceled_pairing && self.remote_credentials.is_some() {
+            self.schedule_remote_connect(Duration::ZERO, cx);
+        }
+        cx.notify();
+    }
+
+    fn pair_remote_machine(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = self.remote_panel.clone() else {
+            return;
+        };
+        if panel.submitting {
+            return;
+        }
+        let port = match panel
+            .port
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+        {
+            Some(port) => port,
+            None => {
+                if let Some(panel) = &mut self.remote_panel {
+                    panel.error = Some("Remote port must be from 1 to 65535.".into());
+                }
+                cx.notify();
+                return;
+            }
+        };
+        if panel.host.trim().is_empty()
+            || panel.code.split_whitespace().collect::<String>().is_empty()
+            || panel.name.trim().is_empty()
+        {
+            if let Some(panel) = &mut self.remote_panel {
+                panel.error = Some("Address, pairing code, and device name are required.".into());
+            }
+            cx.notify();
+            return;
+        }
+        let Some(credentials_file) = self.remote_credentials_file.clone() else {
+            if let Some(panel) = &mut self.remote_panel {
+                panel.error = Some("The remote credentials path is unavailable.".into());
+            }
+            cx.notify();
+            return;
+        };
+        self.remote_generation = self.remote_generation.saturating_add(1);
+        let generation = self.remote_generation;
+        self.remote_daemon = None;
+        self.remote_bridge = None;
+        self.remote_state = RemoteState::Connecting;
+        self.remote_error = None;
+        if let Some(panel) = &mut self.remote_panel {
+            panel.submitting = true;
+            panel.error = None;
+        }
+        let host = panel.host;
+        let code = panel.code;
+        let name = panel.name;
+        let pairing = cx
+            .background_executor()
+            .spawn(async move { remote::pair(&host, port, &code, &name) });
+        cx.spawn(async move |this, cx| {
+            let result = pairing.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.remote_generation != generation || this.remote_panel.is_none() {
+                    return;
+                }
+                match result {
+                    Ok((credentials, session)) => match credentials_file.save(&credentials) {
+                        Ok(()) => {
+                            this.remote_credentials = Some(credentials);
+                            this.install_remote_session(session, generation, cx);
+                        }
+                        Err(error) => {
+                            this.remote_state = RemoteState::Offline;
+                            this.remote_error = Some(error.to_string());
+                            if let Some(panel) = &mut this.remote_panel {
+                                panel.submitting = false;
+                                panel.error = this.remote_error.clone();
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        this.remote_state = if this.remote_credentials.is_some() {
+                            RemoteState::Offline
+                        } else {
+                            RemoteState::Unconfigured
+                        };
+                        this.remote_error = Some(error.to_string());
+                        if let Some(panel) = &mut this.remote_panel {
+                            panel.submitting = false;
+                            panel.error = this.remote_error.clone();
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn forget_remote_machine(&mut self, cx: &mut Context<Self>) {
+        let result = self
+            .remote_credentials_file
+            .as_ref()
+            .ok_or_else(|| "The remote credentials path is unavailable.".to_owned())
+            .and_then(|file| file.clear().map_err(|error| error.to_string()));
+        if let Err(error) = result {
+            if let Some(panel) = &mut self.remote_panel {
+                panel.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+        self.remote_generation = self.remote_generation.saturating_add(1);
+        self.remote_credentials = None;
+        self.remote_daemon = None;
+        self.remote_bridge = None;
+        self.remote_model = AppModel {
+            draft_revision: -1,
+            ..Default::default()
+        };
+        self.remote_state = RemoteState::Unconfigured;
+        self.remote_error = None;
+        self.remote_reconnect_attempt = 0;
+        if let Some(panel) = &mut self.remote_panel {
+            panel.submitting = false;
+            panel.error = None;
+        }
         cx.notify();
     }
 
@@ -10975,6 +11452,12 @@ impl Render for XdDesktop {
         });
 
         let settings_overlay = self.settings_open.then(|| {
+            let remote_status = match self.remote_state {
+                RemoteState::Unconfigured => "Not connected",
+                RemoteState::Connecting => "Connecting…",
+                RemoteState::Connected => "Connected",
+                RemoteState::Offline => "Offline · retrying",
+            };
             let mut accent_buttons = Vec::new();
             for (index, preset) in AccentPreset::ALL.into_iter().enumerate() {
                 let selected = self.settings.accent == preset;
@@ -11387,6 +11870,43 @@ impl Render for XdDesktop {
                                         .child(div().text_xs().text_color(rgb(MUTED)).child(
                                             "Check, install, and explicitly restart this daemon.",
                                         )),
+                                )
+                                .child(div().text_color(rgb(MUTED)).child("›")),
+                        )
+                        .child(
+                            div()
+                                .id("open-remote-machine")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_remote(window, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Connect to a machine"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(remote_status),
+                                        ),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
                         )
@@ -12251,6 +12771,331 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let remote_overlay = self.remote_panel.clone().map(|panel| {
+            let host_input = self.remote_host_input.clone();
+            let port_input = self.remote_port_input.clone();
+            let code_input = self.remote_code_input.clone();
+            let name_input = self.remote_name_input.clone();
+            let host_focus = self.remote_host_input.read(cx).focus_handle(cx);
+            let port_focus = self.remote_port_input.read(cx).focus_handle(cx);
+            let code_focus = self.remote_code_input.read(cx).focus_handle(cx);
+            let name_focus = self.remote_name_input.read(cx).focus_handle(cx);
+            let configured = self.remote_credentials.is_some();
+            let status = match self.remote_state {
+                RemoteState::Unconfigured => "No remote machine is paired.",
+                RemoteState::Connecting => "Opening a secure connection…",
+                RemoteState::Connected => "Connected securely.",
+                RemoteState::Offline => "The paired machine is offline. Retrying automatically…",
+            };
+            let can_pair = !panel.submitting
+                && !panel.host.trim().is_empty()
+                && panel
+                    .port
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .is_some_and(|port| port > 0)
+                && !panel.code.split_whitespace().collect::<String>().is_empty()
+                && !panel.name.trim().is_empty();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(620.0))
+                        .max_h(px(760.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(TEXT))
+                                                .child("Connect to a machine"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Use another xd daemon while keeping this machine available.",
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-remote-machine")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_remote(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .rounded_lg()
+                                .bg(rgb(SURFACE))
+                                .child(
+                                    div()
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(rgb(match self.remote_state {
+                                            RemoteState::Connected => 0x65c985,
+                                            RemoteState::Connecting => accent,
+                                            RemoteState::Offline => 0xe3a45b,
+                                            RemoteState::Unconfigured => MUTED,
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .child(status),
+                                )
+                                .when(
+                                    configured && self.remote_state != RemoteState::Connecting,
+                                    |row| {
+                                        row.child(
+                                            div()
+                                                .id("retry-remote-machine")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_lg()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .cursor_pointer()
+                                                .hover(|style| {
+                                                    style
+                                                        .bg(rgb(SURFACE_HIGH))
+                                                        .text_color(rgb(TEXT))
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.retry_remote_connection(cx);
+                                                }))
+                                                .child("Reconnect"),
+                                        )
+                                    },
+                                )
+                                .when(configured, |row| {
+                                    row.child(
+                                        div()
+                                            .id("forget-remote-machine")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_xs()
+                                            .text_color(rgb(0xefaaaa))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x3b282e)))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.forget_remote_machine(cx);
+                                            }))
+                                            .child("Forget"),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(MUTED))
+                                .child(if configured {
+                                    "PAIR A DIFFERENT MACHINE"
+                                } else {
+                                    "PAIR THIS DEVICE"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("remote-host-field")
+                                        .track_focus(&host_focus)
+                                        .h(px(40.0))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if host_focus.is_focused(window) {
+                                            accent
+                                        } else {
+                                            BORDER
+                                        }))
+                                        .bg(rgb(SURFACE))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus =
+                                                this.remote_host_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(host_input),
+                                )
+                                .child(
+                                    div()
+                                        .id("remote-port-field")
+                                        .track_focus(&port_focus)
+                                        .h(px(40.0))
+                                        .w(px(120.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if port_focus.is_focused(window) {
+                                            accent
+                                        } else {
+                                            BORDER
+                                        }))
+                                        .bg(rgb(SURFACE))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus =
+                                                this.remote_port_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(port_input),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("remote-code-field")
+                                .track_focus(&code_focus)
+                                .h(px(40.0))
+                                .w_full()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(if code_focus.is_focused(window) {
+                                    accent
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(SURFACE))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus = this.remote_code_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(code_input),
+                        )
+                        .child(
+                            div()
+                                .id("remote-name-field")
+                                .track_focus(&name_focus)
+                                .h(px(40.0))
+                                .w_full()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(if name_focus.is_focused(window) {
+                                    accent
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(SURFACE))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let focus = this.remote_name_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                }))
+                                .child(name_input),
+                        )
+                        .when_some(panel.error, |dialog, error| {
+                            dialog.child(
+                                div()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(rgb(0x3b282e))
+                                    .text_xs()
+                                    .text_color(rgb(0xefaaaa))
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("cancel-remote-machine")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_remote(cx);
+                                        }))
+                                        .child("Close"),
+                                )
+                                .child(
+                                    div()
+                                        .id("pair-remote-machine")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_pair { accent } else { SURFACE_HIGH }))
+                                        .text_sm()
+                                        .text_color(rgb(if can_pair { 0xffffff } else { MUTED }))
+                                        .when(can_pair, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(accent_hover)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_pair {
+                                                this.pair_remote_machine(cx);
+                                            }
+                                        }))
+                                        .child(if panel.submitting {
+                                            "Pairing…"
+                                        } else {
+                                            "Pair device"
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let share_overlay = self.share_panel.clone().map(|panel| {
             let ready = !panel.host.is_empty() && panel.port.is_some() && !panel.code.is_empty();
             let address = panel
@@ -12788,6 +13633,7 @@ impl Render for XdDesktop {
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
             .when_some(self_update_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
+            .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
             .when_some(message_image_overlay, |root, overlay| root.child(overlay))
