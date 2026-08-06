@@ -27,6 +27,7 @@ actions!(
         Cut,
         Copy,
         Newline,
+        Submit,
         Tab,
     ]
 );
@@ -34,6 +35,7 @@ actions!(
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
     Changed(String),
+    Submit,
 }
 
 pub struct FileEditor {
@@ -45,6 +47,8 @@ pub struct FileEditor {
     last_lines: Vec<PaintedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    composer: bool,
+    placeholder: SharedString,
 }
 
 #[derive(Clone)]
@@ -69,6 +73,16 @@ impl FileEditor {
             last_lines: Vec::new(),
             last_bounds: None,
             is_selecting: false,
+            composer: false,
+            placeholder: "".into(),
+        }
+    }
+
+    pub fn composer(cx: &mut Context<Self>) -> Self {
+        Self {
+            composer: true,
+            placeholder: "Message xd…".into(),
+            ..Self::new(cx)
         }
     }
 
@@ -158,6 +172,10 @@ impl FileEditor {
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         self.replace_text_in_range(None, "\n", window, cx);
+    }
+
+    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::Submit);
     }
 
     fn tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -293,6 +311,7 @@ impl FileEditor {
                 + line
                     .layout
                     .closest_index_for_x(point.x - line.bounds.left())
+                    .min(line.range.end - line.range.start)
         })
     }
 
@@ -497,11 +516,17 @@ impl Element for EditorElement {
         let cursor_offset = input.cursor_offset();
         let mut cursor = None;
         for (index, range) in ranges.into_iter().enumerate() {
-            let text: SharedString = input.content[range.clone()].to_owned().into();
+            let placeholder =
+                input.content.is_empty() && index == 0 && !input.placeholder.is_empty();
+            let text: SharedString = if placeholder {
+                input.placeholder.clone()
+            } else {
+                input.content[range.clone()].to_owned().into()
+            };
             let run = TextRun {
                 len: text.len(),
                 font: style.font(),
-                color: rgb(0xdde1ea).into(),
+                color: rgb(if placeholder { 0xa8a8ad } else { 0xdde1ea }).into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -606,6 +631,7 @@ impl Render for FileEditor {
             .w_full()
             .min_h_full()
             .key_context("FileEditor")
+            .when(self.composer, |editor| editor.key_context("MessageEditor"))
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
@@ -623,6 +649,7 @@ impl Render for FileEditor {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))

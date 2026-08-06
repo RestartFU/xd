@@ -42,7 +42,7 @@ use editor::{
     Down as EditorDown, EditorEvent, End as EditorEnd, FileEditor, Home as EditorHome,
     Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
     SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft, SelectRight as EditorSelectRight,
-    Tab as EditorTab, Up as EditorUp,
+    Submit as EditorSubmit, Tab as EditorTab, Up as EditorUp,
 };
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
@@ -397,7 +397,7 @@ struct XdDesktop {
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
-    composer_input: Entity<ComposerInput>,
+    composer_input: Entity<FileEditor>,
     queue_edit_input: Entity<ComposerInput>,
     sidebar_edit_input: Entity<ComposerInput>,
     workspace_create_input: Entity<ComposerInput>,
@@ -464,11 +464,10 @@ struct XdDesktop {
 
 impl XdDesktop {
     fn new(cx: &mut Context<Self>) -> Self {
-        let composer_input = cx.new(|cx| ComposerInput::new(cx, "Message xd…"));
+        let composer_input = cx.new(FileEditor::composer);
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => this.composer_changed(text.clone(), cx),
-            ComposerEvent::Submit => this.send_composer(cx),
-            ComposerEvent::Bytes(_) => {}
+            EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
+            EditorEvent::Submit => this.send_composer(cx),
         })
         .detach();
         let queue_edit_input = cx.new(|cx| ComposerInput::new(cx, "Edit queued message…"));
@@ -574,6 +573,7 @@ impl XdDesktop {
                     cx.notify();
                 }
             }
+            EditorEvent::Submit => {}
         })
         .detach();
         let terminal_input = cx.new(ComposerInput::terminal);
@@ -7588,7 +7588,7 @@ impl Render for XdDesktop {
                     .w_full()
                     .max_w(px(1040.0))
                     .mx_auto()
-                    .min_h(px(64.0))
+                    .min_h(px(72.0))
                     .flex()
                     .items_center()
                     .gap_3()
@@ -7646,7 +7646,17 @@ impl Render for XdDesktop {
                             }))
                             .child(voice_label),
                     )
-                    .child(self.composer_input.clone())
+                    .child(
+                        div()
+                            .id("message-editor-scroll")
+                            .flex_1()
+                            .min_w_0()
+                            .min_h(px(40.0))
+                            .max_h(px(160.0))
+                            .py_2()
+                            .overflow_y_scroll()
+                            .child(self.composer_input.clone()),
+                    )
                     .child(
                         div()
                             .id("send")
@@ -10546,6 +10556,27 @@ fn main() {
             KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
             KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
             KeyBinding::new("tab", EditorTab, Some("FileEditor")),
+            KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
+            KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
+            KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
+            KeyBinding::new("right", EditorRight, Some("MessageEditor")),
+            KeyBinding::new("up", EditorUp, Some("MessageEditor")),
+            KeyBinding::new("down", EditorDown, Some("MessageEditor")),
+            KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
+            KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
+            KeyBinding::new("home", EditorHome, Some("MessageEditor")),
+            KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
+            KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
+            KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
+            KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
+            KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
+            KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
+            KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
+            KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
+            KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
+            KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
+            KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
+            KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
             KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
             KeyBinding::new("delete", Delete, Some("TerminalInput")),
             KeyBinding::new("left", Left, Some("TerminalInput")),
