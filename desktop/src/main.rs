@@ -116,6 +116,29 @@ struct CliVersion {
     detail: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct SelfUpdateStatus {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    supported: bool,
+    #[serde(default)]
+    available: bool,
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SelfUpdatePanel {
+    status: Option<SelfUpdateStatus>,
+    busy: bool,
+    error: Option<String>,
+}
+
 #[derive(Default)]
 enum VoiceState {
     #[default]
@@ -575,6 +598,7 @@ struct XdDesktop {
     auth_open: bool,
     secrets_panel: Option<SecretsPanel>,
     devices_panel: Option<DevicesPanel>,
+    self_update_panel: Option<SelfUpdatePanel>,
     auth_providers: Vec<AuthProvider>,
     cli_versions: Vec<CliVersion>,
     cli_versions_loading: bool,
@@ -863,6 +887,7 @@ impl XdDesktop {
             auth_open: false,
             secrets_panel: None,
             devices_panel: None,
+            self_update_panel: None,
             auth_providers: Vec::new(),
             cli_versions: Vec::new(),
             cli_versions_loading: false,
@@ -1122,6 +1147,10 @@ impl XdDesktop {
                     panel.mutating = None;
                     panel.error = Some("Paired devices disconnected.".into());
                 }
+                if let Some(panel) = &mut self.self_update_panel {
+                    panel.busy = false;
+                    panel.error = Some("The daemon disconnected. Reconnecting…".into());
+                }
                 if self.auth_open {
                     self.cli_versions_loading = false;
                     self.cli_versions_error = Some("Assistant versions disconnected.".into());
@@ -1174,6 +1203,7 @@ impl XdDesktop {
                     | RequestKind::AgentSecrets { .. }
                     | RequestKind::SetAgentSecrets { .. }
                     | RequestKind::AgentClis
+                    | RequestKind::DaemonUpdate { .. }
                     | RequestKind::Devices
                     | RequestKind::RenameDevice { .. }
                     | RequestKind::RevokeDevice { .. }
@@ -1467,6 +1497,18 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
+                RequestKind::DaemonUpdate { .. } => {
+                    if let Some(panel) = &mut self.self_update_panel {
+                        panel.busy = false;
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The daemon update request failed.")
+                                .to_owned(),
+                        );
+                    }
+                }
                 RequestKind::RenameDevice { device_id }
                 | RequestKind::RevokeDevice { device_id } => {
                     if let Some(panel) = &mut self.devices_panel
@@ -1668,6 +1710,7 @@ impl XdDesktop {
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
+            RequestKind::DaemonUpdate { .. } => self.apply_self_update(&value),
             RequestKind::AgentSecrets { folder_id }
                 if self
                     .secrets_panel
@@ -2644,6 +2687,7 @@ impl XdDesktop {
             }
             "agent-auth-changed" => self.apply_auth_provider(&body),
             "agent-cli-changed" => self.apply_cli_version(&body),
+            "daemon-update" => self.apply_self_update(&body),
             _ => {}
         }
         cx.notify();
@@ -2724,6 +2768,83 @@ impl XdDesktop {
             .iter()
             .any(|version| version.state == "checking");
         self.cli_versions_error = None;
+    }
+
+    fn apply_self_update(&mut self, value: &Value) {
+        let Some(panel) = &mut self.self_update_panel else {
+            return;
+        };
+        match serde_json::from_value::<SelfUpdateStatus>(value.clone()) {
+            Ok(status) => {
+                panel.busy = matches!(status.state.as_str(), "checking" | "installing");
+                panel.error = None;
+                panel.status = Some(status);
+            }
+            Err(error) => {
+                panel.busy = false;
+                panel.error = Some(format!("Invalid daemon update response: {error}"));
+            }
+        }
+    }
+
+    fn open_self_update(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.self_update_panel = Some(SelfUpdatePanel {
+            busy: true,
+            ..Default::default()
+        });
+        self.request_self_update("check");
+        cx.notify();
+    }
+
+    fn close_self_update(&mut self, cx: &mut Context<Self>) {
+        self.self_update_panel = None;
+        cx.notify();
+    }
+
+    fn request_self_update(&mut self, action: &str) {
+        let Some(panel) = &mut self.self_update_panel else {
+            return;
+        };
+        if panel.busy && action != "check" {
+            return;
+        }
+        panel.busy = true;
+        panel.error = None;
+        match self.daemon.as_ref() {
+            Some(daemon) => {
+                if let Err(error) = daemon.daemon_update(action) {
+                    panel.busy = false;
+                    panel.error = Some(error);
+                }
+            }
+            None => {
+                panel.busy = false;
+                panel.error = Some("xd-dev is not connected to a daemon.".into());
+            }
+        }
+    }
+
+    fn install_self_update(&mut self, cx: &mut Context<Self>) {
+        if self
+            .self_update_panel
+            .as_ref()
+            .is_some_and(|panel| self_update_action(panel) == Some("install"))
+        {
+            self.request_self_update("install");
+            cx.notify();
+        }
+    }
+
+    fn restart_self_update(&mut self, cx: &mut Context<Self>) {
+        if self
+            .self_update_panel
+            .as_ref()
+            .is_some_and(|panel| self_update_action(panel) == Some("restart"))
+        {
+            self.request_self_update("restart");
+            cx.notify();
+        }
     }
 
     fn sync_active_auth_state(&mut self) {
@@ -11152,6 +11273,40 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .id("open-daemon-update")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_self_update(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Update xd-dev"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Check, install, and explicitly restart this daemon.",
+                                        )),
+                                )
+                                .child(div().text_color(rgb(MUTED)).child("›")),
+                        )
+                        .child(
+                            div()
                                 .id("open-paired-devices")
                                 .p_3()
                                 .flex()
@@ -11496,6 +11651,163 @@ impl Render for XdDesktop {
                                             "Add secret"
                                         }),
                                 ),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let self_update_overlay = self.self_update_panel.clone().map(|panel| {
+            let action = self_update_action(&panel);
+            let can_install = action == Some("install");
+            let can_restart = action == Some("restart");
+            let status_text = self_update_status_text(&panel);
+            let version_text = panel.status.as_ref().map(|status| {
+                let mut text = format!("Running {}", status.version);
+                if let Some(latest) = &status.latest {
+                    text.push_str(" · latest ");
+                    text.push_str(latest);
+                }
+                text
+            });
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(520.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .text_color(rgb(TEXT))
+                                        .child("Update xd-dev"),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-daemon-update")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_self_update(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .child(div().text_sm().text_color(rgb(TEXT)).child(status_text))
+                                .when_some(version_text, |card, version| {
+                                    card.child(
+                                        div().text_xs().text_color(rgb(MUTED)).child(version),
+                                    )
+                                })
+                                .when(can_restart, |card| {
+                                    card.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(
+                                                "Restarting drops every attached device and loses any running turn.",
+                                            ),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("dismiss-daemon-update")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_self_update(cx);
+                                        }))
+                                        .child("Close"),
+                                )
+                                .child(
+                                    div()
+                                        .id("install-daemon-update")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_install { accent } else { SURFACE_HIGH }))
+                                        .text_sm()
+                                        .text_color(rgb(if can_install { 0xffffff } else { MUTED }))
+                                        .when(can_install, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(accent_hover)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_install {
+                                                this.install_self_update(cx);
+                                            }
+                                        }))
+                                        .child(if panel.busy && !can_restart {
+                                            "Working…"
+                                        } else {
+                                            "Install"
+                                        }),
+                                )
+                                .when(can_restart, |actions| {
+                                    actions.child(
+                                        div()
+                                            .id("restart-daemon-update")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(accent))
+                                            .text_sm()
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(accent_hover)))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.restart_self_update(cx);
+                                            }))
+                                            .child("Restart"),
+                                    )
+                                }),
                         ),
                 )
                 .into_any_element()
@@ -12135,6 +12447,7 @@ impl Render for XdDesktop {
             .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
+            .when_some(self_update_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
             .when_some(message_image_overlay, |root, overlay| root.child(overlay))
@@ -12749,6 +13062,43 @@ fn folder_hidden_by_collapse(
     true
 }
 
+fn self_update_action(panel: &SelfUpdatePanel) -> Option<&'static str> {
+    let status = panel.status.as_ref()?;
+    if panel.busy || !status.supported {
+        return None;
+    }
+    if status.state == "installed" {
+        return Some("restart");
+    }
+    (status.available || status.state == "failed").then_some("install")
+}
+
+fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
+    if let Some(error) = &panel.error {
+        return error.clone();
+    }
+    let Some(status) = &panel.status else {
+        return "Checking for an update…".into();
+    };
+    if panel.busy && status.state == "checking" {
+        "Checking for an update…".into()
+    } else if !status.supported {
+        "This machine's installation cannot update itself. Update it the way it was installed."
+            .into()
+    } else {
+        match status.state.as_str() {
+            "installing" => "Installing. The daemon keeps running until restarted.".into(),
+            "installed" => "Installed. Restart to run the new build.".into(),
+            "failed" => status
+                .error
+                .clone()
+                .unwrap_or_else(|| "The update failed.".into()),
+            _ if status.available => "An update is available.".into(),
+            _ => "This machine is up to date.".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12804,6 +13154,34 @@ mod tests {
         assert_eq!(active_auth_provider("codex", false), "codex");
         assert_eq!(active_auth_provider("codex", true), "claude-mode");
         assert_eq!(active_auth_provider("claude", true), "claude");
+    }
+
+    #[test]
+    fn daemon_update_requires_an_explicit_safe_action() {
+        let mut panel = SelfUpdatePanel {
+            status: Some(SelfUpdateStatus {
+                version: "old".into(),
+                state: "idle".into(),
+                supported: true,
+                available: true,
+                latest: Some("new".into()),
+                error: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(self_update_action(&panel), Some("install"));
+        assert_eq!(self_update_status_text(&panel), "An update is available.");
+
+        panel.busy = true;
+        assert_eq!(self_update_action(&panel), None);
+        panel.busy = false;
+        panel.status.as_mut().unwrap().state = "installed".into();
+        assert_eq!(self_update_action(&panel), Some("restart"));
+        assert!(self_update_status_text(&panel).contains("Restart"));
+
+        panel.status.as_mut().unwrap().supported = false;
+        assert_eq!(self_update_action(&panel), None);
+        assert!(self_update_status_text(&panel).contains("cannot update itself"));
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub enum RequestKind {
     AgentAuth,
     AgentAuthMutation,
     AgentClis,
+    DaemonUpdate {
+        action: String,
+    },
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -377,6 +380,15 @@ impl DaemonHandle {
 
     pub fn agent_clis(&self) -> Result<(), String> {
         self.send(RequestKind::AgentClis, json!({"op": "agent-clis"}))
+    }
+
+    pub fn daemon_update(&self, action: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::DaemonUpdate {
+                action: action.to_owned(),
+            },
+            json!({"op": "daemon-update", "action": action}),
+        )
     }
 
     pub fn agent_auth_action(
