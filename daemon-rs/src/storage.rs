@@ -1550,36 +1550,7 @@ impl StateStore {
     pub fn repository_file(&self, request: &Value) -> Result<Value, StorageError> {
         let workdir = self.chat_repository(request, "repository-file needs a chat and path.")?;
         let relative = required_string(request, "path", "A repository file path is required.")?;
-        if relative.len() > 4_096 {
-            return Err(StorageError::InvalidRequest(
-                "The repository file path is too long.".into(),
-            ));
-        }
-        let relative_path = Path::new(relative);
-        if relative_path.is_absolute()
-            || relative_path
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(StorageError::InvalidRequest(
-                "A safe relative repository file path is required.".into(),
-            ));
-        }
-        let root = fs::canonicalize(&workdir).map_err(|source| StorageError::Filesystem {
-            context: "Cannot resolve the repository root".into(),
-            source,
-        })?;
-        let path = fs::canonicalize(root.join(relative_path)).map_err(|source| {
-            StorageError::Filesystem {
-                context: "Cannot resolve the repository file".into(),
-                source,
-            }
-        })?;
-        if !path.starts_with(&root) || !path.is_file() {
-            return Err(StorageError::InvalidRequest(
-                "The requested path is not a repository file.".into(),
-            ));
-        }
+        let path = safe_repository_file(&workdir, relative)?;
         let mut bytes = Vec::new();
         fs::File::open(&path)
             .and_then(|file| {
@@ -1606,6 +1577,97 @@ impl StateStore {
             "content": content,
             "truncated": truncated,
         }))
+    }
+
+    pub fn write_repository_file(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(
+            request,
+            "repository-file-write needs a chat, path, and content.",
+        )?;
+        let relative = required_string(request, "path", "A repository file path is required.")?;
+        let original = request
+            .get("original")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest(
+                    "The original repository file content is required.".into(),
+                )
+            })?;
+        let content = request
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("Repository file content must be text.".into())
+            })?;
+        if original.len() > MAX_FILE_PREVIEW_BYTES
+            || content.len() > MAX_FILE_PREVIEW_BYTES
+            || original.contains('\0')
+            || content.contains('\0')
+        {
+            return Err(StorageError::InvalidRequest(format!(
+                "Editable repository files are limited to {MAX_FILE_PREVIEW_BYTES} bytes of UTF-8 text."
+            )));
+        }
+        let path = safe_repository_file(&workdir, relative)?;
+        let mut current = Vec::new();
+        fs::File::open(&path)
+            .and_then(|file| {
+                file.take((MAX_FILE_PREVIEW_BYTES + 1) as u64)
+                    .read_to_end(&mut current)
+            })
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot read the repository file before saving".into(),
+                source,
+            })?;
+        if current != original.as_bytes() {
+            return Err(StorageError::InvalidRequest(
+                "The file changed outside xd. Refresh before saving.".into(),
+            ));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            StorageError::InvalidRequest("The repository file has no parent directory.".into())
+        })?;
+        let temporary = parent.join(format!(".xd-save-{}", Uuid::new_v4()));
+        let result = (|| -> Result<(), StorageError> {
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot create a temporary repository file".into(),
+                    source,
+                })?;
+            output
+                .write_all(content.as_bytes())
+                .and_then(|()| output.sync_all())
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot write the repository file".into(),
+                    source,
+                })?;
+            let permissions = fs::metadata(&path)
+                .map_err(|source| StorageError::Filesystem {
+                    context: "Cannot inspect repository file permissions".into(),
+                    source,
+                })?
+                .permissions();
+            fs::set_permissions(&temporary, permissions).map_err(|source| {
+                StorageError::Filesystem {
+                    context: "Cannot preserve repository file permissions".into(),
+                    source,
+                }
+            })?;
+            fs::rename(&temporary, &path).map_err(|source| StorageError::Filesystem {
+                context: "Cannot replace the repository file".into(),
+                source,
+            })?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        Ok(json!({"ok": true, "path": relative, "content": content}))
     }
 
     pub fn git_commit(&self, request: &Value) -> Result<Value, StorageError> {
@@ -3665,6 +3727,39 @@ fn normalize_existing_path(path: &Path) -> String {
         .into_owned()
 }
 
+fn safe_repository_file(workdir: &Path, relative: &str) -> Result<PathBuf, StorageError> {
+    if relative.len() > 4_096 {
+        return Err(StorageError::InvalidRequest(
+            "The repository file path is too long.".into(),
+        ));
+    }
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(StorageError::InvalidRequest(
+            "A safe relative repository file path is required.".into(),
+        ));
+    }
+    let root = fs::canonicalize(workdir).map_err(|source| StorageError::Filesystem {
+        context: "Cannot resolve the repository root".into(),
+        source,
+    })?;
+    let path =
+        fs::canonicalize(root.join(relative_path)).map_err(|source| StorageError::Filesystem {
+            context: "Cannot resolve the repository file".into(),
+            source,
+        })?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err(StorageError::InvalidRequest(
+            "The requested path is not a repository file.".into(),
+        ));
+    }
+    Ok(path)
+}
+
 fn prepare_turn(
     transaction: &rusqlite::Transaction<'_>,
     workspace_root: &Path,
@@ -4090,6 +4185,33 @@ mod tests {
                 .repository_file(&json!({"chat": chat, "path": "untracked.txt"}))
                 .unwrap()["content"],
             "new\n"
+        );
+        assert_eq!(
+            store
+                .write_repository_file(&json!({
+                    "chat": chat,
+                    "path": "untracked.txt",
+                    "original": "new\n",
+                    "content": "saved\n"
+                }))
+                .unwrap()["content"],
+            "saved\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repository.join("untracked.txt")).unwrap(),
+            "saved\n"
+        );
+        assert!(
+            store
+                .write_repository_file(&json!({
+                    "chat": chat,
+                    "path": "untracked.txt",
+                    "original": "new\n",
+                    "content": "overwrite\n"
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("changed outside xd")
         );
         assert!(
             store

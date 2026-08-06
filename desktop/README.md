@@ -16,7 +16,7 @@ Current milestone:
 - persisted active-chat restoration with deletion-safe fallback;
 - persisted workspace expansion state with stale-folder cleanup;
 - workspace and chat creation controls;
-- first-message generated/existing-worktree selection and Rust-owned checkout creation;
+- first-message generated/existing-worktree selection, configured-writer AI naming, and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - bounded queued-message previews with send-now and remove controls;
 - global/workspace prompt shortcuts with send-or-queue buttons and inline management;
@@ -32,6 +32,7 @@ Current milestone:
 - opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
 - shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - simultaneously visible repository and terminal panes with draggable, persisted dividers;
+- conflict-guarded UTF-8 repository file editing with atomic daemon-owned saves;
 - shared expandable activity cards for tools, subagents, and workflow runs;
 - bounded Markdown rendering with language-aware fenced-code highlighting;
 - variable-height virtualized transcript list;

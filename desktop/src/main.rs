@@ -30,12 +30,20 @@ use xd_desktop::{
     model::{AppModel, Attachment, Folder, Message},
 };
 
+mod editor;
 mod input;
 mod settings;
 mod speech;
 mod terminal;
 mod voice_input;
 
+use editor::{
+    Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
+    Down as EditorDown, EditorEvent, End as EditorEnd, FileEditor, Home as EditorHome,
+    Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
+    SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft, SelectRight as EditorSelectRight,
+    Tab as EditorTab, Up as EditorUp,
+};
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
     Left, Paste, Right, SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit, Tab, Up,
@@ -141,7 +149,9 @@ struct DiffFile {
 struct FilePreview {
     path: String,
     content: String,
+    original: String,
     truncated: bool,
+    saving: bool,
 }
 
 #[derive(Clone, Default)]
@@ -400,6 +410,7 @@ struct XdDesktop {
     search_input: Entity<ComposerInput>,
     git_commit_input: Entity<ComposerInput>,
     repo_file_filter_input: Entity<ComposerInput>,
+    file_editor: Entity<FileEditor>,
     terminal_input: Entity<ComposerInput>,
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
@@ -550,6 +561,21 @@ impl XdDesktop {
             }
         })
         .detach();
+        let file_editor = cx.new(FileEditor::new);
+        cx.subscribe(&file_editor, |this, _, event, cx| match event {
+            EditorEvent::Changed(text) => {
+                if let Some(preview) = this
+                    .diff_panel
+                    .as_mut()
+                    .and_then(|panel| panel.file_preview.as_mut())
+                    && !preview.truncated
+                {
+                    preview.content = text.clone();
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
         let terminal_input = cx.new(ComposerInput::terminal);
         cx.subscribe(&terminal_input, |this, _, event, cx| {
             if let ComposerEvent::Bytes(bytes) = event {
@@ -638,6 +664,7 @@ impl XdDesktop {
             search_input,
             git_commit_input,
             repo_file_filter_input,
+            file_editor,
             terminal_input,
             auth_input,
             secret_name_input,
@@ -796,6 +823,7 @@ impl XdDesktop {
                     | RequestKind::GitPullRequestCreate { .. }
                     | RequestKind::RepositoryFiles { .. }
                     | RequestKind::RepositoryFile { .. }
+                    | RequestKind::RepositoryFileWrite { .. }
                     | RequestKind::GitCommit { .. }
                     | RequestKind::GitPush { .. }
                     | RequestKind::TerminalOpen { .. }
@@ -926,6 +954,20 @@ impl XdDesktop {
                             .get("error")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                    }
+                }
+                RequestKind::RepositoryFileWrite { generation, .. }
+                    if *generation == self.diff_generation =>
+                {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.file_loading = false;
+                        diff.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(preview) = &mut diff.file_preview {
+                            preview.saving = false;
+                        }
                     }
                 }
                 RequestKind::GitCommit { generation, .. }
@@ -1425,17 +1467,48 @@ impl XdDesktop {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
+                    let content = content.unwrap_or_default().to_owned();
                     diff.file_preview = Some(FilePreview {
                         path,
-                        content: content.unwrap_or_default().to_owned(),
+                        original: content.clone(),
+                        content: content.clone(),
                         truncated: value
                             .get("truncated")
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
+                        saving: false,
                     });
                     diff.file_loading = false;
                     diff.error = None;
+                    self.file_editor
+                        .update(cx, |editor, cx| editor.set_text(content, cx));
                 }
+            }
+            RequestKind::RepositoryFileWrite {
+                chat_id,
+                path,
+                content,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                if let Some(preview) = self
+                    .diff_panel
+                    .as_mut()
+                    .and_then(|panel| panel.file_preview.as_mut())
+                    && preview.path == path
+                    && preview.content == content
+                {
+                    preview.original = content;
+                    preview.saving = false;
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.error = None;
+                    }
+                }
+                self.refresh_git_status();
             }
             RequestKind::GitCommit {
                 chat_id,
@@ -3317,12 +3390,133 @@ impl XdDesktop {
     }
 
     fn close_file_preview(&mut self, cx: &mut Context<Self>) {
+        if self
+            .diff_panel
+            .as_ref()
+            .and_then(|panel| panel.file_preview.as_ref())
+            .is_some_and(|preview| preview.content != preview.original)
+        {
+            if let Some(diff) = &mut self.diff_panel {
+                diff.error = Some("Save or discard the file changes before closing it.".into());
+            }
+            cx.notify();
+            return;
+        }
         if let Some(diff) = &mut self.diff_panel {
             diff.file_preview = None;
             diff.file_loading = false;
             diff.error = None;
         }
         cx.notify();
+    }
+
+    fn save_repository_file(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some((path, original, content)) = self.diff_panel.as_ref().and_then(|panel| {
+            panel.file_preview.as_ref().and_then(|preview| {
+                (!preview.truncated && !preview.saving && preview.content != preview.original).then(
+                    || {
+                        (
+                            preview.path.clone(),
+                            preview.original.clone(),
+                            preview.content.clone(),
+                        )
+                    },
+                )
+            })
+        }) else {
+            return;
+        };
+        if let Some(preview) = self
+            .diff_panel
+            .as_mut()
+            .and_then(|panel| panel.file_preview.as_mut())
+        {
+            preview.saving = true;
+        }
+        let generation = self.diff_generation;
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| {
+                daemon.write_repository_file(&chat_id, &path, &original, &content, generation)
+            });
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.error = Some(error);
+            if let Some(preview) = &mut diff.file_preview {
+                preview.saving = false;
+            }
+        }
+        cx.notify();
+    }
+
+    fn discard_repository_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(original) = self
+            .diff_panel
+            .as_mut()
+            .and_then(|panel| panel.file_preview.as_mut())
+            .map(|preview| {
+                preview.content = preview.original.clone();
+                preview.saving = false;
+                preview.original.clone()
+            })
+        else {
+            return;
+        };
+        if let Some(diff) = &mut self.diff_panel {
+            diff.error = None;
+        }
+        self.file_editor
+            .update(cx, |editor, cx| editor.set_text(original, cx));
+        cx.notify();
+    }
+
+    fn refresh_repository_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .diff_panel
+            .as_ref()
+            .and_then(|panel| panel.file_preview.as_ref())
+            .map(|preview| {
+                if preview.content == preview.original {
+                    Ok(preview.path.clone())
+                } else {
+                    Err(())
+                }
+            })
+        else {
+            return;
+        };
+        match path {
+            Ok(path) => self.read_repository_file(path, cx),
+            Err(()) => {
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.error = Some("Discard local file changes before refreshing.".into());
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn refresh_git_status(&mut self) {
+        let (Some(chat_id), Some(daemon)) =
+            (self.model.selected_chat.as_ref(), self.daemon.as_ref())
+        else {
+            return;
+        };
+        if let Some(diff) = &mut self.diff_panel {
+            diff.status_loading = true;
+        }
+        if let Err(error) = daemon.git_status(chat_id, self.diff_generation)
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.status_loading = false;
+            diff.action_error = Some(error);
+        }
     }
 
     fn git_commit_changed(&mut self, text: String, cx: &mut Context<Self>) {
@@ -7494,6 +7688,7 @@ impl Render for XdDesktop {
         let git_commit_focus = self.git_commit_input.read(cx).focus_handle(cx);
         let repo_file_filter_input = self.repo_file_filter_input.clone();
         let repo_file_filter_focus = self.repo_file_filter_input.read(cx).focus_handle(cx);
+        let file_editor = self.file_editor.clone();
         let desktop_entity = cx.entity();
         let diff_pane = self.diff_panel.as_ref().map(|diff| {
             let branch_mode = diff.branch;
@@ -7674,6 +7869,8 @@ impl Render for XdDesktop {
             });
             let pane_content = if files_mode {
                 if let Some(preview) = diff.file_preview.clone() {
+                    let modified = preview.content != preview.original;
+                    let saving = preview.saving;
                     let language = preview
                         .path
                         .rsplit_once('.')
@@ -7721,6 +7918,61 @@ impl Render for XdDesktop {
                                         .text_xs()
                                         .text_color(rgb(TEXT))
                                         .child(preview.path),
+                                )
+                                .child(
+                                    div()
+                                        .id("refresh-repository-file")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.refresh_repository_file(cx);
+                                        }))
+                                        .child("Refresh"),
+                                )
+                                .when(modified, |header| {
+                                    header.child(
+                                        div()
+                                            .id("discard-repository-file")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.discard_repository_changes(cx);
+                                            }))
+                                            .child("Discard"),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id("save-repository-file")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(if modified && !saving {
+                                            accent
+                                        } else {
+                                            SURFACE_HIGH
+                                        }))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(if modified && !saving {
+                                            0xffffff
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.save_repository_file(cx);
+                                        }))
+                                        .child(if saving { "Saving…" } else { "Save" }),
                                 ),
                         )
                         .when(preview.truncated, |body| {
@@ -7734,15 +7986,26 @@ impl Render for XdDesktop {
                                     .child("Large file preview truncated for responsive rendering."),
                             )
                         })
-                        .child(
+                        .child(if preview.truncated {
                             div()
                                 .id("repository-file-preview")
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_y_scroll()
                                 .p_3()
-                                .child(Self::markdown_content(document)),
-                        )
+                                .child(Self::markdown_content(document))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id("repository-file-editor")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_scroll()
+                                .p_3()
+                                .bg(rgb(0x0d0e11))
+                                .child(file_editor.clone())
+                                .into_any_element()
+                        })
                         .into_any_element()
                 } else {
                     let filter = self.repo_file_filter.trim().to_ascii_lowercase();
@@ -10263,6 +10526,26 @@ fn main() {
                 ShowCharacterPalette,
                 Some("ComposerInput"),
             ),
+            KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
+            KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
+            KeyBinding::new("left", EditorLeft, Some("FileEditor")),
+            KeyBinding::new("right", EditorRight, Some("FileEditor")),
+            KeyBinding::new("up", EditorUp, Some("FileEditor")),
+            KeyBinding::new("down", EditorDown, Some("FileEditor")),
+            KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
+            KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
+            KeyBinding::new("home", EditorHome, Some("FileEditor")),
+            KeyBinding::new("end", EditorEnd, Some("FileEditor")),
+            KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
+            KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
+            KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
+            KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
+            KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
+            KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
+            KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
+            KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
+            KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
+            KeyBinding::new("tab", EditorTab, Some("FileEditor")),
             KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
             KeyBinding::new("delete", Delete, Some("TerminalInput")),
             KeyBinding::new("left", Left, Some("TerminalInput")),

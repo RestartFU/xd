@@ -170,6 +170,9 @@ impl Engine {
                 .unwrap_or_else(error_reply),
             Some("repository-files") => self.read(|store| store.repository_files(&request)),
             Some("repository-file") => self.read(|store| store.repository_file(&request)),
+            Some("repository-file-write") => {
+                self.read(|store| store.write_repository_file(&request))
+            }
             Some("git-commit") => self.read(|store| store.git_commit(&request)),
             Some("git-push") => self.read(|store| store.git_push(&request)),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),

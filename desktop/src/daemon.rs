@@ -73,6 +73,12 @@ pub enum RequestKind {
         path: String,
         generation: u64,
     },
+    RepositoryFileWrite {
+        chat_id: String,
+        path: String,
+        content: String,
+        generation: u64,
+    },
     GitCommit {
         chat_id: String,
         message: String,
@@ -755,6 +761,31 @@ impl DaemonHandle {
         )
     }
 
+    pub fn write_repository_file(
+        &self,
+        chat_id: &str,
+        path: &str,
+        original: &str,
+        content: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::RepositoryFileWrite {
+                chat_id: chat_id.to_owned(),
+                path: path.to_owned(),
+                content: content.to_owned(),
+                generation,
+            },
+            json!({
+                "op": "repository-file-write",
+                "chat": chat_id,
+                "path": path,
+                "original": original,
+                "content": content,
+            }),
+        )
+    }
+
     pub fn git_commit(&self, chat_id: &str, message: &str, generation: u64) -> Result<(), String> {
         self.send(
             RequestKind::GitCommit {
@@ -1380,6 +1411,54 @@ mod tests {
                 kind: RequestKind::Send { chat_id, text },
                 ..
             } if chat_id == "chat-1" && text == "fix the queue"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sends_conflict_guarded_repository_file_writes() {
+        let directory = env::temp_dir().join(format!("xd-dev-file-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "repository-file-write");
+            assert_eq!(request["chat"], "chat-1");
+            assert_eq!(request["path"], "src/main.rs");
+            assert_eq!(request["original"], "before\n");
+            assert_eq!(request["content"], "after\n");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .write_repository_file("chat-1", "src/main.rs", "before\n", "after\n", 12)
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::RepositoryFileWrite {
+                    chat_id,
+                    path,
+                    content,
+                    generation: 12,
+                },
+                ..
+            } if chat_id == "chat-1" && path == "src/main.rs" && content == "after\n"
         ));
 
         server.join().unwrap();
