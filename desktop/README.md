@@ -45,7 +45,7 @@ Current milestone:
 - bounded full-duplex protocol framing and request-id matching;
 - off-thread daemon startup with bounded automatic reconnection and manual retry;
 - mobile-compatible, explicit install/restart self-update for bundled xd-dev daemons;
-- transport-neutral remote pairing/authentication with compatible token storage and revocation;
+- transport-neutral remote pairing/authentication, private remote-session IPC, and revocation;
 - daemon snapshot/event state reducers with unit tests.
 
 Build and test this crate through the repository Dockerfile:

@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     os::unix::{
-        fs::FileTypeExt,
+        fs::{FileTypeExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -48,6 +48,7 @@ use voice::VoiceService;
 use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
+pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
 
 #[derive(Debug, Error)]
@@ -78,6 +79,8 @@ pub enum ServerError {
 pub struct LocalServer {
     listener: UnixListener,
     socket_path: PathBuf,
+    remote_listener: UnixListener,
+    remote_socket_path: PathBuf,
     engine: Arc<Engine>,
 }
 
@@ -94,7 +97,16 @@ pub struct Engine {
     git_drafts: GitDraftService,
     self_update: SelfUpdate,
     pairing: PairingService,
+    peer_listener: Mutex<Option<PeerListener>>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
+type PeerListener = Arc<dyn Fn(&str, u16) -> Result<PeerEndpoint, String> + Send + Sync>;
 
 #[derive(Default)]
 pub(crate) struct EventBus {
@@ -125,6 +137,7 @@ impl Engine {
             git_drafts: GitDraftService::new(None, events.clone()),
             self_update,
             pairing: PairingService::default(),
+            peer_listener: Mutex::new(None),
             events,
             runtime: None,
         }
@@ -158,6 +171,7 @@ impl Engine {
             git_drafts,
             self_update,
             pairing: PairingService::default(),
+            peer_listener: Mutex::new(None),
             events,
         };
         engine.auth.refresh_all();
@@ -185,9 +199,7 @@ impl Engine {
             Some("ping") => json!({"ok": true}),
             Some("pair") => self.pair(owner, &request),
             Some("hello") => self.hello(owner, &request),
-            Some("peer-pairing") if !self.pairing.is_local(owner) => {
-                error_reply("Pairing codes can only be created on the daemon machine.")
-            }
+            Some("peer-pairing") => self.peer_pairing(owner, &request),
             Some("tree") => self.read(|store| store.tree()),
             Some("devices") => self.devices(),
             Some("rename-device") => self.read(|store| store.rename_device(&request)),
@@ -341,6 +353,57 @@ impl Engine {
 
     pub fn arm_pairing(&self, ttl: std::time::Duration) -> String {
         self.pairing.arm(ttl)
+    }
+
+    pub fn set_peer_listener(
+        &self,
+        listener: impl Fn(&str, u16) -> Result<PeerEndpoint, String> + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        *self
+            .peer_listener
+            .lock()
+            .map_err(|_| "daemon peer-listener state is unavailable".to_owned())? =
+            Some(Arc::new(listener));
+        Ok(())
+    }
+
+    fn peer_pairing(&self, owner: u64, request: &Value) -> Value {
+        if !self.pairing.is_local(owner) {
+            return error_reply("Pairing codes can only be created on the daemon machine.");
+        }
+        let bind = request.get("bind").and_then(Value::as_str).unwrap_or("::");
+        if bind.is_empty() {
+            return error_reply("Pairing bind address cannot be empty.");
+        }
+        let port = match request.get("port") {
+            None => 4001,
+            Some(Value::Number(port)) => {
+                match port.as_u64().and_then(|port| u16::try_from(port).ok()) {
+                    Some(port) => port,
+                    None => return error_reply("Port must be from 0 to 65535."),
+                }
+            }
+            Some(_) => return error_reply("Port must be from 0 to 65535."),
+        };
+        let listener = match self.peer_listener.lock() {
+            Ok(listener) => listener.clone(),
+            Err(_) => return error_reply("Daemon peer-listener state is unavailable."),
+        };
+        let Some(listener) = listener else {
+            return error_reply("This daemon cannot accept remote devices.");
+        };
+        let endpoint = match listener(bind, port) {
+            Ok(endpoint) => endpoint,
+            Err(error) => return error_reply(format!("Cannot accept remote devices: {error}")),
+        };
+        let code = self.arm_pairing(std::time::Duration::from_secs(5 * 60));
+        json!({
+            "ok": true,
+            "code": code,
+            "host": endpoint.host,
+            "port": endpoint.port,
+            "expires_in": 300,
+        })
     }
 
     fn pair(&self, owner: u64, request: &Value) -> Value {
@@ -697,10 +760,6 @@ impl Engine {
         }
     }
 
-    fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
-        self.subscribe_transport(sender, connection, Transport::Local)
-    }
-
     fn subscribe_transport(
         &self,
         sender: SyncSender<Value>,
@@ -814,6 +873,75 @@ impl EventBus {
     }
 }
 
+fn remote_socket_path(local: &Path) -> PathBuf {
+    let mut path = local.as_os_str().to_os_string();
+    path.push(".remote");
+    PathBuf::from(path)
+}
+
+fn bind_daemon_socket(path: &Path) -> Result<UnixListener, ServerError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ServerError::CreateDirectory {
+            path: parent.to_owned(),
+            source,
+        })?;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            if UnixStream::connect(path).is_ok() {
+                return Err(ServerError::AlreadyRunning(path.to_owned()));
+            }
+            fs::remove_file(path).map_err(|source| ServerError::RemoveSocket {
+                path: path.to_owned(),
+                source,
+            })?;
+        }
+        Ok(_) => return Err(ServerError::UnsafeSocketPath(path.to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(ServerError::Bind {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    }
+    let listener = UnixListener::bind(path).map_err(|source| ServerError::Bind {
+        path: path.to_owned(),
+        source,
+    })?;
+    if let Err(source) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = fs::remove_file(path);
+        return Err(ServerError::Bind {
+            path: path.to_owned(),
+            source,
+        });
+    }
+    Ok(listener)
+}
+
+fn accept_connections(listener: UnixListener, engine: Arc<Engine>, transport: Transport) {
+    for connection in listener.incoming() {
+        let Ok(stream) = connection else {
+            break;
+        };
+        let engine = engine.clone();
+        let name = match transport {
+            Transport::Local => "xd-rust-local-client",
+            Transport::Remote => "xd-rust-remote-client",
+        };
+        if thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let _ = serve_connection_with_engine(stream, engine, transport);
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 impl LocalServer {
     pub fn bind(socket_path: impl Into<PathBuf>) -> Result<Self, ServerError> {
         Self::bind_with_engine(socket_path, Engine::transport_only())
@@ -824,50 +952,41 @@ impl LocalServer {
         engine: Engine,
     ) -> Result<Self, ServerError> {
         let socket_path = socket_path.into();
-        if let Some(parent) = socket_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ServerError::CreateDirectory {
-                path: parent.to_owned(),
-                source,
-            })?;
-        }
-        match fs::symlink_metadata(&socket_path) {
-            Ok(metadata) if metadata.file_type().is_socket() => {
-                if UnixStream::connect(&socket_path).is_ok() {
-                    return Err(ServerError::AlreadyRunning(socket_path));
-                }
-                fs::remove_file(&socket_path).map_err(|source| ServerError::RemoveSocket {
-                    path: socket_path.clone(),
-                    source,
-                })?;
+        let listener = bind_daemon_socket(&socket_path)?;
+        let remote_socket_path = remote_socket_path(&socket_path);
+        let remote_listener = match bind_daemon_socket(&remote_socket_path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = fs::remove_file(&socket_path);
+                return Err(error);
             }
-            Ok(_) => return Err(ServerError::UnsafeSocketPath(socket_path)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ServerError::Bind {
-                    path: socket_path,
-                    source,
-                });
-            }
-        }
-        let listener = UnixListener::bind(&socket_path).map_err(|source| ServerError::Bind {
-            path: socket_path.clone(),
-            source,
-        })?;
+        };
         Ok(Self {
             listener,
             socket_path,
+            remote_listener,
+            remote_socket_path,
             engine: Arc::new(engine),
         })
     }
 
     pub fn run(self) -> Result<(), ServerError> {
+        let remote_listener = self
+            .remote_listener
+            .try_clone()
+            .map_err(ServerError::Accept)?;
+        let remote_engine = self.engine.clone();
+        thread::Builder::new()
+            .name("xd-rust-remote-ipc".into())
+            .spawn(move || accept_connections(remote_listener, remote_engine, Transport::Remote))
+            .map_err(ServerError::Accept)?;
         for connection in self.listener.incoming() {
             let stream = connection.map_err(ServerError::Accept)?;
             let engine = self.engine.clone();
             thread::Builder::new()
                 .name("xd-rust-local-client".into())
                 .spawn(move || {
-                    let _ = serve_connection_with_engine(stream, engine);
+                    let _ = serve_connection_with_engine(stream, engine, Transport::Local);
                 })
                 .map_err(ServerError::Accept)?;
         }
@@ -877,24 +996,33 @@ impl LocalServer {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    pub fn remote_socket_path(&self) -> &Path {
+        &self.remote_socket_path
+    }
 }
 
 impl Drop for LocalServer {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket_path);
+        let _ = fs::remove_file(&self.remote_socket_path);
     }
 }
 
 pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
-    serve_connection_with_engine(stream, Arc::new(Engine::transport_only()))
+    serve_connection_with_engine(stream, Arc::new(Engine::transport_only()), Transport::Local)
 }
 
-fn serve_connection_with_engine(stream: UnixStream, engine: Arc<Engine>) -> std::io::Result<()> {
+fn serve_connection_with_engine(
+    stream: UnixStream,
+    engine: Arc<Engine>,
+    transport: Transport,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let writer_stream = stream.try_clone()?;
     let (outbound, frames) = sync_channel(256);
     let subscriber = engine
-        .subscribe(outbound.clone(), stream.try_clone()?)
+        .subscribe_transport(outbound.clone(), stream.try_clone()?, transport)
         .map_err(std::io::Error::other)?;
     let writer = thread::Builder::new()
         .name("xd-rust-local-writer".into())
@@ -915,15 +1043,20 @@ fn read_requests(
     outbound: &SyncSender<Value>,
 ) -> std::io::Result<()> {
     loop {
+        let frame_limit = if engine.pairing.authenticated(subscriber) {
+            FRAME_LIMIT
+        } else {
+            AUTH_FRAME_LIMIT
+        };
         let mut line = Vec::new();
         let count = reader
             .by_ref()
-            .take((FRAME_LIMIT + 1) as u64)
+            .take((frame_limit + 1) as u64)
             .read_until(b'\n', &mut line)?;
         if count == 0 {
             return Ok(());
         }
-        if line.len() > FRAME_LIMIT {
+        if line.len() > frame_limit {
             return Ok(());
         }
         if line.last() == Some(&b'\n') {
@@ -1167,6 +1300,62 @@ mod tests {
     }
 
     #[test]
+    fn unauthenticated_remote_frames_use_the_small_authentication_limit() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let engine = Arc::new(Engine::transport_only());
+        let worker = thread::spawn(move || {
+            serve_connection_with_engine(server, engine, Transport::Remote).unwrap()
+        });
+        let mut frame = vec![b'x'; AUTH_FRAME_LIMIT + 1];
+        frame.push(b'\n');
+        client.write_all(&frame).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(BufReader::new(client).lines().count(), 0);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn local_pairing_requests_start_only_the_configured_remote_listener() {
+        let engine = Engine::transport_only();
+        engine
+            .set_peer_listener(|bind, port| {
+                assert_eq!(bind, "127.0.0.1");
+                assert_eq!(port, 0);
+                Ok(PeerEndpoint {
+                    host: "192.168.1.10".into(),
+                    port: 43125,
+                })
+            })
+            .unwrap();
+        let reply = engine.dispatch(json!({
+            "op": "peer-pairing",
+            "bind": "127.0.0.1",
+            "port": 0,
+        }));
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["host"], "192.168.1.10");
+        assert_eq!(reply["port"], 43125);
+        assert_eq!(reply["expires_in"], 300);
+        assert_eq!(reply["code"].as_str().unwrap().len(), 9);
+
+        let (sender, _receiver) = sync_channel(1);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let remote = engine
+            .subscribe_transport(sender, connection, Transport::Remote)
+            .unwrap();
+        engine
+            .pairing
+            .authenticate(remote, "device".into())
+            .unwrap();
+        assert_eq!(
+            engine.dispatch_for(remote, json!({"op": "peer-pairing"}))["error"],
+            "Pairing codes can only be created on the daemon machine."
+        );
+        engine.unsubscribe(remote);
+        drop(peer);
+    }
+
+    #[test]
     fn voice_operations_require_a_chat_before_starting_work() {
         let reply = dispatch(json!({
             "op": "voice-model",
@@ -1225,8 +1414,19 @@ mod tests {
         let server = LocalServer::bind(&path).unwrap();
         assert_eq!(server.socket_path(), path);
         assert!(path.exists());
+        let remote = server.remote_socket_path().to_owned();
+        assert!(remote.exists());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&remote).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         drop(server);
         assert!(!path.exists());
+        assert!(!remote.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

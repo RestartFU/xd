@@ -100,6 +100,20 @@ impl PairingService {
                 .unwrap_or(false)
     }
 
+    pub(crate) fn authenticated(&self, owner: u64) -> bool {
+        owner == 0
+            || self
+                .connections
+                .lock()
+                .ok()
+                .and_then(|connections| {
+                    connections
+                        .get(&owner)
+                        .map(|connection| connection.authenticated.load(Ordering::Acquire))
+                })
+                .unwrap_or(false)
+    }
+
     pub(crate) fn authenticate(&self, owner: u64, device_id: String) -> Result<(), String> {
         let connections = self
             .connections
