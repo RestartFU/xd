@@ -314,7 +314,7 @@ boundary, not an event cursor.
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
 | `voice-model` | `chat` | `available: boolean` — whether *this daemon* has the speech model on disk |
 | `search` | `query` | matching stored messages |
-| `diff-read` | `chat` plus one `read` of `base`, `working-status`, or `branch-status` (with `base`) | `output: string`, limited to 8 MiB |
+| `diff-read` | `chat` plus one `read` of `base`, `working-status`, `branch-status` (with `base`), `working-all`, `branch-all` (with `base`), `working-file`/`untracked-file` (with a safe relative `path`), or `branch-file` (with `base` and `path`) | `output: string`, limited to 8 MiB |
 | `ping` | none | no members beyond `ok` |
 
 `file-browse` paths are relative to the chat workdir and may not escape it.

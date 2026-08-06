@@ -1600,13 +1600,16 @@ impl StateStore {
             resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
         };
         let workdir = Path::new(&workdir);
-        git_repository_root(workdir.to_string_lossy().as_ref())?;
+        let root = git_repository_root(workdir.to_string_lossy().as_ref())?;
         let output = match kind {
             "base" => find_git_base(workdir)?,
-            "working-all" => working_tree_diff(workdir)?,
-            "branch-all" => {
-                let base = required_string(request, "base", "A valid base branch is required.")?;
-                validate_git_base(base)?;
+            "working-status" => checked_git(
+                workdir,
+                &["status", "--porcelain", "--untracked-files=all"],
+                &[],
+            )?,
+            "branch-status" => {
+                let range = diff_range(request)?;
                 checked_git(
                     workdir,
                     &[
@@ -1614,7 +1617,55 @@ impl StateStore {
                         "diff",
                         "--no-ext-diff",
                         "--no-color",
-                        &format!("{base}...HEAD"),
+                        "--name-status",
+                        &range,
+                    ],
+                    &[],
+                )?
+            }
+            "working-all" => working_tree_diff(workdir)?,
+            "branch-all" => {
+                let range = diff_range(request)?;
+                checked_git(
+                    workdir,
+                    &["--no-pager", "diff", "--no-ext-diff", "--no-color", &range],
+                    &[],
+                )?
+            }
+            "working-file" => {
+                let path = diff_path(request, workdir, &root)?;
+                let baseline = working_tree_baseline(workdir)?;
+                checked_git(
+                    workdir,
+                    &[
+                        "--no-pager",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-color",
+                        baseline,
+                        "--",
+                        path,
+                    ],
+                    &[],
+                )?
+            }
+            "untracked-file" => {
+                let path = diff_path(request, workdir, &root)?;
+                untracked_file_diff(workdir, path)?
+            }
+            "branch-file" => {
+                let path = diff_path(request, workdir, &root)?;
+                let range = diff_range(request)?;
+                checked_git(
+                    workdir,
+                    &[
+                        "--no-pager",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-color",
+                        &range,
+                        "--",
+                        path,
                     ],
                     &[],
                 )?
@@ -3947,15 +3998,100 @@ fn validate_git_base(base: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn working_tree_diff(workdir: &Path) -> Result<Vec<u8>, StorageError> {
-    let baseline = if run_git(workdir, &["rev-parse", "--verify", "--quiet", "HEAD"])?
+fn diff_range(request: &Value) -> Result<String, StorageError> {
+    let base = required_string(request, "base", "A valid base branch is required.")?;
+    validate_git_base(base)?;
+    Ok(format!("{base}...HEAD"))
+}
+
+fn diff_path<'a>(request: &'a Value, workdir: &Path, root: &Path) -> Result<&'a str, StorageError> {
+    let path = required_string(request, "path", "A safe repository diff path is required.")?;
+    validate_diff_path(workdir, root, path)?;
+    Ok(path)
+}
+
+fn validate_diff_path(workdir: &Path, root: &Path, relative: &str) -> Result<(), StorageError> {
+    if relative.is_empty() || relative.len() > 4_096 || relative.contains('\0') {
+        return Err(StorageError::InvalidRequest(
+            "A safe repository diff path is required.".into(),
+        ));
+    }
+    let relative = Path::new(relative);
+    if relative.is_absolute() {
+        return Err(StorageError::InvalidRequest(
+            "That diff path is outside the repository.".into(),
+        ));
+    }
+    let root = fs::canonicalize(root).map_err(|source| StorageError::Filesystem {
+        context: "Cannot resolve the repository root".into(),
+        source,
+    })?;
+    let mut candidate = fs::canonicalize(workdir).map_err(|source| StorageError::Filesystem {
+        context: "Cannot resolve the repository working directory".into(),
+        source,
+    })?;
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => candidate.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                candidate.pop();
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(StorageError::InvalidRequest(
+                    "That diff path is outside the repository.".into(),
+                ));
+            }
+        }
+    }
+    if candidate == root || candidate.starts_with(&root) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidRequest(
+            "That diff path is outside the repository.".into(),
+        ))
+    }
+}
+
+fn working_tree_baseline(workdir: &Path) -> Result<&'static str, StorageError> {
+    if run_git(workdir, &["rev-parse", "--verify", "--quiet", "HEAD"])?
         .0
         .success()
     {
-        "HEAD"
+        Ok("HEAD")
     } else {
-        EMPTY_GIT_TREE
-    };
+        Ok(EMPTY_GIT_TREE)
+    }
+}
+
+fn untracked_file_diff(workdir: &Path, path: &str) -> Result<Vec<u8>, StorageError> {
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let (status, stdout, stderr) = run_git(
+        workdir,
+        &[
+            "--no-pager",
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--no-index",
+            "--",
+            null_device,
+            path,
+        ],
+    )?;
+    if status.success() || status.code() == Some(1) {
+        Ok(stdout)
+    } else {
+        Err(command_failure(
+            &stdout,
+            &stderr,
+            "Git could not read that untracked file.",
+        ))
+    }
+}
+
+fn working_tree_diff(workdir: &Path) -> Result<Vec<u8>, StorageError> {
+    let baseline = working_tree_baseline(workdir)?;
     let index = checked_git(workdir, &["rev-parse", "--git-path", "index"], &[])?;
     let index = String::from_utf8(index)
         .map_err(|_| StorageError::InvalidRequest("Git returned invalid index path.".into()))?;
@@ -4953,6 +5089,50 @@ mod tests {
             .to_owned();
         assert!(working.contains("tracked.txt"));
         assert!(working.contains("untracked.txt"));
+        let working_status = store
+            .diff_read(&json!({"chat": chat, "read": "working-status"}))
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(working_status.contains("tracked.txt"));
+        assert!(working_status.contains("?? untracked.txt"));
+        let tracked = store
+            .diff_read(&json!({
+                "chat": chat,
+                "read": "working-file",
+                "path": "tracked.txt",
+            }))
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(tracked.contains("tracked.txt"));
+        assert!(tracked.contains("+after"));
+        assert!(!tracked.contains("untracked.txt"));
+        let untracked = store
+            .diff_read(&json!({
+                "chat": chat,
+                "read": "untracked-file",
+                "path": "untracked.txt",
+            }))
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(untracked.contains("untracked.txt"));
+        assert!(untracked.contains("+new"));
+        assert!(
+            store
+                .diff_read(&json!({
+                    "chat": chat,
+                    "read": "working-file",
+                    "path": "../../outside.txt",
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("outside the repository")
+        );
         let files = store.repository_files(&json!({"chat": chat})).unwrap();
         assert_eq!(files["files"], json!(["tracked.txt", "untracked.txt"]));
         assert_eq!(files["truncated"], false);
@@ -5055,7 +5235,6 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(committed["action"], "push");
-
         let remote = fixture.root.join("remote.git");
         assert!(
             Command::new("git")
@@ -5080,6 +5259,37 @@ mod tests {
         assert_eq!(pushed["action"], "none");
         assert_eq!(pushed["label"], "Up to date");
         assert_eq!(pushed["enabled"], false);
+        assert!(git(&["checkout", "-b", "feature"]));
+        fs::write(repository.join("tracked.txt"), "branch\n").unwrap();
+        fs::write(repository.join("branch-only.txt"), "feature\n").unwrap();
+        assert!(git(&["add", "tracked.txt", "branch-only.txt"]));
+        assert!(git(&["commit", "-m", "feature changes"]));
+        let branch_status = store
+            .diff_read(&json!({
+                "chat": chat,
+                "read": "branch-status",
+                "base": "main",
+            }))
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(branch_status.contains("tracked.txt"));
+        assert!(branch_status.contains("branch-only.txt"));
+        let branch_file = store
+            .diff_read(&json!({
+                "chat": chat,
+                "read": "branch-file",
+                "base": "main",
+                "path": "tracked.txt",
+            }))
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(branch_file.contains("tracked.txt"));
+        assert!(branch_file.contains("+branch"));
+        assert!(!branch_file.contains("branch-only.txt"));
         assert!(
             store
                 .diff_read(&json!({
