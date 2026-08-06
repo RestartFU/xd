@@ -557,6 +557,33 @@ impl StateStore {
             |row| row.get(0),
         )?;
         let shortcuts = effective_shortcuts(&database, &self.workspace_root, &row.0)?;
+        let context_backend = if row.2 == "codex" && row.9 {
+            "claude-mode"
+        } else {
+            row.2.as_str()
+        };
+        let context_usage = database
+            .query_row(
+                "SELECT context_model, context_used, context_window FROM chat_sessions \
+                 WHERE chat_id = ? AND backend = ?",
+                params![chat_id, context_backend],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .filter(|(model, used, window)| {
+                *used > 0
+                    && *window > 0
+                    && row
+                        .4
+                        .as_deref()
+                        .is_none_or(|selected| model.as_deref() == Some(selected))
+            });
         let mut response = json!({
             "ok": true,
             "title": row.1,
@@ -576,6 +603,10 @@ impl StateStore {
             "new_worktree": row.11,
             "has_messages": has_messages,
         });
+        if let Some((_, used, window)) = context_usage {
+            response["context_used"] = Value::Number(used.into());
+            response["context_window"] = Value::Number(window.into());
+        }
         if let Some(first) = response["queue"].as_array().and_then(|queue| queue.first()) {
             response["queued"] = first.clone();
         }
@@ -1261,6 +1292,32 @@ impl StateStore {
             "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
              ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
             params![chat_id, backend, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_context_usage(
+        &self,
+        chat_id: &str,
+        backend: &str,
+        model: Option<&str>,
+        used: u64,
+        window: u64,
+    ) -> Result<(), StorageError> {
+        let used = i64::try_from(used).map_err(|_| {
+            StorageError::InvalidRequest("Context usage exceeds the storage limit.".into())
+        })?;
+        let window = i64::try_from(window).map_err(|_| {
+            StorageError::InvalidRequest("Context window exceeds the storage limit.".into())
+        })?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO chat_sessions \
+             (chat_id, backend, context_model, context_used, context_window) \
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT (chat_id, backend) DO UPDATE SET \
+             context_model = excluded.context_model, context_used = excluded.context_used, \
+             context_window = excluded.context_window",
+            params![chat_id, backend, model, used, window],
         )?;
         Ok(())
     }
@@ -2673,6 +2730,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             )));
         }
         if version > 0 {
+            ensure_chat_session_context_columns(database)?;
             return Ok(());
         }
     }
@@ -2750,6 +2808,44 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
         [],
     )?;
     transaction.commit()?;
+    ensure_chat_session_context_columns(database)?;
+    Ok(())
+}
+
+fn ensure_chat_session_context_columns(database: &Connection) -> Result<(), StorageError> {
+    let has_sessions: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_sessions')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_sessions {
+        return Ok(());
+    }
+
+    let mut statement = database.prepare("PRAGMA table_info(chat_sessions)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
+
+    if !columns.contains("context_used") {
+        database.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN context_used INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains("context_window") {
+        database.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN context_window INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains("context_model") {
+        database.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN context_model TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -5128,6 +5224,10 @@ mod tests {
         drop(database);
 
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_context_usage("chat-1", "codex", Some("gpt-5"), 16_948, 272_000)
+            .unwrap();
+        store.set_session("chat-1", "codex", "thread-1").unwrap();
         let chat = store.chat("chat-1").unwrap();
         assert_eq!(chat["queue"], json!(["First", "Second"]));
         assert_eq!(chat["queued"], "First");
@@ -5135,6 +5235,14 @@ mod tests {
         assert_eq!(chat["draft_revision"], 4);
         assert_eq!(chat["model"], "gpt-5");
         assert_eq!(chat["shortcuts"], json!(["Global", "Parent", "Child"]));
+        assert_eq!(chat["context_used"], 16_948);
+        assert_eq!(chat["context_window"], 272_000);
+
+        store
+            .set_context_usage("chat-1", "codex", Some("another-model"), 5, 10)
+            .unwrap();
+        let changed_model = store.chat("chat-1").unwrap();
+        assert!(changed_model.get("context_used").is_none());
     }
 
     #[test]

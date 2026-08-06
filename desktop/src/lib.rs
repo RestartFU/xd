@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod context_usage;
 pub mod daemon;
 pub mod markdown;
 pub mod model;

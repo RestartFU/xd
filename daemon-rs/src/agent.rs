@@ -14,7 +14,11 @@ pub enum AgentEvent {
     Text(String),
     TextDelta(String),
     Tool(String),
-    Usage { input: u64, output: u64 },
+    Usage {
+        input: u64,
+        output: u64,
+        window: u64,
+    },
     Completed,
     Error(String),
 }
@@ -114,7 +118,14 @@ impl CodexParser {
                     .and_then(|usage| usage.get("output_tokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                vec![AgentEvent::Usage { input, output }, AgentEvent::Completed]
+                vec![
+                    AgentEvent::Usage {
+                        input,
+                        output,
+                        window: 0,
+                    },
+                    AgentEvent::Completed,
+                ]
             }
             Some("turn.failed") => vec![AgentEvent::Error(error_message(&root))],
             // Codex emits transient `error` frames while reconnecting. Keep the
@@ -278,7 +289,7 @@ impl ClaudeParser {
                             .to_owned(),
                     ));
                 } else {
-                    if let Some(usage) = root.get("usage") {
+                    if let Some(usage) = claude_usage(&root) {
                         let input = usage
                             .get("input_tokens")
                             .and_then(Value::as_u64)
@@ -299,7 +310,11 @@ impl ClaudeParser {
                             .get("output_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0);
-                        events.push(AgentEvent::Usage { input, output });
+                        events.push(AgentEvent::Usage {
+                            input,
+                            output,
+                            window: claude_context_window(&root),
+                        });
                     }
                     events.push(AgentEvent::Completed);
                 }
@@ -412,6 +427,25 @@ impl ClaudeParser {
             })
             .collect()
     }
+}
+
+fn claude_usage(root: &Value) -> Option<&Value> {
+    let usage = root.get("usage")?;
+    usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .and_then(|iterations| iterations.last())
+        .or(Some(usage))
+}
+
+fn claude_context_window(root: &Value) -> u64 {
+    root.get("modelUsage")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|models| models.values())
+        .filter_map(|model| model.get("contextWindow").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
 }
 
 fn normalize_command(value: &str) -> Option<String> {
@@ -693,7 +727,8 @@ mod tests {
                 AgentEvent::Text("hello from hy".into()),
                 AgentEvent::Usage {
                     input: 16_941,
-                    output: 7
+                    output: 7,
+                    window: 0,
                 },
                 AgentEvent::Completed,
             ]
@@ -835,6 +870,14 @@ mod tests {
             AgentEvent::Commands(commands)
                 if commands.first().map(String::as_str) == Some("git-commit")
                     && commands.iter().any(|command| command == "code-review")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Usage {
+                input: 21_328,
+                output: 7,
+                window: 1_000_000,
+            }
         )));
         assert_eq!(normalize_command("/review"), Some("review".into()));
         assert_eq!(normalize_command("bad command"), None);

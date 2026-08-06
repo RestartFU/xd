@@ -205,6 +205,8 @@ pub struct AppModel {
     pub plan: bool,
     pub fast: bool,
     pub claude_mode: bool,
+    pub context_used: u64,
+    pub context_window: u64,
     pub auth_state: String,
     pub commands: Vec<String>,
     pub global_shortcuts: Vec<String>,
@@ -259,6 +261,8 @@ impl AppModel {
             self.plan = false;
             self.fast = false;
             self.claude_mode = false;
+            self.context_used = 0;
+            self.context_window = 0;
             self.auth_state.clear();
             self.commands.clear();
             self.global_shortcuts.clear();
@@ -289,6 +293,8 @@ impl AppModel {
         self.plan = false;
         self.fast = false;
         self.claude_mode = false;
+        self.context_used = 0;
+        self.context_window = 0;
         self.auth_state.clear();
         self.commands.clear();
         self.global_shortcuts.clear();
@@ -338,6 +344,14 @@ impl AppModel {
                 .get("claude_mode")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        self.context_used = body
+            .get("context_used")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.context_window = body
+            .get("context_window")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         self.auth_state = body
             .get("auth_state")
             .and_then(Value::as_str)
@@ -579,6 +593,8 @@ impl AppModel {
             plan: false,
             fast: false,
             claude_mode: false,
+            context_used: 16_948,
+            context_window: 272_000,
             auth_state: "signed-in".into(),
             commands: vec!["review".into(), "compact".into()],
             global_shortcuts: Vec::new(),
@@ -736,7 +752,8 @@ mod tests {
         model.apply_chat(&json!({
             "backend": "claude", "model": "claude-opus-5", "effort": "high",
             "access": "edit", "plan": true, "fast": true, "claude_mode": true,
-            "queue": [], "working": false
+            "queue": [], "working": false,
+            "context_used": 21_335, "context_window": 1_000_000
         }));
 
         assert_eq!(model.backend, "claude");
@@ -744,6 +761,8 @@ mod tests {
         assert_eq!(model.selected_model_name(), Some("Claude Opus 5"));
         assert_eq!(model.effort, "high");
         assert_eq!(model.access, "edit");
+        assert_eq!(model.context_used, 21_335);
+        assert_eq!(model.context_window, 1_000_000);
         assert!(model.plan);
         assert!(!model.fast);
         assert!(!model.claude_mode);
@@ -755,6 +774,8 @@ mod tests {
         }));
         assert!(model.fast);
         assert!(model.claude_mode);
+        assert_eq!(model.context_used, 0);
+        assert_eq!(model.context_window, 0);
     }
 
     #[test]

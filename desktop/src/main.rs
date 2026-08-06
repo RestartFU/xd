@@ -23,12 +23,13 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Point,
     Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
-    list, prelude::*, px, rgb, rgba, size,
+    list, prelude::*, px, relative, rgb, rgba, size,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
     activity::{ActivityCard, ActivityKind},
+    context_usage::{self, Severity as ContextSeverity},
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
     model::{AppModel, Attachment, Folder, Message},
@@ -7831,6 +7832,8 @@ impl Render for XdDesktop {
         .to_owned();
         let can_change_agent =
             selected.is_some() && !working && !self.model.agent_backends.is_empty();
+        let context_meter =
+            context_usage::meter(self.model.context_used, self.model.context_window);
         let fast = self.model.fast;
         let can_toggle_fast = can_change_agent && self.model.backend == "codex";
         let claude_mode = self.model.claude_mode;
@@ -9704,6 +9707,44 @@ impl Render for XdDesktop {
                     }))
                     .child(format!("{model_label}  ▾")),
             )
+            .when_some(context_meter, |controls, meter| {
+                let color = match meter.severity {
+                    ContextSeverity::Normal => accent,
+                    ContextSeverity::Warning => 0xe1b95f,
+                    ContextSeverity::Error => 0xe17272,
+                };
+                controls.child(
+                    div()
+                        .id("context-meter")
+                        .relative()
+                        .w(px(108.0))
+                        .h(px(20.0))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .rounded_md()
+                        .bg(rgb(SURFACE_HIGH))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(0.0))
+                                .bottom(px(0.0))
+                                .w(relative(meter.fraction))
+                                .bg(rgb(color)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .child(meter.label),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("effort-menu")

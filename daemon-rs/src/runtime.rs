@@ -237,7 +237,7 @@ impl TurnRuntime {
         let mut parser = match AgentParser::new(parser_backend) {
             Ok(parser) => parser,
             Err(error) => {
-                self.finish(turn, turn_id, 0, false, Some(error), 0, true, None);
+                self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
                 return;
             }
         };
@@ -248,6 +248,7 @@ impl TurnRuntime {
         let mut streamed_text = String::new();
         let mut assistant_text = String::new();
         let mut visible_streamed_bytes = 0;
+        let mut context_usage = None;
 
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else {
@@ -350,7 +351,17 @@ impl TurnRuntime {
                         latest_error = None;
                     }
                     AgentEvent::Error(error) => latest_error = Some(error),
-                    AgentEvent::Usage { .. } => {}
+                    AgentEvent::Usage {
+                        input,
+                        output,
+                        window,
+                    } => {
+                        if let Some(usage) =
+                            usage_snapshot(input, output, window, turn.context_window)
+                        {
+                            context_usage = Some(usage);
+                        }
+                    }
                 }
             }
         }
@@ -400,6 +411,7 @@ impl TurnRuntime {
             started.elapsed().as_secs(),
             !had_activity && !was_cancelled,
             asked,
+            context_usage,
         );
     }
 
@@ -413,7 +425,17 @@ impl TurnRuntime {
         duration: u64,
         silent: bool,
         asked: Option<Ask>,
+        context_usage: Option<(u64, u64)>,
     ) {
+        if let Some((used, window)) = context_usage {
+            let _ = self.inner.store.set_context_usage(
+                &turn.chat_id,
+                &turn.session_backend,
+                Some(&turn.model),
+                used,
+                window,
+            );
+        }
         let finish = self.inner.store.finish_turn(
             &turn.chat_id,
             success,
@@ -516,6 +538,21 @@ fn set_environment(environment: &mut Vec<(String, String)>, name: String, value:
     }
 }
 
+fn usage_snapshot(
+    input: u64,
+    output: u64,
+    reported_window: u64,
+    configured_window: i64,
+) -> Option<(u64, u64)> {
+    let used = input.saturating_add(output);
+    let window = if reported_window > 0 {
+        reported_window
+    } else {
+        u64::try_from(configured_window).unwrap_or(0)
+    };
+    (used > 0 && window > 0).then_some((used, window))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +582,19 @@ mod tests {
             Some("http://127.0.0.1:4321")
         );
         assert!(environment.contains(&("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "272000".into())));
+    }
+
+    #[test]
+    fn usage_prefers_the_reported_window_and_falls_back_to_the_catalog() {
+        assert_eq!(
+            usage_snapshot(16_941, 7, 0, 272_000),
+            Some((16_948, 272_000))
+        );
+        assert_eq!(
+            usage_snapshot(21_328, 7, 1_000_000, 0),
+            Some((21_335, 1_000_000))
+        );
+        assert_eq!(usage_snapshot(0, 0, 1_000_000, 0), None);
+        assert_eq!(usage_snapshot(1, 0, 0, 0), None);
     }
 }
