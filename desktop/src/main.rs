@@ -9872,8 +9872,12 @@ impl Render for XdDesktop {
             .border_b_1()
             .border_color(rgb(BORDER))
             .bg(rgb(SIDEBAR))
-            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                window.start_window_move();
+            .on_mouse_down(MouseButton::Left, |event, window, _| {
+                if event.click_count >= 2 {
+                    window.zoom_window();
+                } else {
+                    window.start_window_move();
+                }
             })
             .child(
                 div()
