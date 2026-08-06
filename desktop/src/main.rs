@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs,
+    hash::{Hash, Hasher},
     path::PathBuf,
     sync::{
         Arc,
@@ -4920,6 +4921,10 @@ impl XdDesktop {
                 desktop,
             );
         }
+        let markdown_scope = message
+            .id
+            .map(|id| format!("message-{id}"))
+            .unwrap_or_else(|| format!("live-{index}"));
 
         div()
             .w_full()
@@ -4946,7 +4951,7 @@ impl XdDesktop {
                             })
                             .text_color(rgb(TEXT))
                             .child(
-                                Self::markdown_content(message.markdown())
+                                Self::markdown_content(message.markdown(), &markdown_scope)
                                     .text_sm()
                                     .line_height(px(21.0)),
                             ),
@@ -5132,9 +5137,9 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    fn markdown_content(document: std::sync::Arc<markdown::Document>) -> gpui::Div {
+    fn markdown_content(document: std::sync::Arc<markdown::Document>, scope: &str) -> gpui::Div {
         let mut content = div().w_full().flex().flex_col().gap_2();
-        for block in document.blocks.iter().cloned() {
+        for (block_index, block) in document.blocks.iter().cloned().enumerate() {
             let element = match block {
                 Block::Heading { level, content } => {
                     let heading = div()
@@ -5181,6 +5186,9 @@ impl XdDesktop {
                     .into_any_element(),
                 Block::Code(code) => {
                     let language = code.language.unwrap_or_else(|| "text".into());
+                    let source = code.code;
+                    let copied_source = source.clone();
+                    let block_id = scoped_element_id(scope, block_index);
                     let highlights = code.spans.into_iter().map(|span| {
                         let color = match span.kind {
                             CodeKind::Keyword => 0xc792ea,
@@ -5208,20 +5216,42 @@ impl XdDesktop {
                                 .w_full()
                                 .px_3()
                                 .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .bg(rgb(SURFACE_HIGH))
                                 .text_xs()
                                 .text_color(rgb(MUTED))
-                                .child(language),
+                                .child(language)
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .id(("copy-code", block_id))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(BG)))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copied_source.clone(),
+                                            ));
+                                        })
+                                        .child("Copy"),
+                                ),
                         )
                         .child(
                             div()
+                                .id(("scroll-code", block_id))
                                 .w_full()
+                                .overflow_scroll()
                                 .p_3()
                                 .font_family("monospace")
                                 .text_sm()
                                 .line_height(px(20.0))
-                                .whitespace_normal()
-                                .child(StyledText::new(code.code).with_highlights(highlights)),
+                                .whitespace_nowrap()
+                                .child(StyledText::new(source).with_highlights(highlights)),
                         )
                         .into_any_element()
                 }
@@ -8230,6 +8260,7 @@ impl Render for XdDesktop {
                 if let Some(preview) = diff.file_preview.clone() {
                     let modified = preview.content != preview.original;
                     let saving = preview.saving;
+                    let markdown_scope = format!("repository-{}", preview.path);
                     let language = preview
                         .path
                         .rsplit_once('.')
@@ -8352,7 +8383,7 @@ impl Render for XdDesktop {
                                 .min_h_0()
                                 .overflow_y_scroll()
                                 .p_3()
-                                .child(Self::markdown_content(document))
+                                .child(Self::markdown_content(document, &markdown_scope))
                                 .into_any_element()
                         } else {
                             div()
@@ -10682,6 +10713,13 @@ fn turn_duration_label(value: &str) -> Option<String> {
     Some(format!("Worked for {duration}"))
 }
 
+fn scoped_element_id(scope: &str, index: usize) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    scope.hash(&mut hasher);
+    index.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
     if !edit.submitting {
         return false;
@@ -10840,6 +10878,14 @@ mod tests {
         assert_eq!(preview, "first\nsecond\nthird…");
         assert!(preview.chars().count() <= 280);
         assert_eq!(prompt.lines().count(), 4);
+    }
+
+    #[test]
+    fn markdown_code_controls_have_stable_scoped_ids() {
+        let first = scoped_element_id("message-1", 0);
+        assert_eq!(first, scoped_element_id("message-1", 0));
+        assert_ne!(first, scoped_element_id("message-2", 0));
+        assert_ne!(first, scoped_element_id("message-1", 1));
     }
 
     #[test]
