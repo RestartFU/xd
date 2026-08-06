@@ -836,7 +836,7 @@ fn parse_inline(source: &str) -> InlineText {
 
     while !rest.is_empty() {
         let Some((offset, marker)) = rest.char_indices().find(|(offset, character)| {
-            matches!(character, '*' | '`' | '[')
+            matches!(character, '*' | '_' | '`' | '[')
                 || rest[*offset..].starts_with("![")
                 || starts_web_url(&rest[*offset..])
         }) else {
@@ -867,6 +867,8 @@ fn parse_inline(source: &str) -> InlineText {
             inline_delimited(rest, "**", InlineKind::Strong)
         } else if rest.starts_with('*') {
             inline_delimited(rest, "*", InlineKind::Emphasis)
+        } else if rest.starts_with('_') {
+            inline_underscore(rest, text.chars().next_back())
         } else if rest.starts_with('`') {
             inline_delimited(rest, "`", InlineKind::Code)
         } else if marker == '[' {
@@ -951,6 +953,36 @@ fn inline_delimited<'a>(
         value: &body[..end],
         consumed: delimiter.len() + end + delimiter.len(),
         kind,
+        url: None,
+    })
+}
+
+fn inline_underscore(source: &str, previous: Option<char>) -> Option<ParsedInline<'_>> {
+    let delimiter = if source.starts_with("__") { "__" } else { "_" };
+    let body = &source[delimiter.len()..];
+    if previous.is_some_and(char::is_alphanumeric)
+        || body.chars().next().is_none_or(char::is_whitespace)
+    {
+        return None;
+    }
+    let end = body.match_indices(delimiter).find_map(|(offset, _)| {
+        let before = body[..offset].chars().next_back()?;
+        let after = body[offset + delimiter.len()..].chars().next();
+        (!before.is_whitespace() && after.is_none_or(|character| !character.is_alphanumeric()))
+            .then_some(offset)
+    })?;
+    if end == 0 {
+        return None;
+    }
+    Some(ParsedInline {
+        prefix: "",
+        value: &body[..end],
+        consumed: delimiter.len() + end + delimiter.len(),
+        kind: if delimiter.len() == 2 {
+            InlineKind::Strong
+        } else {
+            InlineKind::Emphasis
+        },
         url: None,
     })
 }
@@ -1378,6 +1410,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn underscore_emphasis_preserves_identifiers() {
+        let document = parse(
+            "call some_long_name and _stress this_, then __strong words__; keep _partial and word_end literal",
+        );
+        let Block::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("paragraph")
+        };
+        assert_eq!(
+            paragraph.text,
+            "call some_long_name and stress this, then strong words; keep _partial and word_end literal"
+        );
+        assert_eq!(paragraph.spans.len(), 2);
+        assert_eq!(paragraph.spans[0].kind, InlineKind::Emphasis);
+        assert_eq!(
+            &paragraph.text[paragraph.spans[0].range.clone()],
+            "stress this"
+        );
+        assert_eq!(paragraph.spans[1].kind, InlineKind::Strong);
+        assert_eq!(
+            &paragraph.text[paragraph.spans[1].range.clone()],
+            "strong words"
+        );
     }
 
     #[test]
