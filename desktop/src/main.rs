@@ -472,6 +472,7 @@ struct XdDesktop {
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
     sidebar_move_submitting: bool,
+    sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
     creating_workspace: bool,
     workspace_create_name: String,
@@ -732,6 +733,7 @@ impl XdDesktop {
             sidebar_delete_submitting: false,
             sidebar_move: None,
             sidebar_move_submitting: false,
+            sidebar_move_destination: None,
             collapsed_folders,
             creating_workspace: false,
             workspace_create_name: String::new(),
@@ -1187,6 +1189,7 @@ impl XdDesktop {
                     if self.sidebar_move.as_ref() == Some(&SidebarTarget::Folder(folder_id.clone()))
                     {
                         self.sidebar_move_submitting = false;
+                        self.sidebar_move_destination = None;
                     }
                 }
                 RequestKind::RenameChat { chat_id, .. } => {
@@ -1199,6 +1202,7 @@ impl XdDesktop {
                 RequestKind::MoveChat { chat_id, .. } => {
                     if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id.clone())) {
                         self.sidebar_move_submitting = false;
+                        self.sidebar_move_destination = None;
                     }
                 }
                 RequestKind::TrashFolder { folder_id } => {
@@ -1264,10 +1268,23 @@ impl XdDesktop {
                 if self
                     .sidebar_move
                     .as_ref()
+                    .zip(self.sidebar_move_destination.as_ref())
+                    .is_some_and(|(target, destination)| {
+                        sidebar_move_applied(&self.model, target, destination.as_deref())
+                    })
+                {
+                    self.sidebar_move = None;
+                    self.sidebar_move_submitting = false;
+                    self.sidebar_move_destination = None;
+                }
+                if self
+                    .sidebar_move
+                    .as_ref()
                     .is_some_and(|target| !self.sidebar_target_exists(target))
                 {
                     self.sidebar_move = None;
                     self.sidebar_move_submitting = false;
+                    self.sidebar_move_destination = None;
                 }
                 self.collapsed_folders.retain(|folder_id| {
                     self.model
@@ -1814,36 +1831,11 @@ impl XdDesktop {
                 self.select_chat(chat_id.to_owned(), cx);
             }
             RequestKind::RenameFolder { .. } => self.request_tree(),
-            RequestKind::MoveFolder {
-                folder_id,
-                parent_id,
-            } => {
-                if self.sidebar_move.as_ref() == Some(&SidebarTarget::Folder(folder_id)) {
-                    self.sidebar_move = None;
-                    self.sidebar_move_submitting = false;
-                }
-                let _ = parent_id;
-            }
-            RequestKind::TrashFolder { folder_id } => {
-                if self.pending_sidebar_delete.as_ref() == Some(&SidebarTarget::Folder(folder_id)) {
-                    self.pending_sidebar_delete = None;
-                    self.sidebar_delete_submitting = false;
-                }
-            }
+            RequestKind::MoveFolder { .. } => self.request_tree(),
+            RequestKind::TrashFolder { .. } => self.request_tree(),
             RequestKind::RenameChat { .. } => self.request_tree(),
-            RequestKind::MoveChat { chat_id, folder_id } => {
-                if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id)) {
-                    self.sidebar_move = None;
-                    self.sidebar_move_submitting = false;
-                }
-                let _ = folder_id;
-            }
-            RequestKind::DeleteChat { chat_id } => {
-                if self.pending_sidebar_delete.as_ref() == Some(&SidebarTarget::Chat(chat_id)) {
-                    self.pending_sidebar_delete = None;
-                    self.sidebar_delete_submitting = false;
-                }
-            }
+            RequestKind::MoveChat { .. } => self.request_tree(),
+            RequestKind::DeleteChat { .. } => self.request_tree(),
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
                 let local_attachments = self
                     .attachments_dirty
@@ -3949,6 +3941,7 @@ impl XdDesktop {
         self.sidebar_delete_submitting = false;
         self.sidebar_move = None;
         self.sidebar_move_submitting = false;
+        self.sidebar_move_destination = None;
         self.sidebar_edit = Some(SidebarEdit {
             target,
             original: current.clone(),
@@ -3970,6 +3963,7 @@ impl XdDesktop {
         self.sidebar_delete_submitting = false;
         self.sidebar_move = None;
         self.sidebar_move_submitting = false;
+        self.sidebar_move_destination = None;
         cx.notify();
     }
 
@@ -4035,6 +4029,7 @@ impl XdDesktop {
             self.cancel_sidebar_edit(cx);
             self.sidebar_move = None;
             self.sidebar_move_submitting = false;
+            self.sidebar_move_destination = None;
             self.pending_sidebar_delete = Some(target);
             cx.notify();
             return;
@@ -4062,8 +4057,10 @@ impl XdDesktop {
         self.sidebar_delete_submitting = false;
         if self.sidebar_move.as_ref() == Some(&target) {
             self.sidebar_move = None;
+            self.sidebar_move_destination = None;
         } else {
             self.sidebar_move = Some(target);
+            self.sidebar_move_destination = None;
         }
         cx.notify();
     }
@@ -4087,7 +4084,10 @@ impl XdDesktop {
                 .and_then(|folder_id| daemon.move_chat(chat_id, folder_id)),
         });
         match result {
-            Some(Ok(())) => self.sidebar_move_submitting = true,
+            Some(Ok(())) => {
+                self.sidebar_move_submitting = true;
+                self.sidebar_move_destination = Some(destination);
+            }
             Some(Err(error)) => self.model.connection_error = Some(error),
             None => {
                 self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
@@ -10701,6 +10701,27 @@ fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
     authoritative == Some(edit.text.trim())
 }
 
+fn sidebar_move_applied(
+    model: &AppModel,
+    target: &SidebarTarget,
+    destination: Option<&str>,
+) -> bool {
+    match target {
+        SidebarTarget::Folder(folder_id) => model
+            .folders
+            .iter()
+            .find(|folder| &folder.id == folder_id)
+            .is_some_and(|folder| folder.parent.as_deref() == destination),
+        SidebarTarget::Chat(chat_id) => destination.is_some_and(|destination| {
+            model
+                .chats
+                .iter()
+                .find(|chat| &chat.id == chat_id)
+                .is_some_and(|chat| chat.folder == destination)
+        }),
+    }
+}
+
 fn folder_hidden_by_collapse(
     folders: &[Folder],
     collapsed: &HashSet<String>,
@@ -10912,6 +10933,53 @@ mod tests {
                 submitting: false,
                 ..workspace
             }
+        ));
+    }
+
+    #[test]
+    fn sidebar_move_waits_for_the_authoritative_tree_parent() {
+        let model = AppModel {
+            folders: vec![
+                Folder {
+                    id: "folder-1".into(),
+                    name: "Workspace".into(),
+                    parent: Some("parent-2".into()),
+                },
+                Folder {
+                    id: "parent-2".into(),
+                    name: "Parent".into(),
+                    parent: None,
+                },
+            ],
+            chats: vec![xd_desktop::model::ChatSummary {
+                id: "chat-1".into(),
+                folder: "folder-1".into(),
+                title: Some("Chat".into()),
+                backend: "codex".into(),
+                working: false,
+            }],
+            ..Default::default()
+        };
+
+        assert!(sidebar_move_applied(
+            &model,
+            &SidebarTarget::Folder("folder-1".into()),
+            Some("parent-2")
+        ));
+        assert!(!sidebar_move_applied(
+            &model,
+            &SidebarTarget::Folder("folder-1".into()),
+            None
+        ));
+        assert!(sidebar_move_applied(
+            &model,
+            &SidebarTarget::Chat("chat-1".into()),
+            Some("folder-1")
+        ));
+        assert!(!sidebar_move_applied(
+            &model,
+            &SidebarTarget::Chat("chat-1".into()),
+            None
         ));
     }
 
