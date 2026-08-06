@@ -64,6 +64,7 @@ pub enum RequestKind {
     DiffRead {
         chat_id: String,
         read: String,
+        path: Option<String>,
         generation: u64,
     },
     GitStatus {
@@ -750,16 +751,21 @@ impl DaemonHandle {
         chat_id: &str,
         read: &str,
         base: Option<&str>,
+        path: Option<&str>,
         generation: u64,
     ) -> Result<(), String> {
         let mut body = json!({"op": "diff-read", "chat": chat_id, "read": read});
         if let Some(base) = base {
             body["base"] = Value::String(base.to_owned());
         }
+        if let Some(path) = path {
+            body["path"] = Value::String(path.to_owned());
+        }
         self.send(
             RequestKind::DiffRead {
                 chat_id: chat_id.to_owned(),
                 read: read.to_owned(),
+                path: path.map(str::to_owned),
                 generation,
             },
             body,

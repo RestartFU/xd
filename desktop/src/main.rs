@@ -198,9 +198,14 @@ struct DiffLine {
 #[derive(Clone, Debug)]
 struct DiffFile {
     path: String,
+    status: Option<String>,
     additions: usize,
     deletions: usize,
     lines: Vec<DiffLine>,
+    lazy_read: Option<String>,
+    loaded: bool,
+    loading: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +226,7 @@ struct BrowseEntry {
 #[derive(Clone, Default)]
 struct DiffPanel {
     branch: bool,
+    base: Option<String>,
     files_mode: bool,
     loading: bool,
     files: Vec<DiffFile>,
@@ -2180,13 +2186,26 @@ impl XdDesktop {
                     }
                     self.invalidate_image_rows(path);
                 }
-                RequestKind::DiffRead { generation, .. } if *generation == self.diff_generation => {
-                    if let Some(diff) = &mut self.diff_panel {
+                RequestKind::DiffRead {
+                    path, generation, ..
+                } if *generation == self.diff_generation => {
+                    let message = value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Cannot read repository changes.")
+                        .to_owned();
+                    if let Some(path) = path {
+                        if let Some(file) = self
+                            .diff_panel
+                            .as_mut()
+                            .and_then(|diff| diff.files.iter_mut().find(|file| &file.path == path))
+                        {
+                            file.loading = false;
+                            file.error = Some(message);
+                        }
+                    } else if let Some(diff) = &mut self.diff_panel {
                         diff.loading = false;
-                        diff.error = value
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
+                        diff.error = Some(message);
                     }
                 }
                 RequestKind::GitStatus { generation, .. }
@@ -2766,6 +2785,7 @@ impl XdDesktop {
             RequestKind::DiffRead {
                 chat_id,
                 read,
+                path,
                 generation,
             } => {
                 if generation != self.diff_generation
@@ -2786,14 +2806,32 @@ impl XdDesktop {
                             diff.loading = false;
                             diff.error = Some("No branch to compare against.".into());
                         }
-                    } else if let Some(daemon) = self.active_daemon().cloned()
-                        && let Err(error) =
-                            daemon.diff_read(&chat_id, "branch-all", Some(base), generation)
-                    {
+                    } else {
                         if let Some(diff) = &mut self.diff_panel {
+                            diff.base = Some(base.to_owned());
+                        }
+                        if let Some(daemon) = self.active_daemon().cloned()
+                            && let Err(error) = daemon.diff_read(
+                                &chat_id,
+                                "branch-status",
+                                Some(base),
+                                None,
+                                generation,
+                            )
+                            && let Some(diff) = &mut self.diff_panel
+                        {
                             diff.loading = false;
                             diff.error = Some(error);
                         }
+                    }
+                } else if matches!(read.as_str(), "working-status" | "branch-status") {
+                    self.prepare_diff_listing(output, read == "branch-status", generation, cx);
+                } else if matches!(
+                    read.as_str(),
+                    "working-file" | "untracked-file" | "branch-file"
+                ) {
+                    if let Some(path) = path {
+                        self.prepare_diff_file(path, output, generation, cx);
                     }
                 } else {
                     self.prepare_diff(output, generation, cx);
@@ -6086,6 +6124,7 @@ impl XdDesktop {
         if let Some(diff) = &mut self.diff_panel {
             diff.loading = true;
             diff.status_loading = !files_mode;
+            diff.base = None;
             diff.files.clear();
             diff.file_preview = None;
             diff.file_loading = false;
@@ -6107,7 +6146,8 @@ impl XdDesktop {
                 } else {
                     daemon.diff_read(
                         &chat_id,
-                        if branch { "base" } else { "working-all" },
+                        if branch { "base" } else { "working-status" },
+                        None,
                         None,
                         generation,
                     )
@@ -6165,9 +6205,157 @@ impl XdDesktop {
         .detach();
     }
 
+    fn prepare_diff_listing(
+        &mut self,
+        output: String,
+        branch: bool,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let prepare = cx
+            .background_executor()
+            .spawn(async move { parse_diff_file_list(&output, branch) });
+        cx.spawn(async move |this, cx| {
+            let result = prepare.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.diff_generation != generation {
+                    return;
+                }
+                if let Some(diff) = &mut this.diff_panel {
+                    diff.loading = false;
+                    match result {
+                        Ok((files, truncated)) => {
+                            this.collapsed_diff_files =
+                                files.iter().map(|file| file.path.clone()).collect();
+                            diff.files = files;
+                            diff.truncated = truncated;
+                            diff.error = None;
+                        }
+                        Err(error) => diff.error = Some(error),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn prepare_diff_file(
+        &mut self,
+        path: String,
+        output: String,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let empty = output.trim().is_empty();
+        let prepare = cx
+            .background_executor()
+            .spawn(async move { parse_unified_diff(&output) });
+        cx.spawn(async move |this, cx| {
+            let result = prepare.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.diff_generation != generation {
+                    return;
+                }
+                let Some(diff) = &mut this.diff_panel else {
+                    return;
+                };
+                if this.collapsed_diff_files.contains(&path) {
+                    if let Some(file) = diff.files.iter_mut().find(|file| file.path == path) {
+                        file.loading = false;
+                    }
+                    return;
+                }
+                let Some(file) = diff.files.iter_mut().find(|file| file.path == path) else {
+                    return;
+                };
+                file.loading = false;
+                match result {
+                    Ok((mut parsed, truncated)) => {
+                        if let Some(prepared) = parsed
+                            .iter()
+                            .position(|prepared| prepared.path == path)
+                            .map(|index| parsed.swap_remove(index))
+                            .or_else(|| parsed.pop())
+                        {
+                            file.additions = prepared.additions;
+                            file.deletions = prepared.deletions;
+                            file.lines = prepared.lines;
+                        } else if !empty {
+                            file.error =
+                                Some("Git returned a diff that xd-dev could not parse.".into());
+                            cx.notify();
+                            return;
+                        }
+                        file.loaded = true;
+                        file.error = None;
+                        diff.truncated |= truncated;
+                    }
+                    Err(error) => file.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn toggle_diff_file(&mut self, path: String, cx: &mut Context<Self>) {
         if !self.collapsed_diff_files.remove(&path) {
-            self.collapsed_diff_files.insert(path);
+            self.collapsed_diff_files.insert(path.clone());
+            if let Some(file) = self
+                .diff_panel
+                .as_mut()
+                .and_then(|diff| diff.files.iter_mut().find(|file| file.path == path))
+                .filter(|file| file.lazy_read.is_some())
+            {
+                file.lines.clear();
+                file.additions = 0;
+                file.deletions = 0;
+                file.loaded = false;
+                file.error = None;
+            }
+            cx.notify();
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            cx.notify();
+            return;
+        };
+        let request = self.diff_panel.as_mut().and_then(|diff| {
+            let file = diff.files.iter_mut().find(|file| file.path == path)?;
+            if file.loading {
+                return None;
+            }
+            if file.loaded {
+                return None;
+            }
+            let read = file.lazy_read.clone()?;
+            file.loading = true;
+            file.error = None;
+            Some((read, diff.base.clone()))
+        });
+        if let Some((read, base)) = request {
+            let result = self
+                .active_daemon()
+                .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+                .and_then(|daemon| {
+                    daemon.diff_read(
+                        &chat_id,
+                        &read,
+                        base.as_deref(),
+                        Some(&path),
+                        self.diff_generation,
+                    )
+                });
+            if let Err(error) = result
+                && let Some(file) = self
+                    .diff_panel
+                    .as_mut()
+                    .and_then(|diff| diff.files.iter_mut().find(|file| file.path == path))
+            {
+                file.loading = false;
+                file.error = Some(error);
+            }
         }
         cx.notify();
     }
@@ -11638,34 +11826,61 @@ impl Render for XdDesktop {
                 });
             let total_additions = diff.files.iter().map(|file| file.additions).sum::<usize>();
             let total_deletions = diff.files.iter().map(|file| file.deletions).sum::<usize>();
+            let loaded_files = diff.files.iter().filter(|file| file.loaded).count();
             let mut file_sections = Vec::new();
             for (index, file) in diff.files.iter().enumerate() {
                 let collapsed = self.collapsed_diff_files.contains(&file.path);
                 let path = file.path.clone();
                 let mut lines = Vec::new();
                 if !collapsed {
-                    for (line_index, line) in file.lines.iter().enumerate() {
-                        let (background, color) = match line.kind {
-                            DiffLineKind::Added => (0x172b20, 0xa9d8b5),
-                            DiffLineKind::Removed => (0x332025, 0xf0a8b3),
-                            DiffLineKind::Hunk => (0x1d2940, 0xaec4ff),
-                            DiffLineKind::Header => (0x1d222b, 0xaab2c0),
-                            DiffLineKind::Context => (0x14171c, 0xc9ced8),
-                        };
+                    if file.loading {
                         lines.push(
                             div()
-                                .id(("diff-line", index * 10_000 + line_index))
+                                .id(("diff-file-loading", index))
                                 .w_full()
-                                .px_2()
-                                .py(px(1.0))
-                                .bg(rgb(background))
-                                .font_family("monospace")
+                                .px_3()
+                                .py_2()
                                 .text_xs()
-                                .line_height(px(18.0))
-                                .text_color(rgb(color))
-                                .child(line.text.clone())
+                                .text_color(rgb(0xaec4ff))
+                                .child("Loading this file’s patch…")
                                 .into_any_element(),
                         );
+                    } else if let Some(error) = &file.error {
+                        lines.push(
+                            div()
+                                .id(("diff-file-error", index))
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .text_xs()
+                                .text_color(rgb(0xf0a8b3))
+                                .child(error.clone())
+                                .into_any_element(),
+                        );
+                    } else {
+                        for (line_index, line) in file.lines.iter().enumerate() {
+                            let (background, color) = match line.kind {
+                                DiffLineKind::Added => (0x172b20, 0xa9d8b5),
+                                DiffLineKind::Removed => (0x332025, 0xf0a8b3),
+                                DiffLineKind::Hunk => (0x1d2940, 0xaec4ff),
+                                DiffLineKind::Header => (0x1d222b, 0xaab2c0),
+                                DiffLineKind::Context => (0x14171c, 0xc9ced8),
+                            };
+                            lines.push(
+                                div()
+                                    .id(("diff-line", index * 10_000 + line_index))
+                                    .w_full()
+                                    .px_2()
+                                    .py(px(1.0))
+                                    .bg(rgb(background))
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .line_height(px(18.0))
+                                    .text_color(rgb(color))
+                                    .child(line.text.clone())
+                                    .into_any_element(),
+                            );
+                        }
                     }
                 }
                 file_sections.push(
@@ -11701,18 +11916,26 @@ impl Render for XdDesktop {
                                         .text_color(rgb(TEXT))
                                         .child(file.path.clone()),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x78c995))
-                                        .child(format!("+{}", file.additions)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0xe88e9c))
-                                        .child(format!("−{}", file.deletions)),
-                                ),
+                                .when_some(file.status.clone(), |header, status| {
+                                    header
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(status))
+                                })
+                                .when(file.loaded, |header| {
+                                    header.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x78c995))
+                                            .child(format!("+{}", file.additions)),
+                                    )
+                                })
+                                .when(file.loaded, |header| {
+                                    header.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xe88e9c))
+                                            .child(format!("−{}", file.deletions)),
+                                    )
+                                }),
                         )
                         .children(lines)
                         .into_any_element(),
@@ -12111,6 +12334,14 @@ impl Render for XdDesktop {
                                 .child(div().text_xs().text_color(rgb(MUTED)).child(
                                     if files_mode {
                                         format!("{} entries", diff.browse_entries.len())
+                                    } else if loaded_files < diff.files.len() {
+                                        format!(
+                                            "{} files · {} loaded  +{}  −{}",
+                                            diff.files.len(),
+                                            loaded_files,
+                                            total_additions,
+                                            total_deletions
+                                        )
                                     } else {
                                         format!(
                                             "{} files  +{}  −{}",
@@ -15801,9 +16032,14 @@ fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
                 .to_owned();
             current = Some(DiffFile {
                 path,
+                status: None,
                 additions: 0,
                 deletions: 0,
                 lines: Vec::new(),
+                lazy_read: None,
+                loaded: true,
+                loading: false,
+                error: None,
             });
         }
         let Some(file) = &mut current else {
@@ -15851,6 +16087,115 @@ fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
         return Err("Git returned a diff that xd-dev could not parse.".into());
     }
     Ok((files, truncated))
+}
+
+fn parse_diff_file_list(output: &str, branch: bool) -> Result<(Vec<DiffFile>, bool), String> {
+    const MAX_FILES: usize = 500;
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    let mut truncated = false;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if files.len() >= MAX_FILES {
+            truncated = true;
+            break;
+        }
+        let (status, raw_path) = if branch {
+            let mut fields = line.split('\t');
+            let status = fields.next().unwrap_or_default().trim();
+            let path = fields.next_back().unwrap_or_default();
+            (status, path)
+        } else {
+            if line.len() < 4 || line.as_bytes().get(2) != Some(&b' ') {
+                return Err("Git returned a file list that xd-dev could not parse.".into());
+            }
+            let status = &line[..2];
+            let mut path = &line[3..];
+            if (status.starts_with('R') || status.starts_with('C'))
+                && let Some((_, renamed)) = path.rsplit_once(" -> ")
+            {
+                path = renamed;
+            }
+            (status, path)
+        };
+        if status.is_empty() || raw_path.is_empty() {
+            return Err("Git returned a file list that xd-dev could not parse.".into());
+        }
+        let path = decode_git_path(raw_path)?;
+        if path.is_empty() || !seen.insert(path.clone()) {
+            continue;
+        }
+        files.push(DiffFile {
+            path,
+            status: Some(status.to_owned()),
+            additions: 0,
+            deletions: 0,
+            lines: Vec::new(),
+            lazy_read: Some(
+                if branch || status != "??" {
+                    if branch {
+                        "branch-file"
+                    } else {
+                        "working-file"
+                    }
+                } else {
+                    "untracked-file"
+                }
+                .to_owned(),
+            ),
+            loaded: false,
+            loading: false,
+            error: None,
+        });
+    }
+    Ok((files, truncated))
+}
+
+fn decode_git_path(value: &str) -> Result<String, String> {
+    if !value.starts_with('"') {
+        return Ok(value.to_owned());
+    }
+    if !value.ends_with('"') || value.len() < 2 {
+        return Err("Git returned an invalid quoted file path.".into());
+    }
+    let input = &value.as_bytes()[1..value.len() - 1];
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'\\' {
+            output.push(input[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(escaped) = input.get(index).copied() else {
+            return Err("Git returned an invalid quoted file path.".into());
+        };
+        if (b'0'..=b'7').contains(&escaped) {
+            let mut value = 0_u8;
+            let mut digits = 0;
+            while digits < 3 && index < input.len() && (b'0'..=b'7').contains(&input[index]) {
+                value = value.saturating_mul(8).saturating_add(input[index] - b'0');
+                index += 1;
+                digits += 1;
+            }
+            output.push(value);
+            continue;
+        }
+        output.push(match escaped {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            b'"' => b'"',
+            b'\\' => b'\\',
+            _ => return Err("Git returned an invalid quoted file path.".into()),
+        });
+        index += 1;
+    }
+    String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
 }
 
 fn compact_label(value: &str, limit: usize) -> String {
@@ -16377,6 +16722,7 @@ mod tests {
         assert!(XdDesktop::remote_chat_reply(&RequestKind::DiffRead {
             chat_id: "chat".into(),
             read: "working-all".into(),
+            path: None,
             generation: 1,
         }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::TerminalOpen {
@@ -16947,6 +17293,39 @@ mod tests {
         assert_eq!((files[0].additions, files[0].deletions), (1, 1));
         assert_eq!(files[1].path, "two.rs");
         assert_eq!((files[1].additions, files[1].deletions), (1, 0));
+    }
+
+    #[test]
+    fn diff_file_lists_choose_safe_lazy_read_modes_and_decode_git_paths() {
+        let working =
+            " M tracked file.rs\n?? new.txt\nR  old.rs -> renamed.rs\n?? \"caf\\303\\251.txt\"\n";
+        let (files, truncated) = parse_diff_file_list(working, false).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| (file.path.as_str(), file.lazy_read.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tracked file.rs", Some("working-file")),
+                ("new.txt", Some("untracked-file")),
+                ("renamed.rs", Some("working-file")),
+                ("café.txt", Some("untracked-file")),
+            ]
+        );
+
+        let (branch, _) = parse_diff_file_list("M\tone.go\nR100\told.rs\tnew.rs\n", true).unwrap();
+        assert_eq!(
+            branch
+                .iter()
+                .map(|file| (file.path.as_str(), file.lazy_read.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("one.go", Some("branch-file")),
+                ("new.rs", Some("branch-file")),
+            ]
+        );
+        assert!(decode_git_path("\"unterminated").is_err());
     }
 }
 
