@@ -24,6 +24,7 @@ pub enum RequestKind {
     AgentCatalog,
     AgentAuth,
     AgentAuthMutation,
+    AgentClis,
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -368,6 +369,10 @@ impl DaemonHandle {
 
     pub fn agent_auth(&self) -> Result<(), String> {
         self.send(RequestKind::AgentAuth, json!({"op": "agent-auth"}))
+    }
+
+    pub fn agent_clis(&self) -> Result<(), String> {
+        self.send(RequestKind::AgentClis, json!({"op": "agent-clis"}))
     }
 
     pub fn agent_auth_action(

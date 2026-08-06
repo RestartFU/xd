@@ -104,6 +104,17 @@ struct AuthProvider {
     needs_input: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct CliVersion {
+    provider: String,
+    display_name: String,
+    state: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
 #[derive(Default)]
 enum VoiceState {
     #[default]
@@ -463,6 +474,9 @@ struct XdDesktop {
     secrets_panel: Option<SecretsPanel>,
     devices_panel: Option<DevicesPanel>,
     auth_providers: Vec<AuthProvider>,
+    cli_versions: Vec<CliVersion>,
+    cli_versions_loading: bool,
+    cli_versions_error: Option<String>,
     auth_input_text: String,
     voice_input: VoiceInput,
     voice_applying_text: bool,
@@ -738,6 +752,9 @@ impl XdDesktop {
             secrets_panel: None,
             devices_panel: None,
             auth_providers: Vec::new(),
+            cli_versions: Vec::new(),
+            cli_versions_loading: false,
+            cli_versions_error: None,
             auth_input_text: String::new(),
             voice_input: VoiceInput::default(),
             voice_applying_text: false,
@@ -899,6 +916,10 @@ impl XdDesktop {
                     panel.mutating = None;
                     panel.error = Some("Paired devices disconnected.".into());
                 }
+                if self.auth_open {
+                    self.cli_versions_loading = false;
+                    self.cli_versions_error = Some("Assistant versions disconnected.".into());
+                }
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -945,6 +966,7 @@ impl XdDesktop {
                     | RequestKind::VoiceMutation { .. }
                     | RequestKind::AgentSecrets { .. }
                     | RequestKind::SetAgentSecrets { .. }
+                    | RequestKind::AgentClis
                     | RequestKind::Devices
                     | RequestKind::RenameDevice { .. }
                     | RequestKind::RevokeDevice { .. }
@@ -1224,6 +1246,13 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
+                RequestKind::AgentClis => {
+                    self.cli_versions_loading = false;
+                    self.cli_versions_error = value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
                 RequestKind::RenameDevice { device_id }
                 | RequestKind::RevokeDevice { device_id } => {
                     if let Some(panel) = &mut self.devices_panel
@@ -1421,6 +1450,7 @@ impl XdDesktop {
             }
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
+            RequestKind::AgentClis => self.apply_cli_versions(&value),
             RequestKind::AgentSecrets { folder_id }
                 if self
                     .secrets_panel
@@ -2387,6 +2417,7 @@ impl XdDesktop {
                 }
             }
             "agent-auth-changed" => self.apply_auth_provider(&body),
+            "agent-cli-changed" => self.apply_cli_version(&body),
             _ => {}
         }
         cx.notify();
@@ -2428,6 +2459,45 @@ impl XdDesktop {
             self.auth_providers.push(provider);
         }
         self.sync_active_auth_state();
+    }
+
+    fn apply_cli_versions(&mut self, value: &Value) {
+        match serde_json::from_value::<Vec<CliVersion>>(
+            value.get("providers").cloned().unwrap_or_default(),
+        ) {
+            Ok(versions) => {
+                self.cli_versions = versions;
+                self.cli_versions_loading = self
+                    .cli_versions
+                    .iter()
+                    .any(|version| version.state == "checking");
+                self.cli_versions_error = None;
+            }
+            Err(error) => {
+                self.cli_versions_loading = false;
+                self.cli_versions_error = Some(format!("Invalid assistant versions: {error}"));
+            }
+        }
+    }
+
+    fn apply_cli_version(&mut self, value: &Value) {
+        let Ok(version) = serde_json::from_value::<CliVersion>(value.clone()) else {
+            return;
+        };
+        if let Some(existing) = self
+            .cli_versions
+            .iter_mut()
+            .find(|existing| existing.provider == version.provider)
+        {
+            *existing = version;
+        } else {
+            self.cli_versions.push(version);
+        }
+        self.cli_versions_loading = self
+            .cli_versions
+            .iter()
+            .any(|version| version.state == "checking");
+        self.cli_versions_error = None;
     }
 
     fn sync_active_auth_state(&mut self) {
@@ -2870,10 +2940,43 @@ impl XdDesktop {
         self.auth_open = !self.auth_open;
         if self.auth_open {
             self.settings_open = false;
+            self.cli_versions_loading = true;
+            self.cli_versions_error = None;
             if let Some(daemon) = &self.daemon
                 && let Err(error) = daemon.agent_auth()
             {
                 self.model.connection_error = Some(error);
+            }
+            if let Some(daemon) = &self.daemon
+                && let Err(error) = daemon.agent_clis()
+            {
+                self.cli_versions_loading = false;
+                self.cli_versions_error = Some(error);
+            }
+            if self.daemon.is_none() {
+                self.cli_versions_loading = false;
+                self.cli_versions_error = Some("xd-dev is not connected to a daemon.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn refresh_cli_versions(&mut self, cx: &mut Context<Self>) {
+        if self.cli_versions_loading {
+            return;
+        }
+        self.cli_versions_loading = true;
+        self.cli_versions_error = None;
+        match self.daemon.as_ref() {
+            Some(daemon) => {
+                if let Err(error) = daemon.agent_clis() {
+                    self.cli_versions_loading = false;
+                    self.cli_versions_error = Some(error);
+                }
+            }
+            None => {
+                self.cli_versions_loading = false;
+                self.cli_versions_error = Some("xd-dev is not connected to a daemon.".into());
             }
         }
         cx.notify();
@@ -9649,6 +9752,51 @@ impl Render for XdDesktop {
                         .into_any_element()
                 })
                 .collect::<Vec<_>>();
+            let cli_rows = self
+                .cli_versions
+                .iter()
+                .enumerate()
+                .map(|(index, version)| {
+                    let failed = version.state == "failed";
+                    let detail = if version.state == "checking" {
+                        "Checking…".to_owned()
+                    } else if failed {
+                        version
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| "Version check failed".into())
+                    } else if let Some(version) = &version.version {
+                        version.clone()
+                    } else {
+                        version
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| "Version unavailable".into())
+                    };
+                    div()
+                        .id(("assistant-cli-version", index))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(version.display_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family("monospace")
+                                .text_xs()
+                                .text_color(rgb(if failed { 0xefaaaa } else { TEXT }))
+                                .child(detail),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
             div()
                 .absolute()
                 .inset_0()
@@ -9690,6 +9838,78 @@ impl Render for XdDesktop {
                                         .on_click(cx.listener(|this, _, _, cx| this.toggle_auth(cx)))
                                         .child("×"),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(TEXT))
+                                                        .child("Bundled assistant CLIs"),
+                                                )
+                                                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                                    "Updated only when xd-dev updates.",
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("refresh-assistant-cli-versions")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_lg()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .when(!self.cli_versions_loading, |button| {
+                                                    button.cursor_pointer().hover(|style| {
+                                                        style
+                                                            .bg(rgb(SURFACE_HIGH))
+                                                            .text_color(rgb(TEXT))
+                                                    })
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.refresh_cli_versions(cx);
+                                                }))
+                                                .child(if self.cli_versions_loading {
+                                                    "Checking…"
+                                                } else {
+                                                    "Refresh"
+                                                }),
+                                        ),
+                                )
+                                .when(cli_rows.is_empty(), |card| {
+                                    card.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child("Checking bundled versions…"),
+                                    )
+                                })
+                                .children(cli_rows)
+                                .when_some(self.cli_versions_error.clone(), |card, error| {
+                                    card.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xefaaaa))
+                                            .child(error),
+                                    )
+                                }),
                         )
                         .child(
                             div()

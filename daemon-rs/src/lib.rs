@@ -21,6 +21,7 @@ use thiserror::Error;
 pub mod agent;
 mod ask;
 mod auth;
+mod cli_versions;
 mod git_draft;
 mod runtime;
 mod secrets;
@@ -31,6 +32,7 @@ mod workflow;
 mod worktree_name;
 
 use auth::AuthManager;
+use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 pub use runtime::TurnRuntime;
 use secrets::SecretsStore;
@@ -79,6 +81,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
+    cli_versions: CliVersions,
     workflows: WorkflowStatuses,
     terminals: TerminalManager,
     voice: VoiceService,
@@ -105,6 +108,7 @@ impl Engine {
         Self {
             store: None,
             auth: AuthManager::new(events.clone()),
+            cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), None),
@@ -123,6 +127,7 @@ impl Engine {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::default());
         let auth = AuthManager::new(events.clone());
+        let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
         let engine = Self {
@@ -133,6 +138,7 @@ impl Engine {
             )),
             store: Some(store),
             auth,
+            cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), data_directory),
@@ -199,6 +205,7 @@ impl Engine {
                 }
             }
             Some("agent-auth") => self.auth.snapshots(),
+            Some("agent-clis") => self.cli_versions.snapshots(),
             Some("agent-auth-refresh") => {
                 let provider = request.get("provider").and_then(Value::as_str);
                 match provider {

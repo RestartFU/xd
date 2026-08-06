@@ -23,6 +23,7 @@ Current milestone:
 - chat-scoped Claude slash-command discovery with filtered composer suggestions;
 - daemon-persisted assistant, model, effort, access, and plan controls;
 - Rust-owned Codex/Claude account status, sign-in, cancellation, authorization-code input, and sign-out;
+- bounded, asynchronous bundled Codex/Claude version inventory in Assistant Accounts;
 - daemon-owned Whisper base.en download and bounded streaming transcription with live partial text;
 - native GPUI microphone capture with cancel/stop controls and synchronized live dictation drafts;
 - cross-device text draft synchronization with a short local debounce;
