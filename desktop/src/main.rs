@@ -521,7 +521,7 @@ enum RemoteState {
     Offline,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 enum ChatEndpoint {
     #[default]
     Local,
@@ -719,8 +719,9 @@ struct XdDesktop {
     workspace_create_submitting: bool,
     workspace_clone_status: Option<String>,
     workspace_path_generation: u64,
-    pending_clone_chats: HashSet<String>,
-    workspace_clone_outcomes: HashMap<String, Option<String>>,
+    pending_clone_requests: HashMap<ChatEndpoint, String>,
+    pending_clone_chats: HashSet<(ChatEndpoint, String)>,
+    workspace_clone_outcomes: HashMap<(ChatEndpoint, String), Option<String>>,
     creating_chat_folder: Option<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
@@ -1091,6 +1092,7 @@ impl XdDesktop {
             workspace_create_submitting: false,
             workspace_clone_status: None,
             workspace_path_generation: 0,
+            pending_clone_requests: HashMap::new(),
             pending_clone_chats: HashSet::new(),
             workspace_clone_outcomes: HashMap::new(),
             creating_chat_folder: None,
@@ -1132,7 +1134,11 @@ impl XdDesktop {
     }
 
     fn active_daemon(&self) -> Option<&DaemonHandle> {
-        match self.active_endpoint {
+        self.endpoint_daemon(self.active_endpoint)
+    }
+
+    fn endpoint_daemon(&self, endpoint: ChatEndpoint) -> Option<&DaemonHandle> {
+        match endpoint {
             ChatEndpoint::Local => self.daemon.as_ref(),
             ChatEndpoint::Remote => self.remote_daemon.as_ref(),
         }
@@ -1329,6 +1335,7 @@ impl XdDesktop {
             self.creating_chat_folder = None;
             self.workspace_context_folder = None;
             self.workspace_defaults = None;
+            self.workspace_clone_status = None;
             self.search = None;
             self.secrets_panel = None;
             self.auth_open = false;
@@ -1619,7 +1626,11 @@ impl XdDesktop {
                         self.handle_reply(kind, body, attachments, cx);
                     }
                 } else {
-                    Self::apply_passive_reply(&mut self.inactive_model, &kind, Value::Object(body));
+                    let value = Value::Object(body);
+                    if !self.handle_workspace_create_reply(ChatEndpoint::Remote, &kind, &value, cx)
+                    {
+                        Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
+                    }
                 }
             }
             DaemonUpdate::Event {
@@ -1633,7 +1644,11 @@ impl XdDesktop {
                         self.handle_event(&name, body, attachments, cx);
                     }
                 } else {
-                    Self::apply_passive_event(&mut self.inactive_model, &name, &body);
+                    if name == "folder-clone" {
+                        self.handle_folder_clone_event(ChatEndpoint::Remote, &body);
+                    } else {
+                        Self::apply_passive_event(&mut self.inactive_model, &name, &body);
+                    }
                     if name == "turn-finished"
                         && let Some(daemon) = &self.remote_daemon
                     {
@@ -1727,11 +1742,15 @@ impl XdDesktop {
                     if Self::local_admin_reply(&kind) {
                         self.handle_reply(kind, body, attachments, cx);
                     } else {
-                        Self::apply_passive_reply(
-                            &mut self.inactive_model,
+                        let value = Value::Object(body);
+                        if !self.handle_workspace_create_reply(
+                            ChatEndpoint::Local,
                             &kind,
-                            Value::Object(body),
-                        );
+                            &value,
+                            cx,
+                        ) {
+                            Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
+                        }
                     }
                 }
                 DaemonUpdate::Event {
@@ -1743,7 +1762,11 @@ impl XdDesktop {
                     if Self::local_admin_event(&name) {
                         self.handle_event(&name, body, attachments, cx);
                     } else {
-                        Self::apply_passive_event(&mut self.inactive_model, &name, &body);
+                        if name == "folder-clone" {
+                            self.handle_folder_clone_event(ChatEndpoint::Local, &body);
+                        } else {
+                            Self::apply_passive_event(&mut self.inactive_model, &name, &body);
+                        }
                         if name == "turn-finished"
                             && let Some(daemon) = &self.daemon
                         {
@@ -1779,8 +1802,11 @@ impl XdDesktop {
                 self.workspace_context_loading = false;
                 self.workspace_context_submitting = false;
                 self.workspace_clone_status = None;
-                self.pending_clone_chats.clear();
-                self.workspace_clone_outcomes.clear();
+                self.pending_clone_requests.remove(&ChatEndpoint::Local);
+                self.pending_clone_chats
+                    .retain(|(endpoint, _)| *endpoint != ChatEndpoint::Local);
+                self.workspace_clone_outcomes
+                    .retain(|(endpoint, _), _| *endpoint != ChatEndpoint::Local);
                 self.pending_speech = None;
                 Arc::make_mut(&mut self.workflow_pending).clear();
                 if let Ok(mut images) = self.message_images.lock() {
@@ -1854,6 +1880,9 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         let value = Value::Object(body);
+        if self.handle_workspace_create_reply(self.active_endpoint, &kind, &value, cx) {
+            return;
+        }
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
             if !matches!(
                 &kind,
@@ -1907,17 +1936,6 @@ impl XdDesktop {
                     {
                         self.pending_speech = None;
                     }
-                }
-                RequestKind::NewFolder {
-                    name,
-                    repo,
-                    repo_url,
-                } if self.creating_workspace
-                    && self.workspace_create_name.trim() == name
-                    && optional_trimmed(&self.workspace_create_repo) == repo.as_deref()
-                    && optional_trimmed(&self.workspace_create_clone) == repo_url.as_deref() =>
-                {
-                    self.workspace_create_submitting = false;
                 }
                 RequestKind::NewChat { folder_id, title }
                     if self.creating_chat_folder.as_deref() == Some(folder_id)
@@ -2890,48 +2908,6 @@ impl XdDesktop {
                 }
                 self.request_tree();
             }
-            RequestKind::NewFolder {
-                name,
-                repo,
-                repo_url,
-            } => {
-                let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
-                    self.model.connection_error =
-                        Some("The daemon returned no workspace id.".into());
-                    return;
-                };
-                if self.creating_workspace
-                    && self.workspace_create_name.trim() == name
-                    && optional_trimmed(&self.workspace_create_repo) == repo.as_deref()
-                    && optional_trimmed(&self.workspace_create_clone) == repo_url.as_deref()
-                {
-                    self.cancel_workspace_create(cx);
-                }
-                if value.get("cloning").and_then(Value::as_str).is_some() {
-                    match self.workspace_clone_outcomes.remove(folder_id) {
-                        Some(None) => {
-                            self.workspace_clone_status = Some("Repository cloned".into());
-                            if let Some(daemon) = self.active_daemon().cloned()
-                                && let Err(error) = daemon.new_chat(folder_id, "New Chat")
-                            {
-                                self.model.connection_error = Some(error);
-                            }
-                        }
-                        Some(Some(error)) => {
-                            self.workspace_clone_status = None;
-                            self.model.connection_error = Some(error);
-                        }
-                        None => {
-                            self.pending_clone_chats.insert(folder_id.to_owned());
-                            self.workspace_clone_status = Some("Cloning repository…".into());
-                        }
-                    }
-                } else if let Some(daemon) = self.active_daemon().cloned()
-                    && let Err(error) = daemon.new_chat(folder_id, "New Chat")
-                {
-                    self.model.connection_error = Some(error);
-                }
-            }
             RequestKind::NewChat { folder_id, title } => {
                 let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
                     self.model.connection_error = Some("The daemon returned no chat id.".into());
@@ -3121,6 +3097,143 @@ impl XdDesktop {
                 {
                     panel.closed = true;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_workspace_create_reply(
+        &mut self,
+        endpoint: ChatEndpoint,
+        kind: &RequestKind,
+        value: &Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let RequestKind::NewFolder {
+            name,
+            repo,
+            repo_url,
+        } = kind
+        else {
+            return false;
+        };
+        let form_matches = endpoint == self.active_endpoint
+            && self.creating_workspace
+            && self.workspace_create_name.trim() == name
+            && optional_trimmed(&self.workspace_create_repo) == repo.as_deref()
+            && optional_trimmed(&self.workspace_create_clone) == repo_url.as_deref();
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            self.pending_clone_requests.remove(&endpoint);
+            if form_matches {
+                self.workspace_create_submitting = false;
+            }
+            self.endpoint_model_mut(endpoint).connection_error = Some(
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("The xd daemon rejected the workspace.")
+                    .to_owned(),
+            );
+            return true;
+        }
+        let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
+            self.pending_clone_requests.remove(&endpoint);
+            self.endpoint_model_mut(endpoint).connection_error =
+                Some("The daemon returned no workspace id.".into());
+            return true;
+        };
+        if form_matches {
+            self.cancel_workspace_create(cx);
+        }
+        self.pending_clone_requests.remove(&endpoint);
+        let key = (endpoint, folder_id.to_owned());
+        if value.get("cloning").and_then(Value::as_str).is_some() {
+            match self.workspace_clone_outcomes.remove(&key) {
+                Some(None) => {
+                    if endpoint == self.active_endpoint {
+                        self.workspace_clone_status = Some("Repository cloned".into());
+                    }
+                    if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
+                        && let Err(error) = daemon.new_chat(folder_id, "New Chat")
+                    {
+                        self.endpoint_model_mut(endpoint).connection_error = Some(error);
+                    }
+                }
+                Some(Some(error)) => {
+                    if endpoint == self.active_endpoint {
+                        self.workspace_clone_status = None;
+                    }
+                    self.endpoint_model_mut(endpoint).connection_error = Some(error);
+                }
+                None => {
+                    self.pending_clone_chats.insert(key);
+                    if endpoint == self.active_endpoint {
+                        self.workspace_clone_status = Some("Cloning repository…".into());
+                    }
+                }
+            }
+        } else if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
+            && let Err(error) = daemon.new_chat(folder_id, "New Chat")
+        {
+            self.endpoint_model_mut(endpoint).connection_error = Some(error);
+        }
+        true
+    }
+
+    fn handle_folder_clone_event(&mut self, endpoint: ChatEndpoint, body: &Value) {
+        let folder_id = body.get("folder").and_then(Value::as_str);
+        let key = folder_id.map(|folder_id| (endpoint, folder_id.to_owned()));
+        let event_url = body.get("url").and_then(Value::as_str);
+        let preserve_outcome = key
+            .as_ref()
+            .is_some_and(|key| self.pending_clone_chats.contains(key))
+            || self
+                .pending_clone_requests
+                .get(&endpoint)
+                .is_some_and(|url| Some(url.as_str()) == event_url);
+        match body.get("state").and_then(Value::as_str) {
+            Some("cloning") => {
+                if endpoint == self.active_endpoint {
+                    self.workspace_clone_status = Some("Cloning repository…".into());
+                }
+            }
+            Some("ready") => {
+                if endpoint == self.active_endpoint {
+                    self.workspace_clone_status = Some("Repository cloned".into());
+                }
+                if preserve_outcome && let Some(key) = &key {
+                    self.workspace_clone_outcomes.insert(key.clone(), None);
+                }
+                if let Some(key) = &key
+                    && self.pending_clone_chats.remove(key)
+                {
+                    if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
+                        && let Err(error) = daemon.new_chat(&key.1, "New Chat")
+                    {
+                        self.endpoint_model_mut(endpoint).connection_error = Some(error);
+                    }
+                    self.workspace_clone_outcomes.remove(key);
+                }
+            }
+            Some("failed") => {
+                let error = body
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Git could not clone that repository.")
+                    .to_owned();
+                if preserve_outcome && let Some(key) = &key {
+                    self.workspace_clone_outcomes
+                        .insert(key.clone(), Some(error.clone()));
+                }
+                if let Some(key) = &key
+                    && self.pending_clone_chats.remove(key)
+                {
+                    self.workspace_clone_outcomes.remove(key);
+                }
+                if endpoint == self.active_endpoint {
+                    self.workspace_clone_status = None;
+                }
+                self.endpoint_model_mut(endpoint).connection_error = Some(error);
             }
             _ => {}
         }
@@ -3339,60 +3452,7 @@ impl XdDesktop {
                 }
             }
             "shortcuts-changed" => self.request_shortcuts(),
-            "folder-clone" => {
-                let folder_id = body.get("folder").and_then(Value::as_str);
-                let preserve_outcome = folder_id
-                    .is_some_and(|folder_id| self.pending_clone_chats.contains(folder_id))
-                    || (self.workspace_create_submitting
-                        && optional_trimmed(&self.workspace_create_clone)
-                            == body.get("url").and_then(Value::as_str));
-                match body.get("state").and_then(Value::as_str) {
-                    Some("cloning") => {
-                        self.workspace_clone_status = Some("Cloning repository…".into());
-                    }
-                    Some("ready") => {
-                        self.workspace_clone_status = Some("Repository cloned".into());
-                        if preserve_outcome && let Some(folder_id) = folder_id {
-                            self.workspace_clone_outcomes
-                                .insert(folder_id.to_owned(), None);
-                        }
-                        if folder_id
-                            .is_some_and(|folder_id| self.pending_clone_chats.remove(folder_id))
-                        {
-                            if let (Some(daemon), Some(folder_id)) =
-                                (self.active_daemon().cloned(), folder_id)
-                                && let Err(error) = daemon.new_chat(folder_id, "New Chat")
-                            {
-                                self.model.connection_error = Some(error);
-                            }
-                            if let Some(folder_id) = folder_id {
-                                self.workspace_clone_outcomes.remove(folder_id);
-                            }
-                        }
-                    }
-                    Some("failed") => {
-                        let error = body
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Git could not clone that repository.")
-                            .to_owned();
-                        if preserve_outcome && let Some(folder_id) = folder_id {
-                            self.workspace_clone_outcomes
-                                .insert(folder_id.to_owned(), Some(error.clone()));
-                        }
-                        if folder_id
-                            .is_some_and(|folder_id| self.pending_clone_chats.remove(folder_id))
-                        {
-                            if let Some(folder_id) = folder_id {
-                                self.workspace_clone_outcomes.remove(folder_id);
-                            }
-                        }
-                        self.workspace_clone_status = None;
-                        self.model.connection_error = Some(error);
-                    }
-                    _ => {}
-                }
-            }
+            "folder-clone" => self.handle_folder_clone_event(self.active_endpoint, &body),
             "agent-auth-changed" => self.apply_auth_provider(&body),
             "agent-cli-changed" => self.apply_cli_version(&body),
             "daemon-update" => self.apply_self_update(&body),
@@ -3741,6 +3801,12 @@ impl XdDesktop {
             .and_then(|daemon| daemon.new_folder(name, repo.as_deref(), repo_url.as_deref()));
         match result {
             Ok(()) => {
+                if let Some(repo_url) = &repo_url {
+                    self.pending_clone_requests
+                        .insert(self.active_endpoint, repo_url.clone());
+                } else {
+                    self.pending_clone_requests.remove(&self.active_endpoint);
+                }
                 self.workspace_create_name = name.to_owned();
                 self.workspace_create_repo = repo.unwrap_or_default();
                 self.workspace_create_clone = repo_url.unwrap_or_default();
@@ -14923,6 +14989,21 @@ mod tests {
         assert!(remote.chats[0].working);
         assert_eq!(ChatEndpoint::Local.other(), ChatEndpoint::Remote);
         assert_eq!(ChatEndpoint::Remote.other(), ChatEndpoint::Local);
+    }
+
+    #[test]
+    fn workspace_clone_tracking_keeps_identical_folder_ids_isolated() {
+        let local = (ChatEndpoint::Local, "same-folder".to_owned());
+        let remote = (ChatEndpoint::Remote, "same-folder".to_owned());
+        let mut pending = HashSet::new();
+        pending.insert(local.clone());
+        assert!(pending.contains(&local));
+        assert!(!pending.contains(&remote));
+
+        let mut outcomes = HashMap::new();
+        outcomes.insert(local, None::<String>);
+        outcomes.insert(remote, Some("remote clone failed".to_owned()));
+        assert_eq!(outcomes.len(), 2);
     }
 
     #[test]
