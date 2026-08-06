@@ -95,6 +95,7 @@ pub struct Engine {
     voice: VoiceService,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
+    git_actions: Arc<Mutex<()>>,
     self_update: SelfUpdate,
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
@@ -135,6 +136,7 @@ impl Engine {
             voice: VoiceService::new(events.clone(), None),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
+            git_actions: Arc::new(Mutex::new(())),
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
@@ -169,6 +171,7 @@ impl Engine {
             voice: VoiceService::new(events.clone(), data_directory),
             secrets,
             git_drafts,
+            git_actions: Arc::new(Mutex::new(())),
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
@@ -215,6 +218,7 @@ impl Engine {
             Some("image-read") => self.read(|store| store.image_read(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
+            Some("git-state") => self.git_state(&request),
             Some("git-pr-status") => self.read(|store| store.git_pull_request_status(&request)),
             Some("git-pr-create") => self.read(|store| store.git_create_pull_request(&request)),
             Some("git-draft") => self
@@ -229,6 +233,7 @@ impl Engine {
             }
             Some("git-commit") => self.read(|store| store.git_commit(&request)),
             Some("git-push") => self.read(|store| store.git_push(&request)),
+            Some("git-action") => self.git_action(&request),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
             Some("agent-secrets") => match self.secret_folder(&request) {
                 Ok(folder) => self
@@ -582,6 +587,125 @@ impl Engine {
         self.workflows
             .start(owner, text)
             .unwrap_or_else(error_reply)
+    }
+
+    fn git_state(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "git-state needs a chat id.") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        if let Err(error) = store.chat(chat_id) {
+            return error_reply(error);
+        }
+        let chat_id = chat_id.to_owned();
+        let request_id = request
+            .get("request")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let store = store.clone();
+        let events = self.events.clone();
+        thread::Builder::new()
+            .name("xd-git-state".into())
+            .spawn(move || {
+                let mut event = store
+                    .git_action_state(&chat_id)
+                    .unwrap_or_else(|_| hidden_git_state());
+                event["event"] = Value::String("git-state".into());
+                event["chat"] = Value::String(chat_id);
+                if let Some(request_id) = request_id {
+                    event["request"] = Value::String(request_id);
+                }
+                events.publish(event);
+            })
+            .map(|_| json!({"ok": true}))
+            .unwrap_or_else(|error| error_reply(format!("Cannot refresh Git state: {error}")))
+    }
+
+    fn git_action(&self, request: &Value) -> Value {
+        let chat_id =
+            match required_string(request, "chat", "git-action needs a chat id and action.") {
+                Ok(chat_id) => chat_id,
+                Err(error) => return error_reply(error),
+            };
+        let action =
+            match required_string(request, "action", "git-action needs a chat id and action.") {
+                Ok(action) if matches!(action, "commit" | "push" | "create-pr" | "view-pr") => {
+                    action
+                }
+                Ok(_) => return error_reply("No such Git action."),
+                Err(error) => return error_reply(error),
+            };
+        if action == "commit"
+            && request
+                .get("message")
+                .and_then(Value::as_str)
+                .is_none_or(|message| message.trim().is_empty())
+        {
+            return error_reply("Write a commit message first.");
+        }
+        if action == "create-pr"
+            && request
+                .get("title")
+                .and_then(Value::as_str)
+                .is_none_or(|title| title.trim().is_empty())
+        {
+            return error_reply("Write a pull request title first.");
+        }
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        if let Err(error) = store.chat(chat_id) {
+            return error_reply(error);
+        }
+        let request = request.clone();
+        let chat_id = chat_id.to_owned();
+        let action = action.to_owned();
+        let request_id = request
+            .get("request")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let store = store.clone();
+        let events = self.events.clone();
+        let action_lock = self.git_actions.clone();
+        thread::Builder::new()
+            .name("xd-git-action".into())
+            .spawn(move || {
+                let mut event = json!({
+                    "event": "git-action-finished",
+                    "chat": chat_id,
+                    "action": action,
+                    "success": false,
+                });
+                if let Some(request_id) = request_id {
+                    event["request"] = Value::String(request_id);
+                }
+                let result = action_lock
+                    .lock()
+                    .map_err(|_| "Git action state is unavailable.".to_owned())
+                    .and_then(|_guard| {
+                        store
+                            .perform_git_action(&request)
+                            .map_err(|error| error.to_string())
+                    });
+                match result {
+                    Ok(state) => {
+                        if let (Some(event), Some(state)) =
+                            (event.as_object_mut(), state.as_object())
+                        {
+                            event.extend(state.clone());
+                            event.insert("chat".into(), Value::String(chat_id));
+                            event.insert("success".into(), Value::Bool(true));
+                        }
+                    }
+                    Err(error) => event["error"] = Value::String(error),
+                }
+                events.publish(event);
+            })
+            .map(|_| json!({"ok": true}))
+            .unwrap_or_else(|error| error_reply(format!("Cannot start Git action: {error}")))
     }
 
     fn terminal_list(&self, request: &Value) -> Value {
@@ -1110,6 +1234,15 @@ fn required_string<'a>(request: &'a Value, key: &str, message: &str) -> Result<&
 
 fn error_reply(error: impl std::fmt::Display) -> Value {
     json!({"ok": false, "error": error.to_string()})
+}
+
+fn hidden_git_state() -> Value {
+    json!({
+        "visible": false,
+        "action": "none",
+        "label": "Up to date",
+        "enabled": false,
+    })
 }
 
 #[cfg(test)]

@@ -1635,6 +1635,58 @@ impl StateStore {
         repository_status(&workdir)
     }
 
+    pub(crate) fn git_action_state(&self, chat_id: &str) -> Result<Value, StorageError> {
+        let workdir = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            resolve_chat_workdir(&database, &self.workspace_root, chat_id)?
+        };
+        Ok(repository_action_state(Path::new(&workdir)))
+    }
+
+    pub(crate) fn perform_git_action(&self, request: &Value) -> Result<Value, StorageError> {
+        let chat_id = required_string(request, "chat", "git-action needs a chat id and action.")?;
+        let action = required_string(request, "action", "git-action needs a chat id and action.")?;
+        if !matches!(action, "commit" | "push" | "create-pr" | "view-pr") {
+            return Err(StorageError::InvalidRequest("No such Git action.".into()));
+        }
+
+        let current = self.git_action_state(chat_id)?;
+        if current.get("visible").and_then(Value::as_bool) != Some(true)
+            || current.get("enabled").and_then(Value::as_bool) != Some(true)
+            || current.get("action").and_then(Value::as_str) != Some(action)
+        {
+            return Err(StorageError::InvalidRequest(
+                "Repository state changed. Try again.".into(),
+            ));
+        }
+
+        let result_url = match action {
+            "commit" => {
+                self.git_commit(request)?;
+                None
+            }
+            "push" => {
+                self.git_push(request)?;
+                None
+            }
+            "create-pr" => self
+                .git_create_pull_request(request)?
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            "view-pr" => current
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => unreachable!("validated Git action"),
+        };
+        let mut state = self.git_action_state(chat_id)?;
+        if let Some(url) = result_url {
+            state["url"] = Value::String(url);
+        }
+        Ok(state)
+    }
+
     pub fn git_pull_request_status(&self, request: &Value) -> Result<Value, StorageError> {
         let workdir = self.chat_repository(request, "git-pr-status needs a chat.")?;
         let (status, stdout, _) =
@@ -3724,6 +3776,66 @@ fn repository_status(workdir: &Path) -> Result<Value, StorageError> {
     }))
 }
 
+fn repository_action_state(workdir: &Path) -> Value {
+    let Ok(status) = repository_status(workdir) else {
+        return hidden_repository_action_state();
+    };
+    let branch = status
+        .get("branch")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if branch.is_empty() {
+        return hidden_repository_action_state();
+    }
+    let base = status
+        .get("base")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let upstream = status
+        .get("upstream")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ahead = status.get("ahead").and_then(Value::as_u64).unwrap_or(0);
+    let clean = status.get("clean").and_then(Value::as_bool) == Some(true);
+    let (action, label, url) = if !clean {
+        ("commit", "Commit", None)
+    } else if ahead > 0 || upstream.is_empty() {
+        ("push", "Push", None)
+    } else if branch != base {
+        let url = run_gh(workdir, &["pr", "view", "--json", "url", "--jq", ".url"])
+            .ok()
+            .filter(|(status, _, _)| status.success())
+            .and_then(|(_, stdout, _)| extract_web_url(&stdout));
+        if url.is_some() {
+            ("view-pr", "View PR", url)
+        } else {
+            ("create-pr", "Create PR", None)
+        }
+    } else {
+        ("none", "Up to date", None)
+    };
+    let mut state = json!({
+        "visible": true,
+        "action": action,
+        "label": label,
+        "enabled": action != "none",
+    });
+    if let Some(url) = url {
+        state["url"] = Value::String(url);
+    }
+    state
+}
+
+fn hidden_repository_action_state() -> Value {
+    json!({
+        "chat": Value::Null,
+        "visible": false,
+        "action": "none",
+        "label": "Up to date",
+        "enabled": false,
+    })
+}
+
 fn local_branch_name(reference: &str) -> &str {
     reference.strip_prefix("origin/").unwrap_or(reference)
 }
@@ -4890,6 +5002,11 @@ mod tests {
         assert_eq!(status["unstaged"], 1);
         assert_eq!(status["untracked"], 1);
         assert_eq!(status["clean"], false);
+        let action_state = store.git_action_state(&chat).unwrap();
+        assert_eq!(action_state["visible"], true);
+        assert_eq!(action_state["action"], "commit");
+        assert_eq!(action_state["label"], "Commit");
+        assert_eq!(action_state["enabled"], true);
         let draft = store
             .prepare_git_draft(&json!({
                 "chat": chat,
@@ -4931,9 +5048,13 @@ mod tests {
             Some("https://github.com/example/repo/pull/12".into())
         );
         let committed = store
-            .git_commit(&json!({"chat": chat, "message": "save changes"}))
+            .perform_git_action(&json!({
+                "chat": chat,
+                "action": "commit",
+                "message": "save changes"
+            }))
             .unwrap();
-        assert_eq!(committed["clean"], true);
+        assert_eq!(committed["action"], "push");
 
         let remote = fixture.root.join("remote.git");
         assert!(
@@ -4953,9 +5074,12 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let pushed = store.git_push(&json!({"chat": chat})).unwrap();
-        assert_eq!(pushed["upstream"], "origin/main");
-        assert_eq!(pushed["ahead"], 0);
+        let pushed = store
+            .perform_git_action(&json!({"chat": chat, "action": "push"}))
+            .unwrap();
+        assert_eq!(pushed["action"], "none");
+        assert_eq!(pushed["label"], "Up to date");
+        assert_eq!(pushed["enabled"], false);
         assert!(
             store
                 .diff_read(&json!({

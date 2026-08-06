@@ -540,6 +540,21 @@ reply with `ok` alone and broadcast a `tree` event.
 `set-shortcuts` replies with the resulting shortcut sets and broadcasts a
 `shortcuts-changed` event so open chats can refresh their buttons.
 
+### Git actions
+
+`git-state` takes a `chat` and an optional request correlation string. It
+acknowledges immediately, reads repository state away from the connection
+loop, and publishes `git-state` with `visible`, `action`, `label`, `enabled`,
+and an optional pull-request `url`.
+
+`git-action` takes a `chat`, one of `commit`, `push`, `create-pr`, or `view-pr`,
+and an optional request correlation string. Commits also require `message`;
+pull-request creation requires `title` and accepts `body`. It acknowledges
+immediately and publishes `git-action-finished`. Successful events contain the
+new repository action state and an optional URL; failures contain `success:
+false` and `error`. The daemon rechecks the advertised action before mutating
+the repository so a stale client cannot run the wrong operation.
+
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
 or one of its descendants, and the daemon rejects a destination name collision.
