@@ -13,6 +13,7 @@ Current milestone:
 - native GPUI application shell;
 - an isolated, app-owned Rust daemon and first-run state initialization;
 - clickable workspace/chat sidebar backed by real daemon tree data;
+- direct chat/workspace drag-and-drop with root drops and cycle-safe nesting;
 - persisted active-chat restoration with deletion-safe fallback;
 - persisted workspace expansion state with stale-folder cleanup;
 - workspace and chat creation controls with per-chat daemon-side working-directory selection;

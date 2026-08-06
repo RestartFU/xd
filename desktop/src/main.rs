@@ -517,6 +517,50 @@ enum SidebarTarget {
     Chat(String),
 }
 
+#[derive(Clone)]
+struct SidebarDrag {
+    target: SidebarTarget,
+    label: SharedString,
+    position: Point<gpui::Pixels>,
+}
+
+impl SidebarDrag {
+    fn new(target: SidebarTarget, label: impl Into<SharedString>) -> Self {
+        Self {
+            target,
+            label: label.into(),
+            position: Point::default(),
+        }
+    }
+
+    fn position(mut self, position: Point<gpui::Pixels>) -> Self {
+        self.position = position;
+        self
+    }
+}
+
+impl Render for SidebarDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .pl(self.position.x + px(10.0))
+            .pt(self.position.y + px(10.0))
+            .child(
+                div()
+                    .max_w(px(240.0))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgba(0x101013ee))
+                    .shadow_md()
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .child(self.label.clone()),
+            )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SidebarContextMenu {
     target: Option<SidebarTarget>,
@@ -6832,6 +6876,35 @@ impl XdDesktop {
         if self.sidebar_move_submitting || self.sidebar_move.as_ref() != Some(&target) {
             return;
         }
+        self.submit_sidebar_move(target, destination, cx);
+    }
+
+    fn drop_sidebar_item(
+        &mut self,
+        target: SidebarTarget,
+        destination: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_move_submitting
+            || !sidebar_drop_allowed(&self.model, &target, destination.as_deref())
+        {
+            return;
+        }
+        self.cancel_sidebar_edit(cx);
+        self.sidebar_context_menu = None;
+        self.pending_sidebar_delete = None;
+        self.sidebar_delete_submitting = false;
+        self.sidebar_move = Some(target.clone());
+        self.sidebar_move_destination = None;
+        self.submit_sidebar_move(target, destination, cx);
+    }
+
+    fn submit_sidebar_move(
+        &mut self,
+        target: SidebarTarget,
+        destination: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let result = self.active_daemon().map(|daemon| match &target {
             SidebarTarget::Folder(folder_id) => {
                 daemon.move_folder(folder_id, destination.as_deref())
@@ -9091,6 +9164,7 @@ impl Render for XdDesktop {
             && !workspace_context_submitting
             && self.model.connected;
         let workspace_defaults = self.workspace_defaults.clone();
+        let root_drop_model = self.model.clone();
         let mut tree_rows = Vec::new();
         let mut chat_row_index = 0_usize;
         for (folder_row_index, folder) in self.model.folders.clone().into_iter().enumerate() {
@@ -9186,9 +9260,13 @@ impl Render for XdDesktop {
             } else {
                 let menu_target = folder_target.clone();
                 let context_menu_target = folder_target.clone();
+                let dragged_folder = SidebarDrag::new(folder_target.clone(), folder_name.clone());
+                let drop_folder_id = folder.id.clone();
+                let drop_model = self.model.clone();
                 let moving_folder = sidebar_move.as_ref() == Some(&folder_target);
                 tree_rows.push(
                     div()
+                        .id(("folder-row", folder_row_index))
                         .min_w_0()
                         .px_3()
                         .ml(px(indent))
@@ -9217,8 +9295,11 @@ impl Render for XdDesktop {
                                 .min_w_0()
                                 .flex_1()
                                 .overflow_hidden()
-                                .cursor_pointer()
+                                .cursor_move()
                                 .hover(|style| style.text_color(rgb(0xb9c7ff)))
+                                .on_drag(dragged_folder, |drag: &SidebarDrag, position, _, cx| {
+                                    cx.new(|_| drag.clone().position(position))
+                                })
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                     if !event.is_right_click() {
                                         this.toggle_folder_collapsed(
@@ -9275,6 +9356,28 @@ impl Render for XdDesktop {
                                 )
                                 .child("···"),
                         )
+                        .can_drop(move |value, _, _| {
+                            value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                                sidebar_drop_allowed(
+                                    &drop_model,
+                                    &drag.target,
+                                    Some(&drop_folder_id),
+                                )
+                            })
+                        })
+                        .drag_over::<SidebarDrag>(move |style, _, _, _| {
+                            style.bg(rgb(SURFACE_HIGH)).border_color(rgb(accent))
+                        })
+                        .on_drop(cx.listener({
+                            let destination = folder.id.clone();
+                            move |this, drag: &SidebarDrag, _, cx| {
+                                this.drop_sidebar_item(
+                                    drag.target.clone(),
+                                    Some(destination.clone()),
+                                    cx,
+                                );
+                            }
+                        }))
                         .into_any_element(),
                 );
                 if moving_folder {
@@ -9963,6 +10066,7 @@ impl Render for XdDesktop {
                 }
                 let menu_target = chat_target.clone();
                 let context_menu_target = chat_target.clone();
+                let dragged_chat = SidebarDrag::new(chat_target.clone(), title.clone());
                 let moving_chat = sidebar_move.as_ref() == Some(&chat_target);
                 tree_rows.push(
                     div()
@@ -9999,7 +10103,10 @@ impl Render for XdDesktop {
                                 .min_w_0()
                                 .flex_1()
                                 .overflow_hidden()
-                                .cursor_pointer()
+                                .cursor_move()
+                                .on_drag(dragged_chat, |drag: &SidebarDrag, position, _, cx| {
+                                    cx.new(|_| drag.clone().position(position))
+                                })
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                     if !event.is_right_click() {
                                         this.select_chat(chat_id.clone(), cx);
@@ -10552,6 +10659,17 @@ impl Render for XdDesktop {
                     .id("workspace-tree")
                     .flex_1()
                     .overflow_y_scroll()
+                    .can_drop(move |value, _, _| {
+                        value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                            sidebar_drop_allowed(&root_drop_model, &drag.target, None)
+                        })
+                    })
+                    .drag_over::<SidebarDrag>(move |style, _, _, _| style.border_color(rgb(accent)))
+                    .on_drop(cx.listener(|this, drag: &SidebarDrag, _, cx| {
+                        if matches!(drag.target, SidebarTarget::Folder(_)) {
+                            this.drop_sidebar_item(drag.target.clone(), None, cx);
+                        }
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -17173,6 +17291,54 @@ fn sidebar_move_applied(
     }
 }
 
+fn sidebar_drop_allowed(
+    model: &AppModel,
+    target: &SidebarTarget,
+    destination: Option<&str>,
+) -> bool {
+    match target {
+        SidebarTarget::Folder(folder_id) => {
+            let Some(folder) = model.folders.iter().find(|folder| &folder.id == folder_id) else {
+                return false;
+            };
+            match destination {
+                None => folder.parent.is_some(),
+                Some(destination) => {
+                    if folder_id == destination
+                        || folder.parent.as_deref() == Some(destination)
+                        || !model.folders.iter().any(|folder| folder.id == destination)
+                    {
+                        return false;
+                    }
+                    let mut current = Some(destination);
+                    for _ in 0..=model.folders.len() {
+                        let Some(id) = current else {
+                            return true;
+                        };
+                        if id == folder_id {
+                            return false;
+                        }
+                        current = model
+                            .folders
+                            .iter()
+                            .find(|folder| folder.id == id)
+                            .and_then(|folder| folder.parent.as_deref());
+                    }
+                    false
+                }
+            }
+        }
+        SidebarTarget::Chat(chat_id) => destination.is_some_and(|destination| {
+            model.folders.iter().any(|folder| folder.id == destination)
+                && model
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == chat_id)
+                    .is_some_and(|chat| chat.folder != destination)
+        }),
+    }
+}
+
 fn folder_hidden_by_collapse(
     folders: &[Folder],
     collapsed: &HashSet<String>,
@@ -17694,6 +17860,78 @@ mod tests {
         assert!(!sidebar_move_applied(
             &model,
             &SidebarTarget::Chat("chat-1".into()),
+            None
+        ));
+    }
+
+    #[test]
+    fn sidebar_drag_rejects_cycles_roots_and_no_op_moves() {
+        let model = AppModel {
+            folders: vec![
+                Folder {
+                    id: "root".into(),
+                    name: "Root".into(),
+                    parent: None,
+                },
+                Folder {
+                    id: "child".into(),
+                    name: "Child".into(),
+                    parent: Some("root".into()),
+                },
+                Folder {
+                    id: "other".into(),
+                    name: "Other".into(),
+                    parent: None,
+                },
+            ],
+            chats: vec![xd_desktop::model::ChatSummary {
+                id: "chat".into(),
+                folder: "child".into(),
+                title: Some("Chat".into()),
+                backend: "codex".into(),
+                working: false,
+            }],
+            ..Default::default()
+        };
+
+        assert!(sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Folder("child".into()),
+            None
+        ));
+        assert!(sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Folder("child".into()),
+            Some("other")
+        ));
+        assert!(!sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Folder("root".into()),
+            None
+        ));
+        assert!(!sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Folder("root".into()),
+            Some("child")
+        ));
+        assert!(!sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Folder("child".into()),
+            Some("root")
+        ));
+        assert!(sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Chat("chat".into()),
+            Some("other")
+        ));
+        assert!(!sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Chat("chat".into()),
+            Some("child")
+        ));
+        assert!(!sidebar_drop_allowed(
+            &model,
+            &SidebarTarget::Chat("chat".into()),
             None
         ));
     }
