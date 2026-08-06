@@ -137,6 +137,9 @@ pub struct TurnSpec {
     pub effort: String,
     pub access: String,
     pub fast: bool,
+    pub claude_mode: bool,
+    pub context_window: i64,
+    pub session_backend: String,
     pub session_id: Option<String>,
     pub label: String,
     pub environment: Vec<(String, String)>,
@@ -4059,7 +4062,7 @@ fn prepare_turn(
 ) -> Result<TurnSpec, StorageError> {
     let chat = transaction
         .query_row(
-            "SELECT folder_id, backend, workdir, model, effort, access, plan, fast, new_worktree, \
+            "SELECT folder_id, backend, workdir, model, effort, access, plan, fast, claude_mode, new_worktree, \
              original_workdir FROM chats WHERE id = ?",
             [chat_id],
             |row| {
@@ -4073,7 +4076,8 @@ fn prepare_turn(
                     row.get::<_, bool>(6)?,
                     row.get::<_, bool>(7)?,
                     row.get::<_, bool>(8)?,
-                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, bool>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )
@@ -4085,9 +4089,9 @@ fn prepare_turn(
         workspace_root,
         &chat.0,
         chat.2.as_deref(),
-        chat.9.as_deref(),
+        chat.10.as_deref(),
     )?;
-    if chat.8 {
+    if chat.9 {
         let source = workdir.clone();
         workdir = create_worktree(
             transaction,
@@ -4117,10 +4121,12 @@ fn prepare_turn(
     } else {
         chat.5.unwrap_or_else(|| "read-only".into())
     };
+    let claude_mode = chat.1 == "codex" && chat.8;
+    let session_backend = if claude_mode { "claude-mode" } else { &chat.1 };
     let session_id = transaction
         .query_row(
             "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
-            params![chat_id, chat.1],
+            params![chat_id, session_backend],
             |row| row.get::<_, Option<String>>(0),
         )
         .optional()?
@@ -4147,16 +4153,24 @@ fn prepare_turn(
         effort: effort.clone(),
         access,
         fast: chat.1 == "codex" && chat.7,
+        claude_mode,
+        context_window: backend_models(&chat.1)
+            .iter()
+            .find(|known| known.0 == model)
+            .map(|known| known.2)
+            .unwrap_or(0),
+        session_backend: session_backend.into(),
         session_id,
         label: format!(
-            "{} · {}{}",
+            "{} · {}{}{}",
             model_label(&chat.1, &model),
             effort_label(&effort),
             if chat.1 == "codex" && chat.7 {
                 " · Fast"
             } else {
                 ""
-            }
+            },
+            if claude_mode { " · Claude mode" } else { "" }
         ),
         environment: Vec::new(),
     })
@@ -4887,6 +4901,41 @@ mod tests {
         };
         assert!(turn.fast);
         assert_eq!(turn.label, "GPT-5.6 Sol · High · Fast");
+    }
+
+    #[test]
+    fn prepares_claude_mode_with_an_isolated_session_and_codex_context() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        database
+            .execute(
+                "UPDATE chats SET fast = 1, claude_mode = 1 WHERE id = 'chat-1'",
+                [],
+            )
+            .unwrap();
+        drop(database);
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_session("chat-1", "codex", "codex-session")
+            .unwrap();
+        store
+            .set_session("chat-1", "claude-mode", "proxy-session")
+            .unwrap();
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
+            .unwrap()
+        else {
+            panic!("first send unexpectedly queued")
+        };
+        assert!(turn.claude_mode);
+        assert_eq!(turn.context_window, 272_000);
+        assert_eq!(turn.session_backend, "claude-mode");
+        assert_eq!(turn.session_id.as_deref(), Some("proxy-session"));
+        assert_eq!(turn.label, "GPT-5.6 Sol · High · Fast · Claude mode");
     }
 
     #[test]

@@ -270,6 +270,7 @@ COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passe
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 COPY --from=agent-binaries /agents/codex-package /codex-package
 COPY --from=agent-binaries /agents/claude-bin /claude
+COPY --from=agent-binaries /agents/claude-code-proxy /claude-code-proxy
 COPY --from=voice-build /voice /voice
 
 # --- bundle runtime closure ------------------------------------------------

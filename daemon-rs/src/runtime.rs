@@ -16,6 +16,7 @@ use crate::{
     EventBus, StateStore,
     agent::{AgentCommand, AgentEvent, AgentParser},
     ask::{self, Ask},
+    claude_proxy::ClaudeProxy,
     secrets::SecretsStore,
     storage::TurnSpec,
 };
@@ -32,6 +33,7 @@ struct RuntimeInner {
     next_turn: AtomicU64,
     secrets: Arc<SecretsStore>,
     commands: Mutex<HashMap<String, (String, Vec<String>)>>,
+    claude_proxy: ClaudeProxy,
 }
 
 impl Drop for RuntimeInner {
@@ -67,6 +69,7 @@ impl TurnRuntime {
                 next_turn: AtomicU64::new(0),
                 secrets,
                 commands: Mutex::new(HashMap::new()),
+                claude_proxy: ClaudeProxy::new(),
             }),
         }
     }
@@ -85,15 +88,31 @@ impl TurnRuntime {
                 _ => secret_prompt,
             });
         }
+        let mut command_backend = turn.backend.clone();
+        let mut command_model = turn.model.clone();
+        let mut command_effort = turn.effort.clone();
+        if turn.claude_mode {
+            let endpoint = self.inner.claude_proxy.endpoint()?;
+            command_backend = "claude".into();
+            command_model = claude_mode_model(&turn.model, turn.fast);
+            if command_effort == "ultra" {
+                command_effort = "max".into();
+            }
+            for (name, value) in
+                claude_mode_environment(&endpoint, &command_model, turn.context_window)
+            {
+                set_environment(&mut turn.environment, name, value);
+            }
+        }
         let mut command = AgentCommand {
-            backend: &turn.backend,
+            backend: &command_backend,
             prompt: &turn.prompt,
             system_prompt: turn.system_prompt.as_deref(),
             workdir: &turn.workdir,
-            model: &turn.model,
-            effort: &turn.effort,
+            model: &command_model,
+            effort: &command_effort,
             access: &turn.access,
-            fast: turn.fast,
+            fast: turn.fast && !turn.claude_mode,
             session_id: turn.session_id.as_deref(),
             environment: &turn.environment,
         }
@@ -103,15 +122,15 @@ impl TurnRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("Cannot start {}: {error}", turn.backend))?;
+            .map_err(|error| format!("Cannot start {command_backend}: {error}"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| format!("Cannot read {} output.", turn.backend))?;
+            .ok_or_else(|| format!("Cannot read {command_backend} output."))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| format!("Cannot read {} errors.", turn.backend))?;
+            .ok_or_else(|| format!("Cannot read {command_backend} errors."))?;
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
         let child = Arc::new(Mutex::new(child));
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -210,7 +229,12 @@ impl TurnRuntime {
                 .read_to_string(&mut output);
             output
         });
-        let mut parser = match AgentParser::new(&turn.backend) {
+        let parser_backend = if turn.claude_mode {
+            "claude"
+        } else {
+            &turn.backend
+        };
+        let mut parser = match AgentParser::new(parser_backend) {
             Ok(parser) => parser,
             Err(error) => {
                 self.finish(turn, turn_id, 0, false, Some(error), 0, true, None);
@@ -233,11 +257,11 @@ impl TurnRuntime {
             for event in parser.feed(&line) {
                 match event {
                     AgentEvent::Session(session) => {
-                        if let Err(error) =
-                            self.inner
-                                .store
-                                .set_session(&turn.chat_id, &turn.backend, &session)
-                        {
+                        if let Err(error) = self.inner.store.set_session(
+                            &turn.chat_id,
+                            &turn.session_backend,
+                            &session,
+                        ) {
                             latest_error = Some(error.to_string());
                         }
                     }
@@ -447,5 +471,79 @@ impl TurnRuntime {
         event.insert("turn_id".into(), turn_id.into());
         event.insert("turn_sequence".into(), sequence.into());
         self.inner.events.publish(Value::Object(event));
+    }
+}
+
+fn claude_mode_model(model: &str, fast: bool) -> String {
+    format!(
+        "{}{suffix}[1m]",
+        model,
+        suffix = if fast { "-fast" } else { "" }
+    )
+}
+
+fn claude_mode_environment(
+    endpoint: &str,
+    model: &str,
+    context_window: i64,
+) -> Vec<(String, String)> {
+    [
+        ("ANTHROPIC_BASE_URL", endpoint.to_owned()),
+        ("ANTHROPIC_AUTH_TOKEN", "unused".into()),
+        ("ANTHROPIC_MODEL", model.to_owned()),
+        ("ANTHROPIC_SMALL_FAST_MODEL", "gpt-5.6-luna[1m]".into()),
+        (
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            context_window.max(0).to_string(),
+        ),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
+        ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1".into()),
+        ("DISABLE_AUTOUPDATER", "1".into()),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.into(), value))
+    .collect()
+}
+
+fn set_environment(environment: &mut Vec<(String, String)>, name: String, value: String) {
+    if let Some((_, current)) = environment
+        .iter_mut()
+        .find(|(existing, _)| existing == &name)
+    {
+        *current = value;
+    } else {
+        environment.push((name, value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_codex_models_through_the_proxy_alias() {
+        assert_eq!(claude_mode_model("gpt-5.6-sol", false), "gpt-5.6-sol[1m]");
+        assert_eq!(
+            claude_mode_model("gpt-5.6-sol", true),
+            "gpt-5.6-sol-fast[1m]"
+        );
+    }
+
+    #[test]
+    fn proxy_environment_overrides_agent_secrets() {
+        let mut environment = vec![("ANTHROPIC_BASE_URL".into(), "private".into())];
+        for (name, value) in
+            claude_mode_environment("http://127.0.0.1:4321", "gpt-5.6-sol[1m]", 272_000)
+        {
+            set_environment(&mut environment, name, value);
+        }
+        assert_eq!(
+            environment
+                .iter()
+                .find(|(name, _)| name == "ANTHROPIC_BASE_URL")
+                .map(|(_, value)| value.as_str()),
+            Some("http://127.0.0.1:4321")
+        );
+        assert!(environment.contains(&("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "272000".into())));
     }
 }

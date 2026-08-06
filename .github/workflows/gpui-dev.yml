@@ -39,6 +39,7 @@ jobs:
           test -x gpui-dist/xd-daemon
           test -x gpui-dist/codex-package/bin/codex
           test -x gpui-dist/claude
+          test -x gpui-dist/claude-code-proxy
           test -x gpui-dist/voice/libexec/whisper-server-bin
 
           install -d package/xd-dev
@@ -46,6 +47,7 @@ jobs:
           install -m0755 gpui-dist/xd-daemon package/xd-dev/xd-daemon-dev
           cp -a gpui-dist/codex-package package/xd-dev/codex-package
           install -m0755 gpui-dist/claude package/xd-dev/claude
+          install -m0755 gpui-dist/claude-code-proxy package/xd-dev/claude-code-proxy
           cp -a gpui-dist/voice/lib package/xd-dev/lib
           cp -a gpui-dist/voice/libexec package/xd-dev/libexec
           install -m0644 desktop/README.md package/xd-dev/README.md
