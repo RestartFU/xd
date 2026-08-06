@@ -1261,6 +1261,78 @@ impl StateStore {
         repository_status(&workdir)
     }
 
+    pub fn git_pull_request_status(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "git-pr-status needs a chat.")?;
+        let (status, stdout, _) =
+            run_gh(&workdir, &["pr", "view", "--json", "url", "--jq", ".url"])?;
+        let url = status
+            .success()
+            .then(|| extract_web_url(&stdout))
+            .flatten()
+            .unwrap_or_default();
+        Ok(json!({"ok": true, "url": url}))
+    }
+
+    pub fn git_create_pull_request(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "git-pr-create needs a chat.")?;
+        let title = required_string(request, "title", "A pull request title is required.")?.trim();
+        let body = request
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if title.is_empty() || title.len() > 200 || title.contains('\0') {
+            return Err(StorageError::InvalidRequest(
+                "Pull request titles must contain 1 to 200 bytes.".into(),
+            ));
+        }
+        if body.len() > 64 * 1024 || body.contains('\0') {
+            return Err(StorageError::InvalidRequest(
+                "Pull request descriptions can contain at most 64 KiB.".into(),
+            ));
+        }
+        let repository = repository_status(&workdir)?;
+        let branch = repository
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let base = repository
+            .get("base")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let upstream = repository
+            .get("upstream")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if repository.get("clean").and_then(Value::as_bool) != Some(true)
+            || branch.is_empty()
+            || matches!(branch, "(detached)" | "(initial)")
+            || base.is_empty()
+            || branch == base
+            || upstream.is_empty()
+            || repository.get("ahead").and_then(Value::as_u64).unwrap_or(0) > 0
+        {
+            return Err(StorageError::InvalidRequest(
+                "Push a clean feature branch before creating a pull request.".into(),
+            ));
+        }
+        let (status, stdout, stderr) = run_gh(
+            &workdir,
+            &["pr", "create", "--title", title, "--body", body],
+        )?;
+        if !status.success() {
+            return Err(command_failure(
+                &stdout,
+                &stderr,
+                "GitHub CLI refused the pull request.",
+            ));
+        }
+        let url = extract_web_url(&stdout).ok_or_else(|| {
+            StorageError::InvalidRequest("GitHub CLI did not return a pull request URL.".into())
+        })?;
+        Ok(json!({"ok": true, "url": url}))
+    }
+
     pub(crate) fn prepare_git_draft(&self, request: &Value) -> Result<GitDraftSpec, StorageError> {
         let chat_id = required_string(request, "chat", "git-draft needs a chat.")?;
         let kind = required_string(request, "kind", "git-draft needs a draft kind.")?;
@@ -3034,6 +3106,45 @@ fn run_git_with_env(
     collect_git_output(child, GIT_TIMEOUT)
 }
 
+fn run_gh(
+    workdir: &Path,
+    arguments: &[&str],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+    let mut command = Command::new("gh");
+    command
+        .args(arguments)
+        .current_dir(workdir)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(|source| StorageError::Filesystem {
+        context: "Cannot run GitHub CLI".into(),
+        source,
+    })?;
+    collect_git_output(child, GIT_TIMEOUT)
+}
+
+fn command_failure(stdout: &[u8], stderr: &[u8], fallback: &str) -> StorageError {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    let detail = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(fallback);
+    StorageError::InvalidRequest(detail.chars().take(240).collect())
+}
+
+fn extract_web_url(output: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(output)
+        .split_whitespace()
+        .map(|word| word.trim_end_matches(['.', ',', ')', ';']))
+        .find(|word| word.starts_with("https://") && word.len() <= 2_048)
+        .map(str::to_owned)
+}
+
 fn checked_git(
     workdir: &Path,
     arguments: &[&str],
@@ -3120,9 +3231,13 @@ fn repository_status(workdir: &Path) -> Result<Value, StorageError> {
             }
         }
     }
+    let base = String::from_utf8(find_git_base(workdir)?)
+        .map_err(|_| StorageError::InvalidRequest("Git returned invalid text.".into()))?;
+    let base = local_branch_name(base.trim());
     Ok(json!({
         "ok": true,
         "branch": branch,
+        "base": base,
         "upstream": upstream,
         "ahead": ahead,
         "behind": behind,
@@ -3132,6 +3247,10 @@ fn repository_status(workdir: &Path) -> Result<Value, StorageError> {
         "conflicted": conflicted,
         "clean": staged == 0 && unstaged == 0 && untracked == 0 && conflicted == 0,
     }))
+}
+
+fn local_branch_name(reference: &str) -> &str {
+    reference.strip_prefix("origin/").unwrap_or(reference)
 }
 
 fn find_git_base(workdir: &Path) -> Result<Vec<u8>, StorageError> {
@@ -3886,6 +4005,7 @@ mod tests {
         );
         let status = store.git_status(&json!({"chat": chat})).unwrap();
         assert_eq!(status["branch"], "main");
+        assert_eq!(status["base"], "main");
         assert_eq!(status["unstaged"], 1);
         assert_eq!(status["untracked"], 1);
         assert_eq!(status["clean"], false);
@@ -3924,6 +4044,10 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("draft kind")
+        );
+        assert_eq!(
+            extract_web_url(b"created https://github.com/example/repo/pull/12\n"),
+            Some("https://github.com/example/repo/pull/12".into())
         );
         let committed = store
             .git_commit(&json!({"chat": chat, "message": "save changes"}))

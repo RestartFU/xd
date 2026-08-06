@@ -159,6 +159,8 @@ impl Engine {
             Some("search") => self.read(|store| store.search(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
+            Some("git-pr-status") => self.read(|store| store.git_pull_request_status(&request)),
+            Some("git-pr-create") => self.read(|store| store.git_create_pull_request(&request)),
             Some("git-draft") => self
                 .git_drafts
                 .start(&request)

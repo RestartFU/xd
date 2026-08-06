@@ -159,6 +159,10 @@ struct DiffPanel {
     repo_files_truncated: bool,
     file_preview: Option<FilePreview>,
     file_loading: bool,
+    pr_url: Option<String>,
+    pr_loading: bool,
+    pr_title: Option<String>,
+    pr_body: String,
 }
 
 struct TerminalPanel {
@@ -184,6 +188,8 @@ fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32)
 #[derive(Clone, Debug, Default, Deserialize)]
 struct GitStatus {
     branch: String,
+    #[serde(default)]
+    base: String,
     upstream: String,
     ahead: u64,
     behind: u64,
@@ -192,6 +198,19 @@ struct GitStatus {
     untracked: u64,
     conflicted: u64,
     clean: bool,
+}
+
+impl GitStatus {
+    fn can_open_pull_request(&self) -> bool {
+        self.clean
+            && self.conflicted == 0
+            && !self.branch.is_empty()
+            && !matches!(self.branch.as_str(), "(detached)" | "(initial)")
+            && !self.base.is_empty()
+            && self.branch != self.base
+            && !self.upstream.is_empty()
+            && self.ahead == 0
+    }
 }
 
 struct PendingSend {
@@ -675,6 +694,8 @@ impl XdDesktop {
                 RequestKind::DiffRead { .. }
                     | RequestKind::GitStatus { .. }
                     | RequestKind::GitDraft { .. }
+                    | RequestKind::GitPullRequestStatus { .. }
+                    | RequestKind::GitPullRequestCreate { .. }
                     | RequestKind::RepositoryFiles { .. }
                     | RequestKind::RepositoryFile { .. }
                     | RequestKind::GitCommit { .. }
@@ -822,6 +843,25 @@ impl XdDesktop {
                     }
                 }
                 RequestKind::GitDraft { generation, .. } if *generation == self.diff_generation => {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.action = None;
+                        diff.action_error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::GitPullRequestStatus { generation, .. }
+                    if *generation == self.diff_generation =>
+                {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.pr_loading = false;
+                        diff.pr_url = None;
+                    }
+                }
+                RequestKind::GitPullRequestCreate { generation, .. }
+                    if *generation == self.diff_generation =>
+                {
                     if let Some(diff) = &mut self.diff_panel {
                         diff.action = None;
                         diff.action_error = value
@@ -1194,10 +1234,23 @@ impl XdDesktop {
                 }
                 match serde_json::from_value::<GitStatus>(value.clone()) {
                     Ok(status) => {
+                        let check_pull_request = status.can_open_pull_request();
                         if let Some(diff) = &mut self.diff_panel {
                             diff.status = Some(status);
                             diff.status_loading = false;
                             diff.action_error = None;
+                            diff.pr_loading = check_pull_request;
+                            if !check_pull_request {
+                                diff.pr_url = None;
+                            }
+                        }
+                        if check_pull_request
+                            && let Some(daemon) = &self.daemon
+                            && let Err(error) = daemon.git_pull_request_status(&chat_id, generation)
+                            && let Some(diff) = &mut self.diff_panel
+                        {
+                            diff.pr_loading = false;
+                            diff.action_error = Some(error);
                         }
                     }
                     Err(error) => {
@@ -1313,6 +1366,45 @@ impl XdDesktop {
                     diff.action_error = None;
                 }
                 self.refresh_diff(cx);
+            }
+            RequestKind::GitPullRequestStatus {
+                chat_id,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.pr_loading = false;
+                    diff.pr_url = value
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_owned);
+                }
+            }
+            RequestKind::GitPullRequestCreate {
+                chat_id,
+                generation,
+            } => {
+                if generation != self.diff_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                if let Some(diff) = &mut self.diff_panel {
+                    diff.action = None;
+                    diff.action_error = None;
+                    diff.pr_url = value
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_owned);
+                    diff.pr_title = None;
+                    diff.pr_body.clear();
+                }
             }
             RequestKind::Shortcuts { folder_id } => {
                 if self
@@ -1723,8 +1815,13 @@ impl XdDesktop {
                 }
             }
             "git-draft-finished" if self.event_is_active(&body) => {
-                let expected = format!("gpui-{}", self.diff_generation);
-                if body.get("kind").and_then(Value::as_str) == Some("commit")
+                let kind = body.get("kind").and_then(Value::as_str).unwrap_or_default();
+                let expected = match kind {
+                    "commit" => format!("gpui-{}", self.diff_generation),
+                    "pull-request" => format!("gpui-pr-{}", self.diff_generation),
+                    _ => String::new(),
+                };
+                if !expected.is_empty()
                     && body.get("request").and_then(Value::as_str) == Some(expected.as_str())
                 {
                     if let Some(diff) = &mut self.diff_panel {
@@ -1736,9 +1833,18 @@ impl XdDesktop {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_owned();
-                            self.git_commit_message = title.clone();
-                            self.git_commit_input
-                                .update(cx, |input, cx| input.set_text(title, cx));
+                            if kind == "commit" {
+                                self.git_commit_message = title.clone();
+                                self.git_commit_input
+                                    .update(cx, |input, cx| input.set_text(title, cx));
+                            } else {
+                                diff.pr_title = Some(title);
+                                diff.pr_body = body
+                                    .get("body")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned();
+                            }
                         } else {
                             diff.action_error = Some(
                                 body.get("error")
@@ -3109,8 +3215,9 @@ impl XdDesktop {
             .as_ref()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
-                daemon.git_draft_commit(
+                daemon.git_draft(
                     &chat_id,
+                    "commit",
                     &request,
                     self.settings.git_writer.backend(),
                     self.settings.git_writer_model.as_deref(),
@@ -3122,6 +3229,94 @@ impl XdDesktop {
         {
             diff.action = None;
             diff.action_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn draft_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let can_draft = self.diff_panel.as_ref().is_some_and(|diff| {
+            diff.action.is_none()
+                && diff.pr_url.is_none()
+                && diff
+                    .status
+                    .as_ref()
+                    .is_some_and(GitStatus::can_open_pull_request)
+        });
+        if !can_draft {
+            return;
+        }
+        let generation = self.diff_generation;
+        let request = format!("gpui-pr-{generation}");
+        if let Some(diff) = &mut self.diff_panel {
+            diff.action = Some("Writing pull request…".into());
+            diff.action_error = None;
+            diff.pr_title = None;
+            diff.pr_body.clear();
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| {
+                daemon.git_draft(
+                    &chat_id,
+                    "pull-request",
+                    &request,
+                    self.settings.git_writer.backend(),
+                    self.settings.git_writer_model.as_deref(),
+                    generation,
+                )
+            });
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.action = None;
+            diff.action_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn create_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some((title, body)) = self.diff_panel.as_ref().and_then(|diff| {
+            if diff.action.is_none() && diff.pr_url.is_none() {
+                diff.pr_title
+                    .clone()
+                    .map(|title| (title, diff.pr_body.clone()))
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        let generation = self.diff_generation;
+        if let Some(diff) = &mut self.diff_panel {
+            diff.action = Some("Creating pull request…".into());
+            diff.action_error = None;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.git_create_pull_request(&chat_id, &title, &body, generation));
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.action = None;
+            diff.action_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn discard_pull_request_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some(diff) = &mut self.diff_panel {
+            diff.pr_title = None;
+            diff.pr_body.clear();
         }
         cx.notify();
     }
@@ -3189,6 +3384,7 @@ impl XdDesktop {
             diff.file_loading = false;
             diff.error = None;
             diff.truncated = false;
+            diff.pr_loading = false;
         } else {
             return;
         }
@@ -6904,6 +7100,59 @@ impl Render for XdDesktop {
                         && status.branch != "(detached)"
                         && status.branch != "(initial)"
                 });
+            let can_prepare_pr = !action_running
+                && status.is_some_and(GitStatus::can_open_pull_request)
+                && diff.pr_url.is_none();
+            let has_pr_draft = diff.pr_title.is_some();
+            let pr_url = diff.pr_url.clone();
+            let pr_enabled = !action_running
+                && (pr_url.is_some() || (can_prepare_pr && !diff.pr_loading));
+            let pr_label = if pr_url.is_some() {
+                "View pull request"
+            } else if diff.pr_loading {
+                "Checking pull request…"
+            } else if has_pr_draft {
+                "Create pull request"
+            } else {
+                "Draft pull request"
+            };
+            let pr_body_preview = {
+                let mut preview = diff.pr_body.chars().take(1_200).collect::<String>();
+                if diff.pr_body.chars().count() > 1_200 {
+                    preview.push('…');
+                }
+                preview
+            };
+            let pr_button = div()
+                .id("git-pull-request")
+                .w_full()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .bg(rgb(if pr_enabled { SURFACE_HIGH } else { BG }))
+                .text_xs()
+                .text_color(rgb(if pr_enabled { TEXT } else { MUTED }))
+                .text_center()
+                .when(pr_enabled, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x242428)))
+                })
+                .when_some(pr_url.clone(), |button, url| {
+                    button.on_click(move |_, _, cx| cx.open_url(&url))
+                })
+                .when(pr_url.is_none(), |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        if pr_enabled {
+                            if has_pr_draft {
+                                this.create_pull_request(cx);
+                            } else {
+                                this.draft_pull_request(cx);
+                            }
+                        }
+                    }))
+                })
+                .child(pr_label);
             let status_label = status
                 .map(|status| {
                     if status.clean {
@@ -7441,6 +7690,62 @@ impl Render for XdDesktop {
                         .when_some(diff.action.clone(), |footer, action| {
                             footer.child(div().text_xs().text_color(rgb(0xaec4ff)).child(action))
                         })
+                        .when_some(diff.pr_title.clone(), |footer, title| {
+                            footer.child(
+                                div()
+                                    .w_full()
+                                    .p_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(BG))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .text_sm()
+                                                    .text_color(rgb(TEXT))
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("discard-pr-draft")
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .text_xs()
+                                                    .text_color(rgb(MUTED))
+                                                    .cursor_pointer()
+                                                    .hover(|style| {
+                                                        style
+                                                            .bg(rgb(SURFACE_HIGH))
+                                                            .text_color(rgb(TEXT))
+                                                    })
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.discard_pull_request_draft(cx);
+                                                    }))
+                                                    .child("Discard"),
+                                            ),
+                                    )
+                                    .when(!pr_body_preview.is_empty(), |review| {
+                                        review.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(pr_body_preview),
+                                        )
+                                    }),
+                            )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -7536,7 +7841,8 @@ impl Render for XdDesktop {
                                     }
                                 }))
                                 .child("Push branch"),
-                        ),
+                        )
+                        .child(pr_button),
                 )
                 .into_any_element()
         });
@@ -9287,6 +9593,39 @@ mod tests {
             Some("Worked for 1h 01m")
         );
         assert_eq!(turn_duration_label("not-a-duration"), None);
+    }
+
+    #[test]
+    fn pull_requests_require_a_clean_published_feature_branch() {
+        let ready = GitStatus {
+            branch: "feature".into(),
+            base: "main".into(),
+            upstream: "origin/feature".into(),
+            clean: true,
+            ..Default::default()
+        };
+        assert!(ready.can_open_pull_request());
+        assert!(
+            !GitStatus {
+                ahead: 1,
+                ..ready.clone()
+            }
+            .can_open_pull_request()
+        );
+        assert!(
+            !GitStatus {
+                branch: "main".into(),
+                ..ready.clone()
+            }
+            .can_open_pull_request()
+        );
+        assert!(
+            !GitStatus {
+                clean: false,
+                ..ready
+            }
+            .can_open_pull_request()
+        );
     }
 
     #[test]

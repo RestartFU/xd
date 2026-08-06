@@ -52,7 +52,16 @@ pub enum RequestKind {
     },
     GitDraft {
         chat_id: String,
+        kind: String,
         request: String,
+        generation: u64,
+    },
+    GitPullRequestStatus {
+        chat_id: String,
+        generation: u64,
+    },
+    GitPullRequestCreate {
+        chat_id: String,
         generation: u64,
     },
     RepositoryFiles {
@@ -657,9 +666,10 @@ impl DaemonHandle {
         )
     }
 
-    pub fn git_draft_commit(
+    pub fn git_draft(
         &self,
         chat_id: &str,
+        kind: &str,
         request: &str,
         backend: Option<&str>,
         model: Option<&str>,
@@ -668,7 +678,7 @@ impl DaemonHandle {
         let mut body = json!({
             "op": "git-draft",
             "chat": chat_id,
-            "kind": "commit",
+            "kind": kind,
             "request": request,
         });
         if let Some(backend) = backend {
@@ -680,10 +690,42 @@ impl DaemonHandle {
         self.send(
             RequestKind::GitDraft {
                 chat_id: chat_id.to_owned(),
+                kind: kind.to_owned(),
                 request: request.to_owned(),
                 generation,
             },
             body,
+        )
+    }
+
+    pub fn git_pull_request_status(&self, chat_id: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::GitPullRequestStatus {
+                chat_id: chat_id.to_owned(),
+                generation,
+            },
+            json!({"op": "git-pr-status", "chat": chat_id}),
+        )
+    }
+
+    pub fn git_create_pull_request(
+        &self,
+        chat_id: &str,
+        title: &str,
+        body: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::GitPullRequestCreate {
+                chat_id: chat_id.to_owned(),
+                generation,
+            },
+            json!({
+                "op": "git-pr-create",
+                "chat": chat_id,
+                "title": title,
+                "body": body,
+            }),
         )
     }
 
