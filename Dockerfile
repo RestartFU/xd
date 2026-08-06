@@ -85,6 +85,31 @@ ENV XD_DEV_COMMIT=$XD_DEV_COMMIT
 RUN cargo build --locked --release \
  && test -x target/release/xd-daemon
 
+# The remote TLS terminator is dependency-isolated from the daemon so the
+# existing desktop and daemon lockfiles remain untouched during the rewrite.
+# Direct dependency versions are exact; this helper's generated lockfile is
+# intentionally not part of the feature branch.
+FROM gpui-toolchain AS rust-tls-proxy-source
+
+WORKDIR /src/tls-proxy-rs
+COPY tls-proxy-rs/Cargo.toml ./
+RUN mkdir -p src \
+ && touch src/main.rs \
+ && cargo fetch \
+ && rm -rf src
+COPY tls-proxy-rs/src ./src
+
+FROM rust-tls-proxy-source AS rust-tls-proxy-tests
+
+RUN cargo fmt --check \
+ && cargo test \
+ && touch /rust-tls-proxy-tests-passed
+
+FROM rust-tls-proxy-source AS rust-tls-proxy-release
+
+RUN cargo build --release \
+ && test -x target/release/xd-tls-proxy-dev
+
 # --- local speech engine ---------------------------------------------------
 #
 # whisper.cpp is built from pinned source because Debian does not package its
@@ -271,6 +296,8 @@ COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
 COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
+COPY --from=rust-tls-proxy-tests /rust-tls-proxy-tests-passed /rust-tls-proxy-tests-passed
+COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy-dev /xd-tls-proxy
 COPY --from=agent-binaries /agents/codex-package /codex-package
 COPY --from=agent-binaries /agents/claude-bin /claude
 COPY --from=agent-binaries /agents/claude-code-proxy /claude-code-proxy

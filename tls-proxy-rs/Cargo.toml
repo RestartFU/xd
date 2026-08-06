@@ -1,0 +1,19 @@
+[package]
+name = "xd-tls-proxy"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "xd-tls-proxy-dev"
+path = "src/main.rs"
+
+[dependencies]
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
