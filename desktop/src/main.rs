@@ -79,6 +79,72 @@ const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
+fn plus_icon(color: u32) -> gpui::AnyElement {
+    div()
+        .relative()
+        .size(px(16.0))
+        .child(
+            div()
+                .absolute()
+                .left(px(3.0))
+                .top(px(7.0))
+                .w(px(10.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(rgb(color)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(7.0))
+                .top(px(3.0))
+                .w(px(2.0))
+                .h(px(10.0))
+                .rounded_full()
+                .bg(rgb(color)),
+        )
+        .into_any_element()
+}
+
+fn trash_icon(color: u32) -> gpui::AnyElement {
+    div()
+        .relative()
+        .size(px(16.0))
+        .child(
+            div()
+                .absolute()
+                .left(px(2.0))
+                .top(px(4.0))
+                .w(px(12.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(rgb(color)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(5.0))
+                .top(px(2.0))
+                .w(px(6.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(rgb(color)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(4.0))
+                .top(px(7.0))
+                .w(px(8.0))
+                .h(px(7.0))
+                .border_1()
+                .border_t_0()
+                .border_color(rgb(color))
+                .rounded_b_sm(),
+        )
+        .into_any_element()
+}
+
 gpui::actions!(
     xd,
     [
@@ -892,6 +958,7 @@ struct XdDesktop {
     search_generation: u64,
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
+    terminal_cursor_visible: bool,
     diff_generation: u64,
     collapsed_diff_files: HashSet<String>,
     git_commit_message: String,
@@ -1292,6 +1359,7 @@ impl XdDesktop {
             search_generation: 0,
             diff_panel: None,
             terminal_panel: None,
+            terminal_cursor_visible: true,
             diff_generation: 0,
             collapsed_diff_files: HashSet::new(),
             git_commit_message: String::new(),
@@ -1322,6 +1390,24 @@ impl XdDesktop {
         if desktop.remote_credentials.is_some() {
             desktop.schedule_remote_connect(Duration::ZERO, cx);
         }
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(500)).await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.terminal_cursor_visible = !this.terminal_cursor_visible;
+                        if this.terminal_panel.is_some() {
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
         desktop
     }
 
@@ -3787,6 +3873,7 @@ impl XdDesktop {
                     && let Ok(data) = STANDARD.decode(data)
                 {
                     session.screen.feed(&data);
+                    self.terminal_cursor_visible = true;
                 }
             }
             "terminal-resized" if self.event_is_active(&body) => {
@@ -5695,7 +5782,7 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+    fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_panel.is_some() {
             self.terminal_panel = None;
             if self
@@ -5706,6 +5793,9 @@ impl XdDesktop {
             }
         } else if let Some(chat_id) = self.model.selected_chat.clone() {
             self.terminal_panel = Some(Self::new_terminal_panel(chat_id));
+            self.terminal_cursor_visible = true;
+            let focus = self.terminal_input.read(cx).focus_handle(cx);
+            window.focus(&focus);
         }
         self.remember_panes();
         cx.notify();
@@ -5850,6 +5940,7 @@ impl XdDesktop {
     }
 
     fn send_terminal_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.terminal_cursor_visible = true;
         let Some(terminal_id) = self
             .terminal_panel
             .as_ref()
@@ -9380,7 +9471,6 @@ impl Render for XdDesktop {
                         .into_any_element(),
                 );
             } else {
-                let menu_target = folder_target.clone();
                 let context_menu_target = folder_target.clone();
                 let dragged_folder = SidebarDrag::new(folder_target.clone(), folder_name.clone());
                 let drop_folder_id = folder.id.clone();
@@ -9451,32 +9541,6 @@ impl Render for XdDesktop {
                                     }
                                 }))
                                 .child("+"),
-                        )
-                        .child(
-                            div()
-                                .id(("folder-menu", folder_row_index))
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MUTED))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.open_sidebar_context_menu(
-                                            Some(menu_target.clone()),
-                                            event.position,
-                                            cx,
-                                        );
-                                    }),
-                                )
-                                .child("···"),
                         )
                         .can_drop(move |value, _, _| {
                             value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
@@ -10186,7 +10250,6 @@ impl Render for XdDesktop {
                     );
                     continue;
                 }
-                let menu_target = chat_target.clone();
                 let context_menu_target = chat_target.clone();
                 let dragged_chat = SidebarDrag::new(chat_target.clone(), title.clone());
                 let moving_chat = sidebar_move.as_ref() == Some(&chat_target);
@@ -10239,32 +10302,6 @@ impl Render for XdDesktop {
                                 } else {
                                     format!("   {title}")
                                 }),
-                        )
-                        .child(
-                            div()
-                                .id(("chat-menu", row_id))
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MUTED))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(BG)).text_color(rgb(TEXT)))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.open_sidebar_context_menu(
-                                            Some(menu_target.clone()),
-                                            event.position,
-                                            cx,
-                                        );
-                                    }),
-                                )
-                                .child("···"),
                         )
                         .into_any_element(),
                 );
@@ -10861,67 +10898,72 @@ impl Render for XdDesktop {
                     )
                     .child(
                         div()
-                            .id("toggle-diff")
                             .ml_2()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(if diff_open { 0x26354d } else { SURFACE_HIGH }))
-                            .text_xs()
-                            .text_color(rgb(if can_open_diff { TEXT } else { MUTED }))
-                            .when(can_open_diff, |button| {
-                                button
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("toggle-diff")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(if diff_open { 0x26354d } else { SURFACE_HIGH }))
+                                    .text_xs()
+                                    .text_color(rgb(if can_open_diff { TEXT } else { MUTED }))
+                                    .when(can_open_diff, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x242428)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_open_diff {
+                                            this.toggle_diff_panel(cx);
+                                        }
+                                    }))
+                                    .child("Changes"),
+                            )
+                            .child(
+                                div()
+                                    .id("toggle-terminal")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(if terminal_open {
+                                        0x26354d
+                                    } else {
+                                        SURFACE_HIGH
+                                    }))
+                                    .text_xs()
+                                    .text_color(rgb(if can_open_diff { TEXT } else { MUTED }))
+                                    .when(can_open_diff, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x242428)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if can_open_diff {
+                                            this.toggle_terminal_panel(window, cx);
+                                        }
+                                    }))
+                                    .child("Terminal"),
+                            )
+                            .child(
+                                div()
+                                    .id("open-search")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(SURFACE_HIGH))
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x242428)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_open_diff {
-                                    this.toggle_diff_panel(cx);
-                                }
-                            }))
-                            .child("Changes"),
-                    )
-                    .child(
-                        div()
-                            .id("toggle-terminal")
-                            .ml_2()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(if terminal_open {
-                                0x26354d
-                            } else {
-                                SURFACE_HIGH
-                            }))
-                            .text_xs()
-                            .text_color(rgb(if can_open_diff { TEXT } else { MUTED }))
-                            .when(can_open_diff, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x242428)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_open_diff {
-                                    this.toggle_terminal_panel(cx);
-                                }
-                            }))
-                            .child("Terminal"),
-                    )
-                    .child(
-                        div()
-                            .id("open-search")
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(SURFACE_HIGH))
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_search(window, cx);
-                            }))
-                            .child("Search  Ctrl K"),
+                                    .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_search(window, cx);
+                                    }))
+                                    .child("Search  Ctrl K"),
+                            ),
                     ),
             );
 
@@ -13312,64 +13354,92 @@ impl Render for XdDesktop {
         let terminal_desktop = cx.entity();
         let terminal_pane = self.terminal_panel.as_ref().map(|panel| {
             let selected_id = panel.selected.clone();
-            let output = panel.selected().map(|session| session.screen.rendered());
-            let (output_text, output_spans) = output
-                .map(|output| (output.text, output.spans))
-                .unwrap_or_else(|| (String::new(), Vec::new()));
-            let highlights = output_spans.into_iter().map(|span| {
-                (
-                    span.range,
-                    HighlightStyle {
-                        color: span.style.foreground.map(|color| rgb(color).into()),
-                        background_color: span.style.background.map(|color| rgb(color).into()),
-                        font_weight: span.style.bold.then_some(FontWeight::BOLD),
-                        ..Default::default()
-                    },
-                )
-            });
-            let output = StyledText::new(output_text).with_highlights(highlights);
-            let active = selected_id.is_some() && !panel.loading;
-            let terminal_tabs = panel
-                .sessions
-                .iter()
-                .enumerate()
-                .map(|(index, session)| {
-                    let id = session.id.clone();
-                    let close_id = id.clone();
-                    let selected = selected_id.as_deref() == Some(id.as_str());
-                    div()
-                        .id(("terminal-tab", index))
-                        .h_full()
-                        .flex_shrink_0()
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .border_b_1()
-                        .border_color(rgb(if selected { accent } else { BORDER }))
-                        .bg(rgb(if selected { SURFACE_HIGH } else { BG }))
-                        .text_xs()
-                        .text_color(rgb(if selected { TEXT } else { MUTED }))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_terminal(id.clone(), cx);
-                        }))
-                        .child(session.title.clone())
-                        .child(
-                            div()
-                                .id(("close-terminal-tab", index))
-                                .px_1()
-                                .rounded_sm()
-                                .hover(|style| style.bg(rgb(0x3c292d)).text_color(rgb(0xf1b3ba)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.kill_terminal_id(close_id.clone(), cx);
-                                }))
-                                .child("×"),
-                        )
+            let output = panel
+                .selected()
+                .map(|session| session.screen.rendered_with_cursor());
+            let (output_text, output_spans, output_cursor) = output
+                .map(|output| (output.text, output.spans, output.cursor))
+                .unwrap_or_else(|| (String::new(), Vec::new(), None));
+            let mut highlights = output_spans
+                .into_iter()
+                .map(|span| {
+                    (
+                        span.range,
+                        HighlightStyle {
+                            color: span.style.foreground.map(|color| rgb(color).into()),
+                            background_color: span.style.background.map(|color| rgb(color).into()),
+                            font_weight: span.style.bold.then_some(FontWeight::BOLD),
+                            ..Default::default()
+                        },
+                    )
                 })
                 .collect::<Vec<_>>();
+            if self.terminal_cursor_visible
+                && terminal_focus.is_focused(window)
+                && let Some(cursor) = output_cursor
+            {
+                highlights.push((
+                    cursor,
+                    HighlightStyle {
+                        color: Some(rgb(BG).into()),
+                        background_color: Some(rgb(0xd8dee9).into()),
+                        ..Default::default()
+                    },
+                ));
+            }
+            let output = StyledText::new(output_text).with_highlights(highlights);
+            let active = selected_id.is_some() && !panel.loading;
+            let show_tabs = panel.sessions.len() > 1;
+            let centered_title = (!show_tabs)
+                .then(|| panel.selected().map(|session| session.title.clone()))
+                .flatten();
+            let terminal_tabs = if show_tabs {
+                panel
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, session)| {
+                        let id = session.id.clone();
+                        let close_id = id.clone();
+                        let selected = selected_id.as_deref() == Some(id.as_str());
+                        div()
+                            .id(("terminal-tab", index))
+                            .h_full()
+                            .flex_shrink_0()
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .border_b_1()
+                            .border_color(rgb(if selected { accent } else { BORDER }))
+                            .bg(rgb(if selected { SURFACE_HIGH } else { BG }))
+                            .text_xs()
+                            .text_color(rgb(if selected { TEXT } else { MUTED }))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_terminal(id.clone(), cx);
+                            }))
+                            .child(session.title.clone())
+                            .child(
+                                div()
+                                    .id(("close-terminal-tab", index))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .hover(|style| {
+                                        style.bg(rgb(0x3c292d)).text_color(rgb(0xf1b3ba))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.kill_terminal_id(close_id.clone(), cx);
+                                    }))
+                                    .child("×"),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             div()
                 .w_full()
                 .h(px(terminal_height as f32))
@@ -13381,6 +13451,7 @@ impl Render for XdDesktop {
                 .bg(rgb(BG))
                 .child(
                     div()
+                        .relative()
                         .h(px(40.0))
                         .px_3()
                         .flex()
@@ -13388,6 +13459,24 @@ impl Render for XdDesktop {
                         .gap_2()
                         .border_b_1()
                         .border_color(rgb(BORDER))
+                        .when_some(centered_title, |header, title| {
+                            header.child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .right_0()
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .px(px(96.0))
+                                    .overflow_hidden()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(TEXT))
+                                    .child(title),
+                            )
+                        })
                         .child(
                             div()
                                 .h_full()
@@ -13401,48 +13490,33 @@ impl Render for XdDesktop {
                         .child(
                             div()
                                 .id("new-terminal-session")
-                                .px_2()
-                                .py_1()
+                                .size(px(28.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(TEXT))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.new_terminal_session(cx)),
                                 )
-                                .child("+"),
+                                .child(plus_icon(TEXT)),
                         )
                         .when(active, |header| {
                             header.child(
                                 div()
                                     .id("kill-terminal")
-                                    .px_2()
-                                    .py_1()
+                                    .size(px(28.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
                                     .rounded_md()
-                                    .text_xs()
-                                    .text_color(rgb(0xf1b3ba))
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(0x3c292d)))
                                     .on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx)))
-                                    .child("Kill"),
+                                    .child(trash_icon(0xf1b3ba)),
                             )
-                        })
-                        .child(
-                            div()
-                                .id("close-terminal")
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(MUTED))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.toggle_terminal_panel(cx)),
-                                )
-                                .child("×"),
-                        ),
+                        }),
                 )
                 .when(panel.loading, |pane| {
                     pane.child(
@@ -14008,13 +14082,13 @@ impl Render for XdDesktop {
                 .child(
                     div()
                         .id("app-settings-panel")
-                        .w(px(440.0))
-                        .max_h(px(680.0))
-                        .overflow_y_scroll()
+                        .w(px(720.0))
+                        .h(px(520.0))
+                        .overflow_hidden()
                         .p_4()
                         .flex()
                         .flex_col()
-                        .gap_4()
+                        .gap_3()
                         .rounded_xl()
                         .border_1()
                         .border_color(rgb(BORDER))
@@ -14046,25 +14120,59 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .flex_1()
+                                .min_h_0()
                                 .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().text_xs().text_color(rgb(MUTED)).child("ACCENT COLOR"))
-                                .child(div().flex().flex_wrap().gap_2().children(accent_buttons)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
+                                .gap_4()
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child("GIT WRITING ASSISTANT"),
-                                )
-                                .child(
-                                    div()
+                                        .id("settings-preferences-column")
+                                        .w(px(316.0))
+                                        .h_full()
+                                        .pr_2()
+                                        .overflow_y_scroll()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(TEXT))
+                                                .child("Preferences"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(MUTED))
+                                                        .child("ACCENT COLOR"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_wrap()
+                                                        .gap_2()
+                                                        .children(accent_buttons),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(MUTED))
+                                                        .child("GIT WRITING ASSISTANT"),
+                                                )
+                                                .child(
+                                                    div()
                                         .id("open-git-writer-menu")
                                         .w_full()
                                         .p_3()
@@ -14090,7 +14198,7 @@ impl Render for XdDesktop {
                                                 "▾"
                                             },
                                         )),
-                                )
+                                                )
                                 .when(
                                     self.settings_menu == Some(SettingsMenu::GitWriter),
                                     |section| {
@@ -14165,14 +14273,14 @@ impl Render for XdDesktop {
                                             },
                                         )
                                 })
-                                .child(
+                                                .child(
                                     div()
                                         .text_xs()
                                         .text_color(rgb(MUTED))
                                         .child("Used for AI commit and pull request drafts."),
-                                ),
-                        )
-                        .child(
+                                                ),
+                                        )
+                                        .child(
                             div()
                                 .id("toggle-notifications")
                                 .p_3()
@@ -14189,8 +14297,7 @@ impl Render for XdDesktop {
                                     this.toggle_notifications(cx);
                                 }))
                                 .child(
-                                    div()
-                                        .min_w_0()
+                                    div().min_w_0()
                                         .flex_1()
                                         .flex()
                                         .flex_col()
@@ -14222,8 +14329,8 @@ impl Render for XdDesktop {
                                             div().size(px(16.0)).rounded_full().bg(rgb(0xffffff)),
                                         ),
                                 ),
-                        )
-                        .child(
+                                        )
+                                        .child(
                             div()
                                 .id("toggle-speech")
                                 .p_3()
@@ -14240,8 +14347,7 @@ impl Render for XdDesktop {
                                     this.toggle_speech(cx);
                                 }))
                                 .child(
-                                    div()
-                                        .min_w_0()
+                                    div().min_w_0()
                                         .flex_1()
                                         .flex()
                                         .flex_col()
@@ -14270,8 +14376,29 @@ impl Render for XdDesktop {
                                             div().size(px(16.0)).rounded_full().bg(rgb(0xffffff)),
                                         ),
                                 ),
-                        )
-                        .child(
+                                        ),
+                                )
+                                .child(div().w(px(1.0)).h_full().bg(rgb(BORDER)))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .h_full()
+                                        .pr_1()
+                                        .id("settings-application-column")
+                                        .overflow_y_scroll()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .mb_1()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(TEXT))
+                                                .child("Application & devices"),
+                                        )
+                                        .child(
                             div()
                                 .id("open-global-shortcuts")
                                 .p_3()
@@ -14304,8 +14431,8 @@ impl Render for XdDesktop {
                                         )),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
-                        )
-                        .child(
+                                        )
+                                        .child(
                             div()
                                 .id("open-daemon-update")
                                 .p_3()
@@ -14338,8 +14465,8 @@ impl Render for XdDesktop {
                                         )),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
-                        )
-                        .child(
+                                        )
+                                        .child(
                             div()
                                 .id("open-remote-machine")
                                 .p_3()
@@ -14375,8 +14502,8 @@ impl Render for XdDesktop {
                                         ),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
-                        )
-                        .child(
+                                        )
+                                        .child(
                             div()
                                 .id("open-add-device")
                                 .p_3()
@@ -14409,8 +14536,8 @@ impl Render for XdDesktop {
                                         )),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
-                        )
-                        .child(
+                                        )
+                                        .child(
                             div()
                                 .id("open-paired-devices")
                                 .p_3()
@@ -14443,8 +14570,8 @@ impl Render for XdDesktop {
                                         )),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
-                        )
-                        .child(
+                                        )
+                                        .child(
                             div()
                                 .id("open-agent-secrets")
                                 .p_3()
@@ -14477,6 +14604,8 @@ impl Render for XdDesktop {
                                         )),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
+                                        ),
+                                ),
                         ),
                 )
                 .into_any_element()
@@ -16456,7 +16585,7 @@ impl Render for XdDesktop {
             .flex_shrink_0()
             .bg(rgb(BG))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|style| style.bg(rgb(accent)))
+            .hover(|style| style.bg(rgb(BORDER)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -16471,7 +16600,7 @@ impl Render for XdDesktop {
                 .flex_shrink_0()
                 .bg(rgb(BG))
                 .cursor(CursorStyle::ResizeLeftRight)
-                .hover(|style| style.bg(rgb(accent)))
+                .hover(|style| style.bg(rgb(BORDER)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -16487,7 +16616,7 @@ impl Render for XdDesktop {
                 .flex_shrink_0()
                 .bg(rgb(BG))
                 .cursor(CursorStyle::ResizeUpDown)
-                .hover(|style| style.bg(rgb(accent)))
+                .hover(|style| style.bg(rgb(BORDER)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {

@@ -21,6 +21,7 @@ pub struct TerminalSpan {
 pub struct TerminalText {
     pub text: String,
     pub spans: Vec<TerminalSpan>,
+    pub cursor: Option<Range<usize>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -161,31 +162,49 @@ impl TerminalScreen {
         self.rendered().text
     }
 
+    #[cfg(test)]
     pub fn rendered(&self) -> TerminalText {
+        self.rendered_inner(false)
+    }
+
+    pub fn rendered_with_cursor(&self) -> TerminalText {
+        self.rendered_inner(true)
+    }
+
+    fn rendered_inner(&self, include_cursor: bool) -> TerminalText {
         let mut lines = self
             .scrollback
             .iter()
             .chain(self.grid.iter())
             .collect::<Vec<_>>();
+        let cursor_line = self.scrollback.len() + self.row;
         while lines
             .last()
             .is_some_and(|line| line.iter().all(|cell| cell.character == ' '))
             && lines.len() > 1
+            && (!include_cursor || lines.len() > cursor_line + 1)
         {
             lines.pop();
         }
         let mut text = String::new();
         let mut spans = Vec::new();
+        let mut cursor = None;
         for (line_index, line) in lines.into_iter().enumerate() {
             if line_index > 0 {
                 text.push('\n');
             }
-            let end = line
+            let content_end = line
                 .iter()
                 .rposition(|cell| cell.character != ' ')
                 .map_or(0, |index| index + 1);
+            let cursor_column = self.column.min(self.columns.saturating_sub(1));
+            let end = if include_cursor && line_index == cursor_line {
+                content_end.max(cursor_column + 1)
+            } else {
+                content_end
+            };
             let mut run: Option<(usize, TerminalStyle)> = None;
-            for cell in &line[..end] {
+            for (column, cell) in line[..end].iter().enumerate() {
                 let style = cell.style.resolved();
                 if run.is_some_and(|(_, current)| current != style) {
                     let (start, current) = run.take().expect("terminal style run exists");
@@ -199,7 +218,11 @@ impl TerminalScreen {
                 if run.is_none() {
                     run = Some((text.len(), style));
                 }
+                let cell_start = text.len();
                 text.push(cell.character);
+                if include_cursor && line_index == cursor_line && column == cursor_column {
+                    cursor = Some(cell_start..text.len());
+                }
             }
             if let Some((start, style)) = run
                 && style != TerminalStyle::default()
@@ -210,7 +233,11 @@ impl TerminalScreen {
                 });
             }
         }
-        TerminalText { text, spans }
+        TerminalText {
+            text,
+            spans,
+            cursor,
+        }
     }
 
     fn put(&mut self, character: char) {
@@ -457,5 +484,16 @@ mod tests {
         assert!(rendered.spans.iter().any(|span| {
             &rendered.text[span.range.clone()] == "X" && span.style.background == Some(0x010203)
         }));
+    }
+
+    #[test]
+    fn exposes_the_cursor_cell_without_changing_plain_rendering() {
+        let mut screen = TerminalScreen::new(8, 3);
+        screen.feed(b"prompt> ");
+        assert_eq!(screen.rendered().text, "prompt>");
+
+        let rendered = screen.rendered_with_cursor();
+        let cursor = rendered.cursor.expect("cursor cell");
+        assert_eq!(&rendered.text[cursor], " ");
     }
 }
