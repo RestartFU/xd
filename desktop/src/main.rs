@@ -397,6 +397,7 @@ struct XdDesktop {
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
+    transcript_loading: bool,
     composer_input: Entity<FileEditor>,
     queue_edit_input: Entity<ComposerInput>,
     sidebar_edit_input: Entity<ComposerInput>,
@@ -653,6 +654,7 @@ impl XdDesktop {
             daemon: None,
             _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
+            transcript_loading: false,
             composer_input,
             queue_edit_input,
             sidebar_edit_input,
@@ -760,6 +762,7 @@ impl XdDesktop {
                 self.model.connected = false;
                 self.model.connection_error = Some(message);
                 self.sending = false;
+                self.transcript_loading = false;
                 self.workspace_create_submitting = false;
                 self.chat_create_submitting = false;
                 self.workspace_context_loading = false;
@@ -855,13 +858,15 @@ impl XdDesktop {
                     self.sending = false;
                     self.restore_pending_send(cx);
                 }
-                RequestKind::Messages { chat_id }
+                RequestKind::Messages { chat_id } if self.chat_is_active(chat_id) => {
+                    self.transcript_loading = false;
                     if self
                         .pending_speech
                         .as_ref()
-                        .is_some_and(|pending| pending.chat_id == *chat_id) =>
-                {
-                    self.pending_speech = None;
+                        .is_some_and(|pending| pending.chat_id == *chat_id)
+                    {
+                        self.pending_speech = None;
+                    }
                 }
                 RequestKind::NewFolder {
                     name,
@@ -1832,6 +1837,7 @@ impl XdDesktop {
                     }
                 }
                 self.transcript.reset(self.model.display_message_count());
+                self.transcript_loading = false;
                 self.request_workflow_statuses();
             }
             RequestKind::Send { chat_id, text } if self.chat_is_active(&chat_id) => {
@@ -4251,6 +4257,7 @@ impl XdDesktop {
         self.clear_question(cx);
         self.cancel_queue_edit(cx);
         self.sending = false;
+        self.transcript_loading = true;
         self.transcript.reset(0);
         self.request_chat(&chat_id);
         self.request_messages(&chat_id);
@@ -7123,22 +7130,35 @@ impl Render for XdDesktop {
         let workflow_statuses = self.workflow_statuses.clone();
         let workflow_pending = self.workflow_pending.clone();
         let desktop = cx.entity();
-        let transcript = list(self.transcript.clone(), move |index, _window, _cx| {
-            let message = &messages[index];
-            let key = message
-                .id
-                .map(|id| format!("message-{id}"))
-                .unwrap_or_else(|| format!("live-{index}"));
-            Self::message_row(
-                message,
-                index,
-                expanded_activity.contains(&key),
-                workflow_statuses.get(&message.content),
-                workflow_pending.contains(&message.content),
-                desktop.clone(),
-            )
-        })
-        .size_full();
+        let transcript = if self.transcript_loading {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child("Loading conversation…")
+                .into_any_element()
+        } else {
+            list(self.transcript.clone(), move |index, _window, _cx| {
+                let message = &messages[index];
+                let key = message
+                    .id
+                    .map(|id| format!("message-{id}"))
+                    .unwrap_or_else(|| format!("live-{index}"));
+                Self::message_row(
+                    message,
+                    index,
+                    expanded_activity.contains(&key),
+                    workflow_statuses.get(&message.content),
+                    workflow_pending.contains(&message.content),
+                    desktop.clone(),
+                )
+            })
+            .size_full()
+            .into_any_element()
+        };
 
         let composer_focus = self.composer_input.read(cx).focus_handle(cx);
         let attachment_count = self.model.draft_attachments.len();
