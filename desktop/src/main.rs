@@ -19,9 +19,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations, Entity,
-    Focusable, FontStyle, FontWeight, HighlightStyle, Image, KeyBinding, ListAlignment, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Point,
-    Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
+    Focusable, FontStyle, FontWeight, HighlightStyle, Image, InteractiveText, KeyBinding,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Point, Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
     list, prelude::*, px, relative, rgb, rgba, size,
 };
@@ -8520,12 +8520,13 @@ impl XdDesktop {
     fn markdown_content(document: std::sync::Arc<markdown::Document>, scope: &str) -> gpui::Div {
         let mut content = div().w_full().flex().flex_col().gap_2();
         for (block_index, block) in document.blocks.iter().cloned().enumerate() {
+            let block_id = scoped_element_id(scope, block_index);
             let element = match block {
                 Block::Heading { level, content } => {
                     let heading = div()
                         .mt_1()
                         .font_weight(FontWeight::BOLD)
-                        .child(Self::inline_text(content));
+                        .child(Self::inline_text(content, block_id));
                     match level {
                         1 => heading.text_xl().line_height(px(30.0)),
                         2 => heading.text_lg().line_height(px(27.0)),
@@ -8535,7 +8536,7 @@ impl XdDesktop {
                 }
                 Block::Paragraph(content) => div()
                     .whitespace_normal()
-                    .child(Self::inline_text(content))
+                    .child(Self::inline_text(content, block_id))
                     .into_any_element(),
                 Block::Quote(content) => div()
                     .pl_3()
@@ -8543,7 +8544,7 @@ impl XdDesktop {
                     .border_l_2()
                     .border_color(rgb(0x59647a))
                     .text_color(rgb(MUTED))
-                    .child(Self::inline_text(content))
+                    .child(Self::inline_text(content, block_id))
                     .into_any_element(),
                 Block::ListItem { ordered, content } => div()
                     .flex()
@@ -8556,7 +8557,7 @@ impl XdDesktop {
                             .text_color(rgb(MUTED))
                             .child(if ordered { "1." } else { "•" }),
                     )
-                    .child(div().flex_1().child(Self::inline_text(content)))
+                    .child(div().flex_1().child(Self::inline_text(content, block_id)))
                     .into_any_element(),
                 Block::Rule => div()
                     .w_full()
@@ -8568,7 +8569,6 @@ impl XdDesktop {
                     let language = code.language.unwrap_or_else(|| "text".into());
                     let source = code.code;
                     let copied_source = source.clone();
-                    let block_id = scoped_element_id(scope, block_index);
                     let highlights = code.spans.into_iter().map(|span| {
                         let color = match span.kind {
                             CodeKind::Keyword => 0xc792ea,
@@ -8641,7 +8641,12 @@ impl XdDesktop {
         content
     }
 
-    fn inline_text(content: InlineText) -> StyledText {
+    fn inline_text(content: InlineText, id: u64) -> gpui::AnyElement {
+        let links = content
+            .spans
+            .iter()
+            .filter_map(|span| span.url.clone().map(|url| (span.range.clone(), url)))
+            .collect::<Vec<_>>();
         let highlights = content.spans.into_iter().map(|span| {
             let style = match span.kind {
                 InlineKind::Strong => HighlightStyle {
@@ -8664,7 +8669,19 @@ impl XdDesktop {
             };
             (span.range, style)
         });
-        StyledText::new(content.text).with_highlights(highlights)
+        let text = StyledText::new(content.text).with_highlights(highlights);
+        if links.is_empty() {
+            return text.into_any_element();
+        }
+        let ranges = links.iter().map(|(range, _)| range.clone()).collect();
+        let urls = links.into_iter().map(|(_, url)| url).collect::<Vec<_>>();
+        InteractiveText::new(("markdown-inline", id), text)
+            .on_click(ranges, move |index, _, cx| {
+                if let Some(url) = urls.get(index) {
+                    cx.open_url(url);
+                }
+            })
+            .into_any_element()
     }
 
     fn sidebar_context_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {

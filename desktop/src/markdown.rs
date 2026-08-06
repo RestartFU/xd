@@ -30,6 +30,7 @@ pub struct InlineText {
 pub struct InlineSpan {
     pub range: Range<usize>,
     pub kind: InlineKind,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,14 +558,15 @@ fn parse_inline(source: &str) -> InlineText {
             None
         };
 
-        if let Some((value, consumed, kind)) = parsed {
+        if let Some(parsed) = parsed {
             let start = text.len();
-            text.push_str(value);
+            text.push_str(parsed.value);
             spans.push(InlineSpan {
                 range: start..text.len(),
-                kind,
+                kind: parsed.kind,
+                url: parsed.url,
             });
-            rest = &rest[consumed..];
+            rest = &rest[parsed.consumed..];
         } else {
             let length = rest.chars().next().map(char::len_utf8).unwrap_or(0);
             text.push_str(&rest[..length]);
@@ -574,27 +576,60 @@ fn parse_inline(source: &str) -> InlineText {
     InlineText { text, spans }
 }
 
+struct ParsedInline<'a> {
+    value: &'a str,
+    consumed: usize,
+    kind: InlineKind,
+    url: Option<String>,
+}
+
 fn inline_delimited<'a>(
     source: &'a str,
     delimiter: &str,
     kind: InlineKind,
-) -> Option<(&'a str, usize, InlineKind)> {
+) -> Option<ParsedInline<'a>> {
     let body = &source[delimiter.len()..];
     let end = body.find(delimiter)?;
     if end == 0 {
         return None;
     }
-    Some((&body[..end], delimiter.len() + end + delimiter.len(), kind))
+    Some(ParsedInline {
+        value: &body[..end],
+        consumed: delimiter.len() + end + delimiter.len(),
+        kind,
+        url: None,
+    })
 }
 
-fn inline_link(source: &str) -> Option<(&str, usize, InlineKind)> {
+fn inline_link(source: &str) -> Option<ParsedInline<'_>> {
     let label_end = source.find("](")?;
     let url_start = label_end + 2;
     let url_end = source[url_start..].find(')')? + url_start;
     if label_end <= 1 || url_end == url_start {
         return None;
     }
-    Some((&source[1..label_end], url_end + 1, InlineKind::Link))
+    let url = &source[url_start..url_end];
+    Some(ParsedInline {
+        value: &source[1..label_end],
+        consumed: url_end + 1,
+        kind: InlineKind::Link,
+        url: safe_link_url(url).map(ToOwned::to_owned),
+    })
+}
+
+fn safe_link_url(url: &str) -> Option<&str> {
+    const MAX_LINK_BYTES: usize = 2_048;
+    if url.len() > MAX_LINK_BYTES
+        || url
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    let remainder = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    (!remainder.is_empty()).then_some(url)
 }
 
 fn highlight_code(language: Option<&str>, code: &str) -> Vec<CodeSpan> {
@@ -919,6 +954,7 @@ mod tests {
         };
         assert_eq!(paragraph.text, "A bold and code link to xd.");
         assert_eq!(paragraph.spans.len(), 3);
+        assert_eq!(paragraph.spans[2].url.as_deref(), Some("https://xd.dev"));
         assert!(matches!(
             document.blocks[2],
             Block::ListItem { ordered: false, .. }
@@ -929,6 +965,31 @@ mod tests {
         ));
         assert!(matches!(document.blocks[4], Block::Quote(_)));
         assert!(matches!(document.blocks[5], Block::Rule));
+    }
+
+    #[test]
+    fn links_keep_only_bounded_web_destinations() {
+        let document = parse(
+            "[secure](https://example.com/path) [plain](http://localhost:3000) [file](file:///tmp/x) [script](javascript:alert(1)) [space](https://example.com/a b)",
+        );
+        let Block::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("paragraph")
+        };
+        let urls = paragraph
+            .spans
+            .iter()
+            .map(|span| span.url.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            urls,
+            vec![
+                Some("https://example.com/path"),
+                Some("http://localhost:3000"),
+                None,
+                None,
+                None,
+            ]
+        );
     }
 
     #[test]
