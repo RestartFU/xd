@@ -45,8 +45,8 @@ use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
     Down as EditorDown, EditorEvent, End as EditorEnd, FileEditor, Home as EditorHome,
     Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
-    SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft, SelectRight as EditorSelectRight,
-    Submit as EditorSubmit, Tab as EditorTab, Up as EditorUp,
+    Save as EditorSave, SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft,
+    SelectRight as EditorSelectRight, Submit as EditorSubmit, Tab as EditorTab, Up as EditorUp,
 };
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
@@ -673,12 +673,14 @@ impl XdDesktop {
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
             EditorEvent::Submit => this.send_composer(cx),
+            EditorEvent::Save => {}
         })
         .detach();
         let queue_edit_input = cx.new(|cx| FileEditor::message(cx, "Edit queued message…"));
         cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
             EditorEvent::Submit => this.save_queue_edit(cx),
+            EditorEvent::Save => {}
         })
         .detach();
         let sidebar_edit_input = cx.new(|cx| ComposerInput::new(cx, "Name…"));
@@ -778,6 +780,7 @@ impl XdDesktop {
                 }
             }
             EditorEvent::Submit => {}
+            EditorEvent::Save => this.save_browse_file(cx),
         })
         .detach();
         let terminal_input = cx.new(ComposerInput::terminal);
@@ -1933,6 +1936,7 @@ impl XdDesktop {
                 }
                 if let Some(diff) = &mut self.diff_panel {
                     let content = content.unwrap_or_default().to_owned();
+                    let editor_path = path.clone();
                     diff.file_preview = Some(FilePreview {
                         path,
                         original: content.clone(),
@@ -1942,8 +1946,9 @@ impl XdDesktop {
                     });
                     diff.file_loading = false;
                     diff.error = None;
-                    self.file_editor
-                        .update(cx, |editor, cx| editor.set_text(content, cx));
+                    self.file_editor.update(cx, |editor, cx| {
+                        editor.set_file(&editor_path, content, cx);
+                    });
                 }
             }
             RequestKind::FileBrowseWrite {
@@ -13100,6 +13105,8 @@ fn main() {
             KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
             KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
             KeyBinding::new("tab", EditorTab, Some("FileEditor")),
+            KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
+            KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
             KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
             KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
             KeyBinding::new("left", EditorLeft, Some("MessageEditor")),

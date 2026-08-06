@@ -455,6 +455,43 @@ fn normalize_language(language: &str) -> String {
     }
 }
 
+pub fn language_for_path(path: &str) -> Option<String> {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let language = match name.as_str() {
+        "dockerfile" => "dockerfile",
+        "makefile" | "gnumakefile" => "makefile",
+        _ => {
+            let extension = name.rsplit_once('.')?.1;
+            match extension {
+                "go" | "rs" | "py" | "pyw" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "cr"
+                | "rb" | "sh" | "bash" | "zsh" | "sql" | "java" | "kt" | "kts" | "c" | "h"
+                | "cc" | "cpp" | "cxx" | "hpp" | "swift" | "json" | "jsonc" | "yml" | "yaml"
+                | "toml" | "html" | "htm" | "xml" | "lua" => extension,
+                _ => return None,
+            }
+        }
+    };
+    Some(match language {
+        "pyw" => "python".into(),
+        "jsx" | "mjs" | "cjs" => "javascript".into(),
+        "tsx" => "typescript".into(),
+        "cr" => "crystal".into(),
+        "rb" => "ruby".into(),
+        "bash" => "shell".into(),
+        "kt" | "kts" => "kotlin".into(),
+        "h" => "c".into(),
+        "cc" | "cxx" | "hpp" => "cpp".into(),
+        "jsonc" => "json".into(),
+        "htm" => "html".into(),
+        other => normalize_language(other),
+    })
+}
+
+pub fn code_spans(language: Option<&str>, source: &str) -> Vec<CodeSpan> {
+    let (source, _) = bounded_prefix(source, MAX_MARKDOWN_BYTES);
+    highlight_code(language, source)
+}
+
 fn heading(line: &str) -> Option<(u8, &str)> {
     let trimmed = line.trim_start();
     let count = trimmed.bytes().take_while(|byte| *byte == b'#').count();
@@ -621,7 +658,7 @@ fn highlight_code(language: Option<&str>, code: &str) -> Vec<CodeSpan> {
 
 fn comment_length(language: Option<&str>, source: &str) -> Option<usize> {
     let line_comment = match language.unwrap_or_default() {
-        "python" | "shell" | "ruby" | "yaml" => "#",
+        "python" | "shell" | "ruby" | "yaml" | "toml" | "dockerfile" | "makefile" => "#",
         "sql" | "lua" => "--",
         "html" | "xml" => "<!--",
         _ => "//",
@@ -909,6 +946,28 @@ mod tests {
         assert!(code.spans.iter().any(|span| span.kind == CodeKind::Comment));
         assert!(code.spans.iter().any(|span| span.kind == CodeKind::String));
         assert!(code.spans.iter().any(|span| span.kind == CodeKind::Number));
+    }
+
+    #[test]
+    fn infers_editor_languages_from_workspace_paths() {
+        assert_eq!(language_for_path("cmd/xd/main.go").as_deref(), Some("go"));
+        assert_eq!(
+            language_for_path("desktop/src/main.rs").as_deref(),
+            Some("rust")
+        );
+        assert_eq!(
+            language_for_path("mobile/build.gradle.kts").as_deref(),
+            Some("kotlin")
+        );
+        assert_eq!(
+            language_for_path("scripts/install.bash").as_deref(),
+            Some("shell")
+        );
+        assert_eq!(
+            language_for_path("vendor/Dockerfile").as_deref(),
+            Some("dockerfile")
+        );
+        assert_eq!(language_for_path("README.md"), None);
     }
 
     #[test]

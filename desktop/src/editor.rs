@@ -9,6 +9,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use xd_desktop::markdown::{self, CodeKind, CodeSpan};
+
 actions!(
     file_editor,
     [
@@ -28,6 +30,7 @@ actions!(
         Copy,
         Newline,
         Submit,
+        Save,
         Tab,
     ]
 );
@@ -36,6 +39,7 @@ actions!(
 pub enum EditorEvent {
     Changed(String),
     Submit,
+    Save,
 }
 
 pub struct FileEditor {
@@ -49,6 +53,8 @@ pub struct FileEditor {
     is_selecting: bool,
     composer: bool,
     placeholder: SharedString,
+    syntax_language: Option<String>,
+    syntax_spans: Vec<CodeSpan>,
 }
 
 #[derive(Clone)]
@@ -75,6 +81,8 @@ impl FileEditor {
             is_selecting: false,
             composer: false,
             placeholder: "".into(),
+            syntax_language: None,
+            syntax_spans: Vec::new(),
         }
     }
 
@@ -92,11 +100,21 @@ impl FileEditor {
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = text.into();
+        self.refresh_syntax();
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    pub fn set_file(&mut self, path: &str, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.syntax_language = markdown::language_for_path(path);
+        self.set_text(text, cx);
+    }
+
+    fn refresh_syntax(&mut self) {
+        self.syntax_spans = markdown::code_spans(self.syntax_language.as_deref(), &self.content);
     }
 
     fn changed(&self, cx: &mut Context<Self>) {
@@ -180,6 +198,10 @@ impl FileEditor {
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(EditorEvent::Submit);
+    }
+
+    fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::Save);
     }
 
     fn tab(&mut self, _: &Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,6 +416,7 @@ impl EntityInputHandler for FileEditor {
             .unwrap_or(self.selected_range.clone());
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
+        self.refresh_syntax();
         let cursor = range.start + text.len();
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
@@ -416,6 +439,7 @@ impl EntityInputHandler for FileEditor {
             .unwrap_or(self.selected_range.clone());
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
+        self.refresh_syntax();
         self.marked_range = (!text.is_empty()).then_some(range.start..range.start + text.len());
         self.selected_range = selected
             .as_ref()
@@ -527,17 +551,10 @@ impl Element for EditorElement {
             } else {
                 input.content[range.clone()].to_owned().into()
             };
-            let run = TextRun {
-                len: text.len(),
-                font: style.font(),
-                color: rgb(if placeholder { 0xa8a8ad } else { 0xdde1ea }).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
+            let runs = text_runs(&input, &range, &style, placeholder);
             let layout = window
                 .text_system()
-                .shape_line(text, font_size, &[run], None);
+                .shape_line(text, font_size, &runs, None);
             let line_bounds = Bounds::new(
                 point(
                     bounds.left(),
@@ -654,6 +671,7 @@ impl Render for FileEditor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -661,6 +679,63 @@ impl Render for FileEditor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .font_family("monospace")
             .child(EditorElement { input: cx.entity() })
+    }
+}
+
+fn text_runs(
+    input: &FileEditor,
+    range: &Range<usize>,
+    style: &gpui::TextStyle,
+    placeholder: bool,
+) -> Vec<TextRun> {
+    let default_color = if placeholder { 0xa8a8ad } else { 0xdde1ea };
+    if placeholder || range.is_empty() || input.syntax_spans.is_empty() {
+        return vec![text_run(range.len(), style, default_color)];
+    }
+
+    let mut runs = Vec::new();
+    let mut cursor = range.start;
+    for span in input
+        .syntax_spans
+        .iter()
+        .filter(|span| span.range.end > range.start && span.range.start < range.end)
+    {
+        let start = span.range.start.max(range.start).max(cursor);
+        let end = span.range.end.min(range.end);
+        if cursor < start {
+            runs.push(text_run(start - cursor, style, default_color));
+        }
+        if start < end {
+            runs.push(text_run(end - start, style, syntax_color(span.kind)));
+            cursor = end;
+        }
+    }
+    if cursor < range.end {
+        runs.push(text_run(range.end - cursor, style, default_color));
+    }
+    if runs.is_empty() {
+        runs.push(text_run(range.len(), style, default_color));
+    }
+    runs
+}
+
+fn text_run(len: usize, style: &gpui::TextStyle, color: u32) -> TextRun {
+    TextRun {
+        len,
+        font: style.font(),
+        color: rgb(color).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }
+}
+
+fn syntax_color(kind: CodeKind) -> u32 {
+    match kind {
+        CodeKind::Keyword => 0xc792ea,
+        CodeKind::String => 0xc3e88d,
+        CodeKind::Comment => 0x758195,
+        CodeKind::Number => 0xf78c6c,
     }
 }
 
