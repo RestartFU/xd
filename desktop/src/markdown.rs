@@ -716,15 +716,29 @@ fn parse_inline(source: &str) -> InlineText {
     let mut rest = source;
 
     while !rest.is_empty() {
-        let Some((offset, marker)) = rest
-            .char_indices()
-            .find(|(_, character)| matches!(character, '*' | '`' | '['))
-        else {
+        let Some((offset, marker)) = rest.char_indices().find(|(offset, character)| {
+            matches!(character, '*' | '`' | '[') || starts_web_url(&rest[*offset..])
+        }) else {
             text.push_str(rest);
             break;
         };
         text.push_str(&rest[..offset]);
         rest = &rest[offset..];
+
+        if starts_web_url(rest) {
+            let length = bare_url_length(rest);
+            if length > 0 {
+                let start = text.len();
+                text.push_str(&rest[..length]);
+                spans.push(InlineSpan {
+                    range: start..text.len(),
+                    kind: InlineKind::Link,
+                    url: Some(rest[..length].to_owned()),
+                });
+                rest = &rest[length..];
+                continue;
+            }
+        }
 
         let parsed = if rest.starts_with("**") {
             inline_delimited(rest, "**", InlineKind::Strong)
@@ -754,6 +768,38 @@ fn parse_inline(source: &str) -> InlineText {
         }
     }
     InlineText { text, spans }
+}
+
+fn starts_web_url(source: &str) -> bool {
+    source.starts_with("https://") || source.starts_with("http://")
+}
+
+fn bare_url_length(source: &str) -> usize {
+    let mut length = source
+        .char_indices()
+        .take_while(|(_, character)| {
+            !character.is_whitespace()
+                && !character.is_control()
+                && !matches!(character, '<' | '>' | '"' | '\'')
+        })
+        .map(|(offset, character)| offset + character.len_utf8())
+        .take_while(|end| *end <= 2_048)
+        .last()
+        .unwrap_or(0);
+
+    while length > 0 {
+        let candidate = &source[..length];
+        let last = candidate.chars().next_back().expect("non-empty URL");
+        let trim = matches!(last, '.' | ',' | ';' | ':' | '!' | '?')
+            || (last == ')' && candidate.matches(')').count() > candidate.matches('(').count())
+            || (last == ']' && candidate.matches(']').count() > candidate.matches('[').count());
+        if !trim {
+            break;
+        }
+        length -= last.len_utf8();
+    }
+
+    safe_link_url(&source[..length]).map_or(0, str::len)
 }
 
 struct ParsedInline<'a> {
@@ -1170,6 +1216,46 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn autolinks_bare_web_urls_without_sentence_punctuation() {
+        let document = parse(
+            "See https://github.com/RestartFU/xd/issues/5 and (https://example.com/a_(b)). Next.",
+        );
+        let Block::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("paragraph")
+        };
+        assert_eq!(
+            paragraph.text,
+            "See https://github.com/RestartFU/xd/issues/5 and (https://example.com/a_(b)). Next."
+        );
+        let links = paragraph
+            .spans
+            .iter()
+            .filter_map(|span| span.url.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            links,
+            vec![
+                "https://github.com/RestartFU/xd/issues/5",
+                "https://example.com/a_(b)",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_incomplete_and_oversized_bare_urls_safe() {
+        let oversized = format!("https://example.com/{}", "a".repeat(3_000));
+        let document = parse(&format!("http:// https:// {oversized}"));
+        let Block::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("paragraph")
+        };
+        assert!(paragraph.spans.iter().all(|span| {
+            span.url
+                .as_ref()
+                .is_none_or(|url| url.len() <= 2_048 && safe_link_url(url).is_some())
+        }));
     }
 
     #[test]
