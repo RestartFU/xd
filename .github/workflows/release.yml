@@ -188,131 +188,8 @@ jobs:
             xd-linux-x86_64.tar.gz.sha256
             scripts/install.sh
 
-  macos:
-    needs: prepare
-    runs-on: macos-15
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: Install native build dependencies
-        env:
-          # No `brew update` first: the formulae this needs are pinned by the
-          # runner image and updating costs more than it can save here.
-          HOMEBREW_NO_AUTO_UPDATE: '1'
-          HOMEBREW_NO_INSTALL_CLEANUP: '1'
-        run: >-
-          brew install
-          crystal
-          pkgconf
-          gobject-introspection
-          gtk4
-          libadwaita
-          adwaita-icon-theme
-          vte3
-          portaudio
-          sqlite
-          glib-networking
-          librsvg
-          cmake
-
-      # Git, OpenSSL and whisper.cpp are pinned by version and compiled the same
-      # way every run, which is most of this job. Keyed on the scripts that
-      # build them; each entry inside is keyed on its own version, so a partial
-      # hit is still safe.
-      - uses: actions/cache@v4
-        with:
-          path: .payload-cache
-          key: >-
-            payloads-macos-arm64-${{ hashFiles(
-            'scripts/build-macos-git.sh',
-            'scripts/build-macos-openssl.sh',
-            'scripts/build-native-whisper.sh',
-            'scripts/payload-cache.sh') }}
-          restore-keys: payloads-macos-arm64-
-
-      - name: Build the complete macOS app
-        env:
-          XD_PAYLOAD_CACHE: ${{ github.workspace }}/.payload-cache
-        run: ./scripts/build-macos.sh "$PWD/macos-dist" release
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: |
-            macos-dist/xd-macos-arm64.zip
-            macos-dist/xd-macos-arm64.zip.sha256
-            scripts/install-macos.sh
-
-  windows:
-    needs: prepare
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          # The toolchain and GTK stack are a two-minute download every run
-          # otherwise, and they only change when this list does.
-          cache: true
-          install: >-
-            git
-            unzip
-            mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-crystal
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gobject-introspection
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-sqlite3
-            mingw-w64-ucrt-x86_64-glib-networking
-            mingw-w64-ucrt-x86_64-librsvg
-            mingw-w64-ucrt-x86_64-portaudio
-
-      # whisper.cpp is compiled from a pinned tag; see the macOS job.
-      - uses: actions/cache@v4
-        with:
-          path: .payload-cache
-          key: >-
-            payloads-windows-x86_64-${{ hashFiles(
-            'scripts/build-native-whisper.sh',
-            'scripts/payload-cache.sh') }}
-          restore-keys: payloads-windows-x86_64-
-
-      - name: Build the complete Windows payload
-        shell: msys2 {0}
-        run: |
-          # msys2 needs a Unix path; the workspace one is a drive path.
-          XD_PAYLOAD_CACHE="$(cygpath -u "$GITHUB_WORKSPACE")/.payload-cache"
-          export XD_PAYLOAD_CACHE
-          ./scripts/build-windows.sh "$PWD/windows-dist" release
-
-      - name: Build the MSI
-        shell: pwsh
-        run: >-
-          ./scripts/package-windows.ps1
-          -Payload windows-dist
-          -OutputDirectory windows-artifacts
-          -Profile release
-          -Version ${{ needs.prepare.outputs.version }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: |
-            windows-artifacts/xd-windows-x86_64.msi
-            windows-artifacts/xd-windows-x86_64.msi.sha256
-            scripts/install.ps1
-
   publish:
-    needs: [prepare, linux, macos, windows]
+    needs: [prepare, linux]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -339,25 +216,10 @@ jobs:
           Install it:
 
           \`\`\`
-          tar -xzf xd-linux-x86_64.tar.gz
-          ./xd/xd.sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh | sh -s -- --release
           \`\`\`
 
-          macOS Apple Silicon:
-
-          \`\`\`
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -- --release
-          \`\`\`
-
-          Windows x86_64:
-
-          \`\`\`powershell
-          & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
-          \`\`\`
-
-          Every artifact is self-contained. On Linux and macOS, the daemon is
-          the same bundled binary and can pair another device with
-          \`xd serve --pair\`.
+          The Linux bundle is self-contained.
           EOF
           )
 
@@ -367,11 +229,7 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
-              macos-dist/xd-macos-arm64.zip \
-              macos-dist/xd-macos-arm64.zip.sha256 \
-              windows-artifacts/xd-windows-x86_64.msi \
-              windows-artifacts/xd-windows-x86_64.msi.sha256 \
-              scripts/install.sh scripts/install-macos.sh scripts/install.ps1
+              scripts/install.sh
           else
             gh release create "$tag" \
               --verify-tag \
@@ -379,11 +237,5 @@ jobs:
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
               xd-linux-x86_64.tar.gz.sha256 \
-              macos-dist/xd-macos-arm64.zip \
-              macos-dist/xd-macos-arm64.zip.sha256 \
-              windows-artifacts/xd-windows-x86_64.msi \
-              windows-artifacts/xd-windows-x86_64.msi.sha256 \
-              scripts/install.sh \
-              scripts/install-macos.sh \
-              scripts/install.ps1
+              scripts/install.sh
           fi

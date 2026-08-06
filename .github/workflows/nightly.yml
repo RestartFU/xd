@@ -1,6 +1,5 @@
-# A runnable xd for every commit on master. Linux, macOS, and Windows artifacts
-# are built from the same commit and published under one rolling nightly tag.
-# Every artifact carries its own app, agent, Git, speech, and native runtime.
+# A runnable Rust/GPUI xd for every commit on master, published for Linux with
+# the independent Android client under one rolling nightly tag.
 #
 # Built as the nightly profile, which gives it its own application id, settings,
 # data directory and workspaces -- so installing it does not disturb a release
@@ -58,124 +57,6 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256
             scripts/install.sh
 
-  macos:
-    runs-on: macos-15
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install native build dependencies
-        env:
-          # No `brew update` first: the formulae this needs are pinned by the
-          # runner image and updating costs more than it can save here.
-          HOMEBREW_NO_AUTO_UPDATE: '1'
-          HOMEBREW_NO_INSTALL_CLEANUP: '1'
-        run: >-
-          brew install
-          crystal
-          pkgconf
-          gobject-introspection
-          gtk4
-          libadwaita
-          adwaita-icon-theme
-          vte3
-          portaudio
-          sqlite
-          glib-networking
-          librsvg
-          cmake
-
-      # Git, OpenSSL and whisper.cpp are pinned by version and compiled the same
-      # way every run, which is most of this job. Keyed on the scripts that
-      # build them; each entry inside is keyed on its own version, so a partial
-      # hit is still safe.
-      - uses: actions/cache@v4
-        with:
-          path: .payload-cache
-          key: >-
-            payloads-macos-arm64-${{ hashFiles(
-            'scripts/build-macos-git.sh',
-            'scripts/build-macos-openssl.sh',
-            'scripts/build-native-whisper.sh',
-            'scripts/payload-cache.sh') }}
-          restore-keys: payloads-macos-arm64-
-
-      - name: Build the complete macOS app
-        env:
-          XD_PAYLOAD_CACHE: ${{ github.workspace }}/.payload-cache
-        run: ./scripts/build-macos.sh "$PWD/macos-dist" nightly
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: |
-            macos-dist/xd-nightly-macos-arm64.zip
-            macos-dist/xd-nightly-macos-arm64.zip.sha256
-            scripts/install-macos.sh
-
-  windows:
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          # The toolchain and GTK stack are a two-minute download every run
-          # otherwise, and they only change when this list does.
-          cache: true
-          install: >-
-            git
-            unzip
-            mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-crystal
-            mingw-w64-ucrt-x86_64-7zip
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gobject-introspection
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-sqlite3
-            mingw-w64-ucrt-x86_64-glib-networking
-            mingw-w64-ucrt-x86_64-librsvg
-            mingw-w64-ucrt-x86_64-portaudio
-
-      # whisper.cpp is compiled from a pinned tag; see the macOS job.
-      - uses: actions/cache@v4
-        with:
-          path: .payload-cache
-          key: >-
-            payloads-windows-x86_64-${{ hashFiles(
-            'scripts/build-native-whisper.sh',
-            'scripts/payload-cache.sh') }}
-          restore-keys: payloads-windows-x86_64-
-
-      - name: Build the complete Windows payload
-        shell: msys2 {0}
-        run: |
-          # msys2 needs a Unix path; the workspace one is a drive path.
-          XD_PAYLOAD_CACHE="$(cygpath -u "$GITHUB_WORKSPACE")/.payload-cache"
-          export XD_PAYLOAD_CACHE
-          ./scripts/build-windows.sh "$PWD/windows-dist" nightly
-
-      - name: Build the MSI
-        shell: pwsh
-        run: >-
-          ./scripts/package-windows.ps1
-          -Payload windows-dist
-          -OutputDirectory windows-artifacts
-          -Profile nightly
-          -Version 0.1.0
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: |
-            windows-artifacts/xd-nightly-windows-x86_64.msi
-            windows-artifacts/xd-nightly-windows-x86_64.msi.sha256
-            scripts/install.ps1
-
   android:
     runs-on: [self-hosted, linux, x64, xd]
 
@@ -202,7 +83,7 @@ jobs:
             xd-nightly-android.apk.sha256
 
   publish:
-    needs: [linux, macos, windows, android]
+    needs: [linux, android]
     # GitHub's own runner, deliberately: this job downloads every artifact and
     # uploads it again as a release asset -- about a gigabyte each way. On a
     # self-hosted runner that gigabyte crosses a home connection twice; here it
@@ -240,28 +121,15 @@ jobs:
           ./xd-nightly/xd.sh
           \`\`\`
 
-          macOS Apple Silicon:
-
-          \`\`\`
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install-macos.sh | sh
-          \`\`\`
-
-          Windows x86_64:
-
-          \`\`\`powershell
-          irm https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.ps1 | iex
-          \`\`\`
-
           Android:
 
           Install \`xd-nightly-android.apk\` on a phone that can reach the
-          machine running the daemon, then pair it with \`xd serve --pair\`.
+          machine running the daemon, then pair it from the desktop's Devices
+          settings.
           It is a test build signed with a per-build key, so uninstall the
           previous one before installing a newer APK.
 
-          Every artifact is self-contained and installs beside a release.
-          On Linux and macOS, the daemon is the same bundled binary and can
-          pair another device with \`xd serve --pair\`.
+          The Linux bundle is self-contained and installs beside a release.
           EOF
           )
 
@@ -277,12 +145,6 @@ jobs:
             --notes "$notes" \
             xd-nightly-linux-x86_64.tar.gz \
             xd-nightly-linux-x86_64.tar.gz.sha256 \
-            macos-dist/xd-nightly-macos-arm64.zip \
-            macos-dist/xd-nightly-macos-arm64.zip.sha256 \
-            windows-artifacts/xd-nightly-windows-x86_64.msi \
-            windows-artifacts/xd-nightly-windows-x86_64.msi.sha256 \
             xd-nightly-android.apk \
             xd-nightly-android.apk.sha256 \
-            scripts/install.sh \
-            scripts/install-macos.sh \
-            scripts/install.ps1
+            scripts/install.sh
