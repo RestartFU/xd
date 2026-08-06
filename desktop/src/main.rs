@@ -38,6 +38,7 @@ use xd_desktop::{
 
 mod editor;
 mod input;
+mod presence;
 mod settings;
 mod speech;
 mod terminal;
@@ -54,6 +55,7 @@ use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
     Left, Paste, Right, SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit, Tab, Up,
 };
+use presence::DiscordPresence;
 use settings::{AccentPreset, AppSettings, GitWriter};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
@@ -741,6 +743,7 @@ struct XdDesktop {
     voice_input: VoiceInput,
     voice_applying_text: bool,
     speech_output: SpeechOutput,
+    presence: DiscordPresence,
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
@@ -1134,6 +1137,7 @@ impl XdDesktop {
             voice_input: VoiceInput::default(),
             voice_applying_text: false,
             speech_output: SpeechOutput::default(),
+            presence: DiscordPresence::default(),
             pending_speech: None,
             daemon: None,
             _started_daemon: None,
@@ -8563,10 +8567,32 @@ impl XdDesktop {
                 .into_any_element(),
         )
     }
+
+    fn presence_state(&self) -> &'static str {
+        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+            return "Browsing workspaces";
+        };
+        if self.active_endpoint == ChatEndpoint::Remote
+            && self.remote_state != RemoteState::Connected
+        {
+            "Remote unavailable"
+        } else if self
+            .open_question
+            .as_ref()
+            .is_some_and(|question| question.chat_id == chat_id)
+        {
+            "Waiting for input"
+        } else if self.model.working {
+            "Agent working"
+        } else {
+            "Reviewing a conversation"
+        }
+    }
 }
 
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.presence.set_state(self.presence_state());
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });
         let accent = self.settings.accent.color();

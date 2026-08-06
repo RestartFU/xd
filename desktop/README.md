@@ -36,6 +36,7 @@ Current milestone:
 - live assistant text, activity, turn state, and queue event handling;
 - structured agent questions with option buttons and custom-answer input;
 - opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
+- best-effort Discord Rich Presence with private, fixed conversation-state labels;
 - shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - simultaneously visible repository and terminal panes with draggable, persisted dividers;
 - workdir-relative directory browsing and conflict-guarded UTF-8 file editing for Git and non-Git chats;
