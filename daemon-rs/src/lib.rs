@@ -105,7 +105,7 @@ impl Engine {
         Self {
             store: None,
             auth: AuthManager::new(events.clone()),
-            workflows: WorkflowStatuses::new(),
+            workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), None),
             secrets,
@@ -133,7 +133,7 @@ impl Engine {
             )),
             store: Some(store),
             auth,
-            workflows: WorkflowStatuses::new(),
+            workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), data_directory),
             secrets,
@@ -247,7 +247,7 @@ impl Engine {
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
             Some("steer-queue") => self.steer_queue(&request),
-            Some("workflow-status") => self.workflow_status(&request),
+            Some("workflow-status") => self.workflow_status(owner, &request),
             Some("terminal-list") => self.terminal_list(&request),
             Some("terminal-open") => self.terminal_open(&request),
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
@@ -378,7 +378,7 @@ impl Engine {
         }
     }
 
-    fn workflow_status(&self, request: &Value) -> Value {
+    fn workflow_status(&self, owner: u64, request: &Value) -> Value {
         let text = match required_string(
             request,
             "text",
@@ -387,7 +387,9 @@ impl Engine {
             Ok(text) => text,
             Err(error) => return error_reply(error),
         };
-        self.workflows.fetch(text).unwrap_or_else(error_reply)
+        self.workflows
+            .start(owner, text)
+            .unwrap_or_else(error_reply)
     }
 
     fn terminal_list(&self, request: &Value) -> Value {

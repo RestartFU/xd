@@ -46,6 +46,106 @@ impl ActivityCard {
             footer: None,
         }
     }
+
+    pub fn with_workflow_status(mut self, status: Option<&Value>, pending: bool) -> Self {
+        if self.title != "Workflow" {
+            return self;
+        }
+        let Some(status) = status else {
+            if pending {
+                self.status = "Checking…".into();
+            }
+            return self;
+        };
+        if status.get("ok").and_then(Value::as_bool) != Some(true) {
+            self.kind = ActivityKind::Failure;
+            self.status = "Status unavailable".into();
+            self.detail = status
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("GitHub did not return this workflow run.")
+                .to_owned();
+            return self;
+        }
+        if status.get("pending").and_then(Value::as_bool) == Some(true) {
+            self.status = "Checking…".into();
+            return self;
+        }
+
+        if let Some(name) = status
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        {
+            self.name = compact(name, 120, &self.name);
+        }
+        let state = status
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let conclusion = status
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let stale = status.get("stale").and_then(Value::as_bool) == Some(true);
+        let (kind, label) = workflow_state(state, conclusion);
+        self.kind = kind;
+        self.status = if stale {
+            format!("{label} · cached")
+        } else {
+            label.into()
+        };
+        if let Some(detail) = workflow_jobs(status) {
+            self.detail = detail;
+        }
+        self
+    }
+}
+
+fn workflow_state(state: &str, conclusion: &str) -> (ActivityKind, &'static str) {
+    if state == "completed" {
+        return match conclusion {
+            "success" => (ActivityKind::Success, "Passed"),
+            "failure" | "timed_out" | "startup_failure" => (ActivityKind::Failure, "Failed"),
+            "cancelled" => (ActivityKind::Finished, "Cancelled"),
+            "skipped" | "neutral" => (ActivityKind::Finished, "Finished"),
+            _ => (ActivityKind::Finished, "Completed"),
+        };
+    }
+    match state {
+        "in_progress" => (ActivityKind::Running, "In progress"),
+        "queued" | "pending" | "requested" | "waiting" => (ActivityKind::Running, "Queued"),
+        _ => (ActivityKind::Running, "Running"),
+    }
+}
+
+fn workflow_jobs(status: &Value) -> Option<String> {
+    let jobs = status.get("jobs")?.as_array()?;
+    if jobs.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for job in jobs.iter().take(100) {
+        let name = job.get("name").and_then(Value::as_str)?;
+        let state = job
+            .get("status")
+            .or_else(|| job.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let conclusion = job
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let (_, label) = workflow_state(state, conclusion);
+        let activity = job
+            .get("log")
+            .and_then(Value::as_str)
+            .filter(|activity| !activity.is_empty())
+            .map(|activity| format!(" · {activity}"))
+            .unwrap_or_default();
+        lines.push(format!("{name} · {label}{activity}"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn generic_failure(summary: &str) -> bool {
@@ -156,6 +256,43 @@ mod tests {
     }
 
     #[test]
+    fn workflow_status_hydrates_the_shared_card_without_losing_cached_state() {
+        let marker =
+            "workflow_run\n31028502744\nhttps://github.com/RestartFU/xd/actions/runs/31028502744";
+        let running = ActivityCard::parse(marker).with_workflow_status(
+            Some(&serde_json::json!({
+                "ok": true,
+                "name": "GPUI dev",
+                "state": "in_progress",
+                "stale": true,
+                "jobs": [{
+                    "name": "linux",
+                    "state": "in_progress",
+                    "log": "Build release"
+                }]
+            })),
+            false,
+        );
+        assert_eq!(running.name, "GPUI dev");
+        assert_eq!(running.kind, ActivityKind::Running);
+        assert_eq!(running.status, "In progress · cached");
+        assert_eq!(running.detail, "linux · In progress · Build release");
+
+        let failed = ActivityCard::parse(marker).with_workflow_status(
+            Some(&serde_json::json!({
+                "ok": true,
+                "name": "GPUI dev",
+                "state": "completed",
+                "conclusion": "failure",
+                "jobs": []
+            })),
+            false,
+        );
+        assert_eq!(failed.kind, ActivityKind::Failure);
+        assert_eq!(failed.status, "Failed");
+    }
+
+    #[test]
     fn generic_tools_stay_compact_and_bounded() {
         let card = ActivityCard::parse(&"read  ".repeat(1_000));
         assert_eq!(card.title, "Activity");
@@ -173,3 +310,4 @@ mod tests {
         assert_eq!(ActivityCard::parse("read file").status, "Done");
     }
 }
+use serde_json::Value;

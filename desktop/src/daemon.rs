@@ -41,6 +41,9 @@ pub enum RequestKind {
     Search {
         query: String,
     },
+    WorkflowStatus {
+        marker: String,
+    },
     DiffRead {
         chat_id: String,
         read: String,
@@ -449,6 +452,15 @@ impl DaemonHandle {
                 folder_id: folder_id.to_owned(),
             },
             json!({"op": "shortcuts", "folder": folder_id}),
+        )
+    }
+
+    pub fn workflow_status(&self, marker: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::WorkflowStatus {
+                marker: marker.to_owned(),
+            },
+            json!({"op": "workflow-status", "text": marker}),
         )
     }
 

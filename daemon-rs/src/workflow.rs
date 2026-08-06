@@ -1,11 +1,14 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant},
 };
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+use crate::EventBus;
 
 const PREFIX: &str = "workflow_run\n";
 const MAX_BODY_BYTES: u64 = 2 * 1024 * 1024;
@@ -34,28 +37,138 @@ struct CacheEntry {
 type Resolver = dyn Fn(&WorkflowRun) -> Result<Resolution, String> + Send + Sync;
 
 pub(crate) struct WorkflowStatuses {
-    entries: Mutex<HashMap<String, CacheEntry>>,
-    failures: Mutex<HashMap<String, Instant>>,
+    entries: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    failures: Arc<Mutex<HashMap<String, Instant>>>,
+    inflight: Arc<Mutex<HashSet<String>>>,
     resolver: Arc<Resolver>,
     failure_ttl: Duration,
+    events: Arc<EventBus>,
 }
 
 impl WorkflowStatuses {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(events: Arc<EventBus>) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(10)))
             .user_agent("xd-dev/0.1")
             .build()
             .into();
         Self {
-            entries: Mutex::new(HashMap::new()),
-            failures: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            failures: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashSet::new())),
             resolver: Arc::new(move |run| resolve(&agent, run)),
             failure_ttl: FAILURE_TTL,
+            events,
         }
     }
 
-    pub(crate) fn fetch(&self, marker: &str) -> Result<Value, String> {
+    pub(crate) fn start(&self, owner: u64, marker: &str) -> Result<Value, String> {
+        let run = parse_marker(marker).ok_or_else(|| "Invalid workflow run marker.".to_owned())?;
+        let key = format!("{}/{}", run.repository, run.id);
+        let now = Instant::now();
+        let cached = {
+            let entries = self
+                .entries
+                .lock()
+                .map_err(|_| "Workflow status cache is unavailable.".to_owned())?;
+            entries.get(&key).map(|entry| {
+                (
+                    entry.status.clone(),
+                    terminal(&entry.status)
+                        || now.saturating_duration_since(entry.checked_at) < entry.active_ttl,
+                )
+            })
+        };
+        if let Some((status, true)) = cached.as_ref() {
+            return Ok(status.clone());
+        }
+
+        let cooling_down = self
+            .failures
+            .lock()
+            .map_err(|_| "Workflow status cache is unavailable.".to_owned())?
+            .get(&key)
+            .is_some_and(|failed_at| now.saturating_duration_since(*failed_at) < self.failure_ttl);
+        if cooling_down {
+            return cached
+                .map(|(status, _)| stale_status(status, false))
+                .ok_or_else(|| "Workflow status is temporarily unavailable.".to_owned());
+        }
+
+        let inserted = self
+            .inflight
+            .lock()
+            .map_err(|_| "Workflow status cache is unavailable.".to_owned())?
+            .insert(key.clone());
+        if inserted {
+            let entries = self.entries.clone();
+            let failures = self.failures.clone();
+            let inflight = self.inflight.clone();
+            let resolver = self.resolver.clone();
+            let events = self.events.clone();
+            let marker = marker.to_owned();
+            let worker_key = key.clone();
+            thread::Builder::new()
+                .name("xd-workflow-status".into())
+                .spawn(move || {
+                    let checked_at = Instant::now();
+                    let event_status = match resolver(&run) {
+                        Ok(resolution) => {
+                            let active_ttl = if resolution.authenticated {
+                                AUTHENTICATED_TTL
+                            } else {
+                                ANONYMOUS_TTL
+                            };
+                            let status = resolution.status;
+                            if let Ok(mut entries) = entries.lock() {
+                                entries.insert(
+                                    worker_key.clone(),
+                                    CacheEntry {
+                                        status: status.clone(),
+                                        checked_at,
+                                        active_ttl,
+                                    },
+                                );
+                            }
+                            if let Ok(mut failures) = failures.lock() {
+                                failures.remove(&worker_key);
+                            }
+                            status
+                        }
+                        Err(error) => {
+                            if let Ok(mut failures) = failures.lock() {
+                                failures.insert(worker_key.clone(), checked_at);
+                            }
+                            entries
+                                .lock()
+                                .ok()
+                                .and_then(|entries| {
+                                    entries.get(&worker_key).map(|entry| entry.status.clone())
+                                })
+                                .map(|status| stale_status(status, false))
+                                .unwrap_or_else(|| json!({"ok": false, "error": error}))
+                        }
+                    };
+                    if let Ok(mut inflight) = inflight.lock() {
+                        inflight.remove(&worker_key);
+                    }
+                    events.publish_to(owner, workflow_event(&marker, event_status));
+                })
+                .map_err(|error| {
+                    if let Ok(mut inflight) = self.inflight.lock() {
+                        inflight.remove(&key);
+                    }
+                    format!("Cannot start workflow status refresh: {error}")
+                })?;
+        }
+
+        Ok(cached
+            .map(|(status, _)| stale_status(status, true))
+            .unwrap_or_else(|| json!({"ok": true, "pending": true})))
+    }
+
+    #[cfg(test)]
+    fn fetch(&self, marker: &str) -> Result<Value, String> {
         let run = parse_marker(marker).ok_or_else(|| "Invalid workflow run marker.".to_owned())?;
         let key = format!("{}/{}", run.repository, run.id);
         let now = Instant::now();
@@ -118,13 +231,47 @@ impl WorkflowStatuses {
         resolver: impl Fn(&WorkflowRun) -> Result<Resolution, String> + Send + Sync + 'static,
         failure_ttl: Duration,
     ) -> Self {
+        Self::with_resolver_and_events(resolver, failure_ttl, Arc::new(EventBus::default()))
+    }
+
+    #[cfg(test)]
+    fn with_resolver_and_events(
+        resolver: impl Fn(&WorkflowRun) -> Result<Resolution, String> + Send + Sync + 'static,
+        failure_ttl: Duration,
+        events: Arc<EventBus>,
+    ) -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
-            failures: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            failures: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashSet::new())),
             resolver: Arc::new(resolver),
             failure_ttl,
+            events,
         }
     }
+}
+
+fn stale_status(mut status: Value, refreshing: bool) -> Value {
+    if let Some(status) = status.as_object_mut() {
+        status.insert("stale".into(), Value::Bool(true));
+        if refreshing {
+            status.insert("refreshing".into(), Value::Bool(true));
+        }
+    }
+    status
+}
+
+fn workflow_event(marker: &str, mut status: Value) -> Value {
+    let fields = status
+        .as_object_mut()
+        .map(std::mem::take)
+        .unwrap_or_default();
+    let mut event = Map::from_iter([
+        ("event".to_owned(), Value::String("workflow-status".into())),
+        ("text".to_owned(), Value::String(marker.to_owned())),
+    ]);
+    event.extend(fields);
+    Value::Object(event)
 }
 
 fn resolve(agent: &ureq::Agent, run: &WorkflowRun) -> Result<Resolution, String> {
@@ -289,6 +436,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{os::unix::net::UnixStream, sync::mpsc::sync_channel};
 
     #[test]
     fn marker_parser_accepts_only_the_captured_github_run() {
@@ -393,6 +541,47 @@ mod tests {
 
         assert_eq!(statuses.fetch(marker).unwrap()["conclusion"], "success");
         assert_eq!(statuses.fetch(marker).unwrap()["conclusion"], "success");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn background_refresh_replies_immediately_and_targets_the_completed_status() {
+        let events = Arc::new(EventBus::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver_calls = calls.clone();
+        let statuses = WorkflowStatuses::with_resolver_and_events(
+            move |_| {
+                resolver_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Resolution {
+                    status: json!({
+                        "ok": true,
+                        "name": "GPUI dev",
+                        "state": "completed",
+                        "conclusion": "success",
+                        "jobs": []
+                    }),
+                    authenticated: true,
+                })
+            },
+            Duration::ZERO,
+            events.clone(),
+        );
+        let (sender, frames) = sync_channel(2);
+        let (connection, _peer) = UnixStream::pair().unwrap();
+        let owner = events.subscribe(sender, connection).unwrap();
+        let marker = "workflow_run\n123\nhttps://github.com/RestartFU/xd/actions/runs/123";
+
+        let reply = statuses.start(owner, marker).unwrap();
+        assert_eq!(reply, json!({"ok": true, "pending": true}));
+        let event = frames.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(event["event"], "workflow-status");
+        assert_eq!(event["text"], marker);
+        assert_eq!(event["conclusion"], "success");
+
+        assert_eq!(
+            statuses.start(owner, marker).unwrap()["conclusion"],
+            "success"
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

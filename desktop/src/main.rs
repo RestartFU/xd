@@ -459,6 +459,8 @@ struct XdDesktop {
     open_question: Option<OpenQuestion>,
     question_answer: String,
     expanded_activity: HashSet<String>,
+    workflow_statuses: HashMap<String, Value>,
+    workflow_pending: HashSet<String>,
     pane_resize: Option<PaneResize>,
 }
 
@@ -713,6 +715,8 @@ impl XdDesktop {
             open_question: None,
             question_answer: String::new(),
             expanded_activity: HashSet::new(),
+            workflow_statuses: HashMap::new(),
+            workflow_pending: HashSet::new(),
             pane_resize: None,
         };
         desktop.connect(cx);
@@ -764,6 +768,7 @@ impl XdDesktop {
                 self.pending_clone_chats.clear();
                 self.workspace_clone_outcomes.clear();
                 self.pending_speech = None;
+                self.workflow_pending.clear();
                 self.speech_output.stop();
                 self.cancel_voice(false, cx);
                 if let Some(defaults) = &mut self.workspace_defaults {
@@ -835,6 +840,7 @@ impl XdDesktop {
                     | RequestKind::VoiceMutation { .. }
                     | RequestKind::AgentSecrets { .. }
                     | RequestKind::SetAgentSecrets { .. }
+                    | RequestKind::WorkflowStatus { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -913,6 +919,11 @@ impl XdDesktop {
                     if let Some(search) = &mut self.search {
                         search.loading = false;
                     }
+                }
+                RequestKind::WorkflowStatus { marker } => {
+                    self.workflow_pending.remove(marker);
+                    self.workflow_statuses.insert(marker.clone(), value.clone());
+                    self.schedule_workflow_refresh(marker.clone(), cx);
                 }
                 RequestKind::DiffRead { generation, .. } if *generation == self.diff_generation => {
                     if let Some(diff) = &mut self.diff_panel {
@@ -1333,6 +1344,13 @@ impl XdDesktop {
                             }
                         }
                     }
+                }
+            }
+            RequestKind::WorkflowStatus { marker } => {
+                if value.get("pending").and_then(Value::as_bool) != Some(true) {
+                    self.workflow_pending.remove(&marker);
+                    self.workflow_statuses.insert(marker.clone(), value.clone());
+                    self.schedule_workflow_refresh(marker, cx);
                 }
             }
             RequestKind::DiffRead {
@@ -1812,6 +1830,7 @@ impl XdDesktop {
                     }
                 }
                 self.transcript.reset(self.model.display_message_count());
+                self.request_workflow_statuses();
             }
             RequestKind::Send { chat_id, text } if self.chat_is_active(&chat_id) => {
                 self.sending = false;
@@ -1955,6 +1974,20 @@ impl XdDesktop {
         }
         match name {
             "voice" => self.handle_voice_event(&body, cx),
+            "workflow-status" => {
+                if let Some(marker) = body.get("text").and_then(Value::as_str).map(str::to_owned)
+                    && self
+                        .model
+                        .messages
+                        .iter()
+                        .chain(self.model.live_activity.iter())
+                        .any(|message| message.role == "tool" && message.content == marker)
+                {
+                    self.workflow_pending.remove(&marker);
+                    self.workflow_statuses.insert(marker.clone(), body.clone());
+                    self.schedule_workflow_refresh(marker, cx);
+                }
+            }
             "terminal-opened" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel {
                     panel.terminal_id = body
@@ -2082,6 +2115,9 @@ impl XdDesktop {
                         .splice(old_count..old_count, new_count - old_count);
                 } else if new_count > 0 {
                     self.transcript.splice(new_count - 1..new_count, 1);
+                }
+                if name == "tool" {
+                    self.request_workflow_statuses();
                 }
             }
             "turn-finished" if self.event_is_active(&body) => {
@@ -4125,6 +4161,70 @@ impl XdDesktop {
         }
     }
 
+    fn request_workflow_statuses(&mut self) {
+        let markers = self
+            .model
+            .messages
+            .iter()
+            .chain(self.model.live_activity.iter())
+            .filter(|message| message.role == "tool")
+            .map(|message| message.content.clone())
+            .filter(|content| content.starts_with("workflow_run\n"))
+            .collect::<HashSet<_>>();
+        self.workflow_statuses
+            .retain(|marker, _| markers.contains(marker));
+        self.workflow_pending
+            .retain(|marker| markers.contains(marker));
+        for marker in markers {
+            if !self.workflow_statuses.contains_key(&marker) {
+                self.request_workflow_status(marker);
+            }
+        }
+    }
+
+    fn request_workflow_status(&mut self, marker: String) {
+        if !self.workflow_pending.insert(marker.clone()) {
+            return;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "The xd daemon is offline.".to_owned())
+            .and_then(|daemon| daemon.workflow_status(&marker));
+        if let Err(error) = result {
+            self.workflow_pending.remove(&marker);
+            self.workflow_statuses
+                .insert(marker, serde_json::json!({"ok": false, "error": error}));
+        }
+    }
+
+    fn schedule_workflow_refresh(&mut self, marker: String, cx: &mut Context<Self>) {
+        let terminal = self
+            .workflow_statuses
+            .get(&marker)
+            .is_some_and(workflow_status_terminal);
+        let selected_chat = self.model.selected_chat.clone();
+        if terminal || selected_chat.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_secs(10)).await;
+            let _ = this.update(cx, |this, _cx| {
+                let still_visible = this.model.selected_chat == selected_chat
+                    && this
+                        .model
+                        .messages
+                        .iter()
+                        .chain(this.model.live_activity.iter())
+                        .any(|message| message.role == "tool" && message.content == marker);
+                if still_visible {
+                    this.request_workflow_status(marker);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn select_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
             return;
@@ -4143,6 +4243,8 @@ impl XdDesktop {
         self.draft_dirty = false;
         self.attachments_dirty = false;
         self.pending_send = None;
+        self.workflow_statuses.clear();
+        self.workflow_pending.clear();
         self.clear_question(cx);
         self.cancel_queue_edit(cx);
         self.sending = false;
@@ -4621,6 +4723,8 @@ impl XdDesktop {
         message: &Message,
         index: usize,
         expanded: bool,
+        workflow_status: Option<&Value>,
+        workflow_pending: bool,
         desktop: Entity<Self>,
     ) -> gpui::AnyElement {
         if message.role == "duration" {
@@ -4652,7 +4756,8 @@ impl XdDesktop {
                 .map(|id| format!("message-{id}"))
                 .unwrap_or_else(|| format!("live-{index}"));
             return Self::activity_card(
-                ActivityCard::parse(&message.content),
+                ActivityCard::parse(&message.content)
+                    .with_workflow_status(workflow_status, workflow_pending),
                 key,
                 index,
                 expanded,
@@ -6937,6 +7042,8 @@ impl Render for XdDesktop {
             );
 
         let expanded_activity = self.expanded_activity.clone();
+        let workflow_statuses = self.workflow_statuses.clone();
+        let workflow_pending = self.workflow_pending.clone();
         let desktop = cx.entity();
         let transcript = list(self.transcript.clone(), move |index, _window, _cx| {
             let message = &messages[index];
@@ -6948,6 +7055,8 @@ impl Render for XdDesktop {
                 message,
                 index,
                 expanded_activity.contains(&key),
+                workflow_statuses.get(&message.content),
+                workflow_pending.contains(&message.content),
                 desktop.clone(),
             )
         })
@@ -10220,6 +10329,11 @@ fn voice_request_token() -> String {
         std::process::id(),
         NEXT_VOICE_REQUEST.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+fn workflow_status_terminal(status: &Value) -> bool {
+    status.get("ok").and_then(Value::as_bool) == Some(true)
+        && status.get("state").and_then(Value::as_str) == Some("completed")
 }
 
 fn merge_dictation(base: &str, spoken: &str) -> String {

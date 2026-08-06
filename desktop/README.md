@@ -33,7 +33,8 @@ Current milestone:
 - shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - simultaneously visible repository and terminal panes with draggable, persisted dividers;
 - conflict-guarded UTF-8 repository file editing with atomic daemon-owned saves;
-- shared expandable activity cards for tools, subagents, and workflow runs;
+- shared expandable activity cards for tools, subagents, and live workflow runs
+  with non-blocking, last-good status refresh;
 - bounded Markdown rendering with language-aware fenced-code highlighting;
 - variable-height virtualized transcript list;
 - bounded full-duplex protocol framing and request-id matching;
