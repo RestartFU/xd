@@ -22,6 +22,8 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 
+mod client;
+
 const IO_TIMEOUT: Duration = Duration::from_millis(50);
 const COPY_BUFFER: usize = 64 * 1024;
 static TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
@@ -35,7 +37,13 @@ struct Options {
 }
 
 fn main() -> ExitCode {
-    match arguments(env::args().skip(1)).and_then(run) {
+    let command_arguments = env::args().skip(1).collect::<Vec<_>>();
+    let result = if command_arguments.first().map(String::as_str) == Some("connect") {
+        client::arguments(command_arguments.into_iter().skip(1)).and_then(client::run)
+    } else {
+        arguments(command_arguments).and_then(run)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("xd-tls-proxy-dev: {error}");
