@@ -4493,8 +4493,11 @@ impl XdDesktop {
         }
     }
 
-    fn begin_queue_edit(&mut self, index: usize, prompt: String, cx: &mut Context<Self>) {
+    fn begin_queue_edit(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(prompt) = self.model.queue.get(index).cloned() else {
             return;
         };
         self.queue_edit = Some(QueueEdit {
@@ -4552,8 +4555,11 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn steer_queued(&mut self, index: usize, text: &str) {
+    fn steer_queued(&mut self, index: usize) {
         let Some(chat_id) = self.model.selected_chat.as_deref() else {
+            return;
+        };
+        let Some(text) = self.model.queue.get(index) else {
             return;
         };
         if let Some(daemon) = &self.daemon
@@ -7317,13 +7323,12 @@ impl Render for XdDesktop {
             .model
             .queue
             .iter()
-            .cloned()
             .enumerate()
             .map(|(index, prompt)| {
                 let editing = queue_edit.as_ref().is_some_and(|edit| {
                     edit.chat_id == selected_chat_id
                         && edit.index == index
-                        && edit.original == prompt
+                        && edit.original == prompt.as_str()
                 });
                 if editing {
                     let can_save = queue_edit.as_ref().is_some_and(|edit| {
@@ -7417,8 +7422,7 @@ impl Render for XdDesktop {
                         )
                         .into_any_element();
                 }
-                let steer_prompt = prompt.clone();
-                let edit_prompt = prompt.clone();
+                let preview = queue_preview(prompt);
                 div()
                     .w_full()
                     .px_3()
@@ -7451,7 +7455,7 @@ impl Render for XdDesktop {
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(0x302b3a)))
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.begin_queue_edit(index, edit_prompt.clone(), cx);
+                                        this.begin_queue_edit(index, cx);
                                         let focus = this.queue_edit_input.read(cx).focus_handle(cx);
                                         window.focus(&focus);
                                     }))
@@ -7468,7 +7472,7 @@ impl Render for XdDesktop {
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(0x302b3a)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.steer_queued(index, &steer_prompt);
+                                        this.steer_queued(index);
                                         cx.notify();
                                     }))
                                     .child("Send now"),
@@ -7498,7 +7502,7 @@ impl Render for XdDesktop {
                             .text_sm()
                             .line_height(px(21.0))
                             .text_color(rgb(0xd7cede))
-                            .child(prompt),
+                            .child(preview),
                     )
                     .into_any_element()
             })
@@ -10465,6 +10469,31 @@ fn compact_label(value: &str, limit: usize) -> String {
     shortened
 }
 
+fn queue_preview(value: &str) -> String {
+    const MAX_CHARS: usize = 280;
+    const MAX_LINES: usize = 3;
+    let mut preview = String::new();
+    let mut chars = 0;
+    let mut lines = 1;
+    let mut truncated = false;
+    for character in value.chars() {
+        if chars >= MAX_CHARS - 1 || (character == '\n' && lines >= MAX_LINES) {
+            truncated = true;
+            break;
+        }
+        if character == '\n' {
+            lines += 1;
+        }
+        preview.push(character);
+        chars += 1;
+    }
+    if truncated {
+        preview.truncate(preview.trim_end().len());
+        preview.push('…');
+    }
+    preview
+}
+
 fn command_suggestions(commands: &[String], text: &str) -> Vec<String> {
     let Some(query) = text.strip_prefix('/') else {
         return Vec::new();
@@ -10699,6 +10728,16 @@ mod tests {
         };
 
         assert_eq!(workflow_row_indices(&model, marker), [1, 4]);
+    }
+
+    #[test]
+    fn queued_message_previews_bound_text_without_changing_the_source() {
+        let prompt = format!("first\nsecond\nthird\nfourth {}", "x".repeat(1_000));
+        let preview = queue_preview(&prompt);
+
+        assert_eq!(preview, "first\nsecond\nthird…");
+        assert!(preview.chars().count() <= 280);
+        assert_eq!(prompt.lines().count(), 4);
     }
 
     #[test]
