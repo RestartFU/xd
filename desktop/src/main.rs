@@ -111,6 +111,17 @@ struct SearchPanel {
     loading: bool,
 }
 
+#[derive(Clone)]
+struct DirectoryBrowser {
+    target: WorkspacePathTarget,
+    path: Option<String>,
+    entries: Vec<String>,
+    selected: Option<usize>,
+    loading: bool,
+    error: Option<String>,
+    generation: u64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct AuthProvider {
     provider: String,
@@ -810,6 +821,7 @@ struct XdDesktop {
     workspace_create_submitting: bool,
     workspace_clone_status: Option<String>,
     workspace_path_generation: u64,
+    directory_browser: Option<DirectoryBrowser>,
     pending_clone_requests: HashMap<ChatEndpoint, String>,
     pending_clone_chats: HashSet<(ChatEndpoint, String)>,
     workspace_clone_outcomes: HashMap<(ChatEndpoint, String), Option<String>>,
@@ -1204,6 +1216,7 @@ impl XdDesktop {
             workspace_create_submitting: false,
             workspace_clone_status: None,
             workspace_path_generation: 0,
+            directory_browser: None,
             pending_clone_requests: HashMap::new(),
             pending_clone_chats: HashSet::new(),
             workspace_clone_outcomes: HashMap::new(),
@@ -1362,6 +1375,7 @@ impl XdDesktop {
                 | RequestKind::Messages { .. }
                 | RequestKind::Shortcuts { .. }
                 | RequestKind::Search { .. }
+                | RequestKind::ListDirectory { .. }
                 | RequestKind::WorkflowStatus { .. }
                 | RequestKind::ImageRead { .. }
                 | RequestKind::Send { .. }
@@ -1489,6 +1503,7 @@ impl XdDesktop {
             self.creating_chat_folder = None;
             self.workspace_context_folder = None;
             self.workspace_defaults = None;
+            self.directory_browser = None;
             self.workspace_clone_status = None;
             self.search = None;
             self.secrets_panel = None;
@@ -2083,6 +2098,7 @@ impl XdDesktop {
                     | RequestKind::ImageRead { .. }
                     | RequestKind::Shortcuts { .. }
                     | RequestKind::SetShortcuts { .. }
+                    | RequestKind::ListDirectory { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -2151,6 +2167,23 @@ impl XdDesktop {
                 {
                     if let Some(search) = &mut self.search {
                         search.loading = false;
+                    }
+                }
+                RequestKind::ListDirectory { generation, .. }
+                    if self
+                        .directory_browser
+                        .as_ref()
+                        .is_some_and(|browser| browser.generation == *generation) =>
+                {
+                    if let Some(browser) = &mut self.directory_browser {
+                        browser.loading = false;
+                        browser.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Cannot read that directory.")
+                                .to_owned(),
+                        );
                     }
                 }
                 RequestKind::Shortcuts { folder_id }
@@ -2774,6 +2807,41 @@ impl XdDesktop {
                             if let Some(search) = &mut self.search {
                                 search.loading = false;
                             }
+                        }
+                    }
+                }
+            }
+            RequestKind::ListDirectory { generation, .. } => {
+                if self
+                    .directory_browser
+                    .as_ref()
+                    .is_none_or(|browser| browser.generation != generation)
+                {
+                    return;
+                }
+                let path = value.get("path").and_then(Value::as_str).map(str::to_owned);
+                let entries = value
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    });
+                if let Some(browser) = &mut self.directory_browser {
+                    match (path, entries) {
+                        (Some(path), Some(entries)) => {
+                            browser.path = Some(path);
+                            browser.entries = entries;
+                            browser.selected = (!browser.entries.is_empty()).then_some(0);
+                            browser.loading = false;
+                            browser.error = None;
+                        }
+                        _ => {
+                            browser.loading = false;
+                            browser.error = Some("Daemon returned an invalid directory.".into());
                         }
                     }
                 }
@@ -3983,94 +4051,167 @@ impl XdDesktop {
     }
 
     fn choose_workspace_path(&mut self, target: WorkspacePathTarget, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            self.model.connection_error =
-                Some("Type a path on the remote machine, or use a repository clone URL.".into());
-            cx.notify();
-            return;
-        }
+        let start = match &target {
+            WorkspacePathTarget::CreateRepository => {
+                optional_trimmed(&self.workspace_create_repo).map(str::to_owned)
+            }
+            WorkspacePathTarget::DefaultsWorkdir { folder_id } => self
+                .workspace_defaults
+                .as_ref()
+                .filter(|defaults| &defaults.folder_id == folder_id)
+                .and_then(|defaults| optional_trimmed(&defaults.workdir))
+                .map(str::to_owned),
+            WorkspacePathTarget::DefaultsRepository { folder_id } => self
+                .workspace_defaults
+                .as_ref()
+                .filter(|defaults| &defaults.folder_id == folder_id)
+                .and_then(|defaults| {
+                    optional_trimmed(&defaults.repo).or_else(|| optional_trimmed(&defaults.workdir))
+                })
+                .map(str::to_owned),
+        };
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         let generation = self.workspace_path_generation;
-        let prompt = match &target {
-            WorkspacePathTarget::CreateRepository => "Choose an existing repository",
-            WorkspacePathTarget::DefaultsWorkdir { .. } => "Choose a working directory",
-            WorkspacePathTarget::DefaultsRepository { .. } => "Choose a repository directory",
-        };
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some(prompt.into()),
+        self.directory_browser = Some(DirectoryBrowser {
+            target,
+            path: start.clone(),
+            entries: Vec::new(),
+            selected: None,
+            loading: true,
+            error: None,
+            generation,
         });
-        cx.spawn(async move |this, cx| {
-            let selection = match receiver.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next().map(Ok),
-                Ok(Ok(None)) => None,
-                Ok(Err(error)) => Some(Err(format!("Cannot open the folder picker: {error}"))),
-                Err(_) => Some(Err("The folder picker closed unexpectedly.".into())),
-            };
-            let Some(selection) = selection else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                if this.workspace_path_generation != generation {
-                    return;
+        if let Some(daemon) = self.active_daemon().cloned() {
+            if let Err(error) = daemon.list_directory(start.as_deref(), generation)
+                && let Some(browser) = &mut self.directory_browser
+            {
+                browser.loading = false;
+                browser.error = Some(error);
+            }
+        } else if let Some(browser) = &mut self.directory_browser {
+            browser.loading = false;
+            browser.error = Some("xd-dev is not connected to a daemon.".into());
+        }
+        cx.notify();
+    }
+
+    fn show_directory(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        let generation = self.workspace_path_generation;
+        let Some(browser) = &mut self.directory_browser else {
+            return;
+        };
+        browser.loading = true;
+        browser.error = None;
+        browser.generation = generation;
+        if let Some(daemon) = self.active_daemon().cloned() {
+            if let Err(error) = daemon.list_directory(path.as_deref(), generation)
+                && let Some(browser) = &mut self.directory_browser
+            {
+                browser.loading = false;
+                browser.error = Some(error);
+            }
+        } else if let Some(browser) = &mut self.directory_browser {
+            browser.loading = false;
+            browser.error = Some("xd-dev is not connected to a daemon.".into());
+        }
+        cx.notify();
+    }
+
+    fn select_directory_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(browser) = &mut self.directory_browser
+            && index < browser.entries.len()
+        {
+            browser.selected = Some(index);
+            cx.notify();
+        }
+    }
+
+    fn descend_directory(&mut self, index: usize, cx: &mut Context<Self>) {
+        let path = self.directory_browser.as_ref().and_then(|browser| {
+            Some(directory_child_path(
+                browser.path.as_deref()?,
+                browser.entries.get(index)?,
+            ))
+        });
+        if let Some(path) = path {
+            self.show_directory(Some(path), cx);
+        }
+    }
+
+    fn ascend_directory(&mut self, cx: &mut Context<Self>) {
+        let parent = self
+            .directory_browser
+            .as_ref()
+            .and_then(|browser| browser.path.as_deref())
+            .and_then(directory_parent_path);
+        if let Some(parent) = parent {
+            self.show_directory(Some(parent), cx);
+        }
+    }
+
+    fn choose_current_directory(&mut self, cx: &mut Context<Self>) {
+        let Some((target, path)) = self.directory_browser.as_ref().and_then(|browser| {
+            browser
+                .path
+                .clone()
+                .map(|path| (browser.target.clone(), path))
+        }) else {
+            return;
+        };
+        self.directory_browser = None;
+        self.apply_workspace_path(target, path, cx);
+    }
+
+    fn apply_workspace_path(
+        &mut self,
+        target: WorkspacePathTarget,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            WorkspacePathTarget::CreateRepository
+                if self.creating_workspace && !self.workspace_create_submitting =>
+            {
+                self.workspace_create_repo = path.clone();
+                self.workspace_create_clone.clear();
+                self.workspace_repo_input
+                    .update(cx, |input, cx| input.set_text(path, cx));
+                self.workspace_clone_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+            }
+            WorkspacePathTarget::DefaultsWorkdir { folder_id } => {
+                if let Some(defaults) = &mut self.workspace_defaults
+                    && defaults.folder_id == folder_id
+                    && !defaults.loading
+                    && !defaults.submitting
+                {
+                    defaults.workdir = path.clone();
+                    self.workspace_workdir_input
+                        .update(cx, |input, cx| input.set_text(path, cx));
                 }
-                let path = match selection {
-                    Ok(path) => match path.to_str() {
-                        Some(path) => path.to_owned(),
-                        None => {
-                            this.model.connection_error =
-                                Some("Workspace paths must be valid UTF-8.".into());
-                            cx.notify();
-                            return;
-                        }
-                    },
-                    Err(error) => {
-                        this.model.connection_error = Some(error);
-                        cx.notify();
-                        return;
-                    }
-                };
-                match target {
-                    WorkspacePathTarget::CreateRepository
-                        if this.creating_workspace && !this.workspace_create_submitting =>
-                    {
-                        this.workspace_create_repo = path.clone();
-                        this.workspace_create_clone.clear();
-                        this.workspace_repo_input
-                            .update(cx, |input, cx| input.set_text(path, cx));
-                        this.workspace_clone_input
-                            .update(cx, |input, cx| input.set_text("", cx));
-                    }
-                    WorkspacePathTarget::DefaultsWorkdir { folder_id } => {
-                        if let Some(defaults) = &mut this.workspace_defaults
-                            && defaults.folder_id == folder_id
-                            && !defaults.loading
-                            && !defaults.submitting
-                        {
-                            defaults.workdir = path.clone();
-                            this.workspace_workdir_input
-                                .update(cx, |input, cx| input.set_text(path, cx));
-                        }
-                    }
-                    WorkspacePathTarget::DefaultsRepository { folder_id } => {
-                        if let Some(defaults) = &mut this.workspace_defaults
-                            && defaults.folder_id == folder_id
-                            && !defaults.loading
-                            && !defaults.submitting
-                        {
-                            defaults.repo = path.clone();
-                            this.workspace_repo_default_input
-                                .update(cx, |input, cx| input.set_text(path, cx));
-                        }
-                    }
-                    _ => {}
+            }
+            WorkspacePathTarget::DefaultsRepository { folder_id } => {
+                if let Some(defaults) = &mut self.workspace_defaults
+                    && defaults.folder_id == folder_id
+                    && !defaults.loading
+                    && !defaults.submitting
+                {
+                    defaults.repo = path.clone();
+                    self.workspace_repo_default_input
+                        .update(cx, |input, cx| input.set_text(path, cx));
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn close_directory_browser(&mut self, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        if self.directory_browser.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn save_workspace_create(&mut self, cx: &mut Context<Self>) {
@@ -4115,6 +4256,7 @@ impl XdDesktop {
 
     fn cancel_workspace_create(&mut self, cx: &mut Context<Self>) {
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        self.directory_browser = None;
         self.creating_workspace = false;
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
@@ -4272,6 +4414,7 @@ impl XdDesktop {
 
     fn cancel_workspace_defaults(&mut self, cx: &mut Context<Self>) {
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        self.directory_browser = None;
         self.workspace_defaults = None;
         cx.notify();
     }
@@ -9293,21 +9436,16 @@ impl Render for XdDesktop {
                                                 .items_center()
                                                 .rounded_md()
                                                 .bg(rgb(BG))
-                                                .text_color(rgb(if remote_active { MUTED } else { TEXT }))
-                                                .when(!remote_active, |button| {
-                                                    button
-                                                        .cursor_pointer()
-                                                        .hover(|style| style.bg(rgb(0x242428)))
-                                                })
+                                                .text_color(rgb(TEXT))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x242428)))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if !remote_active {
-                                                        this.choose_workspace_path(
-                                                            WorkspacePathTarget::DefaultsWorkdir {
-                                                                folder_id: workdir_folder_id.clone(),
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
+                                                    this.choose_workspace_path(
+                                                        WorkspacePathTarget::DefaultsWorkdir {
+                                                            folder_id: workdir_folder_id.clone(),
+                                                        },
+                                                        cx,
+                                                    );
                                                 }))
                                                 .child("Browse"),
                                         ),
@@ -9364,21 +9502,16 @@ impl Render for XdDesktop {
                                                 .items_center()
                                                 .rounded_md()
                                                 .bg(rgb(BG))
-                                                .text_color(rgb(if remote_active { MUTED } else { TEXT }))
-                                                .when(!remote_active, |button| {
-                                                    button
-                                                        .cursor_pointer()
-                                                        .hover(|style| style.bg(rgb(0x242428)))
-                                                })
+                                                .text_color(rgb(TEXT))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x242428)))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if !remote_active {
-                                                        this.choose_workspace_path(
-                                                            WorkspacePathTarget::DefaultsRepository {
-                                                                folder_id: repository_folder_id.clone(),
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
+                                                    this.choose_workspace_path(
+                                                        WorkspacePathTarget::DefaultsRepository {
+                                                            folder_id: repository_folder_id.clone(),
+                                                        },
+                                                        cx,
+                                                    );
                                                 }))
                                                 .child("Browse"),
                                         ),
@@ -10082,19 +10215,14 @@ impl Render for XdDesktop {
                                         .rounded_md()
                                         .bg(rgb(BG))
                                         .text_xs()
-                                        .text_color(rgb(if remote_active { MUTED } else { TEXT }))
-                                        .when(!remote_active, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x242428)))
-                                        })
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x242428)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            if !remote_active {
-                                                this.choose_workspace_path(
-                                                    WorkspacePathTarget::CreateRepository,
-                                                    cx,
-                                                );
-                                            }
+                                            this.choose_workspace_path(
+                                                WorkspacePathTarget::CreateRepository,
+                                                cx,
+                                            );
                                         }))
                                         .child("Browse"),
                                 ),
@@ -15449,6 +15577,195 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let directory_overlay = self.directory_browser.clone().map(|browser| {
+            let can_ascend = browser
+                .path
+                .as_deref()
+                .and_then(directory_parent_path)
+                .is_some()
+                && !browser.loading;
+            let can_choose = browser.path.is_some() && !browser.loading;
+            let path = browser.path.clone().unwrap_or_else(|| "Daemon home".into());
+            let rows = browser
+                .entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let selected = browser.selected == Some(index);
+                    div()
+                        .id(("directory-entry", index))
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .bg(rgb(if selected { SURFACE_HIGH } else { BG }))
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            if event.click_count() >= 2 {
+                                this.descend_directory(index, cx);
+                            } else {
+                                this.select_directory_entry(index, cx);
+                            }
+                        }))
+                        .child("▸")
+                        .child(entry)
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .id("directory-browser")
+                        .w(px(620.0))
+                        .h(px(460.0))
+                        .flex()
+                        .flex_col()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .px_4()
+                                .py_3()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(rgb(BORDER))
+                                .child(
+                                    div()
+                                        .id("directory-back")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(if can_ascend { TEXT } else { MUTED }))
+                                        .when(can_ascend, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.ascend_directory(cx);
+                                                }))
+                                        })
+                                        .child("← Back"),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .child(path),
+                                )
+                                .child(
+                                    div()
+                                        .id("directory-choose")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_choose { accent } else { SURFACE_HIGH }))
+                                        .text_sm()
+                                        .text_color(rgb(if can_choose { 0xffffff } else { MUTED }))
+                                        .when(can_choose, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(accent_hover)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.choose_current_directory(cx);
+                                                }))
+                                        })
+                                        .child("Work here"),
+                                ),
+                        )
+                        .when_some(browser.error.clone(), |panel, error| {
+                            panel.child(
+                                div()
+                                    .mx_4()
+                                    .mt_3()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(0x382126))
+                                    .text_sm()
+                                    .text_color(rgb(0xefb1b1))
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("directory-entries")
+                                .min_h_0()
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .when(browser.loading, |list| {
+                                    list.child(
+                                        div()
+                                            .p_4()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("Loading folders…"),
+                                    )
+                                })
+                                .when(!browser.loading && rows.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .p_4()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("No folders here."),
+                                    )
+                                })
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .px_4()
+                                .py_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(rgb(BORDER))
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child("Double-click a folder to open it")
+                                .child(
+                                    div()
+                                        .id("close-directory-browser")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_directory_browser(cx);
+                                        }))
+                                        .child("Cancel"),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let search_overlay = self.search.clone().map(|search| {
             let search_focus = self.search_input.read(cx).focus_handle(cx);
             let mut result_rows = Vec::new();
@@ -15769,6 +16086,7 @@ impl Render for XdDesktop {
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(shortcut_overlay, |root, overlay| root.child(overlay))
+            .when_some(directory_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
             .when_some(message_image_overlay, |root, overlay| root.child(overlay))
             .when_some(resize_overlay, |root, overlay| root.child(overlay));
@@ -15858,7 +16176,9 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                if this.message_image_viewer.is_some() {
+                if this.directory_browser.is_some() {
+                    this.close_directory_browser(cx);
+                } else if this.message_image_viewer.is_some() {
                     this.close_message_image(cx);
                 } else if this.sidebar_context_menu.is_some() {
                     this.close_sidebar_context_menu(cx);
@@ -16426,6 +16746,20 @@ fn notify_turn_finished(_: &str) {}
 fn optional_trimmed(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+fn directory_child_path(path: &str, entry: &str) -> String {
+    if path.ends_with('/') {
+        format!("{path}{entry}")
+    } else {
+        format!("{path}/{entry}")
+    }
+}
+
+fn directory_parent_path(path: &str) -> Option<String> {
+    let path = std::path::Path::new(path);
+    let parent = path.parent()?;
+    (parent != path).then(|| parent.to_string_lossy().into_owned())
 }
 
 fn filtered_models(
@@ -17114,6 +17448,17 @@ mod tests {
     fn optional_workspace_repository_ignores_only_blank_input() {
         assert_eq!(optional_trimmed("  /tmp/repo  "), Some("/tmp/repo"));
         assert_eq!(optional_trimmed(" \n\t "), None);
+    }
+
+    #[test]
+    fn daemon_directory_navigation_keeps_root_and_child_paths_stable() {
+        assert_eq!(directory_child_path("/", "workspace"), "/workspace");
+        assert_eq!(
+            directory_child_path("/home/danick", "projects"),
+            "/home/danick/projects"
+        );
+        assert_eq!(directory_parent_path("/home/danick"), Some("/home".into()));
+        assert_eq!(directory_parent_path("/"), None);
     }
 
     #[test]

@@ -55,6 +55,10 @@ pub enum RequestKind {
     Search {
         query: String,
     },
+    ListDirectory {
+        path: Option<String>,
+        generation: u64,
+    },
     ImageRead {
         path: String,
     },
@@ -737,6 +741,20 @@ impl DaemonHandle {
                 query: query.to_owned(),
             },
             json!({"op": "search", "query": query}),
+        )
+    }
+
+    pub fn list_directory(&self, path: Option<&str>, generation: u64) -> Result<(), String> {
+        let mut body = json!({"op": "list-dir"});
+        if let Some(path) = path {
+            body["path"] = Value::String(path.to_owned());
+        }
+        self.send(
+            RequestKind::ListDirectory {
+                path: path.map(str::to_owned),
+                generation,
+            },
+            body,
         )
     }
 
@@ -1701,6 +1719,48 @@ mod tests {
                 },
                 ..
             } if chat_id == "chat-1" && path == "src/main.rs" && content == "after\n"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn requests_daemon_side_directories_for_remote_safe_browsing() {
+        let directory =
+            env::temp_dir().join(format!("xd-dev-list-directory-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "list-dir");
+            assert_eq!(request["path"], "/srv/workspaces");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon.list_directory(Some("/srv/workspaces"), 14).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::ListDirectory {
+                    path: Some(path),
+                    generation: 14,
+                },
+                ..
+            } if path == "/srv/workspaces"
         ));
 
         server.join().unwrap();
