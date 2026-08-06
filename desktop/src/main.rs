@@ -1334,9 +1334,32 @@ impl XdDesktop {
                     self.remote_error = Some(format!("Invalid remote tree response: {error}"));
                 }
             }
-            DaemonUpdate::Event { name, body, .. } if name == "tree" => {
-                if let Err(error) = self.remote_model.apply_tree(&Value::Object(body)) {
-                    self.remote_error = Some(format!("Invalid remote tree event: {error}"));
+            DaemonUpdate::Event { name, body, .. } => {
+                let body = Value::Object(body);
+                if name == "tree" {
+                    if let Err(error) = self.remote_model.apply_tree(&body) {
+                        self.remote_error = Some(format!("Invalid remote tree event: {error}"));
+                    }
+                } else {
+                    if let Some(chat_id) = body.get("chat").and_then(Value::as_str)
+                        && let Some(chat) = self
+                            .remote_model
+                            .chats
+                            .iter_mut()
+                            .find(|chat| chat.id == chat_id)
+                    {
+                        if name == "turn-started" {
+                            chat.working = true;
+                        } else if name == "turn-finished" {
+                            chat.working = false;
+                        }
+                    }
+                    self.remote_model.apply_event(&name, &body);
+                    if name == "turn-finished"
+                        && let Some(daemon) = &self.remote_daemon
+                    {
+                        let _ = daemon.tree();
+                    }
                 }
             }
             _ => {}
@@ -8377,6 +8400,117 @@ impl Render for XdDesktop {
                             .into_any_element(),
                     );
                 }
+            }
+        }
+
+        if let Some(credentials) = &self.remote_credentials {
+            let remote_status = match self.remote_state {
+                RemoteState::Unconfigured => "not paired",
+                RemoteState::Connecting => "connecting",
+                RemoteState::Connected => "connected",
+                RemoteState::Offline => "offline",
+            };
+            tree_rows.push(
+                div()
+                    .mt_3()
+                    .mx_3()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(div().size(px(7.0)).rounded_full().bg(rgb(
+                        if self.remote_state == RemoteState::Connected {
+                            0x65c985
+                        } else {
+                            MUTED
+                        },
+                    )))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(format!("REMOTE · {}", credentials.host)),
+                    )
+                    .child(remote_status)
+                    .into_any_element(),
+            );
+            if self.remote_state == RemoteState::Connected {
+                if self.remote_model.folders.is_empty() {
+                    tree_rows.push(
+                        div()
+                            .mx_3()
+                            .py_3()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("No remote workspaces")
+                            .into_any_element(),
+                    );
+                }
+                for (folder_index, folder) in
+                    self.remote_model.folders.clone().into_iter().enumerate()
+                {
+                    let indent = if folder.parent.is_some() { 34.0 } else { 24.0 };
+                    tree_rows.push(
+                        div()
+                            .id(("remote-folder", folder_index))
+                            .ml(px(indent))
+                            .mr_2()
+                            .pt_2()
+                            .pb_1()
+                            .text_sm()
+                            .text_color(rgb(TEXT))
+                            .child(format!("▾  {}", folder.name))
+                            .into_any_element(),
+                    );
+                    for chat in self
+                        .remote_model
+                        .chats
+                        .iter()
+                        .filter(|chat| chat.folder == folder.id)
+                    {
+                        let title = chat.title.clone().unwrap_or_else(|| "New Chat".into());
+                        let unread = self.remote_model.unread_chats.contains(&chat.id);
+                        tree_rows.push(
+                            div()
+                                .id(SharedString::from(format!("remote-chat-{}", chat.id)))
+                                .min_w_0()
+                                .ml(px(indent + 10.0))
+                                .mr_2()
+                                .mb_1()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(if chat.working || unread { TEXT } else { MUTED }))
+                                .when(unread, |row| row.font_weight(FontWeight::BOLD))
+                                .child(if chat.working || unread {
+                                    format!("●  {title}")
+                                } else {
+                                    format!("   {title}")
+                                })
+                                .into_any_element(),
+                        );
+                    }
+                }
+            } else {
+                tree_rows.push(
+                    div()
+                        .mx_3()
+                        .py_3()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(
+                            self.remote_error
+                                .clone()
+                                .unwrap_or_else(|| "Remote workspaces will appear here.".into()),
+                        )
+                        .into_any_element(),
+                );
             }
         }
 
