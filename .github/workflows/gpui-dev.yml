@@ -54,26 +54,6 @@ jobs:
           sha256sum xd-dev-linux-x86_64.tar.gz \
             > xd-dev-linux-x86_64.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gpui-linux
-          path: |
-            xd-dev-linux-x86_64.tar.gz
-            xd-dev-linux-x86_64.tar.gz.sha256
-            scripts/install-dev.sh
-
-  publish:
-    needs: linux
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v5
-        with:
-          path: .
-          merge-multiple: true
-
       - name: Publish the rolling dev prerelease
         env:
           GH_TOKEN: ${{ github.token }}
