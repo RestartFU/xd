@@ -35,6 +35,7 @@ pub enum RequestKind {
         folder_id: Option<String>,
     },
     Devices,
+    PeerPairing,
     RenameDevice {
         device_id: String,
     },
@@ -443,6 +444,10 @@ impl DaemonHandle {
 
     pub fn devices(&self) -> Result<(), String> {
         self.send(RequestKind::Devices, json!({"op": "devices"}))
+    }
+
+    pub fn peer_pairing(&self) -> Result<(), String> {
+        self.send(RequestKind::PeerPairing, json!({"op": "peer-pairing"}))
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<(), String> {

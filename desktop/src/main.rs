@@ -502,6 +502,15 @@ struct DevicesPanel {
     error: Option<String>,
 }
 
+#[derive(Clone, Default)]
+struct SharePanel {
+    loading: bool,
+    host: String,
+    port: Option<u16>,
+    code: String,
+    error: Option<String>,
+}
+
 #[derive(Clone)]
 enum MessageImageState {
     Loading,
@@ -598,6 +607,7 @@ struct XdDesktop {
     auth_open: bool,
     secrets_panel: Option<SecretsPanel>,
     devices_panel: Option<DevicesPanel>,
+    share_panel: Option<SharePanel>,
     self_update_panel: Option<SelfUpdatePanel>,
     auth_providers: Vec<AuthProvider>,
     cli_versions: Vec<CliVersion>,
@@ -887,6 +897,7 @@ impl XdDesktop {
             auth_open: false,
             secrets_panel: None,
             devices_panel: None,
+            share_panel: None,
             self_update_panel: None,
             auth_providers: Vec::new(),
             cli_versions: Vec::new(),
@@ -1147,6 +1158,10 @@ impl XdDesktop {
                     panel.mutating = None;
                     panel.error = Some("Paired devices disconnected.".into());
                 }
+                if let Some(panel) = &mut self.share_panel {
+                    panel.loading = false;
+                    panel.error = Some("Device pairing disconnected.".into());
+                }
                 if let Some(panel) = &mut self.self_update_panel {
                     panel.busy = false;
                     panel.error = Some("The daemon disconnected. Reconnecting…".into());
@@ -1205,6 +1220,7 @@ impl XdDesktop {
                     | RequestKind::AgentClis
                     | RequestKind::DaemonUpdate { .. }
                     | RequestKind::Devices
+                    | RequestKind::PeerPairing
                     | RequestKind::RenameDevice { .. }
                     | RequestKind::RevokeDevice { .. }
                     | RequestKind::WorkflowStatus { .. }
@@ -1488,6 +1504,21 @@ impl XdDesktop {
                             .get("error")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                    }
+                }
+                RequestKind::PeerPairing => {
+                    if let Some(panel) = &mut self.share_panel {
+                        panel.loading = false;
+                        panel.host.clear();
+                        panel.port = None;
+                        panel.code.clear();
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Could not create a pairing code.")
+                                .to_owned(),
+                        );
                     }
                 }
                 RequestKind::AgentClis => {
@@ -1779,6 +1810,25 @@ impl XdDesktop {
                         if let Some(panel) = &mut self.devices_panel {
                             panel.loading = false;
                             panel.error = Some(format!("Invalid paired devices response: {error}"));
+                        }
+                    }
+                }
+            }
+            RequestKind::PeerPairing => {
+                if let Some(panel) = &mut self.share_panel {
+                    panel.loading = false;
+                    match pairing_details(&value) {
+                        Ok((host, port, code)) => {
+                            panel.host = host;
+                            panel.port = Some(port);
+                            panel.code = code;
+                            panel.error = None;
+                        }
+                        Err(error) => {
+                            panel.host.clear();
+                            panel.port = None;
+                            panel.code.clear();
+                            panel.error = Some(error);
                         }
                     }
                 }
@@ -3483,6 +3533,41 @@ impl XdDesktop {
             ..Default::default()
         });
         self.request_devices();
+        cx.notify();
+    }
+
+    fn open_share(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.share_panel = Some(SharePanel::default());
+        cx.notify();
+    }
+
+    fn close_share(&mut self, cx: &mut Context<Self>) {
+        self.share_panel = None;
+        cx.notify();
+    }
+
+    fn request_pairing_code(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.share_panel else {
+            return;
+        };
+        if panel.loading {
+            return;
+        }
+        panel.loading = true;
+        panel.error = None;
+        match self.daemon.as_ref() {
+            Some(daemon) => {
+                if let Err(error) = daemon.peer_pairing() {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
+            None => {
+                panel.loading = false;
+                panel.error = Some("xd-dev is not connected to a daemon.".into());
+            }
+        }
         cx.notify();
     }
 
@@ -11307,6 +11392,40 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .id("open-add-device")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_share(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Add a device"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Create a five-minute code for another xd app.",
+                                        )),
+                                )
+                                .child(div().text_color(rgb(MUTED)).child("›")),
+                        )
+                        .child(
+                            div()
                                 .id("open-paired-devices")
                                 .p_3()
                                 .flex()
@@ -12132,6 +12251,226 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let share_overlay = self.share_panel.clone().map(|panel| {
+            let ready = !panel.host.is_empty() && panel.port.is_some() && !panel.code.is_empty();
+            let address = panel
+                .port
+                .map(|port| format!("{}:{port}", panel.host))
+                .unwrap_or_default();
+            let copied_code = panel.code.clone();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(620.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(TEXT))
+                                                .child("Add a device"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Connect another xd app to this machine, its chats, and running agents.",
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-add-device")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_share(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_lg()
+                                .bg(rgb(SURFACE))
+                                .text_sm()
+                                .text_color(rgb(if panel.error.is_some() {
+                                    0xefaaaa
+                                } else {
+                                    MUTED
+                                }))
+                                .child(if let Some(error) = panel.error.clone() {
+                                    error
+                                } else if panel.loading {
+                                    "Opening a secure listener…".into()
+                                } else if ready {
+                                    "Ready for one device.".into()
+                                } else {
+                                    "Create a code for the connecting device.".into()
+                                }),
+                        )
+                        .when(ready, |dialog| {
+                            dialog
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child("MACHINE ADDRESS AND PORT"),
+                                        )
+                                        .child(
+                                            div()
+                                                .p_3()
+                                                .rounded_lg()
+                                                .border_1()
+                                                .border_color(rgb(BORDER))
+                                                .bg(rgb(SURFACE))
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child(address),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child("ONE-TIME PAIRING CODE"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .flex_1()
+                                                        .p_3()
+                                                        .rounded_lg()
+                                                        .border_1()
+                                                        .border_color(rgb(BORDER))
+                                                        .bg(rgb(SURFACE))
+                                                        .text_lg()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(rgb(TEXT))
+                                                        .child(panel.code.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("copy-pairing-code")
+                                                        .px_4()
+                                                        .py_3()
+                                                        .rounded_lg()
+                                                        .bg(rgb(SURFACE_HIGH))
+                                                        .text_sm()
+                                                        .text_color(rgb(TEXT))
+                                                        .cursor_pointer()
+                                                        .hover(|style| style.bg(rgb(BORDER)))
+                                                        .on_click(move |_, _, cx| {
+                                                            cx.write_to_clipboard(
+                                                                ClipboardItem::new_string(
+                                                                    copied_code.clone(),
+                                                                ),
+                                                            );
+                                                        })
+                                                        .child("Copy"),
+                                                ),
+                                        ),
+                                )
+                                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                    "On the other device, choose “Connect to a machine”, then enter this address and code. It expires after five minutes and works once.",
+                                ))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("dismiss-add-device")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_share(cx);
+                                        }))
+                                        .child("Close"),
+                                )
+                                .child(
+                                    div()
+                                        .id("create-pairing-code")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if panel.loading { SURFACE_HIGH } else { accent }))
+                                        .text_sm()
+                                        .text_color(rgb(if panel.loading {
+                                            MUTED
+                                        } else {
+                                            0xffffff
+                                        }))
+                                        .when(!panel.loading, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(accent_hover)))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.request_pairing_code(cx);
+                                        }))
+                                        .child(if panel.loading {
+                                            "Opening…"
+                                        } else if ready {
+                                            "Create another code"
+                                        } else {
+                                            "Create code"
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let search_overlay = self.search.clone().map(|search| {
             let search_focus = self.search_input.read(cx).focus_handle(cx);
             let mut result_rows = Vec::new();
@@ -12449,6 +12788,7 @@ impl Render for XdDesktop {
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
             .when_some(self_update_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
+            .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
             .when_some(message_image_overlay, |root, overlay| root.child(overlay))
             .when_some(resize_overlay, |root, overlay| root.child(overlay));
@@ -12542,6 +12882,8 @@ impl Render for XdDesktop {
                     this.close_message_image(cx);
                 } else if this.sidebar_context_menu.is_some() {
                     this.close_sidebar_context_menu(cx);
+                } else if this.share_panel.is_some() {
+                    this.close_share(cx);
                 } else if this.devices_panel.is_some() {
                     this.close_devices(cx);
                 } else if this.secrets_panel.is_some() {
@@ -12964,6 +13306,26 @@ fn turn_duration_label(value: &str) -> Option<String> {
         format!("{seconds}s")
     };
     Some(format!("Worked for {duration}"))
+}
+
+fn pairing_details(value: &Value) -> Result<(String, u16, String), String> {
+    let host = value
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "The daemon returned an invalid pairing address.".to_owned())?;
+    let port = value
+        .get("port")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port > 0)
+        .ok_or_else(|| "The daemon returned an invalid pairing port.".to_owned())?;
+    let code = value
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .ok_or_else(|| "The daemon returned an invalid pairing code.".to_owned())?;
+    Ok((host.to_owned(), port, code.to_owned()))
 }
 
 fn device_time_label(label: &str, timestamp: i64) -> String {
@@ -13402,6 +13764,28 @@ mod tests {
             Some("Worked for 1h 01m")
         );
         assert_eq!(turn_duration_label("not-a-duration"), None);
+    }
+
+    #[test]
+    fn pairing_details_require_a_complete_bounded_response() {
+        assert_eq!(
+            pairing_details(&serde_json::json!({
+                "host": "192.168.1.10",
+                "port": 4001,
+                "code": "ABCD-EFGH"
+            }))
+            .unwrap(),
+            ("192.168.1.10".into(), 4001, "ABCD-EFGH".into())
+        );
+        assert!(pairing_details(&serde_json::json!({"port": 0})).is_err());
+        assert!(
+            pairing_details(&serde_json::json!({
+                "host": "host",
+                "port": 65_536,
+                "code": "code"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
