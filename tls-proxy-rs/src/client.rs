@@ -20,6 +20,7 @@ use rustls::{
     crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature},
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
+use sha2::{Digest, Sha256};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_millis(50);
@@ -30,7 +31,13 @@ pub(crate) struct Options {
     host: String,
     port: u16,
     socket: PathBuf,
-    pin: Option<Vec<u8>>,
+    expected: Option<ExpectedCertificate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExpectedCertificate {
+    Der(Vec<u8>),
+    Fingerprint([u8; 32]),
 }
 
 pub(crate) fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<Options, String> {
@@ -38,7 +45,7 @@ pub(crate) fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<O
     let mut host = None;
     let mut port = None;
     let mut socket = None;
-    let mut pin = None;
+    let mut expected = None;
     while let Some(argument) = arguments.next() {
         let value = arguments
             .next()
@@ -62,7 +69,16 @@ pub(crate) fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<O
                 if decoded.is_empty() || decoded.len() > MAX_CERTIFICATE_BYTES {
                     return Err("--pin is not a valid certificate".into());
                 }
-                pin = Some(decoded);
+                if expected.is_some() {
+                    return Err("provide only one certificate pin".into());
+                }
+                expected = Some(ExpectedCertificate::Der(decoded));
+            }
+            "--fingerprint" => {
+                if expected.is_some() {
+                    return Err("provide only one certificate pin".into());
+                }
+                expected = Some(ExpectedCertificate::Fingerprint(parse_fingerprint(&value)?));
             }
             _ => return Err(format!("unknown argument {argument}")),
         }
@@ -74,16 +90,62 @@ pub(crate) fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<O
         host,
         port: port.ok_or_else(|| "--port is required".to_owned())?,
         socket: socket.ok_or_else(|| "--socket is required".to_owned())?,
-        pin,
+        expected,
     })
+}
+
+fn parse_fingerprint(value: &str) -> Result<[u8; 32], String> {
+    let compact = value
+        .bytes()
+        .filter(|byte| *byte != b':')
+        .collect::<Vec<_>>();
+    if compact.len() != 64 {
+        return Err("--fingerprint must contain exactly 64 hexadecimal digits".into());
+    }
+    let mut fingerprint = [0_u8; 32];
+    for (index, pair) in compact.chunks_exact(2).enumerate() {
+        let high = hexadecimal(pair[0])
+            .ok_or_else(|| "--fingerprint contains a non-hexadecimal digit".to_owned())?;
+        let low = hexadecimal(pair[1])
+            .ok_or_else(|| "--fingerprint contains a non-hexadecimal digit".to_owned())?;
+        fingerprint[index] = (high << 4) | low;
+    }
+    Ok(fingerprint)
+}
+
+fn hexadecimal(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn certificate_fingerprint(certificate: &[u8]) -> [u8; 32] {
+    Sha256::digest(certificate).into()
+}
+
+fn fingerprint_text(fingerprint: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(64);
+    for byte in fingerprint {
+        text.push(HEX[(byte >> 4) as usize] as char);
+        text.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    text
 }
 
 pub(crate) fn run(options: Options) -> Result<(), String> {
     watch_parent()?;
-    let config = Arc::new(client_config(options.pin.clone())?);
+    let config = Arc::new(client_config(options.expected.clone())?);
     let (_, certificate) = connect_tls(&options.host, options.port, config.clone())?;
     let listener = bind_private_socket(&options.socket)?;
-    println!("{{\"certificate\":\"{}\"}}", STANDARD.encode(certificate));
+    println!(
+        "{{\"certificate\":\"{}\",\"fingerprint\":\"{}\"}}",
+        STANDARD.encode(&certificate),
+        fingerprint_text(&certificate_fingerprint(&certificate))
+    );
     io::stdout()
         .flush()
         .map_err(|error| format!("cannot report the remote certificate: {error}"))?;
@@ -119,7 +181,7 @@ fn watch_parent() -> Result<(), String> {
         .map_err(|error| format!("cannot monitor the desktop process: {error}"))
 }
 
-fn client_config(pin: Option<Vec<u8>>) -> Result<ClientConfig, String> {
+fn client_config(expected: Option<ExpectedCertificate>) -> Result<ClientConfig, String> {
     let provider = rustls::crypto::ring::default_provider();
     let algorithms = provider.signature_verification_algorithms;
     ClientConfig::builder_with_provider(Arc::new(provider))
@@ -129,7 +191,7 @@ fn client_config(pin: Option<Vec<u8>>) -> Result<ClientConfig, String> {
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(CertificateVerifier {
-                    expected: pin,
+                    expected,
                     algorithms,
                 }))
                 .with_no_client_auth()
@@ -258,7 +320,7 @@ fn retryable(error: &io::Error) -> bool {
 }
 
 struct CertificateVerifier {
-    expected: Option<Vec<u8>>,
+    expected: Option<ExpectedCertificate>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
@@ -280,11 +342,16 @@ impl ServerCertVerifier for CertificateVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, TlsError> {
-        if self
-            .expected
-            .as_ref()
-            .is_some_and(|expected| expected.as_slice() != end_entity.as_ref())
-        {
+        let matches = match self.expected.as_ref() {
+            None => true,
+            Some(ExpectedCertificate::Der(expected)) => {
+                constant_time_equal(expected, end_entity.as_ref())
+            }
+            Some(ExpectedCertificate::Fingerprint(expected)) => {
+                constant_time_equal(expected, &certificate_fingerprint(end_entity.as_ref()))
+            }
+        };
+        if !matches {
             return Err(TlsError::General("remote certificate changed".into()));
         }
         Ok(ServerCertVerified::assertion())
@@ -311,6 +378,18 @@ impl ServerCertVerifier for CertificateVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
     }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 #[cfg(test)]
@@ -367,7 +446,7 @@ mod tests {
         .unwrap();
         assert_eq!(unpinned.host, "desktop.local");
         assert_eq!(unpinned.port, 4001);
-        assert!(unpinned.pin.is_none());
+        assert!(unpinned.expected.is_none());
 
         let pinned = arguments([
             "--host".into(),
@@ -380,7 +459,29 @@ mod tests {
             STANDARD.encode(b"certificate"),
         ])
         .unwrap();
-        assert_eq!(pinned.pin, Some(b"certificate".to_vec()));
+        assert_eq!(
+            pinned.expected,
+            Some(ExpectedCertificate::Der(b"certificate".to_vec()))
+        );
+        let fingerprint = arguments([
+            "--host".into(),
+            "desktop.local".into(),
+            "--port".into(),
+            "4001".into(),
+            "--socket".into(),
+            "/tmp/xd-remote.sock".into(),
+            "--fingerprint".into(),
+            "00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            fingerprint.expected,
+            Some(ExpectedCertificate::Fingerprint([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                0xcc, 0xdd, 0xee, 0xff,
+            ]))
+        );
         assert!(
             arguments([
                 "--host".into(),
@@ -389,6 +490,19 @@ mod tests {
                 "0".into(),
                 "--socket".into(),
                 "/tmp/socket".into(),
+            ])
+            .is_err()
+        );
+        assert!(
+            arguments([
+                "--host".into(),
+                "host".into(),
+                "--port".into(),
+                "4001".into(),
+                "--socket".into(),
+                "/tmp/socket".into(),
+                "--fingerprint".into(),
+                "not-a-fingerprint".into(),
             ])
             .is_err()
         );
@@ -409,13 +523,35 @@ mod tests {
         server.join().unwrap();
 
         let (port, certificate, server) = tls_server(&root);
-        let config = Arc::new(client_config(Some(certificate.clone())).unwrap());
+        let config =
+            Arc::new(client_config(Some(ExpectedCertificate::Der(certificate.clone()))).unwrap());
         let (_, observed) = connect_tls("127.0.0.1", port, config).unwrap();
         assert_eq!(observed, certificate);
         server.join().unwrap();
 
         let (port, _, server) = tls_server(&root);
-        let config = Arc::new(client_config(Some(b"different certificate".to_vec())).unwrap());
+        let config = Arc::new(
+            client_config(Some(ExpectedCertificate::Der(
+                b"different certificate".to_vec(),
+            )))
+            .unwrap(),
+        );
+        assert!(connect_tls("127.0.0.1", port, config).is_err());
+        server.join().unwrap();
+
+        let (port, certificate, server) = tls_server(&root);
+        let config = Arc::new(
+            client_config(Some(ExpectedCertificate::Fingerprint(
+                certificate_fingerprint(&certificate),
+            )))
+            .unwrap(),
+        );
+        assert!(connect_tls("127.0.0.1", port, config).is_ok());
+        server.join().unwrap();
+
+        let (port, _, server) = tls_server(&root);
+        let config =
+            Arc::new(client_config(Some(ExpectedCertificate::Fingerprint([0x42; 32]))).unwrap());
         assert!(connect_tls("127.0.0.1", port, config).is_err());
         server.join().unwrap();
         fs::remove_dir_all(root).unwrap();

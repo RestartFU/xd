@@ -13,6 +13,7 @@ path = "src/main.rs"
 base64 = "=0.22.1"
 rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
 rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "=0.10.9"
 
 [profile.release]
 lto = "thin"

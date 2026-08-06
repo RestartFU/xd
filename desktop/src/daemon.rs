@@ -36,6 +36,8 @@ pub enum RequestKind {
     },
     Devices,
     PeerPairing,
+    PairRemote,
+    HelloRemote,
     RenameDevice {
         device_id: String,
     },
@@ -448,6 +450,20 @@ impl DaemonHandle {
 
     pub fn peer_pairing(&self) -> Result<(), String> {
         self.send(RequestKind::PeerPairing, json!({"op": "peer-pairing"}))
+    }
+
+    pub fn pair_remote(&self, code: &str, name: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::PairRemote,
+            json!({"op": "pair", "code": code, "name": name}),
+        )
+    }
+
+    pub fn hello_remote(&self, token: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::HelloRemote,
+            json!({"op": "hello", "token": token}),
+        )
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<(), String> {
@@ -1442,6 +1458,64 @@ mod tests {
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             DaemonUpdate::Event { name, .. } if name == "tree"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sends_remote_pair_and_resume_authentication_before_other_requests() {
+        let directory = env::temp_dir().join(format!("xd-dev-remote-auth-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], "pair");
+            assert_eq!(request["code"], "ABCD2345");
+            assert_eq!(request["name"], "Laptop");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(
+                stream,
+                "{{\"ok\":true,\"_xd_request\":{request_id},\"token\":\"private\"}}"
+            )
+            .unwrap();
+
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], "hello");
+            assert_eq!(request["token"], "private");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon.pair_remote("ABCD2345", "Laptop").unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::PairRemote,
+                ..
+            }
+        ));
+        daemon.hello_remote("private").unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::HelloRemote,
+                ..
+            }
         ));
 
         server.join().unwrap();

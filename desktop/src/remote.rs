@@ -1,0 +1,619 @@
+use std::{
+    env, fmt, fs,
+    io::{self, Read, Write},
+    os::unix::{
+        fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt},
+        process::ExitStatusExt,
+    },
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
+};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+const CREDENTIALS_VERSION: u32 = 1;
+const STARTUP_LIMIT: usize = 4 * 1024;
+const STDERR_LIMIT: usize = 8 * 1024;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+static TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCredentials {
+    pub version: u32,
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+    pub fingerprint: String,
+}
+
+impl fmt::Debug for RemoteCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemoteCredentials")
+            .field("version", &self.version)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("token", &"[redacted]")
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl RemoteCredentials {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        token: impl Into<String>,
+        fingerprint: impl Into<String>,
+    ) -> Result<Self, RemoteError> {
+        let credentials = Self {
+            version: CREDENTIALS_VERSION,
+            host: host.into().trim().to_owned(),
+            port,
+            token: token.into(),
+            fingerprint: normalize_fingerprint(&fingerprint.into())?,
+        };
+        credentials.validate()?;
+        Ok(credentials)
+    }
+
+    pub fn validate(&self) -> Result<(), RemoteError> {
+        if self.version != CREDENTIALS_VERSION {
+            return Err(RemoteError::Credentials(
+                "Remote credentials version is unsupported.".into(),
+            ));
+        }
+        if self.host.trim().is_empty() {
+            return Err(RemoteError::Credentials(
+                "Remote host cannot be empty.".into(),
+            ));
+        }
+        if self.port == 0 {
+            return Err(RemoteError::Credentials(
+                "Remote port must be from 1 to 65535.".into(),
+            ));
+        }
+        if self.token.is_empty() {
+            return Err(RemoteError::Credentials(
+                "Remote device token cannot be empty.".into(),
+            ));
+        }
+        if self.fingerprint.len() != 64
+            || !self
+                .fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(RemoteError::Credentials(
+                "Remote certificate fingerprint is invalid.".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RemoteError {
+    #[error("{0}")]
+    Credentials(String),
+    #[error("Cannot read remote credentials: {0}")]
+    ReadCredentials(String),
+    #[error("Cannot save remote credentials: {0}")]
+    SaveCredentials(String),
+    #[error("Cannot remove remote credentials: {0}")]
+    ClearCredentials(String),
+    #[error("Cannot start the secure remote connection: {0}")]
+    Bridge(String),
+}
+
+pub struct CredentialsFile {
+    path: PathBuf,
+}
+
+impl CredentialsFile {
+    pub fn default_path() -> Result<PathBuf, RemoteError> {
+        if let Some(path) =
+            env::var_os("XD_REMOTE_CREDENTIALS_FILE").filter(|path| !path.is_empty())
+        {
+            return Ok(PathBuf::from(path));
+        }
+        let data_home = env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .ok_or_else(|| {
+                RemoteError::Credentials(
+                    "Cannot locate the data directory for remote credentials.".into(),
+                )
+            })?;
+        let data_name = env::var_os("XD_DATA_NAME")
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "xd-dev".into());
+        Ok(data_home.join(data_name).join("remote.json"))
+    }
+
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn load(&self) -> Result<Option<RemoteCredentials>, RemoteError> {
+        let metadata = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(RemoteError::ReadCredentials(error.to_string())),
+        };
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(RemoteError::ReadCredentials(format!(
+                "{} is not a regular file",
+                self.path.display()
+            )));
+        }
+        let bytes = fs::read(&self.path)
+            .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
+        let mut credentials: RemoteCredentials = serde_json::from_slice(&bytes)
+            .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
+        credentials.host = credentials.host.trim().to_owned();
+        credentials.fingerprint = normalize_fingerprint(&credentials.fingerprint)
+            .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
+        credentials
+            .validate()
+            .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
+        Ok(Some(credentials))
+    }
+
+    pub fn save(&self, credentials: &RemoteCredentials) -> Result<(), RemoteError> {
+        credentials
+            .validate()
+            .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+        let parent = self.path.parent().ok_or_else(|| {
+            RemoteError::SaveCredentials("the credentials path has no parent directory".into())
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+        let temporary = parent.join(format!(
+            ".xd-remote-{}-{}.tmp",
+            std::process::id(),
+            TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut bytes = serde_json::to_vec_pretty(credentials)
+                .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+            bytes.push(b'\n');
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+            fs::rename(&temporary, &self.path)
+                .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| RemoteError::SaveCredentials(error.to_string()))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn clear(&self) -> Result<(), RemoteError> {
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata)
+                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+            {
+                fs::remove_file(&self.path)
+                    .map_err(|error| RemoteError::ClearCredentials(error.to_string()))
+            }
+            Ok(_) => Err(RemoteError::ClearCredentials(format!(
+                "{} is not a regular file",
+                self.path.display()
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RemoteError::ClearCredentials(error.to_string())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct BridgeStartup {
+    pub fingerprint: String,
+}
+
+pub struct RemoteBridge {
+    child: Child,
+    socket: PathBuf,
+    directory: PathBuf,
+}
+
+impl RemoteBridge {
+    pub fn launch(
+        host: &str,
+        port: u16,
+        fingerprint: Option<&str>,
+    ) -> Result<(Self, BridgeStartup), RemoteError> {
+        let host = host.trim();
+        if host.is_empty() {
+            return Err(RemoteError::Bridge("remote host cannot be empty".into()));
+        }
+        if port == 0 {
+            return Err(RemoteError::Bridge(
+                "remote port must be from 1 to 65535".into(),
+            ));
+        }
+        let fingerprint = fingerprint.map(normalize_fingerprint).transpose()?;
+        let directory = private_bridge_directory()?;
+        let socket = directory.join("daemon.sock");
+        let mut failures = Vec::new();
+        for executable in helper_candidates() {
+            match launch_helper(&executable, host, port, fingerprint.as_deref(), &socket) {
+                Ok((child, startup)) => {
+                    return Ok((
+                        Self {
+                            child,
+                            socket,
+                            directory,
+                        },
+                        startup,
+                    ));
+                }
+                Err(error) => failures.push(format!("{}: {error}", executable.display())),
+            }
+        }
+        let _ = fs::remove_dir(&directory);
+        Err(RemoteError::Bridge(failures.join("; ")))
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+}
+
+impl Drop for RemoteBridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if fs::symlink_metadata(&self.socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+        {
+            let _ = fs::remove_file(&self.socket);
+        }
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+fn launch_helper(
+    executable: &Path,
+    host: &str,
+    port: u16,
+    fingerprint: Option<&str>,
+    socket: &Path,
+) -> Result<(Child, BridgeStartup), String> {
+    let mut command = Command::new(executable);
+    command
+        .arg("connect")
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--socket")
+        .arg(socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(fingerprint) = fingerprint {
+        command.arg("--fingerprint").arg(fingerprint);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot launch the TLS bridge: {error}"))?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            stop_child(&mut child);
+            return Err("cannot read TLS bridge startup".into());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            stop_child(&mut child);
+            return Err("cannot read TLS bridge errors".into());
+        }
+    };
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    drain_bounded(stderr, errors.clone());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if let Err(error) = thread::Builder::new()
+        .name("xd-remote-bridge-startup".into())
+        .spawn(move || {
+            let _ = sender.send(read_startup(stdout));
+        })
+    {
+        stop_child(&mut child);
+        return Err(format!("cannot monitor TLS bridge startup: {error}"));
+    }
+    let startup = match receiver.recv_timeout(STARTUP_TIMEOUT) {
+        Ok(Ok(startup)) => startup,
+        Ok(Err(error)) => {
+            stop_child(&mut child);
+            return Err(with_stderr(error, &errors));
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            stop_child(&mut child);
+            return Err(with_stderr("TLS bridge startup timed out".into(), &errors));
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            stop_child(&mut child);
+            return Err(with_stderr(
+                "TLS bridge startup ended unexpectedly".into(),
+                &errors,
+            ));
+        }
+    };
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            return Err(with_stderr(
+                format!("TLS bridge exited with {}", status_text(status)),
+                &errors,
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            stop_child(&mut child);
+            return Err(format!("cannot inspect the TLS bridge: {error}"));
+        }
+    }
+    let metadata = match fs::symlink_metadata(socket) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            stop_child(&mut child);
+            return Err(with_stderr(
+                format!("TLS bridge did not create its socket: {error}"),
+                &errors,
+            ));
+        }
+    };
+    if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o077 != 0 {
+        stop_child(&mut child);
+        return Err("TLS bridge did not create a private Unix socket".into());
+    }
+    if fingerprint.is_some_and(|expected| expected != startup.fingerprint) {
+        stop_child(&mut child);
+        return Err("TLS bridge reported a different certificate fingerprint".into());
+    }
+    Ok((child, startup))
+}
+
+fn read_startup(mut reader: impl Read) -> Result<BridgeStartup, String> {
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    while line.len() <= STARTUP_LIMIT {
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => line.push(byte[0]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("cannot read TLS bridge startup: {error}")),
+        }
+    }
+    if line.len() > STARTUP_LIMIT {
+        return Err("TLS bridge startup response is too large".into());
+    }
+    if line.is_empty() {
+        return Err("TLS bridge returned no startup response".into());
+    }
+    let mut startup: BridgeStartup = serde_json::from_slice(&line)
+        .map_err(|error| format!("TLS bridge returned invalid startup data: {error}"))?;
+    startup.fingerprint = normalize_fingerprint(&startup.fingerprint)
+        .map_err(|error| format!("TLS bridge returned invalid startup data: {error}"))?;
+    Ok(startup)
+}
+
+fn drain_bounded(mut stderr: impl Read + Send + 'static, destination: Arc<Mutex<Vec<u8>>>) {
+    let _ = thread::Builder::new()
+        .name("xd-remote-bridge-errors".into())
+        .spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = match stderr.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => count,
+                };
+                if let Ok(mut destination) = destination.lock() {
+                    destination.extend_from_slice(&buffer[..count]);
+                    if destination.len() > STDERR_LIMIT {
+                        let excess = destination.len() - STDERR_LIMIT;
+                        destination.drain(..excess);
+                    }
+                }
+            }
+        });
+}
+
+fn with_stderr(message: String, stderr: &Arc<Mutex<Vec<u8>>>) -> String {
+    let detail = stderr
+        .lock()
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+        .unwrap_or_default();
+    if detail.is_empty() {
+        message
+    } else {
+        format!("{message}: {detail}")
+    }
+}
+
+fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn status_text(status: std::process::ExitStatus) -> String {
+    status
+        .code()
+        .map(|code| code.to_string())
+        .or_else(|| status.signal().map(|signal| format!("signal {signal}")))
+        .unwrap_or_else(|| "an unknown status".into())
+}
+
+fn helper_candidates() -> Vec<PathBuf> {
+    if let Some(path) = env::var_os("XD_TLS_PROXY_EXECUTABLE").filter(|path| !path.is_empty()) {
+        return vec![PathBuf::from(path)];
+    }
+    let mut candidates = Vec::new();
+    if let Ok(current) = env::current_exe()
+        && let Some(parent) = current.parent()
+    {
+        let sibling = parent.join("xd-tls-proxy-dev");
+        if sibling.is_file() {
+            candidates.push(sibling);
+        }
+    }
+    candidates.push(PathBuf::from("xd-tls-proxy-dev"));
+    candidates
+}
+
+fn private_bridge_directory() -> Result<PathBuf, RemoteError> {
+    let parent = env::var_os("XD_REMOTE_BRIDGE_DIR")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+        .unwrap_or_else(env::temp_dir)
+        .join("xd-dev");
+    fs::create_dir_all(&parent).map_err(|error| RemoteError::Bridge(error.to_string()))?;
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
+        .map_err(|error| RemoteError::Bridge(error.to_string()))?;
+    for _ in 0..32 {
+        let directory = parent.join(format!(
+            "remote-{}-{}",
+            std::process::id(),
+            TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(RemoteError::Bridge(error.to_string())),
+        }
+    }
+    Err(RemoteError::Bridge(
+        "cannot allocate a private local bridge directory".into(),
+    ))
+}
+
+fn normalize_fingerprint(value: &str) -> Result<String, RemoteError> {
+    let fingerprint = value.trim().to_ascii_lowercase().replace(':', "");
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RemoteError::Credentials(
+            "Remote certificate fingerprint is invalid.".into(),
+        ));
+    }
+    Ok(fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fixture(name: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "xd-dev-remote-{name}-{}-{}",
+            std::process::id(),
+            TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn credentials() -> RemoteCredentials {
+        RemoteCredentials::new(
+            " desktop.local ",
+            4001,
+            "secret-token",
+            "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn credentials_match_the_existing_json_contract() {
+        let credentials = credentials();
+        assert_eq!(credentials.host, "desktop.local");
+        assert_eq!(credentials.version, 1);
+        assert_eq!(credentials.fingerprint.len(), 64);
+        let encoded = serde_json::to_value(&credentials).unwrap();
+        assert_eq!(encoded["port"], 4001);
+        assert_eq!(encoded["token"], "secret-token");
+        assert_eq!(encoded["fingerprint"], credentials.fingerprint);
+    }
+
+    #[test]
+    fn credentials_file_is_atomic_private_and_clearable() {
+        let root = fixture("credentials");
+        let path = root.join("private").join("remote.json");
+        let file = CredentialsFile::new(path.clone());
+        assert!(file.load().unwrap().is_none());
+        file.save(&credentials()).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(file.load().unwrap(), Some(credentials()));
+        file.clear().unwrap();
+        assert!(file.load().unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_unsafe_credentials_are_rejected() {
+        assert!(RemoteCredentials::new("", 4001, "token", "0".repeat(64)).is_err());
+        assert!(RemoteCredentials::new("host", 0, "token", "0".repeat(64)).is_err());
+        assert!(RemoteCredentials::new("host", 4001, "", "0".repeat(64)).is_err());
+        assert!(RemoteCredentials::new("host", 4001, "token", "not-a-pin").is_err());
+
+        let root = fixture("symlink");
+        let target = root.join("target");
+        fs::write(&target, b"keep").unwrap();
+        let path = root.join("remote.json");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let file = CredentialsFile::new(path);
+        assert!(file.load().is_err());
+        assert!(file.clear().is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bridge_startup_is_bounded_and_normalizes_the_fingerprint() {
+        let startup = read_startup(
+            br#"{"fingerprint":"00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"}
+"#
+            .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(startup.fingerprint.len(), 64);
+        assert_eq!(
+            startup.fingerprint,
+            startup.fingerprint.to_ascii_lowercase()
+        );
+        assert!(read_startup(b"{}\n".as_slice()).is_err());
+        assert!(read_startup(vec![b'x'; STARTUP_LIMIT + 1].as_slice()).is_err());
+    }
+}
