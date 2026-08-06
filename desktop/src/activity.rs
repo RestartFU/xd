@@ -28,15 +28,32 @@ impl ActivityCard {
             return card;
         }
         let summary = compact(content, 180, "Used a tool");
+        let failure = generic_failure(&summary);
         Self {
-            kind: ActivityKind::Finished,
+            kind: if failure {
+                ActivityKind::Failure
+            } else {
+                ActivityKind::Finished
+            },
             title: "Activity".into(),
-            name: summary.clone(),
-            status: "Done".into(),
+            name: if summary.eq_ignore_ascii_case("error") {
+                "Error".into()
+            } else {
+                summary.clone()
+            },
+            status: if failure { "Failed" } else { "Done" }.into(),
             detail: summary,
             footer: None,
         }
     }
+}
+
+fn generic_failure(summary: &str) -> bool {
+    let summary = summary.trim().to_ascii_lowercase();
+    matches!(summary.as_str(), "error" | "failed" | "failure" | "errored")
+        || summary.starts_with("error:")
+        || summary.starts_with("failed:")
+        || summary.starts_with("failure:")
 }
 
 fn parse_subagent(content: &str) -> Option<ActivityCard> {
@@ -144,5 +161,15 @@ mod tests {
         assert_eq!(card.title, "Activity");
         assert!(card.name.chars().count() <= 180);
         assert_eq!(card.kind, ActivityKind::Finished);
+    }
+
+    #[test]
+    fn explicit_generic_errors_are_not_reported_as_done() {
+        for content in ["error", "failed", "Error: agent process exited"] {
+            let card = ActivityCard::parse(content);
+            assert_eq!(card.kind, ActivityKind::Failure);
+            assert_eq!(card.status, "Failed");
+        }
+        assert_eq!(ActivityCard::parse("read file").status, "Done");
     }
 }
