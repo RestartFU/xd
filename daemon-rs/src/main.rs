@@ -59,6 +59,7 @@ fn serve(options: Options) -> Result<(), String> {
     if options.pair && pair_with_running_daemon(&options)? {
         return Ok(());
     }
+    refuse_live_daemon(&options.socket)?;
     let store = StateStore::open(&options.database, &options.workspaces)
         .map_err(|error| error.to_string())?;
     let saved_listener = store.remote_listener().map_err(|error| error.to_string())?;
@@ -108,6 +109,27 @@ fn serve(options: Options) -> Result<(), String> {
         eprintln!("xd-daemon-dev: cannot restore remote listener: {error}");
     }
     server.run().map_err(|error| error.to_string())
+}
+
+fn refuse_live_daemon(socket: &Path) -> Result<(), String> {
+    match UnixStream::connect(socket) {
+        Ok(_) => Err(format!(
+            "an xd daemon is already listening on {}",
+            socket.display()
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "cannot check whether an xd daemon is already using {}: {error}",
+            socket.display()
+        )),
+    }
 }
 
 fn pair_with_running_daemon(options: &Options) -> Result<bool, String> {
@@ -184,6 +206,7 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
     let mut socket = None;
     let mut database = None;
     let mut workspaces = None;
+    let mut data = None;
     let mut bind = "::".to_owned();
     let mut port = 4001;
     let mut pair = false;
@@ -200,6 +223,14 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
             }
             _ if argument.starts_with("--port=") => {
                 port = parse_port(&argument["--port=".len()..])?;
+            }
+            "--data" => {
+                data = Some(PathBuf::from(
+                    arguments.next().ok_or("--data needs a directory")?,
+                ));
+            }
+            _ if argument.starts_with("--data=") => {
+                data = Some(PathBuf::from(&argument["--data=".len()..]));
             }
             "--socket" => {
                 socket = Some(PathBuf::from(
@@ -236,7 +267,17 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
             _ => return Err(format!("unknown argument {argument}")),
         }
     }
-    let socket = socket.ok_or_else(|| "--socket is required".to_string())?;
+    if data.is_some() && (socket.is_some() || database.is_some() || workspaces.is_some()) {
+        return Err(
+            "--data cannot be combined with --socket, --database, --workspaces, or --root".into(),
+        );
+    }
+    if let Some(data) = data {
+        socket = Some(data.join("daemon.sock"));
+        database = Some(data.join("chats.db"));
+        workspaces = Some(data.join("Workspaces"));
+    }
+    let socket = socket.ok_or_else(|| "--socket or --data is required".to_string())?;
     let data_directory = socket
         .parent()
         .ok_or_else(|| "--socket must have a parent directory".to_string())?;
@@ -271,9 +312,10 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-daemon-dev serve --socket PATH [options]\n\
+    "usage: xd-daemon-dev serve (--socket PATH | --data DIR) [options]\n\
      \n\
      options:\n\
+       --data DIR         adopt one xd data root atomically\n\
        --database FILE    chat database beside the socket by default\n\
        --workspaces DIR   workspace root beside the socket by default\n\
        --root DIR         alias for --workspaces\n\
@@ -336,6 +378,53 @@ mod tests {
             ])
             .is_err()
         );
+
+        let CliCommand::Serve(options) =
+            arguments(["serve".into(), "--data=/state/xd-nightly".into()]).unwrap()
+        else {
+            panic!("expected serve options");
+        };
+        assert_eq!(
+            options.socket,
+            PathBuf::from("/state/xd-nightly/daemon.sock")
+        );
+        assert_eq!(
+            options.database,
+            PathBuf::from("/state/xd-nightly/chats.db")
+        );
+        assert_eq!(
+            options.workspaces,
+            PathBuf::from("/state/xd-nightly/Workspaces")
+        );
+        assert!(
+            arguments([
+                "serve".into(),
+                "--data=/state/xd-nightly".into(),
+                "--socket=/tmp/other.sock".into(),
+            ])
+            .is_err()
+        );
+        assert!(arguments(["serve".into()]).is_err());
+    }
+
+    #[test]
+    fn refuses_a_live_socket_before_opening_state() {
+        let directory = env::temp_dir().join(format!(
+            "xd-rust-cli-live-check-{}-{}",
+            std::process::id(),
+            thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        let error = refuse_live_daemon(&socket).unwrap_err();
+        assert!(error.contains("already listening"));
+        assert!(!directory.join("chats.db").exists());
+
+        drop(listener);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

@@ -79,6 +79,19 @@ The bundled Rust daemon also supports the established headless pairing flow:
 xd-daemon-dev serve --socket /path/to/daemon.sock --pair
 ```
 
+To explicitly run the Rust daemon against an existing xd data directory during
+the migration, stop the previous daemon first and adopt all of its state paths
+as one unit:
+
+```sh
+xd-daemon-dev serve --data ~/.local/share/xd-nightly
+```
+
+This keeps the existing database, managed workspace paths, and compatible
+secret files in place. `--data` cannot be combined with individual socket,
+database, or workspace overrides, and the Rust daemon refuses to open the
+database while another daemon is listening on that data root's socket.
+
 This is still a development channel. Several production-client management
 surfaces have not yet been ported.
 
