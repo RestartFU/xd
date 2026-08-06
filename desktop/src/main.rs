@@ -1138,6 +1138,14 @@ impl XdDesktop {
         }
     }
 
+    fn secrets_daemon(&self, folder_id: Option<&str>) -> Option<&DaemonHandle> {
+        if folder_id.is_some() {
+            self.active_daemon()
+        } else {
+            self.daemon.as_ref()
+        }
+    }
+
     fn endpoint_model(&self, endpoint: ChatEndpoint) -> &AppModel {
         if endpoint == self.active_endpoint {
             &self.model
@@ -1218,6 +1226,20 @@ impl XdDesktop {
                 | RequestKind::TerminalInput { .. }
                 | RequestKind::TerminalResize { .. }
                 | RequestKind::TerminalKill { .. }
+                | RequestKind::AgentSecrets { folder_id: Some(_) }
+                | RequestKind::SetAgentSecrets { folder_id: Some(_) }
+                | RequestKind::FolderContext { .. }
+                | RequestKind::SetFolderContext { .. }
+                | RequestKind::FolderSettings { .. }
+                | RequestKind::SetFolderSettings { .. }
+                | RequestKind::NewFolder { .. }
+                | RequestKind::NewChat { .. }
+                | RequestKind::RenameFolder { .. }
+                | RequestKind::MoveFolder { .. }
+                | RequestKind::TrashFolder { .. }
+                | RequestKind::RenameChat { .. }
+                | RequestKind::MoveChat { .. }
+                | RequestKind::DeleteChat { .. }
         )
     }
 
@@ -1241,6 +1263,31 @@ impl XdDesktop {
                 | "terminal-resized"
                 | "terminal-closed"
                 | "git-draft-finished"
+                | "folder-clone"
+        )
+    }
+
+    fn local_admin_reply(kind: &RequestKind) -> bool {
+        matches!(
+            kind,
+            RequestKind::AgentAuth
+                | RequestKind::AgentAuthMutation
+                | RequestKind::AgentClis
+                | RequestKind::DaemonUpdate { .. }
+                | RequestKind::AgentSecrets { folder_id: None }
+                | RequestKind::SetAgentSecrets { folder_id: None }
+                | RequestKind::Devices
+                | RequestKind::PeerPairing
+                | RequestKind::PairRemote
+                | RequestKind::RenameDevice { .. }
+                | RequestKind::RevokeDevice { .. }
+        )
+    }
+
+    fn local_admin_event(name: &str) -> bool {
+        matches!(
+            name,
+            "agent-auth-changed" | "agent-cli-changed" | "daemon-update"
         )
     }
 
@@ -1660,16 +1707,36 @@ impl XdDesktop {
                     self.connection_in_flight = false;
                     self.schedule_reconnect(cx);
                 }
-                DaemonUpdate::Reply { kind, body, .. } => {
-                    Self::apply_passive_reply(&mut self.inactive_model, &kind, Value::Object(body))
+                DaemonUpdate::Reply {
+                    kind,
+                    body,
+                    attachments,
+                } => {
+                    if Self::local_admin_reply(&kind) {
+                        self.handle_reply(kind, body, attachments, cx);
+                    } else {
+                        Self::apply_passive_reply(
+                            &mut self.inactive_model,
+                            &kind,
+                            Value::Object(body),
+                        );
+                    }
                 }
-                DaemonUpdate::Event { name, body, .. } => {
+                DaemonUpdate::Event {
+                    name,
+                    body,
+                    attachments,
+                } => {
                     let body = Value::Object(body);
-                    Self::apply_passive_event(&mut self.inactive_model, &name, &body);
-                    if name == "turn-finished"
-                        && let Some(daemon) = &self.daemon
-                    {
-                        let _ = daemon.tree();
+                    if Self::local_admin_event(&name) {
+                        self.handle_event(&name, body, attachments, cx);
+                    } else {
+                        Self::apply_passive_event(&mut self.inactive_model, &name, &body);
+                        if name == "turn-finished"
+                            && let Some(daemon) = &self.daemon
+                        {
+                            let _ = daemon.tree();
+                        }
                     }
                 }
             }
@@ -2300,12 +2367,10 @@ impl XdDesktop {
                     self.close_secrets(cx);
                 }
                 if self.model.selected_chat.is_none() {
-                    let chat_id = self
-                        .settings
-                        .last_chat
-                        .as_ref()
-                        .filter(|chat_id| self.model.chats.iter().any(|chat| &chat.id == *chat_id))
-                        .cloned()
+                    let chat_id = (self.active_endpoint == ChatEndpoint::Local)
+                        .then(|| self.settings.last_chat.clone())
+                        .flatten()
+                        .filter(|chat_id| self.model.chats.iter().any(|chat| &chat.id == chat_id))
                         .or_else(|| self.model.chats.first().map(|chat| chat.id.clone()));
                     if let Some(chat_id) = chat_id {
                         self.select_chat(chat_id, cx);
@@ -2365,7 +2430,7 @@ impl XdDesktop {
                     panel.submitting = false;
                     panel.loading = true;
                 }
-                if let Some(daemon) = &self.daemon
+                if let Some(daemon) = self.secrets_daemon(folder_id.as_deref()).cloned()
                     && let Err(error) = daemon.agent_secrets(folder_id.as_deref())
                     && let Some(panel) = &mut self.secrets_panel
                 {
@@ -2834,7 +2899,7 @@ impl XdDesktop {
                     match self.workspace_clone_outcomes.remove(folder_id) {
                         Some(None) => {
                             self.workspace_clone_status = Some("Repository cloned".into());
-                            if let Some(daemon) = &self.daemon
+                            if let Some(daemon) = self.active_daemon().cloned()
                                 && let Err(error) = daemon.new_chat(folder_id, "New Chat")
                             {
                                 self.model.connection_error = Some(error);
@@ -2849,7 +2914,7 @@ impl XdDesktop {
                             self.workspace_clone_status = Some("Cloning repository…".into());
                         }
                     }
-                } else if let Some(daemon) = &self.daemon
+                } else if let Some(daemon) = self.active_daemon().cloned()
                     && let Err(error) = daemon.new_chat(folder_id, "New Chat")
                 {
                     self.model.connection_error = Some(error);
@@ -3282,7 +3347,8 @@ impl XdDesktop {
                         if folder_id
                             .is_some_and(|folder_id| self.pending_clone_chats.remove(folder_id))
                         {
-                            if let (Some(daemon), Some(folder_id)) = (&self.daemon, folder_id)
+                            if let (Some(daemon), Some(folder_id)) =
+                                (self.active_daemon().cloned(), folder_id)
                                 && let Err(error) = daemon.new_chat(folder_id, "New Chat")
                             {
                                 self.model.connection_error = Some(error);
@@ -3478,6 +3544,9 @@ impl XdDesktop {
     }
 
     fn sync_active_auth_state(&mut self) {
+        if self.active_endpoint == ChatEndpoint::Remote {
+            return;
+        }
         let active_provider = active_auth_provider(&self.model.backend, self.model.claude_mode);
         if let Some(provider) = self
             .auth_providers
@@ -3512,9 +3581,6 @@ impl XdDesktop {
     }
 
     fn begin_workspace_create(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         self.creating_workspace = true;
         self.workspace_create_submitting = false;
@@ -3552,6 +3618,12 @@ impl XdDesktop {
     }
 
     fn choose_workspace_path(&mut self, target: WorkspacePathTarget, cx: &mut Context<Self>) {
+        if self.active_endpoint == ChatEndpoint::Remote {
+            self.model.connection_error =
+                Some("Type a path on the remote machine, or use a repository clone URL.".into());
+            cx.notify();
+            return;
+        }
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         let generation = self.workspace_path_generation;
         let prompt = match &target {
@@ -3655,8 +3727,7 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.new_folder(name, repo.as_deref(), repo_url.as_deref()));
         match result {
@@ -3717,8 +3788,7 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.new_chat(&folder_id, title));
         match result {
@@ -3747,7 +3817,7 @@ impl XdDesktop {
         self.workspace_context_submitting = false;
         self.workspace_context_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
-        if let Some(daemon) = &self.daemon {
+        if let Some(daemon) = self.active_daemon().cloned() {
             if let Err(error) = daemon.folder_context(&folder_id) {
                 self.workspace_context_loading = false;
                 self.model.connection_error = Some(error);
@@ -3778,8 +3848,7 @@ impl XdDesktop {
         }
         let context = optional_trimmed(&self.workspace_context_text).map(str::to_owned);
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.set_folder_context(&folder_id, context.as_deref()));
         match result {
@@ -3804,7 +3873,7 @@ impl XdDesktop {
 
     fn begin_workspace_defaults(&mut self, folder_id: String, cx: &mut Context<Self>) {
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
-        let Some(daemon) = self.daemon.as_ref() else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             cx.notify();
             return;
@@ -3885,8 +3954,7 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.set_folder_settings(
@@ -4079,7 +4147,7 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text("", cx));
         self.secret_value_input
             .update(cx, |input, cx| input.set_text("", cx));
-        match self.daemon.as_ref() {
+        match self.secrets_daemon(folder_id.as_deref()).cloned() {
             Some(daemon) => {
                 if let Err(error) = daemon.agent_secrets(folder_id.as_deref())
                     && let Some(panel) = &mut self.secrets_panel
@@ -4552,7 +4620,7 @@ impl XdDesktop {
             .map(|existing| (existing.clone(), None))
             .collect::<Vec<_>>();
         entries.push((name.to_owned(), Some(panel.value)));
-        match self.daemon.as_ref() {
+        match self.secrets_daemon(panel.folder_id.as_deref()).cloned() {
             Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
                 Ok(()) => {
                     if let Some(current) = &mut self.secrets_panel {
@@ -4588,7 +4656,7 @@ impl XdDesktop {
             .filter(|existing| **existing != name)
             .map(|existing| (existing.clone(), None))
             .collect::<Vec<_>>();
-        match self.daemon.as_ref() {
+        match self.secrets_daemon(panel.folder_id.as_deref()).cloned() {
             Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
                 Ok(()) => {
                     if let Some(current) = &mut self.secrets_panel {
@@ -5732,9 +5800,6 @@ impl XdDesktop {
         position: Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         self.cancel_sidebar_edit(cx);
         if self.pending_sidebar_delete.as_ref() != target.as_ref() {
             self.pending_sidebar_delete = None;
@@ -5785,7 +5850,7 @@ impl XdDesktop {
             self.cancel_sidebar_edit(cx);
             return;
         }
-        let result = self.daemon.as_ref().map(|daemon| match &edit.target {
+        let result = self.active_daemon().map(|daemon| match &edit.target {
             SidebarTarget::Folder(folder_id) => daemon.rename_folder(folder_id, text),
             SidebarTarget::Chat(chat_id) => daemon.rename_chat(chat_id, text),
         });
@@ -5826,7 +5891,7 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        let result = self.daemon.as_ref().map(|daemon| match &target {
+        let result = self.active_daemon().map(|daemon| match &target {
             SidebarTarget::Folder(folder_id) => daemon.trash_folder(folder_id),
             SidebarTarget::Chat(chat_id) => daemon.delete_chat(chat_id),
         });
@@ -5866,7 +5931,7 @@ impl XdDesktop {
         if self.sidebar_move_submitting || self.sidebar_move.as_ref() != Some(&target) {
             return;
         }
-        let result = self.daemon.as_ref().map(|daemon| match &target {
+        let result = self.active_daemon().map(|daemon| match &target {
             SidebarTarget::Folder(folder_id) => {
                 daemon.move_folder(folder_id, destination.as_deref())
             }
@@ -7677,7 +7742,6 @@ impl Render for XdDesktop {
         let can_save_chat = creating_chat_folder.is_some()
             && !chat_create_submitting
             && !self.chat_create_title.trim().is_empty()
-            && !remote_active
             && self.model.connected;
         let chat_create_input = self.chat_create_input.clone();
         let chat_create_focus = self.chat_create_input.read(cx).focus_handle(cx);
@@ -8254,16 +8318,21 @@ impl Render for XdDesktop {
                                                 .items_center()
                                                 .rounded_md()
                                                 .bg(rgb(BG))
-                                                .text_color(rgb(TEXT))
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x242428)))
+                                                .text_color(rgb(if remote_active { MUTED } else { TEXT }))
+                                                .when(!remote_active, |button| {
+                                                    button
+                                                        .cursor_pointer()
+                                                        .hover(|style| style.bg(rgb(0x242428)))
+                                                })
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.choose_workspace_path(
-                                                        WorkspacePathTarget::DefaultsWorkdir {
-                                                            folder_id: workdir_folder_id.clone(),
-                                                        },
-                                                        cx,
-                                                    );
+                                                    if !remote_active {
+                                                        this.choose_workspace_path(
+                                                            WorkspacePathTarget::DefaultsWorkdir {
+                                                                folder_id: workdir_folder_id.clone(),
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
                                                 }))
                                                 .child("Browse"),
                                         ),
@@ -8320,16 +8389,21 @@ impl Render for XdDesktop {
                                                 .items_center()
                                                 .rounded_md()
                                                 .bg(rgb(BG))
-                                                .text_color(rgb(TEXT))
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(0x242428)))
+                                                .text_color(rgb(if remote_active { MUTED } else { TEXT }))
+                                                .when(!remote_active, |button| {
+                                                    button
+                                                        .cursor_pointer()
+                                                        .hover(|style| style.bg(rgb(0x242428)))
+                                                })
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.choose_workspace_path(
-                                                        WorkspacePathTarget::DefaultsRepository {
-                                                            folder_id: repository_folder_id.clone(),
-                                                        },
-                                                        cx,
-                                                    );
+                                                    if !remote_active {
+                                                        this.choose_workspace_path(
+                                                            WorkspacePathTarget::DefaultsRepository {
+                                                                folder_id: repository_folder_id.clone(),
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
                                                 }))
                                                 .child("Browse"),
                                         ),
@@ -8862,7 +8936,6 @@ impl Render for XdDesktop {
             && !self.workspace_create_name.trim().is_empty()
             && (self.workspace_create_repo.trim().is_empty()
                 || self.workspace_create_clone.trim().is_empty())
-            && !remote_active
             && self.model.connected;
         let workspace_create_input = self.workspace_create_input.clone();
         let workspace_create_focus = self.workspace_create_input.read(cx).focus_handle(cx);
@@ -8939,18 +9012,14 @@ impl Render for XdDesktop {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .text_color(rgb(if creating_workspace || remote_active {
-                                MUTED
-                            } else {
-                                TEXT
-                            }))
-                            .when(!creating_workspace && !remote_active, |button| {
+                            .text_color(rgb(if creating_workspace { MUTED } else { TEXT }))
+                            .when(!creating_workspace, |button| {
                                 button.cursor_pointer().hover(|style| {
                                     style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
                                 })
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                if !creating_workspace && !remote_active {
+                                if !creating_workspace {
                                     this.begin_workspace_create(cx);
                                     let focus =
                                         this.workspace_create_input.read(cx).focus_handle(cx);
@@ -9038,14 +9107,19 @@ impl Render for XdDesktop {
                                         .rounded_md()
                                         .bg(rgb(BG))
                                         .text_xs()
-                                        .text_color(rgb(TEXT))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(0x242428)))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.choose_workspace_path(
-                                                WorkspacePathTarget::CreateRepository,
-                                                cx,
-                                            );
+                                        .text_color(rgb(if remote_active { MUTED } else { TEXT }))
+                                        .when(!remote_active, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x242428)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if !remote_active {
+                                                this.choose_workspace_path(
+                                                    WorkspacePathTarget::CreateRepository,
+                                                    cx,
+                                                );
+                                            }
                                         }))
                                         .child("Browse"),
                                 ),
@@ -14851,10 +14925,29 @@ mod tests {
         assert!(XdDesktop::remote_chat_reply(&RequestKind::TerminalOpen {
             chat_id: "chat".into(),
         }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::RenameFolder {
+            folder_id: "workspace".into(),
+            name: "Remote workspace".into(),
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
+            folder_id: Some("workspace".into()),
+        }));
+        assert!(!XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
+            folder_id: None,
+        }));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::Devices));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::DaemonUpdate {
             action: "install".into(),
         }));
+        assert!(XdDesktop::local_admin_reply(&RequestKind::AgentSecrets {
+            folder_id: None,
+        }));
+        assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentSecrets {
+            folder_id: Some("workspace".into()),
+        }));
+        assert!(XdDesktop::local_admin_reply(&RequestKind::Devices));
+        assert!(XdDesktop::local_admin_event("agent-auth-changed"));
+        assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("voice"));
         assert!(XdDesktop::remote_read_event("terminal-output"));
