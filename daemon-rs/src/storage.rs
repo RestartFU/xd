@@ -22,7 +22,15 @@ const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_SEARCH_RESULTS: i64 = 40;
 const SEARCH_SNIPPET_CHARS: usize = 120;
 const EMPTY_GIT_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-const SPEECH_INSTRUCTION: &str = "For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap ordinary prose, code, tool output, status updates, analysis, or questions. The client may ignore speech tags when speech is disabled.";
+const AGENT_UI_INSTRUCTIONS: &str = r#"This client is noninteractive. When you genuinely need the user to choose from a short list, put exactly one block at the end of your reply in this form:
+<ask>
+Which approach should I take?
+- First complete answer
+- Second complete answer
+</ask>
+Use two to six options. When the answer must be free-form text, put <input> on its own line inside the block; options and <input> may be combined. Do not ask more than one question per reply.
+
+For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap ordinary prose, code, tool output, status updates, analysis, or questions. The client may ignore speech tags when speech is disabled."#;
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -3645,8 +3653,8 @@ fn prepare_turn(
         .optional()?
         .flatten();
     let system_prompt = effective_instructions(transaction, workspace_root, &chat.0)?
-        .map(|instructions| format!("{instructions}\n\n{SPEECH_INSTRUCTION}"))
-        .or_else(|| Some(SPEECH_INSTRUCTION.into()));
+        .map(|instructions| format!("{instructions}\n\n{AGENT_UI_INSTRUCTIONS}"))
+        .or_else(|| Some(AGENT_UI_INSTRUCTIONS.into()));
     let now = now_seconds();
     transaction.execute(
         "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
@@ -4879,7 +4887,7 @@ mod tests {
         };
         assert_eq!(
             turn.system_prompt.unwrap(),
-            format!("Parent rules\n\nChild rules\n\n{SPEECH_INSTRUCTION}")
+            format!("Parent rules\n\nChild rules\n\n{AGENT_UI_INSTRUCTIONS}")
         );
     }
 

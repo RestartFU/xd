@@ -26,6 +26,7 @@ Current milestone:
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
 - live assistant text, activity, turn state, and queue event handling;
+- structured agent questions with option buttons and custom-answer input;
 - opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
 - shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - simultaneously visible repository and terminal panes with draggable, persisted dividers;

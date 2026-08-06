@@ -172,6 +172,7 @@ pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> D
 }
 
 pub fn display_text(source: &str) -> String {
+    let source = display_without_ask_blocks(source);
     let mut output = String::with_capacity(source.len());
     let mut fenced = false;
     for segment in source.split_inclusive('\n') {
@@ -189,6 +190,113 @@ pub fn display_text(source: &str) -> String {
         }
     }
     output
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskContent {
+    pub question: String,
+    pub options: Vec<String>,
+    pub accepts_input: bool,
+}
+
+pub fn ask(source: &str) -> Option<AskContent> {
+    let mut offset = 0;
+    let mut found = None;
+    while let Some(relative) = source[offset..].find("<ask>") {
+        let opening = offset + relative;
+        let body_start = opening + "<ask>".len();
+        let Some(relative_close) = source[body_start..].find("</ask>") else {
+            break;
+        };
+        let close = body_start + relative_close;
+        if let Some(parsed) = ask_content(&source[body_start..close]) {
+            found = Some(parsed);
+        }
+        offset = close + "</ask>".len();
+    }
+    found
+}
+
+fn display_without_ask_blocks(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut plain = String::new();
+    let mut question = None;
+    let mut fenced = false;
+    for segment in source.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if fence_marker(line) {
+            strip_ask_blocks(&plain, &mut output, &mut question);
+            plain.clear();
+            output.push_str(segment);
+            fenced = !fenced;
+        } else if fenced {
+            output.push_str(segment);
+        } else {
+            plain.push_str(segment);
+        }
+    }
+    strip_ask_blocks(&plain, &mut output, &mut question);
+    if let Some(question) = question {
+        while output.chars().last().is_some_and(char::is_whitespace) {
+            output.pop();
+        }
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(&question);
+        output.push_str("**");
+    }
+    output
+}
+
+fn strip_ask_blocks(source: &str, output: &mut String, question: &mut Option<String>) {
+    let mut offset = 0;
+    while let Some(relative) = source[offset..].find("<ask>") {
+        let opening = offset + relative;
+        let body_start = opening + "<ask>".len();
+        let Some(relative_close) = source[body_start..].find("</ask>") else {
+            break;
+        };
+        let close = body_start + relative_close;
+        if let Some(parsed) = ask_content(&source[body_start..close]) {
+            output.push_str(&source[offset..opening]);
+            *question = Some(format!("**{}", parsed.question));
+            offset = close + "</ask>".len();
+        } else {
+            output.push_str(&source[offset..=opening]);
+            offset = opening + 1;
+        }
+    }
+    output.push_str(&source[offset..]);
+}
+
+fn ask_content(body: &str) -> Option<AskContent> {
+    let mut question = Vec::new();
+    let mut options = Vec::new();
+    let mut accepts_input = false;
+    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line == "<input>" {
+            accepts_input = true;
+        } else if let Some(option) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            if options.len() < 6 && !option.trim().is_empty() {
+                options.push(option.trim().chars().take(1_000).collect());
+            }
+        } else if options.is_empty() {
+            question.push(line);
+        }
+    }
+    if options.len() < 2 && !accepts_input {
+        return None;
+    }
+    Some(AskContent {
+        question: if question.is_empty() {
+            "Which one?".into()
+        } else {
+            question.join(" ").chars().take(2_000).collect()
+        },
+        options,
+        accepts_input,
+    })
 }
 
 pub fn spoken_text(source: &str) -> Option<String> {
@@ -832,5 +940,18 @@ mod tests {
         assert_eq!(spoken_text(source).as_deref(), Some("Say this"));
         assert_eq!(spoken_text("<speak>bad <speak>nest</speak>"), None);
         assert_eq!(spoken_text("ordinary reply"), None);
+    }
+
+    #[test]
+    fn ask_tags_are_hidden_but_questions_remain_in_history() {
+        let source = "Ready.\n\n<ask>\nChoose one\n- Fast\n- Safe\n</ask>";
+        assert_eq!(display_text(source), "Ready.\n\n**Choose one**");
+        assert_eq!(ask(source).unwrap().options, ["Fast", "Safe"]);
+        let code = "```text\n<ask>\n- literal\n- code\n</ask>\n```";
+        assert_eq!(display_text(code), code);
+        assert_eq!(
+            display_text("literal <ask>bad</ask>"),
+            "literal <ask>bad</ask>"
+        );
     }
 }

@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use crate::{
     EventBus, StateStore,
     agent::{AgentCommand, AgentEvent, AgentParser},
+    ask::{self, Ask},
     secrets::SecretsStore,
     storage::TurnSpec,
 };
@@ -211,7 +212,7 @@ impl TurnRuntime {
         let mut parser = match AgentParser::new(&turn.backend) {
             Ok(parser) => parser,
             Err(error) => {
-                self.finish(turn, turn_id, 0, false, Some(error), 0, true);
+                self.finish(turn, turn_id, 0, false, Some(error), 0, true, None);
                 return;
             }
         };
@@ -220,6 +221,8 @@ impl TurnRuntime {
         let mut sequence = 0_u64;
         let mut had_activity = false;
         let mut streamed_text = String::new();
+        let mut assistant_text = String::new();
+        let mut visible_streamed_bytes = 0;
 
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else {
@@ -252,6 +255,7 @@ impl TurnRuntime {
                         }));
                     }
                     AgentEvent::Text(text) => {
+                        assistant_text.push_str(&text);
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
                             "assistant",
@@ -260,28 +264,36 @@ impl TurnRuntime {
                         ) {
                             Ok(_) => {
                                 had_activity = true;
-                                sequence += 1;
-                                self.publish_sequenced(
-                                    "text",
-                                    &turn,
-                                    turn_id,
-                                    sequence,
-                                    json!({"text": text}),
-                                );
+                                let visible = ask::visible_bytes(&text);
+                                if visible > 0 {
+                                    sequence += 1;
+                                    self.publish_sequenced(
+                                        "text",
+                                        &turn,
+                                        turn_id,
+                                        sequence,
+                                        json!({"text": &text[..visible]}),
+                                    );
+                                }
                             }
                             Err(error) => latest_error = Some(error.to_string()),
                         }
                     }
                     AgentEvent::TextDelta(text) => {
                         streamed_text.push_str(&text);
-                        sequence += 1;
-                        self.publish_sequenced(
-                            "text",
-                            &turn,
-                            turn_id,
-                            sequence,
-                            json!({"text": text}),
-                        );
+                        assistant_text.push_str(&text);
+                        let visible = ask::visible_bytes(&streamed_text);
+                        if visible > visible_streamed_bytes {
+                            sequence += 1;
+                            self.publish_sequenced(
+                                "text",
+                                &turn,
+                                turn_id,
+                                sequence,
+                                json!({"text": &streamed_text[visible_streamed_bytes..visible]}),
+                            );
+                            visible_streamed_bytes = visible;
+                        }
                     }
                     AgentEvent::Tool(text) => {
                         match self.inner.store.append_turn_message(
@@ -353,6 +365,7 @@ impl TurnRuntime {
         {
             active.remove(&turn.chat_id);
         }
+        let asked = ask::parse(&assistant_text);
         self.finish(
             turn,
             turn_id,
@@ -361,6 +374,7 @@ impl TurnRuntime {
             error,
             started.elapsed().as_secs(),
             !had_activity && !was_cancelled,
+            asked,
         );
     }
 
@@ -373,6 +387,7 @@ impl TurnRuntime {
         error: Option<String>,
         duration: u64,
         silent: bool,
+        asked: Option<Ask>,
     ) {
         let finish = self.inner.store.finish_turn(
             &turn.chat_id,
@@ -390,13 +405,18 @@ impl TurnRuntime {
             "turn_id": turn_id,
             "turn_sequence": sequence,
             "ok": success,
-            "waiting": false,
+            "waiting": asked.is_some(),
             "silent": success && silent,
             "duration": duration,
             "last_message_id": finish.last_message_id,
         });
         if let Some(error) = error {
             event["error"] = Value::String(error);
+        }
+        if let Some(asked) = asked {
+            event["question"] = Value::String(asked.question);
+            event["options"] = serde_json::to_value(asked.options).unwrap_or(Value::Array(vec![]));
+            event["accepts_input"] = Value::Bool(asked.accepts_input);
         }
         self.inner.events.publish(event);
         if let Some(queue_event) = finish.queue_event {

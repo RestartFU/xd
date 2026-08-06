@@ -220,6 +220,55 @@ struct PendingSend {
     restore: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpenQuestion {
+    chat_id: String,
+    question: String,
+    options: Vec<String>,
+    accepts_input: bool,
+}
+
+fn question_from_event(body: &Value) -> Option<OpenQuestion> {
+    if body.get("waiting").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let chat_id = body.get("chat")?.as_str()?.to_owned();
+    let options = body
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|option| {
+            let option = option.trim();
+            (!option.is_empty()).then(|| option.chars().take(1_000).collect())
+        })
+        .take(6)
+        .collect::<Vec<String>>();
+    let accepts_input = body
+        .get("accepts_input")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if options.len() < 2 && !accepts_input {
+        return None;
+    }
+    let question = body
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|question| !question.is_empty())
+        .unwrap_or("Which one?")
+        .chars()
+        .take(2_000)
+        .collect();
+    Some(OpenQuestion {
+        chat_id,
+        question,
+        options,
+        accepts_input,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaneResizeKind {
     Sidebar,
@@ -355,6 +404,7 @@ struct XdDesktop {
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
+    question_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     composer_menu: Option<ComposerMenu>,
@@ -395,6 +445,8 @@ struct XdDesktop {
     attachment_generation: u64,
     sending: bool,
     pending_send: Option<PendingSend>,
+    open_question: Option<OpenQuestion>,
+    question_answer: String,
     expanded_activity: HashSet<String>,
     pane_resize: Option<PaneResize>,
 }
@@ -542,6 +594,16 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) => {}
         })
         .detach();
+        let question_input = cx.new(|cx| ComposerInput::new(cx, "Type your answer…"));
+        cx.subscribe(&question_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                this.question_answer = text.clone();
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.send_question_input(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -578,6 +640,7 @@ impl XdDesktop {
             auth_input,
             secret_name_input,
             secret_value_input,
+            question_input,
             composer: String::new(),
             queue_edit: None,
             composer_menu: None,
@@ -618,6 +681,8 @@ impl XdDesktop {
             attachment_generation: 0,
             sending: false,
             pending_send: None,
+            open_question: None,
+            question_answer: String::new(),
             expanded_activity: HashSet::new(),
             pane_resize: None,
         };
@@ -1631,6 +1696,9 @@ impl XdDesktop {
                     let draft = self.model.draft.clone();
                     self.set_composer_text(draft, cx);
                 }
+                if self.model.working || !self.model.queue.is_empty() {
+                    self.clear_question(cx);
+                }
             }
             RequestKind::Messages { chat_id } if self.chat_is_active(&chat_id) => {
                 if let Err(error) = self.model.apply_messages(&value) {
@@ -1642,6 +1710,7 @@ impl XdDesktop {
                     self.model.live_text.clear();
                     self.model.live_activity.clear();
                 }
+                self.sync_question_from_history(&chat_id, cx);
                 if self
                     .pending_speech
                     .as_ref()
@@ -1913,6 +1982,7 @@ impl XdDesktop {
             }
             "turn-started" if self.event_is_active(&body) => {
                 self.composer_menu = None;
+                self.clear_question(cx);
                 self.model.apply_event(name, &body);
                 self.sync_transcript_count(false);
                 if let Some(chat_id) = self.model.selected_chat.clone() {
@@ -1933,6 +2003,10 @@ impl XdDesktop {
             }
             "turn-finished" if self.event_is_active(&body) => {
                 self.model.apply_event(name, &body);
+                self.open_question = question_from_event(&body);
+                self.question_answer.clear();
+                self.question_input
+                    .update(cx, |input, cx| input.set_text("", cx));
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.pending_speech = self.settings.speech.then(|| PendingSpeech {
                         chat_id: chat_id.clone(),
@@ -3861,6 +3935,7 @@ impl XdDesktop {
         self.draft_dirty = false;
         self.attachments_dirty = false;
         self.pending_send = None;
+        self.clear_question(cx);
         self.cancel_queue_edit(cx);
         self.sending = false;
         self.transcript.reset(0);
@@ -3940,20 +4015,20 @@ impl XdDesktop {
         self.attachment_generation = self.attachment_generation.saturating_add(1);
     }
 
-    fn send_shortcut(&mut self, prompt: String) {
+    fn send_shortcut(&mut self, prompt: String) -> bool {
         if self.sending || prompt.trim().is_empty() {
-            return;
+            return false;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
+            return false;
         };
         let Some(daemon) = self.daemon.clone() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
-            return;
+            return false;
         };
         if let Err(error) = daemon.send_message(&chat_id, &prompt, &[]) {
             self.model.connection_error = Some(error);
-            return;
+            return false;
         }
         self.sending = true;
         self.pending_send = Some(PendingSend {
@@ -3961,6 +4036,51 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
         });
+        true
+    }
+
+    fn clear_question(&mut self, cx: &mut Context<Self>) {
+        self.open_question = None;
+        self.question_answer.clear();
+        self.question_input
+            .update(cx, |input, cx| input.set_text("", cx));
+    }
+
+    fn sync_question_from_history(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let pending = (!self.model.working && self.model.queue.is_empty())
+            .then(|| {
+                self.model
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role != "duration")
+            })
+            .flatten()
+            .filter(|message| message.role == "assistant")
+            .and_then(|message| markdown::ask(&message.content))
+            .map(|ask| OpenQuestion {
+                chat_id: chat_id.to_owned(),
+                question: ask.question,
+                options: ask.options,
+                accepts_input: ask.accepts_input,
+            });
+        if pending != self.open_question {
+            self.open_question = pending;
+            self.question_answer.clear();
+            self.question_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+    }
+
+    fn answer_question(&mut self, answer: String, cx: &mut Context<Self>) {
+        if self.send_shortcut(answer) {
+            self.clear_question(cx);
+            cx.notify();
+        }
+    }
+
+    fn send_question_input(&mut self, cx: &mut Context<Self>) {
+        self.answer_question(self.question_answer.trim().to_owned(), cx);
     }
 
     fn drop_queued(&mut self, index: usize) {
@@ -6888,6 +7008,121 @@ impl Render for XdDesktop {
         } else {
             "Send"
         };
+        let open_question = self.open_question.clone().filter(|question| {
+            self.model.selected_chat.as_deref() == Some(question.chat_id.as_str())
+        });
+        let question_panel = open_question.map(|question| {
+            let can_answer = !self.sending;
+            let option_buttons = question
+                .options
+                .into_iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    let answer = option.clone();
+                    div()
+                        .id(("question-option", index))
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE_HIGH))
+                        .text_sm()
+                        .text_color(rgb(if can_answer { TEXT } else { MUTED }))
+                        .when(can_answer, |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x242428)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if can_answer {
+                                this.answer_question(answer.clone(), cx);
+                            }
+                        }))
+                        .child(option)
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            let question_input = self.question_input.clone();
+            let question_input_focus = question_input.clone();
+            let question_focus = self.question_input.read(cx).focus_handle(cx);
+            let can_send_answer = can_answer && !self.question_answer.trim().is_empty();
+            div()
+                .id("agent-question")
+                .w_full()
+                .max_w(px(1040.0))
+                .mx_auto()
+                .mb_2()
+                .p_3()
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(accent))
+                .bg(rgb(SURFACE))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(TEXT))
+                        .child(question.question),
+                )
+                .when(!option_buttons.is_empty(), |panel| {
+                    panel.child(div().flex().flex_wrap().gap_2().children(option_buttons))
+                })
+                .when(question.accepts_input, |panel| {
+                    panel.child(
+                        div()
+                            .id("question-input-row")
+                            .track_focus(&question_focus)
+                            .w_full()
+                            .min_h(px(44.0))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(if question_focus.is_focused(window) {
+                                accent
+                            } else {
+                                BORDER
+                            }))
+                            .bg(rgb(BG))
+                            .on_click(move |_, window, cx| {
+                                window.focus(&question_input_focus.read(cx).focus_handle(cx));
+                            })
+                            .child(question_input)
+                            .child(
+                                div()
+                                    .id("send-question-answer")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(if can_send_answer {
+                                        accent
+                                    } else {
+                                        SURFACE_HIGH
+                                    }))
+                                    .text_sm()
+                                    .text_color(rgb(if can_send_answer { 0xffffff } else { MUTED }))
+                                    .when(can_send_answer, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(accent_hover)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_send_answer {
+                                            this.send_question_input(cx);
+                                        }
+                                    }))
+                                    .child("Send"),
+                            ),
+                    )
+                })
+                .into_any_element()
+        });
         let attachment_previews = self
             .model
             .draft_attachments
@@ -6954,6 +7189,7 @@ impl Render for XdDesktop {
             .pt_2()
             .pb_3()
             .bg(rgb(BG))
+            .when_some(question_panel, |element, panel| element.child(panel))
             .when_some(self.model.connection_error.clone(), |element, error| {
                 element.child(
                     div()
@@ -9750,6 +9986,37 @@ fn folder_hidden_by_collapse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_question_events_are_bounded_and_validated() {
+        let question = question_from_event(&serde_json::json!({
+            "chat": "chat-1",
+            "waiting": true,
+            "question": "Choose a direction",
+            "options": ["Fast", "Safe", "Small", "Four", "Five", "Six", "Ignored"],
+            "accepts_input": true,
+        }))
+        .unwrap();
+        assert_eq!(question.chat_id, "chat-1");
+        assert_eq!(question.options.len(), 6);
+        assert!(question.accepts_input);
+        assert!(
+            question_from_event(&serde_json::json!({
+                "chat": "chat-1",
+                "waiting": true,
+                "options": ["Only one"],
+            }))
+            .is_none()
+        );
+        assert!(
+            question_from_event(&serde_json::json!({
+                "chat": "chat-1",
+                "waiting": false,
+                "options": ["One", "Two"],
+            }))
+            .is_none()
+        );
+    }
 
     #[test]
     fn assistant_account_states_choose_safe_actions() {
