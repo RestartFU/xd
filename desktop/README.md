@@ -22,7 +22,8 @@ Current milestone:
 - bounded queued-message previews with send-now and remove controls;
 - global/workspace prompt shortcuts with send-or-queue buttons and inline management;
 - chat-scoped Claude slash-command discovery with filtered composer suggestions;
-- daemon-persisted assistant, model, effort, access, and plan controls;
+- daemon-persisted assistant, model, effort, access, and plan controls, with
+  searchable provider views and locally persisted favorite models;
 - Codex Fast mode backed by the priority service tier for new and resumed turns;
 - daemon-owned, loopback-only Claude mode routing, account management, and GPUI control for Codex models;
 - Rust-owned Codex/Claude account status, sign-in, cancellation, authorization-code input, and sign-out;

@@ -751,6 +751,7 @@ struct XdDesktop {
     workspace_workdir_input: Entity<ComposerInput>,
     workspace_repo_default_input: Entity<ComposerInput>,
     search_input: Entity<ComposerInput>,
+    model_search_input: Entity<ComposerInput>,
     git_commit_input: Entity<ComposerInput>,
     repo_file_filter_input: Entity<ComposerInput>,
     file_editor: Entity<FileEditor>,
@@ -767,6 +768,8 @@ struct XdDesktop {
     composer: String,
     queue_edit: Option<QueueEdit>,
     composer_menu: Option<ComposerMenu>,
+    model_search: String,
+    model_filter: Option<String>,
     sidebar_edit: Option<SidebarEdit>,
     sidebar_context_menu: Option<SidebarContextMenu>,
     pending_sidebar_delete: Option<SidebarTarget>,
@@ -906,6 +909,14 @@ impl XdDesktop {
         cx.subscribe(&search_input, |this, _, event, cx| {
             if let ComposerEvent::Changed(text) = event {
                 this.search_changed(text.clone(), cx);
+            }
+        })
+        .detach();
+        let model_search_input = cx.new(|cx| ComposerInput::new(cx, "Search models…"));
+        cx.subscribe(&model_search_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.model_search = text.clone();
+                cx.notify();
             }
         })
         .detach();
@@ -1133,6 +1144,7 @@ impl XdDesktop {
             workspace_workdir_input,
             workspace_repo_default_input,
             search_input,
+            model_search_input,
             git_commit_input,
             repo_file_filter_input,
             file_editor,
@@ -1149,6 +1161,8 @@ impl XdDesktop {
             composer: String::new(),
             queue_edit: None,
             composer_menu: None,
+            model_search: String::new(),
+            model_filter: None,
             sidebar_edit: None,
             sidebar_context_menu: None,
             pending_sidebar_delete: None,
@@ -6339,11 +6353,52 @@ impl XdDesktop {
     }
 
     fn toggle_composer_menu(&mut self, menu: ComposerMenu, cx: &mut Context<Self>) {
-        self.composer_menu = if self.composer_menu == Some(menu) {
-            None
+        let opening = self.composer_menu != Some(menu);
+        self.composer_menu = if !opening { None } else { Some(menu) };
+        if opening && menu == ComposerMenu::Model {
+            self.model_search.clear();
+            self.model_filter = Some(self.model.backend.clone());
+            self.model_search_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        cx.notify();
+    }
+
+    fn set_model_filter(&mut self, backend: Option<String>, cx: &mut Context<Self>) {
+        if self.composer_menu != Some(ComposerMenu::Model) {
+            return;
+        }
+        self.model_filter = backend;
+        cx.notify();
+    }
+
+    fn toggle_model_favorite(&mut self, backend: String, model: String, cx: &mut Context<Self>) {
+        let valid = self.model.agent_backends.iter().any(|candidate| {
+            candidate.id == backend
+                && candidate
+                    .models
+                    .iter()
+                    .any(|candidate| candidate.id == model)
+        });
+        if !valid {
+            return;
+        }
+        let key = format!("{backend}/{model}");
+        if self
+            .settings
+            .favorite_models
+            .iter()
+            .any(|value| value == &key)
+        {
+            self.settings.favorite_models.retain(|value| value != &key);
         } else {
-            Some(menu)
-        };
+            self.settings.favorite_models.push(key);
+            self.settings.favorite_models.sort_unstable();
+            self.settings.favorite_models.dedup();
+        }
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
         cx.notify();
     }
 
@@ -10024,9 +10079,33 @@ impl Render for XdDesktop {
             let (title, choices) = match menu {
                 ComposerMenu::Model if can_change_agent => {
                     let multiple_backends = self.model.agent_backends.len() > 1;
+                    let needle = self.model_search.trim().to_lowercase();
                     let mut choices = Vec::new();
                     for backend in &self.model.agent_backends {
+                        if self
+                            .model_filter
+                            .as_ref()
+                            .is_some_and(|filter| filter != &backend.id)
+                        {
+                            continue;
+                        }
                         for model in &backend.models {
+                            let key = format!("{}/{}", backend.id, model.id);
+                            let favorite = self
+                                .settings
+                                .favorite_models
+                                .iter()
+                                .any(|value| value == &key);
+                            if self.model_filter.is_none() && !favorite {
+                                continue;
+                            }
+                            if !needle.is_empty()
+                                && !model.name.to_lowercase().contains(&needle)
+                                && !model.id.to_lowercase().contains(&needle)
+                                && !backend.name.to_lowercase().contains(&needle)
+                            {
+                                continue;
+                            }
                             let label = if multiple_backends {
                                 format!("{} · {}", backend.name, model.name)
                             } else {
@@ -10040,6 +10119,7 @@ impl Render for XdDesktop {
                                     backend: backend.id.clone(),
                                     model: model.id.clone(),
                                 },
+                                Some((backend.id.clone(), model.id.clone(), favorite)),
                             ));
                         }
                     }
@@ -10061,6 +10141,7 @@ impl Render for XdDesktop {
                                         effort.clone(),
                                         effort == &self.model.effort,
                                         ComposerChoice::Effort(effort.clone()),
+                                        None,
                                     )
                                 })
                                 .collect::<Vec<_>>()
@@ -10081,6 +10162,7 @@ impl Render for XdDesktop {
                             label.to_owned(),
                             self.model.access == access,
                             ComposerChoice::Access(access.to_owned()),
+                            None,
                         )
                     })
                     .collect(),
@@ -10110,6 +10192,7 @@ impl Render for XdDesktop {
                                 label,
                                 worktree.current,
                                 ComposerChoice::Workspace(worktree.path.clone()),
+                                None,
                             )
                         })
                         .collect::<Vec<_>>();
@@ -10117,18 +10200,77 @@ impl Render for XdDesktop {
                 }
                 _ => return None,
             };
-            if choices.is_empty() {
+            if choices.is_empty() && menu != ComposerMenu::Model {
                 return None;
             }
+            let model_filter_buttons = (menu == ComposerMenu::Model).then(|| {
+                let mut buttons = Vec::new();
+                let favorite_selected = self.model_filter.is_none();
+                let desktop = menu_desktop.clone();
+                buttons.push(
+                    div()
+                        .id("model-filter-favorites")
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(if favorite_selected {
+                            0x26354d
+                        } else {
+                            SURFACE_HIGH
+                        }))
+                        .text_xs()
+                        .text_color(rgb(if favorite_selected { TEXT } else { MUTED }))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
+                        .on_click(move |_, _, cx| {
+                            desktop.update(cx, |this, cx| this.set_model_filter(None, cx));
+                        })
+                        .child("★ Starred")
+                        .into_any_element(),
+                );
+                for (index, backend) in self.model.agent_backends.iter().enumerate() {
+                    let backend_id = backend.id.clone();
+                    let selected = self.model_filter.as_deref() == Some(backend.id.as_str());
+                    let desktop = menu_desktop.clone();
+                    buttons.push(
+                        div()
+                            .id(("model-filter-provider", index))
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(if selected { 0x26354d } else { SURFACE_HIGH }))
+                            .text_xs()
+                            .text_color(rgb(if selected { TEXT } else { MUTED }))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x242428)).text_color(rgb(TEXT)))
+                            .on_click(move |_, _, cx| {
+                                desktop.update(cx, |this, cx| {
+                                    this.set_model_filter(Some(backend_id.clone()), cx);
+                                });
+                            })
+                            .child(backend.name.clone())
+                            .into_any_element(),
+                    );
+                }
+                buttons
+            });
             let choice_rows = choices
                 .into_iter()
                 .enumerate()
-                .map(|(index, (label, selected, choice))| {
+                .map(|(index, (label, selected, choice, favorite))| {
                     let desktop = menu_desktop.clone();
-                    div()
+                    let label = if selected {
+                        format!("✓  {label}")
+                    } else {
+                        label
+                    };
+                    let row = div()
                         .id(("composer-menu-choice", index))
                         .px_3()
                         .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .rounded_lg()
                         .bg(rgb(if selected { 0x26354d } else { SURFACE_HIGH }))
                         .text_xs()
@@ -10140,14 +10282,38 @@ impl Render for XdDesktop {
                                 this.apply_composer_choice(choice.clone(), cx);
                             });
                         })
-                        .child(if selected {
-                            format!("✓  {label}")
-                        } else {
-                            label
-                        })
-                        .into_any_element()
+                        .child(div().min_w_0().flex_1().child(label));
+                    row.when_some(favorite, |row, (backend, model, favorite)| {
+                        let desktop = menu_desktop.clone();
+                        row.child(
+                            div()
+                                .id(("favorite-model", index))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(if favorite { 0xf3c969 } else { MUTED }))
+                                .hover(|style| style.bg(rgb(SURFACE)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    desktop.update(cx, |this, cx| {
+                                        this.toggle_model_favorite(
+                                            backend.clone(),
+                                            model.clone(),
+                                            cx,
+                                        );
+                                    });
+                                })
+                                .child(if favorite { "★" } else { "☆" }),
+                        )
+                    })
+                    .into_any_element()
                 })
                 .collect::<Vec<_>>();
+            let model_search = self.model_search_input.clone();
+            let model_search_focus = self.model_search_input.read(cx).focus_handle(cx);
+            let no_models = choice_rows.is_empty();
             Some(
                 div()
                     .w_full()
@@ -10191,7 +10357,51 @@ impl Render for XdDesktop {
                                     .child("×"),
                             ),
                     )
-                    .child(div().flex().flex_wrap().gap_2().children(choice_rows))
+                    .when_some(model_filter_buttons, |menu, buttons| {
+                        menu.child(div().flex().flex_wrap().gap_2().children(buttons))
+                            .child(
+                                div()
+                                    .id("model-search-input")
+                                    .track_focus(&model_search_focus)
+                                    .h(px(38.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(if model_search_focus.is_focused(window) {
+                                        accent
+                                    } else {
+                                        BORDER
+                                    }))
+                                    .bg(rgb(SURFACE))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let focus =
+                                            this.model_search_input.read(cx).focus_handle(cx);
+                                        window.focus(&focus);
+                                    }))
+                                    .child(model_search),
+                            )
+                    })
+                    .child(
+                        div()
+                            .id("model-choice-list")
+                            .max_h(px(260.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .when(no_models, |list| {
+                                list.child(
+                                    div()
+                                        .p_3()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child("No models match this view."),
+                                )
+                            })
+                            .children(choice_rows),
+                    )
                     .into_any_element(),
             )
         });
@@ -10219,9 +10429,13 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if can_change_agent {
                             this.toggle_composer_menu(ComposerMenu::Model, cx);
+                            if this.composer_menu == Some(ComposerMenu::Model) {
+                                let focus = this.model_search_input.read(cx).focus_handle(cx);
+                                window.focus(&focus);
+                            }
                         }
                     }))
                     .child(format!("{model_label}  ▾")),
