@@ -9,6 +9,7 @@ pub struct ActivityCard {
     pub status: String,
     pub detail: String,
     pub footer: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,7 @@ impl ActivityCard {
             status: if failure { "Failed" } else { "Done" }.into(),
             detail: summary,
             footer: None,
+            url: None,
         }
     }
 
@@ -183,6 +185,7 @@ fn parse_subagent(content: &str) -> Option<ActivityCard> {
         status: status.into(),
         detail: compact(task, 360, "Delegated task"),
         footer: None,
+        url: None,
     })
 }
 
@@ -206,6 +209,7 @@ fn parse_workflow(content: &str) -> Option<ActivityCard> {
         status: format!("Run #{id}"),
         detail: url.into(),
         footer: Some("GitHub Actions".into()),
+        url: Some(url.into()),
     })
 }
 
@@ -253,6 +257,10 @@ mod tests {
         assert_eq!(card.name, "RestartFU/xd");
         assert_eq!(card.status, "Run #31028502744");
         assert_eq!(card.kind, ActivityKind::Running);
+        assert_eq!(
+            card.url.as_deref(),
+            Some("https://github.com/RestartFU/xd/actions/runs/31028502744")
+        );
     }
 
     #[test]

@@ -4893,13 +4893,31 @@ impl XdDesktop {
                     .child(card.detail),
             );
             if let Some(footer) = card.footer {
+                let url = card.url.clone();
                 body = body.child(
                     div()
                         .px_4()
                         .pb_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_xs()
                         .text_color(rgb(MUTED))
-                        .child(footer),
+                        .child(footer)
+                        .when_some(url, |footer, url| {
+                            footer.child(
+                                div()
+                                    .id(("open-workflow-run", index))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_color(rgb(0x91a7ff))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                                    .child("Open in GitHub ↗"),
+                            )
+                        }),
                 );
             }
         }
