@@ -1203,6 +1203,21 @@ impl XdDesktop {
                 | RequestKind::SetDraft { .. }
                 | RequestKind::VoiceModel { .. }
                 | RequestKind::VoiceMutation { .. }
+                | RequestKind::DiffRead { .. }
+                | RequestKind::GitStatus { .. }
+                | RequestKind::GitDraft { .. }
+                | RequestKind::GitPullRequestStatus { .. }
+                | RequestKind::GitPullRequestCreate { .. }
+                | RequestKind::FileBrowseList { .. }
+                | RequestKind::FileBrowseRead { .. }
+                | RequestKind::FileBrowseWrite { .. }
+                | RequestKind::GitCommit { .. }
+                | RequestKind::GitPush { .. }
+                | RequestKind::TerminalOpen { .. }
+                | RequestKind::TerminalList { .. }
+                | RequestKind::TerminalInput { .. }
+                | RequestKind::TerminalResize { .. }
+                | RequestKind::TerminalKill { .. }
         )
     }
 
@@ -1221,6 +1236,11 @@ impl XdDesktop {
                 | "shortcuts-changed"
                 | "workflow-status"
                 | "voice"
+                | "terminal-opened"
+                | "terminal-output"
+                | "terminal-resized"
+                | "terminal-closed"
+                | "git-draft-finished"
         )
     }
 
@@ -1509,6 +1529,17 @@ impl XdDesktop {
                     self.speech_output.stop();
                     self.cancel_voice(false, cx);
                     self.restore_pending_send(cx);
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.loading = false;
+                        diff.status_loading = false;
+                        diff.action = None;
+                        diff.action_error = Some(message.clone());
+                    }
+                    if let Some(panel) = &mut self.terminal_panel {
+                        panel.loading = false;
+                        panel.opening = false;
+                        panel.error = Some(message.clone());
+                    }
                 }
                 self.remote_state = RemoteState::Offline;
                 self.remote_error = Some(format!("{message} Reconnecting…"));
@@ -2474,7 +2505,7 @@ impl XdDesktop {
                             diff.loading = false;
                             diff.error = Some("No branch to compare against.".into());
                         }
-                    } else if let Some(daemon) = &self.daemon
+                    } else if let Some(daemon) = self.active_daemon().cloned()
                         && let Err(error) =
                             daemon.diff_read(&chat_id, "branch-all", Some(base), generation)
                     {
@@ -2509,7 +2540,7 @@ impl XdDesktop {
                             }
                         }
                         if check_pull_request
-                            && let Some(daemon) = &self.daemon
+                            && let Some(daemon) = self.active_daemon().cloned()
                             && let Err(error) = daemon.git_pull_request_status(&chat_id, generation)
                             && let Some(diff) = &mut self.diff_panel
                         {
@@ -2983,7 +3014,7 @@ impl XdDesktop {
                         .zip(panel.viewport)
                         .map(|(terminal_id, (columns, rows))| (terminal_id, columns, rows));
                 }
-                if let Some(daemon) = &self.daemon {
+                if let Some(daemon) = self.active_daemon().cloned() {
                     let result = resize
                         .map(|(terminal_id, columns, rows)| {
                             daemon.terminal_resize(&terminal_id, columns, rows)
@@ -4872,9 +4903,6 @@ impl XdDesktop {
     }
 
     fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         if self.diff_panel.is_some() {
             self.diff_generation = self.diff_generation.saturating_add(1);
             self.diff_panel = None;
@@ -4892,9 +4920,6 @@ impl XdDesktop {
     }
 
     fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         if self.terminal_panel.is_some() {
             self.terminal_panel = None;
             if self
@@ -4988,7 +5013,7 @@ impl XdDesktop {
             panel.opening = true;
         }
 
-        let result = if let Some(daemon) = &self.daemon {
+        let result = if let Some(daemon) = self.active_daemon().cloned() {
             if let Some(terminal_id) = terminal_id {
                 daemon.terminal_resize(&terminal_id, columns, rows)
             } else if should_open {
@@ -5017,7 +5042,7 @@ impl XdDesktop {
         else {
             return;
         };
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.terminal_input(&terminal_id, bytes)
             && let Some(panel) = &mut self.terminal_panel
         {
@@ -5034,7 +5059,7 @@ impl XdDesktop {
         else {
             return;
         };
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.terminal_kill(&terminal_id)
             && let Some(panel) = &mut self.terminal_panel
         {
@@ -5174,8 +5199,7 @@ impl XdDesktop {
                 .update(cx, |input, cx| input.set_text(String::new(), cx));
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.file_browse_list(&chat_id, &path, generation));
         if let Err(error) = result
@@ -5230,8 +5254,7 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.file_browse_read(&chat_id, &path, generation));
         if let Err(error) = result
@@ -5292,8 +5315,7 @@ impl XdDesktop {
         }
         let generation = self.diff_generation;
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.file_browse_write(&chat_id, &path, &original, &content, generation)
@@ -5357,15 +5379,16 @@ impl XdDesktop {
     }
 
     fn refresh_git_status(&mut self) {
-        let (Some(chat_id), Some(daemon)) =
-            (self.model.selected_chat.as_ref(), self.daemon.as_ref())
-        else {
+        let (Some(chat_id), Some(daemon)) = (
+            self.model.selected_chat.clone(),
+            self.active_daemon().cloned(),
+        ) else {
             return;
         };
         if let Some(diff) = &mut self.diff_panel {
             diff.status_loading = true;
         }
-        if let Err(error) = daemon.git_status(chat_id, self.diff_generation)
+        if let Err(error) = daemon.git_status(&chat_id, self.diff_generation)
             && let Some(diff) = &mut self.diff_panel
         {
             diff.status_loading = false;
@@ -5398,8 +5421,7 @@ impl XdDesktop {
             diff.action_error = None;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_commit(&chat_id, &message, generation));
         if let Err(error) = result
@@ -5432,8 +5454,7 @@ impl XdDesktop {
             diff.action_error = None;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.git_draft(
@@ -5478,8 +5499,7 @@ impl XdDesktop {
             diff.pr_body.clear();
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.git_draft(
@@ -5521,8 +5541,7 @@ impl XdDesktop {
             diff.action_error = None;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_create_pull_request(&chat_id, &title, &body, generation));
         if let Err(error) = result
@@ -5563,8 +5582,7 @@ impl XdDesktop {
             diff.action_error = None;
         }
         let result = self
-            .daemon
-            .as_ref()
+            .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_push(&chat_id, generation));
         if let Err(error) = result
@@ -5609,7 +5627,7 @@ impl XdDesktop {
         } else {
             return;
         }
-        match self.daemon.as_ref() {
+        match self.active_daemon().cloned() {
             Some(daemon) => {
                 let content = if files_mode {
                     let path = self
@@ -7576,7 +7594,7 @@ impl Render for XdDesktop {
         let selected = self.model.selected_summary().cloned();
         let diff_open = self.diff_panel.is_some();
         let terminal_open = self.terminal_panel.is_some();
-        let can_open_diff = selected.is_some() && !remote_active;
+        let can_open_diff = selected.is_some();
         let new_worktree = self.model.new_worktree;
         let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
         let can_cycle_workspace =
@@ -14825,13 +14843,23 @@ mod tests {
             token: "voice".into(),
             operation: "voice-stream-start".into(),
         }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::DiffRead {
+            chat_id: "chat".into(),
+            read: "working-all".into(),
+            generation: 1,
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::TerminalOpen {
+            chat_id: "chat".into(),
+        }));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::Devices));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::DaemonUpdate {
             action: "install".into(),
         }));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("voice"));
-        assert!(!XdDesktop::remote_read_event("terminal"));
+        assert!(XdDesktop::remote_read_event("terminal-output"));
+        assert!(XdDesktop::remote_read_event("git-draft-finished"));
+        assert!(!XdDesktop::remote_read_event("devices-changed"));
     }
 
     #[test]
