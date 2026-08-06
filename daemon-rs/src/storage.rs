@@ -41,6 +41,8 @@ const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPOSITORY_FILES: usize = 5_000;
 const MAX_FILE_PREVIEW_BYTES: usize = 128 * 1024;
+const MAX_FILE_BROWSE_BYTES: usize = 1024 * 1024;
+const MAX_DIRECTORY_ENTRIES: usize = 5_000;
 const MAX_GIT_DRAFT_CONTEXT_BYTES: usize = 256 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -541,6 +543,61 @@ impl StateStore {
     pub fn terminal_workdir(&self, chat_id: &str) -> Result<PathBuf, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         resolve_chat_workdir(&database, &self.workspace_root, chat_id).map(PathBuf::from)
+    }
+
+    pub fn list_directory(&self, request: &Value) -> Result<Value, StorageError> {
+        let path = optional_string(request, "path")?
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(PathBuf::from))
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("The daemon home directory is unavailable.".into())
+            })?;
+        let mut entries = visible_directory_entries(&path, true)?;
+        entries.truncate(MAX_DIRECTORY_ENTRIES);
+        Ok(json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "entries": entries.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
+        }))
+    }
+
+    pub fn file_browse(&self, request: &Value) -> Result<Value, StorageError> {
+        let message = "file-browse needs a chat and action.";
+        let chat_id = required_string(request, "chat", message)?;
+        let action = required_string(request, "action", message)?;
+        let relative = optional_string(request, "path")?;
+        let root = self.terminal_workdir(chat_id)?;
+        let path = safe_chat_path(&root, relative)?;
+
+        match action {
+            "list" => {
+                let entries = visible_directory_entries(&path, false)?;
+                Ok(json!({
+                    "ok": true,
+                    "entries": entries.into_iter().take(MAX_DIRECTORY_ENTRIES).map(|entry| {
+                        json!({"name": entry.name, "directory": entry.directory})
+                    }).collect::<Vec<_>>(),
+                }))
+            }
+            "read" => {
+                let content = read_browsable_file(&path)?;
+                Ok(json!({"ok": true, "content": content}))
+            }
+            "write" => {
+                let content = request
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        StorageError::InvalidRequest("file-browse write needs content.".into())
+                    })?;
+                write_browsable_file(&path, content)?;
+                Ok(json!({"ok": true}))
+            }
+            _ => Err(StorageError::InvalidRequest(
+                "No such file-browse action.".into(),
+            )),
+        }
     }
 
     pub fn shortcuts(&self, request: &Value) -> Result<Value, StorageError> {
@@ -3805,6 +3862,143 @@ fn normalize_existing_path(path: &Path) -> String {
         .into_owned()
 }
 
+struct BrowsableEntry {
+    name: String,
+    directory: bool,
+}
+
+fn visible_directory_entries(
+    path: &Path,
+    directories_only: bool,
+) -> Result<Vec<BrowsableEntry>, StorageError> {
+    let directory = fs::read_dir(path).map_err(|source| StorageError::Filesystem {
+        context: format!("Cannot list directory {}", path.display()),
+        source,
+    })?;
+    let mut entries = Vec::new();
+    for entry in directory {
+        let entry = entry.map_err(|source| StorageError::Filesystem {
+            context: format!("Cannot read directory {}", path.display()),
+            source,
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let directory = entry.metadata().is_ok_and(|metadata| metadata.is_dir());
+        if directories_only && !directory {
+            continue;
+        }
+        entries.push(BrowsableEntry { name, directory });
+    }
+    entries.sort_unstable_by(|left, right| {
+        (!left.directory, left.name.as_str()).cmp(&(!right.directory, right.name.as_str()))
+    });
+    Ok(entries)
+}
+
+fn safe_chat_path(root: &Path, relative: Option<&str>) -> Result<PathBuf, StorageError> {
+    let relative = relative.unwrap_or("");
+    if relative.len() > 4_096 {
+        return Err(StorageError::InvalidRequest(
+            "The file path is too long.".into(),
+        ));
+    }
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(StorageError::InvalidRequest(
+            "File paths must be relative to the working directory.".into(),
+        ));
+    }
+    let root = fs::canonicalize(root).map_err(|source| StorageError::Filesystem {
+        context: "Cannot resolve the chat working directory".into(),
+        source,
+    })?;
+    let path =
+        fs::canonicalize(root.join(relative_path)).map_err(|source| StorageError::Filesystem {
+            context: "Cannot resolve that file".into(),
+            source,
+        })?;
+    if path != root && !path.starts_with(&root) {
+        return Err(StorageError::InvalidRequest(
+            "That file is outside the working directory.".into(),
+        ));
+    }
+    Ok(path)
+}
+
+fn read_browsable_file(path: &Path) -> Result<String, StorageError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| StorageError::Filesystem {
+        context: "Cannot inspect that file".into(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(StorageError::InvalidRequest(
+            "Only regular files can be previewed.".into(),
+        ));
+    }
+    if metadata.len() > MAX_FILE_BROWSE_BYTES as u64 {
+        return Err(StorageError::InvalidRequest(
+            "Files larger than 1 MB are not previewed.".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take((MAX_FILE_BROWSE_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|source| StorageError::Filesystem {
+            context: "Cannot read that file".into(),
+            source,
+        })?;
+    if bytes.len() > MAX_FILE_BROWSE_BYTES {
+        return Err(StorageError::InvalidRequest(
+            "Files larger than 1 MB are not previewed.".into(),
+        ));
+    }
+    if bytes.contains(&0) {
+        return Err(StorageError::InvalidRequest(
+            "Binary files cannot be previewed as text.".into(),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        StorageError::InvalidRequest("Binary files cannot be previewed as text.".into())
+    })
+}
+
+fn write_browsable_file(path: &Path, content: &str) -> Result<(), StorageError> {
+    if content.len() > MAX_FILE_BROWSE_BYTES || content.contains('\0') {
+        return Err(StorageError::InvalidRequest(
+            "Files larger than 1 MB cannot be saved here.".into(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|source| StorageError::Filesystem {
+        context: "Cannot inspect that file".into(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(StorageError::InvalidRequest(
+            "Only regular files can be edited.".into(),
+        ));
+    }
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(content.as_bytes()))
+        .map_err(|source| StorageError::Filesystem {
+            context: "Cannot save that file".into(),
+            source,
+        })
+}
+
 fn safe_repository_file(workdir: &Path, relative: &str) -> Result<PathBuf, StorageError> {
     if relative.len() > 4_096 {
         return Err(StorageError::InvalidRequest(
@@ -4197,6 +4391,7 @@ mod tests {
     use super::*;
     use std::{
         env,
+        os::unix::fs::symlink,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -4212,6 +4407,106 @@ mod tests {
         let snippet = search_snippet(&format!("{}\nrest", "x".repeat(125)));
         assert_eq!(snippet.chars().count(), SEARCH_SNIPPET_CHARS + 1);
         assert!(snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn browses_chat_files_without_escaping_the_workdir() {
+        let fixture = Fixture::new();
+        let chooser = fixture.root.join("chooser");
+        let workdir = fixture.root.join("workdir");
+        let outside = fixture.root.join("outside.txt");
+        fs::create_dir_all(chooser.join("beta")).unwrap();
+        fs::create_dir_all(chooser.join("alpha")).unwrap();
+        fs::create_dir_all(chooser.join(".hidden")).unwrap();
+        fs::write(chooser.join("file.txt"), "ignored").unwrap();
+        fs::create_dir_all(workdir.join("nested")).unwrap();
+        fs::write(workdir.join("hello.txt"), "hello\n").unwrap();
+        fs::write(workdir.join("binary.bin"), b"a\0b").unwrap();
+        fs::write(
+            workdir.join("large.txt"),
+            vec![b'x'; MAX_FILE_BROWSE_BYTES + 1],
+        )
+        .unwrap();
+        fs::write(workdir.join(".secret"), "hidden").unwrap();
+        fs::write(&outside, "outside").unwrap();
+        symlink(&outside, workdir.join("escape.txt")).unwrap();
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(
+            store
+                .list_directory(&json!({"path": chooser.to_string_lossy()}))
+                .unwrap()["entries"],
+            json!(["alpha", "beta"])
+        );
+        let folder = store.new_folder(&json!({"name": "Browse"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({
+                "folder": folder,
+                "workdir": workdir.to_string_lossy(),
+            }))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let listing = store
+            .file_browse(&json!({"chat": chat, "action": "list"}))
+            .unwrap();
+        let entries = listing["entries"].as_array().unwrap();
+        assert_eq!(entries[0], json!({"name": "nested", "directory": true}));
+        assert!(entries.iter().all(|entry| entry["name"] != ".secret"));
+        assert_eq!(
+            store
+                .file_browse(&json!({
+                    "chat": chat,
+                    "action": "read",
+                    "path": "hello.txt",
+                }))
+                .unwrap()["content"],
+            "hello\n"
+        );
+        store
+            .file_browse(&json!({
+                "chat": chat,
+                "action": "write",
+                "path": "hello.txt",
+                "content": "saved\n",
+            }))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workdir.join("hello.txt")).unwrap(),
+            "saved\n"
+        );
+        for (path, expected) in [
+            ("binary.bin", "Binary files"),
+            ("large.txt", "larger than 1 MB"),
+            ("escape.txt", "outside the working directory"),
+        ] {
+            assert!(
+                store
+                    .file_browse(&json!({
+                        "chat": chat,
+                        "action": "read",
+                        "path": path,
+                    }))
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+        assert!(
+            store
+                .file_browse(&json!({
+                    "chat": chat,
+                    "action": "read",
+                    "path": "../outside.txt",
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("relative")
+        );
     }
 
     #[test]

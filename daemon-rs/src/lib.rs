@@ -167,6 +167,8 @@ impl Engine {
                 Err(error) => error_reply(error),
             },
             Some("messages") => self.read(|store| store.messages(&request)),
+            Some("list-dir") => self.read(|store| store.list_directory(&request)),
+            Some("file-browse") => self.read(|store| store.file_browse(&request)),
             Some("search") => self.read(|store| store.search(&request)),
             Some("image-read") => self.read(|store| store.image_read(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
