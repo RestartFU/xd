@@ -486,6 +486,12 @@ struct MessageImageCache {
     order: VecDeque<String>,
 }
 
+#[derive(Clone)]
+struct MessageImageViewer {
+    image: Arc<Image>,
+    number: usize,
+}
+
 impl MessageImageCache {
     fn state(&mut self, path: &str) -> Option<MessageImageState> {
         let state = self.entries.get(path)?.clone();
@@ -579,6 +585,7 @@ struct XdDesktop {
     connecting: bool,
     connection_in_flight: bool,
     message_images: Arc<Mutex<MessageImageCache>>,
+    message_image_viewer: Option<MessageImageViewer>,
     transcript: ListState,
     transcript_snapshot: TranscriptSnapshot,
     transcript_loading: bool,
@@ -863,6 +870,7 @@ impl XdDesktop {
             connecting: false,
             connection_in_flight: false,
             message_images: Arc::new(Mutex::new(MessageImageCache::default())),
+            message_image_viewer: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loading: false,
@@ -1074,6 +1082,7 @@ impl XdDesktop {
                 if let Ok(mut images) = self.message_images.lock() {
                     images.clear_loading();
                 }
+                self.message_image_viewer = None;
                 self.speech_output.stop();
                 self.cancel_voice(false, cx);
                 if let Some(defaults) = &mut self.workspace_defaults {
@@ -4997,6 +5006,7 @@ impl XdDesktop {
         if let Ok(mut images) = self.message_images.lock() {
             images.clear();
         }
+        self.message_image_viewer = None;
         self.model.select_chat(chat_id.clone());
         self.invalidate_live_markdown_work();
         self.transcript_snapshot = TranscriptSnapshot::default();
@@ -5593,9 +5603,22 @@ impl XdDesktop {
         self.transcript.scroll_to(anchor);
     }
 
+    fn open_message_image(&mut self, image: Arc<Image>, number: usize, cx: &mut Context<Self>) {
+        self.message_image_viewer = Some(MessageImageViewer { image, number });
+        cx.notify();
+    }
+
+    fn close_message_image(&mut self, cx: &mut Context<Self>) {
+        if self.message_image_viewer.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn message_image(
         path: &str,
         number: usize,
+        scope: &str,
+        desktop: Entity<Self>,
         daemon: Option<&DaemonHandle>,
         cache: &Arc<Mutex<MessageImageCache>>,
     ) -> gpui::AnyElement {
@@ -5632,20 +5655,35 @@ impl XdDesktop {
             .justify_center();
         let preview = match state {
             Some(MessageImageState::Ready(image)) => {
-                preview.child(img(image).size_full().object_fit(ObjectFit::Contain))
+                let open_image = image.clone();
+                preview
+                    .id(SharedString::from(format!("open-{scope}-image-{number}")))
+                    .cursor_pointer()
+                    .hover(|style| style.border_color(rgb(0x626268)))
+                    .on_click(move |_, _, cx| {
+                        desktop.update(cx, |this, cx| {
+                            this.open_message_image(open_image.clone(), number, cx);
+                        });
+                    })
+                    .child(img(image).size_full().object_fit(ObjectFit::Contain))
+                    .into_any_element()
             }
-            Some(MessageImageState::Loading) => preview.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("Loading image…"),
-            ),
-            Some(MessageImageState::Unavailable) | None => preview.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("Preview unavailable"),
-            ),
+            Some(MessageImageState::Loading) => preview
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("Loading image…"),
+                )
+                .into_any_element(),
+            Some(MessageImageState::Unavailable) | None => preview
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("Preview unavailable"),
+                )
+                .into_any_element(),
         };
         div()
             .flex()
@@ -5717,7 +5755,16 @@ impl XdDesktop {
             .image_paths()
             .iter()
             .enumerate()
-            .map(|(index, path)| Self::message_image(path, index + 1, daemon, image_cache))
+            .map(|(index, path)| {
+                Self::message_image(
+                    path,
+                    index + 1,
+                    &markdown_scope,
+                    desktop.clone(),
+                    daemon,
+                    image_cache,
+                )
+            })
             .collect::<Vec<_>>();
 
         div()
@@ -11664,6 +11711,85 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let message_image_overlay = self.message_image_viewer.clone().map(|viewer| {
+            div()
+                .id("message-image-backdrop")
+                .absolute()
+                .inset_0()
+                .p_6()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x000000dd))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.close_message_image(cx)),
+                )
+                .child(
+                    div()
+                        .id("message-image-viewer")
+                        .w_full()
+                        .h_full()
+                        .max_w(px(1200.0))
+                        .max_h(px(800.0))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(TEXT))
+                                        .child(format!("Image #{}", viewer.number)),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-message-image")
+                                        .w(px(32.0))
+                                        .h(px(32.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_message_image(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .rounded_lg()
+                                .bg(rgb(SURFACE))
+                                .overflow_hidden()
+                                .child(
+                                    img(viewer.image).size_full().object_fit(ObjectFit::Contain),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let sidebar_splitter = div()
             .id("sidebar-resize")
             .w(px(5.0))
@@ -11764,6 +11890,7 @@ impl Render for XdDesktop {
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
+            .when_some(message_image_overlay, |root, overlay| root.child(overlay))
             .when_some(resize_overlay, |root, overlay| root.child(overlay));
 
         let titlebar = div()
@@ -11851,7 +11978,9 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                if this.sidebar_context_menu.is_some() {
+                if this.message_image_viewer.is_some() {
+                    this.close_message_image(cx);
+                } else if this.sidebar_context_menu.is_some() {
                     this.close_sidebar_context_menu(cx);
                 } else if this.devices_panel.is_some() {
                     this.close_devices(cx);
