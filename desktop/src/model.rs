@@ -233,6 +233,25 @@ struct MessagesSnapshot {
     messages: Vec<Message>,
 }
 
+pub const MAX_RETAINED_MESSAGES: usize = 480;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessagePageDirection {
+    Tail,
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessagePageChange {
+    pub inserted_at_start: usize,
+    pub inserted_at_end: usize,
+    pub removed_from_start: usize,
+    pub removed_from_end: usize,
+    pub has_older: bool,
+    pub has_newer: bool,
+}
+
 impl AppModel {
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
         let snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
@@ -429,14 +448,67 @@ impl AppModel {
         }
     }
 
-    pub fn apply_messages(&mut self, body: &Value) -> Result<(), serde_json::Error> {
+    pub fn apply_message_page(
+        &mut self,
+        body: &Value,
+        direction: MessagePageDirection,
+    ) -> Result<MessagePageChange, serde_json::Error> {
         let mut snapshot: MessagesSnapshot = serde_json::from_value(body.clone())?;
         snapshot
             .messages
             .iter_mut()
             .for_each(Message::cache_markdown);
-        self.messages = snapshot.messages;
-        Ok(())
+        let has_older = body
+            .get("has_older")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let has_newer = body
+            .get("has_newer")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut change = MessagePageChange {
+            inserted_at_start: 0,
+            inserted_at_end: 0,
+            removed_from_start: 0,
+            removed_from_end: 0,
+            has_older,
+            has_newer,
+        };
+        if direction == MessagePageDirection::Tail {
+            self.messages = snapshot.messages;
+            if self.messages.len() > MAX_RETAINED_MESSAGES {
+                change.removed_from_start = self.messages.len() - MAX_RETAINED_MESSAGES;
+                self.messages.drain(0..change.removed_from_start);
+            }
+            return Ok(change);
+        }
+
+        snapshot.messages.retain(|candidate| {
+            candidate.id.is_none()
+                || !self
+                    .messages
+                    .iter()
+                    .any(|existing| existing.id == candidate.id)
+        });
+        match direction {
+            MessagePageDirection::Before => {
+                change.inserted_at_start = snapshot.messages.len();
+                self.messages.splice(0..0, snapshot.messages);
+                change.removed_from_end = self.messages.len().saturating_sub(MAX_RETAINED_MESSAGES);
+                self.messages.truncate(MAX_RETAINED_MESSAGES);
+            }
+            MessagePageDirection::After => {
+                change.inserted_at_end = snapshot.messages.len();
+                self.messages.extend(snapshot.messages);
+                change.removed_from_start =
+                    self.messages.len().saturating_sub(MAX_RETAINED_MESSAGES);
+                if change.removed_from_start > 0 {
+                    self.messages.drain(0..change.removed_from_start);
+                }
+            }
+            MessagePageDirection::Tail => unreachable!(),
+        }
+        Ok(change)
     }
 
     pub fn apply_event(&mut self, name: &str, body: &Value) {
@@ -869,5 +941,55 @@ mod tests {
             message_content("assistant", "Keep [image: /not/a/reference.png] literal");
         assert!(paths.is_empty());
         assert_eq!(shown, "Keep [image: /not/a/reference.png] literal");
+    }
+
+    #[test]
+    fn cursor_pages_keep_a_bounded_bidirectional_message_window() {
+        let mut model = AppModel {
+            messages: (121..=600)
+                .map(|id| Message::new(Some(id), "assistant", format!("message {id}"), None))
+                .collect(),
+            ..Default::default()
+        };
+        let older = (1..=120)
+            .map(|id| json!({"id": id, "role": "assistant", "content": format!("message {id}")}))
+            .collect::<Vec<_>>();
+        let change = model
+            .apply_message_page(
+                &json!({"messages": older, "has_older": false, "has_newer": true}),
+                MessagePageDirection::Before,
+            )
+            .unwrap();
+        assert_eq!(change.inserted_at_start, 120);
+        assert_eq!(change.removed_from_end, 120);
+        assert_eq!(model.messages.len(), MAX_RETAINED_MESSAGES);
+        assert_eq!(
+            model.messages.first().and_then(|message| message.id),
+            Some(1)
+        );
+        assert_eq!(
+            model.messages.last().and_then(|message| message.id),
+            Some(480)
+        );
+
+        let newer = (481..=600)
+            .map(|id| json!({"id": id, "role": "assistant", "content": format!("message {id}")}))
+            .collect::<Vec<_>>();
+        let change = model
+            .apply_message_page(
+                &json!({"messages": newer, "has_older": true, "has_newer": false}),
+                MessagePageDirection::After,
+            )
+            .unwrap();
+        assert_eq!(change.inserted_at_end, 120);
+        assert_eq!(change.removed_from_start, 120);
+        assert_eq!(
+            model.messages.first().and_then(|message| message.id),
+            Some(121)
+        );
+        assert_eq!(
+            model.messages.last().and_then(|message| message.id),
+            Some(600)
+        );
     }
 }

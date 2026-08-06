@@ -30,9 +30,9 @@ use serde_json::Value;
 use xd_desktop::{
     activity::{ActivityCard, ActivityKind},
     context_usage::{self, Severity as ContextSeverity},
-    daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
+    daemon::{DaemonHandle, DaemonUpdate, MessageCursor, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
-    model::{AgentBackend, AppModel, Attachment, Folder, Message},
+    model::{AgentBackend, AppModel, Attachment, Folder, Message, MessagePageDirection},
     remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
 };
 
@@ -781,6 +781,11 @@ struct XdDesktop {
     transcript: ListState,
     transcript_snapshot: TranscriptSnapshot,
     transcript_loading: bool,
+    transcript_page_loading: bool,
+    transcript_refresh_pending: bool,
+    transcript_has_older: bool,
+    transcript_has_newer: bool,
+    transcript_scroll_handler_attached: bool,
     composer_input: Entity<FileEditor>,
     queue_edit_input: Entity<FileEditor>,
     sidebar_edit_input: Entity<ComposerInput>,
@@ -1176,6 +1181,11 @@ impl XdDesktop {
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loading: false,
+            transcript_page_loading: false,
+            transcript_refresh_pending: false,
+            transcript_has_older: false,
+            transcript_has_newer: false,
+            transcript_scroll_handler_attached: false,
             composer_input,
             queue_edit_input,
             sidebar_edit_input,
@@ -1980,6 +1990,8 @@ impl XdDesktop {
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
                 self.sending = false;
                 self.transcript_loading = false;
+                self.transcript_page_loading = false;
+                self.transcript_refresh_pending = false;
                 self.workspace_create_submitting = false;
                 self.chat_create_submitting = false;
                 self.workspace_context_loading = false;
@@ -2119,8 +2131,10 @@ impl XdDesktop {
                     self.sending = false;
                     self.restore_pending_send(cx);
                 }
-                RequestKind::Messages { chat_id } if self.chat_is_active(chat_id) => {
+                RequestKind::Messages { chat_id, .. } if self.chat_is_active(chat_id) => {
                     self.transcript_loading = false;
+                    self.transcript_page_loading = false;
+                    self.transcript_refresh_pending = false;
                     if self
                         .pending_speech
                         .as_ref()
@@ -3310,12 +3324,26 @@ impl XdDesktop {
                     self.clear_question(cx);
                 }
             }
-            RequestKind::Messages { chat_id } if self.chat_is_active(&chat_id) => {
-                if let Err(error) = self.model.apply_messages(&value) {
-                    self.model.connection_error =
-                        Some(format!("Invalid transcript response: {error}"));
-                    return;
-                }
+            RequestKind::Messages { chat_id, cursor } if self.chat_is_active(&chat_id) => {
+                let direction = match cursor {
+                    MessageCursor::Tail => MessagePageDirection::Tail,
+                    MessageCursor::Before(_) => MessagePageDirection::Before,
+                    MessageCursor::After(_) => MessagePageDirection::After,
+                };
+                let old_message_count = self.model.messages.len();
+                let change = match self.model.apply_message_page(&value, direction) {
+                    Ok(change) => change,
+                    Err(error) => {
+                        self.model.connection_error =
+                            Some(format!("Invalid transcript response: {error}"));
+                        self.transcript_loading = false;
+                        self.transcript_page_loading = false;
+                        self.transcript_refresh_pending = false;
+                        return;
+                    }
+                };
+                self.transcript_has_older = change.has_older;
+                self.transcript_has_newer = change.has_newer;
                 if !self.model.working {
                     self.model.live_text.clear();
                     self.model.live_activity.clear();
@@ -3325,7 +3353,9 @@ impl XdDesktop {
                 if !self.model.working {
                     self.transcript_snapshot.sync_live_text(&self.model);
                 }
-                self.sync_question_from_history(&chat_id, cx);
+                if !self.transcript_has_newer {
+                    self.sync_question_from_history(&chat_id, cx);
+                }
                 if self
                     .pending_speech
                     .as_ref()
@@ -3343,9 +3373,40 @@ impl XdDesktop {
                         self.speech_output.speak(&text);
                     }
                 }
-                self.transcript.reset(self.model.display_message_count());
+                match direction {
+                    MessagePageDirection::Tail => {
+                        self.transcript.reset(self.model.display_message_count());
+                    }
+                    MessagePageDirection::Before => {
+                        if change.inserted_at_start > 0 {
+                            self.transcript.splice(0..0, change.inserted_at_start);
+                        }
+                        if change.removed_from_end > 0 {
+                            let end = old_message_count + change.inserted_at_start;
+                            self.transcript
+                                .splice(end - change.removed_from_end..end, 0);
+                        }
+                        self.sync_transcript_count(false);
+                    }
+                    MessagePageDirection::After => {
+                        if change.inserted_at_end > 0 {
+                            self.transcript.splice(
+                                old_message_count..old_message_count,
+                                change.inserted_at_end,
+                            );
+                        }
+                        if change.removed_from_start > 0 {
+                            self.transcript.splice(0..change.removed_from_start, 0);
+                        }
+                        self.sync_transcript_count(false);
+                    }
+                }
                 self.transcript_loading = false;
+                self.transcript_page_loading = false;
                 self.request_workflow_statuses();
+                if std::mem::take(&mut self.transcript_refresh_pending) {
+                    self.request_messages(&chat_id);
+                }
             }
             RequestKind::Send { chat_id, text } if self.chat_is_active(&chat_id) => {
                 self.sending = false;
@@ -7013,11 +7074,57 @@ impl XdDesktop {
     }
 
     fn request_messages(&mut self, chat_id: &str) {
+        if self.transcript_page_loading {
+            self.transcript_refresh_pending = true;
+            return;
+        }
+        let cursor = self
+            .model
+            .messages
+            .last()
+            .and_then(|message| message.id)
+            .map(MessageCursor::After)
+            .unwrap_or(MessageCursor::Tail);
+        self.request_message_page(chat_id, cursor);
+    }
+
+    fn request_message_page(&mut self, chat_id: &str, cursor: MessageCursor) {
+        if self.transcript_page_loading {
+            return;
+        }
         if let Some(daemon) = self.active_daemon() {
-            if let Err(error) = daemon.messages(chat_id) {
+            if let Err(error) = daemon.messages(chat_id, cursor) {
                 self.model.connection_error = Some(error);
+            } else {
+                self.transcript_page_loading = true;
             }
         }
+    }
+
+    fn request_older_messages(&mut self) {
+        if !self.transcript_has_older || self.transcript_page_loading || self.transcript_loading {
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(first_id) = self.model.messages.first().and_then(|message| message.id) else {
+            return;
+        };
+        self.request_message_page(&chat_id, MessageCursor::Before(first_id));
+    }
+
+    fn request_newer_messages(&mut self) {
+        if !self.transcript_has_newer || self.transcript_page_loading || self.transcript_loading {
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(last_id) = self.model.messages.last().and_then(|message| message.id) else {
+            return;
+        };
+        self.request_message_page(&chat_id, MessageCursor::After(last_id));
     }
 
     fn request_workflow_statuses(&mut self) {
@@ -7160,9 +7267,13 @@ impl XdDesktop {
         self.cancel_queue_edit(cx);
         self.sending = false;
         self.transcript_loading = true;
+        self.transcript_page_loading = false;
+        self.transcript_refresh_pending = false;
+        self.transcript_has_older = false;
+        self.transcript_has_newer = false;
         self.transcript.reset(0);
         self.request_chat(&chat_id);
-        self.request_messages(&chat_id);
+        self.request_message_page(&chat_id, MessageCursor::Tail);
         if let Some(daemon) = self.active_daemon()
             && let Err(error) = daemon.git_state(&chat_id)
         {
@@ -8845,6 +8956,22 @@ impl XdDesktop {
 
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.transcript_scroll_handler_attached {
+            self.transcript_scroll_handler_attached = true;
+            let desktop = cx.entity();
+            self.transcript
+                .set_scroll_handler(move |event, _window, cx| {
+                    let near_start = event.visible_range.start <= 8;
+                    let near_end = event.visible_range.end.saturating_add(8) >= event.count;
+                    let _ = desktop.update(cx, |this, _cx| {
+                        if near_start && this.transcript_has_older {
+                            this.request_older_messages();
+                        } else if near_end {
+                            this.request_newer_messages();
+                        }
+                    });
+                });
+        }
         self.presence.set_state(self.presence_state());
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });

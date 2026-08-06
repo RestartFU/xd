@@ -18,6 +18,15 @@ use thiserror::Error;
 use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
+const MESSAGE_PAGE_SIZE: usize = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageCursor {
+    Tail,
+    Before(i64),
+    After(i64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
@@ -186,6 +195,7 @@ pub enum RequestKind {
     },
     Messages {
         chat_id: String,
+        cursor: MessageCursor,
     },
     Send {
         chat_id: String,
@@ -737,12 +747,23 @@ impl DaemonHandle {
         )
     }
 
-    pub fn messages(&self, chat_id: &str) -> Result<(), String> {
+    pub fn messages(&self, chat_id: &str, cursor: MessageCursor) -> Result<(), String> {
+        let mut body = json!({
+            "op": "messages",
+            "chat": chat_id,
+            "limit": MESSAGE_PAGE_SIZE,
+        });
+        match cursor {
+            MessageCursor::Tail => {}
+            MessageCursor::Before(id) => body["before"] = Value::from(id),
+            MessageCursor::After(id) => body["after"] = Value::from(id),
+        }
         self.send(
             RequestKind::Messages {
                 chat_id: chat_id.to_owned(),
+                cursor,
             },
-            json!({"op": "messages", "chat": chat_id, "limit": 400}),
+            body,
         )
     }
 
@@ -1526,6 +1547,68 @@ mod tests {
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             DaemonUpdate::Event { name, .. } if name == "tree"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sends_stable_bidirectional_message_cursors() {
+        let directory =
+            env::temp_dir().join(format!("xd-dev-message-cursors-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for (key, id) in [("before", 42), ("after", 84)] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["op"], "messages");
+                assert_eq!(request["chat"], "chat-1");
+                assert_eq!(request["limit"], MESSAGE_PAGE_SIZE);
+                assert_eq!(request[key], id);
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(
+                    stream,
+                    "{{\"ok\":true,\"_xd_request\":{request_id},\"messages\":[]}}"
+                )
+                .unwrap();
+            }
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .messages("chat-1", MessageCursor::Before(42))
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::Messages {
+                    cursor: MessageCursor::Before(42),
+                    ..
+                },
+                ..
+            }
+        ));
+        daemon.messages("chat-1", MessageCursor::After(84)).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::Messages {
+                    cursor: MessageCursor::After(84),
+                    ..
+                },
+                ..
+            }
         ));
 
         server.join().unwrap();

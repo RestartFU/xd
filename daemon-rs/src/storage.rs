@@ -12,7 +12,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
@@ -1454,6 +1454,8 @@ impl StateStore {
         let chat_id = required_string(request, "chat", "messages needs a chat id")?;
         let requested_limit = optional_integer(request, "limit")?.unwrap_or(0);
         let requested_offset = optional_integer(request, "offset")?;
+        let before = optional_integer(request, "before")?;
+        let after = optional_integer(request, "after")?;
         if requested_limit < 0 {
             return Err(StorageError::InvalidRequest(
                 "limit must not be negative".into(),
@@ -1467,6 +1469,26 @@ impl StateStore {
         if requested_offset.is_some() && requested_limit <= 0 {
             return Err(StorageError::InvalidRequest(
                 "offset requests need a positive limit".into(),
+            ));
+        }
+        if (before.is_some() || after.is_some()) && requested_limit <= 0 {
+            return Err(StorageError::InvalidRequest(
+                "cursor requests need a positive limit".into(),
+            ));
+        }
+        if before.is_some() && after.is_some() {
+            return Err(StorageError::InvalidRequest(
+                "messages accepts either before or after, not both".into(),
+            ));
+        }
+        if requested_offset.is_some() && (before.is_some() || after.is_some()) {
+            return Err(StorageError::InvalidRequest(
+                "offset cannot be combined with a message cursor".into(),
+            ));
+        }
+        if before.is_some_and(|id| id <= 0) || after.is_some_and(|id| id <= 0) {
+            return Err(StorageError::InvalidRequest(
+                "message cursors must be positive".into(),
             ));
         }
 
@@ -1489,36 +1511,72 @@ impl StateStore {
             [chat_id],
             |row| row.get(0),
         )?;
-        let (offset, limit) = if let Some(offset) = requested_offset {
-            (offset.min(total), requested_limit.min(MAX_MESSAGE_PAGE))
-        } else if requested_limit > 0 {
-            let limit = requested_limit.min(MAX_MESSAGE_PAGE);
-            ((total - limit).max(0), limit)
+        let limit = if requested_limit > 0 {
+            requested_limit.min(MAX_MESSAGE_PAGE)
         } else {
-            (0, total)
+            total
         };
-        let mut statement = database.prepare(
-            "SELECT role, content, created_at, label FROM messages \
-             WHERE chat_id = ? ORDER BY id LIMIT ? OFFSET ?",
-        )?;
-        let messages = statement
-            .query_map(params![chat_id, limit, offset], |row| {
-                let mut message = json!({
-                    "role": row.get::<_, String>(0)?,
-                    "content": row.get::<_, String>(1)?,
-                    "at": row.get::<_, i64>(2)?,
-                });
-                if let Some(label) = row.get::<_, Option<String>>(3)? {
-                    message["label"] = Value::String(label);
-                }
-                Ok(message)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let (offset, messages) = if let Some(before) = before {
+            let mut statement = database.prepare(
+                "SELECT id, role, content, created_at, label FROM messages \
+                 WHERE chat_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+            )?;
+            let mut messages = statement
+                .query_map(params![chat_id, before, limit], message_from_page_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            messages.reverse();
+            (0, messages)
+        } else if let Some(after) = after {
+            let mut statement = database.prepare(
+                "SELECT id, role, content, created_at, label FROM messages \
+                 WHERE chat_id = ? AND id > ? ORDER BY id LIMIT ?",
+            )?;
+            let messages = statement
+                .query_map(params![chat_id, after, limit], message_from_page_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            (0, messages)
+        } else {
+            let offset = if let Some(offset) = requested_offset {
+                offset.min(total)
+            } else {
+                (total - limit).max(0)
+            };
+            let mut statement = database.prepare(
+                "SELECT id, role, content, created_at, label FROM messages \
+                 WHERE chat_id = ? ORDER BY id LIMIT ? OFFSET ?",
+            )?;
+            let messages = statement
+                .query_map(params![chat_id, limit, offset], message_from_page_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            (offset, messages)
+        };
+        let first_id = messages
+            .first()
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_i64);
+        let final_id = messages
+            .last()
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_i64);
+        let has_older = match first_id {
+            Some(first_id) => database.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND id < ?)",
+                params![chat_id, first_id],
+                |row| row.get::<_, bool>(0),
+            )?,
+            None => after.is_some() && total > 0,
+        };
+        let has_newer = match final_id {
+            Some(final_id) => final_id < last_message_id,
+            None => after.is_some_and(|after| after < last_message_id),
+        };
         Ok(json!({
             "ok": true,
             "total_messages": total,
             "last_message_id": last_message_id,
             "offset": offset,
+            "has_older": has_older,
+            "has_newer": has_newer,
             "messages": messages,
             "turn_start": null,
         }))
@@ -4719,6 +4777,19 @@ fn optional_integer(request: &Value, key: &str) -> Result<Option<i64>, StorageEr
     }
 }
 
+fn message_from_page_row(row: &Row<'_>) -> rusqlite::Result<Value> {
+    let mut message = json!({
+        "id": row.get::<_, i64>(0)?,
+        "role": row.get::<_, String>(1)?,
+        "content": row.get::<_, String>(2)?,
+        "at": row.get::<_, i64>(3)?,
+    });
+    if let Some(label) = row.get::<_, Option<String>>(4)? {
+        message["label"] = Value::String(label);
+    }
+    Ok(message)
+}
+
 fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>, StorageError> {
     match request.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -5638,9 +5709,35 @@ mod tests {
             .unwrap();
         assert_eq!(messages["total_messages"], 3);
         assert_eq!(messages["offset"], 1);
+        assert_eq!(messages["has_older"], true);
+        assert_eq!(messages["has_newer"], false);
+        assert_eq!(messages["messages"][0]["id"], 2);
         assert_eq!(messages["messages"][0]["content"], "two");
         assert_eq!(messages["messages"][0]["label"], "Codex");
         assert_eq!(messages["messages"][1]["content"], "three");
+
+        let older = store
+            .messages(&json!({"chat": "chat-1", "limit": 1, "before": 2}))
+            .unwrap();
+        assert_eq!(older["messages"][0]["id"], 1);
+        assert_eq!(older["has_older"], false);
+        assert_eq!(older["has_newer"], true);
+
+        let newer = store
+            .messages(&json!({"chat": "chat-1", "limit": 1, "after": 1}))
+            .unwrap();
+        assert_eq!(newer["messages"][0]["id"], 2);
+        assert_eq!(newer["has_older"], true);
+        assert_eq!(newer["has_newer"], true);
+
+        let invalid = store
+            .messages(&json!({"chat": "chat-1", "limit": 1, "before": 2, "after": 1}))
+            .unwrap_err();
+        assert!(invalid.to_string().contains("either before or after"));
+        let unbounded_cursor = store
+            .messages(&json!({"chat": "chat-1", "before": 2}))
+            .unwrap_err();
+        assert!(unbounded_cursor.to_string().contains("positive limit"));
     }
 
     #[test]

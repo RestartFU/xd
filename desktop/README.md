@@ -43,7 +43,8 @@ Current milestone:
 - shared expandable activity cards for tools, subagents, and live workflow runs
   with non-blocking, last-good status refresh;
 - bounded Markdown rendering with language-aware fenced-code highlighting;
-- variable-height virtualized transcript list;
+- variable-height virtualized transcript list with automatic, cursor-stable
+  bidirectional paging and a bounded retained message window;
 - bounded full-duplex protocol framing and request-id matching;
 - off-thread daemon startup with bounded automatic reconnection and manual retry;
 - mobile-compatible, explicit install/restart self-update for bundled xd-dev daemons;

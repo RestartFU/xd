@@ -270,7 +270,10 @@ optional nonnegative `offset` changes the request to a zero-based, oldest-first
 slice through the active transcript boundary. Offset requests require a
 positive limit and return the actual clamped offset in the response;
 `turn_start` may still identify the preceding user message when a slice begins
-in the middle of a turn.
+in the middle of a turn. Cursor-aware clients may instead send one positive
+message id as `before` or `after`; the two cursors are mutually exclusive,
+cannot be combined with `offset`, and require a positive limit. Cursor pages
+remain oldest-to-newest and do not shift when another device appends a turn.
 
 ```json
 {
@@ -278,17 +281,21 @@ in the middle of a turn.
   "total_messages": 2,
   "last_message_id": 42,
   "offset": 0,
+  "has_older": false,
+  "has_newer": false,
   "messages": [
-    {"role":"user","content":"Hello","at":1753700000},
-    {"role":"assistant","content":"Hi","at":1753700001,"label":"Codex"}
+    {"id":41,"role":"user","content":"Hello","at":1753700000},
+    {"id":42,"role":"assistant","content":"Hi","at":1753700001,"label":"Codex"}
   ]
 }
 ```
 
-Messages are oldest-to-newest within the returned slice. `at` is Unix seconds
-and `label` is optional. Roles include `user`, `assistant`, `tool`, `event`,
-`error`, and `duration`; render an unknown role as system text. `duration` rows
-carry an elapsed-seconds string and are normally hidden.
+Messages are oldest-to-newest within the returned slice. `id` is the stable
+persisted cursor, `at` is Unix seconds, and `label` is optional. Roles include
+`user`, `assistant`, `tool`, `event`, `error`, and `duration`; render an unknown
+role as system text. `duration` rows carry an elapsed-seconds string and are
+normally hidden. `has_older` and `has_newer` describe rows outside the returned
+cursor page.
 
 For recent requests, `total_messages` greater than the returned count means
 older messages exist. Offset slices may have both older and newer messages
