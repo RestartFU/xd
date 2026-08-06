@@ -5,12 +5,7 @@
 # GTK support data + launcher) so the result runs on any glibc-based x86_64
 # host, including NixOS where there is no /lib64 loader and no system GTK.
 
-# --- GPUI desktop prototype -----------------------------------------------
-#
-# The Rust frontend is intentionally built independently of the production
-# Crystal client while it reaches feature parity. Keep its toolchain and
-# system dependencies isolated so normal Crystal-only targets retain their
-# existing cache and build time.
+# --- GPUI desktop ----------------------------------------------------------
 FROM rust:1.95-slim-trixie@sha256:28846ec5a6bcfcddb93f403ba7071bd579787852b2f2ac3839965620e8bd9456 AS gpui-toolchain
 
 ENV PATH="/usr/local/cargo/bin:${PATH}"
@@ -57,6 +52,10 @@ RUN cargo fmt --check \
 
 FROM gpui-desktop-source AS gpui-desktop-release
 
+ARG COMMIT=development
+ARG XD_DEV_COMMIT=$COMMIT
+ENV XD_DEV_COMMIT=$XD_DEV_COMMIT
+
 RUN cargo build --locked --release \
  && test -x target/release/xd-desktop
 
@@ -79,7 +78,8 @@ RUN cargo fmt --check \
 
 FROM rust-daemon-source AS rust-daemon-release
 
-ARG XD_DEV_COMMIT=development
+ARG COMMIT=development
+ARG XD_DEV_COMMIT=$COMMIT
 ENV XD_DEV_COMMIT=$XD_DEV_COMMIT
 
 RUN cargo build --locked --release \
@@ -328,13 +328,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libegl1 \
       libgl1-mesa-dri \
       libadwaita-1-dev \
+      libasound2 \
+      libfontconfig1 \
       libgtk-4-dev \
       libportaudio2 \
       libpulse-dev \
       libsqlite3-dev \
       libssl-dev \
+      libvulkan1 \
       libvte-2.91-gtk4-dev \
+      libwayland-client0 \
       libx11-data \
+      libx11-xcb1 \
+      libxkbcommon-x11-0 \
       librsvg2-common \
       openssl \
       patchelf \
@@ -343,8 +349,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git --version | grep -F "git version $GIT_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep established CI target name.
-FROM crystal AS test
+# Keep the established CI target name, now backed entirely by Rust.
+FROM gpui-desktop-check AS test
 
 # --- assemble redistributable bundle ---------------------------------------
 FROM bundle-tools AS staging
@@ -363,7 +369,9 @@ COPY scripts/git-helper.sh /stage/usr/libexec/git-helper
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
 COPY scripts/whisper.sh /stage/usr/libexec/whisper
 COPY scripts/whisper-server.sh /stage/usr/libexec/whisper-server
-COPY --from=crystal /crystal-build/xd /stage/usr/bin/xd
+COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
+COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /stage/usr/libexec/xd-daemon-dev
+COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy-dev /stage/usr/libexec/xd-tls-proxy-dev
 COPY --from=agent-binaries /agents/ /stage/usr/libexec/
 COPY --from=voice-build /voice/libexec/ /stage/usr/libexec/
 COPY --from=voice-build /voice/lib/ /stage/usr/lib/

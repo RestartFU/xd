@@ -18,6 +18,19 @@ fi
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
+case "$(basename "$HERE")" in
+  xd-nightly)
+    export XD_APP_ID=com.restartfu.Xd.Nightly
+    export XD_DATA_NAME=xd-nightly
+    export XD_SETTINGS_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/xd-nightly/settings.json"
+    ;;
+  *)
+    export XD_APP_ID=com.restartfu.Xd
+    export XD_DATA_NAME=xd
+    export XD_SETTINGS_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/xd/settings.json"
+    ;;
+esac
+
 # Per bundle, not just per user: a nightly and a release installed side by side
 # would otherwise rewrite each other's caches while both are running.
 RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/xd-$(id -u)/$(basename "$HERE")"
@@ -104,6 +117,15 @@ export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"
 export XDG_DATA_DIRS="$HERE/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/icons}"
 export PATH="$HERE/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+
+# The Rust desktop and daemon are separate processes. Resolve every bundled
+# helper here so neither process can accidentally select a stale host install.
+export XD_DAEMON_EXECUTABLE="$HERE/libexec/xd-daemon-dev"
+export XD_TLS_PROXY_EXECUTABLE="$HERE/libexec/xd-tls-proxy-dev"
+export XD_CODEX_EXECUTABLE="$HERE/libexec/codex-package/bin/codex"
+export XD_CLAUDE_EXECUTABLE="$HERE/libexec/claude"
+export XD_CLAUDE_PROXY_EXECUTABLE="$HERE/libexec/claude-code-proxy"
+export XD_WHISPER_SERVER="$HERE/libexec/whisper-server-bin"
 
 # The keyfile backend keeps settings in $XDG_CONFIG_HOME/glib-2.0/settings and
 # is built into GIO, so the bundle needs no dconf module or D-Bus round trip.

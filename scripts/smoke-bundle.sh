@@ -34,6 +34,11 @@ require_file \
   share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 require_file \
   share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
+require_file libexec/xd-daemon-dev
+require_file libexec/xd-tls-proxy-dev
+require_file libexec/codex-package/bin/codex
+require_file libexec/claude
+require_file libexec/whisper-server-bin
 
 svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \
   -name 'libpixbufloader*svg*.so' -print -quit)
@@ -55,6 +60,10 @@ env -i \
   XDG_CACHE_HOME="$WORK/launcher-home/cache" \
   XDG_CONFIG_HOME="$WORK/launcher-home/config" \
   "$BUNDLE/xd.sh" --version | grep -E '^xd [0-9]'
+
+"$BUNDLE/lib/ld-linux-x86-64.so.2" \
+  --library-path "$BUNDLE/lib" \
+  "$BUNDLE/libexec/xd-daemon-dev" --version | grep -E '^xd-daemon-dev [0-9]'
 
 git_clean()
 {

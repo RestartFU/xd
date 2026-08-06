@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
-    fs,
+    env, fs,
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::{
@@ -18486,6 +18486,13 @@ mod tests {
 }
 
 fn main() {
+    if env::args_os()
+        .skip(1)
+        .any(|argument| argument == "--version" || argument == "-v")
+    {
+        println!("xd {}", desktop_version());
+        return;
+    }
     Application::new().run(|cx: &mut App| {
         cx.bind_keys([
             KeyBinding::new("ctrl-k", OpenSearch, Some("XdDesktop")),
@@ -18610,7 +18617,11 @@ fn main() {
                 window_min_size: Some(size(px(760.0), px(560.0))),
                 window_background: WindowBackgroundAppearance::Opaque,
                 window_decorations: Some(WindowDecorations::Client),
-                app_id: Some("xd-dev".into()),
+                app_id: Some(
+                    env::var("XD_APP_ID")
+                        .unwrap_or_else(|_| "com.restartfu.Xd".into())
+                        .into(),
+                ),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
@@ -18618,4 +18629,17 @@ fn main() {
         .expect("open xd GPUI window");
         cx.activate(true);
     });
+}
+
+fn desktop_version() -> String {
+    option_env!("XD_DEV_COMMIT")
+        .filter(|commit| !commit.is_empty() && *commit != "development")
+        .map(|commit| {
+            format!(
+                "{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                &commit[..7.min(commit.len())]
+            )
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
 }
