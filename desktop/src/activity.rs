@@ -10,6 +10,15 @@ pub struct ActivityCard {
     pub detail: String,
     pub footer: Option<String>,
     pub url: Option<String>,
+    pub items: Vec<ActivityItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    pub kind: ActivityKind,
+    pub name: String,
+    pub status: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +55,7 @@ impl ActivityCard {
             detail: summary,
             footer: None,
             url: None,
+            items: Vec::new(),
         }
     }
 
@@ -71,6 +81,7 @@ impl ActivityCard {
         }
         if status.get("pending").and_then(Value::as_bool) == Some(true) {
             self.status = "Checking…".into();
+            self.detail = "Waiting for GitHub to report this run.".into();
             return self;
         }
 
@@ -97,9 +108,16 @@ impl ActivityCard {
         } else {
             label.into()
         };
-        if let Some(detail) = workflow_jobs(status) {
-            self.detail = detail;
-        }
+        self.items = workflow_jobs(status);
+        self.detail = if self.items.is_empty() {
+            "GitHub has not reported any jobs for this run.".into()
+        } else {
+            format!(
+                "{} job{}",
+                self.items.len(),
+                if self.items.len() == 1 { "" } else { "s" }
+            )
+        };
         self
     }
 }
@@ -121,33 +139,37 @@ fn workflow_state(state: &str, conclusion: &str) -> (ActivityKind, &'static str)
     }
 }
 
-fn workflow_jobs(status: &Value) -> Option<String> {
-    let jobs = status.get("jobs")?.as_array()?;
-    if jobs.is_empty() {
-        return None;
-    }
-    let mut lines = Vec::new();
-    for job in jobs.iter().take(100) {
-        let name = job.get("name").and_then(Value::as_str)?;
-        let state = job
-            .get("status")
-            .or_else(|| job.get("state"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let conclusion = job
-            .get("conclusion")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let (_, label) = workflow_state(state, conclusion);
-        let activity = job
-            .get("log")
-            .and_then(Value::as_str)
-            .filter(|activity| !activity.is_empty())
-            .map(|activity| format!(" · {activity}"))
-            .unwrap_or_default();
-        lines.push(format!("{name} · {label}{activity}"));
-    }
-    Some(lines.join("\n"))
+fn workflow_jobs(status: &Value) -> Vec<ActivityItem> {
+    let Some(jobs) = status.get("jobs").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    jobs.iter()
+        .take(100)
+        .filter_map(|job| {
+            let name = job.get("name").and_then(Value::as_str)?;
+            let state = job
+                .get("status")
+                .or_else(|| job.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let conclusion = job
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let (kind, label) = workflow_state(state, conclusion);
+            let detail = job
+                .get("log")
+                .and_then(Value::as_str)
+                .filter(|activity| !activity.is_empty())
+                .map(str::to_owned);
+            Some(ActivityItem {
+                kind,
+                name: compact(name, 160, "Job"),
+                status: label.into(),
+                detail,
+            })
+        })
+        .collect()
 }
 
 fn generic_failure(summary: &str) -> bool {
@@ -186,6 +208,7 @@ fn parse_subagent(content: &str) -> Option<ActivityCard> {
         detail: compact(task, 360, "Delegated task"),
         footer: None,
         url: None,
+        items: Vec::new(),
     })
 }
 
@@ -207,9 +230,10 @@ fn parse_workflow(content: &str) -> Option<ActivityCard> {
         title: "Workflow".into(),
         name: compact(repository, 120, "GitHub Actions"),
         status: format!("Run #{id}"),
-        detail: url.into(),
+        detail: "Waiting for GitHub to report this run.".into(),
         footer: Some("GitHub Actions".into()),
         url: Some(url.into()),
+        items: Vec::new(),
     })
 }
 
@@ -284,7 +308,16 @@ mod tests {
         assert_eq!(running.name, "GPUI dev");
         assert_eq!(running.kind, ActivityKind::Running);
         assert_eq!(running.status, "In progress · cached");
-        assert_eq!(running.detail, "linux · In progress · Build release");
+        assert_eq!(running.detail, "1 job");
+        assert_eq!(
+            running.items,
+            vec![ActivityItem {
+                kind: ActivityKind::Running,
+                name: "linux".into(),
+                status: "In progress".into(),
+                detail: Some("Build release".into()),
+            }]
+        );
 
         let failed = ActivityCard::parse(marker).with_workflow_status(
             Some(&serde_json::json!({

@@ -4806,12 +4806,51 @@ impl XdDesktop {
         expanded: bool,
         desktop: Entity<Self>,
     ) -> gpui::AnyElement {
-        let status_color = match card.kind {
-            ActivityKind::Running => 0x91a7ff,
-            ActivityKind::Success => 0x8bd5a0,
-            ActivityKind::Failure => 0xff8f8f,
-            ActivityKind::Finished => 0xaab2c0,
-        };
+        let status_color = activity_status_color(card.kind);
+        let has_items = !card.items.is_empty();
+        let item_rows = card
+            .items
+            .iter()
+            .map(|item| {
+                let color = activity_status_color(item.kind);
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(SURFACE_HIGH))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().text_color(rgb(color)).child("●"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(item.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(color))
+                                    .child(item.status.clone()),
+                            ),
+                    )
+                    .when_some(item.detail.clone(), |row, detail| {
+                        row.child(
+                            div()
+                                .mt_1()
+                                .ml_4()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(detail),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
         let toggle_key = key.clone();
         let mut body = div()
             .w_full()
@@ -4890,7 +4929,10 @@ impl XdDesktop {
                     .border_color(rgb(BORDER))
                     .text_sm()
                     .text_color(rgb(MUTED))
-                    .child(card.detail),
+                    .child(card.detail)
+                    .when(has_items, |details| {
+                        details.mt_2().flex().flex_col().gap_2().children(item_rows)
+                    }),
             );
             if let Some(footer) = card.footer {
                 let url = card.url.clone();
@@ -10352,6 +10394,15 @@ fn voice_request_token() -> String {
 fn workflow_status_terminal(status: &Value) -> bool {
     status.get("ok").and_then(Value::as_bool) == Some(true)
         && status.get("state").and_then(Value::as_str) == Some("completed")
+}
+
+fn activity_status_color(kind: ActivityKind) -> u32 {
+    match kind {
+        ActivityKind::Running => 0x91a7ff,
+        ActivityKind::Success => 0x8bd5a0,
+        ActivityKind::Failure => 0xff8f8f,
+        ActivityKind::Finished => 0xaab2c0,
+    }
 }
 
 fn merge_dictation(base: &str, spoken: &str) -> String {
