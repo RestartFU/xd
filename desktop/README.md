@@ -18,6 +18,7 @@ Current milestone:
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - bounded queued-message previews with send-now and remove controls;
 - global/workspace prompt shortcuts with send-or-queue buttons and inline management;
+- chat-scoped Claude slash-command discovery with filtered composer suggestions;
 - daemon-persisted assistant, model, effort, access, and plan controls;
 - Rust-owned Codex/Claude account status, sign-in, cancellation, authorization-code input, and sign-out;
 - daemon-owned Whisper base.en download and bounded streaming transcription with live partial text;

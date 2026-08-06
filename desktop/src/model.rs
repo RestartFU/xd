@@ -150,6 +150,7 @@ pub struct AppModel {
     pub access: String,
     pub plan: bool,
     pub auth_state: String,
+    pub commands: Vec<String>,
     pub global_shortcuts: Vec<String>,
     pub workspace_shortcuts: Vec<String>,
     pub shortcuts: Vec<String>,
@@ -201,6 +202,7 @@ impl AppModel {
             self.access.clear();
             self.plan = false;
             self.auth_state.clear();
+            self.commands.clear();
             self.global_shortcuts.clear();
             self.workspace_shortcuts.clear();
             self.shortcuts.clear();
@@ -228,6 +230,7 @@ impl AppModel {
         self.access.clear();
         self.plan = false;
         self.auth_state.clear();
+        self.commands.clear();
         self.global_shortcuts.clear();
         self.workspace_shortcuts.clear();
         self.shortcuts.clear();
@@ -273,6 +276,9 @@ impl AppModel {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
+        if let Some(commands) = body.get("commands").and_then(Value::as_array) {
+            self.commands = string_array(commands);
+        }
         if let Some(shortcuts) = body.get("shortcuts").and_then(Value::as_array) {
             self.shortcuts = string_array(shortcuts);
         }
@@ -371,6 +377,11 @@ impl AppModel {
                 }
             }
             "draft" if self.event_is_active(body) => self.apply_draft(body),
+            "commands" if self.event_is_active(body) => {
+                if let Some(commands) = body.get("commands").and_then(Value::as_array) {
+                    self.commands = string_array(commands);
+                }
+            }
             "turn-started" if self.event_is_active(body) => {
                 self.working = true;
                 self.live_text.clear();
@@ -500,6 +511,7 @@ impl AppModel {
             access: "edit".into(),
             plan: false,
             auth_state: "signed-in".into(),
+            commands: vec!["review".into(), "compact".into()],
             global_shortcuts: Vec::new(),
             workspace_shortcuts: Vec::new(),
             shortcuts: vec!["Review the current diff".into()],
@@ -566,6 +578,20 @@ mod tests {
             &json!({"chat":"chat-1", "queue":["first", "second"]}),
         );
         assert_eq!(model.queue, ["first", "second"]);
+    }
+
+    #[test]
+    fn command_snapshots_and_events_stay_chat_scoped() {
+        let mut model = AppModel {
+            selected_chat: Some("chat-1".into()),
+            ..Default::default()
+        };
+        model.apply_chat(&json!({"commands":["review", "compact"]}));
+        assert_eq!(model.commands, ["review", "compact"]);
+        model.apply_event("commands", &json!({"chat":"chat-2", "commands":["wrong"]}));
+        assert_eq!(model.commands, ["review", "compact"]);
+        model.apply_event("commands", &json!({"chat":"chat-1", "commands":["rename"]}));
+        assert_eq!(model.commands, ["rename"]);
     }
 
     #[test]

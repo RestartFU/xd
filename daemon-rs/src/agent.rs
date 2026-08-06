@@ -10,6 +10,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
     Session(String),
+    Commands(Vec<String>),
     Text(String),
     TextDelta(String),
     Tool(String),
@@ -229,11 +230,25 @@ impl ClaudeParser {
             return Vec::new();
         };
         match root.get("type").and_then(Value::as_str) {
-            Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => root
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(|id| vec![AgentEvent::Session(id.to_owned())])
-                .unwrap_or_default(),
+            Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => {
+                let mut events = Vec::new();
+                if let Some(session) = root.get("session_id").and_then(Value::as_str) {
+                    events.push(AgentEvent::Session(session.to_owned()));
+                }
+                let commands = root
+                    .get("slash_commands")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter_map(normalize_command)
+                    .take(200)
+                    .collect::<Vec<_>>();
+                if !commands.is_empty() {
+                    events.push(AgentEvent::Commands(commands));
+                }
+                events
+            }
             Some("stream_event") => self.stream_event(&root),
             Some("assistant") if !self.saw_streamed_text => self.assistant_event(&root),
             Some("result") => {
@@ -393,6 +408,14 @@ impl ClaudeParser {
             })
             .collect()
     }
+}
+
+fn normalize_command(value: &str) -> Option<String> {
+    let value = value.strip_prefix('/').unwrap_or(value).trim();
+    if value.is_empty() || value.chars().count() > 256 || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn append_model_and_effort(command: &mut Command, model: &str, effort: &str) {
@@ -796,6 +819,14 @@ mod tests {
             AgentEvent::Session(session)
                 if session == "653dbf2a-6521-4412-9ac9-81b4d94160e7"
         )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Commands(commands)
+                if commands.first().map(String::as_str) == Some("git-commit")
+                    && commands.iter().any(|command| command == "code-review")
+        )));
+        assert_eq!(normalize_command("/review"), Some("review".into()));
+        assert_eq!(normalize_command("bad command"), None);
 
         let command = AgentCommand {
             backend: "claude",

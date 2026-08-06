@@ -30,6 +30,7 @@ struct RuntimeInner {
     active: Mutex<HashMap<String, ActiveProcess>>,
     next_turn: AtomicU64,
     secrets: Arc<SecretsStore>,
+    commands: Mutex<HashMap<String, (String, Vec<String>)>>,
 }
 
 impl Drop for RuntimeInner {
@@ -64,6 +65,7 @@ impl TurnRuntime {
                 active: Mutex::new(HashMap::new()),
                 next_turn: AtomicU64::new(0),
                 secrets,
+                commands: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -177,6 +179,17 @@ impl TurnRuntime {
             .is_ok_and(|mut child| child.kill().is_ok())
     }
 
+    pub fn commands(&self, chat_id: &str, backend: &str) -> Vec<String> {
+        self.inner
+            .commands
+            .lock()
+            .ok()
+            .and_then(|commands| commands.get(chat_id).cloned())
+            .filter(|(stored_backend, _)| stored_backend == backend)
+            .map(|(_, commands)| commands)
+            .unwrap_or_default()
+    }
+
     fn run(
         &self,
         turn: TurnSpec,
@@ -223,6 +236,20 @@ impl TurnRuntime {
                         {
                             latest_error = Some(error.to_string());
                         }
+                    }
+                    AgentEvent::Commands(commands) => {
+                        if let Ok(mut cached) = self.inner.commands.lock() {
+                            cached.insert(
+                                turn.chat_id.clone(),
+                                (turn.backend.clone(), commands.clone()),
+                            );
+                        }
+                        self.inner.events.publish(json!({
+                            "event": "commands",
+                            "chat": turn.chat_id,
+                            "backend": turn.backend,
+                            "commands": commands,
+                        }));
                     }
                     AgentEvent::Text(text) => {
                         match self.inner.store.append_turn_message(

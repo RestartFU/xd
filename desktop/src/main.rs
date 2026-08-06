@@ -1908,6 +1908,9 @@ impl XdDesktop {
                     self.set_composer_text(draft, cx);
                 }
             }
+            "commands" if self.event_is_active(&body) => {
+                self.model.apply_event(name, &body);
+            }
             "turn-started" if self.event_is_active(&body) => {
                 self.composer_menu = None;
                 self.model.apply_event(name, &body);
@@ -4088,6 +4091,13 @@ impl XdDesktop {
         self.composer.clone_from(&text);
         self.composer_input
             .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    fn choose_command(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_composer_text(format!("/{command} "), cx);
+        let focus = self.composer_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
     }
 
     fn attach_images(&mut self, cx: &mut Context<Self>) {
@@ -6641,6 +6651,28 @@ impl Render for XdDesktop {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let command_buttons = command_suggestions(&self.model.commands, &self.composer)
+            .into_iter()
+            .enumerate()
+            .map(|(index, command)| {
+                let selected = command.clone();
+                div()
+                    .id(("slash-command", index))
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(SURFACE_HIGH))
+                    .text_xs()
+                    .text_color(rgb(TEXT))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0x242428)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_command(selected.clone(), window, cx);
+                    }))
+                    .child(format!("/{command}"))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let queue_edit = self.queue_edit.clone();
         let queue_edit_input = self.queue_edit_input.clone();
         let queue_edit_focus = self.queue_edit_input.read(cx).focus_handle(cx);
@@ -6968,6 +7000,22 @@ impl Render for XdDesktop {
                                 )),
                         )
                         .children(queue_rows),
+                )
+            })
+            .when(!command_buttons.is_empty(), |element| {
+                element.child(
+                    div()
+                        .id("slash-command-suggestions")
+                        .w_full()
+                        .max_w(px(1040.0))
+                        .mx_auto()
+                        .mb_2()
+                        .max_h(px(144.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(command_buttons),
                 )
             })
             .when(!shortcut_buttons.is_empty(), |element| {
@@ -9585,6 +9633,23 @@ fn compact_label(value: &str, limit: usize) -> String {
     shortened
 }
 
+fn command_suggestions(commands: &[String], text: &str) -> Vec<String> {
+    let Some(query) = text.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if query.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = query.to_lowercase();
+    commands
+        .iter()
+        .take(200)
+        .filter(|command| command.to_lowercase().starts_with(&query))
+        .take(40)
+        .cloned()
+        .collect()
+}
+
 fn auth_operation(state: &str) -> Option<&'static str> {
     match state {
         "signed-in" => Some("agent-auth-logout"),
@@ -9707,6 +9772,15 @@ mod tests {
             merge_dictation("Please\n", "open the diff"),
             "Please\nopen the diff"
         );
+    }
+
+    #[test]
+    fn slash_commands_match_only_an_unbroken_prefix() {
+        let commands = vec!["review".into(), "rename".into(), "compact".into()];
+        assert_eq!(command_suggestions(&commands, "/re"), ["review", "rename"]);
+        assert_eq!(command_suggestions(&commands, "/RE"), ["review", "rename"]);
+        assert!(command_suggestions(&commands, "re").is_empty());
+        assert!(command_suggestions(&commands, "/review now").is_empty());
     }
 
     #[test]

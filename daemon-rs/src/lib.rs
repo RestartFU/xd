@@ -302,8 +302,18 @@ impl Engine {
         let provider = response
             .get("backend")
             .and_then(Value::as_str)
-            .unwrap_or("codex");
-        response["auth_state"] = Value::String(self.auth.state(provider));
+            .unwrap_or("codex")
+            .to_owned();
+        response["auth_state"] = Value::String(self.auth.state(&provider));
+        if let Some(runtime) = &self.runtime {
+            response["commands"] = Value::Array(
+                runtime
+                    .commands(chat_id, &provider)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            );
+        }
         response
     }
 
