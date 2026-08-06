@@ -26,6 +26,7 @@ mod cli_versions;
 mod git_draft;
 mod runtime;
 mod secrets;
+mod self_update;
 mod storage;
 mod terminal;
 mod voice;
@@ -37,6 +38,7 @@ use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 pub use runtime::TurnRuntime;
 use secrets::SecretsStore;
+use self_update::SelfUpdate;
 use storage::clone_repository;
 pub use storage::{SendDisposition, StateStore, StorageError};
 use terminal::TerminalManager;
@@ -88,6 +90,7 @@ pub struct Engine {
     voice: VoiceService,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
+    self_update: SelfUpdate,
 }
 
 #[derive(Default)]
@@ -106,6 +109,7 @@ impl Engine {
     pub fn transport_only() -> Self {
         let events = Arc::new(EventBus::default());
         let secrets = Arc::new(SecretsStore::new(None));
+        let self_update = SelfUpdate::new(events.clone());
         Self {
             store: None,
             auth: AuthManager::new(events.clone()),
@@ -115,6 +119,7 @@ impl Engine {
             voice: VoiceService::new(events.clone(), None),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
+            self_update,
             events,
             runtime: None,
         }
@@ -131,6 +136,7 @@ impl Engine {
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
+        let self_update = SelfUpdate::new(events.clone());
         let engine = Self {
             runtime: Some(TurnRuntime::new(
                 store.clone(),
@@ -145,6 +151,7 @@ impl Engine {
             voice: VoiceService::new(events.clone(), data_directory),
             secrets,
             git_drafts,
+            self_update,
             events,
         };
         engine.auth.refresh_all();
@@ -210,6 +217,10 @@ impl Engine {
             }
             Some("agent-auth") => self.auth.snapshots(),
             Some("agent-clis") => self.cli_versions.snapshots(),
+            Some("daemon-update") => self
+                .self_update
+                .perform(request.get("action").and_then(Value::as_str))
+                .unwrap_or_else(error_reply),
             Some("agent-auth-refresh") => {
                 let provider = request.get("provider").and_then(Value::as_str);
                 match provider {

@@ -44,6 +44,7 @@ Current milestone:
 - variable-height virtualized transcript list;
 - bounded full-duplex protocol framing and request-id matching;
 - off-thread daemon startup with bounded automatic reconnection and manual retry;
+- mobile-compatible, explicit install/restart self-update for bundled xd-dev daemons;
 - daemon snapshot/event state reducers with unit tests.
 
 Build and test this crate through the repository Dockerfile:

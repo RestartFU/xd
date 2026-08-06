@@ -79,6 +79,9 @@ RUN cargo fmt --check \
 
 FROM rust-daemon-source AS rust-daemon-release
 
+ARG XD_DEV_COMMIT=development
+ENV XD_DEV_COMMIT=$XD_DEV_COMMIT
+
 RUN cargo build --locked --release \
  && test -x target/release/xd-daemon
 

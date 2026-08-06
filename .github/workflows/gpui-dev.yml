@@ -27,6 +27,7 @@ jobs:
         run: >-
           docker buildx build
           --target gpui-desktop-check
+          --build-arg XD_DEV_COMMIT="$GITHUB_SHA"
           --output type=local,dest=gpui-dist
           .
 
@@ -48,6 +49,7 @@ jobs:
           cp -a gpui-dist/codex-package package/xd-dev/codex-package
           install -m0755 gpui-dist/claude package/xd-dev/claude
           install -m0755 gpui-dist/claude-code-proxy package/xd-dev/claude-code-proxy
+          install -m0755 scripts/install-dev.sh package/xd-dev/install-dev.sh
           cp -a gpui-dist/voice/lib package/xd-dev/lib
           cp -a gpui-dist/voice/libexec package/xd-dev/libexec
           install -m0644 desktop/README.md package/xd-dev/README.md
