@@ -24,7 +24,7 @@ Current milestone:
 - chat-scoped Claude slash-command discovery with filtered composer suggestions;
 - daemon-persisted assistant, model, effort, access, and plan controls;
 - Codex Fast mode backed by the priority service tier for new and resumed turns;
-- daemon-owned, loopback-only Claude mode routing for Codex models;
+- daemon-owned, loopback-only Claude mode routing, account management, and GPUI control for Codex models;
 - Rust-owned Codex/Claude account status, sign-in, cancellation, authorization-code input, and sign-out;
 - bounded, asynchronous bundled Codex/Claude version inventory in Assistant Accounts;
 - daemon-owned Whisper base.en download and bounded streaming transcription with live partial text;

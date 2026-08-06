@@ -747,6 +747,14 @@ mod tests {
         assert!(model.plan);
         assert!(!model.fast);
         assert!(!model.claude_mode);
+
+        model.apply_chat(&json!({
+            "backend": "codex", "model": "gpt-5.6-sol", "effort": "max",
+            "access": "edit", "plan": false, "fast": true, "claude_mode": true,
+            "queue": [], "working": false
+        }));
+        assert!(model.fast);
+        assert!(model.claude_mode);
     }
 
     #[test]

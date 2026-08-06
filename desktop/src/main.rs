@@ -2206,6 +2206,7 @@ impl XdDesktop {
                     .attachments_dirty
                     .then(|| self.model.draft_attachments.clone());
                 self.model.apply_chat(&value);
+                self.sync_active_auth_state();
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
                 } else if let Some(attachments) = attachments {
@@ -2726,10 +2727,11 @@ impl XdDesktop {
     }
 
     fn sync_active_auth_state(&mut self) {
+        let active_provider = active_auth_provider(&self.model.backend, self.model.claude_mode);
         if let Some(provider) = self
             .auth_providers
             .iter()
-            .find(|provider| provider.provider == self.model.backend)
+            .find(|provider| provider.provider == active_provider)
         {
             self.model.auth_state = provider.state.clone();
         }
@@ -4942,7 +4944,9 @@ impl XdDesktop {
             }
             ComposerChoice::Effort(effort)
                 if self.model.agent_backends.iter().any(|backend| {
-                    backend.id == self.model.backend && backend.efforts.contains(&effort)
+                    backend.id == self.model.backend
+                        && backend.efforts.contains(&effort)
+                        && !(self.model.claude_mode && effort == "ultra")
                 }) =>
             {
                 self.daemon
@@ -5006,6 +5010,20 @@ impl XdDesktop {
         }
         if let Some(daemon) = &self.daemon
             && let Err(error) = daemon.set_fast(&chat_id, !self.model.fast)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn toggle_claude_mode(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.working || self.model.backend != "codex" {
+            return;
+        }
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_claude_mode(&chat_id, !self.model.claude_mode)
         {
             self.model.connection_error = Some(error);
         }
@@ -6624,6 +6642,8 @@ impl Render for XdDesktop {
             selected.is_some() && !working && !self.model.agent_backends.is_empty();
         let fast = self.model.fast;
         let can_toggle_fast = can_change_agent && self.model.backend == "codex";
+        let claude_mode = self.model.claude_mode;
+        let can_toggle_claude_mode = can_change_agent && self.model.backend == "codex";
         let access_label = match self.model.access.as_str() {
             "full" => "Full access",
             "edit" => "Edit",
@@ -8002,7 +8022,12 @@ impl Render for XdDesktop {
                     "failed" => "sign-in check failed",
                     _ => "sign-in unknown",
                 };
-                format!("{} · {state}", chat.backend)
+                let assistant = if chat.backend == "codex" && self.model.claude_mode {
+                    "Claude mode"
+                } else {
+                    &chat.backend
+                };
+                format!("{assistant} · {state}")
             })
             .unwrap_or_else(|| "xd daemon".into());
         let header = div()
@@ -8143,6 +8168,7 @@ impl Render for XdDesktop {
                             backend
                                 .efforts
                                 .iter()
+                                .filter(|effort| !(self.model.claude_mode && *effort == "ultra"))
                                 .map(|effort| {
                                     (
                                         effort.clone(),
@@ -8355,6 +8381,33 @@ impl Render for XdDesktop {
                             }
                         }))
                         .child(if fast { "Fast: on" } else { "Fast: off" }),
+                )
+            })
+            .when(self.model.backend == "codex", |controls| {
+                controls.child(
+                    div()
+                        .id("claude-mode-toggle")
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .bg(rgb(if claude_mode { 0x26354d } else { SURFACE_HIGH }))
+                        .text_xs()
+                        .text_color(rgb(if can_toggle_claude_mode { TEXT } else { MUTED }))
+                        .when(can_toggle_claude_mode, |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x242428)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if can_toggle_claude_mode {
+                                this.toggle_claude_mode();
+                            }
+                        }))
+                        .child(if claude_mode {
+                            "Claude mode: on"
+                        } else {
+                            "Claude mode: off"
+                        }),
                 )
             })
             .child(
@@ -12481,6 +12534,14 @@ fn auth_operation(state: &str) -> Option<&'static str> {
     }
 }
 
+fn active_auth_provider(backend: &str, claude_mode: bool) -> &str {
+    if backend == "codex" && claude_mode {
+        "claude-mode"
+    } else {
+        backend
+    }
+}
+
 fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_millis(match attempt {
         0 => 0,
@@ -12740,6 +12801,9 @@ mod tests {
         assert_eq!(auth_operation("signing-in"), Some("agent-auth-cancel"));
         assert_eq!(auth_operation("checking"), None);
         assert_eq!(auth_operation("signing-out"), None);
+        assert_eq!(active_auth_provider("codex", false), "codex");
+        assert_eq!(active_auth_provider("codex", true), "claude-mode");
+        assert_eq!(active_auth_provider("claude", true), "claude");
     }
 
     #[test]
