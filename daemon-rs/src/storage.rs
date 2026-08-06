@@ -219,6 +219,54 @@ impl StateStore {
         )
     }
 
+    pub fn remote_listener(&self) -> Result<Option<(String, u16)>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let encoded = database
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'remote_listener'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(encoded) = encoded else {
+            return Ok(None);
+        };
+        let value: Value = serde_json::from_str(&encoded).map_err(|error| {
+            StorageError::InvalidRequest(format!("Saved remote listener is invalid: {error}"))
+        })?;
+        let bind = value
+            .get("bind")
+            .and_then(Value::as_str)
+            .filter(|bind| !bind.is_empty())
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("Saved remote listener bind is invalid.".into())
+            })?;
+        let port = value
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("Saved remote listener port is invalid.".into())
+            })?;
+        Ok(Some((bind.to_owned(), port)))
+    }
+
+    pub fn save_remote_listener(&self, bind: &str, port: u16) -> Result<(), StorageError> {
+        if bind.is_empty() {
+            return Err(StorageError::InvalidRequest(
+                "Remote listener bind cannot be empty.".into(),
+            ));
+        }
+        let encoded = json!({"bind": bind, "port": port}).to_string();
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO meta (key, value) VALUES ('remote_listener', ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [encoded],
+        )?;
+        Ok(())
+    }
+
     fn open_with_flags(
         database_path: impl AsRef<Path>,
         workspace_root: impl Into<PathBuf>,
@@ -4469,6 +4517,28 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn remote_listener_uses_the_compatible_persisted_shape() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.remote_listener().unwrap(), None);
+        store.save_remote_listener("::", 4001).unwrap();
+        assert_eq!(store.remote_listener().unwrap(), Some(("::".into(), 4001)));
+
+        let database = Connection::open(&fixture.database).unwrap();
+        let encoded: String = database
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'remote_listener'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded).unwrap(),
+            json!({"bind": "::", "port": 4001})
+        );
+    }
 
     #[test]
     fn search_terms_are_escaped_and_snippets_are_bounded() {

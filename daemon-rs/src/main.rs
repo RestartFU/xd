@@ -2,9 +2,13 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
 };
 
-use xd_daemon::{Engine, LocalServer, StateStore};
+mod remote_proxy;
+
+use remote_proxy::RemoteProxy;
+use xd_daemon::{Engine, LocalServer, StateStore, remote_socket_path};
 
 struct Options {
     socket: PathBuf,
@@ -14,20 +18,7 @@ struct Options {
 
 fn main() -> ExitCode {
     match arguments(env::args().skip(1)) {
-        Ok(options) => match StateStore::open(&options.database, &options.workspaces)
-            .map_err(|error| error.to_string())
-            .and_then(|store| {
-                LocalServer::bind_with_engine(
-                    &options.socket,
-                    Engine::with_store_and_data(
-                        store,
-                        options.database.parent().map(Path::to_path_buf),
-                    ),
-                )
-                .map_err(|error| error.to_string())
-            })
-            .and_then(|server| server.run().map_err(|error| error.to_string()))
-        {
+        Ok(options) => match serve(options) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("xd-daemon-dev: {error}");
@@ -42,6 +33,32 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn serve(options: Options) -> Result<(), String> {
+    let store = StateStore::open(&options.database, &options.workspaces)
+        .map_err(|error| error.to_string())?;
+    let saved_listener = store.remote_listener().map_err(|error| error.to_string())?;
+    let data_directory = options
+        .database
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "--database must have a parent directory".to_owned())?;
+    let proxy = Arc::new(RemoteProxy::new(
+        remote_socket_path(&options.socket),
+        data_directory.join("tls"),
+    ));
+    let engine = Engine::with_store_and_data(store, Some(data_directory));
+    let listener = proxy.clone();
+    engine.set_peer_listener(move |bind, port| listener.listen(bind, port))?;
+    let server = LocalServer::bind_with_engine(&options.socket, engine)
+        .map_err(|error| error.to_string())?;
+    if let Some((bind, port)) = saved_listener
+        && let Err(error) = proxy.listen(&bind, port)
+    {
+        eprintln!("xd-daemon-dev: cannot restore remote listener: {error}");
+    }
+    server.run().map_err(|error| error.to_string())
 }
 
 fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<Options, String> {

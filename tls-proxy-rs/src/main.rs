@@ -45,6 +45,14 @@ fn main() -> ExitCode {
 }
 
 fn run(options: Options) -> Result<(), String> {
+    thread::Builder::new()
+        .name("xd-tls-parent-watch".into())
+        .spawn(|| {
+            let mut buffer = [0_u8; 1];
+            while io::stdin().read(&mut buffer).is_ok_and(|count| count > 0) {}
+            std::process::exit(0);
+        })
+        .map_err(|error| format!("cannot monitor the daemon process: {error}"))?;
     let config = Arc::new(load_server_config(
         &options.certificate,
         &options.private_key,

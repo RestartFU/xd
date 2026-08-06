@@ -396,6 +396,11 @@ impl Engine {
             Ok(endpoint) => endpoint,
             Err(error) => return error_reply(format!("Cannot accept remote devices: {error}")),
         };
+        if let Some(store) = self.store.as_ref()
+            && let Err(error) = store.save_remote_listener(bind, endpoint.port)
+        {
+            return error_reply(format!("Cannot save the remote listener: {error}"));
+        }
         let code = self.arm_pairing(std::time::Duration::from_secs(5 * 60));
         json!({
             "ok": true,
@@ -873,7 +878,7 @@ impl EventBus {
     }
 }
 
-fn remote_socket_path(local: &Path) -> PathBuf {
+pub fn remote_socket_path(local: &Path) -> PathBuf {
     let mut path = local.as_os_str().to_os_string();
     path.push(".remote");
     PathBuf::from(path)

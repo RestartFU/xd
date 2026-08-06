@@ -38,6 +38,7 @@ jobs:
           test -f gpui-dist/rust-daemon-tests-passed
           test -x gpui-dist/xd-desktop
           test -x gpui-dist/xd-daemon
+          test -x gpui-dist/xd-tls-proxy-dev
           test -x gpui-dist/codex-package/bin/codex
           test -x gpui-dist/claude
           test -x gpui-dist/claude-code-proxy
@@ -46,6 +47,7 @@ jobs:
           install -d package/xd-dev
           install -m0755 gpui-dist/xd-desktop package/xd-dev/xd-dev
           install -m0755 gpui-dist/xd-daemon package/xd-dev/xd-daemon-dev
+          install -m0755 gpui-dist/xd-tls-proxy-dev package/xd-dev/xd-tls-proxy-dev
           cp -a gpui-dist/codex-package package/xd-dev/codex-package
           install -m0755 gpui-dist/claude package/xd-dev/claude
           install -m0755 gpui-dist/claude-code-proxy package/xd-dev/claude-code-proxy
@@ -70,7 +72,7 @@ jobs:
 
           This is the in-progress GPUI desktop client, separate from production
           xd. It runs the bundled Rust daemon against isolated xd-dev state and
-          uses bundled Codex, Claude Code, and whisper.cpp executables. No Crystal xd
+          uses bundled Codex, Claude Code, whisper.cpp, and a Rust TLS proxy. No Crystal xd
           installation is required. The current Linux x86_64 build supports persisted workspaces,
           chats, drafts, queueing, options, shortcuts, and live assistant turns.
 
