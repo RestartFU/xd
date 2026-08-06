@@ -3,6 +3,7 @@ use std::ops::Range;
 pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
 pub const MAX_MARKDOWN_BLOCKS: usize = 2_048;
 pub const MAX_CODE_SPANS: usize = 4_096;
+pub const MAX_TABLE_RENDER_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
@@ -18,6 +19,7 @@ pub enum Block {
     ListItem { ordered: bool, content: InlineText },
     Rule,
     Code(CodeBlock),
+    Table(TableBlock),
     Analysis(Vec<Block>),
 }
 
@@ -47,6 +49,12 @@ pub struct CodeBlock {
     pub language: Option<String>,
     pub code: String,
     pub spans: Vec<CodeSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableBlock {
+    pub text: String,
+    pub header: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +150,14 @@ fn parse_blocks(source: &str, block_limit: usize) -> (Vec<Block>, bool) {
                 code,
                 spans,
             }));
+            continue;
+        }
+
+        if paragraph.is_empty()
+            && let Some((table, consumed)) = table(&lines[index..])
+        {
+            blocks.push(Block::Table(table));
+            index += consumed;
             continue;
         }
 
@@ -710,6 +726,98 @@ fn is_rule(line: &str) -> bool {
         })
 }
 
+fn table(lines: &[&str]) -> Option<(TableBlock, usize)> {
+    let header = split_table_row(*lines.first()?)?;
+    let delimiter = split_table_row(*lines.get(1)?)?;
+    if header.is_empty()
+        || header.len() != delimiter.len()
+        || !delimiter.iter().all(|cell| table_delimiter(cell))
+    {
+        return None;
+    }
+
+    let end = lines
+        .iter()
+        .position(|line| line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let mut rows = vec![header];
+    for line in &lines[2..end] {
+        let row = split_table_row(line)?;
+        if row.len() != delimiter.len() {
+            return None;
+        }
+        rows.push(row);
+    }
+
+    let mut widths = vec![0; delimiter.len()];
+    for row in &mut rows {
+        for (column, cell) in row.iter_mut().enumerate() {
+            *cell = parse_inline(cell).text;
+            widths[column] = widths[column].max(cell.chars().count());
+        }
+    }
+    let row_chars = widths.iter().sum::<usize>() + 3 * widths.len().saturating_sub(1);
+    let rendered_chars = row_chars
+        .saturating_mul(rows.len().saturating_add(1))
+        .saturating_add(rows.len());
+    if rendered_chars > MAX_TABLE_RENDER_BYTES {
+        return None;
+    }
+
+    let mut text = String::with_capacity(rendered_chars);
+    render_table_row(&mut text, &rows[0], &widths);
+    let header = 0..text.len();
+    text.push('\n');
+    for (column, width) in widths.iter().enumerate() {
+        if column > 0 {
+            text.push_str("─┼─");
+        }
+        text.extend(std::iter::repeat_n('─', *width));
+    }
+    for row in rows.iter().skip(1) {
+        text.push('\n');
+        render_table_row(&mut text, row, &widths);
+    }
+    if text.len() > MAX_TABLE_RENDER_BYTES {
+        return None;
+    }
+    Some((TableBlock { text, header }, end))
+}
+
+fn render_table_row(output: &mut String, row: &[String], widths: &[usize]) {
+    for (column, cell) in row.iter().enumerate() {
+        if column > 0 {
+            output.push_str(" │ ");
+        }
+        output.push_str(cell);
+        output.extend(std::iter::repeat_n(
+            ' ',
+            widths[column].saturating_sub(cell.chars().count()),
+        ));
+    }
+}
+
+fn split_table_row(line: &str) -> Option<Vec<String>> {
+    let mut contents = line.trim();
+    if !contents.contains('|') {
+        return None;
+    }
+    contents = contents.strip_prefix('|').unwrap_or(contents);
+    contents = contents.strip_suffix('|').unwrap_or(contents);
+    Some(
+        contents
+            .split('|')
+            .map(|cell| cell.trim().to_owned())
+            .collect(),
+    )
+}
+
+fn table_delimiter(cell: &str) -> bool {
+    let cell = cell.strip_prefix(':').unwrap_or(cell);
+    let cell = cell.strip_suffix(':').unwrap_or(cell);
+    cell.len() >= 3 && cell.bytes().all(|byte| byte == b'-')
+}
+
 fn parse_inline(source: &str) -> InlineText {
     let mut text = String::with_capacity(source.len());
     let mut spans = Vec::new();
@@ -1242,6 +1350,56 @@ mod tests {
                 "https://example.com/a_(b)",
             ]
         );
+    }
+
+    #[test]
+    fn renders_standalone_tables_as_aligned_monospace_grids() {
+        let document = parse(
+            "| metric | old | new |\n|:---|---:|:---:|\n| **ack_rtt_p50** | 269ms | 41ms |\n| corrections | 0 | 0 |",
+        );
+        let Block::Table(table) = &document.blocks[0] else {
+            panic!("table")
+        };
+        assert_eq!(
+            &table.text[table.header.clone()],
+            "metric      │ old   │ new "
+        );
+        assert!(table.text.contains("────────────┼───────┼─────"));
+        assert!(table.text.contains("ack_rtt_p50 │ 269ms │ 41ms"));
+        assert!(!table.text.contains("|:---"));
+    }
+
+    #[test]
+    fn leaves_pipe_prose_and_malformed_tables_as_paragraphs() {
+        for source in [
+            "Run foo | bar.\nStill ordinary prose.",
+            "| first | second |\n|---|---|\n| only one |",
+            "Results:\n| old | new |\n|---|---|\n| 1 | 2 |",
+        ] {
+            let document = parse(source);
+            assert!(
+                document
+                    .blocks
+                    .iter()
+                    .all(|block| !matches!(block, Block::Table(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_tables_whose_alignment_padding_exceeds_the_render_budget() {
+        let header = format!("| {} | short |", "x".repeat(200_000));
+        let lines = [header.as_str(), "|---|---|", "| 1 | 2 |", "| 3 | 4 |"];
+        assert!(table(&lines).is_none());
+
+        let unicode_header = format!("| {} | short |", "界".repeat(70_000));
+        let unicode_lines = [
+            unicode_header.as_str(),
+            "|---|---|",
+            "| 1 | 2 |",
+            "| 3 | 4 |",
+        ];
+        assert!(table(&unicode_lines).is_none());
     }
 
     #[test]

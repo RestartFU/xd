@@ -8648,6 +8648,27 @@ impl XdDesktop {
                         )
                         .into_any_element()
                 }
+                Block::Table(table) => div()
+                    .id(("scroll-table", block_id))
+                    .w_full()
+                    .overflow_x_scroll()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(BG))
+                    .p_3()
+                    .font_family("monospace")
+                    .text_sm()
+                    .line_height(px(20.0))
+                    .whitespace_nowrap()
+                    .child(StyledText::new(table.text).with_highlights([(
+                        table.header,
+                        HighlightStyle {
+                            font_weight: Some(FontWeight::BOLD),
+                            ..Default::default()
+                        },
+                    )]))
+                    .into_any_element(),
                 Block::Analysis(blocks) => {
                     let section_key = format!("{scope}-analysis-{block_index}");
                     let is_expanded =
