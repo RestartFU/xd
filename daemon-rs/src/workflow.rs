@@ -456,11 +456,29 @@ fn normalize_status(run: &Value, jobs: Option<&Value>) -> Result<Value, String> 
     let mut status = Map::from_iter([
         ("ok".to_owned(), Value::Bool(true)),
         ("name".to_owned(), Value::String(name)),
-        ("state".to_owned(), Value::String(state)),
+        ("state".to_owned(), Value::String(state.clone())),
         ("jobs".to_owned(), Value::Array(normalize_jobs(jobs))),
     ]);
     if let Some(conclusion) = bounded_string(run.get("conclusion"), 40) {
         status.insert("conclusion".into(), Value::String(conclusion));
+    }
+    if let Some(started_at) = timestamp(
+        run.get("run_started_at")
+            .or_else(|| run.get("started_at"))
+            .or_else(|| run.get("startedAt"))
+            .or_else(|| run.get("created_at"))
+            .or_else(|| run.get("createdAt")),
+    ) {
+        status.insert("started_at".into(), Value::Number(started_at.into()));
+    }
+    if state == "completed"
+        && let Some(completed_at) = timestamp(
+            run.get("completed_at")
+                .or_else(|| run.get("updated_at"))
+                .or_else(|| run.get("updatedAt")),
+        )
+    {
+        status.insert("completed_at".into(), Value::Number(completed_at.into()));
     }
     Ok(Value::Object(status))
 }
@@ -497,7 +515,102 @@ fn normalize_job(job: &Value) -> Option<Value> {
     {
         fields.insert("log".into(), Value::String(log));
     }
+    if let Some(started_at) = timestamp(job.get("started_at").or_else(|| job.get("startedAt"))) {
+        fields.insert("started_at".into(), Value::Number(started_at.into()));
+    }
+    if let Some(completed_at) =
+        timestamp(job.get("completed_at").or_else(|| job.get("completedAt")))
+    {
+        fields.insert("completed_at".into(), Value::Number(completed_at.into()));
+    }
     Some(Value::Object(fields))
+}
+
+fn timestamp(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(value) => value.as_i64().filter(|value| *value >= 0),
+        Value::String(value) => parse_rfc3339(value),
+        _ => None,
+    }
+}
+
+fn parse_rfc3339(value: &str) -> Option<i64> {
+    let (date, clock) = value.split_once('T')?;
+    let mut date = date.split('-');
+    let year = date.next()?.parse::<i64>().ok()?;
+    let month = date.next()?.parse::<u32>().ok()?;
+    let day = date.next()?.parse::<u32>().ok()?;
+    if date.next().is_some()
+        || !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+    {
+        return None;
+    }
+
+    let (clock, offset) = if let Some(clock) = clock.strip_suffix('Z') {
+        (clock, 0_i64)
+    } else {
+        let offset_index = clock
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index))?;
+        let (clock, zone) = clock.split_at(offset_index);
+        let sign = if zone.starts_with('+') { 1_i64 } else { -1_i64 };
+        let (hours, minutes) = zone.get(1..)?.split_once(':')?;
+        let hours = hours.parse::<i64>().ok()?;
+        let minutes = minutes.parse::<i64>().ok()?;
+        if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+            return None;
+        }
+        (clock, sign * (hours * 3_600 + minutes * 60))
+    };
+    let mut components = clock.split(':');
+    let hour = components.next()?.parse::<i64>().ok()?;
+    let minute = components.next()?.parse::<i64>().ok()?;
+    let seconds = components.next()?;
+    if components.next().is_some() {
+        return None;
+    }
+    let seconds = if let Some((seconds, fraction)) = seconds.split_once('.') {
+        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        seconds
+    } else {
+        seconds
+    };
+    let second = seconds.parse::<i64>().ok()?;
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let timestamp = days
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?
+        .checked_sub(offset)?;
+    (timestamp >= 0).then_some(timestamp)
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let shifted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 fn latest_job_activity(job: &Value, state: &str) -> Option<String> {
@@ -577,12 +690,18 @@ mod tests {
     #[test]
     fn github_payload_is_bounded_and_reports_the_active_step() {
         let status = normalize_status(
-            &json!({"name": "Nightly", "status": "in_progress", "conclusion": null}),
+            &json!({
+                "name": "Nightly",
+                "status": "in_progress",
+                "conclusion": null,
+                "run_started_at": "1970-01-01T00:00:05Z"
+            }),
             Some(&json!({"jobs": [{
                 "id": 7,
                 "name": "linux",
                 "status": "in_progress",
                 "conclusion": null,
+                "started_at": "1970-01-01T01:00:07+01:00",
                 "steps": [
                     {"name": "Build", "status": "completed"},
                     {"name": "Test", "status": "in_progress"}
@@ -593,9 +712,41 @@ mod tests {
         assert_eq!(status["ok"], true);
         assert_eq!(status["name"], "Nightly");
         assert_eq!(status["state"], "in_progress");
+        assert_eq!(status["started_at"], 5);
         assert_eq!(status["jobs"][0]["id"], "7");
         assert_eq!(status["jobs"][0]["log"], "Test");
+        assert_eq!(status["jobs"][0]["started_at"], 7);
         assert!(status.get("conclusion").is_none());
+        assert!(status.get("completed_at").is_none());
+    }
+
+    #[test]
+    fn workflow_timestamps_are_validated_and_completed_runs_use_the_last_update() {
+        let status = normalize_status(
+            &json!({
+                "name": "Nightly",
+                "status": "completed",
+                "conclusion": "success",
+                "createdAt": "1970-01-01T00:00:02.500Z",
+                "updatedAt": "1970-01-01T00:01:02Z"
+            }),
+            Some(&json!({"jobs": [{
+                "id": "job",
+                "name": "linux",
+                "state": "completed",
+                "startedAt": "1970-01-01T00:00:03Z",
+                "completedAt": "1970-01-01T00:01:01Z"
+            }]})),
+        )
+        .unwrap();
+
+        assert_eq!(status["started_at"], 2);
+        assert_eq!(status["completed_at"], 62);
+        assert_eq!(status["jobs"][0]["started_at"], 3);
+        assert_eq!(status["jobs"][0]["completed_at"], 61);
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(parse_rfc3339("2023-02-29T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00+24:00"), None);
     }
 
     #[test]

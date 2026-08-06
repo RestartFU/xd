@@ -749,6 +749,7 @@ struct XdDesktop {
     expanded_activity: Arc<HashSet<String>>,
     workflow_statuses: Arc<HashMap<String, Value>>,
     workflow_pending: Arc<HashSet<String>>,
+    workflow_ticking: HashSet<String>,
     live_markdown_generation: u64,
     live_markdown_scheduled: Option<u64>,
     pane_resize: Option<PaneResize>,
@@ -1122,6 +1123,7 @@ impl XdDesktop {
             expanded_activity: Arc::new(HashSet::new()),
             workflow_statuses: Arc::new(HashMap::new()),
             workflow_pending: Arc::new(HashSet::new()),
+            workflow_ticking: HashSet::new(),
             live_markdown_generation: 0,
             live_markdown_scheduled: None,
             pane_resize: None,
@@ -6234,6 +6236,7 @@ impl XdDesktop {
     }
 
     fn schedule_workflow_refresh(&mut self, marker: String, cx: &mut Context<Self>) {
+        self.schedule_workflow_clock(marker.clone(), cx);
         let terminal = self
             .workflow_statuses
             .get(&marker)
@@ -6256,6 +6259,47 @@ impl XdDesktop {
                     this.request_workflow_status(marker);
                 }
             });
+        })
+        .detach();
+    }
+
+    fn schedule_workflow_clock(&mut self, marker: String, cx: &mut Context<Self>) {
+        let active = self
+            .workflow_statuses
+            .get(&marker)
+            .is_some_and(workflow_clock_active);
+        if !active || !self.workflow_ticking.insert(marker.clone()) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
+                let keep_ticking = this
+                    .update(cx, |this, cx| {
+                        let visible = this
+                            .model
+                            .messages
+                            .iter()
+                            .chain(this.model.live_activity.iter())
+                            .any(|message| message.role == "tool" && message.content == marker);
+                        let active = visible
+                            && this
+                                .workflow_statuses
+                                .get(&marker)
+                                .is_some_and(workflow_clock_active);
+                        if !active {
+                            this.workflow_ticking.remove(&marker);
+                            return false;
+                        }
+                        this.invalidate_workflow_rows(&marker);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_ticking {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -6290,6 +6334,7 @@ impl XdDesktop {
         self.pending_send = None;
         Arc::make_mut(&mut self.workflow_statuses).clear();
         Arc::make_mut(&mut self.workflow_pending).clear();
+        self.workflow_ticking.clear();
         self.clear_question(cx);
         self.cancel_queue_edit(cx);
         self.sending = false;
@@ -7109,6 +7154,9 @@ impl XdDesktop {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(item.name.clone()),
                             )
+                            .when_some(item.elapsed.clone(), |row, elapsed| {
+                                row.child(div().text_xs().text_color(rgb(MUTED)).child(elapsed))
+                            })
                             .child(
                                 div()
                                     .text_xs()
@@ -7191,6 +7239,9 @@ impl XdDesktop {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(card.name.clone()),
                             )
+                            .when_some(card.elapsed.clone(), |row, elapsed| {
+                                row.child(div().text_xs().text_color(rgb(MUTED)).child(elapsed))
+                            })
                             .child(
                                 div()
                                     .text_xs()
@@ -14719,6 +14770,15 @@ fn workflow_status_terminal(status: &Value) -> bool {
         && status.get("state").and_then(Value::as_str) == Some("completed")
 }
 
+fn workflow_clock_active(status: &Value) -> bool {
+    status.get("ok").and_then(Value::as_bool) == Some(true)
+        && !workflow_status_terminal(status)
+        && status
+            .get("started_at")
+            .and_then(Value::as_i64)
+            .is_some_and(|started_at| started_at >= 0)
+}
+
 fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
     let live_offset = model.messages.len() + usize::from(!model.live_text.is_empty());
     model
@@ -15189,6 +15249,17 @@ mod tests {
         };
 
         assert_eq!(workflow_row_indices(&model, marker), [1, 4]);
+        assert!(workflow_clock_active(&serde_json::json!({
+            "ok": true,
+            "state": "in_progress",
+            "started_at": 1
+        })));
+        assert!(!workflow_clock_active(&serde_json::json!({
+            "ok": true,
+            "state": "completed",
+            "started_at": 1,
+            "completed_at": 2
+        })));
     }
 
     #[test]

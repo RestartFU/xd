@@ -7,6 +7,7 @@ pub struct ActivityCard {
     pub title: String,
     pub name: String,
     pub status: String,
+    pub elapsed: Option<String>,
     pub detail: String,
     pub footer: Option<String>,
     pub url: Option<String>,
@@ -18,6 +19,7 @@ pub struct ActivityItem {
     pub kind: ActivityKind,
     pub name: String,
     pub status: String,
+    pub elapsed: Option<String>,
     pub detail: Option<String>,
 }
 
@@ -52,6 +54,7 @@ impl ActivityCard {
                 summary.clone()
             },
             status: if failure { "Failed" } else { "Done" }.into(),
+            elapsed: None,
             detail: summary,
             footer: None,
             url: None,
@@ -103,12 +106,14 @@ impl ActivityCard {
         let stale = status.get("stale").and_then(Value::as_bool) == Some(true);
         let (kind, label) = workflow_state(state, conclusion);
         self.kind = kind;
+        let now = unix_seconds();
+        self.elapsed = workflow_elapsed(status, state == "completed", now);
         self.status = if stale {
             format!("{label} · cached")
         } else {
             label.into()
         };
-        self.items = workflow_jobs(status);
+        self.items = workflow_jobs(status, now);
         self.detail = if self.items.is_empty() {
             "GitHub has not reported any jobs for this run.".into()
         } else {
@@ -139,7 +144,7 @@ fn workflow_state(state: &str, conclusion: &str) -> (ActivityKind, &'static str)
     }
 }
 
-fn workflow_jobs(status: &Value) -> Vec<ActivityItem> {
+fn workflow_jobs(status: &Value, now: i64) -> Vec<ActivityItem> {
     let Some(jobs) = status.get("jobs").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -166,10 +171,41 @@ fn workflow_jobs(status: &Value) -> Vec<ActivityItem> {
                 kind,
                 name: compact(name, 160, "Job"),
                 status: label.into(),
+                elapsed: workflow_elapsed(job, state == "completed", now),
                 detail,
             })
         })
         .collect()
+}
+
+fn workflow_elapsed(status: &Value, terminal: bool, now: i64) -> Option<String> {
+    let started_at = status.get("started_at")?.as_i64()?;
+    let completed_at = status.get("completed_at").and_then(Value::as_i64);
+    if started_at < 0 || completed_at.is_some_and(|completed_at| completed_at < 0) {
+        return None;
+    }
+    let finished_at = if terminal { completed_at? } else { now };
+    Some(duration_label(
+        finished_at.saturating_sub(started_at).max(0) as u64,
+    ))
+}
+
+fn duration_label(seconds: u64) -> String {
+    if seconds >= 3_600 {
+        format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64
 }
 
 fn generic_failure(summary: &str) -> bool {
@@ -205,6 +241,7 @@ fn parse_subagent(content: &str) -> Option<ActivityCard> {
         title: "Subagent".into(),
         name: compact(identity, 120, "Agent"),
         status: status.into(),
+        elapsed: None,
         detail: compact(task, 360, "Delegated task"),
         footer: None,
         url: None,
@@ -230,6 +267,7 @@ fn parse_workflow(content: &str) -> Option<ActivityCard> {
         title: "Workflow".into(),
         name: compact(repository, 120, "GitHub Actions"),
         status: format!("Run #{id}"),
+        elapsed: None,
         detail: "Waiting for GitHub to report this run.".into(),
         footer: Some("GitHub Actions".into()),
         url: Some(url.into()),
@@ -315,6 +353,7 @@ mod tests {
                 kind: ActivityKind::Running,
                 name: "linux".into(),
                 status: "In progress".into(),
+                elapsed: None,
                 detail: Some("Build release".into()),
             }]
         );
@@ -331,6 +370,38 @@ mod tests {
         );
         assert_eq!(failed.kind, ActivityKind::Failure);
         assert_eq!(failed.status, "Failed");
+    }
+
+    #[test]
+    fn workflow_status_formats_run_and_job_clocks_with_units() {
+        let marker =
+            "workflow_run\n31028502744\nhttps://github.com/RestartFU/xd/actions/runs/31028502744";
+        let card = ActivityCard::parse(marker).with_workflow_status(
+            Some(&serde_json::json!({
+                "ok": true,
+                "state": "completed",
+                "conclusion": "success",
+                "started_at": 10,
+                "completed_at": 3_671,
+                "jobs": [{
+                    "name": "linux",
+                    "state": "completed",
+                    "conclusion": "success",
+                    "started_at": 10,
+                    "completed_at": 75
+                }, {
+                    "name": "missing clock",
+                    "state": "completed",
+                    "started_at": 10
+                }]
+            })),
+            false,
+        );
+
+        assert_eq!(card.elapsed.as_deref(), Some("1h 01m"));
+        assert_eq!(card.items[0].elapsed.as_deref(), Some("1m 05s"));
+        assert_eq!(card.items[1].elapsed, None);
+        assert_eq!(duration_label(5), "5s");
     }
 
     #[test]
@@ -351,4 +422,6 @@ mod tests {
         assert_eq!(ActivityCard::parse("read file").status, "Done");
     }
 }
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde_json::Value;
