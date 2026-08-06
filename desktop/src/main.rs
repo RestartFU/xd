@@ -3969,21 +3969,6 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn toggle_sidebar_menu(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
-        self.sidebar_context_menu = None;
-        self.sidebar_menu = if self.sidebar_menu.as_ref() == Some(&target) {
-            None
-        } else {
-            Some(target)
-        };
-        self.pending_sidebar_delete = None;
-        self.sidebar_delete_submitting = false;
-        self.sidebar_move = None;
-        self.sidebar_move_submitting = false;
-        self.sidebar_move_destination = None;
-        cx.notify();
-    }
-
     fn open_sidebar_context_menu(
         &mut self,
         target: Option<SidebarTarget>,
@@ -5942,9 +5927,17 @@ impl Render for XdDesktop {
                                 .text_color(rgb(if folder_menu_open { TEXT } else { MUTED }))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_sidebar_menu(menu_target.clone(), cx);
-                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_sidebar_context_menu(
+                                            Some(menu_target.clone()),
+                                            event.position,
+                                            cx,
+                                        );
+                                    }),
+                                )
                                 .child("···"),
                         )
                         .into_any_element(),
@@ -6773,9 +6766,17 @@ impl Render for XdDesktop {
                                 .text_color(rgb(if chat_menu_open { TEXT } else { MUTED }))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(BG)).text_color(rgb(TEXT)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_sidebar_menu(menu_target.clone(), cx);
-                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_sidebar_context_menu(
+                                            Some(menu_target.clone()),
+                                            event.position,
+                                            cx,
+                                        );
+                                    }),
+                                )
                                 .child("···"),
                         )
                         .into_any_element(),
