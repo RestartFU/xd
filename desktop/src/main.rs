@@ -223,16 +223,42 @@ struct DiffPanel {
     pr_body: String,
 }
 
-struct TerminalPanel {
-    chat_id: String,
-    terminal_id: Option<String>,
+struct TerminalTab {
+    id: String,
     title: String,
     screen: TerminalScreen,
+}
+
+struct TerminalPanel {
+    chat_id: String,
+    sessions: Vec<TerminalTab>,
+    selected: Option<String>,
     viewport: Option<(usize, usize)>,
     opening: bool,
     loading: bool,
-    closed: bool,
     error: Option<String>,
+}
+
+impl TerminalPanel {
+    fn selected(&self) -> Option<&TerminalTab> {
+        let selected = self.selected.as_deref()?;
+        self.sessions.iter().find(|session| session.id == selected)
+    }
+
+    fn selected_mut(&mut self) -> Option<&mut TerminalTab> {
+        let selected = self.selected.as_deref()?;
+        self.sessions
+            .iter_mut()
+            .find(|session| session.id == selected)
+    }
+
+    fn remove(&mut self, terminal_id: &str) {
+        self.sessions
+            .retain(|session| session.id.as_str() != terminal_id);
+        if self.selected.as_deref() == Some(terminal_id) {
+            self.selected = self.sessions.first().map(|session| session.id.clone());
+        }
+    }
 }
 
 fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32) -> (usize, usize) {
@@ -2112,7 +2138,8 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
-                RequestKind::TerminalOpen { chat_id } | RequestKind::TerminalList { chat_id }
+                RequestKind::TerminalOpen { chat_id, .. }
+                | RequestKind::TerminalList { chat_id }
                     if self
                         .terminal_panel
                         .as_ref()
@@ -2130,11 +2157,12 @@ impl XdDesktop {
                 RequestKind::TerminalInput { terminal_id }
                 | RequestKind::TerminalResize { terminal_id }
                 | RequestKind::TerminalKill { terminal_id }
-                    if self
-                        .terminal_panel
-                        .as_ref()
-                        .and_then(|panel| panel.terminal_id.as_ref())
-                        == Some(terminal_id) =>
+                    if self.terminal_panel.as_ref().is_some_and(|panel| {
+                        panel
+                            .sessions
+                            .iter()
+                            .any(|session| &session.id == terminal_id)
+                    }) =>
                 {
                     if let Some(panel) = &mut self.terminal_panel {
                         panel.error = value
@@ -3069,7 +3097,7 @@ impl XdDesktop {
                     self.attachments_dirty = false;
                 }
             }
-            RequestKind::TerminalOpen { chat_id }
+            RequestKind::TerminalOpen { chat_id, .. }
                 if self
                     .terminal_panel
                     .as_ref()
@@ -3077,12 +3105,11 @@ impl XdDesktop {
             {
                 let mut resize = None;
                 if let Some(panel) = &mut self.terminal_panel {
-                    panel.terminal_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                    panel.selected = value.get("id").and_then(Value::as_str).map(str::to_owned);
                     panel.opening = false;
                     panel.loading = true;
-                    panel.closed = false;
                     resize = panel
-                        .terminal_id
+                        .selected
                         .clone()
                         .zip(panel.viewport)
                         .map(|(terminal_id, (columns, rows))| (terminal_id, columns, rows));
@@ -3111,13 +3138,7 @@ impl XdDesktop {
                 self.apply_terminal_list(&value);
             }
             RequestKind::TerminalInput { .. } | RequestKind::TerminalResize { .. } => {}
-            RequestKind::TerminalKill { terminal_id } => {
-                if let Some(panel) = &mut self.terminal_panel
-                    && panel.terminal_id.as_deref() == Some(terminal_id.as_str())
-                {
-                    panel.closed = true;
-                }
-            }
+            RequestKind::TerminalKill { .. } => {}
             _ => {}
         }
     }
@@ -3299,43 +3320,64 @@ impl XdDesktop {
             }
             "terminal-opened" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel {
-                    panel.terminal_id = body
+                    let terminal_id = body
                         .get("terminal")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                     panel.opening = false;
-                    panel.title = body
+                    let title = body
                         .get("title")
                         .and_then(Value::as_str)
                         .unwrap_or("Terminal")
                         .to_owned();
-                    panel.closed = false;
+                    let columns =
+                        body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
+                    let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
+                    if let Some(terminal_id) = terminal_id {
+                        if !panel
+                            .sessions
+                            .iter()
+                            .any(|session| session.id == terminal_id)
+                        {
+                            panel.sessions.push(TerminalTab {
+                                id: terminal_id.clone(),
+                                title,
+                                screen: TerminalScreen::new(columns, rows),
+                            });
+                        }
+                        panel.selected = Some(terminal_id);
+                    }
                 }
             }
             "terminal-output" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel
-                    && panel.terminal_id.as_deref() == body.get("terminal").and_then(Value::as_str)
+                    && let Some(session) = panel.sessions.iter_mut().find(|session| {
+                        Some(session.id.as_str()) == body.get("terminal").and_then(Value::as_str)
+                    })
                     && let Some(data) = body.get("data").and_then(Value::as_str)
                     && let Ok(data) = STANDARD.decode(data)
                 {
-                    panel.screen.feed(&data);
+                    session.screen.feed(&data);
                 }
             }
             "terminal-resized" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel
-                    && panel.terminal_id.as_deref() == body.get("terminal").and_then(Value::as_str)
+                    && let Some(session) = panel.sessions.iter_mut().find(|session| {
+                        Some(session.id.as_str()) == body.get("terminal").and_then(Value::as_str)
+                    })
                 {
                     let columns =
                         body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
                     let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
-                    panel.screen.resize(columns, rows);
+                    session.screen.resize(columns, rows);
                 }
             }
             "terminal-closed" if self.event_is_active(&body) => {
-                if let Some(panel) = &mut self.terminal_panel
-                    && panel.terminal_id.as_deref() == body.get("terminal").and_then(Value::as_str)
-                {
-                    panel.closed = true;
+                if let Some(panel) = &mut self.terminal_panel {
+                    let closed = body.get("terminal").and_then(Value::as_str);
+                    if let Some(closed) = closed {
+                        panel.remove(closed);
+                    }
                     panel.loading = false;
                 }
             }
@@ -5104,13 +5146,11 @@ impl XdDesktop {
     fn new_terminal_panel(chat_id: String) -> TerminalPanel {
         TerminalPanel {
             chat_id,
-            terminal_id: None,
-            title: "Terminal".into(),
-            screen: TerminalScreen::default(),
+            sessions: Vec::new(),
+            selected: None,
             viewport: None,
             opening: false,
             loading: true,
-            closed: false,
             error: None,
         }
     }
@@ -5208,11 +5248,13 @@ impl XdDesktop {
             return;
         }
         panel.viewport = Some(geometry);
-        if panel.screen.geometry() != geometry {
-            panel.screen.resize(columns, rows);
+        if let Some(session) = panel.selected_mut()
+            && session.screen.geometry() != geometry
+        {
+            session.screen.resize(columns, rows);
         }
-        let terminal_id = panel.terminal_id.clone();
-        let should_open = terminal_id.is_none() && panel.loading && !panel.opening && !panel.closed;
+        let terminal_id = panel.selected.clone();
+        let should_open = panel.sessions.is_empty() && panel.loading && !panel.opening;
         let chat_id = panel.chat_id.clone();
         if should_open {
             panel.opening = true;
@@ -5222,7 +5264,7 @@ impl XdDesktop {
             if let Some(terminal_id) = terminal_id {
                 daemon.terminal_resize(&terminal_id, columns, rows)
             } else if should_open {
-                daemon.terminal_open(&chat_id, columns, rows)
+                daemon.terminal_open(&chat_id, columns, rows, true)
             } else {
                 Ok(())
             }
@@ -5243,7 +5285,7 @@ impl XdDesktop {
         let Some(terminal_id) = self
             .terminal_panel
             .as_ref()
-            .and_then(|panel| panel.terminal_id.clone())
+            .and_then(|panel| panel.selected.clone())
         else {
             return;
         };
@@ -5260,10 +5302,14 @@ impl XdDesktop {
         let Some(terminal_id) = self
             .terminal_panel
             .as_ref()
-            .and_then(|panel| panel.terminal_id.clone())
+            .and_then(|panel| panel.selected.clone())
         else {
             return;
         };
+        self.kill_terminal_id(terminal_id, cx);
+    }
+
+    fn kill_terminal_id(&mut self, terminal_id: String, cx: &mut Context<Self>) {
         if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.terminal_kill(&terminal_id)
             && let Some(panel) = &mut self.terminal_panel
@@ -5273,18 +5319,55 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn restart_terminal(&mut self, cx: &mut Context<Self>) {
+    fn new_terminal_session(&mut self, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
-        let (columns, rows) = panel.viewport.unwrap_or_else(|| panel.screen.geometry());
-        panel.terminal_id = None;
-        panel.screen = TerminalScreen::new(columns, rows);
-        panel.viewport = None;
-        panel.opening = false;
-        panel.loading = true;
-        panel.closed = false;
+        if panel.opening {
+            return;
+        }
+        let (columns, rows) = panel.viewport.unwrap_or((120, 32));
+        let chat_id = panel.chat_id.clone();
+        panel.opening = true;
         panel.error = None;
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.terminal_open(&chat_id, columns, rows, false));
+        if let Err(error) = result
+            && let Some(panel) = &mut self.terminal_panel
+        {
+            panel.opening = false;
+            panel.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn select_terminal(&mut self, terminal_id: String, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.terminal_panel else {
+            return;
+        };
+        if panel.selected.as_deref() == Some(terminal_id.as_str())
+            || !panel
+                .sessions
+                .iter()
+                .any(|session| session.id == terminal_id)
+        {
+            return;
+        }
+        panel.selected = Some(terminal_id.clone());
+        let viewport = panel.viewport;
+        if let Some((columns, rows)) = viewport
+            && let Some(session) = panel.selected_mut()
+        {
+            session.screen.resize(columns, rows);
+            if let Some(daemon) = self.active_daemon().cloned()
+                && let Err(error) = daemon.terminal_resize(&terminal_id, columns, rows)
+                && let Some(panel) = &mut self.terminal_panel
+            {
+                panel.error = Some(error);
+            }
+        }
         cx.notify();
     }
 
@@ -5293,30 +5376,37 @@ impl XdDesktop {
             return;
         };
         panel.loading = false;
-        let Some(terminal) = value
+        panel.opening = false;
+        let previous = panel.selected.clone();
+        let sessions = value
             .get("terminals")
             .and_then(Value::as_array)
-            .and_then(|items| {
-                items.iter().find(|item| {
-                    item.get("id").and_then(Value::as_str) == panel.terminal_id.as_deref()
-                })
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Self::terminal_tab_from_snapshot)
+                    .collect::<Vec<_>>()
             })
-        else {
-            panel.closed = true;
-            return;
-        };
-        panel.title = terminal
+            .unwrap_or_default();
+        panel.sessions = sessions;
+        panel.selected = previous
+            .filter(|selected| panel.sessions.iter().any(|session| &session.id == selected))
+            .or_else(|| panel.sessions.first().map(|session| session.id.clone()));
+    }
+
+    fn terminal_tab_from_snapshot(terminal: &Value) -> Option<TerminalTab> {
+        let id = terminal.get("id")?.as_str()?.to_owned();
+        let title = terminal
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or("Terminal")
             .to_owned();
-        panel.screen = TerminalScreen::new(
-            terminal
-                .get("columns")
-                .and_then(Value::as_u64)
-                .unwrap_or(120) as usize,
-            terminal.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize,
-        );
+        let columns = terminal
+            .get("columns")
+            .and_then(Value::as_u64)
+            .unwrap_or(120) as usize;
+        let rows = terminal.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
+        let mut screen = TerminalScreen::new(columns, rows);
         if let Some(replay) = terminal.get("replay").and_then(Value::as_array) {
             for frame in replay {
                 if let Some(data) = frame
@@ -5324,16 +5414,16 @@ impl XdDesktop {
                     .and_then(Value::as_str)
                     .and_then(|data| STANDARD.decode(data).ok())
                 {
-                    panel.screen.feed(&data);
+                    screen.feed(&data);
                 } else if let (Some(columns), Some(rows)) = (
                     frame.get("columns").and_then(Value::as_u64),
                     frame.get("rows").and_then(Value::as_u64),
                 ) {
-                    panel.screen.resize(columns as usize, rows as usize);
+                    screen.resize(columns as usize, rows as usize);
                 }
             }
         }
-        panel.closed = false;
+        Some(TerminalTab { id, title, screen })
     }
 
     fn set_diff_mode(&mut self, branch: bool, cx: &mut Context<Self>) {
@@ -11731,8 +11821,12 @@ impl Render for XdDesktop {
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
         let terminal_desktop = cx.entity();
         let terminal_pane = self.terminal_panel.as_ref().map(|panel| {
-            let output = panel.screen.rendered();
-            let highlights = output.spans.into_iter().map(|span| {
+            let selected_id = panel.selected.clone();
+            let output = panel.selected().map(|session| session.screen.rendered());
+            let (output_text, output_spans) = output
+                .map(|output| (output.text, output.spans))
+                .unwrap_or_else(|| (String::new(), Vec::new()));
+            let highlights = output_spans.into_iter().map(|span| {
                 (
                     span.range,
                     HighlightStyle {
@@ -11743,8 +11837,49 @@ impl Render for XdDesktop {
                     },
                 )
             });
-            let output = StyledText::new(output.text).with_highlights(highlights);
-            let active = panel.terminal_id.is_some() && !panel.closed && !panel.loading;
+            let output = StyledText::new(output_text).with_highlights(highlights);
+            let active = selected_id.is_some() && !panel.loading;
+            let terminal_tabs = panel
+                .sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| {
+                    let id = session.id.clone();
+                    let close_id = id.clone();
+                    let selected = selected_id.as_deref() == Some(id.as_str());
+                    div()
+                        .id(("terminal-tab", index))
+                        .h_full()
+                        .flex_shrink_0()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .border_b_1()
+                        .border_color(rgb(if selected { accent } else { BORDER }))
+                        .bg(rgb(if selected { SURFACE_HIGH } else { BG }))
+                        .text_xs()
+                        .text_color(rgb(if selected { TEXT } else { MUTED }))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_terminal(id.clone(), cx);
+                        }))
+                        .child(session.title.clone())
+                        .child(
+                            div()
+                                .id(("close-terminal-tab", index))
+                                .px_1()
+                                .rounded_sm()
+                                .hover(|style| style.bg(rgb(0x3c292d)).text_color(rgb(0xf1b3ba)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.kill_terminal_id(close_id.clone(), cx);
+                                }))
+                                .child("×"),
+                        )
+                })
+                .collect::<Vec<_>>();
             div()
                 .w_full()
                 .h(px(terminal_height as f32))
@@ -11765,29 +11900,29 @@ impl Render for XdDesktop {
                         .border_color(rgb(BORDER))
                         .child(
                             div()
+                                .h_full()
                                 .min_w_0()
                                 .flex_1()
+                                .flex()
+                                .items_center()
+                                .overflow_hidden()
+                                .children(terminal_tabs),
+                        )
+                        .child(
+                            div()
+                                .id("new-terminal-session")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
                                 .text_sm()
                                 .text_color(rgb(TEXT))
-                                .child(panel.title.clone()),
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.new_terminal_session(cx)),
+                                )
+                                .child("+"),
                         )
-                        .when(panel.closed, |header| {
-                            header.child(
-                                div()
-                                    .id("restart-terminal")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(rgb(accent))
-                                    .text_xs()
-                                    .text_color(rgb(0xffffff))
-                                    .cursor_pointer()
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.restart_terminal(cx)),
-                                    )
-                                    .child("Restart"),
-                            )
-                        })
                         .when(active, |header| {
                             header.child(
                                 div()
@@ -11827,6 +11962,16 @@ impl Render for XdDesktop {
                             .text_xs()
                             .text_color(rgb(0xaec4ff))
                             .child("Opening terminal…"),
+                    )
+                })
+                .when(!panel.loading && panel.sessions.is_empty(), |pane| {
+                    pane.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("No terminal sessions. Press + to open one."),
                     )
                 })
                 .when_some(panel.error.clone(), |pane, error| {
@@ -15183,6 +15328,7 @@ mod tests {
         }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::TerminalOpen {
             chat_id: "chat".into(),
+            reuse: false,
         }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::RenameFolder {
             folder_id: "workspace".into(),
@@ -15635,6 +15781,44 @@ mod tests {
         assert_eq!(
             terminal_geometry(100_000.0, 100_000.0, 8.0, 19.0),
             (500, 200)
+        );
+    }
+
+    #[test]
+    fn terminal_tabs_restore_replay_and_fall_back_after_close() {
+        let first = XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
+            "id": "terminal-one",
+            "title": "shell one",
+            "columns": 40,
+            "rows": 8,
+            "replay": [{"data": "Zmlyc3Q="}],
+        }))
+        .unwrap();
+        let second = XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
+            "id": "terminal-two",
+            "title": "shell two",
+            "columns": 80,
+            "rows": 12,
+            "replay": [],
+        }))
+        .unwrap();
+        assert!(first.screen.rendered().text.contains("first"));
+        assert_eq!(first.screen.geometry(), (40, 8));
+
+        let mut panel = TerminalPanel {
+            chat_id: "chat".into(),
+            sessions: vec![first, second],
+            selected: Some("terminal-one".into()),
+            viewport: None,
+            opening: false,
+            loading: false,
+            error: None,
+        };
+        panel.remove("terminal-one");
+        assert_eq!(panel.selected.as_deref(), Some("terminal-two"));
+        assert_eq!(
+            panel.selected().map(|session| session.title.as_str()),
+            Some("shell two")
         );
     }
 

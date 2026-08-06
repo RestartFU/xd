@@ -111,6 +111,7 @@ pub enum RequestKind {
     },
     TerminalOpen {
         chat_id: String,
+        reuse: bool,
     },
     TerminalList {
         chat_id: String,
@@ -906,10 +907,19 @@ impl DaemonHandle {
         )
     }
 
-    pub fn terminal_open(&self, chat_id: &str, columns: usize, rows: usize) -> Result<(), String> {
+    pub fn terminal_open(
+        &self,
+        chat_id: &str,
+        columns: usize,
+        rows: usize,
+        reuse: bool,
+    ) -> Result<(), String> {
         self.send(
-            RequestKind::TerminalOpen { chat_id: chat_id.to_owned() },
-            json!({"op": "terminal-open", "chat": chat_id, "columns": columns, "rows": rows, "reuse": true}),
+            RequestKind::TerminalOpen {
+                chat_id: chat_id.to_owned(),
+                reuse,
+            },
+            json!({"op": "terminal-open", "chat": chat_id, "columns": columns, "rows": rows, "reuse": reuse}),
         )
     }
 
