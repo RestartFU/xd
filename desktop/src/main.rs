@@ -797,10 +797,11 @@ struct XdDesktop {
     live_markdown_generation: u64,
     live_markdown_scheduled: Option<u64>,
     pane_resize: Option<PaneResize>,
+    window_settings_generation: u64,
 }
 
 impl XdDesktop {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer_input = cx.new(FileEditor::composer);
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
@@ -1171,12 +1172,51 @@ impl XdDesktop {
             live_markdown_generation: 0,
             live_markdown_scheduled: None,
             pane_resize: None,
+            window_settings_generation: 0,
         };
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.window_bounds_changed(window, cx);
+        })
+        .detach();
         desktop.schedule_connect(Duration::ZERO, cx);
         if desktop.remote_credentials.is_some() {
             desktop.schedule_remote_connect(Duration::ZERO, cx);
         }
         desktop
+    }
+
+    fn window_bounds_changed(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let maximized = window.is_maximized();
+        let bounds = window.bounds();
+        let mut changed = self.settings.window_maximized != maximized;
+        self.settings.window_maximized = maximized;
+        if !maximized {
+            let width = f32::from(bounds.size.width)
+                .round()
+                .clamp(760.0, u16::MAX as f32) as u16;
+            let height = f32::from(bounds.size.height)
+                .round()
+                .clamp(560.0, u16::MAX as f32) as u16;
+            changed |= self.settings.window_width != width || self.settings.window_height != height;
+            self.settings.window_width = width;
+            self.settings.window_height = height;
+        }
+        if !changed {
+            return;
+        }
+        self.window_settings_generation = self.window_settings_generation.saturating_add(1);
+        let generation = self.window_settings_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(300)).await;
+            let _ = this.update(cx, |this, _| {
+                if this.window_settings_generation == generation
+                    && let Err(error) = this.settings.save()
+                {
+                    this.model.connection_error = Some(error);
+                }
+            });
+        })
+        .detach();
     }
 
     fn active_daemon(&self) -> Option<&DaemonHandle> {
@@ -15985,11 +16025,24 @@ fn main() {
             KeyBinding::new("ctrl-v", Paste, Some("TerminalInput")),
             KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
         ]);
-        let bounds = Bounds::centered(None, size(px(1180.0), px(780.0)), cx);
+        let settings = AppSettings::load();
+        let bounds = Bounds::centered(
+            None,
+            size(
+                px(f32::from(settings.window_width.max(760))),
+                px(f32::from(settings.window_height.max(560))),
+            ),
+            cx,
+        );
+        let window_bounds = if settings.window_maximized {
+            WindowBounds::Maximized(bounds)
+        } else {
+            WindowBounds::Windowed(bounds)
+        };
         cx.open_window(
             WindowOptions {
                 focus: true,
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(window_bounds),
                 is_resizable: true,
                 window_min_size: Some(size(px(760.0), px(560.0))),
                 window_background: WindowBackgroundAppearance::Opaque,
@@ -15997,7 +16050,7 @@ fn main() {
                 app_id: Some("xd-dev".into()),
                 ..Default::default()
             },
-            |_, cx| cx.new(XdDesktop::new),
+            |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
         )
         .expect("open xd GPUI window");
         cx.activate(true);
