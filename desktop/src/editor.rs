@@ -1,11 +1,11 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, actions, div, fill, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, ImageFormat, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, Window, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -38,6 +38,7 @@ actions!(
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
     Changed(String),
+    PasteImage { format: ImageFormat, bytes: Vec<u8> },
     Submit,
     Save,
 }
@@ -52,6 +53,7 @@ pub struct FileEditor {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     composer: bool,
+    allow_images: bool,
     placeholder: SharedString,
     syntax_language: Option<String>,
     syntax_spans: Vec<CodeSpan>,
@@ -80,6 +82,7 @@ impl FileEditor {
             last_bounds: None,
             is_selecting: false,
             composer: false,
+            allow_images: false,
             placeholder: "".into(),
             syntax_language: None,
             syntax_spans: Vec::new(),
@@ -87,7 +90,10 @@ impl FileEditor {
     }
 
     pub fn composer(cx: &mut Context<Self>) -> Self {
-        Self::message(cx, "Message xd…")
+        Self {
+            allow_images: true,
+            ..Self::message(cx, "Message xd…")
+        }
     }
 
     pub fn message(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
@@ -209,9 +215,21 @@ impl FileEditor {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
             let text = text.replace("\r\n", "\n").replace('\r', "\n");
             self.replace_text_in_range(None, &text, window, cx);
+        } else if self.allow_images
+            && let Some(ClipboardEntry::Image(image)) = item
+                .into_entries()
+                .find(|entry| matches!(entry, ClipboardEntry::Image(_)))
+        {
+            cx.emit(EditorEvent::PasteImage {
+                format: image.format(),
+                bytes: image.bytes().to_vec(),
+            });
         }
     }
 

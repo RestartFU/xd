@@ -826,6 +826,9 @@ impl XdDesktop {
         let composer_input = cx.new(FileEditor::composer);
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
+            EditorEvent::PasteImage { format, bytes } => {
+                this.attach_clipboard_image(*format, bytes.clone(), cx)
+            }
             EditorEvent::Submit => this.send_composer(cx),
             EditorEvent::Save => {}
         })
@@ -833,6 +836,7 @@ impl XdDesktop {
         let queue_edit_input = cx.new(|cx| FileEditor::message(cx, "Edit queued message…"));
         cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
+            EditorEvent::PasteImage { .. } => {}
             EditorEvent::Submit => this.save_queue_edit(cx),
             EditorEvent::Save => {}
         })
@@ -933,6 +937,7 @@ impl XdDesktop {
                     cx.notify();
                 }
             }
+            EditorEvent::PasteImage { .. } => {}
             EditorEvent::Submit => {}
             EditorEvent::Save => this.save_browse_file(cx),
         })
@@ -7115,6 +7120,65 @@ impl XdDesktop {
             });
         })
         .detach();
+    }
+
+    fn attach_clipboard_image(
+        &mut self,
+        format: gpui::ImageFormat,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.selected_chat.is_none() {
+            return;
+        }
+        if format != gpui::ImageFormat::Png {
+            self.model.connection_error = Some(
+                "That clipboard image is not available as PNG. Save it as PNG and attach it."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.model.draft_attachments.len() >= MAX_ATTACHMENTS {
+            self.model.connection_error = Some(format!(
+                "A message can contain at most {MAX_ATTACHMENTS} images."
+            ));
+            cx.notify();
+            return;
+        }
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            self.model.connection_error = Some("That image is larger than 10 MiB.".into());
+            cx.notify();
+            return;
+        }
+        let total = self
+            .model
+            .draft_attachments
+            .iter()
+            .map(|attachment| attachment.preview.bytes.len())
+            .sum::<usize>();
+        if total.saturating_add(bytes.len()) > MAX_TOTAL_ATTACHMENT_BYTES {
+            self.model.connection_error = Some("Attached images exceed the 20 MiB limit.".into());
+            cx.notify();
+            return;
+        }
+        let name = format!(
+            "paste-{}.png",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        match Attachment::from_png(name, bytes) {
+            Ok(attachment) => {
+                self.model.draft_attachments.push(attachment);
+                self.attachments_dirty = true;
+                self.attachment_generation = self.attachment_generation.saturating_add(1);
+                self.schedule_draft_sync(cx);
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
     }
 
     fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
