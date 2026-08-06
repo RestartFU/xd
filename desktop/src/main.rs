@@ -1235,6 +1235,13 @@ impl XdDesktop {
                 if self
                     .sidebar_edit
                     .as_ref()
+                    .is_some_and(|edit| sidebar_edit_applied(&self.model, edit))
+                {
+                    self.cancel_sidebar_edit(cx);
+                }
+                if self
+                    .sidebar_edit
+                    .as_ref()
                     .is_some_and(|edit| !self.sidebar_target_exists(&edit.target))
                 {
                     self.cancel_sidebar_edit(cx);
@@ -1806,13 +1813,7 @@ impl XdDesktop {
                 self.request_tree();
                 self.select_chat(chat_id.to_owned(), cx);
             }
-            RequestKind::RenameFolder { folder_id, name } => {
-                if self.sidebar_edit.as_ref().is_some_and(|edit| {
-                    edit.target == SidebarTarget::Folder(folder_id) && edit.text.trim() == name
-                }) {
-                    self.cancel_sidebar_edit(cx);
-                }
-            }
+            RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder {
                 folder_id,
                 parent_id,
@@ -1829,13 +1830,7 @@ impl XdDesktop {
                     self.sidebar_delete_submitting = false;
                 }
             }
-            RequestKind::RenameChat { chat_id, title } => {
-                if self.sidebar_edit.as_ref().is_some_and(|edit| {
-                    edit.target == SidebarTarget::Chat(chat_id) && edit.text.trim() == title
-                }) {
-                    self.cancel_sidebar_edit(cx);
-                }
-            }
+            RequestKind::RenameChat { .. } => self.request_tree(),
             RequestKind::MoveChat { chat_id, folder_id } => {
                 if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id)) {
                     self.sidebar_move = None;
@@ -10687,6 +10682,25 @@ fn turn_duration_label(value: &str) -> Option<String> {
     Some(format!("Worked for {duration}"))
 }
 
+fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
+    if !edit.submitting {
+        return false;
+    }
+    let authoritative = match &edit.target {
+        SidebarTarget::Folder(folder_id) => model
+            .folders
+            .iter()
+            .find(|folder| &folder.id == folder_id)
+            .map(|folder| folder.name.as_str()),
+        SidebarTarget::Chat(chat_id) => model
+            .chats
+            .iter()
+            .find(|chat| &chat.id == chat_id)
+            .and_then(|chat| chat.title.as_deref()),
+    };
+    authoritative == Some(edit.text.trim())
+}
+
 fn folder_hidden_by_collapse(
     folders: &[Folder],
     collapsed: &HashSet<String>,
@@ -10857,6 +10871,47 @@ mod tests {
             &folders,
             &collapsed,
             "grandchild"
+        ));
+    }
+
+    #[test]
+    fn sidebar_rename_waits_for_the_authoritative_tree_name() {
+        let model = AppModel {
+            folders: vec![Folder {
+                id: "folder-1".into(),
+                name: "Renamed workspace".into(),
+                parent: None,
+            }],
+            chats: vec![xd_desktop::model::ChatSummary {
+                id: "chat-1".into(),
+                folder: "folder-1".into(),
+                title: Some("Old chat".into()),
+                backend: "codex".into(),
+                working: false,
+            }],
+            ..Default::default()
+        };
+        let workspace = SidebarEdit {
+            target: SidebarTarget::Folder("folder-1".into()),
+            original: "Old workspace".into(),
+            text: "Renamed workspace".into(),
+            submitting: true,
+        };
+        let chat = SidebarEdit {
+            target: SidebarTarget::Chat("chat-1".into()),
+            original: "Old chat".into(),
+            text: "Renamed chat".into(),
+            submitting: true,
+        };
+
+        assert!(sidebar_edit_applied(&model, &workspace));
+        assert!(!sidebar_edit_applied(&model, &chat));
+        assert!(!sidebar_edit_applied(
+            &model,
+            &SidebarEdit {
+                submitting: false,
+                ..workspace
+            }
         ));
     }
 
