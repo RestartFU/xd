@@ -79,9 +79,13 @@ impl FileEditor {
     }
 
     pub fn composer(cx: &mut Context<Self>) -> Self {
+        Self::message(cx, "Message xd…")
+    }
+
+    pub fn message(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         Self {
             composer: true,
-            placeholder: "Message xd…".into(),
+            placeholder: placeholder.into(),
             ..Self::new(cx)
         }
     }

@@ -445,7 +445,7 @@ struct XdDesktop {
     transcript_snapshot: TranscriptSnapshot,
     transcript_loading: bool,
     composer_input: Entity<FileEditor>,
-    queue_edit_input: Entity<ComposerInput>,
+    queue_edit_input: Entity<FileEditor>,
     sidebar_edit_input: Entity<ComposerInput>,
     workspace_create_input: Entity<ComposerInput>,
     workspace_repo_input: Entity<ComposerInput>,
@@ -522,11 +522,10 @@ impl XdDesktop {
             EditorEvent::Submit => this.send_composer(cx),
         })
         .detach();
-        let queue_edit_input = cx.new(|cx| ComposerInput::new(cx, "Edit queued message…"));
+        let queue_edit_input = cx.new(|cx| FileEditor::message(cx, "Edit queued message…"));
         cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
-            ComposerEvent::Submit => this.save_queue_edit(cx),
-            ComposerEvent::Bytes(_) => {}
+            EditorEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
+            EditorEvent::Submit => this.save_queue_edit(cx),
         })
         .detach();
         let sidebar_edit_input = cx.new(|cx| ComposerInput::new(cx, "Name…"));
@@ -7464,10 +7463,11 @@ impl Render for XdDesktop {
                                 .track_focus(&queue_edit_focus)
                                 .mt_2()
                                 .w_full()
-                                .h(px(36.0))
+                                .min_h(px(64.0))
+                                .max_h(px(120.0))
                                 .px_2()
-                                .flex()
-                                .items_center()
+                                .py_2()
+                                .overflow_y_scroll()
                                 .rounded_md()
                                 .border_1()
                                 .border_color(rgb(if queue_edit_focus.is_focused(window) {
