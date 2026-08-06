@@ -4997,6 +4997,20 @@ impl XdDesktop {
         }
     }
 
+    fn toggle_fast(&mut self) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if self.model.working || self.model.backend != "codex" {
+            return;
+        }
+        if let Some(daemon) = &self.daemon
+            && let Err(error) = daemon.set_fast(&chat_id, !self.model.fast)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     fn remove_selected_worktree(&mut self) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
@@ -6608,6 +6622,8 @@ impl Render for XdDesktop {
         .to_owned();
         let can_change_agent =
             selected.is_some() && !working && !self.model.agent_backends.is_empty();
+        let fast = self.model.fast;
+        let can_toggle_fast = can_change_agent && self.model.backend == "codex";
         let access_label = match self.model.access.as_str() {
             "full" => "Full access",
             "edit" => "Edit",
@@ -8318,6 +8334,29 @@ impl Render for XdDesktop {
                     }))
                     .child(format!("Effort: {effort_label}  ▾")),
             )
+            .when(self.model.backend == "codex", |controls| {
+                controls.child(
+                    div()
+                        .id("fast-toggle")
+                        .px_3()
+                        .py_1()
+                        .rounded_full()
+                        .bg(rgb(if fast { 0x26354d } else { SURFACE_HIGH }))
+                        .text_xs()
+                        .text_color(rgb(if can_toggle_fast { TEXT } else { MUTED }))
+                        .when(can_toggle_fast, |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x242428)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if can_toggle_fast {
+                                this.toggle_fast();
+                            }
+                        }))
+                        .child(if fast { "Fast: on" } else { "Fast: off" }),
+                )
+            })
             .child(
                 div()
                     .id("access-menu")

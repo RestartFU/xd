@@ -203,6 +203,8 @@ pub struct AppModel {
     pub effort: String,
     pub access: String,
     pub plan: bool,
+    pub fast: bool,
+    pub claude_mode: bool,
     pub auth_state: String,
     pub commands: Vec<String>,
     pub global_shortcuts: Vec<String>,
@@ -255,6 +257,8 @@ impl AppModel {
             self.effort.clear();
             self.access.clear();
             self.plan = false;
+            self.fast = false;
+            self.claude_mode = false;
             self.auth_state.clear();
             self.commands.clear();
             self.global_shortcuts.clear();
@@ -283,6 +287,8 @@ impl AppModel {
         self.effort.clear();
         self.access.clear();
         self.plan = false;
+        self.fast = false;
+        self.claude_mode = false;
         self.auth_state.clear();
         self.commands.clear();
         self.global_shortcuts.clear();
@@ -325,6 +331,13 @@ impl AppModel {
             .unwrap_or("read-only")
             .to_owned();
         self.plan = body.get("plan").and_then(Value::as_bool).unwrap_or(false);
+        self.fast =
+            self.backend == "codex" && body.get("fast").and_then(Value::as_bool).unwrap_or(false);
+        self.claude_mode = self.backend == "codex"
+            && body
+                .get("claude_mode")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         self.auth_state = body
             .get("auth_state")
             .and_then(Value::as_str)
@@ -564,6 +577,8 @@ impl AppModel {
             effort: "high".into(),
             access: "edit".into(),
             plan: false,
+            fast: false,
+            claude_mode: false,
             auth_state: "signed-in".into(),
             commands: vec!["review".into(), "compact".into()],
             global_shortcuts: Vec::new(),
@@ -720,7 +735,8 @@ mod tests {
             .unwrap();
         model.apply_chat(&json!({
             "backend": "claude", "model": "claude-opus-5", "effort": "high",
-            "access": "edit", "plan": true, "queue": [], "working": false
+            "access": "edit", "plan": true, "fast": true, "claude_mode": true,
+            "queue": [], "working": false
         }));
 
         assert_eq!(model.backend, "claude");
@@ -729,6 +745,8 @@ mod tests {
         assert_eq!(model.effort, "high");
         assert_eq!(model.access, "edit");
         assert!(model.plan);
+        assert!(!model.fast);
+        assert!(!model.claude_mode);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub struct AgentCommand<'a> {
     pub model: &'a str,
     pub effort: &'a str,
     pub access: &'a str,
+    pub fast: bool,
     pub session_id: Option<&'a str>,
     pub environment: &'a [(String, String)],
 }
@@ -139,6 +140,9 @@ impl AgentCommand<'_> {
         let mut command = Command::new(resolve_codex());
         command.arg("exec");
         append_system_prompt(&mut command, self.system_prompt);
+        if self.fast {
+            command.args(["-c", "service_tier=\"priority\""]);
+        }
         if let Some(session_id) = self.session_id {
             command.args(["resume", "--json", "--skip-git-repo-check"]);
             append_model_and_effort(&mut command, self.model, self.effort);
@@ -719,6 +723,7 @@ mod tests {
             model: "gpt-5.6-sol",
             effort: "high",
             access: "edit",
+            fast: true,
             session_id: None,
             environment: &[("API_TOKEN".into(), "private".into())],
         }
@@ -735,6 +740,10 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "-c" && pair[1] == "developer_instructions=\"Always test.\""
         }));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "service_tier=\"priority\""])
+        );
         assert_eq!(args.last().map(String::as_str), Some("hello"));
         assert!(new.get_envs().any(|(name, value)| {
             name == "API_TOKEN" && value.is_some_and(|value| value == "private")
@@ -751,6 +760,7 @@ mod tests {
                 model: "gpt-5.6-sol",
                 effort: "max",
                 access: "full",
+                fast: false,
                 session_id: None,
                 environment: &[],
             }
@@ -774,6 +784,7 @@ mod tests {
                 model: "gpt-5.6-sol",
                 effort: "high",
                 access: "read-only",
+                fast: false,
                 session_id: Some("thread-1"),
                 environment: &[],
             }
@@ -836,6 +847,7 @@ mod tests {
             model: "claude-opus-5",
             effort: "xhigh",
             access: "edit",
+            fast: false,
             session_id: Some("session-1"),
             environment: &[],
         }

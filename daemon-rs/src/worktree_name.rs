@@ -38,6 +38,7 @@ pub(crate) fn generate(spec: WorktreeNameSpec) -> Result<String, String> {
         model: &spec.model,
         effort: &spec.effort,
         access: "read-only",
+        fast: false,
         session_id: None,
         environment: &empty_environment,
     }

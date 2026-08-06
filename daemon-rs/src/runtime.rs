@@ -93,6 +93,7 @@ impl TurnRuntime {
             model: &turn.model,
             effort: &turn.effort,
             access: &turn.access,
+            fast: turn.fast,
             session_id: turn.session_id.as_deref(),
             environment: &turn.environment,
         }

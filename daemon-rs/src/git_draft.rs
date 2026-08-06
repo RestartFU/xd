@@ -70,6 +70,7 @@ impl GitDraftService {
             model: &spec.model,
             effort: &spec.effort,
             access: "read-only",
+            fast: false,
             session_id: None,
             environment: &empty_environment,
         }

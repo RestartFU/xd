@@ -136,6 +136,7 @@ pub struct TurnSpec {
     pub model: String,
     pub effort: String,
     pub access: String,
+    pub fast: bool,
     pub session_id: Option<String>,
     pub label: String,
     pub environment: Vec<(String, String)>,
@@ -4058,7 +4059,7 @@ fn prepare_turn(
 ) -> Result<TurnSpec, StorageError> {
     let chat = transaction
         .query_row(
-            "SELECT folder_id, backend, workdir, model, effort, access, plan, new_worktree, \
+            "SELECT folder_id, backend, workdir, model, effort, access, plan, fast, new_worktree, \
              original_workdir FROM chats WHERE id = ?",
             [chat_id],
             |row| {
@@ -4071,7 +4072,8 @@ fn prepare_turn(
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, bool>(6)?,
                     row.get::<_, bool>(7)?,
-                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, bool>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -4083,9 +4085,9 @@ fn prepare_turn(
         workspace_root,
         &chat.0,
         chat.2.as_deref(),
-        chat.8.as_deref(),
+        chat.9.as_deref(),
     )?;
-    if chat.7 {
+    if chat.8 {
         let source = workdir.clone();
         workdir = create_worktree(
             transaction,
@@ -4144,11 +4146,17 @@ fn prepare_turn(
         model: model.clone(),
         effort: effort.clone(),
         access,
+        fast: chat.1 == "codex" && chat.7,
         session_id,
         label: format!(
-            "{} · {}",
+            "{} · {}{}",
             model_label(&chat.1, &model),
-            effort_label(&effort)
+            effort_label(&effort),
+            if chat.1 == "codex" && chat.7 {
+                " · Fast"
+            } else {
+                ""
+            }
         ),
         environment: Vec::new(),
     })
@@ -4856,6 +4864,29 @@ mod tests {
         assert_eq!(turn.access, "edit");
         assert_eq!(turn.session_id.as_deref(), Some("claude-session"));
         assert_eq!(turn.label, "Claude Opus 5 · Extra high");
+    }
+
+    #[test]
+    fn carries_codex_fast_mode_into_the_turn() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        database
+            .execute("UPDATE chats SET fast = 1 WHERE id = 'chat-1'", [])
+            .unwrap();
+        drop(database);
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
+            .unwrap()
+        else {
+            panic!("first send unexpectedly queued")
+        };
+        assert!(turn.fast);
+        assert_eq!(turn.label, "GPT-5.6 Sol · High · Fast");
     }
 
     #[test]
