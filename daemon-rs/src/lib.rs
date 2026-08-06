@@ -168,6 +168,7 @@ impl Engine {
             },
             Some("messages") => self.read(|store| store.messages(&request)),
             Some("search") => self.read(|store| store.search(&request)),
+            Some("image-read") => self.read(|store| store.image_read(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
             Some("git-pr-status") => self.read(|store| store.git_pull_request_status(&request)),

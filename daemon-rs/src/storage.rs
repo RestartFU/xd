@@ -1363,6 +1363,34 @@ impl StateStore {
         Ok(json!({"ok": true, "results": results}))
     }
 
+    pub fn image_read(&self, request: &Value) -> Result<Value, StorageError> {
+        let supplied = required_string(request, "path", "image-read needs an image path.")?;
+        let supplied = Path::new(supplied);
+        if !supplied.is_absolute() {
+            return Err(StorageError::InvalidRequest(
+                "image-read needs an image path.".into(),
+            ));
+        }
+        let paste_root = fs::canonicalize(&self.paste_root).map_err(|_| invalid_remote_paste())?;
+        let canonical = fs::canonicalize(supplied).map_err(|_| invalid_remote_paste())?;
+        if canonical.parent() != Some(paste_root.as_path()) {
+            return Err(invalid_remote_paste());
+        }
+        let metadata = fs::symlink_metadata(supplied).map_err(|_| invalid_remote_paste())?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_IMAGE_BYTES as u64 {
+            return Err(invalid_remote_paste());
+        }
+        let data = fs::read(&canonical).map_err(|_| invalid_remote_paste())?;
+        if data.len() > MAX_IMAGE_BYTES || !data.starts_with(PNG_SIGNATURE) {
+            return Err(invalid_remote_paste());
+        }
+        Ok(json!({
+            "ok": true,
+            "mime": "image/png",
+            "data": STANDARD.encode(data),
+        }))
+    }
+
     pub fn diff_read(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "diff-read needs a chat and read type.")?;
         let kind = required_string(request, "read", "diff-read needs a chat and read type.")?;
@@ -4094,6 +4122,10 @@ fn now_microseconds() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+fn invalid_remote_paste() -> StorageError {
+    StorageError::InvalidRequest("That image is not a remote paste.".into())
+}
+
 fn validate_attachments(
     value: &Value,
     allow_empty: bool,
@@ -5544,6 +5576,43 @@ mod tests {
         assert_eq!(
             fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+        let read = store
+            .image_read(&json!({
+                "path": first_path.to_string_lossy(),
+                "preview": true,
+            }))
+            .unwrap();
+        assert_eq!(read["mime"], "image/png");
+        assert_eq!(
+            STANDARD.decode(read["data"].as_str().unwrap()).unwrap(),
+            PNG_SIGNATURE
+        );
+
+        let outside = fixture.root.join("outside.png");
+        fs::write(&outside, PNG_SIGNATURE).unwrap();
+        assert!(
+            store
+                .image_read(&json!({"path": outside.to_string_lossy()}))
+                .unwrap_err()
+                .to_string()
+                .contains("not a remote paste")
+        );
+        let linked = fixture.root.join("remote-pasted").join("linked.png");
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        assert!(
+            store
+                .image_read(&json!({"path": linked.to_string_lossy()}))
+                .unwrap_err()
+                .to_string()
+                .contains("not a remote paste")
+        );
+        assert!(
+            store
+                .image_read(&json!({"path": "relative.png"}))
+                .unwrap_err()
+                .to_string()
+                .contains("image path")
         );
 
         let second = store
