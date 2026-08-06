@@ -39,7 +39,7 @@ use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
     Left, Paste, Right, SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit, Tab, Up,
 };
-use settings::{AccentPreset, AppSettings};
+use settings::{AccentPreset, AppSettings, GitWriter};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 use voice_input::{CaptureEvent, VoiceRecorder};
@@ -228,6 +228,12 @@ enum ComposerMenu {
     Workspace,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsMenu {
+    GitWriter,
+    GitWriterModel,
+}
+
 #[derive(Clone, Debug)]
 enum ComposerChoice {
     Model { backend: String, model: String },
@@ -272,6 +278,7 @@ struct XdDesktop {
     model: AppModel,
     settings: AppSettings,
     settings_open: bool,
+    settings_menu: Option<SettingsMenu>,
     auth_open: bool,
     secrets_panel: Option<SecretsPanel>,
     auth_providers: Vec<AuthProvider>,
@@ -493,6 +500,7 @@ impl XdDesktop {
             },
             settings: AppSettings::load(),
             settings_open: false,
+            settings_menu: None,
             auth_open: false,
             secrets_panel: None,
             auth_providers: Vec::new(),
@@ -2314,9 +2322,34 @@ impl XdDesktop {
 
     fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
+        self.settings_menu = None;
         if self.settings_open {
             self.search_generation = self.search_generation.saturating_add(1);
             self.search = None;
+        }
+        cx.notify();
+    }
+
+    fn toggle_settings_menu(&mut self, menu: SettingsMenu, cx: &mut Context<Self>) {
+        self.settings_menu = (self.settings_menu != Some(menu)).then_some(menu);
+        cx.notify();
+    }
+
+    fn set_git_writer(&mut self, writer: GitWriter, cx: &mut Context<Self>) {
+        self.settings.git_writer = writer;
+        self.settings.git_writer_model = None;
+        self.settings_menu = None;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn set_git_writer_model(&mut self, model: String, cx: &mut Context<Self>) {
+        self.settings.git_writer_model = Some(model);
+        self.settings_menu = None;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
         }
         cx.notify();
     }
@@ -3075,7 +3108,15 @@ impl XdDesktop {
             .daemon
             .as_ref()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
-            .and_then(|daemon| daemon.git_draft_commit(&chat_id, &request, generation));
+            .and_then(|daemon| {
+                daemon.git_draft_commit(
+                    &chat_id,
+                    &request,
+                    self.settings.git_writer.backend(),
+                    self.settings.git_writer_model.as_deref(),
+                    generation,
+                )
+            });
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
         {
@@ -7922,6 +7963,85 @@ impl Render for XdDesktop {
                         .into_any_element(),
                 );
             }
+            let writer = self.settings.git_writer;
+            let mut writer_buttons = Vec::new();
+            for (index, choice) in GitWriter::ALL.into_iter().enumerate() {
+                let selected = writer == choice;
+                writer_buttons.push(
+                    div()
+                        .id(("git-writer-choice", index))
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_git_writer(choice, cx);
+                        }))
+                        .child(choice.label())
+                        .when(selected, |row| {
+                            row.child(div().text_color(rgb(accent)).child("✓"))
+                        })
+                        .into_any_element(),
+                );
+            }
+            let writer_backend = writer.backend();
+            let writer_backend_catalog = writer_backend.and_then(|backend| {
+                self.model
+                    .agent_backends
+                    .iter()
+                    .find(|candidate| candidate.id == backend)
+            });
+            let selected_writer_model =
+                self.settings.git_writer_model.as_deref().or_else(|| {
+                    writer_backend_catalog.map(|backend| backend.default_model.as_str())
+                });
+            let writer_model_label = writer_backend_catalog
+                .and_then(|backend| {
+                    backend
+                        .models
+                        .iter()
+                        .find(|model| Some(model.id.as_str()) == selected_writer_model)
+                })
+                .map(|model| model.name.clone())
+                .or_else(|| selected_writer_model.map(str::to_owned))
+                .unwrap_or_else(|| "Default model".into());
+            let mut model_buttons = Vec::new();
+            if let Some(backend) = writer_backend_catalog {
+                for (index, model) in backend.models.iter().enumerate() {
+                    let model_id = model.id.clone();
+                    let selected = Some(model.id.as_str()) == selected_writer_model;
+                    model_buttons.push(
+                        div()
+                            .id(("git-writer-model-choice", index))
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_git_writer_model(model_id.clone(), cx);
+                            }))
+                            .child(model.name.clone())
+                            .when(selected, |row| {
+                                row.child(div().text_color(rgb(accent)).child("✓"))
+                            })
+                            .into_any_element(),
+                    );
+                }
+            }
             let notifications = self.settings.notifications;
             let speech = self.settings.speech;
             div()
@@ -7933,7 +8053,10 @@ impl Render for XdDesktop {
                 .bg(rgba(0x00000099))
                 .child(
                     div()
+                        .id("app-settings-panel")
                         .w(px(440.0))
+                        .max_h(px(680.0))
+                        .overflow_y_scroll()
                         .p_4()
                         .flex()
                         .flex_col()
@@ -7974,6 +8097,126 @@ impl Render for XdDesktop {
                                 .gap_2()
                                 .child(div().text_xs().text_color(rgb(MUTED)).child("ACCENT COLOR"))
                                 .child(div().flex().flex_wrap().gap_2().children(accent_buttons)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child("GIT WRITING ASSISTANT"),
+                                )
+                                .child(
+                                    div()
+                                        .id("open-git-writer-menu")
+                                        .w_full()
+                                        .p_3()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(BORDER))
+                                        .bg(rgb(SURFACE))
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_settings_menu(SettingsMenu::GitWriter, cx);
+                                        }))
+                                        .child(writer.label())
+                                        .child(div().text_color(rgb(MUTED)).child(
+                                            if self.settings_menu == Some(SettingsMenu::GitWriter) {
+                                                "▴"
+                                            } else {
+                                                "▾"
+                                            },
+                                        )),
+                                )
+                                .when(
+                                    self.settings_menu == Some(SettingsMenu::GitWriter),
+                                    |section| {
+                                        section.child(
+                                            div()
+                                                .w_full()
+                                                .p_1()
+                                                .rounded_lg()
+                                                .border_1()
+                                                .border_color(rgb(BORDER))
+                                                .bg(rgb(SURFACE))
+                                                .children(writer_buttons),
+                                        )
+                                    },
+                                )
+                                .when(writer_backend.is_some(), |section| {
+                                    section
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child("MODEL"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("open-git-writer-model-menu")
+                                                .w_full()
+                                                .p_3()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .rounded_lg()
+                                                .border_1()
+                                                .border_color(rgb(BORDER))
+                                                .bg(rgb(SURFACE))
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_settings_menu(
+                                                        SettingsMenu::GitWriterModel,
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child(writer_model_label)
+                                                .child(div().text_color(rgb(MUTED)).child(
+                                                    if self.settings_menu
+                                                        == Some(SettingsMenu::GitWriterModel)
+                                                    {
+                                                        "▴"
+                                                    } else {
+                                                        "▾"
+                                                    },
+                                                )),
+                                        )
+                                        .when(
+                                            self.settings_menu
+                                                == Some(SettingsMenu::GitWriterModel),
+                                            |section| {
+                                                section.child(
+                                                    div()
+                                                        .w_full()
+                                                        .p_1()
+                                                        .rounded_lg()
+                                                        .border_1()
+                                                        .border_color(rgb(BORDER))
+                                                        .bg(rgb(SURFACE))
+                                                        .children(model_buttons),
+                                                )
+                                            },
+                                        )
+                                })
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child("Used for AI commit and pull request drafts."),
+                                ),
                         )
                         .child(
                             div()

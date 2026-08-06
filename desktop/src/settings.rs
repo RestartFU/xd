@@ -63,12 +63,43 @@ impl AccentPreset {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitWriter {
+    #[default]
+    Chat,
+    Claude,
+    Codex,
+}
+
+impl GitWriter {
+    pub const ALL: [Self; 3] = [Self::Chat, Self::Claude, Self::Codex];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Use chat model",
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    pub fn backend(self) -> Option<&'static str> {
+        match self {
+            Self::Chat => None,
+            Self::Claude => Some("claude"),
+            Self::Codex => Some("codex"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub accent: AccentPreset,
     pub notifications: bool,
     pub speech: bool,
+    pub git_writer: GitWriter,
+    pub git_writer_model: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -77,6 +108,8 @@ impl Default for AppSettings {
             accent: AccentPreset::Blue,
             notifications: true,
             speech: false,
+            git_writer: GitWriter::Chat,
+            git_writer_model: None,
         }
     }
 }
@@ -167,6 +200,8 @@ mod tests {
             accent: AccentPreset::Purple,
             notifications: false,
             speech: true,
+            git_writer: GitWriter::Claude,
+            git_writer_model: Some("claude-opus-5".into()),
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);

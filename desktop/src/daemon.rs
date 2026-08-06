@@ -661,20 +661,29 @@ impl DaemonHandle {
         &self,
         chat_id: &str,
         request: &str,
+        backend: Option<&str>,
+        model: Option<&str>,
         generation: u64,
     ) -> Result<(), String> {
+        let mut body = json!({
+            "op": "git-draft",
+            "chat": chat_id,
+            "kind": "commit",
+            "request": request,
+        });
+        if let Some(backend) = backend {
+            body["backend"] = Value::String(backend.to_owned());
+        }
+        if let Some(model) = model {
+            body["model"] = Value::String(model.to_owned());
+        }
         self.send(
             RequestKind::GitDraft {
                 chat_id: chat_id.to_owned(),
                 request: request.to_owned(),
                 generation,
             },
-            json!({
-                "op": "git-draft",
-                "chat": chat_id,
-                "kind": "commit",
-                "request": request,
-            }),
+            body,
         )
     }
 

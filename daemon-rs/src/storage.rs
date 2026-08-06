@@ -1275,7 +1275,7 @@ impl StateStore {
                 "A valid Git draft request id is required.".into(),
             ));
         }
-        let (backend, model, effort, workdir) = {
+        let (chat_backend, chat_model, chat_effort, workdir) = {
             let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
             let (backend, model, effort) = database
                 .query_row(
@@ -1294,10 +1294,33 @@ impl StateStore {
             let workdir = resolve_chat_workdir(&database, &self.workspace_root, chat_id)?;
             (backend, model, effort, workdir)
         };
+        validate_backend(&chat_backend)?;
+        let requested_backend = request.get("backend").and_then(Value::as_str);
+        if request.get("backend").is_some() && requested_backend.is_none() {
+            return Err(StorageError::InvalidRequest(
+                "Git draft backend must be a string.".into(),
+            ));
+        }
+        let backend = requested_backend.unwrap_or(&chat_backend).to_owned();
         validate_backend(&backend)?;
-        let model = model.unwrap_or_else(|| default_model(&backend).into());
+        let requested_model = request.get("model").and_then(Value::as_str);
+        if request.get("model").is_some() && requested_model.is_none() {
+            return Err(StorageError::InvalidRequest(
+                "Git draft model must be a string.".into(),
+            ));
+        }
+        let model = requested_model
+            .map(str::to_owned)
+            .or_else(|| {
+                (backend == chat_backend)
+                    .then(|| chat_model.clone())
+                    .flatten()
+            })
+            .unwrap_or_else(|| default_model(&backend).into());
         validate_model(&backend, &model)?;
-        let effort = effort
+        let effort = (backend == chat_backend)
+            .then_some(chat_effort)
+            .flatten()
             .filter(|effort| effort_supported(&backend, effort))
             .unwrap_or_else(|| "high".into());
         let repository = git_repository_root(&workdir)?;
@@ -3879,6 +3902,18 @@ mod tests {
         assert!(draft.prompt.contains("tracked.txt"));
         assert!(draft.prompt.contains("untracked.txt"));
         assert!(draft.system_prompt.contains("untrusted data"));
+        let configured = store
+            .prepare_git_draft(&json!({
+                "chat": chat,
+                "kind": "commit",
+                "request": "configured-draft",
+                "backend": "claude",
+                "model": "claude-haiku-4-5",
+            }))
+            .unwrap();
+        assert_eq!(configured.backend, "claude");
+        assert_eq!(configured.model, "claude-haiku-4-5");
+        assert_eq!(configured.effort, "high");
         assert!(
             store
                 .prepare_git_draft(&json!({
