@@ -25,6 +25,7 @@ mod claude_proxy;
 mod cli_versions;
 mod git_draft;
 mod pairing;
+mod repository_monitor;
 mod runtime;
 mod secrets;
 mod self_update;
@@ -38,6 +39,7 @@ use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 use pairing::{PairingService, Transport, generate_token, token_hash};
+use repository_monitor::RepositoryMonitor;
 pub use runtime::TurnRuntime;
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
@@ -96,6 +98,7 @@ pub struct Engine {
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     git_actions: Arc<Mutex<()>>,
+    repository_monitor: RepositoryMonitor,
     self_update: SelfUpdate,
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
@@ -137,6 +140,7 @@ impl Engine {
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             git_actions: Arc::new(Mutex::new(())),
+            repository_monitor: RepositoryMonitor::disabled(),
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
@@ -157,6 +161,7 @@ impl Engine {
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
         let self_update = SelfUpdate::new(events.clone());
+        let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
         let engine = Self {
             runtime: Some(TurnRuntime::new(
                 store.clone(),
@@ -172,6 +177,7 @@ impl Engine {
             secrets,
             git_drafts,
             git_actions: Arc::new(Mutex::new(())),
+            repository_monitor,
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
@@ -231,8 +237,8 @@ impl Engine {
             Some("repository-file-write") => {
                 self.read(|store| store.write_repository_file(&request))
             }
-            Some("git-commit") => self.read(|store| store.git_commit(&request)),
-            Some("git-push") => self.read(|store| store.git_push(&request)),
+            Some("git-commit") => self.git_commit(&request),
+            Some("git-push") => self.git_push(&request),
             Some("git-action") => self.git_action(&request),
             Some("agent-catalog") => self.read(|store| store.agent_catalog()),
             Some("agent-secrets") => match self.secret_folder(&request) {
@@ -600,6 +606,7 @@ impl Engine {
         if let Err(error) = store.chat(chat_id) {
             return error_reply(error);
         }
+        self.repository_monitor.watch(chat_id);
         let chat_id = chat_id.to_owned();
         let request_id = request
             .get("request")
@@ -670,6 +677,7 @@ impl Engine {
         let store = store.clone();
         let events = self.events.clone();
         let action_lock = self.git_actions.clone();
+        let repository_monitor = self.repository_monitor.handle();
         thread::Builder::new()
             .name("xd-git-action".into())
             .spawn(move || {
@@ -692,6 +700,7 @@ impl Engine {
                     });
                 match result {
                     Ok(state) => {
+                        repository_monitor.reset(&chat_id);
                         if let (Some(event), Some(state)) =
                             (event.as_object_mut(), state.as_object())
                         {
@@ -706,6 +715,44 @@ impl Engine {
             })
             .map(|_| json!({"ok": true}))
             .unwrap_or_else(|error| error_reply(format!("Cannot start Git action: {error}")))
+    }
+
+    fn git_commit(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        let chat_id = request
+            .get("chat")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match store.git_commit(request) {
+            Ok(reply) => {
+                if let Some(chat_id) = chat_id {
+                    self.repository_monitor.handle().reset(&chat_id);
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn git_push(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        let chat_id = request
+            .get("chat")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match store.git_push(request) {
+            Ok(reply) => {
+                if let Some(chat_id) = chat_id {
+                    self.repository_monitor.handle().reset(&chat_id);
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
     }
 
     fn terminal_list(&self, request: &Value) -> Value {

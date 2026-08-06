@@ -71,6 +71,9 @@ pub enum RequestKind {
         chat_id: String,
         generation: u64,
     },
+    GitState {
+        chat_id: String,
+    },
     GitDraft {
         chat_id: String,
         kind: String,
@@ -779,6 +782,15 @@ impl DaemonHandle {
                 generation,
             },
             json!({"op": "git-status", "chat": chat_id}),
+        )
+    }
+
+    pub fn git_state(&self, chat_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::GitState {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "git-state", "chat": chat_id}),
         )
     }
 

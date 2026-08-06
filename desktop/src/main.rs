@@ -1376,6 +1376,7 @@ impl XdDesktop {
                 | RequestKind::VoiceMutation { .. }
                 | RequestKind::DiffRead { .. }
                 | RequestKind::GitStatus { .. }
+                | RequestKind::GitState { .. }
                 | RequestKind::GitDraft { .. }
                 | RequestKind::GitPullRequestStatus { .. }
                 | RequestKind::GitPullRequestCreate { .. }
@@ -1874,6 +1875,9 @@ impl XdDesktop {
                     if let Some(daemon) = &self.daemon {
                         let _ = daemon.tree();
                         let _ = daemon.agent_catalog();
+                        if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
+                            let _ = daemon.git_state(chat_id);
+                        }
                     }
                 }
                 DaemonUpdate::Disconnected { message } => {
@@ -1940,6 +1944,11 @@ impl XdDesktop {
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
+                if let Some(chat_id) = self.model.selected_chat.as_deref()
+                    && let Some(daemon) = self.active_daemon()
+                {
+                    let _ = daemon.git_state(chat_id);
+                }
             }
             DaemonUpdate::Disconnected { message } => {
                 if self.connection_generation != generation {
@@ -2046,6 +2055,7 @@ impl XdDesktop {
                 &kind,
                 RequestKind::DiffRead { .. }
                     | RequestKind::GitStatus { .. }
+                    | RequestKind::GitState { .. }
                     | RequestKind::GitDraft { .. }
                     | RequestKind::GitPullRequestStatus { .. }
                     | RequestKind::GitPullRequestCreate { .. }
@@ -2880,6 +2890,7 @@ impl XdDesktop {
                     }
                 }
             }
+            RequestKind::GitState { .. } => {}
             RequestKind::FileBrowseList {
                 chat_id,
                 path,
@@ -3642,6 +3653,14 @@ impl XdDesktop {
             "changed" if self.event_is_active(&body) => {
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.request_chat(&chat_id);
+                }
+            }
+            "repository-changed" if self.event_is_active(&body) => {
+                if let Some(chat_id) = self.model.selected_chat.clone() {
+                    self.request_chat(&chat_id);
+                    if self.diff_panel.is_some() {
+                        self.refresh_diff(cx);
+                    }
                 }
             }
             "draft" if self.event_is_active(&body) => {
@@ -6915,6 +6934,11 @@ impl XdDesktop {
         self.transcript.reset(0);
         self.request_chat(&chat_id);
         self.request_messages(&chat_id);
+        if let Some(daemon) = self.active_daemon()
+            && let Err(error) = daemon.git_state(&chat_id)
+        {
+            self.model.connection_error = Some(error);
+        }
         self.request_shortcuts();
         self.repo_file_filter.clear();
         self.repo_file_filter_input

@@ -1694,6 +1694,37 @@ impl StateStore {
         Ok(repository_action_state(Path::new(&workdir)))
     }
 
+    pub(crate) fn repository_head_signature(&self, chat_id: &str) -> String {
+        let workdir = match self.database.lock().ok().and_then(|database| {
+            resolve_chat_workdir(&database, &self.workspace_root, chat_id).ok()
+        }) {
+            Some(workdir) => workdir,
+            None => return String::new(),
+        };
+        let Ok((status, stdout, _)) = run_git(
+            Path::new(&workdir),
+            &[
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=no",
+            ],
+        ) else {
+            return String::new();
+        };
+        if !status.success() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&stdout)
+            .lines()
+            .filter(|line| line.starts_with("# branch.oid ") || line.starts_with("# branch.head "))
+            .fold(String::new(), |mut signature, line| {
+                signature.push_str(line);
+                signature.push('\n');
+                signature
+            })
+    }
+
     pub(crate) fn perform_git_action(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "git-action needs a chat id and action.")?;
         let action = required_string(request, "action", "git-action needs a chat id and action.")?;
