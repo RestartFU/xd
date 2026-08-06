@@ -545,6 +545,7 @@ enum WorkspacePathTarget {
     CreateRepository,
     DefaultsWorkdir { folder_id: String },
     DefaultsRepository { folder_id: String },
+    CreateChat { folder_id: String, title: String },
 }
 
 #[derive(Clone)]
@@ -2123,9 +2124,10 @@ impl XdDesktop {
                         self.pending_speech = None;
                     }
                 }
-                RequestKind::NewChat { folder_id, title }
-                    if self.creating_chat_folder.as_deref() == Some(folder_id)
-                        && self.chat_create_title.trim() == title =>
+                RequestKind::NewChat {
+                    folder_id, title, ..
+                } if self.creating_chat_folder.as_deref() == Some(folder_id)
+                    && self.chat_create_title.trim() == title =>
                 {
                     self.chat_create_submitting = false;
                 }
@@ -2148,6 +2150,12 @@ impl XdDesktop {
                     if let Some(defaults) = &mut self.workspace_defaults {
                         defaults.loading = false;
                     }
+                }
+                RequestKind::FolderSettings { folder_id }
+                    if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
+                        && self.chat_create_submitting =>
+                {
+                    self.chat_create_submitting = false;
                 }
                 RequestKind::SetFolderSettings { folder_id }
                     if self
@@ -3207,7 +3215,7 @@ impl XdDesktop {
                         .unwrap_or_default()
                         .to_owned();
                     self.workspace_defaults = Some(WorkspaceDefaults {
-                        folder_id,
+                        folder_id: folder_id.clone(),
                         backend: value
                             .get("backend")
                             .and_then(Value::as_str)
@@ -3231,6 +3239,20 @@ impl XdDesktop {
                     self.workspace_repo_default_input
                         .update(cx, |input, cx| input.set_text(repo, cx));
                 }
+                if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
+                    && self.chat_create_submitting
+                {
+                    let title = self.chat_create_title.clone();
+                    let start = value
+                        .get("effective_workdir")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    self.open_directory_browser(
+                        WorkspacePathTarget::CreateChat { folder_id, title },
+                        start,
+                        cx,
+                    );
+                }
             }
             RequestKind::SetFolderSettings { folder_id } => {
                 if self
@@ -3242,8 +3264,11 @@ impl XdDesktop {
                 }
                 self.request_tree();
             }
-            RequestKind::NewChat { folder_id, title } => {
+            RequestKind::NewChat {
+                folder_id, title, ..
+            } => {
                 let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
+                    self.chat_create_submitting = false;
                     self.model.connection_error = Some("The daemon returned no chat id.".into());
                     return;
                 };
@@ -3489,7 +3514,7 @@ impl XdDesktop {
                         self.workspace_clone_status = Some("Repository cloned".into());
                     }
                     if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-                        && let Err(error) = daemon.new_chat(folder_id, "New Chat")
+                        && let Err(error) = daemon.new_chat(folder_id, "New Chat", None)
                     {
                         self.endpoint_model_mut(endpoint).connection_error = Some(error);
                     }
@@ -3508,7 +3533,7 @@ impl XdDesktop {
                 }
             }
         } else if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-            && let Err(error) = daemon.new_chat(folder_id, "New Chat")
+            && let Err(error) = daemon.new_chat(folder_id, "New Chat", None)
         {
             self.endpoint_model_mut(endpoint).connection_error = Some(error);
         }
@@ -3543,7 +3568,7 @@ impl XdDesktop {
                     && self.pending_clone_chats.remove(key)
                 {
                     if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-                        && let Err(error) = daemon.new_chat(&key.1, "New Chat")
+                        && let Err(error) = daemon.new_chat(&key.1, "New Chat", None)
                     {
                         self.endpoint_model_mut(endpoint).connection_error = Some(error);
                     }
@@ -4069,7 +4094,17 @@ impl XdDesktop {
                     optional_trimmed(&defaults.repo).or_else(|| optional_trimmed(&defaults.workdir))
                 })
                 .map(str::to_owned),
+            WorkspacePathTarget::CreateChat { .. } => None,
         };
+        self.open_directory_browser(target, start, cx);
+    }
+
+    fn open_directory_browser(
+        &mut self,
+        target: WorkspacePathTarget,
+        start: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         let generation = self.workspace_path_generation;
         self.directory_browser = Some(DirectoryBrowser {
@@ -4202,6 +4237,16 @@ impl XdDesktop {
                         .update(cx, |input, cx| input.set_text(path, cx));
                 }
             }
+            WorkspacePathTarget::CreateChat { folder_id, title } => {
+                let result = self
+                    .active_daemon()
+                    .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+                    .and_then(|daemon| daemon.new_chat(&folder_id, &title, Some(&path)));
+                if let Err(error) = result {
+                    self.chat_create_submitting = false;
+                    self.model.connection_error = Some(error);
+                }
+            }
             _ => {}
         }
         cx.notify();
@@ -4209,7 +4254,18 @@ impl XdDesktop {
 
     fn close_directory_browser(&mut self, cx: &mut Context<Self>) {
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
-        if self.directory_browser.take().is_some() {
+        let target = self.directory_browser.take().map(|browser| browser.target);
+        if let Some(WorkspacePathTarget::CreateChat { folder_id, title }) = target.as_ref() {
+            let result = self
+                .active_daemon()
+                .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+                .and_then(|daemon| daemon.new_chat(folder_id, title, None));
+            if let Err(error) = result {
+                self.chat_create_submitting = false;
+                self.model.connection_error = Some(error);
+            }
+        }
+        if target.is_some() {
             cx.notify();
         }
     }
@@ -4303,7 +4359,7 @@ impl XdDesktop {
         let result = self
             .active_daemon()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
-            .and_then(|daemon| daemon.new_chat(&folder_id, title));
+            .and_then(|daemon| daemon.folder_settings(&folder_id));
         match result {
             Ok(()) => {
                 self.chat_create_title = title.to_owned();
@@ -4315,6 +4371,8 @@ impl XdDesktop {
     }
 
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        self.directory_browser = None;
         self.creating_chat_folder = None;
         self.chat_create_title.clear();
         self.chat_create_submitting = false;
@@ -15578,6 +15636,12 @@ impl Render for XdDesktop {
         });
 
         let directory_overlay = self.directory_browser.clone().map(|browser| {
+            let default_label = if matches!(browser.target, WorkspacePathTarget::CreateChat { .. })
+            {
+                "Use workspace default"
+            } else {
+                "Cancel"
+            };
             let can_ascend = browser
                 .path
                 .as_deref()
@@ -15759,7 +15823,7 @@ impl Render for XdDesktop {
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.close_directory_browser(cx);
                                         }))
-                                        .child("Cancel"),
+                                        .child(default_label),
                                 ),
                         ),
                 )

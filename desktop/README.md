@@ -15,7 +15,7 @@ Current milestone:
 - clickable workspace/chat sidebar backed by real daemon tree data;
 - persisted active-chat restoration with deletion-safe fallback;
 - persisted workspace expansion state with stale-folder cleanup;
-- workspace and chat creation controls;
+- workspace and chat creation controls with per-chat daemon-side working-directory selection;
 - daemon-backed folder browsing for local and paired existing repositories and workspace path defaults;
 - first-message generated/existing-worktree selection, configured-writer AI naming, and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;

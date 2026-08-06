@@ -157,6 +157,7 @@ pub enum RequestKind {
     NewChat {
         folder_id: String,
         title: String,
+        workdir: Option<String>,
     },
     RenameFolder {
         folder_id: String,
@@ -645,13 +646,23 @@ impl DaemonHandle {
         )
     }
 
-    pub fn new_chat(&self, folder_id: &str, title: &str) -> Result<(), String> {
+    pub fn new_chat(
+        &self,
+        folder_id: &str,
+        title: &str,
+        workdir: Option<&str>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "new-chat", "folder": folder_id, "title": title});
+        if let Some(workdir) = workdir {
+            body["workdir"] = Value::String(workdir.to_owned());
+        }
         self.send(
             RequestKind::NewChat {
                 folder_id: folder_id.to_owned(),
                 title: title.to_owned(),
+                workdir: workdir.map(str::to_owned),
             },
-            json!({"op": "new-chat", "folder": folder_id, "title": title}),
+            body,
         )
     }
 
@@ -1761,6 +1772,80 @@ mod tests {
                 },
                 ..
             } if path == "/srv/workspaces"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn new_chats_send_selected_workdirs_and_omit_workspace_defaults() {
+        let directory =
+            env::temp_dir().join(format!("xd-dev-new-chat-workdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for (title, workdir) in [
+                ("Selected directory", Some("/srv/workspaces/project")),
+                ("Workspace default", None),
+            ] {
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["op"], "new-chat");
+                assert_eq!(request["folder"], "folder-1");
+                assert_eq!(request["title"], title);
+                match workdir {
+                    Some(workdir) => assert_eq!(request["workdir"], workdir),
+                    None => assert!(request.get("workdir").is_none()),
+                }
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+            }
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .new_chat(
+                "folder-1",
+                "Selected directory",
+                Some("/srv/workspaces/project"),
+            )
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::NewChat {
+                    folder_id,
+                    title,
+                    workdir: Some(workdir),
+                },
+                ..
+            } if folder_id == "folder-1"
+                && title == "Selected directory"
+                && workdir == "/srv/workspaces/project"
+        ));
+        daemon
+            .new_chat("folder-1", "Workspace default", None)
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::NewChat {
+                    folder_id,
+                    title,
+                    workdir: None,
+                },
+                ..
+            } if folder_id == "folder-1" && title == "Workspace default"
         ));
 
         server.join().unwrap();
