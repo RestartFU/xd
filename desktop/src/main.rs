@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(target_os = "linux")]
@@ -433,6 +433,27 @@ struct SecretsPanel {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct PairedDevice {
+    id: String,
+    name: String,
+    created_at: i64,
+    last_seen: i64,
+    #[serde(default)]
+    connected: bool,
+}
+
+#[derive(Clone, Default)]
+struct DevicesPanel {
+    devices: Vec<PairedDevice>,
+    loading: bool,
+    mutating: Option<String>,
+    editing_id: Option<String>,
+    edit_name: String,
+    revoke_confirmation: Option<String>,
+    error: Option<String>,
+}
+
 struct XdDesktop {
     model: AppModel,
     settings: AppSettings,
@@ -440,6 +461,7 @@ struct XdDesktop {
     settings_menu: Option<SettingsMenu>,
     auth_open: bool,
     secrets_panel: Option<SecretsPanel>,
+    devices_panel: Option<DevicesPanel>,
     auth_providers: Vec<AuthProvider>,
     auth_input_text: String,
     voice_input: VoiceInput,
@@ -469,6 +491,7 @@ struct XdDesktop {
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
+    device_name_input: Entity<ComposerInput>,
     question_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
@@ -678,6 +701,19 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) => {}
         })
         .detach();
+        let device_name_input = cx.new(|cx| ComposerInput::new(cx, "Device name…"));
+        cx.subscribe(&device_name_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.devices_panel {
+                    panel.edit_name = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.save_device_name(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
         let question_input = cx.new(|cx| ComposerInput::new(cx, "Type your answer…"));
         cx.subscribe(&question_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -700,6 +736,7 @@ impl XdDesktop {
             settings_menu: None,
             auth_open: false,
             secrets_panel: None,
+            devices_panel: None,
             auth_providers: Vec::new(),
             auth_input_text: String::new(),
             voice_input: VoiceInput::default(),
@@ -729,6 +766,7 @@ impl XdDesktop {
             auth_input,
             secret_name_input,
             secret_value_input,
+            device_name_input,
             question_input,
             composer: String::new(),
             queue_edit: None,
@@ -856,6 +894,11 @@ impl XdDesktop {
                     panel.submitting = false;
                     panel.error = Some("Agent secrets disconnected.".into());
                 }
+                if let Some(panel) = &mut self.devices_panel {
+                    panel.loading = false;
+                    panel.mutating = None;
+                    panel.error = Some("Paired devices disconnected.".into());
+                }
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -902,6 +945,9 @@ impl XdDesktop {
                     | RequestKind::VoiceMutation { .. }
                     | RequestKind::AgentSecrets { .. }
                     | RequestKind::SetAgentSecrets { .. }
+                    | RequestKind::Devices
+                    | RequestKind::RenameDevice { .. }
+                    | RequestKind::RevokeDevice { .. }
                     | RequestKind::WorkflowStatus { .. }
             ) {
                 self.model.connection_error = Some(
@@ -1169,6 +1215,27 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
+                RequestKind::Devices => {
+                    if let Some(panel) = &mut self.devices_panel {
+                        panel.loading = false;
+                        panel.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::RenameDevice { device_id }
+                | RequestKind::RevokeDevice { device_id } => {
+                    if let Some(panel) = &mut self.devices_panel
+                        && panel.mutating.as_ref() == Some(device_id)
+                    {
+                        panel.mutating = None;
+                        panel.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
                 RequestKind::EditQueue {
                     chat_id,
                     index,
@@ -1404,6 +1471,42 @@ impl XdDesktop {
                     panel.loading = false;
                     panel.error = Some(error);
                 }
+            }
+            RequestKind::Devices => {
+                match serde_json::from_value::<Vec<PairedDevice>>(
+                    value.get("devices").cloned().unwrap_or_default(),
+                ) {
+                    Ok(devices) => {
+                        if let Some(panel) = &mut self.devices_panel {
+                            panel.devices = devices;
+                            panel.loading = false;
+                            panel.mutating = None;
+                            panel.error = None;
+                            panel.revoke_confirmation = None;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(panel) = &mut self.devices_panel {
+                            panel.loading = false;
+                            panel.error = Some(format!("Invalid paired devices response: {error}"));
+                        }
+                    }
+                }
+            }
+            RequestKind::RenameDevice { device_id } | RequestKind::RevokeDevice { device_id } => {
+                if let Some(panel) = &mut self.devices_panel
+                    && panel.mutating.as_ref() == Some(&device_id)
+                {
+                    panel.loading = true;
+                    panel.mutating = None;
+                    panel.editing_id = None;
+                    panel.edit_name.clear();
+                    panel.revoke_confirmation = None;
+                    panel.error = None;
+                }
+                self.device_name_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.request_devices();
             }
             RequestKind::VoiceModel { chat_id }
                 if self.chat_is_active(&chat_id)
@@ -2825,6 +2928,167 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text("", cx));
         self.secret_value_input
             .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn open_devices(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.devices_panel = Some(DevicesPanel {
+            loading: true,
+            ..Default::default()
+        });
+        self.request_devices();
+        cx.notify();
+    }
+
+    fn close_devices(&mut self, cx: &mut Context<Self>) {
+        self.devices_panel = None;
+        self.device_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn request_devices(&mut self) {
+        match self.daemon.as_ref() {
+            Some(daemon) => {
+                if let Err(error) = daemon.devices()
+                    && let Some(panel) = &mut self.devices_panel
+                {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
+            None => {
+                if let Some(panel) = &mut self.devices_panel {
+                    panel.loading = false;
+                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
+        }
+    }
+
+    fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.devices_panel {
+            if panel.loading || panel.mutating.is_some() {
+                return;
+            }
+            panel.loading = true;
+            panel.error = None;
+        }
+        self.request_devices();
+        cx.notify();
+    }
+
+    fn edit_device_name(
+        &mut self,
+        device_id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = &mut self.devices_panel else {
+            return;
+        };
+        if panel.loading || panel.mutating.is_some() {
+            return;
+        }
+        panel.editing_id = Some(device_id);
+        panel.edit_name = name.clone();
+        panel.revoke_confirmation = None;
+        panel.error = None;
+        self.device_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        let focus = self.device_name_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn cancel_device_name(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.devices_panel {
+            panel.editing_id = None;
+            panel.edit_name.clear();
+            panel.error = None;
+        }
+        self.device_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn save_device_name(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = self.devices_panel.clone() else {
+            return;
+        };
+        let Some(device_id) = panel.editing_id else {
+            return;
+        };
+        if panel.loading || panel.mutating.is_some() {
+            return;
+        }
+        let name = panel.edit_name.trim();
+        if name.is_empty() {
+            if let Some(panel) = &mut self.devices_panel {
+                panel.error = Some("Enter a device name.".into());
+            }
+            cx.notify();
+            return;
+        }
+        match self.daemon.as_ref() {
+            Some(daemon) => match daemon.rename_device(&device_id, name) {
+                Ok(()) => {
+                    if let Some(panel) = &mut self.devices_panel {
+                        panel.mutating = Some(device_id);
+                        panel.error = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(panel) = &mut self.devices_panel {
+                        panel.error = Some(error);
+                    }
+                }
+            },
+            None => {
+                if let Some(panel) = &mut self.devices_panel {
+                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn revoke_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.devices_panel else {
+            return;
+        };
+        if panel.loading || panel.mutating.is_some() {
+            return;
+        }
+        if panel.revoke_confirmation.as_ref() != Some(&device_id) {
+            panel.revoke_confirmation = Some(device_id);
+            panel.editing_id = None;
+            panel.error = None;
+            cx.notify();
+            return;
+        }
+        match self.daemon.as_ref() {
+            Some(daemon) => match daemon.revoke_device(&device_id) {
+                Ok(()) => {
+                    if let Some(panel) = &mut self.devices_panel {
+                        panel.mutating = Some(device_id);
+                        panel.error = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(panel) = &mut self.devices_panel {
+                        panel.error = Some(error);
+                    }
+                }
+            },
+            None => {
+                if let Some(panel) = &mut self.devices_panel {
+                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -9825,6 +10089,40 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .id("open-paired-devices")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_devices(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Paired devices"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Rename or revoke devices connected to this machine.",
+                                        )),
+                                )
+                                .child(div().text_color(rgb(MUTED)).child("›")),
+                        )
+                        .child(
+                            div()
                                 .id("open-agent-secrets")
                                 .p_3()
                                 .flex()
@@ -10140,6 +10438,325 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let devices_overlay = self.devices_panel.clone().map(|panel| {
+            let name_input = self.device_name_input.clone();
+            let name_focus = self.device_name_input.read(cx).focus_handle(cx);
+            let rows = panel
+                .devices
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, device)| {
+                    let editing = panel.editing_id.as_ref() == Some(&device.id);
+                    let confirming = panel.revoke_confirmation.as_ref() == Some(&device.id);
+                    let busy = panel.mutating.as_ref() == Some(&device.id);
+                    let rename_id = device.id.clone();
+                    let rename_name = device.name.clone();
+                    let revoke_id = device.id.clone();
+                    div()
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .child(device.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_full()
+                                        .text_xs()
+                                        .text_color(rgb(if device.connected {
+                                            0x8bd5a0
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .bg(rgb(if device.connected {
+                                            0x173423
+                                        } else {
+                                            SURFACE_HIGH
+                                        }))
+                                        .child(if device.connected {
+                                            "Connected"
+                                        } else {
+                                            "Offline"
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(device_time_label("Last seen", device.last_seen))
+                                .child("·")
+                                .child(device_time_label("Paired", device.created_at)),
+                        )
+                        .when(editing, |row| {
+                            row.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(("device-name-input", index))
+                                            .track_focus(&name_focus)
+                                            .h(px(40.0))
+                                            .min_w_0()
+                                            .flex_1()
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_lg()
+                                            .border_1()
+                                            .border_color(rgb(if name_focus.is_focused(window) {
+                                                accent
+                                            } else {
+                                                BORDER
+                                            }))
+                                            .bg(rgb(BG))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let focus = this
+                                                    .device_name_input
+                                                    .read(cx)
+                                                    .focus_handle(cx);
+                                                window.focus(&focus);
+                                            }))
+                                            .child(name_input.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("save-device-name", index))
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(if busy { SURFACE_HIGH } else { accent }))
+                                            .text_xs()
+                                            .text_color(rgb(if busy { MUTED } else { 0xffffff }))
+                                            .when(!busy, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(accent_hover)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if !busy {
+                                                    this.save_device_name(cx);
+                                                }
+                                            }))
+                                            .child(if busy { "Saving…" } else { "Save" }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("cancel-device-name", index))
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .cursor_pointer()
+                                            .hover(|style| {
+                                                style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cancel_device_name(cx);
+                                            }))
+                                            .child("Cancel"),
+                                    ),
+                            )
+                        })
+                        .when(!editing, |row| {
+                            row.child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(("rename-device", index))
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .cursor_pointer()
+                                            .hover(|style| {
+                                                style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                            })
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.edit_device_name(
+                                                    rename_id.clone(),
+                                                    rename_name.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("Rename"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("revoke-device", index))
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_xs()
+                                            .text_color(rgb(0xefaaaa))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x3b282e)))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.revoke_device(revoke_id.clone(), cx);
+                                            }))
+                                            .child(if busy {
+                                                "Revoking…"
+                                            } else if confirming {
+                                                "Confirm revoke"
+                                            } else {
+                                                "Revoke"
+                                            }),
+                                    ),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(620.0))
+                        .max_h(px(680.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(TEXT))
+                                                .child("Paired devices"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Devices authorized to connect to this xd daemon.",
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("refresh-paired-devices")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.refresh_devices(cx);
+                                        }))
+                                        .child(if panel.loading {
+                                            "Loading…"
+                                        } else {
+                                            "Refresh"
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-paired-devices")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_devices(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("paired-device-list")
+                                .min_h(px(100.0))
+                                .max_h(px(460.0))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .when(panel.loading && rows.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .p_3()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("Loading paired devices…"),
+                                    )
+                                })
+                                .when(!panel.loading && rows.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .p_3()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("No devices are paired with this machine."),
+                                    )
+                                })
+                                .children(rows),
+                        )
+                        .when_some(panel.error, |dialog, error| {
+                            dialog.child(
+                                div()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(rgb(0x3b282e))
+                                    .text_xs()
+                                    .text_color(rgb(0xefaaaa))
+                                    .child(error),
+                            )
+                        }),
+                )
+                .into_any_element()
+        });
+
         let search_overlay = self.search.clone().map(|search| {
             let search_focus = self.search_input.read(cx).focus_handle(cx);
             let mut result_rows = Vec::new();
@@ -10376,6 +10993,7 @@ impl Render for XdDesktop {
             .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
+            .when_some(devices_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
             .when_some(resize_overlay, |root, overlay| root.child(overlay));
 
@@ -10466,6 +11084,8 @@ impl Render for XdDesktop {
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
                 if this.sidebar_context_menu.is_some() {
                     this.close_sidebar_context_menu(cx);
+                } else if this.devices_panel.is_some() {
+                    this.close_devices(cx);
                 } else if this.secrets_panel.is_some() {
                     this.close_secrets(cx);
                 } else if this.auth_open {
@@ -10855,6 +11475,31 @@ fn turn_duration_label(value: &str) -> Option<String> {
     Some(format!("Worked for {duration}"))
 }
 
+fn device_time_label(label: &str, timestamp: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    format!("{label} {}", relative_time(timestamp, now))
+}
+
+fn relative_time(timestamp: i64, now: i64) -> String {
+    if timestamp <= 0 {
+        return "unknown".into();
+    }
+    let seconds = now.saturating_sub(timestamp).max(0) as u64;
+    if seconds < 60 {
+        "just now".into()
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
+}
+
 fn scoped_element_id(scope: &str, index: usize) -> u64 {
     let mut hasher = DefaultHasher::new();
     scope.hash(&mut hasher);
@@ -11189,6 +11834,17 @@ mod tests {
             Some("Worked for 1h 01m")
         );
         assert_eq!(turn_duration_label("not-a-duration"), None);
+    }
+
+    #[test]
+    fn paired_device_times_are_human_readable() {
+        let now = 1_000_000;
+        assert_eq!(relative_time(0, now), "unknown");
+        assert_eq!(relative_time(now - 5, now), "just now");
+        assert_eq!(relative_time(now - 300, now), "5m ago");
+        assert_eq!(relative_time(now - 7_200, now), "2h ago");
+        assert_eq!(relative_time(now - 259_200, now), "3d ago");
+        assert_eq!(relative_time(now + 10, now), "just now");
     }
 
     #[test]

@@ -30,6 +30,13 @@ pub enum RequestKind {
     SetAgentSecrets {
         folder_id: Option<String>,
     },
+    Devices,
+    RenameDevice {
+        device_id: String,
+    },
+    RevokeDevice {
+        device_id: String,
+    },
     VoiceModel {
         chat_id: String,
     },
@@ -410,6 +417,28 @@ impl DaemonHandle {
                 folder_id: folder_id.map(str::to_owned),
             },
             body,
+        )
+    }
+
+    pub fn devices(&self) -> Result<(), String> {
+        self.send(RequestKind::Devices, json!({"op": "devices"}))
+    }
+
+    pub fn rename_device(&self, device_id: &str, name: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::RenameDevice {
+                device_id: device_id.to_owned(),
+            },
+            json!({"op": "rename-device", "device": device_id, "name": name}),
+        )
+    }
+
+    pub fn revoke_device(&self, device_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::RevokeDevice {
+                device_id: device_id.to_owned(),
+            },
+            json!({"op": "revoke-device", "device": device_id}),
         )
     }
 
