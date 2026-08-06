@@ -73,6 +73,8 @@ pub struct Message {
     pub label: Option<String>,
     #[serde(skip)]
     markdown: Option<Arc<Document>>,
+    #[serde(skip)]
+    image_paths: Vec<String>,
 }
 
 impl Message {
@@ -83,13 +85,16 @@ impl Message {
         label: Option<String>,
     ) -> Self {
         let content = content.into();
-        let markdown = Some(Arc::new(markdown::parse(&markdown::display_text(&content))));
+        let role = role.into();
+        let (shown, image_paths) = message_content(&role, &content);
+        let markdown = Some(Arc::new(markdown::parse(&markdown::display_text(&shown))));
         Self {
             id,
-            role: role.into(),
+            role,
             content,
             label,
             markdown,
+            image_paths,
         }
     }
 
@@ -100,13 +105,16 @@ impl Message {
         label: Option<String>,
     ) -> Self {
         let content = content.into();
-        let markdown = Some(Arc::new(markdown::plain_document(&content)));
+        let role = role.into();
+        let (shown, image_paths) = message_content(&role, &content);
+        let markdown = Some(Arc::new(markdown::plain_document(&shown)));
         Self {
             id,
-            role: role.into(),
+            role,
             content,
             label,
             markdown,
+            image_paths,
         }
     }
 
@@ -116,10 +124,39 @@ impl Message {
             .unwrap_or_else(|| Arc::new(markdown::parse(&markdown::display_text(&self.content))))
     }
 
+    pub fn image_paths(&self) -> &[String] {
+        &self.image_paths
+    }
+
     fn cache_markdown(&mut self) {
-        self.markdown = Some(Arc::new(markdown::parse(&markdown::display_text(
-            &self.content,
-        ))));
+        let (shown, image_paths) = message_content(&self.role, &self.content);
+        self.markdown = Some(Arc::new(markdown::parse(&markdown::display_text(&shown))));
+        self.image_paths = image_paths;
+    }
+}
+
+fn message_content(role: &str, content: &str) -> (String, Vec<String>) {
+    if role == "assistant" {
+        return (content.to_owned(), Vec::new());
+    }
+    let mut shown = Vec::new();
+    let mut images = Vec::new();
+    for raw_line in content.lines() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if let Some(path) = line
+            .strip_prefix("[image: ")
+            .and_then(|line| line.strip_suffix(']'))
+            .filter(|path| !path.is_empty())
+        {
+            images.push(path.to_owned());
+        } else {
+            shown.push(line);
+        }
+    }
+    if images.is_empty() {
+        (content.to_owned(), images)
+    } else {
+        (shown.join("\n").trim().to_owned(), images)
     }
 }
 
@@ -770,5 +807,20 @@ mod tests {
             "draft_attachments": []
         }));
         assert!(model.draft_attachments.is_empty());
+    }
+
+    #[test]
+    fn persisted_image_references_are_hidden_from_user_text() {
+        let (shown, paths) = message_content(
+            "user",
+            "before\n[image: /private/paste-one.png]\nafter\n[image: /private/paste-two.png]",
+        );
+        assert_eq!(paths, ["/private/paste-one.png", "/private/paste-two.png"]);
+        assert_eq!(shown, "before\nafter");
+
+        let (shown, paths) =
+            message_content("assistant", "Keep [image: /not/a/reference.png] literal");
+        assert!(paths.is_empty());
+        assert_eq!(shown, "Keep [image: /not/a/reference.png] literal");
     }
 }

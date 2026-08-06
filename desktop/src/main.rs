@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -19,7 +19,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations, Entity,
-    Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState,
+    Focusable, FontStyle, FontWeight, HighlightStyle, Image, KeyBinding, ListAlignment, ListState,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Point,
     Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
@@ -70,6 +70,7 @@ const MUTED: u32 = 0xa8a8ad;
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_CACHED_MESSAGE_IMAGES: usize = 8;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 gpui::actions!(xd, [OpenSearch, CloseSearch]);
@@ -472,6 +473,88 @@ struct DevicesPanel {
     error: Option<String>,
 }
 
+#[derive(Clone)]
+enum MessageImageState {
+    Loading,
+    Ready(Arc<Image>),
+    Unavailable,
+}
+
+#[derive(Default)]
+struct MessageImageCache {
+    entries: HashMap<String, MessageImageState>,
+    order: VecDeque<String>,
+}
+
+impl MessageImageCache {
+    fn state(&mut self, path: &str) -> Option<MessageImageState> {
+        let state = self.entries.get(path)?.clone();
+        self.touch(path);
+        Some(state)
+    }
+
+    fn begin(&mut self, path: &str) -> bool {
+        if self.entries.contains_key(path) {
+            self.touch(path);
+            return false;
+        }
+        while self.entries.len() >= MAX_CACHED_MESSAGE_IMAGES {
+            let Some(index) = self.order.iter().position(|candidate| {
+                !matches!(
+                    self.entries.get(candidate),
+                    Some(MessageImageState::Loading)
+                )
+            }) else {
+                return false;
+            };
+            if let Some(evicted) = self.order.remove(index) {
+                self.entries.remove(&evicted);
+            }
+        }
+        self.entries
+            .insert(path.to_owned(), MessageImageState::Loading);
+        self.order.push_back(path.to_owned());
+        true
+    }
+
+    fn finish(&mut self, path: &str, image: Option<Arc<Image>>) {
+        if !matches!(self.entries.get(path), Some(MessageImageState::Loading)) {
+            return;
+        }
+        self.entries.insert(
+            path.to_owned(),
+            image
+                .map(MessageImageState::Ready)
+                .unwrap_or(MessageImageState::Unavailable),
+        );
+        self.touch(path);
+    }
+
+    fn clear_loading(&mut self) {
+        let loading = self
+            .entries
+            .iter()
+            .filter_map(|(path, state)| {
+                matches!(state, MessageImageState::Loading).then_some(path.clone())
+            })
+            .collect::<Vec<_>>();
+        for path in loading {
+            self.entries.remove(&path);
+            self.order.retain(|candidate| candidate != &path);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn touch(&mut self, path: &str) {
+        self.order.retain(|candidate| candidate != path);
+        self.order.push_back(path.to_owned());
+    }
+}
+
 struct XdDesktop {
     model: AppModel,
     settings: AppSettings,
@@ -495,6 +578,7 @@ struct XdDesktop {
     reconnect_attempt: u32,
     connecting: bool,
     connection_in_flight: bool,
+    message_images: Arc<Mutex<MessageImageCache>>,
     transcript: ListState,
     transcript_snapshot: TranscriptSnapshot,
     transcript_loading: bool,
@@ -778,6 +862,7 @@ impl XdDesktop {
             reconnect_attempt: 0,
             connecting: false,
             connection_in_flight: false,
+            message_images: Arc::new(Mutex::new(MessageImageCache::default())),
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loading: false,
@@ -986,6 +1071,9 @@ impl XdDesktop {
                 self.workspace_clone_outcomes.clear();
                 self.pending_speech = None;
                 Arc::make_mut(&mut self.workflow_pending).clear();
+                if let Ok(mut images) = self.message_images.lock() {
+                    images.clear_loading();
+                }
                 self.speech_output.stop();
                 self.cancel_voice(false, cx);
                 if let Some(defaults) = &mut self.workspace_defaults {
@@ -1072,6 +1160,7 @@ impl XdDesktop {
                     | RequestKind::RenameDevice { .. }
                     | RequestKind::RevokeDevice { .. }
                     | RequestKind::WorkflowStatus { .. }
+                    | RequestKind::ImageRead { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -1159,6 +1248,12 @@ impl XdDesktop {
                         .insert(marker.clone(), value.clone());
                     self.invalidate_workflow_rows(marker);
                     self.schedule_workflow_refresh(marker.clone(), cx);
+                }
+                RequestKind::ImageRead { path } => {
+                    if let Ok(mut images) = self.message_images.lock() {
+                        images.finish(path, None);
+                    }
+                    self.invalidate_image_rows(path);
                 }
                 RequestKind::DiffRead { generation, .. } if *generation == self.diff_generation => {
                     if let Some(diff) = &mut self.diff_panel {
@@ -1436,6 +1531,9 @@ impl XdDesktop {
                 }
                 if selected_before.is_some() && self.model.selected_chat.is_none() {
                     self.invalidate_live_markdown_work();
+                    if let Ok(mut images) = self.message_images.lock() {
+                        images.clear();
+                    }
                     self.transcript_snapshot = TranscriptSnapshot::default();
                     self.transcript.reset(0);
                 }
@@ -1674,6 +1772,15 @@ impl XdDesktop {
                         }
                     }
                 }
+            }
+            RequestKind::ImageRead { path } => {
+                let image = attachments
+                    .and_then(|mut attachments| attachments.pop())
+                    .map(|attachment| attachment.preview);
+                if let Ok(mut images) = self.message_images.lock() {
+                    images.finish(&path, image);
+                }
+                self.invalidate_image_rows(&path);
             }
             RequestKind::WorkflowStatus { marker } => {
                 if value.get("pending").and_then(Value::as_bool) != Some(true) {
@@ -4887,6 +4994,9 @@ impl XdDesktop {
         if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
             return;
         }
+        if let Ok(mut images) = self.message_images.lock() {
+            images.clear();
+        }
         self.model.select_chat(chat_id.clone());
         self.invalidate_live_markdown_work();
         self.transcript_snapshot = TranscriptSnapshot::default();
@@ -5459,6 +5569,99 @@ impl XdDesktop {
         self.transcript.scroll_to(anchor);
     }
 
+    fn invalidate_image_rows(&self, path: &str) {
+        let indices = self
+            .model
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                message
+                    .image_paths()
+                    .iter()
+                    .any(|candidate| candidate == path)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            return;
+        }
+        let anchor = self.transcript.logical_scroll_top();
+        for index in indices {
+            self.transcript.splice(index..index + 1, 1);
+        }
+        self.transcript.scroll_to(anchor);
+    }
+
+    fn message_image(
+        path: &str,
+        number: usize,
+        daemon: Option<&DaemonHandle>,
+        cache: &Arc<Mutex<MessageImageCache>>,
+    ) -> gpui::AnyElement {
+        let mut request = false;
+        let mut state = cache.lock().ok().and_then(|mut cache| cache.state(path));
+        if state.is_none()
+            && daemon.is_some()
+            && let Ok(mut cache) = cache.lock()
+            && cache.begin(path)
+        {
+            request = true;
+            state = Some(MessageImageState::Loading);
+        }
+        if request
+            && let Some(daemon) = daemon
+            && daemon.image_read(path).is_err()
+        {
+            if let Ok(mut cache) = cache.lock() {
+                cache.finish(path, None);
+            }
+            state = Some(MessageImageState::Unavailable);
+        }
+
+        let preview = div()
+            .w(px(168.0))
+            .h(px(96.0))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(SURFACE))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center();
+        let preview = match state {
+            Some(MessageImageState::Ready(image)) => {
+                preview.child(img(image).size_full().object_fit(ObjectFit::Contain))
+            }
+            Some(MessageImageState::Loading) => preview.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("Loading image…"),
+            ),
+            Some(MessageImageState::Unavailable) | None => preview.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("Preview unavailable"),
+            ),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap_1()
+            .child(preview)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(format!("Image #{number}")),
+            )
+            .into_any_element()
+    }
+
     fn message_row(
         message: &Message,
         index: usize,
@@ -5466,6 +5669,8 @@ impl XdDesktop {
         workflow_status: Option<&Value>,
         workflow_pending: bool,
         desktop: Entity<Self>,
+        daemon: Option<&DaemonHandle>,
+        image_cache: &Arc<Mutex<MessageImageCache>>,
     ) -> gpui::AnyElement {
         if message.role == "duration" {
             return turn_duration_label(&message.content)
@@ -5508,6 +5713,12 @@ impl XdDesktop {
             .id
             .map(|id| format!("message-{id}"))
             .unwrap_or_else(|| format!("live-{index}"));
+        let images = message
+            .image_paths()
+            .iter()
+            .enumerate()
+            .map(|(index, path)| Self::message_image(path, index + 1, daemon, image_cache))
+            .collect::<Vec<_>>();
 
         div()
             .w_full()
@@ -5534,9 +5745,16 @@ impl XdDesktop {
                             })
                             .text_color(rgb(TEXT))
                             .child(
-                                Self::markdown_content(message.markdown(), &markdown_scope)
-                                    .text_sm()
-                                    .line_height(px(21.0)),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        Self::markdown_content(message.markdown(), &markdown_scope)
+                                            .text_sm()
+                                            .line_height(px(21.0)),
+                                    )
+                                    .children(images),
                             ),
                     ),
             )
@@ -8093,6 +8311,8 @@ impl Render for XdDesktop {
         let expanded_activity = self.expanded_activity.clone();
         let workflow_statuses = self.workflow_statuses.clone();
         let workflow_pending = self.workflow_pending.clone();
+        let image_cache = self.message_images.clone();
+        let transcript_daemon = self.daemon.clone();
         let desktop = cx.entity();
         let transcript = if self.transcript_loading {
             div()
@@ -8120,6 +8340,8 @@ impl Render for XdDesktop {
                     workflow_statuses.get(&message.content),
                     workflow_pending.contains(&message.content),
                     desktop.clone(),
+                    transcript_daemon.as_ref(),
+                    &image_cache,
                 )
             })
             .size_full()
@@ -12413,6 +12635,23 @@ mod tests {
         assert_eq!(reconnect_delay(4), Duration::from_secs(2));
         assert_eq!(reconnect_delay(5), Duration::from_secs(5));
         assert_eq!(reconnect_delay(u32::MAX), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn persisted_image_cache_is_bounded_without_evicting_inflight_reads() {
+        let mut cache = MessageImageCache::default();
+        for index in 0..MAX_CACHED_MESSAGE_IMAGES {
+            assert!(cache.begin(&format!("/paste-{index}.png")));
+        }
+        assert!(!cache.begin("/deferred.png"));
+        cache.finish("/paste-0.png", None);
+        assert!(cache.begin("/deferred.png"));
+        assert_eq!(cache.entries.len(), MAX_CACHED_MESSAGE_IMAGES);
+        assert!(!cache.entries.contains_key("/paste-0.png"));
+        assert!(matches!(
+            cache.state("/deferred.png"),
+            Some(MessageImageState::Loading)
+        ));
     }
 
     #[test]

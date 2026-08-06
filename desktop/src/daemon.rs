@@ -49,6 +49,9 @@ pub enum RequestKind {
     Search {
         query: String,
     },
+    ImageRead {
+        path: String,
+    },
     WorkflowStatus {
         marker: String,
     },
@@ -687,6 +690,15 @@ impl DaemonHandle {
         )
     }
 
+    pub fn image_read(&self, path: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::ImageRead {
+                path: path.to_owned(),
+            },
+            json!({"op": "image-read", "path": path, "preview": true}),
+        )
+    }
+
     pub fn diff_read(
         &self,
         chat_id: &str,
@@ -1216,7 +1228,12 @@ fn spawn_reader(
                         let Some(kind) = kind else {
                             continue;
                         };
-                        let attachments = take_draft_attachments(&mut body);
+                        let attachments = match &kind {
+                            RequestKind::ImageRead { path } => {
+                                take_image(&mut body, path).map(|attachment| vec![attachment])
+                            }
+                            _ => take_draft_attachments(&mut body),
+                        };
                         DaemonUpdate::Reply {
                             kind,
                             body,
@@ -1239,6 +1256,18 @@ fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachmen
     let value = body.remove("draft_attachments")?;
     let values = value.as_array()?;
     Some(values.iter().filter_map(Attachment::from_value).collect())
+}
+
+fn take_image(body: &mut Map<String, Value>, path: &str) -> Option<Attachment> {
+    let value = json!({
+        "name": Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image.png"),
+        "mime": body.remove("mime")?,
+        "data": body.remove("data")?,
+    });
+    Attachment::from_value(&value)
 }
 
 fn disconnect(updates: &Sender<DaemonUpdate>, message: String) {
@@ -1647,5 +1676,22 @@ mod tests {
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].preview.bytes, b"\x89PNG\r\n\x1a\n");
         assert!(!body.contains_key("draft_attachments"));
+    }
+
+    #[test]
+    fn decodes_persisted_image_replies_before_the_ui_thread() {
+        let mut body = json!({
+            "ok": true,
+            "mime": "image/png",
+            "data": "iVBORw0KGgo="
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let image = take_image(&mut body, "/private/paste.png").unwrap();
+        assert_eq!(image.name, "paste.png");
+        assert_eq!(image.preview.bytes, b"\x89PNG\r\n\x1a\n");
+        assert!(!body.contains_key("data"));
     }
 }

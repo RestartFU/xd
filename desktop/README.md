@@ -29,6 +29,7 @@ Current milestone:
 - native GPUI microphone capture with cancel/stop controls and synchronized live dictation drafts;
 - cross-device text draft synchronization with a short local debounce;
 - background PNG attachment loading with synchronized thumbnail previews;
+- lazy, sandboxed previews for persisted sent-image references;
 - live assistant text, activity, turn state, and queue event handling;
 - structured agent questions with option buttons and custom-answer input;
 - opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
