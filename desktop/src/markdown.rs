@@ -836,7 +836,9 @@ fn parse_inline(source: &str) -> InlineText {
 
     while !rest.is_empty() {
         let Some((offset, marker)) = rest.char_indices().find(|(offset, character)| {
-            matches!(character, '*' | '`' | '[') || starts_web_url(&rest[*offset..])
+            matches!(character, '*' | '`' | '[')
+                || rest[*offset..].starts_with("![")
+                || starts_web_url(&rest[*offset..])
         }) else {
             text.push_str(rest);
             break;
@@ -859,7 +861,9 @@ fn parse_inline(source: &str) -> InlineText {
             }
         }
 
-        let parsed = if rest.starts_with("**") {
+        let parsed = if rest.starts_with("![") {
+            inline_image(rest)
+        } else if rest.starts_with("**") {
             inline_delimited(rest, "**", InlineKind::Strong)
         } else if rest.starts_with('*') {
             inline_delimited(rest, "*", InlineKind::Emphasis)
@@ -872,13 +876,16 @@ fn parse_inline(source: &str) -> InlineText {
         };
 
         if let Some(parsed) = parsed {
+            text.push_str(parsed.prefix);
             let start = text.len();
             text.push_str(parsed.value);
-            spans.push(InlineSpan {
-                range: start..text.len(),
-                kind: parsed.kind,
-                url: parsed.url,
-            });
+            if parsed.kind != InlineKind::Link || parsed.url.is_some() {
+                spans.push(InlineSpan {
+                    range: start..text.len(),
+                    kind: parsed.kind,
+                    url: parsed.url,
+                });
+            }
             rest = &rest[parsed.consumed..];
         } else {
             let length = rest.chars().next().map(char::len_utf8).unwrap_or(0);
@@ -922,6 +929,7 @@ fn bare_url_length(source: &str) -> usize {
 }
 
 struct ParsedInline<'a> {
+    prefix: &'static str,
     value: &'a str,
     consumed: usize,
     kind: InlineKind,
@@ -939,6 +947,7 @@ fn inline_delimited<'a>(
         return None;
     }
     Some(ParsedInline {
+        prefix: "",
         value: &body[..end],
         consumed: delimiter.len() + end + delimiter.len(),
         kind,
@@ -950,12 +959,30 @@ fn inline_link(source: &str) -> Option<ParsedInline<'_>> {
     let label_end = source.find("](")?;
     let url_start = label_end + 2;
     let url_end = source[url_start..].find(')')? + url_start;
-    if label_end <= 1 || url_end == url_start {
+    if label_end <= 1 {
         return None;
     }
     let url = &source[url_start..url_end];
     Some(ParsedInline {
+        prefix: "",
         value: &source[1..label_end],
+        consumed: url_end + 1,
+        kind: InlineKind::Link,
+        url: safe_link_url(url).map(ToOwned::to_owned),
+    })
+}
+
+fn inline_image(source: &str) -> Option<ParsedInline<'_>> {
+    let label_end = source.find("](")?;
+    let url_start = label_end + 2;
+    let url_end = source[url_start..].find(')')? + url_start;
+    if label_end < 2 {
+        return None;
+    }
+    let url = &source[url_start..url_end];
+    Some(ParsedInline {
+        prefix: "Image: ",
+        value: &source[2..label_end],
         consumed: url_end + 1,
         kind: InlineKind::Link,
         url: safe_link_url(url).map(ToOwned::to_owned),
@@ -973,7 +1000,8 @@ fn safe_link_url(url: &str) -> Option<&str> {
     }
     let remainder = url
         .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("mailto:"))?;
     (!remainder.is_empty()).then_some(url)
 }
 
@@ -1353,28 +1381,31 @@ mod tests {
     }
 
     #[test]
-    fn links_keep_only_bounded_web_destinations() {
+    fn links_and_images_keep_only_bounded_safe_destinations() {
         let document = parse(
-            "[secure](https://example.com/path) [plain](http://localhost:3000) [file](file:///tmp/x) [script](javascript:alert(1)) [space](https://example.com/a b)",
+            "![diagram](https://example.com/a.png) ![local](file:///tmp/x) [secure](https://example.com/path) [email](mailto:hello@example.com) [file](file:///tmp/x) [script](javascript:alert(1)) [space](https://example.com/a b)",
         );
         let Block::Paragraph(paragraph) = &document.blocks[0] else {
             panic!("paragraph")
         };
+        assert_eq!(
+            paragraph.text,
+            "Image: diagram Image: local secure email file script) space"
+        );
         let urls = paragraph
             .spans
             .iter()
-            .map(|span| span.url.as_deref())
+            .filter_map(|span| span.url.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(
             urls,
             vec![
-                Some("https://example.com/path"),
-                Some("http://localhost:3000"),
-                None,
-                None,
-                None,
+                "https://example.com/a.png",
+                "https://example.com/path",
+                "mailto:hello@example.com",
             ]
         );
+        assert!(paragraph.spans.iter().all(|span| span.url.is_some()));
     }
 
     #[test]
