@@ -1183,7 +1183,7 @@ impl XdDesktop {
         }
     }
 
-    fn remote_read_reply(kind: &RequestKind) -> bool {
+    fn remote_chat_reply(kind: &RequestKind) -> bool {
         matches!(
             kind,
             RequestKind::Tree
@@ -1193,6 +1193,16 @@ impl XdDesktop {
                 | RequestKind::Shortcuts { .. }
                 | RequestKind::WorkflowStatus { .. }
                 | RequestKind::ImageRead { .. }
+                | RequestKind::Send { .. }
+                | RequestKind::QueueMutation { .. }
+                | RequestKind::EditQueue { .. }
+                | RequestKind::Cancel { .. }
+                | RequestKind::SetOption { .. }
+                | RequestKind::SetShortcuts
+                | RequestKind::RemoveWorktree { .. }
+                | RequestKind::SetDraft { .. }
+                | RequestKind::VoiceModel { .. }
+                | RequestKind::VoiceMutation { .. }
         )
     }
 
@@ -1210,6 +1220,7 @@ impl XdDesktop {
                 | "queued"
                 | "shortcuts-changed"
                 | "workflow-status"
+                | "voice"
         )
     }
 
@@ -1225,9 +1236,9 @@ impl XdDesktop {
             return;
         }
         if endpoint != self.active_endpoint {
-            if self.active_endpoint == ChatEndpoint::Local {
-                self.sync_draft();
-            }
+            self.sync_draft();
+            self.draft_generation = self.draft_generation.saturating_add(1);
+            self.cancel_voice(false, cx);
             std::mem::swap(&mut self.model, &mut self.inactive_model);
             std::mem::swap(
                 &mut self.collapsed_folders,
@@ -1241,7 +1252,6 @@ impl XdDesktop {
             self.composer_menu = None;
             self.pending_speech = None;
             self.speech_output.stop();
-            self.cancel_voice(false, cx);
             self.diff_panel = None;
             self.terminal_panel = None;
             self.sidebar_edit = None;
@@ -1487,6 +1497,19 @@ impl XdDesktop {
                 let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
                 remote_model.connected = false;
                 remote_model.connection_error = Some(format!("{message} Reconnecting…"));
+                if self.active_endpoint == ChatEndpoint::Remote {
+                    self.sending = false;
+                    self.transcript_loading = false;
+                    self.pending_speech = None;
+                    Arc::make_mut(&mut self.workflow_pending).clear();
+                    if let Ok(mut images) = self.message_images.lock() {
+                        images.clear_loading();
+                    }
+                    self.message_image_viewer = None;
+                    self.speech_output.stop();
+                    self.cancel_voice(false, cx);
+                    self.restore_pending_send(cx);
+                }
                 self.remote_state = RemoteState::Offline;
                 self.remote_error = Some(format!("{message} Reconnecting…"));
                 if let Some(panel) = &mut self.remote_panel {
@@ -1502,7 +1525,7 @@ impl XdDesktop {
                 attachments,
             } => {
                 if self.active_endpoint == ChatEndpoint::Remote {
-                    if Self::remote_read_reply(&kind) {
+                    if Self::remote_chat_reply(&kind) {
                         self.handle_reply(kind, body, attachments, cx);
                     }
                 } else {
@@ -1564,6 +1587,9 @@ impl XdDesktop {
             return;
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
+        if self.active_endpoint == ChatEndpoint::Remote {
+            self.cancel_voice(false, cx);
+        }
         self.remote_daemon = None;
         self.remote_bridge = None;
         self.remote_state = RemoteState::Offline;
@@ -4593,9 +4619,6 @@ impl XdDesktop {
     }
 
     fn toggle_voice(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         match self.voice_input.state {
             VoiceState::Idle | VoiceState::Failed(_) => self.check_voice_model(cx),
             VoiceState::NeedsModel => self.download_voice_model(cx),
@@ -4616,7 +4639,7 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        let Some(daemon) = &self.daemon else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return;
         };
@@ -4637,7 +4660,7 @@ impl XdDesktop {
 
     fn download_voice_model(&mut self, cx: &mut Context<Self>) {
         let VoiceInput { chat_id, token, .. } = &self.voice_input;
-        let Some(daemon) = &self.daemon else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             return;
         };
         if let Err(error) = daemon.voice_action("voice-model-download", chat_id, token, None) {
@@ -4651,7 +4674,7 @@ impl XdDesktop {
     fn start_voice_recording(&mut self, cx: &mut Context<Self>) {
         let chat_id = self.voice_input.chat_id.clone();
         let token = self.voice_input.token.clone();
-        let Some(daemon) = &self.daemon else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             self.fail_voice("xd-dev is not connected to a daemon.".into(), cx);
             return;
         };
@@ -4689,7 +4712,7 @@ impl XdDesktop {
             return;
         }
         let chat_id = self.voice_input.chat_id.clone();
-        let Some(daemon) = self.daemon.clone() else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             self.fail_voice("xd-dev is not connected to a daemon.".into(), cx);
             return;
         };
@@ -4771,6 +4794,8 @@ impl XdDesktop {
         self.voice_applying_text = true;
         self.set_composer_text(text, cx);
         self.voice_applying_text = false;
+        self.draft_dirty = true;
+        self.schedule_draft_sync(cx);
     }
 
     fn fail_voice(&mut self, error: String, cx: &mut Context<Self>) {
@@ -4798,7 +4823,7 @@ impl XdDesktop {
         if let Some(recorder) = &self.voice_input.recorder {
             recorder.cancel();
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && !self.voice_input.token.is_empty()
         {
             let _ = daemon.voice_action(
@@ -5852,7 +5877,7 @@ impl XdDesktop {
         if self.model.has_messages || self.model.working {
             return;
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.set_new_worktree(&chat_id, !self.model.new_worktree)
         {
             self.model.connection_error = Some(error);
@@ -5888,8 +5913,7 @@ impl XdDesktop {
                             .any(|candidate| candidate.id == model)
                 }) =>
             {
-                self.daemon
-                    .as_ref()
+                self.active_daemon()
                     .map(|daemon| daemon.set_model(&chat_id, &backend, &model))
             }
             ComposerChoice::Effort(effort)
@@ -5899,15 +5923,13 @@ impl XdDesktop {
                         && !(self.model.claude_mode && effort == "ultra")
                 }) =>
             {
-                self.daemon
-                    .as_ref()
+                self.active_daemon()
                     .map(|daemon| daemon.set_effort(&chat_id, &effort))
             }
             ComposerChoice::Access(access)
                 if matches!(access.as_str(), "read-only" | "edit" | "full") =>
             {
-                self.daemon
-                    .as_ref()
+                self.active_daemon()
                     .map(|daemon| daemon.set_access(&chat_id, &access))
             }
             ComposerChoice::Workspace(path)
@@ -5918,8 +5940,7 @@ impl XdDesktop {
                         .iter()
                         .any(|worktree| worktree.path == path) =>
             {
-                self.daemon
-                    .as_ref()
+                self.active_daemon()
                     .map(|daemon| daemon.set_workspace(&chat_id, &path))
             }
             _ => {
@@ -5944,7 +5965,7 @@ impl XdDesktop {
         if self.model.working {
             return;
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.set_plan(&chat_id, !self.model.plan)
         {
             self.model.connection_error = Some(error);
@@ -5958,7 +5979,7 @@ impl XdDesktop {
         if self.model.working || self.model.backend != "codex" {
             return;
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.set_fast(&chat_id, !self.model.fast)
         {
             self.model.connection_error = Some(error);
@@ -5972,7 +5993,7 @@ impl XdDesktop {
         if self.model.working || self.model.backend != "codex" {
             return;
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.set_claude_mode(&chat_id, !self.model.claude_mode)
         {
             self.model.connection_error = Some(error);
@@ -5994,8 +6015,9 @@ impl XdDesktop {
         else {
             return;
         };
-        if let Some(daemon) = &self.daemon
-            && let Err(error) = daemon.remove_worktree(&chat_id, &worktree.path)
+        let path = worktree.path.clone();
+        if let Some(daemon) = self.active_daemon().cloned()
+            && let Err(error) = daemon.remove_worktree(&chat_id, &path)
         {
             self.model.connection_error = Some(error);
         }
@@ -6082,6 +6104,8 @@ impl XdDesktop {
         if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
             return;
         }
+        self.sync_draft();
+        self.draft_generation = self.draft_generation.saturating_add(1);
         if let Ok(mut images) = self.message_images.lock() {
             images.clear();
         }
@@ -6128,12 +6152,6 @@ impl XdDesktop {
     }
 
     fn send_composer(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            self.model.connection_error =
-                Some("Remote chat sending is being ported and is not enabled yet.".into());
-            cx.notify();
-            return;
-        }
         if self.sending {
             return;
         }
@@ -6148,7 +6166,7 @@ impl XdDesktop {
         if text.is_empty() && attachments.is_empty() {
             return;
         }
-        let Some(daemon) = self.daemon.clone() else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return;
         };
@@ -6200,14 +6218,13 @@ impl XdDesktop {
     }
 
     fn send_shortcut(&mut self, prompt: String) -> bool {
-        if self.active_endpoint == ChatEndpoint::Remote || self.sending || prompt.trim().is_empty()
-        {
+        if self.sending || prompt.trim().is_empty() {
             return false;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return false;
         };
-        let Some(daemon) = self.daemon.clone() else {
+        let Some(daemon) = self.active_daemon().cloned() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return false;
         };
@@ -6275,13 +6292,10 @@ impl XdDesktop {
     }
 
     fn drop_queued(&mut self, index: usize) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let Some(chat_id) = self.model.selected_chat.as_deref() else {
             return;
         };
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.drop_queue(chat_id, index)
         {
             self.model.connection_error = Some(error);
@@ -6289,9 +6303,6 @@ impl XdDesktop {
     }
 
     fn begin_queue_edit(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -6320,9 +6331,6 @@ impl XdDesktop {
     }
 
     fn save_queue_edit(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let Some(edit) = self.queue_edit.clone() else {
             return;
         };
@@ -6336,7 +6344,7 @@ impl XdDesktop {
             self.cancel_queue_edit(cx);
             return;
         }
-        if let Some(daemon) = &self.daemon {
+        if let Some(daemon) = self.active_daemon().cloned() {
             if let Err(error) = daemon.edit_queue(&edit.chat_id, edit.index, &edit.original, text) {
                 self.model.connection_error = Some(error);
             } else if let Some(active) = &mut self.queue_edit
@@ -6357,16 +6365,13 @@ impl XdDesktop {
     }
 
     fn steer_queued(&mut self, index: usize) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let Some(chat_id) = self.model.selected_chat.as_deref() else {
             return;
         };
         let Some(text) = self.model.queue.get(index) else {
             return;
         };
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.steer_queue(chat_id, index, text)
         {
             self.model.connection_error = Some(error);
@@ -6374,13 +6379,10 @@ impl XdDesktop {
     }
 
     fn cancel_turn(&mut self) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let Some(chat_id) = self.model.selected_chat.as_deref() else {
             return;
         };
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.cancel(chat_id)
         {
             self.model.connection_error = Some(error);
@@ -6388,9 +6390,6 @@ impl XdDesktop {
     }
 
     fn toggle_shortcut(&mut self, workspace: bool) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let prompt = self.composer.trim();
         if prompt.is_empty() {
             return;
@@ -6415,7 +6414,7 @@ impl XdDesktop {
         if workspace && folder_id.is_none() {
             return;
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.set_shortcuts(folder_id.as_deref(), &shortcuts)
         {
             self.model.connection_error = Some(error);
@@ -6436,9 +6435,6 @@ impl XdDesktop {
     }
 
     fn attach_images(&mut self, cx: &mut Context<Self>) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let available = MAX_ATTACHMENTS.saturating_sub(self.model.draft_attachments.len());
         if available == 0 || self.model.selected_chat.is_none() {
             return;
@@ -6519,16 +6515,13 @@ impl XdDesktop {
     }
 
     fn sync_draft(&mut self) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         if !self.draft_dirty && !self.attachments_dirty {
             return;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if let Some(daemon) = &self.daemon {
+        if let Some(daemon) = self.active_daemon().cloned() {
             let attachments = self
                 .attachments_dirty
                 .then_some(self.model.draft_attachments.as_slice());
@@ -7585,8 +7578,7 @@ impl Render for XdDesktop {
         let terminal_open = self.terminal_panel.is_some();
         let can_open_diff = selected.is_some() && !remote_active;
         let new_worktree = self.model.new_worktree;
-        let can_change_worktree =
-            selected.is_some() && !self.model.has_messages && !working && !remote_active;
+        let can_change_worktree = selected.is_some() && !self.model.has_messages && !working;
         let can_cycle_workspace =
             can_change_worktree && !new_worktree && self.model.worktrees.len() > 1;
         let can_remove_worktree = can_change_worktree
@@ -7626,10 +7618,8 @@ impl Render for XdDesktop {
             &self.model.effort
         }
         .to_owned();
-        let can_change_agent = selected.is_some()
-            && !working
-            && !remote_active
-            && !self.model.agent_backends.is_empty();
+        let can_change_agent =
+            selected.is_some() && !working && !self.model.agent_backends.is_empty();
         let fast = self.model.fast;
         let can_toggle_fast = can_change_agent && self.model.backend == "codex";
         let claude_mode = self.model.claude_mode;
@@ -9686,13 +9676,13 @@ impl Render for XdDesktop {
                     .bg(rgb(if working { 0x26354d } else { SURFACE_HIGH }))
                     .text_xs()
                     .text_color(rgb(if working { 0xaec0ff } else { MUTED }))
-                    .when(working && !remote_active, |button| {
+                    .when(working, |button| {
                         button
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x31435f)))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if working && !remote_active {
+                        if working {
                             this.cancel_turn();
                             cx.notify();
                         }
@@ -9744,17 +9734,12 @@ impl Render for XdDesktop {
         let attachment_count = self.model.draft_attachments.len();
         let can_attach = attachment_count < MAX_ATTACHMENTS
             && self.model.selected_chat.is_some()
-            && self.model.connected
-            && !remote_active;
+            && self.model.connected;
         let can_send = (!self.composer.trim().is_empty() || attachment_count > 0)
             && self.model.selected_chat.is_some()
             && self.model.connected
-            && !self.sending
-            && !remote_active;
-        let can_voice = self.model.selected_chat.is_some()
-            && self.model.connected
-            && !self.sending
-            && !remote_active;
+            && !self.sending;
+        let can_voice = self.model.selected_chat.is_some() && self.model.connected && !self.sending;
         let (voice_label, voice_active, voice_error) = match &self.voice_input.state {
             VoiceState::Idle => ("● Voice".to_owned(), false, None),
             VoiceState::Checking => ("Checking…".to_owned(), true, None),
@@ -9767,10 +9752,8 @@ impl Render for XdDesktop {
             VoiceState::Transcribing => ("Cancel voice".to_owned(), true, None),
             VoiceState::Failed(error) => ("Retry voice".to_owned(), false, Some(error.clone())),
         };
-        let shortcuts_enabled = self.model.selected_chat.is_some()
-            && self.model.connected
-            && !self.sending
-            && !remote_active;
+        let shortcuts_enabled =
+            self.model.selected_chat.is_some() && self.model.connected && !self.sending;
         let shortcut_buttons = self
             .model
             .shortcuts
@@ -10032,7 +10015,7 @@ impl Render for XdDesktop {
                 .workspace_shortcuts
                 .iter()
                 .any(|prompt| prompt == draft_prompt);
-        let can_edit_shortcuts = !draft_prompt.is_empty() && selected.is_some() && !remote_active;
+        let can_edit_shortcuts = !draft_prompt.is_empty() && selected.is_some();
         let send_label = if self.sending {
             "Sending…"
         } else if working {
@@ -10044,7 +10027,7 @@ impl Render for XdDesktop {
             self.model.selected_chat.as_deref() == Some(question.chat_id.as_str())
         });
         let question_panel = open_question.map(|question| {
-            let can_answer = !self.sending && !remote_active;
+            let can_answer = !self.sending;
             let option_buttons = question
                 .options
                 .into_iter()
@@ -10228,24 +10211,6 @@ impl Render for XdDesktop {
             .pb_3()
             .bg(rgb(BG))
             .when_some(question_panel, |element, panel| element.child(panel))
-            .when(remote_active, |element| {
-                element.child(
-                    div()
-                        .w_full()
-                        .max_w(px(1040.0))
-                        .mx_auto()
-                        .mb_2()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x202b3a))
-                        .text_xs()
-                        .text_color(rgb(0xb8c8e8))
-                        .child(
-                            "Remote transcript is connected read-only; sending and mutations are the next port slice.",
-                        ),
-                )
-            })
             .when_some(self.model.connection_error.clone(), |element, error| {
                 element.child(
                     div()
@@ -14842,6 +14807,31 @@ mod tests {
         assert!(remote.chats[0].working);
         assert_eq!(ChatEndpoint::Local.other(), ChatEndpoint::Remote);
         assert_eq!(ChatEndpoint::Remote.other(), ChatEndpoint::Local);
+    }
+
+    #[test]
+    fn remote_endpoint_accepts_chat_writes_but_not_machine_admin_replies() {
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::Send {
+            chat_id: "chat".into(),
+            text: "hello".into(),
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::SetDraft {
+            chat_id: "chat".into(),
+            text: "partial".into(),
+            attachment_generation: None,
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::VoiceMutation {
+            chat_id: "chat".into(),
+            token: "voice".into(),
+            operation: "voice-stream-start".into(),
+        }));
+        assert!(!XdDesktop::remote_chat_reply(&RequestKind::Devices));
+        assert!(!XdDesktop::remote_chat_reply(&RequestKind::DaemonUpdate {
+            action: "install".into(),
+        }));
+        assert!(XdDesktop::remote_read_event("queued"));
+        assert!(XdDesktop::remote_read_event("voice"));
+        assert!(!XdDesktop::remote_read_event("terminal"));
     }
 
     #[test]
