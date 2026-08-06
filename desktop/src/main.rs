@@ -333,6 +333,23 @@ enum PaneResizeKind {
     Terminal,
 }
 
+const PANE_TERMINAL: u8 = 1;
+const PANE_DIFF: u8 = 4;
+
+fn pane_state_key(endpoint: ChatEndpoint, remote: Option<(&str, u16)>, chat_id: &str) -> String {
+    match endpoint {
+        ChatEndpoint::Local => format!("local/{chat_id}"),
+        ChatEndpoint::Remote => {
+            let (host, port) = remote.unwrap_or(("remote", 0));
+            format!("remote/{host}:{port}/{chat_id}")
+        }
+    }
+}
+
+fn pane_state_mask(diff_open: bool, terminal_open: bool) -> u8 {
+    (if terminal_open { PANE_TERMINAL } else { 0 }) | (if diff_open { PANE_DIFF } else { 0 })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PaneResize {
     kind: PaneResizeKind,
@@ -5060,11 +5077,12 @@ impl XdDesktop {
             {
                 self.pane_resize = None;
             }
-            cx.notify();
-            return;
+        } else {
+            self.diff_panel = Some(DiffPanel::default());
+            self.refresh_diff(cx);
         }
-        self.diff_panel = Some(DiffPanel::default());
-        self.refresh_diff(cx);
+        self.remember_panes();
+        cx.notify();
     }
 
     fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
@@ -5076,14 +5094,16 @@ impl XdDesktop {
             {
                 self.pane_resize = None;
             }
-            cx.notify();
-            return;
+        } else if let Some(chat_id) = self.model.selected_chat.clone() {
+            self.terminal_panel = Some(Self::new_terminal_panel(chat_id));
         }
-        let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
-        };
-        self.terminal_panel = Some(TerminalPanel {
-            chat_id: chat_id.clone(),
+        self.remember_panes();
+        cx.notify();
+    }
+
+    fn new_terminal_panel(chat_id: String) -> TerminalPanel {
+        TerminalPanel {
+            chat_id,
             terminal_id: None,
             title: "Terminal".into(),
             screen: TerminalScreen::default(),
@@ -5092,8 +5112,45 @@ impl XdDesktop {
             loading: true,
             closed: false,
             error: None,
-        });
-        cx.notify();
+        }
+    }
+
+    fn current_pane_key(&self) -> Option<String> {
+        let chat_id = self.model.selected_chat.as_deref()?;
+        let remote = self
+            .remote_credentials
+            .as_ref()
+            .map(|credentials| (credentials.host.as_str(), credentials.port));
+        Some(pane_state_key(self.active_endpoint, remote, chat_id))
+    }
+
+    fn remember_panes(&mut self) {
+        let Some(key) = self.current_pane_key() else {
+            return;
+        };
+        let state = pane_state_mask(self.diff_panel.is_some(), self.terminal_panel.is_some());
+        self.settings.pane_states.insert(key, state);
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn restore_panes(&mut self, cx: &mut Context<Self>) {
+        self.diff_panel = None;
+        self.terminal_panel = None;
+        let Some(key) = self.current_pane_key() else {
+            return;
+        };
+        let state = self.settings.pane_states.get(&key).copied().unwrap_or(0);
+        if state & PANE_DIFF != 0 {
+            self.diff_panel = Some(DiffPanel::default());
+            self.refresh_diff(cx);
+        }
+        if state & PANE_TERMINAL != 0
+            && let Some(chat_id) = self.model.selected_chat.clone()
+        {
+            self.terminal_panel = Some(Self::new_terminal_panel(chat_id));
+        }
     }
 
     fn begin_pane_resize(
@@ -6328,6 +6385,8 @@ impl XdDesktop {
         self.pending_speech = None;
         self.speech_output.stop();
         self.cancel_voice(false, cx);
+        self.diff_generation = self.diff_generation.saturating_add(1);
+        self.diff_panel = None;
         self.terminal_panel = None;
         self.set_composer_text(String::new(), cx);
         self.draft_dirty = false;
@@ -6344,16 +6403,10 @@ impl XdDesktop {
         self.request_chat(&chat_id);
         self.request_messages(&chat_id);
         self.request_shortcuts();
-        if self.diff_panel.is_some() {
-            self.repo_file_filter.clear();
-            self.repo_file_filter_input
-                .update(cx, |input, cx| input.set_text("", cx));
-            if let Some(diff) = &mut self.diff_panel {
-                diff.action = None;
-                diff.action_error = None;
-            }
-            self.refresh_diff(cx);
-        }
+        self.repo_file_filter.clear();
+        self.repo_file_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.restore_panes(cx);
         cx.notify();
     }
 
@@ -15621,6 +15674,30 @@ mod tests {
             ),
             760
         );
+    }
+
+    #[test]
+    fn pane_state_keys_keep_devices_and_chats_isolated() {
+        assert_eq!(
+            pane_state_key(ChatEndpoint::Local, None, "same-chat"),
+            "local/same-chat"
+        );
+        assert_eq!(
+            pane_state_key(
+                ChatEndpoint::Remote,
+                Some(("dev.example", 4001)),
+                "same-chat"
+            ),
+            "remote/dev.example:4001/same-chat"
+        );
+        assert_ne!(
+            pane_state_key(ChatEndpoint::Remote, Some(("first.example", 4001)), "chat"),
+            pane_state_key(ChatEndpoint::Remote, Some(("second.example", 4001)), "chat")
+        );
+        assert_eq!(pane_state_mask(false, false), 0);
+        assert_eq!(pane_state_mask(true, false), PANE_DIFF);
+        assert_eq!(pane_state_mask(false, true), PANE_TERMINAL);
+        assert_eq!(pane_state_mask(true, true), PANE_DIFF | PANE_TERMINAL);
     }
 
     #[test]

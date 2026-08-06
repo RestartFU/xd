@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -105,6 +106,7 @@ pub struct AppSettings {
     pub sidebar_width: u16,
     pub diff_width: u16,
     pub terminal_height: u16,
+    pub pane_states: HashMap<String, u8>,
 }
 
 impl Default for AppSettings {
@@ -120,6 +122,7 @@ impl Default for AppSettings {
             sidebar_width: 272,
             diff_width: 460,
             terminal_height: 320,
+            pane_states: HashMap::new(),
         }
     }
 }
@@ -217,6 +220,10 @@ mod tests {
             sidebar_width: 318,
             diff_width: 512,
             terminal_height: 280,
+            pane_states: HashMap::from([
+                ("local/chat-restore".into(), 5),
+                ("remote/dev.example:4001/chat-remote".into(), 1),
+            ]),
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
