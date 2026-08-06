@@ -1,17 +1,55 @@
+use std::ops::Range;
+
 const MAX_SCROLLBACK: usize = 5_000;
 const MAX_GEOMETRY: usize = 1_000;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalStyle {
+    pub foreground: Option<u32>,
+    pub background: Option<u32>,
+    pub bold: bool,
+    inverse: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSpan {
+    pub range: Range<usize>,
+    pub style: TerminalStyle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalText {
+    pub text: String,
+    pub spans: Vec<TerminalSpan>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Cell {
+    character: char,
+    style: TerminalStyle,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            character: ' ',
+            style: TerminalStyle::default(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TerminalScreen {
     columns: usize,
     rows: usize,
-    grid: Vec<Vec<char>>,
-    scrollback: Vec<Vec<char>>,
+    grid: Vec<Vec<Cell>>,
+    scrollback: Vec<Vec<Cell>>,
     row: usize,
     column: usize,
     saved: (usize, usize),
     parser: Parser,
     utf8: Vec<u8>,
+    style: TerminalStyle,
 }
 
 #[derive(Clone, Default)]
@@ -32,13 +70,14 @@ impl TerminalScreen {
         Self {
             columns,
             rows,
-            grid: vec![vec![' '; columns]; rows],
+            grid: vec![vec![Cell::default(); columns]; rows],
             scrollback: Vec::new(),
             row: 0,
             column: 0,
             saved: (0, 0),
             parser: Parser::Ground,
             utf8: Vec::new(),
+            style: TerminalStyle::default(),
         }
     }
 
@@ -46,13 +85,13 @@ impl TerminalScreen {
         let columns = columns.clamp(1, MAX_GEOMETRY);
         let rows = rows.clamp(1, MAX_GEOMETRY);
         for line in &mut self.grid {
-            line.resize(columns, ' ');
+            line.resize(columns, Cell::default());
         }
         while self.grid.len() > rows {
             self.scrollback.push(self.grid.remove(0));
         }
         while self.grid.len() < rows {
-            self.grid.push(vec![' '; columns]);
+            self.grid.push(vec![Cell::default(); columns]);
         }
         self.columns = columns;
         self.rows = rows;
@@ -117,21 +156,61 @@ impl TerminalScreen {
         }
     }
 
+    #[cfg(test)]
     pub fn text(&self) -> String {
-        let mut lines = self.scrollback.clone();
-        lines.extend(self.grid.clone());
+        self.rendered().text
+    }
+
+    pub fn rendered(&self) -> TerminalText {
+        let mut lines = self
+            .scrollback
+            .iter()
+            .chain(self.grid.iter())
+            .collect::<Vec<_>>();
         while lines
             .last()
-            .is_some_and(|line| line.iter().all(|character| *character == ' '))
+            .is_some_and(|line| line.iter().all(|cell| cell.character == ' '))
             && lines.len() > 1
         {
             lines.pop();
         }
-        lines
-            .iter()
-            .map(|line| line.iter().collect::<String>().trim_end().to_owned())
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for (line_index, line) in lines.into_iter().enumerate() {
+            if line_index > 0 {
+                text.push('\n');
+            }
+            let end = line
+                .iter()
+                .rposition(|cell| cell.character != ' ')
+                .map_or(0, |index| index + 1);
+            let mut run: Option<(usize, TerminalStyle)> = None;
+            for cell in &line[..end] {
+                let style = cell.style.resolved();
+                if run.is_some_and(|(_, current)| current != style) {
+                    let (start, current) = run.take().expect("terminal style run exists");
+                    if current != TerminalStyle::default() {
+                        spans.push(TerminalSpan {
+                            range: start..text.len(),
+                            style: current,
+                        });
+                    }
+                }
+                if run.is_none() {
+                    run = Some((text.len(), style));
+                }
+                text.push(cell.character);
+            }
+            if let Some((start, style)) = run
+                && style != TerminalStyle::default()
+            {
+                spans.push(TerminalSpan {
+                    range: start..text.len(),
+                    style,
+                });
+            }
+        }
+        TerminalText { text, spans }
     }
 
     fn put(&mut self, character: char) {
@@ -139,7 +218,10 @@ impl TerminalScreen {
             self.column = 0;
             self.line_feed();
         }
-        self.grid[self.row][self.column] = character;
+        self.grid[self.row][self.column] = Cell {
+            character,
+            style: self.style,
+        };
         self.column += 1;
     }
 
@@ -166,7 +248,7 @@ impl TerminalScreen {
             self.row += 1;
         } else {
             self.scrollback.push(self.grid.remove(0));
-            self.grid.push(vec![' '; self.columns]);
+            self.grid.push(vec![Cell::default(); self.columns]);
             self.trim_scrollback();
         }
     }
@@ -179,9 +261,10 @@ impl TerminalScreen {
     }
 
     fn clear(&mut self) {
-        self.grid = vec![vec![' '; self.columns]; self.rows];
+        self.grid = vec![vec![Cell::default(); self.columns]; self.rows];
         self.row = 0;
         self.column = 0;
+        self.style = TerminalStyle::default();
     }
 
     fn csi(&mut self, sequence: &str, command: char) {
@@ -218,27 +301,112 @@ impl TerminalScreen {
             'J' if first == 2 || first == 3 => self.clear(),
             'J' => {
                 for column in self.column..self.columns {
-                    self.grid[self.row][column] = ' ';
+                    self.grid[self.row][column] = Cell::default();
                 }
                 for row in self.row + 1..self.rows {
-                    self.grid[row].fill(' ');
+                    self.grid[row].fill(Cell::default());
                 }
             }
-            'K' if first == 2 => self.grid[self.row].fill(' '),
+            'K' if first == 2 => self.grid[self.row].fill(Cell::default()),
             'K' if first == 1 => {
                 for column in 0..=self.column.min(self.columns - 1) {
-                    self.grid[self.row][column] = ' ';
+                    self.grid[self.row][column] = Cell::default();
                 }
             }
             'K' => {
                 for column in self.column..self.columns {
-                    self.grid[self.row][column] = ' ';
+                    self.grid[self.row][column] = Cell::default();
                 }
             }
+            'm' => self.sgr(&values),
             's' => self.saved = (self.row, self.column),
             'u' => (self.row, self.column) = self.saved,
             _ => {}
         }
+    }
+
+    fn sgr(&mut self, values: &[usize]) {
+        let mut index = 0;
+        while index < values.len() {
+            let value = values[index];
+            match value {
+                0 => self.style = TerminalStyle::default(),
+                1 => self.style.bold = true,
+                22 => self.style.bold = false,
+                7 => self.style.inverse = true,
+                27 => self.style.inverse = false,
+                30..=37 => self.style.foreground = Some(ansi_color(value - 30)),
+                39 => self.style.foreground = None,
+                40..=47 => self.style.background = Some(ansi_color(value - 40)),
+                49 => self.style.background = None,
+                90..=97 => self.style.foreground = Some(ansi_color(value - 90 + 8)),
+                100..=107 => self.style.background = Some(ansi_color(value - 100 + 8)),
+                38 | 48 => {
+                    let foreground = value == 38;
+                    let color = match values.get(index + 1).copied() {
+                        Some(5) => {
+                            index += 2;
+                            values.get(index).copied().map(xterm_color)
+                        }
+                        Some(2) if index + 4 < values.len() => {
+                            let red = values[index + 2].min(255) as u32;
+                            let green = values[index + 3].min(255) as u32;
+                            let blue = values[index + 4].min(255) as u32;
+                            index += 4;
+                            Some((red << 16) | (green << 8) | blue)
+                        }
+                        _ => None,
+                    };
+                    if foreground {
+                        self.style.foreground = color;
+                    } else {
+                        self.style.background = color;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+}
+
+impl TerminalStyle {
+    fn resolved(mut self) -> Self {
+        if self.inverse {
+            std::mem::swap(&mut self.foreground, &mut self.background);
+            self.inverse = false;
+        }
+        self
+    }
+}
+
+fn ansi_color(index: usize) -> u32 {
+    const COLORS: [u32; 16] = [
+        0x1f2329, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xd7dae0, 0x5c6370,
+        0xff7a85, 0xb3e180, 0xffd68a, 0x7dbaff, 0xd99bff, 0x75d5e0, 0xffffff,
+    ];
+    COLORS[index.min(COLORS.len() - 1)]
+}
+
+fn xterm_color(index: usize) -> u32 {
+    match index.min(255) {
+        0..=15 => ansi_color(index),
+        16..=231 => {
+            let value = index - 16;
+            let component = |part: usize| -> u32 {
+                const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
+                LEVELS[part.min(5)]
+            };
+            let red = component(value / 36);
+            let green = component((value / 6) % 6);
+            let blue = component(value % 6);
+            (red << 16) | (green << 8) | blue
+        }
+        232..=255 => {
+            let gray = 8 + (index - 232) as u32 * 10;
+            (gray << 16) | (gray << 8) | gray
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -269,5 +437,25 @@ mod tests {
         }
         assert!(screen.scrollback.len() <= MAX_SCROLLBACK);
         assert!(screen.text().contains("line"));
+    }
+
+    #[test]
+    fn preserves_standard_extended_and_truecolor_sgr_styles() {
+        let mut screen = TerminalScreen::new(20, 2);
+        screen.feed(b"plain \x1b[31;1mred\x1b[0m \x1b[38;5;82mgreen\x1b[0m \x1b[48;2;1;2;3mX");
+        let rendered = screen.rendered();
+        assert_eq!(rendered.text, "plain red green X");
+        assert!(rendered.spans.iter().any(|span| {
+            &rendered.text[span.range.clone()] == "red"
+                && span.style.foreground == Some(ansi_color(1))
+                && span.style.bold
+        }));
+        assert!(rendered.spans.iter().any(|span| {
+            &rendered.text[span.range.clone()] == "green"
+                && span.style.foreground == Some(xterm_color(82))
+        }));
+        assert!(rendered.spans.iter().any(|span| {
+            &rendered.text[span.range.clone()] == "X" && span.style.background == Some(0x010203)
+        }));
     }
 }

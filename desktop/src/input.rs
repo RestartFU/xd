@@ -72,7 +72,7 @@ impl ComposerInput {
     }
 
     pub fn terminal(cx: &mut Context<Self>) -> Self {
-        let mut input = Self::new(cx, "Type in terminal…");
+        let mut input = Self::new(cx, "");
         input.terminal = true;
         input
     }
@@ -644,9 +644,13 @@ impl Element for TextElement {
             window.paint_quad(selection);
         }
         let line = prepaint.line.take().expect("input line was shaped");
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .expect("paint input line");
-        if focus_handle.is_focused(window)
+        let terminal = self.input.read(cx).terminal;
+        if !terminal {
+            line.paint(bounds.origin, window.line_height(), window, cx)
+                .expect("paint input line");
+        }
+        if !terminal
+            && focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
             window.paint_quad(cursor);
@@ -664,7 +668,16 @@ impl Render for ComposerInput {
             .flex_1()
             .min_w_0()
             .key_context("ComposerInput")
-            .when(self.terminal, |input| input.key_context("TerminalInput"))
+            .when(self.terminal, |input| {
+                input
+                    .key_context("TerminalInput")
+                    .absolute()
+                    .left_0()
+                    .bottom_0()
+                    .w(px(1.0))
+                    .h(px(1.0))
+                    .overflow_hidden()
+            })
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))

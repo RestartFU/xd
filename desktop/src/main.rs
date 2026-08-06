@@ -8536,7 +8536,19 @@ impl Render for XdDesktop {
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
         let terminal_desktop = cx.entity();
         let terminal_pane = self.terminal_panel.as_ref().map(|panel| {
-            let output = panel.screen.text();
+            let output = panel.screen.rendered();
+            let highlights = output.spans.into_iter().map(|span| {
+                (
+                    span.range,
+                    HighlightStyle {
+                        color: span.style.foreground.map(|color| rgb(color).into()),
+                        background_color: span.style.background.map(|color| rgb(color).into()),
+                        font_weight: span.style.bold.then_some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                )
+            });
+            let output = StyledText::new(output.text).with_highlights(highlights);
             let active = panel.terminal_id.is_some() && !panel.closed && !panel.loading;
             div()
                 .w_full()
@@ -8644,6 +8656,15 @@ impl Render for XdDesktop {
                         .text_size(px(13.0))
                         .line_height(px(19.0))
                         .text_color(rgb(0xd8dee9))
+                        .track_focus(&terminal_focus)
+                        .when(active, |output| {
+                            output.cursor(CursorStyle::IBeam).on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    let focus = this.terminal_input.read(cx).focus_handle(cx);
+                                    window.focus(&focus);
+                                },
+                            ))
+                        })
                         .child(
                             canvas(
                                 {
@@ -8688,31 +8709,7 @@ impl Render for XdDesktop {
                             .absolute()
                             .inset_0(),
                         )
-                        .child(output),
-                )
-                .child(
-                    div()
-                        .id("terminal-input")
-                        .track_focus(&terminal_focus)
-                        .h(px(40.0))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .border_t_1()
-                        .border_color(rgb(if terminal_focus.is_focused(window) {
-                            accent
-                        } else {
-                            BORDER
-                        }))
-                        .bg(rgb(BG))
-                        .when(active, |input| {
-                            input
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let focus = this.terminal_input.read(cx).focus_handle(cx);
-                                    window.focus(&focus);
-                                }))
-                        })
+                        .child(output)
                         .child(terminal_input.clone()),
                 )
                 .into_any_element()
