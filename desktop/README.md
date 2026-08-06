@@ -94,6 +94,11 @@ cannot be combined with individual socket, database, or workspace overrides,
 and the Rust daemon refuses to open the database while another daemon is
 listening on that data root's socket.
 
+On its first launch, GPUI also imports compatible nightly (or stable) dconf
+preferences—window and pane geometry, the last local chat, favorite models,
+Git-writing selection, and per-chat pane state. It never replaces an existing
+`xd-dev/settings.json` file.
+
 This is still a development channel. Several production-client management
 surfaces have not yet been ported.
 

@@ -1,9 +1,11 @@
 use std::{
     collections::HashMap,
     env, fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -137,11 +139,297 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn load() -> Self {
-        load_from(&settings_path()).unwrap_or_default()
+        let path = settings_path();
+        match fs::symlink_metadata(&path) {
+            Ok(_) => load_from(&path).unwrap_or_default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let settings = import_legacy_settings().unwrap_or_default();
+                let _ = save_to(&path, &settings);
+                settings
+            }
+            Err(_) => Self::default(),
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
         save_to(&settings_path(), self)
+    }
+}
+
+const LEGACY_DCONF_PATHS: [&str; 2] = ["/com/restartfu/XdNightly/", "/com/restartfu/Hy/"];
+const DCONF_OUTPUT_LIMIT: u64 = 256 * 1024;
+const DCONF_TIMEOUT: Duration = Duration::from_millis(750);
+
+fn import_legacy_settings() -> Option<AppSettings> {
+    LEGACY_DCONF_PATHS
+        .iter()
+        .find_map(|path| read_dconf(path).and_then(|dump| import_legacy_dump(&dump)))
+}
+
+fn read_dconf(path: &str) -> Option<String> {
+    let mut child = Command::new("dconf")
+        .args(["dump", path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let reader = match thread::Builder::new()
+        .name("xd-dev-dconf-import".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .take(DCONF_OUTPUT_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes)
+        }) {
+        Ok(reader) => reader,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let deadline = Instant::now() + DCONF_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()?.ok()?;
+    if !status?.success() || bytes.is_empty() || bytes.len() as u64 > DCONF_OUTPUT_LIMIT {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn import_legacy_dump(dump: &str) -> Option<AppSettings> {
+    let values = dump
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('[') && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .collect::<HashMap<_, _>>();
+    let mut settings = AppSettings::default();
+    let mut imported = false;
+
+    if let Some(width) = bounded_u16(values.get("window-width").copied(), 8_192) {
+        settings.window_width = width;
+        imported = true;
+    }
+    if let Some(height) = bounded_u16(values.get("window-height").copied(), 8_192) {
+        settings.window_height = height;
+        imported = true;
+    }
+    if let Some(maximized) = variant_bool(values.get("window-maximized").copied()) {
+        settings.window_maximized = maximized;
+        imported = true;
+    }
+    if let Some(width) = bounded_u16(values.get("sidebar-width").copied(), 2_048) {
+        settings.sidebar_width = width;
+        imported = true;
+    }
+    if let Some(width) = bounded_u16(values.get("diff-width").copied(), 4_096) {
+        settings.diff_width = width;
+        imported = true;
+    }
+    if let Some(height) = bounded_u16(values.get("terminal-height").copied(), 4_096) {
+        settings.terminal_height = height;
+        imported = true;
+    }
+    if let Some(favorites) = values
+        .get("favorite-models")
+        .and_then(|value| variant_strings(value))
+    {
+        settings.favorite_models = favorites
+            .into_iter()
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .take(128)
+            .collect();
+        imported = true;
+    }
+    if let Some(active) = values
+        .get("active-chat")
+        .and_then(|value| variant_string(value))
+        .and_then(|value| value.strip_prefix("local:").map(str::to_owned))
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+    {
+        settings.last_chat = Some(active);
+        imported = true;
+    }
+    if let Some(backend) = values
+        .get("git-writing-backend")
+        .and_then(|value| variant_string(value))
+    {
+        settings.git_writer = match backend.as_str() {
+            "claude" => GitWriter::Claude,
+            "codex" => GitWriter::Codex,
+            _ => GitWriter::Chat,
+        };
+        imported = true;
+    }
+    if settings.git_writer != GitWriter::Chat
+        && let Some(model) = values
+            .get("git-writing-model")
+            .and_then(|value| variant_string(value))
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+    {
+        settings.git_writer_model = Some(model);
+        imported = true;
+    }
+    if let Some(states) = values
+        .get("pane-state")
+        .and_then(|value| variant_u32_map(value))
+    {
+        settings.pane_states = states
+            .into_iter()
+            .filter(|(key, _)| !key.is_empty() && key.len() <= 512)
+            .take(512)
+            .map(|(key, state)| (key, (state & 0b0101) as u8))
+            .collect();
+        imported = true;
+    }
+
+    imported.then_some(settings)
+}
+
+fn bounded_u16(value: Option<&str>, maximum: u16) -> Option<u16> {
+    value?
+        .parse::<u16>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= maximum)
+}
+
+fn variant_bool(value: Option<&str>) -> Option<bool> {
+    match value? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn variant_string(value: &str) -> Option<String> {
+    let mut cursor = 0;
+    let result = quoted_string(value.trim(), &mut cursor)?;
+    (value.trim()[cursor..].trim().is_empty()).then_some(result)
+}
+
+fn variant_strings(value: &str) -> Option<Vec<String>> {
+    let value = value.trim();
+    if !value.starts_with('[') || !value.ends_with(']') {
+        return None;
+    }
+    let mut cursor = 1;
+    let end = value.len() - 1;
+    let mut strings = Vec::new();
+    loop {
+        skip_ascii_whitespace(value, &mut cursor);
+        if cursor == end {
+            return Some(strings);
+        }
+        strings.push(quoted_string(value, &mut cursor)?);
+        skip_ascii_whitespace(value, &mut cursor);
+        match value.as_bytes().get(cursor) {
+            Some(b',') => cursor += 1,
+            _ if cursor == end => return Some(strings),
+            _ => return None,
+        }
+    }
+}
+
+fn variant_u32_map(value: &str) -> Option<HashMap<String, u32>> {
+    let value = value.trim();
+    if !value.starts_with('{') || !value.ends_with('}') {
+        return None;
+    }
+    let mut cursor = 1;
+    let end = value.len() - 1;
+    let mut values = HashMap::new();
+    loop {
+        skip_ascii_whitespace(value, &mut cursor);
+        if cursor == end {
+            return Some(values);
+        }
+        let key = quoted_string(value, &mut cursor)?;
+        skip_ascii_whitespace(value, &mut cursor);
+        if value.as_bytes().get(cursor) != Some(&b':') {
+            return None;
+        }
+        cursor += 1;
+        skip_ascii_whitespace(value, &mut cursor);
+        if value[cursor..].starts_with("uint32") {
+            cursor += "uint32".len();
+            skip_ascii_whitespace(value, &mut cursor);
+        }
+        let start = cursor;
+        while value.as_bytes().get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if start == cursor {
+            return None;
+        }
+        let state = value[start..cursor].parse().ok()?;
+        values.insert(key, state);
+        skip_ascii_whitespace(value, &mut cursor);
+        match value.as_bytes().get(cursor) {
+            Some(b',') => cursor += 1,
+            _ if cursor == end => return Some(values),
+            _ => return None,
+        }
+    }
+}
+
+fn quoted_string(value: &str, cursor: &mut usize) -> Option<String> {
+    skip_ascii_whitespace(value, cursor);
+    let quote = *value.as_bytes().get(*cursor)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    *cursor += 1;
+    let mut bytes = Vec::new();
+    while let Some(byte) = value.as_bytes().get(*cursor).copied() {
+        *cursor += 1;
+        if byte == quote {
+            return String::from_utf8(bytes).ok();
+        }
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let escaped = value.as_bytes().get(*cursor).copied()?;
+        *cursor += 1;
+        bytes.push(match escaped {
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'\\' => b'\\',
+            b'\'' => b'\'',
+            b'"' => b'"',
+            _ => return None,
+        });
+    }
+    None
+}
+
+fn skip_ascii_whitespace(value: &str, cursor: &mut usize) {
+    while value
+        .as_bytes()
+        .get(*cursor)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        *cursor += 1;
     }
 }
 
@@ -246,5 +534,51 @@ mod tests {
         .unwrap();
         assert_eq!(load_from(&path).unwrap().accent, AccentPreset::Green);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn imports_only_compatible_legacy_dconf_settings() {
+        let settings = import_legacy_dump(
+            r#"
+[/]
+window-width=1440
+window-height=900
+window-maximized=true
+sidebar-width=312
+diff-width=540
+terminal-height=280
+favorite-models=['codex/gpt-5.4', 'claude/claude-opus-4-6']
+active-chat='local:chat-123'
+git-writing-backend='codex'
+git-writing-model='gpt-5.4'
+expanded-folders=['folder-open']
+pane-state={'local/chat-123': uint32 5, 'remote/host:4001/chat': uint32 3}
+"#,
+        )
+        .unwrap();
+        assert_eq!(settings.window_width, 1440);
+        assert_eq!(settings.window_height, 900);
+        assert!(settings.window_maximized);
+        assert_eq!(settings.sidebar_width, 312);
+        assert_eq!(settings.diff_width, 540);
+        assert_eq!(settings.terminal_height, 280);
+        assert_eq!(settings.favorite_models.len(), 2);
+        assert_eq!(settings.last_chat.as_deref(), Some("chat-123"));
+        assert_eq!(settings.git_writer, GitWriter::Codex);
+        assert_eq!(settings.git_writer_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(settings.pane_states["local/chat-123"], 5);
+        assert_eq!(settings.pane_states["remote/host:4001/chat"], 1);
+        assert!(settings.collapsed_folders.is_empty());
+    }
+
+    #[test]
+    fn legacy_variant_parser_handles_escapes_and_rejects_malformed_values() {
+        assert_eq!(
+            variant_strings(r#"['one', 'two\'s', "three"]"#).unwrap(),
+            ["one", "two's", "three"]
+        );
+        assert!(variant_strings("['unterminated]").is_none());
+        assert!(variant_u32_map("{'chat': uint32 nope}").is_none());
+        assert!(import_legacy_dump("[/]\nunknown='value'").is_none());
     }
 }
