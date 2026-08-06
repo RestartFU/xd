@@ -8559,16 +8559,23 @@ impl XdDesktop {
                     .text_color(rgb(MUTED))
                     .child(Self::inline_text(content, block_id))
                     .into_any_element(),
-                Block::ListItem { ordered, content } => div()
+                Block::ListItem {
+                    number,
+                    depth,
+                    content,
+                } => div()
                     .flex()
                     .items_start()
                     .gap_2()
+                    .pl(px(f32::from(depth) * 18.0))
                     .child(
                         div()
-                            .w(px(18.0))
+                            .min_w(px(18.0))
                             .flex_none()
                             .text_color(rgb(MUTED))
-                            .child(if ordered { "1." } else { "•" }),
+                            .child(
+                                number.map_or_else(|| "•".into(), |number| format!("{number}.")),
+                            ),
                     )
                     .child(div().flex_1().child(Self::inline_text(content, block_id)))
                     .into_any_element(),

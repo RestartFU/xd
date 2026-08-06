@@ -13,10 +13,17 @@ pub struct Document {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
-    Heading { level: u8, content: InlineText },
+    Heading {
+        level: u8,
+        content: InlineText,
+    },
     Paragraph(InlineText),
     Quote(InlineText),
-    ListItem { ordered: bool, content: InlineText },
+    ListItem {
+        number: Option<u64>,
+        depth: u8,
+        content: InlineText,
+    },
     Rule,
     Code(CodeBlock),
     Table(TableBlock),
@@ -193,10 +200,11 @@ fn parse_blocks(source: &str, block_limit: usize) -> (Vec<Block>, bool) {
             continue;
         }
 
-        if let Some((ordered, text)) = list_item(line) {
+        if let Some((number, depth, text)) = list_item(line) {
             flush_paragraph(&mut blocks, &mut paragraph);
             blocks.push(Block::ListItem {
-                ordered,
+                number,
+                depth,
                 content: parse_inline(text),
             });
             index += 1;
@@ -704,16 +712,19 @@ fn quote(line: &str) -> Option<&str> {
         .map(|text| text.strip_prefix(' ').unwrap_or(text))
 }
 
-fn list_item(line: &str) -> Option<(bool, &str)> {
+fn list_item(line: &str) -> Option<(Option<u64>, u8, &str)> {
     let trimmed = line.trim_start();
+    let indentation = line.len().saturating_sub(trimmed.len());
+    let depth = u8::try_from(indentation / 2).unwrap_or(u8::MAX).min(16);
     for marker in ["- ", "* ", "+ "] {
         if let Some(text) = trimmed.strip_prefix(marker) {
-            return Some((false, text));
+            return Some((None, depth, text));
         }
     }
     let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
     if digits > 0 && trimmed.get(digits..digits + 2) == Some(". ") {
-        return Some((true, &trimmed[digits + 2..]));
+        let number = trimmed[..digits].parse().ok()?;
+        return Some((Some(number), depth, &trimmed[digits + 2..]));
     }
     None
 }
@@ -1291,14 +1302,54 @@ mod tests {
         assert_eq!(paragraph.spans[2].url.as_deref(), Some("https://xd.dev"));
         assert!(matches!(
             document.blocks[2],
-            Block::ListItem { ordered: false, .. }
+            Block::ListItem { number: None, .. }
         ));
         assert!(matches!(
             document.blocks[3],
-            Block::ListItem { ordered: true, .. }
+            Block::ListItem {
+                number: Some(1),
+                ..
+            }
         ));
         assert!(matches!(document.blocks[4], Block::Quote(_)));
         assert!(matches!(document.blocks[5], Block::Rule));
+    }
+
+    #[test]
+    fn preserves_ordered_markers_and_nested_list_depth() {
+        let document = parse("3. third\n4. fourth\n  - nested\n    9. deep");
+        assert!(matches!(
+            document.blocks[0],
+            Block::ListItem {
+                number: Some(3),
+                depth: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            document.blocks[1],
+            Block::ListItem {
+                number: Some(4),
+                depth: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            document.blocks[2],
+            Block::ListItem {
+                number: None,
+                depth: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            document.blocks[3],
+            Block::ListItem {
+                number: Some(9),
+                depth: 2,
+                ..
+            }
+        ));
     }
 
     #[test]
