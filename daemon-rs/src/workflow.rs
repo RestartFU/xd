@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    io::Read,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -16,6 +18,8 @@ const MAX_JOBS: usize = 100;
 const AUTHENTICATED_TTL: Duration = Duration::from_secs(8);
 const ANONYMOUS_TTL: Duration = Duration::from_secs(3 * 60);
 const FAILURE_TTL: Duration = Duration::from_secs(30);
+const TOKEN_TIMEOUT: Duration = Duration::from_secs(2);
+const TOKEN_OUTPUT_LIMIT: usize = 8 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkflowRun {
@@ -35,6 +39,31 @@ struct CacheEntry {
 }
 
 type Resolver = dyn Fn(&WorkflowRun) -> Result<Resolution, String> + Send + Sync;
+type TokenResolver = dyn Fn() -> Option<String> + Send + Sync;
+
+struct TokenCache {
+    value: Mutex<Option<Option<String>>>,
+    resolver: Arc<TokenResolver>,
+}
+
+impl TokenCache {
+    fn new(resolver: impl Fn() -> Option<String> + Send + Sync + 'static) -> Self {
+        Self {
+            value: Mutex::new(None),
+            resolver: Arc::new(resolver),
+        }
+    }
+
+    fn fetch(&self) -> Option<String> {
+        let mut value = self.value.lock().ok()?;
+        if let Some(value) = value.as_ref() {
+            return value.clone();
+        }
+        let resolved = normalize_token((self.resolver)());
+        *value = Some(resolved.clone());
+        resolved
+    }
+}
 
 pub(crate) struct WorkflowStatuses {
     entries: Arc<Mutex<HashMap<String, CacheEntry>>>,
@@ -52,11 +81,15 @@ impl WorkflowStatuses {
             .user_agent("xd-dev/0.1")
             .build()
             .into();
+        let tokens = Arc::new(TokenCache::new(resolve_token));
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             failures: Arc::new(Mutex::new(HashMap::new())),
             inflight: Arc::new(Mutex::new(HashSet::new())),
-            resolver: Arc::new(move |run| resolve(&agent, run)),
+            resolver: Arc::new(move |run| {
+                let token = tokens.fetch();
+                resolve(&agent, run, token.as_deref())
+            }),
             failure_ttl: FAILURE_TTL,
             events,
         }
@@ -274,15 +307,18 @@ fn workflow_event(marker: &str, mut status: Value) -> Value {
     Value::Object(event)
 }
 
-fn resolve(agent: &ureq::Agent, run: &WorkflowRun) -> Result<Resolution, String> {
-    let token = environment_token();
+fn resolve(
+    agent: &ureq::Agent,
+    run: &WorkflowRun,
+    token: Option<&str>,
+) -> Result<Resolution, String> {
     let run_url = format!(
         "https://api.github.com/repos/{}/actions/runs/{}",
         run.repository, run.id
     );
-    let run_status = request_json(agent, &run_url, token.as_deref())?;
+    let run_status = request_json(agent, &run_url, token)?;
     let jobs_url = format!("{run_url}/jobs?per_page={MAX_JOBS}");
-    let jobs = request_json(agent, &jobs_url, token.as_deref()).ok();
+    let jobs = request_json(agent, &jobs_url, token).ok();
     Ok(Resolution {
         status: normalize_status(&run_status, jobs.as_ref())?,
         authenticated: token.is_some(),
@@ -318,6 +354,70 @@ fn environment_token() -> Option<String> {
         (!token.is_empty() && token.len() <= 4096 && !token.chars().any(char::is_whitespace))
             .then(|| token.to_owned())
     })
+}
+
+fn resolve_token() -> Option<String> {
+    if let Some(token) = environment_token() {
+        return Some(token);
+    }
+    let mut child = Command::new("gh")
+        .args(["auth", "token"])
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child
+        .stdout
+        .take()
+        .map(|stream| thread::spawn(move || read_token_output(stream)))?;
+    let deadline = Instant::now() + TOKEN_TIMEOUT;
+    let mut status = None;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(result)) => {
+                status = Some(result);
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    let timed_out_or_failed = status.is_none();
+    if timed_out_or_failed {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let output = stdout.join().ok()?;
+    if timed_out_or_failed || !status.is_some_and(|status| status.success()) {
+        return None;
+    }
+    normalize_token(String::from_utf8(output).ok())
+}
+
+fn read_token_output(mut stream: impl Read) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let Ok(count) = stream.read(&mut buffer) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let remaining = TOKEN_OUTPUT_LIMIT.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    output
+}
+
+fn normalize_token(token: Option<String>) -> Option<String> {
+    let token = token?;
+    let token = token.trim();
+    (!token.is_empty() && token.len() <= 4096 && !token.chars().any(char::is_whitespace))
+        .then(|| token.to_owned())
 }
 
 fn parse_marker(marker: &str) -> Option<WorkflowRun> {
@@ -456,6 +556,22 @@ mod tests {
         assert!(
             parse_marker("workflow_run\n123\nhttps://github.com/a/b/c/actions/runs/123").is_none()
         );
+    }
+
+    #[test]
+    fn github_token_lookup_is_normalized_and_cached_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver_calls = calls.clone();
+        let tokens = TokenCache::new(move || {
+            resolver_calls.fetch_add(1, Ordering::Relaxed);
+            Some("  github-token\n".into())
+        });
+
+        assert_eq!(tokens.fetch().as_deref(), Some("github-token"));
+        assert_eq!(tokens.fetch().as_deref(), Some("github-token"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(normalize_token(Some("has whitespace".into())), None);
+        assert_eq!(normalize_token(Some("x".repeat(4097))), None);
     }
 
     #[test]
