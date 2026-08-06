@@ -416,7 +416,10 @@ mod tests {
     fn tls_server(root: &Path) -> (u16, Vec<u8>, thread::JoinHandle<()>) {
         let certificate_path = root.join("certificate.der");
         let key_path = root.join("private-key.der");
-        let (certificate, _) = crate::ensure_certificate(&certificate_path, &key_path).unwrap();
+        let certificate = crate::ensure_identity(&certificate_path, &key_path)
+            .unwrap()
+            .certificates[0]
+            .clone();
         let config = Arc::new(crate::load_server_config(&certificate_path, &key_path).unwrap());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

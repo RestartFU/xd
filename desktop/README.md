@@ -88,9 +88,11 @@ xd-daemon-dev serve --data ~/.local/share/xd-nightly
 ```
 
 This keeps the existing database, managed workspace paths, and compatible
-secret files in place. `--data` cannot be combined with individual socket,
-database, or workspace overrides, and the Rust daemon refuses to open the
-database while another daemon is listening on that data root's socket.
+secret files in place. Existing `server-cert.pem` and `server-key.pem` files are
+also reused so paired clients keep the same pinned daemon identity. `--data`
+cannot be combined with individual socket, database, or workspace overrides,
+and the Rust daemon refuses to open the database while another daemon is
+listening on that data root's socket.
 
 This is still a development channel. Several production-client management
 surfaces have not yet been ported.

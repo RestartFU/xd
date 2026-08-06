@@ -16,16 +16,20 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::{
     ServerConfig, ServerConnection, StreamOwned,
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    pki_types::{
+        CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+    },
 };
 
 mod client;
 
 const IO_TIMEOUT: Duration = Duration::from_millis(50);
 const COPY_BUFFER: usize = 64 * 1024;
+const MAX_IDENTITY_BYTES: u64 = 1024 * 1024;
 static TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -126,25 +130,47 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<Options, Str
 }
 
 fn load_server_config(certificate: &Path, private_key: &Path) -> Result<ServerConfig, String> {
-    let (certificate, private_key) = ensure_certificate(certificate, private_key)?;
+    let identity = ensure_identity(certificate, private_key)?;
     let provider = rustls::crypto::ring::default_provider();
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .map_err(|error| format!("cannot configure TLS: {error}"))?
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(certificate)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key)),
+            identity
+                .certificates
+                .into_iter()
+                .map(CertificateDer::from)
+                .collect(),
+            identity.private_key.into_der(),
         )
         .map_err(|error| format!("cannot load the TLS identity: {error}"))?;
     config.send_tls13_tickets = 0;
     Ok(config)
 }
 
-fn ensure_certificate(
-    certificate_path: &Path,
-    private_key_path: &Path,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+struct Identity {
+    certificates: Vec<Vec<u8>>,
+    private_key: StoredPrivateKey,
+}
+
+enum StoredPrivateKey {
+    Pkcs8(Vec<u8>),
+    Pkcs1(Vec<u8>),
+    Sec1(Vec<u8>),
+}
+
+impl StoredPrivateKey {
+    fn into_der(self) -> PrivateKeyDer<'static> {
+        match self {
+            Self::Pkcs8(bytes) => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(bytes)),
+            Self::Pkcs1(bytes) => PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(bytes)),
+            Self::Sec1(bytes) => PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(bytes)),
+        }
+    }
+}
+
+fn ensure_identity(certificate_path: &Path, private_key_path: &Path) -> Result<Identity, String> {
     match (
         read_regular(certificate_path),
         read_regular(private_key_path),
@@ -153,10 +179,17 @@ fn ensure_certificate(
             fs::set_permissions(private_key_path, fs::Permissions::from_mode(0o600)).map_err(
                 |error| format!("cannot secure {}: {error}", private_key_path.display()),
             )?;
-            return Ok((certificate, private_key));
+            return parse_identity(&certificate, &private_key);
         }
         (Err(error), _) | (_, Err(error)) => return Err(error),
-        _ => {}
+        (Ok(None), Ok(None)) => {}
+        _ => {
+            return Err(format!(
+                "TLS certificate and private key must both exist: {} and {}",
+                certificate_path.display(),
+                private_key_path.display()
+            ));
+        }
     }
 
     let CertifiedKey { cert, signing_key } =
@@ -166,7 +199,78 @@ fn ensure_certificate(
     let private_key_der = signing_key.serialize_der();
     write_private_atomic(private_key_path, &private_key_der, 0o600)?;
     write_private_atomic(certificate_path, &certificate_der, 0o644)?;
-    Ok((certificate_der, private_key_der))
+    Ok(Identity {
+        certificates: vec![certificate_der],
+        private_key: StoredPrivateKey::Pkcs8(private_key_der),
+    })
+}
+
+fn parse_identity(certificate: &[u8], private_key: &[u8]) -> Result<Identity, String> {
+    let certificates = if contains_pem_marker(certificate) {
+        pem_blocks(certificate, "CERTIFICATE")?
+    } else {
+        vec![certificate.to_vec()]
+    };
+    if certificates.is_empty() || certificates.iter().any(Vec::is_empty) {
+        return Err("the TLS certificate file contains no certificates".into());
+    }
+    let private_key = if contains_pem_marker(private_key) {
+        if let Some(key) = pem_blocks(private_key, "PRIVATE KEY")?.into_iter().next() {
+            StoredPrivateKey::Pkcs8(key)
+        } else if let Some(key) = pem_blocks(private_key, "RSA PRIVATE KEY")?
+            .into_iter()
+            .next()
+        {
+            StoredPrivateKey::Pkcs1(key)
+        } else if let Some(key) = pem_blocks(private_key, "EC PRIVATE KEY")?
+            .into_iter()
+            .next()
+        {
+            StoredPrivateKey::Sec1(key)
+        } else {
+            return Err("the TLS private-key file contains no supported private key".into());
+        }
+    } else {
+        StoredPrivateKey::Pkcs8(private_key.to_vec())
+    };
+    Ok(Identity {
+        certificates,
+        private_key,
+    })
+}
+
+fn contains_pem_marker(contents: &[u8]) -> bool {
+    contents
+        .windows(b"-----BEGIN ".len())
+        .any(|window| window == b"-----BEGIN ")
+}
+
+fn pem_blocks(contents: &[u8], label: &str) -> Result<Vec<Vec<u8>>, String> {
+    let contents = std::str::from_utf8(contents)
+        .map_err(|_| "TLS PEM identity is not valid UTF-8".to_owned())?;
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let mut remaining = contents;
+    let mut blocks = Vec::new();
+    while let Some(start) = remaining.find(&begin) {
+        let encoded = &remaining[start + begin.len()..];
+        let finish = encoded
+            .find(&end)
+            .ok_or_else(|| format!("TLS PEM {label} block is incomplete"))?;
+        let compact = encoded[..finish]
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        let decoded = STANDARD
+            .decode(compact)
+            .map_err(|_| format!("TLS PEM {label} block is not valid base64"))?;
+        if decoded.is_empty() {
+            return Err(format!("TLS PEM {label} block is empty"));
+        }
+        blocks.push(decoded);
+        remaining = &encoded[finish + end.len()..];
+    }
+    Ok(blocks)
 }
 
 fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -178,6 +282,12 @@ fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, String> {
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return Err(format!(
             "refusing non-file TLS identity at {}",
+            path.display()
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_IDENTITY_BYTES {
+        return Err(format!(
+            "TLS identity at {} must be from 1 byte to {MAX_IDENTITY_BYTES} bytes",
             path.display()
         ));
     }
@@ -309,11 +419,11 @@ mod tests {
         let root = fixture();
         let certificate = root.join("certificate.der");
         let key = root.join("private-key.der");
-        let first = ensure_certificate(&certificate, &key).unwrap();
-        let second = ensure_certificate(&certificate, &key).unwrap();
-        assert_eq!(first, second);
-        assert!(!first.0.is_empty());
-        assert!(!first.1.is_empty());
+        let first = ensure_identity(&certificate, &key).unwrap();
+        let first_certificate = first.certificates[0].clone();
+        let second = ensure_identity(&certificate, &key).unwrap();
+        assert_eq!(first_certificate, second.certificates[0]);
+        assert!(!first_certificate.is_empty());
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o700
@@ -330,11 +440,57 @@ mod tests {
     }
 
     #[test]
+    fn loads_the_existing_crystal_pem_identity_without_changing_its_certificate() {
+        let root = fixture();
+        let certificate_path = root.join("server-cert.pem");
+        let key_path = root.join("server-key.pem");
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(["xd".to_owned()]).unwrap();
+        let certificate_der = cert.der().to_vec();
+        let key_der = signing_key.serialize_der();
+        fs::write(&certificate_path, pem("CERTIFICATE", &certificate_der)).unwrap();
+        fs::write(&key_path, pem("PRIVATE KEY", &key_der)).unwrap();
+
+        let identity = ensure_identity(&certificate_path, &key_path).unwrap();
+        assert_eq!(identity.certificates, vec![certificate_der]);
+        load_server_config(&certificate_path, &key_path).unwrap();
+        assert_eq!(
+            fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_partial_and_oversized_tls_identities() {
+        let root = fixture();
+        let certificate = root.join("server-cert.pem");
+        let key = root.join("server-key.pem");
+        fs::write(&certificate, "certificate without its key").unwrap();
+        assert!(ensure_identity(&certificate, &key).is_err());
+        fs::write(&key, vec![0_u8; MAX_IDENTITY_BYTES as usize + 1]).unwrap();
+        assert!(ensure_identity(&certificate, &key).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn pem(label: &str, der: &[u8]) -> String {
+        let encoded = STANDARD.encode(der);
+        let body = encoded
+            .as_bytes()
+            .chunks(64)
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("-----BEGIN {label}-----\n{body}\n-----END {label}-----\n")
+    }
+
+    #[test]
     fn proxies_a_real_tls_session_to_the_private_unix_socket() {
         let root = fixture();
         let certificate = root.join("certificate.der");
         let key = root.join("private-key.der");
-        let (certificate_der, _) = ensure_certificate(&certificate, &key).unwrap();
+        let certificate_der = ensure_identity(&certificate, &key).unwrap().certificates[0].clone();
         let server_config = Arc::new(load_server_config(&certificate, &key).unwrap());
         let unix_path = root.join("daemon.remote");
         let unix_listener = std::os::unix::net::UnixListener::bind(&unix_path).unwrap();

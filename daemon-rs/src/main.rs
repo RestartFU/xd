@@ -70,7 +70,7 @@ fn serve(options: Options) -> Result<(), String> {
         .ok_or_else(|| "--database must have a parent directory".to_owned())?;
     let proxy = Arc::new(RemoteProxy::new(
         remote_socket_path(&options.socket),
-        data_directory.join("tls"),
+        data_directory.clone(),
     ));
     let pairing_endpoint = if options.pair {
         let endpoint = proxy.listen(&options.bind, options.port)?;

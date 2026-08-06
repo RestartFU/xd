@@ -31,12 +31,13 @@ struct RunningProxy {
 }
 
 impl RemoteProxy {
-    pub(crate) fn new(upstream: PathBuf, identity_directory: PathBuf) -> Self {
+    pub(crate) fn new(upstream: PathBuf, data_directory: PathBuf) -> Self {
+        let (certificate, private_key) = identity_paths(&data_directory);
         Self {
             executable: executable(),
             upstream,
-            certificate: identity_directory.join("certificate.der"),
-            private_key: identity_directory.join("private-key.der"),
+            certificate,
+            private_key,
             running: Mutex::new(None),
         }
     }
@@ -164,6 +165,24 @@ impl RemoteProxy {
     }
 }
 
+fn identity_paths(data_directory: &Path) -> (PathBuf, PathBuf) {
+    let legacy_certificate = data_directory.join("server-cert.pem");
+    let legacy_private_key = data_directory.join("server-key.pem");
+    if fs_entry_exists(&legacy_certificate) || fs_entry_exists(&legacy_private_key) {
+        (legacy_certificate, legacy_private_key)
+    } else {
+        let identity_directory = data_directory.join("tls");
+        (
+            identity_directory.join("certificate.der"),
+            identity_directory.join("private-key.der"),
+        )
+    }
+}
+
+fn fs_entry_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 impl Drop for RemoteProxy {
     fn drop(&mut self) {
         if let Ok(running) = self.running.get_mut()
@@ -213,10 +232,23 @@ fn executable() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn explicit_bind_addresses_are_advertised_unchanged() {
         assert_eq!(advertised_host("127.0.0.1".parse().unwrap()), "127.0.0.1");
         assert_eq!(advertised_host("::1".parse().unwrap()), "::1");
+    }
+
+    #[test]
+    fn preserves_a_legacy_identity_when_adopting_an_existing_data_root() {
+        let root = env::temp_dir().join(format!("xd-rust-legacy-identity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("server-cert.pem"), "legacy").unwrap();
+        let (certificate, private_key) = identity_paths(&root);
+        assert_eq!(certificate, root.join("server-cert.pem"));
+        assert_eq!(private_key, root.join("server-key.pem"));
+        fs::remove_dir_all(root).unwrap();
     }
 }
