@@ -1183,7 +1183,14 @@ impl XdDesktop {
                     self.close_secrets(cx);
                 }
                 if self.model.selected_chat.is_none() {
-                    if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
+                    let chat_id = self
+                        .settings
+                        .last_chat
+                        .as_ref()
+                        .filter(|chat_id| self.model.chats.iter().any(|chat| &chat.id == *chat_id))
+                        .cloned()
+                        .or_else(|| self.model.chats.first().map(|chat| chat.id.clone()));
+                    if let Some(chat_id) = chat_id {
                         self.select_chat(chat_id, cx);
                     }
                 }
@@ -3926,6 +3933,10 @@ impl XdDesktop {
             return;
         }
         self.model.select_chat(chat_id.clone());
+        self.settings.last_chat = Some(chat_id.clone());
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
         self.composer_menu = None;
         self.pending_speech = None;
         self.speech_output.stop();
