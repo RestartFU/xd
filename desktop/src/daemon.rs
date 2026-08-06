@@ -24,6 +24,12 @@ pub enum RequestKind {
     AgentCatalog,
     AgentAuth,
     AgentAuthMutation,
+    AgentSecrets {
+        folder_id: Option<String>,
+    },
+    SetAgentSecrets {
+        folder_id: Option<String>,
+    },
     VoiceModel {
         chat_id: String,
     },
@@ -345,6 +351,43 @@ impl DaemonHandle {
             body["input"] = Value::String(input.to_owned());
         }
         self.send(RequestKind::AgentAuthMutation, body)
+    }
+
+    pub fn agent_secrets(&self, folder_id: Option<&str>) -> Result<(), String> {
+        let mut body = json!({"op": "agent-secrets"});
+        if let Some(folder_id) = folder_id {
+            body["folder"] = Value::String(folder_id.to_owned());
+        }
+        self.send(
+            RequestKind::AgentSecrets {
+                folder_id: folder_id.map(str::to_owned),
+            },
+            body,
+        )
+    }
+
+    pub fn set_agent_secrets(
+        &self,
+        folder_id: Option<&str>,
+        entries: &[(String, Option<String>)],
+    ) -> Result<(), String> {
+        let entries = entries
+            .iter()
+            .map(|(name, value)| match value {
+                Some(value) => json!({"name": name, "value": value}),
+                None => json!({"name": name}),
+            })
+            .collect::<Vec<_>>();
+        let mut body = json!({"op": "set-agent-secrets", "entries": entries});
+        if let Some(folder_id) = folder_id {
+            body["folder"] = Value::String(folder_id.to_owned());
+        }
+        self.send(
+            RequestKind::SetAgentSecrets {
+                folder_id: folder_id.map(str::to_owned),
+            },
+            body,
+        )
     }
 
     pub fn voice_model(&self, chat_id: &str) -> Result<(), String> {
@@ -1243,6 +1286,57 @@ mod tests {
                 kind: RequestKind::VoiceMutation { token, operation, .. },
                 ..
             } if token == "recording-1" && operation == "voice-stream-chunk"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sends_scoped_secret_updates_without_placeholder_values() {
+        let directory = env::temp_dir().join(format!("xd-dev-secrets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "set-agent-secrets");
+            assert_eq!(request["folder"], "folder-1");
+            assert_eq!(request["entries"][0], json!({"name": "EXISTING"}));
+            assert_eq!(
+                request["entries"][1],
+                json!({"name": "NEW_TOKEN", "value": "private"})
+            );
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .set_agent_secrets(
+                Some("folder-1"),
+                &[
+                    ("EXISTING".into(), None),
+                    ("NEW_TOKEN".into(), Some("private".into())),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::SetAgentSecrets { folder_id },
+                ..
+            } if folder_id.as_deref() == Some("folder-1")
         ));
 
         server.join().unwrap();

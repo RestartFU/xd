@@ -49,6 +49,7 @@ pub struct ComposerInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     terminal: bool,
+    concealed: bool,
 }
 
 impl EventEmitter<ComposerEvent> for ComposerInput {}
@@ -66,12 +67,19 @@ impl ComposerInput {
             last_bounds: None,
             is_selecting: false,
             terminal: false,
+            concealed: false,
         }
     }
 
     pub fn terminal(cx: &mut Context<Self>) -> Self {
         let mut input = Self::new(cx, "Type in terminal…");
         input.terminal = true;
+        input
+    }
+
+    pub fn password(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
+        let mut input = Self::new(cx, placeholder);
+        input.concealed = true;
         input
     }
 
@@ -240,7 +248,7 @@ impl ComposerInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.concealed && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -249,9 +257,11 @@ impl ComposerInput {
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
-            ));
+            if !self.concealed {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.content[self.selected_range.clone()].to_string(),
+                ));
+            }
             self.replace_text_in_range(None, "", window, cx);
         }
     }
@@ -526,7 +536,11 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
+        let content = if input.concealed && !input.content.is_empty() {
+            "*".repeat(input.content.len()).into()
+        } else {
+            input.content.clone()
+        };
         let selected_range = input.selected_range.clone();
         let cursor_offset = input.cursor_offset();
         let style = window.text_style();

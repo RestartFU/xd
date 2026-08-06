@@ -256,11 +256,24 @@ struct WorkspaceDefaults {
     submitting: bool,
 }
 
+#[derive(Clone)]
+struct SecretsPanel {
+    folder_id: Option<String>,
+    folder_name: Option<String>,
+    names: Vec<String>,
+    name: String,
+    value: String,
+    loading: bool,
+    submitting: bool,
+    error: Option<String>,
+}
+
 struct XdDesktop {
     model: AppModel,
     settings: AppSettings,
     settings_open: bool,
     auth_open: bool,
+    secrets_panel: Option<SecretsPanel>,
     auth_providers: Vec<AuthProvider>,
     auth_input_text: String,
     voice_input: VoiceInput,
@@ -285,6 +298,8 @@ struct XdDesktop {
     repo_file_filter_input: Entity<ComposerInput>,
     terminal_input: Entity<ComposerInput>,
     auth_input: Entity<ComposerInput>,
+    secret_name_input: Entity<ComposerInput>,
+    secret_value_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     composer_menu: Option<ComposerMenu>,
@@ -444,6 +459,33 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) => {}
         })
         .detach();
+        let secret_name_input = cx.new(|cx| ComposerInput::new(cx, "ENVIRONMENT_VARIABLE"));
+        cx.subscribe(&secret_name_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.secrets_panel {
+                    panel.name = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.save_secret(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
+        let secret_value_input =
+            cx.new(|cx| ComposerInput::password(cx, "Secret value (never displayed)"));
+        cx.subscribe(&secret_value_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.secrets_panel {
+                    panel.value = text.clone();
+                    panel.error = None;
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.save_secret(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -452,6 +494,7 @@ impl XdDesktop {
             settings: AppSettings::load(),
             settings_open: false,
             auth_open: false,
+            secrets_panel: None,
             auth_providers: Vec::new(),
             auth_input_text: String::new(),
             voice_input: VoiceInput::default(),
@@ -476,6 +519,8 @@ impl XdDesktop {
             repo_file_filter_input,
             terminal_input,
             auth_input,
+            secret_name_input,
+            secret_value_input,
             composer: String::new(),
             queue_edit: None,
             composer_menu: None,
@@ -587,6 +632,11 @@ impl XdDesktop {
                     panel.opening = false;
                     panel.error = Some("Terminal disconnected.".into());
                 }
+                if let Some(panel) = &mut self.secrets_panel {
+                    panel.loading = false;
+                    panel.submitting = false;
+                    panel.error = Some("Agent secrets disconnected.".into());
+                }
                 self.restore_pending_send(cx);
             }
             DaemonUpdate::Reply {
@@ -627,6 +677,8 @@ impl XdDesktop {
                     | RequestKind::TerminalKill { .. }
                     | RequestKind::VoiceModel { .. }
                     | RequestKind::VoiceMutation { .. }
+                    | RequestKind::AgentSecrets { .. }
+                    | RequestKind::SetAgentSecrets { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -814,6 +866,34 @@ impl XdDesktop {
                         cx,
                     );
                 }
+                RequestKind::AgentSecrets { folder_id }
+                    if self
+                        .secrets_panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.folder_id == *folder_id) =>
+                {
+                    if let Some(panel) = &mut self.secrets_panel {
+                        panel.loading = false;
+                        panel.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::SetAgentSecrets { folder_id }
+                    if self
+                        .secrets_panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.folder_id == *folder_id) =>
+                {
+                    if let Some(panel) = &mut self.secrets_panel {
+                        panel.submitting = false;
+                        panel.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
                 RequestKind::EditQueue {
                     chat_id,
                     index,
@@ -937,6 +1017,17 @@ impl XdDesktop {
                 }) {
                     self.workspace_defaults = None;
                 }
+                if self.secrets_panel.as_ref().is_some_and(|panel| {
+                    panel.folder_id.as_ref().is_some_and(|folder_id| {
+                        !self
+                            .model
+                            .folders
+                            .iter()
+                            .any(|folder| &folder.id == folder_id)
+                    })
+                }) {
+                    self.close_secrets(cx);
+                }
                 if self.model.selected_chat.is_none() {
                     if let Some(chat_id) = self.model.chats.first().map(|chat| chat.id.clone()) {
                         self.select_chat(chat_id, cx);
@@ -951,6 +1042,57 @@ impl XdDesktop {
             }
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
+            RequestKind::AgentSecrets { folder_id }
+                if self
+                    .secrets_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.folder_id == folder_id) =>
+            {
+                match serde_json::from_value::<Vec<String>>(
+                    value.get("names").cloned().unwrap_or_default(),
+                ) {
+                    Ok(mut names) => {
+                        names.sort();
+                        names.dedup();
+                        if let Some(panel) = &mut self.secrets_panel {
+                            panel.names = names;
+                            panel.loading = false;
+                            panel.submitting = false;
+                            panel.error = None;
+                            panel.name.clear();
+                            panel.value.clear();
+                        }
+                        self.secret_name_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.secret_value_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                    }
+                    Err(error) => {
+                        if let Some(panel) = &mut self.secrets_panel {
+                            panel.loading = false;
+                            panel.error = Some(format!("Invalid agent secrets response: {error}"));
+                        }
+                    }
+                }
+            }
+            RequestKind::SetAgentSecrets { folder_id }
+                if self
+                    .secrets_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.folder_id == folder_id) =>
+            {
+                if let Some(panel) = &mut self.secrets_panel {
+                    panel.submitting = false;
+                    panel.loading = true;
+                }
+                if let Some(daemon) = &self.daemon
+                    && let Err(error) = daemon.agent_secrets(folder_id.as_deref())
+                    && let Some(panel) = &mut self.secrets_panel
+                {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
             RequestKind::VoiceModel { chat_id }
                 if self.chat_is_active(&chat_id)
                     && matches!(self.voice_input.state, VoiceState::Checking) =>
@@ -2149,6 +2291,159 @@ impl XdDesktop {
                 && let Err(error) = daemon.agent_auth()
             {
                 self.model.connection_error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_secrets(
+        &mut self,
+        folder_id: Option<String>,
+        folder_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_open = false;
+        self.sidebar_menu = None;
+        self.secrets_panel = Some(SecretsPanel {
+            folder_id: folder_id.clone(),
+            folder_name,
+            names: Vec::new(),
+            name: String::new(),
+            value: String::new(),
+            loading: true,
+            submitting: false,
+            error: None,
+        });
+        self.secret_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.secret_value_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        match self.daemon.as_ref() {
+            Some(daemon) => {
+                if let Err(error) = daemon.agent_secrets(folder_id.as_deref())
+                    && let Some(panel) = &mut self.secrets_panel
+                {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
+            None => {
+                if let Some(panel) = &mut self.secrets_panel {
+                    panel.loading = false;
+                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
+        }
+        let focus = self.secret_name_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn close_secrets(&mut self, cx: &mut Context<Self>) {
+        self.secrets_panel = None;
+        self.secret_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.secret_value_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn choose_secret(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.secrets_panel else {
+            return;
+        };
+        if panel.loading || panel.submitting {
+            return;
+        }
+        panel.name = name.clone();
+        panel.value.clear();
+        panel.error = None;
+        self.secret_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.secret_value_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        let focus = self.secret_value_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn save_secret(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = self.secrets_panel.clone() else {
+            return;
+        };
+        if panel.loading || panel.submitting {
+            return;
+        }
+        let name = panel.name.trim();
+        if name.is_empty() || panel.value.is_empty() {
+            if let Some(panel) = &mut self.secrets_panel {
+                panel.error = Some("Enter an environment name and secret value.".into());
+            }
+            cx.notify();
+            return;
+        }
+        let mut entries = panel
+            .names
+            .iter()
+            .filter(|existing| existing.as_str() != name)
+            .map(|existing| (existing.clone(), None))
+            .collect::<Vec<_>>();
+        entries.push((name.to_owned(), Some(panel.value)));
+        match self.daemon.as_ref() {
+            Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
+                Ok(()) => {
+                    if let Some(current) = &mut self.secrets_panel {
+                        current.submitting = true;
+                        current.error = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(current) = &mut self.secrets_panel {
+                        current.error = Some(error);
+                    }
+                }
+            },
+            None => {
+                if let Some(current) = &mut self.secrets_panel {
+                    current.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn remove_secret(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(panel) = self.secrets_panel.clone() else {
+            return;
+        };
+        if panel.loading || panel.submitting {
+            return;
+        }
+        let entries = panel
+            .names
+            .iter()
+            .filter(|existing| **existing != name)
+            .map(|existing| (existing.clone(), None))
+            .collect::<Vec<_>>();
+        match self.daemon.as_ref() {
+            Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
+                Ok(()) => {
+                    if let Some(current) = &mut self.secrets_panel {
+                        current.submitting = true;
+                        current.error = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(current) = &mut self.secrets_panel {
+                        current.error = Some(error);
+                    }
+                }
+            },
+            None => {
+                if let Some(current) = &mut self.secrets_panel {
+                    current.error = Some("xd-dev is not connected to a daemon.".into());
+                }
             }
         }
         cx.notify();
@@ -3987,8 +4282,10 @@ impl Render for XdDesktop {
             let new_chat_folder_id = folder.id.clone();
             let context_folder_id = folder.id.clone();
             let defaults_folder_id = folder.id.clone();
+            let secrets_folder_id = folder.id.clone();
             let collapse_folder_id = folder.id.clone();
             let folder_name = folder.name.clone();
+            let secrets_folder_name = folder.name.clone();
             let folder_collapsed = self.collapsed_folders.contains(&folder.id);
             let folder_target = SidebarTarget::Folder(folder.id.clone());
             let editing_folder = sidebar_edit
@@ -4229,6 +4526,26 @@ impl Render for XdDesktop {
                                         );
                                     }))
                                     .child("Agent"),
+                            )
+                            .child(
+                                div()
+                                    .id(("secrets-folder", folder_row_index))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(BG)).text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_secrets(
+                                            Some(secrets_folder_id.clone()),
+                                            Some(secrets_folder_name.clone()),
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .child("Secrets"),
                             )
                             .child(
                                 div()
@@ -7661,6 +7978,319 @@ impl Render for XdDesktop {
                                             div().size(px(16.0)).rounded_full().bg(rgb(0xffffff)),
                                         ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .id("open-agent-secrets")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_secrets(None, None, window, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Agent secrets"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Private environment variables for local agents.",
+                                        )),
+                                )
+                                .child(div().text_color(rgb(MUTED)).child("›")),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let secrets_overlay = self.secrets_panel.clone().map(|panel| {
+            let name_input = self.secret_name_input.clone();
+            let value_input = self.secret_value_input.clone();
+            let name_focus = self.secret_name_input.read(cx).focus_handle(cx);
+            let value_focus = self.secret_value_input.read(cx).focus_handle(cx);
+            let replacing = panel
+                .names
+                .iter()
+                .any(|name| name == panel.name.trim());
+            let can_submit = self.model.connected
+                && !panel.loading
+                && !panel.submitting
+                && !panel.name.trim().is_empty()
+                && !panel.value.is_empty();
+            let title = panel
+                .folder_name
+                .as_ref()
+                .map(|name| format!("Agent Secrets · {name}"))
+                .unwrap_or_else(|| "Agent Secrets · This Machine".into());
+            let description = if panel.folder_id.is_some() {
+                "This workspace inherits global and parent secrets. Values set here override them for this workspace and its children."
+            } else {
+                "Stored privately outside workspaces. Values never enter prompts or protocol replies; local agent processes receive them as environment variables."
+            };
+            let rows = panel
+                .names
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, name)| {
+                    let replace_name = name.clone();
+                    let remove_name = name.clone();
+                    div()
+                        .p_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .font_family("monospace")
+                                .text_sm()
+                                .text_color(rgb(TEXT))
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .id(("replace-secret", index))
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.choose_secret(replace_name.clone(), window, cx);
+                                }))
+                                .child("Replace"),
+                        )
+                        .child(
+                            div()
+                                .id(("remove-secret", index))
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .text_xs()
+                                .text_color(rgb(0xefaaaa))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x3b282e)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.remove_secret(remove_name.clone(), cx);
+                                }))
+                                .child("Remove"),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(620.0))
+                        .max_h(px(680.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(div().text_lg().text_color(rgb(TEXT)).child(title))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(description),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-agent-secrets")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_secrets(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("agent-secret-list")
+                                .min_h(px(80.0))
+                                .max_h(px(300.0))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .when(panel.loading, |list| {
+                                    list.child(
+                                        div()
+                                            .p_3()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("Loading secret names…"),
+                                    )
+                                })
+                                .when(!panel.loading && rows.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .p_3()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("No secrets stored at this scope."),
+                                    )
+                                })
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(if replacing {
+                                            "REPLACE SECRET"
+                                        } else {
+                                            "ADD SECRET"
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id("secret-name-input")
+                                        .track_focus(&name_focus)
+                                        .h(px(42.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if name_focus.is_focused(window) {
+                                            accent
+                                        } else {
+                                            BORDER
+                                        }))
+                                        .bg(rgb(SURFACE))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus = this
+                                                .secret_name_input
+                                                .read(cx)
+                                                .focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(name_input),
+                                )
+                                .child(
+                                    div()
+                                        .id("secret-value-input")
+                                        .track_focus(&value_focus)
+                                        .h(px(42.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if value_focus.is_focused(window) {
+                                            accent
+                                        } else {
+                                            BORDER
+                                        }))
+                                        .bg(rgb(SURFACE))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus = this
+                                                .secret_value_input
+                                                .read(cx)
+                                                .focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(value_input),
+                                ),
+                        )
+                        .when_some(panel.error, |dialog, error| {
+                            dialog.child(
+                                div()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(rgb(0x3b282e))
+                                    .text_xs()
+                                    .text_color(rgb(0xefaaaa))
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .child(
+                                    div()
+                                        .id("save-agent-secret")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_submit { accent } else { SURFACE_HIGH }))
+                                        .text_sm()
+                                        .text_color(rgb(if can_submit { 0xffffff } else { MUTED }))
+                                        .when(can_submit, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(accent_hover)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_submit {
+                                                this.save_secret(cx);
+                                            }
+                                        }))
+                                        .child(if panel.submitting {
+                                            "Saving…"
+                                        } else if replacing {
+                                            "Replace secret"
+                                        } else {
+                                            "Add secret"
+                                        }),
+                                ),
                         ),
                 )
                 .into_any_element()
@@ -7826,6 +8456,7 @@ impl Render for XdDesktop {
             .when_some(diff_pane, |root, pane| root.child(pane))
             .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
+            .when_some(secrets_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay));
 
         let titlebar = div()
@@ -7909,7 +8540,9 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                if this.auth_open {
+                if this.secrets_panel.is_some() {
+                    this.close_secrets(cx);
+                } else if this.auth_open {
                     this.auth_open = false;
                     cx.notify();
                 } else if this.settings_open {
