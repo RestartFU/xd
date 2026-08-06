@@ -1196,6 +1196,9 @@ impl XdDesktop {
             kind,
             RequestKind::Tree
                 | RequestKind::AgentCatalog
+                | RequestKind::AgentAuth
+                | RequestKind::AgentAuthMutation
+                | RequestKind::AgentClis
                 | RequestKind::Chat { .. }
                 | RequestKind::Messages { .. }
                 | RequestKind::Shortcuts { .. }
@@ -1249,6 +1252,8 @@ impl XdDesktop {
             name,
             "tree"
                 | "changed"
+                | "agent-auth-changed"
+                | "agent-cli-changed"
                 | "draft"
                 | "commands"
                 | "turn-started"
@@ -1271,10 +1276,7 @@ impl XdDesktop {
     fn local_admin_reply(kind: &RequestKind) -> bool {
         matches!(
             kind,
-            RequestKind::AgentAuth
-                | RequestKind::AgentAuthMutation
-                | RequestKind::AgentClis
-                | RequestKind::DaemonUpdate { .. }
+            RequestKind::DaemonUpdate { .. }
                 | RequestKind::AgentSecrets { folder_id: None }
                 | RequestKind::SetAgentSecrets { folder_id: None }
                 | RequestKind::Devices
@@ -1286,10 +1288,7 @@ impl XdDesktop {
     }
 
     fn local_admin_event(name: &str) -> bool {
-        matches!(
-            name,
-            "agent-auth-changed" | "agent-cli-changed" | "daemon-update"
-        )
+        name == "daemon-update"
     }
 
     fn select_endpoint_chat(
@@ -1332,6 +1331,14 @@ impl XdDesktop {
             self.workspace_defaults = None;
             self.search = None;
             self.secrets_panel = None;
+            self.auth_open = false;
+            self.auth_providers.clear();
+            self.cli_versions.clear();
+            self.cli_versions_loading = false;
+            self.cli_versions_error = None;
+            self.auth_input_text.clear();
+            self.auth_input
+                .update(cx, |input, cx| input.set_text("", cx));
             self.pending_send = None;
             self.sending = false;
             self.clear_question(cx);
@@ -1587,6 +1594,10 @@ impl XdDesktop {
                         panel.loading = false;
                         panel.opening = false;
                         panel.error = Some(message.clone());
+                    }
+                    if self.auth_open {
+                        self.cli_versions_loading = false;
+                        self.cli_versions_error = Some("Assistant versions disconnected.".into());
                     }
                 }
                 self.remote_state = RemoteState::Offline;
@@ -3545,9 +3556,6 @@ impl XdDesktop {
     }
 
     fn sync_active_auth_state(&mut self) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
         let active_provider = active_auth_provider(&self.model.backend, self.model.claude_mode);
         if let Some(provider) = self
             .auth_providers
@@ -4084,22 +4092,24 @@ impl XdDesktop {
         self.auth_open = !self.auth_open;
         if self.auth_open {
             self.settings_open = false;
+            self.auth_providers.clear();
+            self.cli_versions.clear();
             self.cli_versions_loading = true;
             self.cli_versions_error = None;
-            if let Some(daemon) = &self.daemon
-                && let Err(error) = daemon.agent_auth()
-            {
-                self.model.connection_error = Some(error);
-            }
-            if let Some(daemon) = &self.daemon
-                && let Err(error) = daemon.agent_clis()
-            {
-                self.cli_versions_loading = false;
-                self.cli_versions_error = Some(error);
-            }
-            if self.daemon.is_none() {
-                self.cli_versions_loading = false;
-                self.cli_versions_error = Some("xd-dev is not connected to a daemon.".into());
+            match self.active_daemon().cloned() {
+                Some(daemon) => {
+                    if let Err(error) = daemon.agent_auth() {
+                        self.model.connection_error = Some(error);
+                    }
+                    if let Err(error) = daemon.agent_clis() {
+                        self.cli_versions_loading = false;
+                        self.cli_versions_error = Some(error);
+                    }
+                }
+                None => {
+                    self.cli_versions_loading = false;
+                    self.cli_versions_error = Some("The selected machine is not connected.".into());
+                }
             }
         }
         cx.notify();
@@ -4111,7 +4121,7 @@ impl XdDesktop {
         }
         self.cli_versions_loading = true;
         self.cli_versions_error = None;
-        match self.daemon.as_ref() {
+        match self.active_daemon().cloned() {
             Some(daemon) => {
                 if let Err(error) = daemon.agent_clis() {
                     self.cli_versions_loading = false;
@@ -4120,7 +4130,7 @@ impl XdDesktop {
             }
             None => {
                 self.cli_versions_loading = false;
-                self.cli_versions_error = Some("xd-dev is not connected to a daemon.".into());
+                self.cli_versions_error = Some("The selected machine is not connected.".into());
             }
         }
         cx.notify();
@@ -4684,7 +4694,7 @@ impl XdDesktop {
         let Some(operation) = auth_operation(state) else {
             return;
         };
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.agent_auth_action(operation, provider, None)
         {
             self.model.connection_error = Some(error);
@@ -4705,7 +4715,7 @@ impl XdDesktop {
         if input.is_empty() {
             return;
         }
-        if let Some(daemon) = &self.daemon
+        if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) =
                 daemon.agent_auth_action("agent-auth-input", &provider, Some(&input))
         {
@@ -11690,6 +11700,17 @@ impl Render for XdDesktop {
         });
 
         let auth_input = self.auth_input.clone();
+        let account_machine = if remote_active {
+            format!(
+                "the remote machine at {}",
+                self.remote_credentials
+                    .as_ref()
+                    .map(|credentials| credentials.host.as_str())
+                    .unwrap_or("the paired address")
+            )
+        } else {
+            "this machine".to_owned()
+        };
         let auth_overlay = self.auth_open.then(|| {
             let rows = self
                 .auth_providers
@@ -11914,7 +11935,9 @@ impl Render for XdDesktop {
                                     div()
                                         .flex_1()
                                         .child(div().text_lg().text_color(rgb(TEXT)).child("Assistant Accounts"))
-                                        .child(div().text_xs().text_color(rgb(MUTED)).child("Credentials stay on this machine and are used only by its Rust daemon.")),
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                            "Credentials stay on {account_machine} and are used only by that Rust daemon."
+                                        ))),
                                 )
                                 .child(
                                     div()
@@ -14936,6 +14959,8 @@ mod tests {
         assert!(XdDesktop::remote_chat_reply(&RequestKind::Search {
             query: "needle".into(),
         }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentAuth));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentClis));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
             folder_id: None,
         }));
@@ -14950,12 +14975,16 @@ mod tests {
             folder_id: Some("workspace".into()),
         }));
         assert!(XdDesktop::local_admin_reply(&RequestKind::Devices));
-        assert!(XdDesktop::local_admin_event("agent-auth-changed"));
+        assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentAuth));
+        assert!(!XdDesktop::local_admin_event("agent-auth-changed"));
+        assert!(XdDesktop::local_admin_event("daemon-update"));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("voice"));
         assert!(XdDesktop::remote_read_event("terminal-output"));
         assert!(XdDesktop::remote_read_event("git-draft-finished"));
+        assert!(XdDesktop::remote_read_event("agent-auth-changed"));
+        assert!(XdDesktop::remote_read_event("agent-cli-changed"));
         assert!(!XdDesktop::remote_read_event("devices-changed"));
     }
 
