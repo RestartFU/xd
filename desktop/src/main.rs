@@ -511,9 +511,9 @@ struct XdDesktop {
     pending_send: Option<PendingSend>,
     open_question: Option<OpenQuestion>,
     question_answer: String,
-    expanded_activity: HashSet<String>,
-    workflow_statuses: HashMap<String, Value>,
-    workflow_pending: HashSet<String>,
+    expanded_activity: Arc<HashSet<String>>,
+    workflow_statuses: Arc<HashMap<String, Value>>,
+    workflow_pending: Arc<HashSet<String>>,
     pane_resize: Option<PaneResize>,
 }
 
@@ -769,9 +769,9 @@ impl XdDesktop {
             pending_send: None,
             open_question: None,
             question_answer: String::new(),
-            expanded_activity: HashSet::new(),
-            workflow_statuses: HashMap::new(),
-            workflow_pending: HashSet::new(),
+            expanded_activity: Arc::new(HashSet::new()),
+            workflow_statuses: Arc::new(HashMap::new()),
+            workflow_pending: Arc::new(HashSet::new()),
             pane_resize: None,
         };
         desktop.connect(cx);
@@ -824,7 +824,7 @@ impl XdDesktop {
                 self.pending_clone_chats.clear();
                 self.workspace_clone_outcomes.clear();
                 self.pending_speech = None;
-                self.workflow_pending.clear();
+                Arc::make_mut(&mut self.workflow_pending).clear();
                 self.speech_output.stop();
                 self.cancel_voice(false, cx);
                 if let Some(defaults) = &mut self.workspace_defaults {
@@ -979,8 +979,9 @@ impl XdDesktop {
                     }
                 }
                 RequestKind::WorkflowStatus { marker } => {
-                    self.workflow_pending.remove(marker);
-                    self.workflow_statuses.insert(marker.clone(), value.clone());
+                    Arc::make_mut(&mut self.workflow_pending).remove(marker);
+                    Arc::make_mut(&mut self.workflow_statuses)
+                        .insert(marker.clone(), value.clone());
                     self.invalidate_workflow_rows(marker);
                     self.schedule_workflow_refresh(marker.clone(), cx);
                 }
@@ -1412,8 +1413,9 @@ impl XdDesktop {
             }
             RequestKind::WorkflowStatus { marker } => {
                 if value.get("pending").and_then(Value::as_bool) != Some(true) {
-                    self.workflow_pending.remove(&marker);
-                    self.workflow_statuses.insert(marker.clone(), value.clone());
+                    Arc::make_mut(&mut self.workflow_pending).remove(&marker);
+                    Arc::make_mut(&mut self.workflow_statuses)
+                        .insert(marker.clone(), value.clone());
                     self.invalidate_workflow_rows(&marker);
                     self.schedule_workflow_refresh(marker, cx);
                 }
@@ -2050,8 +2052,8 @@ impl XdDesktop {
                         .chain(self.model.live_activity.iter())
                         .any(|message| message.role == "tool" && message.content == marker)
                 {
-                    self.workflow_pending.remove(&marker);
-                    self.workflow_statuses.insert(marker.clone(), body.clone());
+                    Arc::make_mut(&mut self.workflow_pending).remove(&marker);
+                    Arc::make_mut(&mut self.workflow_statuses).insert(marker.clone(), body.clone());
                     self.invalidate_workflow_rows(&marker);
                     self.schedule_workflow_refresh(marker, cx);
                 }
@@ -4246,10 +4248,8 @@ impl XdDesktop {
             .map(|message| message.content.clone())
             .filter(|content| content.starts_with("workflow_run\n"))
             .collect::<HashSet<_>>();
-        self.workflow_statuses
-            .retain(|marker, _| markers.contains(marker));
-        self.workflow_pending
-            .retain(|marker| markers.contains(marker));
+        Arc::make_mut(&mut self.workflow_statuses).retain(|marker, _| markers.contains(marker));
+        Arc::make_mut(&mut self.workflow_pending).retain(|marker| markers.contains(marker));
         for marker in markers {
             if !self.workflow_statuses.contains_key(&marker) {
                 self.request_workflow_status(marker);
@@ -4258,7 +4258,7 @@ impl XdDesktop {
     }
 
     fn request_workflow_status(&mut self, marker: String) {
-        if !self.workflow_pending.insert(marker.clone()) {
+        if !Arc::make_mut(&mut self.workflow_pending).insert(marker.clone()) {
             return;
         }
         let result = self
@@ -4267,8 +4267,8 @@ impl XdDesktop {
             .ok_or_else(|| "The xd daemon is offline.".to_owned())
             .and_then(|daemon| daemon.workflow_status(&marker));
         if let Err(error) = result {
-            self.workflow_pending.remove(&marker);
-            self.workflow_statuses
+            Arc::make_mut(&mut self.workflow_pending).remove(&marker);
+            Arc::make_mut(&mut self.workflow_statuses)
                 .insert(marker, serde_json::json!({"ok": false, "error": error}));
         }
     }
@@ -4319,8 +4319,8 @@ impl XdDesktop {
         self.draft_dirty = false;
         self.attachments_dirty = false;
         self.pending_send = None;
-        self.workflow_statuses.clear();
-        self.workflow_pending.clear();
+        Arc::make_mut(&mut self.workflow_statuses).clear();
+        Arc::make_mut(&mut self.workflow_pending).clear();
         self.clear_question(cx);
         self.cancel_queue_edit(cx);
         self.sending = false;
@@ -4961,8 +4961,9 @@ impl XdDesktop {
                     .on_click(move |_, _, cx| {
                         desktop.update(cx, |this, cx| {
                             let anchor = this.transcript.logical_scroll_top();
-                            if !this.expanded_activity.remove(&toggle_key) {
-                                this.expanded_activity.insert(toggle_key.clone());
+                            let expanded = Arc::make_mut(&mut this.expanded_activity);
+                            if !expanded.remove(&toggle_key) {
+                                expanded.insert(toggle_key.clone());
                             }
                             this.transcript.splice(index..index + 1, 1);
                             this.transcript.scroll_to(anchor);
