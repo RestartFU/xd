@@ -21,6 +21,7 @@ const MAX_MESSAGE_PAGE: i64 = 1_600;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_SEARCH_RESULTS: i64 = 40;
 const SEARCH_SNIPPET_CHARS: usize = 120;
+const MAX_DEVICE_NAME_BYTES: usize = 80;
 const EMPTY_GIT_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const AGENT_UI_INSTRUCTIONS: &str = r#"This client is noninteractive. When you genuinely need the user to choose from a short list, put exactly one block at the end of your reply in this form:
 <ask>
@@ -236,6 +237,55 @@ impl StateStore {
                 .unwrap_or_else(|| Path::new("."))
                 .join("remote-pasted"),
         })
+    }
+
+    pub fn devices(&self) -> Result<Value, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT token_hash, name, created_at, last_seen FROM devices \
+             ORDER BY last_seen DESC, created_at DESC",
+        )?;
+        let devices = statement
+            .query_map([], |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "name": row.get::<_, String>(1)?,
+                    "created_at": row.get::<_, i64>(2)?,
+                    "last_seen": row.get::<_, i64>(3)?,
+                    // The Rust daemon currently accepts local Unix-socket clients only.
+                    "connected": false,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({"ok": true, "devices": devices}))
+    }
+
+    pub fn rename_device(&self, request: &Value) -> Result<Value, StorageError> {
+        let device_id = device_id(request, "rename-device needs a device id.")?;
+        let name = required_string(request, "name", "rename-device needs a device name.")?;
+        let name = normalize_device_name(name)?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if database.execute(
+            "UPDATE devices SET name = ? WHERE token_hash = ?",
+            params![name, device_id],
+        )? != 1
+        {
+            return Err(StorageError::InvalidRequest("Unknown device.".into()));
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn revoke_device(&self, request: &Value) -> Result<Value, StorageError> {
+        let device_id = device_id(request, "revoke-device needs a device id.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if database.execute(
+            "DELETE FROM devices WHERE token_hash = ?",
+            params![device_id],
+        )? != 1
+        {
+            return Err(StorageError::InvalidRequest("Unknown device.".into()));
+        }
+        Ok(json!({"ok": true}))
     }
 
     pub fn tree(&self) -> Result<Value, StorageError> {
@@ -3907,6 +3957,40 @@ fn required_string_allow_empty<'a>(
         .ok_or_else(|| StorageError::InvalidRequest(message.into()))
 }
 
+fn device_id<'a>(request: &'a Value, message: &str) -> Result<&'a str, StorageError> {
+    request
+        .get("device")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            request
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| StorageError::InvalidRequest(message.into()))
+}
+
+fn normalize_device_name(name: &str) -> Result<&str, StorageError> {
+    if name.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err(StorageError::InvalidRequest(
+            "A device name cannot contain control characters.".into(),
+        ));
+    }
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return Err(StorageError::InvalidRequest(
+            "A device name cannot be empty.".into(),
+        ));
+    }
+    if normalized.len() > MAX_DEVICE_NAME_BYTES {
+        return Err(StorageError::InvalidRequest(format!(
+            "A device name cannot exceed {MAX_DEVICE_NAME_BYTES} bytes."
+        )));
+    }
+    Ok(normalized)
+}
+
 fn optional_integer(request: &Value, key: &str) -> Result<Option<i64>, StorageError> {
     match request.get(key) {
         None => Ok(None),
@@ -5478,6 +5562,107 @@ mod tests {
             .next
             .expect("queued image turn");
         assert_eq!(next.prompt, event["queue"][0]);
+    }
+
+    #[test]
+    fn lists_renames_and_revokes_paired_devices() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        {
+            let database = store.database.lock().unwrap();
+            database
+                .execute(
+                    "INSERT INTO devices (token_hash, name, created_at, last_seen) \
+                     VALUES (?, ?, ?, ?)",
+                    params!["older", "Desk", 10, 20],
+                )
+                .unwrap();
+            database
+                .execute(
+                    "INSERT INTO devices (token_hash, name, created_at, last_seen) \
+                     VALUES (?, ?, ?, ?)",
+                    params!["newer", "Phone", 30, 40],
+                )
+                .unwrap();
+        }
+
+        let devices = store.devices().unwrap();
+        let devices = devices["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0]["id"], "newer");
+        assert_eq!(devices[0]["name"], "Phone");
+        assert_eq!(devices[0]["created_at"], 30);
+        assert_eq!(devices[0]["last_seen"], 40);
+        assert_eq!(devices[0]["connected"], false);
+
+        assert_eq!(
+            store
+                .rename_device(&json!({"device": "newer", "name": "  Laptop  "}))
+                .unwrap(),
+            json!({"ok": true})
+        );
+        assert_eq!(store.devices().unwrap()["devices"][0]["name"], "Laptop");
+
+        assert_eq!(
+            store.revoke_device(&json!({"id": "older"})).unwrap(),
+            json!({"ok": true})
+        );
+        let devices = store.devices().unwrap();
+        assert_eq!(devices["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(devices["devices"][0]["id"], "newer");
+    }
+
+    #[test]
+    fn validates_paired_device_mutations() {
+        assert_eq!(normalize_device_name("  Phone  ").unwrap(), "Phone");
+        for (name, message) in [
+            ("\nPhone", "cannot contain control characters"),
+            ("   ", "cannot be empty"),
+        ] {
+            assert!(
+                normalize_device_name(name)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+        assert!(
+            normalize_device_name(&"x".repeat(MAX_DEVICE_NAME_BYTES + 1))
+                .unwrap_err()
+                .to_string()
+                .contains("cannot exceed 80 bytes")
+        );
+
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(
+            store
+                .rename_device(&json!({"id": "missing", "name": "Phone"}))
+                .unwrap_err()
+                .to_string(),
+            "Unknown device."
+        );
+        assert_eq!(
+            store
+                .revoke_device(&json!({"device": "missing"}))
+                .unwrap_err()
+                .to_string(),
+            "Unknown device."
+        );
+        assert!(
+            store
+                .rename_device(&json!({"name": "Phone"}))
+                .unwrap_err()
+                .to_string()
+                .contains("needs a device id")
+        );
+        assert!(
+            store
+                .revoke_device(&json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("needs a device id")
+        );
     }
 
     struct Fixture {

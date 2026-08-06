@@ -153,6 +153,9 @@ impl Engine {
         let mut reply = match request.get("op").and_then(Value::as_str) {
             Some("ping") => json!({"ok": true}),
             Some("tree") => self.read(|store| store.tree()),
+            Some("devices") => self.read(|store| store.devices()),
+            Some("rename-device") => self.read(|store| store.rename_device(&request)),
+            Some("revoke-device") => self.read(|store| store.revoke_device(&request)),
             Some("chat") => match required_string(&request, "chat", "chat needs a chat id") {
                 Ok(chat_id) => self.chat(chat_id),
                 Err(error) => error_reply(error),
