@@ -16,9 +16,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations, Entity,
     Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState,
-    MouseButton, ObjectFit, PathPromptOptions, Render, ResizeEdge, SharedString, StyledText,
-    TextRun, Timer, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowOptions, canvas, div, img, list, prelude::*, px, rgb, rgba, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathPromptOptions, Point,
+    Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
+    list, prelude::*, px, rgb, rgba, size,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -219,6 +220,34 @@ struct PendingSend {
     restore: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneResizeKind {
+    Sidebar,
+    Diff,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PaneResize {
+    kind: PaneResizeKind,
+    origin: Point<gpui::Pixels>,
+    initial_size: f32,
+}
+
+fn resized_pane_size(kind: PaneResizeKind, initial_size: f32, delta: Point<f32>) -> u16 {
+    let size = match kind {
+        PaneResizeKind::Sidebar => initial_size + delta.x,
+        PaneResizeKind::Diff => initial_size - delta.x,
+        PaneResizeKind::Terminal => initial_size - delta.y,
+    };
+    let (minimum, maximum) = match kind {
+        PaneResizeKind::Sidebar => (220.0, 520.0),
+        PaneResizeKind::Diff => (320.0, 760.0),
+        PaneResizeKind::Terminal => (180.0, 640.0),
+    };
+    size.round().clamp(minimum, maximum) as u16
+}
+
 struct PendingSpeech {
     chat_id: String,
     previous_assistant_id: Option<i64>,
@@ -367,6 +396,7 @@ struct XdDesktop {
     sending: bool,
     pending_send: Option<PendingSend>,
     expanded_activity: HashSet<String>,
+    pane_resize: Option<PaneResize>,
 }
 
 impl XdDesktop {
@@ -589,6 +619,7 @@ impl XdDesktop {
             sending: false,
             pending_send: None,
             expanded_activity: HashSet::new(),
+            pane_resize: None,
         };
         desktop.connect(cx);
         desktop
@@ -2919,10 +2950,15 @@ impl XdDesktop {
         if self.diff_panel.is_some() {
             self.diff_generation = self.diff_generation.saturating_add(1);
             self.diff_panel = None;
+            if self
+                .pane_resize
+                .is_some_and(|resize| resize.kind == PaneResizeKind::Diff)
+            {
+                self.pane_resize = None;
+            }
             cx.notify();
             return;
         }
-        self.terminal_panel = None;
         self.diff_panel = Some(DiffPanel::default());
         self.refresh_diff(cx);
     }
@@ -2930,14 +2966,18 @@ impl XdDesktop {
     fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
         if self.terminal_panel.is_some() {
             self.terminal_panel = None;
+            if self
+                .pane_resize
+                .is_some_and(|resize| resize.kind == PaneResizeKind::Terminal)
+            {
+                self.pane_resize = None;
+            }
             cx.notify();
             return;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        self.diff_generation = self.diff_generation.saturating_add(1);
-        self.diff_panel = None;
         self.terminal_panel = Some(TerminalPanel {
             chat_id: chat_id.clone(),
             terminal_id: None,
@@ -2949,6 +2989,52 @@ impl XdDesktop {
             closed: false,
             error: None,
         });
+        cx.notify();
+    }
+
+    fn begin_pane_resize(
+        &mut self,
+        kind: PaneResizeKind,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_size = match kind {
+            PaneResizeKind::Sidebar => self.settings.sidebar_width,
+            PaneResizeKind::Diff => self.settings.diff_width,
+            PaneResizeKind::Terminal => self.settings.terminal_height,
+        } as f32;
+        self.pane_resize = Some(PaneResize {
+            kind,
+            origin: event.position,
+            initial_size,
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn update_pane_resize(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(resize) = self.pane_resize else {
+            return;
+        };
+        let delta = Point {
+            x: f32::from(event.position.x - resize.origin.x),
+            y: f32::from(event.position.y - resize.origin.y),
+        };
+        let size = resized_pane_size(resize.kind, resize.initial_size, delta);
+        match resize.kind {
+            PaneResizeKind::Sidebar => self.settings.sidebar_width = size,
+            PaneResizeKind::Diff => self.settings.diff_width = size,
+            PaneResizeKind::Terminal => self.settings.terminal_height = size,
+        }
+        cx.notify();
+    }
+
+    fn finish_pane_resize(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_resize.take().is_some()
+            && let Err(error) = self.settings.save()
+        {
+            self.model.connection_error = Some(error);
+        }
         cx.notify();
     }
 
@@ -4484,6 +4570,9 @@ impl Render for XdDesktop {
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });
         let accent = self.settings.accent.color();
         let accent_hover = self.settings.accent.hover_color();
+        let sidebar_width = self.settings.sidebar_width;
+        let diff_width = self.settings.diff_width;
+        let terminal_height = self.settings.terminal_height;
         let messages = self.model.display_messages();
         let queue_count = self.model.queue.len();
         let working = self.model.working;
@@ -5739,7 +5828,7 @@ impl Render for XdDesktop {
         let workspace_clone_status = self.workspace_clone_status.clone();
         let settings_open = self.settings_open;
         let sidebar = div()
-            .w(px(272.0))
+            .w(px(sidebar_width as f32))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -7498,7 +7587,7 @@ impl Render for XdDesktop {
                     .into_any_element()
             };
             div()
-                .w(px(460.0))
+                .w(px(diff_width as f32))
                 .h_full()
                 .flex_shrink_0()
                 .flex()
@@ -7855,7 +7944,7 @@ impl Render for XdDesktop {
             let active = panel.terminal_id.is_some() && !panel.closed && !panel.loading;
             div()
                 .w_full()
-                .h(px(320.0))
+                .h(px(terminal_height as f32))
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
@@ -9078,6 +9167,77 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let sidebar_splitter = div()
+            .id("sidebar-resize")
+            .w(px(5.0))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(BG))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .hover(|style| style.bg(rgb(accent)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_pane_resize(PaneResizeKind::Sidebar, event, cx);
+                }),
+            );
+        let diff_splitter = diff_open.then(|| {
+            div()
+                .id("diff-resize")
+                .w(px(5.0))
+                .h_full()
+                .flex_shrink_0()
+                .bg(rgb(BG))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .hover(|style| style.bg(rgb(accent)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.begin_pane_resize(PaneResizeKind::Diff, event, cx);
+                    }),
+                )
+        });
+        let terminal_splitter = terminal_open.then(|| {
+            div()
+                .id("terminal-resize")
+                .w_full()
+                .h(px(5.0))
+                .flex_shrink_0()
+                .bg(rgb(BG))
+                .cursor(CursorStyle::ResizeUpDown)
+                .hover(|style| style.bg(rgb(accent)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.begin_pane_resize(PaneResizeKind::Terminal, event, cx);
+                    }),
+                )
+        });
+        let resize_overlay = self.pane_resize.map(|resize| {
+            let cursor = match resize.kind {
+                PaneResizeKind::Sidebar | PaneResizeKind::Diff => CursorStyle::ResizeLeftRight,
+                PaneResizeKind::Terminal => CursorStyle::ResizeUpDown,
+            };
+            div()
+                .absolute()
+                .top(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .left(px(0.0))
+                .cursor(cursor)
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    this.update_pane_resize(event, cx)
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(XdDesktop::finish_pane_resize),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(XdDesktop::finish_pane_resize),
+                )
+        });
+
         let content = div()
             .flex_1()
             .min_h_0()
@@ -9085,6 +9245,7 @@ impl Render for XdDesktop {
             .relative()
             .bg(rgb(BG))
             .child(sidebar)
+            .child(sidebar_splitter)
             .child(
                 div()
                     .flex_1()
@@ -9095,13 +9256,16 @@ impl Render for XdDesktop {
                     .child(header)
                     .child(div().flex_1().min_h_0().child(transcript))
                     .child(composer)
+                    .when_some(terminal_splitter, |column, splitter| column.child(splitter))
                     .when_some(terminal_pane, |column, pane| column.child(pane)),
             )
+            .when_some(diff_splitter, |root, splitter| root.child(splitter))
             .when_some(diff_pane, |root, pane| root.child(pane))
             .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
-            .when_some(search_overlay, |root, overlay| root.child(overlay));
+            .when_some(search_overlay, |root, overlay| root.child(overlay))
+            .when_some(resize_overlay, |root, overlay| root.child(overlay));
 
         let titlebar = div()
             .h(px(34.0))
@@ -9635,6 +9799,44 @@ mod tests {
         assert_eq!(
             terminal_geometry(100_000.0, 100_000.0, 8.0, 19.0),
             (500, 200)
+        );
+    }
+
+    #[test]
+    fn pane_resizing_uses_each_divider_direction_and_bounds() {
+        assert_eq!(
+            resized_pane_size(PaneResizeKind::Sidebar, 272.0, Point { x: 48.0, y: 0.0 }),
+            320
+        );
+        assert_eq!(
+            resized_pane_size(PaneResizeKind::Diff, 460.0, Point { x: 40.0, y: 0.0 }),
+            420
+        );
+        assert_eq!(
+            resized_pane_size(PaneResizeKind::Terminal, 320.0, Point { x: 0.0, y: -60.0 }),
+            380
+        );
+        assert_eq!(
+            resized_pane_size(
+                PaneResizeKind::Sidebar,
+                272.0,
+                Point {
+                    x: -1_000.0,
+                    y: 0.0
+                }
+            ),
+            220
+        );
+        assert_eq!(
+            resized_pane_size(
+                PaneResizeKind::Diff,
+                460.0,
+                Point {
+                    x: -1_000.0,
+                    y: 0.0
+                }
+            ),
+            760
         );
     }
 

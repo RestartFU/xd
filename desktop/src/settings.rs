@@ -100,6 +100,9 @@ pub struct AppSettings {
     pub speech: bool,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
+    pub sidebar_width: u16,
+    pub diff_width: u16,
+    pub terminal_height: u16,
 }
 
 impl Default for AppSettings {
@@ -110,6 +113,9 @@ impl Default for AppSettings {
             speech: false,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
+            sidebar_width: 272,
+            diff_width: 460,
+            terminal_height: 320,
         }
     }
 }
@@ -202,6 +208,9 @@ mod tests {
             speech: true,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
+            sidebar_width: 318,
+            diff_width: 512,
+            terminal_height: 280,
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
