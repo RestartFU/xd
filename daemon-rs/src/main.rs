@@ -299,7 +299,7 @@ fn parse_port(value: &str) -> Result<u16, String> {
 }
 
 fn version_string() -> String {
-    option_env!("XD_DEV_COMMIT")
+    option_env!("XD_COMMIT")
         .filter(|commit| !commit.is_empty() && *commit != "development")
         .map(|commit| {
             format!(

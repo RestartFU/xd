@@ -32,8 +32,8 @@ if [[ -n "$dry_run" && "$dry_run" != --dry-run ]]; then
 fi
 
 current=$(sed -nE \
-  's/^[[:space:]]*VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/p' \
-  src/xd/version.cr)
+  '0,/^[[:space:]]*version = "([0-9]+\.[0-9]+\.[0-9]+)"/{s//\1/p}' \
+  desktop/Cargo.toml)
 
 if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
   printf 'cannot read current semantic version\n' >&2
@@ -44,12 +44,17 @@ major="${BASH_REMATCH[1]}"
 minor="${BASH_REMATCH[2]}"
 patch="${BASH_REMATCH[3]}"
 
-grep -qx "version: $current" shard.yml \
-  || { printf 'shard.yml version mismatch\n' >&2; exit 1; }
-grep -Fq "<string>$current</string>" installer/macos/Info.plist.in \
-  || { printf 'macOS Info.plist version mismatch\n' >&2; exit 1; }
-grep -Fq "\$Version = '$current'" scripts/package-windows.ps1 \
-  || { printf 'Windows packager version mismatch\n' >&2; exit 1; }
+for manifest in daemon-rs/Cargo.toml tls-proxy-rs/Cargo.toml; do
+  grep -m1 -qx "version = \"$current\"" "$manifest" \
+    || { printf '%s version mismatch\n' "$manifest" >&2; exit 1; }
+done
+
+grep -A1 -m1 '^name = "xd-desktop"$' desktop/Cargo.lock \
+  | grep -qx "version = \"$current\"" \
+  || { printf 'desktop/Cargo.lock version mismatch\n' >&2; exit 1; }
+grep -A1 -m1 '^name = "xd-daemon"$' daemon-rs/Cargo.lock \
+  | grep -qx "version = \"$current\"" \
+  || { printf 'daemon-rs/Cargo.lock version mismatch\n' >&2; exit 1; }
 
 case "$bump" in
   patch) patch=$((patch + 1)) ;;
@@ -64,17 +69,21 @@ if [[ "$dry_run" == --dry-run ]]; then
   exit 0
 fi
 
+for manifest in \
+  desktop/Cargo.toml \
+  daemon-rs/Cargo.toml \
+  tls-proxy-rs/Cargo.toml
+do
+  sed -i \
+    "0,/^version = \"$current\"\$/s//version = \"$next\"/" \
+    "$manifest"
+done
+
 sed -i \
-  "s/VERSION = \"$current\"/VERSION = \"$next\"/" \
-  src/xd/version.cr
+  "/^name = \"xd-desktop\"\$/,/^\$/ s/^version = \"$current\"\$/version = \"$next\"/" \
+  desktop/Cargo.lock
 sed -i \
-  "0,/^version: $current\$/s//version: $next/" \
-  shard.yml
-sed -i \
-  "s|<string>$current</string>|<string>$next</string>|g" \
-  installer/macos/Info.plist.in
-sed -i \
-  "s|\\\$Version = '$current'|\$Version = '$next'|" \
-  scripts/package-windows.ps1
+  "/^name = \"xd-daemon\"\$/,/^\$/ s/^version = \"$current\"\$/version = \"$next\"/" \
+  daemon-rs/Cargo.lock
 
 printf '%s\n' "$next"

@@ -77,8 +77,9 @@ jobs:
           set -euo pipefail
 
           source_version () {
-            sed -nE 's/^[[:space:]]*VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/p' \
-              src/xd/version.cr
+            sed -nE \
+              '0,/^[[:space:]]*version = "([0-9]+\.[0-9]+\.[0-9]+)"/{s//\1/p}' \
+              desktop/Cargo.toml
           }
 
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
@@ -124,11 +125,13 @@ jobs:
               git config user.email \
                 "41898282+github-actions[bot]@users.noreply.github.com"
               git add \
-                src/xd/version.cr \
-                shard.yml \
-                installer/macos/Info.plist.in \
-                scripts/package-windows.ps1
-              git commit -m "chore: release $tag"
+                desktop/Cargo.toml \
+                desktop/Cargo.lock \
+                daemon-rs/Cargo.toml \
+                daemon-rs/Cargo.lock \
+                tls-proxy-rs/Cargo.toml
+              git commit -m "chore: release $tag" \
+                -m "Co-authored-by: Codex <codex@openai.com>"
               git tag -a "$tag" -m "xd $tag"
             fi
           else

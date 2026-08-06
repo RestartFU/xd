@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 use crate::EventBus;
 
-const RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
+const NIGHTLY_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
+const STABLE_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/latest";
 const MAX_RELEASE_BYTES: u64 = 256 * 1024;
 const INSTALL_OUTPUT_LIMIT: usize = 16 * 1024;
 
@@ -26,7 +27,30 @@ struct SelfUpdateInner {
     state: Mutex<UpdateState>,
     events: Arc<EventBus>,
     install: Option<InstallLocation>,
+    channel: UpdateChannel,
     current: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpdateChannel {
+    Nightly,
+    Release,
+}
+
+impl UpdateChannel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Nightly => "nightly",
+            Self::Release => "release",
+        }
+    }
+
+    fn release_url(self) -> &'static str {
+        match self {
+            Self::Nightly => NIGHTLY_RELEASE_URL,
+            Self::Release => STABLE_RELEASE_URL,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -43,6 +67,7 @@ struct UpdateState {
 
 impl SelfUpdate {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
+        let channel = update_channel();
         Self {
             inner: Arc::new(SelfUpdateInner {
                 state: Mutex::new(UpdateState {
@@ -52,7 +77,8 @@ impl SelfUpdate {
                 }),
                 events,
                 install: install_location(),
-                current: current_version(),
+                channel,
+                current: current_version(channel),
             }),
         }
     }
@@ -73,9 +99,10 @@ impl SelfUpdate {
             return Ok(());
         }
         let updater = self.clone();
+        let channel = self.inner.channel;
         thread::Builder::new()
             .name("xd-update-check".into())
-            .spawn(move || match latest_release() {
+            .spawn(move || match latest_release(channel) {
                 Ok(latest) => updater.finish("idle", Some(latest), None),
                 Err(error) => updater.finish("failed", None, Some(error)),
             })
@@ -97,9 +124,10 @@ impl SelfUpdate {
             return Ok(());
         }
         let updater = self.clone();
+        let channel = self.inner.channel;
         thread::Builder::new()
             .name("xd-update-install".into())
-            .spawn(move || match run_installer(&location.installer) {
+            .spawn(move || match run_installer(&location.installer, channel) {
                 Ok(()) => updater.finish("installed", None, None),
                 Err(error) => updater.finish("failed", None, Some(error)),
             })
@@ -165,6 +193,7 @@ impl SelfUpdate {
             .unwrap_or(("failed", None, Some("Update state is unavailable.".into())));
         snapshot_value(
             &self.inner.current,
+            self.inner.channel,
             self.inner.install.is_some(),
             phase,
             latest.as_deref(),
@@ -181,6 +210,7 @@ impl SelfUpdate {
 
 fn snapshot_value(
     current: &str,
+    channel: UpdateChannel,
     supported: bool,
     state: &str,
     latest: Option<&str>,
@@ -189,7 +219,7 @@ fn snapshot_value(
     let mut value = json!({
         "ok": true,
         "version": current,
-        "channel": "nightly",
+        "channel": channel.as_str(),
         "supported": supported,
         "state": state,
         "available": latest.is_some_and(|latest| latest != current),
@@ -203,43 +233,78 @@ fn snapshot_value(
     value
 }
 
-fn current_version() -> String {
-    option_env!("XD_DEV_COMMIT")
-        .filter(|version| !version.is_empty())
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
-        .to_owned()
+fn update_channel() -> UpdateChannel {
+    match env::var("XD_UPDATE_CHANNEL").as_deref() {
+        Ok("release") => UpdateChannel::Release,
+        _ => UpdateChannel::Nightly,
+    }
 }
 
-fn latest_release() -> Result<String, String> {
+fn current_version(channel: UpdateChannel) -> String {
+    match channel {
+        UpdateChannel::Nightly => option_env!("XD_COMMIT")
+            .filter(|version| !version.is_empty())
+            .unwrap_or(env!("CARGO_PKG_VERSION")),
+        UpdateChannel::Release => env!("CARGO_PKG_VERSION"),
+    }
+    .to_owned()
+}
+
+fn latest_release(channel: UpdateChannel) -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
         .build()
         .into();
     let mut response = agent
-        .get(RELEASE_URL)
+        .get(channel.release_url())
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "xd")
         .call()
-        .map_err(|_| "Could not reach the nightly release feed.".to_owned())?;
+        .map_err(|_| format!("Could not reach the {} release feed.", channel.as_str()))?;
     let body = response
         .body_mut()
         .with_config()
         .limit(MAX_RELEASE_BYTES)
         .read_to_string()
-        .map_err(|_| "The nightly release feed was unreadable.".to_owned())?;
-    let release: Value = serde_json::from_str(&body)
-        .map_err(|_| "The nightly release feed returned invalid data.".to_owned())?;
-    release
-        .get("target_commitish")
-        .and_then(Value::as_str)
-        .filter(|target| !target.is_empty() && target.len() <= 128)
-        .map(str::to_owned)
-        .ok_or_else(|| "The nightly release feed did not identify its build.".to_owned())
+        .map_err(|_| format!("The {} release feed was unreadable.", channel.as_str()))?;
+    let release: Value = serde_json::from_str(&body).map_err(|_| {
+        format!(
+            "The {} release feed returned invalid data.",
+            channel.as_str()
+        )
+    })?;
+    release_identity(channel, &release)
 }
 
-fn run_installer(installer: &Path) -> Result<(), String> {
-    let mut child = Command::new("sh")
-        .arg(installer)
+fn release_identity(channel: UpdateChannel, release: &Value) -> Result<String, String> {
+    let field = match channel {
+        UpdateChannel::Nightly => "target_commitish",
+        UpdateChannel::Release => "tag_name",
+    };
+    release
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|target| !target.is_empty() && target.len() <= 128)
+        .map(|identity| match channel {
+            UpdateChannel::Nightly => identity.to_owned(),
+            UpdateChannel::Release => identity.strip_prefix('v').unwrap_or(identity).to_owned(),
+        })
+        .ok_or_else(|| {
+            format!(
+                "The {} release feed did not identify its build.",
+                channel.as_str()
+            )
+        })
+}
+
+fn run_installer(installer: &Path, channel: UpdateChannel) -> Result<(), String> {
+    let mut command = Command::new("sh");
+    command.arg(installer);
+    if channel == UpdateChannel::Release {
+        command.arg("--release");
+    }
+    let mut child = command
+        .env("XD_ALLOW_RUNNING_INSTALL", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -306,13 +371,50 @@ mod tests {
     #[test]
     fn update_snapshots_compare_exact_build_identity() {
         assert_eq!(
-            snapshot_value("abc", true, "idle", Some("abc"), None)["available"],
+            snapshot_value(
+                "abc",
+                UpdateChannel::Nightly,
+                true,
+                "idle",
+                Some("abc"),
+                None
+            )["available"],
             false
         );
-        let available = snapshot_value("abc", true, "idle", Some("def"), None);
+        let available = snapshot_value(
+            "abc",
+            UpdateChannel::Nightly,
+            true,
+            "idle",
+            Some("def"),
+            None,
+        );
         assert_eq!(available["available"], true);
         assert_eq!(available["channel"], "nightly");
         assert_eq!(available["latest"], "def");
+    }
+
+    #[test]
+    fn stable_releases_compare_semantic_versions() {
+        let release = json!({"tag_name": "v1.2.3", "target_commitish": "master"});
+        assert_eq!(
+            release_identity(UpdateChannel::Release, &release).unwrap(),
+            "1.2.3"
+        );
+        assert_eq!(
+            release_identity(UpdateChannel::Nightly, &release).unwrap(),
+            "master"
+        );
+        let snapshot = snapshot_value(
+            "1.2.3",
+            UpdateChannel::Release,
+            true,
+            "idle",
+            Some("1.2.3"),
+            None,
+        );
+        assert_eq!(snapshot["channel"], "release");
+        assert_eq!(snapshot["available"], false);
     }
 
     #[test]

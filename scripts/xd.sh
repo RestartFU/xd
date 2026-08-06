@@ -22,11 +22,13 @@ case "$(basename "$HERE")" in
   xd-nightly)
     export XD_APP_ID=com.restartfu.Xd.Nightly
     export XD_DATA_NAME=xd-nightly
+    export XD_UPDATE_CHANNEL=nightly
     export XD_SETTINGS_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/xd-nightly/settings.json"
     ;;
   *)
     export XD_APP_ID=com.restartfu.Xd
     export XD_DATA_NAME=xd
+    export XD_UPDATE_CHANNEL=release
     export XD_SETTINGS_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/xd/settings.json"
     ;;
 esac

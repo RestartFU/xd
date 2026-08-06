@@ -36,6 +36,7 @@ require_file \
   share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
 require_file libexec/xd-daemon
 require_file libexec/xd-tls-proxy
+require_file libexec/install.sh
 require_file libexec/codex-package/bin/codex
 require_file libexec/claude
 require_file libexec/whisper-server-bin

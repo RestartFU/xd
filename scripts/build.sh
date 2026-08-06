@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 
 # So the bundle can say which commit it is, which is the only way to tell one
 # nightly from the next. Empty outside a checkout, which is fine.
-COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true)
+COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
 
 rm -rf dist
 docker buildx build \

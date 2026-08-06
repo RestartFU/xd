@@ -53,8 +53,8 @@ RUN cargo fmt --check \
 FROM gpui-desktop-source AS gpui-desktop-release
 
 ARG COMMIT=development
-ARG XD_DEV_COMMIT=$COMMIT
-ENV XD_DEV_COMMIT=$XD_DEV_COMMIT
+ARG XD_COMMIT=$COMMIT
+ENV XD_COMMIT=$XD_COMMIT
 
 RUN cargo build --locked --release \
  && test -x target/release/xd-desktop
@@ -79,8 +79,8 @@ RUN cargo fmt --check \
 FROM rust-daemon-source AS rust-daemon-release
 
 ARG COMMIT=development
-ARG XD_DEV_COMMIT=$COMMIT
-ENV XD_DEV_COMMIT=$XD_DEV_COMMIT
+ARG XD_COMMIT=$COMMIT
+ENV XD_COMMIT=$XD_COMMIT
 
 RUN cargo build --locked --release \
  && test -x target/release/xd-daemon
@@ -362,6 +362,7 @@ COPY data ./data
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
 COPY scripts/smoke-bundle.sh /usr/local/bin/smoke-bundle.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
+COPY scripts/install.sh /stage/usr/libexec/install.sh
 COPY scripts/claude.sh /stage/usr/libexec/claude
 COPY scripts/curl.sh /stage/usr/libexec/curl
 COPY scripts/git.sh /stage/usr/bin/git
@@ -436,6 +437,7 @@ RUN set -eux; \
       /stage/usr/libexec/claude \
       /stage/usr/libexec/curl \
       /stage/usr/libexec/git-helper \
+      /stage/usr/libexec/install.sh \
       /stage/usr/libexec/openssl \
       /stage/usr/libexec/whisper \
       /stage/usr/libexec/whisper-server; \

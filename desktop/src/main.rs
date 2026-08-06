@@ -18624,7 +18624,7 @@ fn main() {
 }
 
 fn desktop_version() -> String {
-    option_env!("XD_DEV_COMMIT")
+    option_env!("XD_COMMIT")
         .filter(|commit| !commit.is_empty() && *commit != "development")
         .map(|commit| {
             format!(

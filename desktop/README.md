@@ -56,8 +56,8 @@ Build and test this crate through the repository Dockerfile:
 docker build --target gpui-desktop-check .
 ```
 
-Every push to `feat/gpui-desktop` also replaces the rolling `dev` prerelease so
-the branch can be tested before it reaches the Linux nightly.
+Every push to `master` replaces the rolling Linux nightly. Tagged releases use
+the stable application id and install beside the nightly.
 
 The archive carries `xd-daemon`, a pinned Codex package, the pinned
 Claude Code executable, and a private pinned whisper.cpp runtime. The Rust daemon
