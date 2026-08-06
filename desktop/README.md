@@ -16,6 +16,7 @@ Current milestone:
 - persisted active-chat restoration with deletion-safe fallback;
 - persisted workspace expansion state with stale-folder cleanup;
 - workspace and chat creation controls;
+- native folder pickers for existing repositories and workspace path defaults;
 - first-message generated/existing-worktree selection, configured-writer AI naming, and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;
 - bounded queued-message previews with send-now and remove controls;

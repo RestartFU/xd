@@ -413,6 +413,13 @@ enum ComposerChoice {
 }
 
 #[derive(Clone)]
+enum WorkspacePathTarget {
+    CreateRepository,
+    DefaultsWorkdir { folder_id: String },
+    DefaultsRepository { folder_id: String },
+}
+
+#[derive(Clone)]
 struct SidebarEdit {
     target: SidebarTarget,
     original: String,
@@ -524,6 +531,7 @@ struct XdDesktop {
     workspace_create_clone: String,
     workspace_create_submitting: bool,
     workspace_clone_status: Option<String>,
+    workspace_path_generation: u64,
     pending_clone_chats: HashSet<String>,
     workspace_clone_outcomes: HashMap<String, Option<String>>,
     creating_chat_folder: Option<String>,
@@ -802,6 +810,7 @@ impl XdDesktop {
             workspace_create_clone: String::new(),
             workspace_create_submitting: false,
             workspace_clone_status: None,
+            workspace_path_generation: 0,
             pending_clone_chats: HashSet::new(),
             workspace_clone_outcomes: HashMap::new(),
             creating_chat_folder: None,
@@ -2534,6 +2543,7 @@ impl XdDesktop {
     }
 
     fn begin_workspace_create(&mut self, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         self.creating_workspace = true;
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
@@ -2567,6 +2577,91 @@ impl XdDesktop {
             self.workspace_create_clone = text;
             cx.notify();
         }
+    }
+
+    fn choose_workspace_path(&mut self, target: WorkspacePathTarget, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        let generation = self.workspace_path_generation;
+        let prompt = match &target {
+            WorkspacePathTarget::CreateRepository => "Choose an existing repository",
+            WorkspacePathTarget::DefaultsWorkdir { .. } => "Choose a working directory",
+            WorkspacePathTarget::DefaultsRepository { .. } => "Choose a repository directory",
+        };
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(prompt.into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let selection = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next().map(Ok),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => Some(Err(format!("Cannot open the folder picker: {error}"))),
+                Err(_) => Some(Err("The folder picker closed unexpectedly.".into())),
+            };
+            let Some(selection) = selection else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.workspace_path_generation != generation {
+                    return;
+                }
+                let path = match selection {
+                    Ok(path) => match path.to_str() {
+                        Some(path) => path.to_owned(),
+                        None => {
+                            this.model.connection_error =
+                                Some("Workspace paths must be valid UTF-8.".into());
+                            cx.notify();
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        this.model.connection_error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                };
+                match target {
+                    WorkspacePathTarget::CreateRepository
+                        if this.creating_workspace && !this.workspace_create_submitting =>
+                    {
+                        this.workspace_create_repo = path.clone();
+                        this.workspace_create_clone.clear();
+                        this.workspace_repo_input
+                            .update(cx, |input, cx| input.set_text(path, cx));
+                        this.workspace_clone_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                    }
+                    WorkspacePathTarget::DefaultsWorkdir { folder_id } => {
+                        if let Some(defaults) = &mut this.workspace_defaults
+                            && defaults.folder_id == folder_id
+                            && !defaults.loading
+                            && !defaults.submitting
+                        {
+                            defaults.workdir = path.clone();
+                            this.workspace_workdir_input
+                                .update(cx, |input, cx| input.set_text(path, cx));
+                        }
+                    }
+                    WorkspacePathTarget::DefaultsRepository { folder_id } => {
+                        if let Some(defaults) = &mut this.workspace_defaults
+                            && defaults.folder_id == folder_id
+                            && !defaults.loading
+                            && !defaults.submitting
+                        {
+                            defaults.repo = path.clone();
+                            this.workspace_repo_default_input
+                                .update(cx, |input, cx| input.set_text(path, cx));
+                        }
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn save_workspace_create(&mut self, cx: &mut Context<Self>) {
@@ -2605,6 +2700,7 @@ impl XdDesktop {
     }
 
     fn cancel_workspace_create(&mut self, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         self.creating_workspace = false;
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
@@ -2735,6 +2831,7 @@ impl XdDesktop {
     }
 
     fn begin_workspace_defaults(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         let Some(daemon) = self.daemon.as_ref() else {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             cx.notify();
@@ -2758,6 +2855,12 @@ impl XdDesktop {
             self.workspace_defaults = None;
             self.model.connection_error = Some(error);
         }
+        cx.notify();
+    }
+
+    fn cancel_workspace_defaults(&mut self, cx: &mut Context<Self>) {
+        self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
+        self.workspace_defaults = None;
         cx.notify();
     }
 
@@ -6481,6 +6584,8 @@ impl Render for XdDesktop {
             {
                 let loading = defaults.loading;
                 let submitting = defaults.submitting;
+                let workdir_folder_id = defaults.folder_id.clone();
+                let repository_folder_id = defaults.folder_id.clone();
                 let selected_backend = defaults
                     .backend
                     .as_deref()
@@ -6609,62 +6714,126 @@ impl Render for XdDesktop {
                                 .child("Working directory")
                                 .child(
                                     div()
-                                        .id(("workspace-workdir-input", folder_row_index))
-                                        .track_focus(&workspace_workdir_focus)
-                                        .h(px(32.0))
-                                        .w_full()
-                                        .min_w_0()
-                                        .px_2()
                                         .flex()
                                         .items_center()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(rgb(
-                                            if workspace_workdir_focus.is_focused(window) {
-                                                accent
-                                            } else {
-                                                BORDER
-                                            },
-                                        ))
-                                        .bg(rgb(BG))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            let focus = this
-                                                .workspace_workdir_input
-                                                .read(cx)
-                                                .focus_handle(cx);
-                                            window.focus(&focus);
-                                        }))
-                                        .child(workspace_workdir_input.clone()),
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .id(("workspace-workdir-input", folder_row_index))
+                                                .track_focus(&workspace_workdir_focus)
+                                                .h(px(32.0))
+                                                .min_w_0()
+                                                .flex_1()
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .border_1()
+                                                .border_color(rgb(
+                                                    if workspace_workdir_focus.is_focused(window) {
+                                                        accent
+                                                    } else {
+                                                        BORDER
+                                                    },
+                                                ))
+                                                .bg(rgb(BG))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    let focus = this
+                                                        .workspace_workdir_input
+                                                        .read(cx)
+                                                        .focus_handle(cx);
+                                                    window.focus(&focus);
+                                                }))
+                                                .child(workspace_workdir_input.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("browse-workspace-workdir", folder_row_index))
+                                                .h(px(32.0))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .bg(rgb(BG))
+                                                .text_color(rgb(TEXT))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x242428)))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.choose_workspace_path(
+                                                        WorkspacePathTarget::DefaultsWorkdir {
+                                                            folder_id: workdir_folder_id.clone(),
+                                                        },
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child("Browse"),
+                                        ),
                                 )
                                 .child("Repository")
                                 .child(
                                     div()
-                                        .id(("workspace-repo-default-input", folder_row_index))
-                                        .track_focus(&workspace_repo_default_focus)
-                                        .h(px(32.0))
-                                        .w_full()
-                                        .min_w_0()
-                                        .px_2()
                                         .flex()
                                         .items_center()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(rgb(
-                                            if workspace_repo_default_focus.is_focused(window) {
-                                                accent
-                                            } else {
-                                                BORDER
-                                            },
-                                        ))
-                                        .bg(rgb(BG))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            let focus = this
-                                                .workspace_repo_default_input
-                                                .read(cx)
-                                                .focus_handle(cx);
-                                            window.focus(&focus);
-                                        }))
-                                        .child(workspace_repo_default_input.clone()),
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .id((
+                                                    "workspace-repo-default-input",
+                                                    folder_row_index,
+                                                ))
+                                                .track_focus(&workspace_repo_default_focus)
+                                                .h(px(32.0))
+                                                .min_w_0()
+                                                .flex_1()
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .border_1()
+                                                .border_color(rgb(
+                                                    if workspace_repo_default_focus
+                                                        .is_focused(window)
+                                                    {
+                                                        accent
+                                                    } else {
+                                                        BORDER
+                                                    },
+                                                ))
+                                                .bg(rgb(BG))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    let focus = this
+                                                        .workspace_repo_default_input
+                                                        .read(cx)
+                                                        .focus_handle(cx);
+                                                    window.focus(&focus);
+                                                }))
+                                                .child(workspace_repo_default_input.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .id((
+                                                    "browse-workspace-repository-default",
+                                                    folder_row_index,
+                                                ))
+                                                .h(px(32.0))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .bg(rgb(BG))
+                                                .text_color(rgb(TEXT))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x242428)))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.choose_workspace_path(
+                                                        WorkspacePathTarget::DefaultsRepository {
+                                                            folder_id: repository_folder_id.clone(),
+                                                        },
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child("Browse"),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -6686,8 +6855,7 @@ impl Render for XdDesktop {
                                         .cursor_pointer()
                                         .hover(|style| style.bg(rgb(0x242428)))
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.workspace_defaults = None;
-                                            cx.notify();
+                                            this.cancel_workspace_defaults(cx);
                                         }))
                                         .child("Cancel"),
                                 )
@@ -7172,27 +7340,57 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
-                                .id("workspace-repo-input")
-                                .track_focus(&workspace_repo_focus)
-                                .h(px(32.0))
-                                .w_full()
-                                .min_w_0()
-                                .px_2()
                                 .flex()
                                 .items_center()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(rgb(if workspace_repo_focus.is_focused(window) {
-                                    accent
-                                } else {
-                                    BORDER
-                                }))
-                                .bg(rgb(BG))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let focus = this.workspace_repo_input.read(cx).focus_handle(cx);
-                                    window.focus(&focus);
-                                }))
-                                .child(workspace_repo_input),
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .id("workspace-repo-input")
+                                        .track_focus(&workspace_repo_focus)
+                                        .h(px(32.0))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(
+                                            if workspace_repo_focus.is_focused(window) {
+                                                accent
+                                            } else {
+                                                BORDER
+                                            },
+                                        ))
+                                        .bg(rgb(BG))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus =
+                                                this.workspace_repo_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus);
+                                        }))
+                                        .child(workspace_repo_input),
+                                )
+                                .child(
+                                    div()
+                                        .id("browse-workspace-repository")
+                                        .h(px(32.0))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .bg(rgb(BG))
+                                        .text_xs()
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x242428)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.choose_workspace_path(
+                                                WorkspacePathTarget::CreateRepository,
+                                                cx,
+                                            );
+                                        }))
+                                        .child("Browse"),
+                                ),
                         )
                         .child(
                             div()
