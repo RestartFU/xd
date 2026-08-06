@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -312,6 +315,54 @@ struct PendingSpeech {
     previous_assistant_id: Option<i64>,
 }
 
+#[derive(Clone, Default)]
+struct TranscriptSnapshot {
+    messages: Arc<Vec<Message>>,
+    live_text: Option<Arc<Message>>,
+    live_activity: Arc<Vec<Message>>,
+}
+
+impl TranscriptSnapshot {
+    fn sync_messages(&mut self, model: &AppModel) {
+        self.messages = Arc::new(model.messages.clone());
+    }
+
+    fn sync_live_text(&mut self, model: &AppModel) {
+        self.live_text = (!model.live_text.is_empty()).then(|| {
+            Arc::new(Message::new(
+                None,
+                "assistant",
+                model.live_text.clone(),
+                model.selected_summary().map(|chat| chat.backend.clone()),
+            ))
+        });
+    }
+
+    fn sync_live_activity(&mut self, model: &AppModel) {
+        self.live_activity = Arc::new(model.live_activity.clone());
+    }
+
+    fn sync_all(&mut self, model: &AppModel) {
+        self.sync_messages(model);
+        self.sync_live_text(model);
+        self.sync_live_activity(model);
+    }
+
+    fn get(&self, index: usize) -> Option<&Message> {
+        if let Some(message) = self.messages.get(index) {
+            return Some(message);
+        }
+        let mut live_index = index.saturating_sub(self.messages.len());
+        if let Some(live_text) = self.live_text.as_deref() {
+            if live_index == 0 {
+                return Some(live_text);
+            }
+            live_index = live_index.saturating_sub(1);
+        }
+        self.live_activity.get(live_index)
+    }
+}
+
 #[derive(Clone)]
 struct QueueEdit {
     chat_id: String,
@@ -397,6 +448,7 @@ struct XdDesktop {
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
     transcript: ListState,
+    transcript_snapshot: TranscriptSnapshot,
     transcript_loading: bool,
     composer_input: Entity<FileEditor>,
     queue_edit_input: Entity<ComposerInput>,
@@ -654,6 +706,7 @@ impl XdDesktop {
             daemon: None,
             _started_daemon: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
+            transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loading: false,
             composer_input,
             queue_edit_input,
@@ -1170,9 +1223,14 @@ impl XdDesktop {
 
         match kind {
             RequestKind::Tree => {
+                let selected_before = self.model.selected_chat.clone();
                 if let Err(error) = self.model.apply_tree(&value) {
                     self.model.connection_error = Some(format!("Invalid tree response: {error}"));
                     return;
+                }
+                if selected_before.is_some() && self.model.selected_chat.is_none() {
+                    self.transcript_snapshot = TranscriptSnapshot::default();
+                    self.transcript.reset(0);
                 }
                 if self
                     .sidebar_edit
@@ -1818,6 +1876,7 @@ impl XdDesktop {
                     self.model.live_text.clear();
                     self.model.live_activity.clear();
                 }
+                self.transcript_snapshot.sync_all(&self.model);
                 self.sync_question_from_history(&chat_id, cx);
                 if self
                     .pending_speech
@@ -2109,6 +2168,8 @@ impl XdDesktop {
                 self.composer_menu = None;
                 self.clear_question(cx);
                 self.model.apply_event(name, &body);
+                self.transcript_snapshot.sync_live_text(&self.model);
+                self.transcript_snapshot.sync_live_activity(&self.model);
                 self.sync_transcript_count(false);
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.request_messages(&chat_id);
@@ -2118,6 +2179,11 @@ impl XdDesktop {
             "text" | "tool" if self.event_is_active(&body) => {
                 let old_count = self.model.display_message_count();
                 self.model.apply_event(name, &body);
+                if name == "text" {
+                    self.transcript_snapshot.sync_live_text(&self.model);
+                } else {
+                    self.transcript_snapshot.sync_live_activity(&self.model);
+                }
                 let new_count = self.model.display_message_count();
                 if new_count > old_count {
                     self.transcript
@@ -4239,6 +4305,7 @@ impl XdDesktop {
             return;
         }
         self.model.select_chat(chat_id.clone());
+        self.transcript_snapshot = TranscriptSnapshot::default();
         self.settings.last_chat = Some(chat_id.clone());
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
@@ -5132,7 +5199,7 @@ impl Render for XdDesktop {
         let sidebar_width = self.settings.sidebar_width;
         let diff_width = self.settings.diff_width;
         let terminal_height = self.settings.terminal_height;
-        let messages = self.model.display_messages();
+        let messages = self.transcript_snapshot.clone();
         let queue_count = self.model.queue.len();
         let working = self.model.working;
         let selected = self.model.selected_summary().cloned();
@@ -7142,7 +7209,9 @@ impl Render for XdDesktop {
                 .into_any_element()
         } else {
             list(self.transcript.clone(), move |index, _window, _cx| {
-                let message = &messages[index];
+                let message = messages
+                    .get(index)
+                    .expect("transcript list index must match its snapshot");
                 let key = message
                     .id
                     .map(|id| format!("message-{id}"))
@@ -10629,6 +10698,27 @@ mod tests {
         };
 
         assert_eq!(workflow_row_indices(&model, marker), [1, 4]);
+    }
+
+    #[test]
+    fn live_transcript_updates_reuse_the_persisted_message_snapshot() {
+        let mut model = AppModel {
+            messages: vec![Message::new(Some(1), "user", "history", None)],
+            live_text: "first partial".into(),
+            live_activity: vec![Message::new(None, "tool", "read file", None)],
+            ..Default::default()
+        };
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_all(&model);
+        let persisted = snapshot.messages.clone();
+
+        model.live_text = "second partial".into();
+        snapshot.sync_live_text(&model);
+
+        assert!(Arc::ptr_eq(&persisted, &snapshot.messages));
+        assert_eq!(snapshot.get(0).unwrap().content, "history");
+        assert_eq!(snapshot.get(1).unwrap().content, "second partial");
+        assert_eq!(snapshot.get(2).unwrap().content, "read file");
     }
 
     #[test]
