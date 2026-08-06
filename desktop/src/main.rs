@@ -4664,25 +4664,31 @@ impl XdDesktop {
             .w_full()
             .px_4()
             .py_2()
-            .flex()
-            .when(is_user, |row| row.justify_end())
             .child(
                 div()
-                    .when(!is_user, |body| body.w_full().max_w(px(1040.0)).mx_auto())
-                    .when(is_user, |body| {
-                        body.max_w(px(680.0))
-                            .px_4()
-                            .py_3()
-                            .rounded_xl()
-                            .border_1()
-                            .border_color(rgb(0x242428))
-                            .bg(rgb(SURFACE_HIGH))
-                    })
-                    .text_color(rgb(TEXT))
+                    .w_full()
+                    .max_w(px(1040.0))
+                    .mx_auto()
+                    .flex()
+                    .when(is_user, |row| row.justify_end())
                     .child(
-                        Self::markdown_content(message.markdown())
-                            .text_sm()
-                            .line_height(px(21.0)),
+                        div()
+                            .when(!is_user, |body| body.w_full())
+                            .when(is_user, |body| {
+                                body.max_w(px(680.0))
+                                    .px_4()
+                                    .py_3()
+                                    .rounded_xl()
+                                    .border_1()
+                                    .border_color(rgb(0x242428))
+                                    .bg(rgb(SURFACE_HIGH))
+                            })
+                            .text_color(rgb(TEXT))
+                            .child(
+                                Self::markdown_content(message.markdown())
+                                    .text_sm()
+                                    .line_height(px(21.0)),
+                            ),
                     ),
             )
             .into_any_element()
