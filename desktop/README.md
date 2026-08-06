@@ -14,6 +14,7 @@ Current milestone:
 - an isolated, app-owned Rust daemon and first-run state initialization;
 - clickable workspace/chat sidebar backed by real daemon tree data;
 - persisted active-chat restoration with deletion-safe fallback;
+- persisted workspace expansion state with stale-folder cleanup;
 - workspace and chat creation controls;
 - first-message generated/existing-worktree selection and Rust-owned checkout creation;
 - interactive composer with Enter-to-send and daemon-authoritative queueing;

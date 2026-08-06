@@ -604,12 +604,14 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) => {}
         })
         .detach();
+        let settings = AppSettings::load();
+        let collapsed_folders = settings.collapsed_folders.iter().cloned().collect();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
                 ..Default::default()
             },
-            settings: AppSettings::load(),
+            settings,
             settings_open: false,
             settings_menu: None,
             auth_open: false,
@@ -650,7 +652,7 @@ impl XdDesktop {
             sidebar_delete_submitting: false,
             sidebar_move: None,
             sidebar_move_submitting: false,
-            collapsed_folders: HashSet::new(),
+            collapsed_folders,
             creating_workspace: false,
             workspace_create_name: String::new(),
             workspace_create_repo: String::new(),
@@ -1149,6 +1151,7 @@ impl XdDesktop {
                         .iter()
                         .any(|folder| &folder.id == folder_id)
                 });
+                self.persist_collapsed_folders();
                 if self
                     .workspace_context_folder
                     .as_ref()
@@ -4377,7 +4380,20 @@ impl XdDesktop {
         if !self.collapsed_folders.remove(&folder_id) {
             self.collapsed_folders.insert(folder_id);
         }
+        self.persist_collapsed_folders();
         cx.notify();
+    }
+
+    fn persist_collapsed_folders(&mut self) {
+        let mut collapsed = self.collapsed_folders.iter().cloned().collect::<Vec<_>>();
+        collapsed.sort();
+        if self.settings.collapsed_folders == collapsed {
+            return;
+        }
+        self.settings.collapsed_folders = collapsed;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
     }
 
     fn sync_transcript_count(&self, reset: bool) {
