@@ -8853,6 +8853,11 @@ impl XdDesktop {
                     font_style: Some(FontStyle::Italic),
                     ..Default::default()
                 },
+                InlineKind::StrongEmphasis => HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    font_style: Some(FontStyle::Italic),
+                    ..Default::default()
+                },
                 InlineKind::Code => HighlightStyle {
                     color: Some(rgb(0xd8b4fe).into()),
                     background_color: Some(rgb(0x292331).into()),

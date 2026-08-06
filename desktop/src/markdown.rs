@@ -47,6 +47,7 @@ pub struct InlineSpan {
 pub enum InlineKind {
     Strong,
     Emphasis,
+    StrongEmphasis,
     Code,
     Link,
 }
@@ -836,7 +837,7 @@ fn parse_inline(source: &str) -> InlineText {
 
     while !rest.is_empty() {
         let Some((offset, marker)) = rest.char_indices().find(|(offset, character)| {
-            matches!(character, '*' | '_' | '`' | '[')
+            matches!(character, '*' | '_' | '`' | '[' | '\\')
                 || rest[*offset..].starts_with("![")
                 || starts_web_url(&rest[*offset..])
         }) else {
@@ -845,6 +846,12 @@ fn parse_inline(source: &str) -> InlineText {
         };
         text.push_str(&rest[..offset]);
         rest = &rest[offset..];
+
+        if let Some((escaped, consumed)) = escaped_markdown_character(rest) {
+            text.push(escaped);
+            rest = &rest[consumed..];
+            continue;
+        }
 
         if starts_web_url(rest) {
             let length = bare_url_length(rest);
@@ -863,6 +870,8 @@ fn parse_inline(source: &str) -> InlineText {
 
         let parsed = if rest.starts_with("![") {
             inline_image(rest)
+        } else if rest.starts_with("***") {
+            inline_delimited(rest, "***", InlineKind::StrongEmphasis)
         } else if rest.starts_with("**") {
             inline_delimited(rest, "**", InlineKind::Strong)
         } else if rest.starts_with('*') {
@@ -944,7 +953,9 @@ fn inline_delimited<'a>(
     kind: InlineKind,
 ) -> Option<ParsedInline<'a>> {
     let body = &source[delimiter.len()..];
-    let end = body.find(delimiter)?;
+    let end = body
+        .match_indices(delimiter)
+        .find_map(|(offset, _)| (!delimiter_is_escaped(body, offset)).then_some(offset))?;
     if end == 0 {
         return None;
     }
@@ -957,8 +968,31 @@ fn inline_delimited<'a>(
     })
 }
 
+fn escaped_markdown_character(source: &str) -> Option<(char, usize)> {
+    let escaped = source.strip_prefix('\\')?.chars().next()?;
+    escaped
+        .is_ascii_punctuation()
+        .then_some((escaped, '\\'.len_utf8() + escaped.len_utf8()))
+}
+
+fn delimiter_is_escaped(source: &str, offset: usize) -> bool {
+    source[..offset]
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
 fn inline_underscore(source: &str, previous: Option<char>) -> Option<ParsedInline<'_>> {
-    let delimiter = if source.starts_with("__") { "__" } else { "_" };
+    let delimiter = if source.starts_with("___") {
+        "___"
+    } else if source.starts_with("__") {
+        "__"
+    } else {
+        "_"
+    };
     let body = &source[delimiter.len()..];
     if previous.is_some_and(char::is_alphanumeric)
         || body.chars().next().is_none_or(char::is_whitespace)
@@ -968,8 +1002,10 @@ fn inline_underscore(source: &str, previous: Option<char>) -> Option<ParsedInlin
     let end = body.match_indices(delimiter).find_map(|(offset, _)| {
         let before = body[..offset].chars().next_back()?;
         let after = body[offset + delimiter.len()..].chars().next();
-        (!before.is_whitespace() && after.is_none_or(|character| !character.is_alphanumeric()))
-            .then_some(offset)
+        (!delimiter_is_escaped(body, offset)
+            && !before.is_whitespace()
+            && after.is_none_or(|character| !character.is_alphanumeric()))
+        .then_some(offset)
     })?;
     if end == 0 {
         return None;
@@ -978,10 +1014,10 @@ fn inline_underscore(source: &str, previous: Option<char>) -> Option<ParsedInlin
         prefix: "",
         value: &body[..end],
         consumed: delimiter.len() + end + delimiter.len(),
-        kind: if delimiter.len() == 2 {
-            InlineKind::Strong
-        } else {
-            InlineKind::Emphasis
+        kind: match delimiter.len() {
+            3 => InlineKind::StrongEmphasis,
+            2 => InlineKind::Strong,
+            _ => InlineKind::Emphasis,
         },
         url: None,
     })
@@ -1434,6 +1470,33 @@ mod tests {
         assert_eq!(
             &paragraph.text[paragraph.spans[1].range.clone()],
             "strong words"
+        );
+    }
+
+    #[test]
+    fn nested_emphasis_and_escaped_markers_render_literally() {
+        let document = parse(
+            "***bold italic*** and ___also both___; \\*literal\\* \\_plain\\_ \\[label](https://example.com)",
+        );
+        let Block::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("paragraph")
+        };
+        assert_eq!(
+            paragraph.text,
+            "bold italic and also both; *literal* _plain_ [label](https://example.com)"
+        );
+        assert_eq!(paragraph.spans.len(), 3);
+        assert!(
+            paragraph
+                .spans
+                .iter()
+                .take(2)
+                .all(|span| span.kind == InlineKind::StrongEmphasis)
+        );
+        assert_eq!(paragraph.spans[2].kind, InlineKind::Link);
+        assert_eq!(
+            paragraph.spans[2].url.as_deref(),
+            Some("https://example.com")
         );
     }
 
