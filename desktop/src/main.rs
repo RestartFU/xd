@@ -923,6 +923,7 @@ impl XdDesktop {
                 RequestKind::WorkflowStatus { marker } => {
                     self.workflow_pending.remove(marker);
                     self.workflow_statuses.insert(marker.clone(), value.clone());
+                    self.invalidate_workflow_rows(marker);
                     self.schedule_workflow_refresh(marker.clone(), cx);
                 }
                 RequestKind::DiffRead { generation, .. } if *generation == self.diff_generation => {
@@ -1350,6 +1351,7 @@ impl XdDesktop {
                 if value.get("pending").and_then(Value::as_bool) != Some(true) {
                     self.workflow_pending.remove(&marker);
                     self.workflow_statuses.insert(marker.clone(), value.clone());
+                    self.invalidate_workflow_rows(&marker);
                     self.schedule_workflow_refresh(marker, cx);
                 }
             }
@@ -1985,6 +1987,7 @@ impl XdDesktop {
                 {
                     self.workflow_pending.remove(&marker);
                     self.workflow_statuses.insert(marker.clone(), body.clone());
+                    self.invalidate_workflow_rows(&marker);
                     self.schedule_workflow_refresh(marker, cx);
                 }
             }
@@ -4719,6 +4722,18 @@ impl XdDesktop {
         }
     }
 
+    fn invalidate_workflow_rows(&self, marker: &str) {
+        let indices = workflow_row_indices(&self.model, marker);
+        if indices.is_empty() {
+            return;
+        }
+        let anchor = self.transcript.logical_scroll_top();
+        for index in indices {
+            self.transcript.splice(index..index + 1, 1);
+        }
+        self.transcript.scroll_to(anchor);
+    }
+
     fn message_row(
         message: &Message,
         index: usize,
@@ -4871,9 +4886,12 @@ impl XdDesktop {
                     .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                     .on_click(move |_, _, cx| {
                         desktop.update(cx, |this, cx| {
+                            let anchor = this.transcript.logical_scroll_top();
                             if !this.expanded_activity.remove(&toggle_key) {
                                 this.expanded_activity.insert(toggle_key.clone());
                             }
+                            this.transcript.splice(index..index + 1, 1);
+                            this.transcript.scroll_to(anchor);
                             cx.notify();
                         });
                     })
@@ -10396,6 +10414,28 @@ fn workflow_status_terminal(status: &Value) -> bool {
         && status.get("state").and_then(Value::as_str) == Some("completed")
 }
 
+fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
+    let live_offset = model.messages.len() + usize::from(!model.live_text.is_empty());
+    model
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message.role == "tool" && message.content == marker).then_some(index)
+        })
+        .chain(
+            model
+                .live_activity
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    (message.role == "tool" && message.content == marker)
+                        .then_some(live_offset + index)
+                }),
+        )
+        .collect()
+}
+
 fn activity_status_color(kind: ActivityKind) -> u32 {
     match kind {
         ActivityKind::Running => 0x91a7ff,
@@ -10550,6 +10590,25 @@ mod tests {
         assert_eq!(command_suggestions(&commands, "/RE"), ["review", "rename"]);
         assert!(command_suggestions(&commands, "re").is_empty());
         assert!(command_suggestions(&commands, "/review now").is_empty());
+    }
+
+    #[test]
+    fn workflow_refresh_targets_persisted_and_live_rows_without_moving_offsets() {
+        let marker = "workflow_run\n123\nhttps://github.com/RestartFU/xd/actions/runs/123";
+        let model = AppModel {
+            messages: vec![
+                Message::new(Some(1), "user", "run it", None),
+                Message::new(Some(2), "tool", marker, None),
+            ],
+            live_text: "Still working".into(),
+            live_activity: vec![
+                Message::new(None, "tool", "read file", None),
+                Message::new(None, "tool", marker, None),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(workflow_row_indices(&model, marker), [1, 4]);
     }
 
     #[test]
