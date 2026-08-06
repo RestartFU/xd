@@ -32,7 +32,7 @@ use xd_desktop::{
     context_usage::{self, Severity as ContextSeverity},
     daemon::{DaemonHandle, DaemonUpdate, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
-    model::{AppModel, Attachment, Folder, Message},
+    model::{AgentBackend, AppModel, Attachment, Folder, Message},
     remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
 };
 
@@ -77,7 +77,22 @@ const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-gpui::actions!(xd, [OpenSearch, CloseSearch]);
+gpui::actions!(
+    xd,
+    [
+        OpenSearch,
+        CloseSearch,
+        SelectModel1,
+        SelectModel2,
+        SelectModel3,
+        SelectModel4,
+        SelectModel5,
+        SelectModel6,
+        SelectModel7,
+        SelectModel8,
+        SelectModel9
+    ]
+);
 
 #[derive(Clone, Debug, Deserialize)]
 struct SearchHit {
@@ -6402,6 +6417,23 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn select_model_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.composer_menu != Some(ComposerMenu::Model) {
+            return;
+        }
+        let Some((backend, model)) = filtered_models(
+            &self.model.agent_backends,
+            &self.settings.favorite_models,
+            self.model_filter.as_deref(),
+            &self.model_search,
+        )
+        .get(index)
+        .cloned() else {
+            return;
+        };
+        self.apply_composer_choice(ComposerChoice::Model { backend, model }, cx);
+    }
+
     fn apply_composer_choice(&mut self, choice: ComposerChoice, cx: &mut Context<Self>) {
         self.composer_menu = None;
         let Some(chat_id) = self.model.selected_chat.clone() else {
@@ -10079,49 +10111,40 @@ impl Render for XdDesktop {
             let (title, choices) = match menu {
                 ComposerMenu::Model if can_change_agent => {
                     let multiple_backends = self.model.agent_backends.len() > 1;
-                    let needle = self.model_search.trim().to_lowercase();
                     let mut choices = Vec::new();
-                    for backend in &self.model.agent_backends {
-                        if self
-                            .model_filter
-                            .as_ref()
-                            .is_some_and(|filter| filter != &backend.id)
-                        {
-                            continue;
-                        }
-                        for model in &backend.models {
-                            let key = format!("{}/{}", backend.id, model.id);
-                            let favorite = self
-                                .settings
-                                .favorite_models
-                                .iter()
-                                .any(|value| value == &key);
-                            if self.model_filter.is_none() && !favorite {
-                                continue;
-                            }
-                            if !needle.is_empty()
-                                && !model.name.to_lowercase().contains(&needle)
-                                && !model.id.to_lowercase().contains(&needle)
-                                && !backend.name.to_lowercase().contains(&needle)
-                            {
-                                continue;
-                            }
-                            let label = if multiple_backends {
-                                format!("{} · {}", backend.name, model.name)
-                            } else {
-                                model.name.clone()
-                            };
-                            choices.push((
-                                label,
-                                backend.id == self.model.backend
-                                    && self.model.model.as_deref() == Some(model.id.as_str()),
-                                ComposerChoice::Model {
-                                    backend: backend.id.clone(),
-                                    model: model.id.clone(),
-                                },
-                                Some((backend.id.clone(), model.id.clone(), favorite)),
-                            ));
-                        }
+                    for (backend_id, model_id) in filtered_models(
+                        &self.model.agent_backends,
+                        &self.settings.favorite_models,
+                        self.model_filter.as_deref(),
+                        &self.model_search,
+                    ) {
+                        let backend = self
+                            .model
+                            .agent_backends
+                            .iter()
+                            .find(|backend| backend.id == backend_id)?;
+                        let model = backend.models.iter().find(|model| model.id == model_id)?;
+                        let key = format!("{backend_id}/{model_id}");
+                        let favorite = self
+                            .settings
+                            .favorite_models
+                            .iter()
+                            .any(|value| value == &key);
+                        let label = if multiple_backends {
+                            format!("{} · {}", backend.name, model.name)
+                        } else {
+                            model.name.clone()
+                        };
+                        choices.push((
+                            label,
+                            backend.id == self.model.backend
+                                && self.model.model.as_deref() == Some(model.id.as_str()),
+                            ComposerChoice::Model {
+                                backend: backend_id.clone(),
+                                model: model_id.clone(),
+                            },
+                            Some((backend_id, model_id, favorite)),
+                        ));
                     }
                     ("Assistant", choices)
                 }
@@ -10282,7 +10305,15 @@ impl Render for XdDesktop {
                                 this.apply_composer_choice(choice.clone(), cx);
                             });
                         })
-                        .child(div().min_w_0().flex_1().child(label));
+                        .child(div().min_w_0().flex_1().child(label))
+                        .when(menu == ComposerMenu::Model && index < 9, |row| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(format!("Ctrl+{}", index + 1)),
+                            )
+                        });
                     row.when_some(favorite, |row, (backend, model, favorite)| {
                         let desktop = menu_desktop.clone();
                         row.child(
@@ -15568,6 +15599,33 @@ impl Render for XdDesktop {
                     this.close_search(cx);
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &SelectModel1, _, cx| this.select_model_shortcut(0, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel2, _, cx| this.select_model_shortcut(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel3, _, cx| this.select_model_shortcut(2, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel4, _, cx| this.select_model_shortcut(3, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel5, _, cx| this.select_model_shortcut(4, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel6, _, cx| this.select_model_shortcut(5, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel7, _, cx| this.select_model_shortcut(6, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel8, _, cx| this.select_model_shortcut(7, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectModel9, _, cx| this.select_model_shortcut(8, cx)),
+            )
             .bg(rgb(BG))
             .font_family("Inter")
             .when(client_decorations, |root| root.child(titlebar))
@@ -15975,6 +16033,36 @@ fn optional_trimmed(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn filtered_models(
+    backends: &[AgentBackend],
+    favorites: &[String],
+    provider: Option<&str>,
+    query: &str,
+) -> Vec<(String, String)> {
+    let needle = query.trim().to_lowercase();
+    let mut visible = Vec::new();
+    for backend in backends {
+        if provider.is_some_and(|provider| provider != backend.id) {
+            continue;
+        }
+        for model in &backend.models {
+            let key = format!("{}/{}", backend.id, model.id);
+            if provider.is_none() && !favorites.iter().any(|favorite| favorite == &key) {
+                continue;
+            }
+            if !needle.is_empty()
+                && !model.name.to_lowercase().contains(&needle)
+                && !model.id.to_lowercase().contains(&needle)
+                && !backend.name.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            visible.push((backend.id.clone(), model.id.clone()));
+        }
+    }
+    visible
+}
+
 fn clean_shortcut_prompts(prompts: &[String]) -> Result<Vec<String>, String> {
     if prompts.len() > MAX_SHORTCUTS {
         return Err(format!(
@@ -16166,6 +16254,50 @@ fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_shortcuts_follow_the_visible_provider_search_and_favorites() {
+        let backends = vec![
+            AgentBackend {
+                id: "codex".into(),
+                name: "Codex".into(),
+                default_model: "gpt-fast".into(),
+                models: vec![
+                    xd_desktop::model::AgentModel {
+                        id: "gpt-fast".into(),
+                        name: "GPT Fast".into(),
+                    },
+                    xd_desktop::model::AgentModel {
+                        id: "gpt-deep".into(),
+                        name: "GPT Deep".into(),
+                    },
+                ],
+                efforts: Vec::new(),
+            },
+            AgentBackend {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                default_model: "opus".into(),
+                models: vec![xd_desktop::model::AgentModel {
+                    id: "opus".into(),
+                    name: "Opus".into(),
+                }],
+                efforts: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            filtered_models(&backends, &[], Some("codex"), "deep"),
+            vec![("codex".into(), "gpt-deep".into())]
+        );
+        assert_eq!(
+            filtered_models(&backends, &["claude/opus".into()], None, ""),
+            vec![("claude".into(), "opus".into())]
+        );
+        assert_eq!(
+            filtered_models(&backends, &[], Some("claude"), "code"),
+            vec![("claude".into(), "opus".into())]
+        );
+    }
 
     #[test]
     fn shortcut_management_matches_daemon_cleaning_and_bounds() {
@@ -16826,6 +16958,15 @@ fn main() {
             KeyBinding::new("cmd-k", OpenSearch, Some("XdDesktop")),
             KeyBinding::new("cmd-f", OpenSearch, Some("XdDesktop")),
             KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
+            KeyBinding::new("ctrl-1", SelectModel1, Some("XdDesktop")),
+            KeyBinding::new("ctrl-2", SelectModel2, Some("XdDesktop")),
+            KeyBinding::new("ctrl-3", SelectModel3, Some("XdDesktop")),
+            KeyBinding::new("ctrl-4", SelectModel4, Some("XdDesktop")),
+            KeyBinding::new("ctrl-5", SelectModel5, Some("XdDesktop")),
+            KeyBinding::new("ctrl-6", SelectModel6, Some("XdDesktop")),
+            KeyBinding::new("ctrl-7", SelectModel7, Some("XdDesktop")),
+            KeyBinding::new("ctrl-8", SelectModel8, Some("XdDesktop")),
+            KeyBinding::new("ctrl-9", SelectModel9, Some("XdDesktop")),
             KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
             KeyBinding::new("delete", Delete, Some("ComposerInput")),
             KeyBinding::new("left", Left, Some("ComposerInput")),
