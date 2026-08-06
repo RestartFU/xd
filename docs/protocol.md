@@ -329,12 +329,14 @@ acting at once are therefore ordered by the daemon rather than racing.
 ### `new-chat`
 
 ```json
-{"op":"new-chat","folder":"folder-1","title":"Optional"}
+{"op":"new-chat","folder":"folder-1","title":"Optional","workdir":"/optional/path"}
 {"ok":true,"id":"chat-9"}
 ```
 
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
-its folder's backend and model.
+its folder's backend and model. When `workdir` is omitted it also inherits the
+folder's effective working directory; a supplied path selects a per-chat
+working directory on the daemon machine.
 
 ### `set-shortcuts`
 

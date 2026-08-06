@@ -73,6 +73,12 @@ The app connects to `XD_SOCKET` when set. Otherwise it uses
 owns that process for the lifetime of the GPUI app. Its database and Workspaces
 directory live beside that socket, separate from `xd` and `xd-nightly`.
 
+The bundled Rust daemon also supports the established headless pairing flow:
+
+```sh
+xd-daemon-dev serve --socket /path/to/daemon.sock --pair
+```
+
 This is still a development channel. Several production-client management
 surfaces have not yet been ported.
 
