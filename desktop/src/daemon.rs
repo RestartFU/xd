@@ -50,6 +50,11 @@ pub enum RequestKind {
         chat_id: String,
         generation: u64,
     },
+    GitDraft {
+        chat_id: String,
+        request: String,
+        generation: u64,
+    },
     RepositoryFiles {
         chat_id: String,
         generation: u64,
@@ -649,6 +654,27 @@ impl DaemonHandle {
                 generation,
             },
             json!({"op": "git-status", "chat": chat_id}),
+        )
+    }
+
+    pub fn git_draft_commit(
+        &self,
+        chat_id: &str,
+        request: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::GitDraft {
+                chat_id: chat_id.to_owned(),
+                request: request.to_owned(),
+                generation,
+            },
+            json!({
+                "op": "git-draft",
+                "chat": chat_id,
+                "kind": "commit",
+                "request": request,
+            }),
         )
     }
 

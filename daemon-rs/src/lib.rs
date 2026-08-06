@@ -20,6 +20,7 @@ use thiserror::Error;
 
 pub mod agent;
 mod auth;
+mod git_draft;
 mod runtime;
 mod secrets;
 mod storage;
@@ -28,6 +29,7 @@ mod voice;
 mod workflow;
 
 use auth::AuthManager;
+use git_draft::GitDraftService;
 pub use runtime::TurnRuntime;
 use secrets::SecretsStore;
 use storage::clone_repository;
@@ -79,6 +81,7 @@ pub struct Engine {
     terminals: TerminalManager,
     voice: VoiceService,
     secrets: Arc<SecretsStore>,
+    git_drafts: GitDraftService,
 }
 
 #[derive(Default)]
@@ -104,6 +107,7 @@ impl Engine {
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), None),
             secrets,
+            git_drafts: GitDraftService::new(None, events.clone()),
             events,
             runtime: None,
         }
@@ -118,6 +122,7 @@ impl Engine {
         let events = Arc::new(EventBus::default());
         let auth = AuthManager::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
+        let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
         let engine = Self {
             runtime: Some(TurnRuntime::new(
                 store.clone(),
@@ -130,6 +135,7 @@ impl Engine {
             terminals: TerminalManager::new(events.clone()),
             voice: VoiceService::new(events.clone(), data_directory),
             secrets,
+            git_drafts,
             events,
         };
         engine.auth.refresh_all();
@@ -153,6 +159,11 @@ impl Engine {
             Some("search") => self.read(|store| store.search(&request)),
             Some("diff-read") => self.read(|store| store.diff_read(&request)),
             Some("git-status") => self.read(|store| store.git_status(&request)),
+            Some("git-draft") => self
+                .git_drafts
+                .start(&request)
+                .map(|()| json!({"ok": true}))
+                .unwrap_or_else(error_reply),
             Some("repository-files") => self.read(|store| store.repository_files(&request)),
             Some("repository-file") => self.read(|store| store.repository_file(&request)),
             Some("git-commit") => self.read(|store| store.git_commit(&request)),

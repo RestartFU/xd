@@ -666,6 +666,7 @@ impl XdDesktop {
                 &kind,
                 RequestKind::DiffRead { .. }
                     | RequestKind::GitStatus { .. }
+                    | RequestKind::GitDraft { .. }
                     | RequestKind::RepositoryFiles { .. }
                     | RequestKind::RepositoryFile { .. }
                     | RequestKind::GitCommit { .. }
@@ -804,6 +805,15 @@ impl XdDesktop {
                 | RequestKind::GitPush { generation, .. }
                     if *generation == self.diff_generation =>
                 {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.action = None;
+                        diff.action_error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::GitDraft { generation, .. } if *generation == self.diff_generation => {
                     if let Some(diff) = &mut self.diff_panel {
                         diff.action = None;
                         diff.action_error = value
@@ -1702,6 +1712,34 @@ impl XdDesktop {
                 {
                     panel.closed = true;
                     panel.loading = false;
+                }
+            }
+            "git-draft-finished" if self.event_is_active(&body) => {
+                let expected = format!("gpui-{}", self.diff_generation);
+                if body.get("kind").and_then(Value::as_str) == Some("commit")
+                    && body.get("request").and_then(Value::as_str) == Some(expected.as_str())
+                {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.action = None;
+                        if body.get("success").and_then(Value::as_bool) == Some(true) {
+                            diff.action_error = None;
+                            let title = body
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            self.git_commit_message = title.clone();
+                            self.git_commit_input
+                                .update(cx, |input, cx| input.set_text(title, cx));
+                        } else {
+                            diff.action_error = Some(
+                                body.get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("The assistant could not write a commit message.")
+                                    .to_owned(),
+                            );
+                        }
+                    }
                 }
             }
             "tree" => self.request_tree(),
@@ -3004,6 +3042,40 @@ impl XdDesktop {
             .as_ref()
             .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_commit(&chat_id, &message, generation));
+        if let Err(error) = result
+            && let Some(diff) = &mut self.diff_panel
+        {
+            diff.action = None;
+            diff.action_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn draft_commit_message(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let can_draft = self.diff_panel.as_ref().is_some_and(|diff| {
+            diff.action.is_none()
+                && diff
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| !status.clean && status.conflicted == 0)
+        });
+        if !can_draft {
+            return;
+        }
+        let generation = self.diff_generation;
+        let request = format!("gpui-{generation}");
+        if let Some(diff) = &mut self.diff_panel {
+            diff.action = Some("Writing commit message…".into());
+            diff.action_error = None;
+        }
+        let result = self
+            .daemon
+            .as_ref()
+            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.git_draft_commit(&chat_id, &request, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
         {
@@ -6783,6 +6855,8 @@ impl Render for XdDesktop {
             let can_commit = !self.git_commit_message.trim().is_empty()
                 && !action_running
                 && status.is_some_and(|status| !status.clean && status.conflicted == 0);
+            let can_draft = !action_running
+                && status.is_some_and(|status| !status.clean && status.conflicted == 0);
             let can_push = !action_running
                 && status.is_some_and(|status| {
                     !status.branch.is_empty()
@@ -7355,6 +7429,27 @@ impl Render for XdDesktop {
                                             window.focus(&focus);
                                         }))
                                         .child(git_commit_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("git-draft-commit")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_draft { SURFACE_HIGH } else { BG }))
+                                        .text_xs()
+                                        .text_color(rgb(if can_draft { TEXT } else { MUTED }))
+                                        .when(can_draft, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(0x242428)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_draft {
+                                                this.draft_commit_message(cx);
+                                            }
+                                        }))
+                                        .child("Draft"),
                                 )
                                 .child(
                                     div()
