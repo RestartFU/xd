@@ -73,6 +73,8 @@ const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_CACHED_MESSAGE_IMAGES: usize = 8;
+const MAX_SHORTCUTS: usize = 24;
+const MAX_SHORTCUT_BYTES: usize = 4_096;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 gpui::actions!(xd, [OpenSearch, CloseSearch]);
@@ -453,6 +455,23 @@ struct QueueEdit {
     submitting: Option<String>,
 }
 
+#[derive(Clone)]
+struct ShortcutRow {
+    id: u64,
+    prompt: String,
+    input: Entity<ComposerInput>,
+}
+
+#[derive(Clone)]
+struct ShortcutPanel {
+    folder_id: Option<String>,
+    folder_name: Option<String>,
+    rows: Vec<ShortcutRow>,
+    loading: bool,
+    submitting: bool,
+    error: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SidebarTarget {
     Folder(String),
@@ -690,6 +709,7 @@ struct XdDesktop {
     secrets_panel: Option<SecretsPanel>,
     devices_panel: Option<DevicesPanel>,
     share_panel: Option<SharePanel>,
+    shortcut_panel: Option<ShortcutPanel>,
     remote_panel: Option<RemotePanel>,
     self_update_panel: Option<SelfUpdatePanel>,
     auth_providers: Vec<AuthProvider>,
@@ -798,6 +818,7 @@ struct XdDesktop {
     live_markdown_scheduled: Option<u64>,
     pane_resize: Option<PaneResize>,
     window_settings_generation: u64,
+    next_shortcut_row_id: u64,
 }
 
 impl XdDesktop {
@@ -1065,6 +1086,7 @@ impl XdDesktop {
             secrets_panel: None,
             devices_panel: None,
             share_panel: None,
+            shortcut_panel: None,
             remote_panel: None,
             self_update_panel: None,
             auth_providers: Vec::new(),
@@ -1173,6 +1195,7 @@ impl XdDesktop {
             live_markdown_scheduled: None,
             pane_resize: None,
             window_settings_generation: 0,
+            next_shortcut_row_id: 0,
         };
         cx.observe_window_bounds(window, |this, window, cx| {
             this.window_bounds_changed(window, cx);
@@ -1302,7 +1325,7 @@ impl XdDesktop {
                 | RequestKind::EditQueue { .. }
                 | RequestKind::Cancel { .. }
                 | RequestKind::SetOption { .. }
-                | RequestKind::SetShortcuts
+                | RequestKind::SetShortcuts { .. }
                 | RequestKind::RemoveWorktree { .. }
                 | RequestKind::SetDraft { .. }
                 | RequestKind::VoiceModel { .. }
@@ -1933,6 +1956,11 @@ impl XdDesktop {
                     panel.loading = false;
                     panel.error = Some("Device pairing disconnected.".into());
                 }
+                if let Some(panel) = &mut self.shortcut_panel {
+                    panel.loading = false;
+                    panel.submitting = false;
+                    panel.error = Some("Shortcut management disconnected.".into());
+                }
                 if let Some(panel) = &mut self.self_update_panel {
                     panel.busy = false;
                     panel.error = Some("The daemon disconnected. Reconnecting…".into());
@@ -1999,6 +2027,8 @@ impl XdDesktop {
                     | RequestKind::RevokeDevice { .. }
                     | RequestKind::WorkflowStatus { .. }
                     | RequestKind::ImageRead { .. }
+                    | RequestKind::Shortcuts { .. }
+                    | RequestKind::SetShortcuts { .. }
             ) {
                 self.model.connection_error = Some(
                     value
@@ -2067,6 +2097,40 @@ impl XdDesktop {
                 {
                     if let Some(search) = &mut self.search {
                         search.loading = false;
+                    }
+                }
+                RequestKind::Shortcuts { folder_id }
+                    if self
+                        .shortcut_panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.folder_id == *folder_id) =>
+                {
+                    if let Some(panel) = &mut self.shortcut_panel {
+                        panel.loading = false;
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Cannot load shortcuts.")
+                                .to_owned(),
+                        );
+                    }
+                }
+                RequestKind::SetShortcuts { folder_id }
+                    if self
+                        .shortcut_panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.folder_id == *folder_id) =>
+                {
+                    if let Some(panel) = &mut self.shortcut_panel {
+                        panel.submitting = false;
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Cannot save shortcuts.")
+                                .to_owned(),
+                        );
                     }
                 }
                 RequestKind::WorkflowStatus { marker } => {
@@ -2915,12 +2979,39 @@ impl XdDesktop {
                 }
             }
             RequestKind::Shortcuts { folder_id } => {
-                if self
-                    .model
-                    .selected_summary()
-                    .is_some_and(|chat| chat.folder == folder_id)
-                {
+                if folder_id.as_ref().is_some_and(|folder_id| {
+                    self.model
+                        .selected_summary()
+                        .is_some_and(|chat| chat.folder == *folder_id)
+                }) {
                     self.model.apply_shortcuts(&value);
+                }
+                if self
+                    .shortcut_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.folder_id == folder_id)
+                {
+                    let key = if folder_id.is_some() {
+                        "workspace"
+                    } else {
+                        "global"
+                    };
+                    let prompts = value
+                        .get(key)
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    self.replace_shortcut_rows(prompts, cx);
+                    if let Some(panel) = &mut self.shortcut_panel {
+                        panel.loading = false;
+                        panel.error = None;
+                    }
                 }
             }
             RequestKind::FolderContext { folder_id } => {
@@ -3111,7 +3202,15 @@ impl XdDesktop {
             }
             // The authoritative shortcuts-changed event follows this reply
             // and refetches the active workspace's merged shortcut state.
-            RequestKind::SetShortcuts => {}
+            RequestKind::SetShortcuts { folder_id } => {
+                if self
+                    .shortcut_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.folder_id == folder_id && panel.submitting)
+                {
+                    self.shortcut_panel = None;
+                }
+            }
             RequestKind::RemoveWorktree { chat_id } if self.chat_is_active(&chat_id) => {
                 self.request_chat(&chat_id);
             }
@@ -3745,7 +3844,7 @@ impl XdDesktop {
             return;
         };
         if let Some(daemon) = self.active_daemon()
-            && let Err(error) = daemon.shortcuts(&folder_id)
+            && let Err(error) = daemon.shortcuts(Some(&folder_id))
         {
             self.model.connection_error = Some(error);
         }
@@ -6810,6 +6909,156 @@ impl XdDesktop {
         }
     }
 
+    fn make_shortcut_row(&mut self, prompt: String, cx: &mut Context<Self>) -> ShortcutRow {
+        self.next_shortcut_row_id = self.next_shortcut_row_id.saturating_add(1);
+        let id = self.next_shortcut_row_id;
+        let input = cx.new(|cx| ComposerInput::new(cx, "Prompt sent when this button is pressed"));
+        input.update(cx, |input, cx| input.set_text(prompt.clone(), cx));
+        cx.subscribe(&input, move |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.shortcut_row_changed(id, text.clone(), cx),
+            ComposerEvent::Submit => this.save_shortcut_panel(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
+        ShortcutRow { id, prompt, input }
+    }
+
+    fn replace_shortcut_rows(&mut self, prompts: Vec<String>, cx: &mut Context<Self>) {
+        let rows = prompts
+            .into_iter()
+            .map(|prompt| self.make_shortcut_row(prompt, cx))
+            .collect();
+        if let Some(panel) = &mut self.shortcut_panel {
+            panel.rows = rows;
+        }
+    }
+
+    fn open_shortcut_panel(
+        &mut self,
+        folder_id: Option<String>,
+        folder_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_open = false;
+        self.settings_menu = None;
+        self.sidebar_context_menu = None;
+        self.shortcut_panel = Some(ShortcutPanel {
+            folder_id: folder_id.clone(),
+            folder_name,
+            rows: Vec::new(),
+            loading: true,
+            submitting: false,
+            error: None,
+        });
+        match self.active_daemon().cloned() {
+            Some(daemon) => {
+                if let Err(error) = daemon.shortcuts(folder_id.as_deref())
+                    && let Some(panel) = &mut self.shortcut_panel
+                {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
+            None => {
+                if let Some(panel) = &mut self.shortcut_panel {
+                    panel.loading = false;
+                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn shortcut_row_changed(&mut self, id: u64, text: String, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .shortcut_panel
+            .as_mut()
+            .and_then(|panel| panel.rows.iter_mut().find(|row| row.id == id))
+        {
+            row.prompt = text;
+            if let Some(panel) = &mut self.shortcut_panel {
+                panel.error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn add_shortcut_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcut_panel.as_ref().is_none_or(|panel| {
+            panel.loading || panel.submitting || panel.rows.len() >= MAX_SHORTCUTS
+        }) {
+            return;
+        }
+        let row = self.make_shortcut_row(String::new(), cx);
+        let focus = row.input.read(cx).focus_handle(cx);
+        if let Some(panel) = &mut self.shortcut_panel {
+            panel.rows.push(row);
+        }
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn remove_shortcut_row(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.shortcut_panel
+            && !panel.submitting
+        {
+            panel.rows.retain(|row| row.id != id);
+            panel.error = None;
+            cx.notify();
+        }
+    }
+
+    fn save_shortcut_panel(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = &self.shortcut_panel else {
+            return;
+        };
+        if panel.loading || panel.submitting {
+            return;
+        }
+        let prompts = panel
+            .rows
+            .iter()
+            .map(|row| row.prompt.clone())
+            .collect::<Vec<_>>();
+        let shortcuts = match clean_shortcut_prompts(&prompts) {
+            Ok(shortcuts) => shortcuts,
+            Err(error) => {
+                if let Some(panel) = &mut self.shortcut_panel {
+                    panel.error = Some(error);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let folder_id = panel.folder_id.clone();
+        let Some(daemon) = self.active_daemon().cloned() else {
+            if let Some(panel) = &mut self.shortcut_panel {
+                panel.error = Some("xd-dev is not connected to a daemon.".into());
+            }
+            cx.notify();
+            return;
+        };
+        match daemon.set_shortcuts(folder_id.as_deref(), &shortcuts) {
+            Ok(()) => {
+                if let Some(panel) = &mut self.shortcut_panel {
+                    panel.submitting = true;
+                    panel.error = None;
+                }
+            }
+            Err(error) => {
+                if let Some(panel) = &mut self.shortcut_panel {
+                    panel.error = Some(error);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn close_shortcut_panel(&mut self, cx: &mut Context<Self>) {
+        self.shortcut_panel = None;
+        cx.notify();
+    }
+
     fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.composer.clone_from(&text);
         self.composer_input
@@ -7765,6 +8014,29 @@ impl XdDesktop {
                             this.begin_workspace_defaults(defaults_folder.clone(), cx);
                         }))
                         .child("Agent Defaults")
+                        .into_any_element(),
+                );
+                let shortcuts_folder = folder.id.clone();
+                let shortcuts_name = folder.name.clone();
+                items.push(
+                    div()
+                        .id("context-folder-shortcuts")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_shortcut_panel(
+                                Some(shortcuts_folder.clone()),
+                                Some(shortcuts_name.clone()),
+                                cx,
+                            );
+                        }))
+                        .child("Shortcuts")
                         .into_any_element(),
                 );
                 let secrets_folder = folder.id.clone();
@@ -12823,6 +13095,40 @@ impl Render for XdDesktop {
                         )
                         .child(
                             div()
+                                .id("open-global-shortcuts")
+                                .p_3()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_shortcut_panel(None, None, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(TEXT))
+                                                .child("Global shortcuts"),
+                                        )
+                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            "Manage prompt buttons available in every workspace.",
+                                        )),
+                                )
+                                .child(div().text_color(rgb(MUTED)).child("›")),
+                        )
+                        .child(
+                            div()
                                 .id("open-daemon-update")
                                 .p_3()
                                 .flex()
@@ -14298,6 +14604,261 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
+        let shortcut_overlay = self.shortcut_panel.clone().map(|panel| {
+            let can_edit = !panel.loading && !panel.submitting;
+            let can_add = can_edit && panel.rows.len() < MAX_SHORTCUTS;
+            let title = panel
+                .folder_name
+                .as_ref()
+                .map(|name| format!("Workspace Shortcuts · {name}"))
+                .unwrap_or_else(|| "Global Shortcuts".into());
+            let description = if panel.folder_id.is_some() {
+                "These prompt buttons appear in this workspace and its children."
+            } else {
+                "These prompt buttons appear in every workspace on this daemon."
+            };
+            let rows = panel
+                .rows
+                .into_iter()
+                .map(|row| {
+                    let focus = row.input.read(cx).focus_handle(cx);
+                    let input = row.input.clone();
+                    let input_for_click = row.input.clone();
+                    let id = row.id;
+                    div()
+                        .id(("shortcut-editor-row", id))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id(("shortcut-editor-input", id))
+                                .track_focus(&focus)
+                                .h(px(40.0))
+                                .min_w_0()
+                                .flex_1()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(if focus.is_focused(window) {
+                                    accent
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(SURFACE))
+                                .on_click(move |_, window, cx| {
+                                    window.focus(&input_for_click.read(cx).focus_handle(cx));
+                                })
+                                .child(input),
+                        )
+                        .child(
+                            div()
+                                .id(("remove-shortcut-row", id))
+                                .size(px(40.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_lg()
+                                .text_sm()
+                                .text_color(rgb(if can_edit { 0xefaaaa } else { MUTED }))
+                                .when(can_edit, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x3b282e)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_shortcut_row(id, cx);
+                                        }))
+                                })
+                                .child("×"),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .id("shortcut-management-panel")
+                        .w(px(700.0))
+                        .max_h(px(620.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(div().text_lg().text_color(rgb(TEXT)).child(title))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(MUTED))
+                                                .child(description),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-shortcut-management")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_shortcut_panel(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("shortcut-editor-list")
+                                .min_h(px(160.0))
+                                .max_h(px(390.0))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .when(panel.loading, |list| {
+                                    list.child(
+                                        div()
+                                            .p_4()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("Loading shortcuts…"),
+                                    )
+                                })
+                                .when(!panel.loading && rows.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .p_4()
+                                            .text_sm()
+                                            .text_color(rgb(MUTED))
+                                            .child("No shortcuts yet."),
+                                    )
+                                })
+                                .children(rows),
+                        )
+                        .when_some(panel.error.clone(), |dialog, error| {
+                            dialog.child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(rgb(0x382126))
+                                    .text_sm()
+                                    .text_color(rgb(0xefb1b1))
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .id("add-shortcut-row")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(SURFACE_HIGH))
+                                        .text_sm()
+                                        .text_color(rgb(if can_add { TEXT } else { MUTED }))
+                                        .when(can_add, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(BORDER)))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.add_shortcut_row(window, cx);
+                                                }))
+                                        })
+                                        .child("Add Prompt"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("cancel-shortcut-management")
+                                                .px_4()
+                                                .py_2()
+                                                .rounded_lg()
+                                                .text_sm()
+                                                .text_color(rgb(MUTED))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.close_shortcut_panel(cx);
+                                                }))
+                                                .child("Cancel"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("save-shortcut-management")
+                                                .px_4()
+                                                .py_2()
+                                                .rounded_lg()
+                                                .bg(rgb(if can_edit {
+                                                    accent
+                                                } else {
+                                                    SURFACE_HIGH
+                                                }))
+                                                .text_sm()
+                                                .text_color(rgb(if can_edit {
+                                                    0xffffff
+                                                } else {
+                                                    MUTED
+                                                }))
+                                                .when(can_edit, |button| {
+                                                    button
+                                                        .cursor_pointer()
+                                                        .hover(|style| style.bg(rgb(accent_hover)))
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.save_shortcut_panel(cx);
+                                                        }))
+                                                })
+                                                .child(if panel.submitting {
+                                                    "Saving…"
+                                                } else {
+                                                    "Save"
+                                                }),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let search_overlay = self.search.clone().map(|search| {
             let search_focus = self.search_input.read(cx).focus_handle(cx);
             let mut result_rows = Vec::new();
@@ -14617,6 +15178,7 @@ impl Render for XdDesktop {
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
+            .when_some(shortcut_overlay, |root, overlay| root.child(overlay))
             .when_some(search_overlay, |root, overlay| root.child(overlay))
             .when_some(message_image_overlay, |root, overlay| root.child(overlay))
             .when_some(resize_overlay, |root, overlay| root.child(overlay));
@@ -14712,6 +15274,8 @@ impl Render for XdDesktop {
                     this.close_sidebar_context_menu(cx);
                 } else if this.share_panel.is_some() {
                     this.close_share(cx);
+                } else if this.shortcut_panel.is_some() {
+                    this.close_shortcut_panel(cx);
                 } else if this.devices_panel.is_some() {
                     this.close_devices(cx);
                 } else if this.secrets_panel.is_some() {
@@ -15133,6 +15697,29 @@ fn optional_trimmed(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn clean_shortcut_prompts(prompts: &[String]) -> Result<Vec<String>, String> {
+    if prompts.len() > MAX_SHORTCUTS {
+        return Err(format!(
+            "A shortcut list can contain at most {MAX_SHORTCUTS} prompts."
+        ));
+    }
+    let mut cleaned = Vec::new();
+    let mut seen = HashSet::new();
+    for prompt in prompts {
+        let prompt = prompt.trim();
+        if prompt.is_empty() || !seen.insert(prompt.to_owned()) {
+            continue;
+        }
+        if prompt.len() > MAX_SHORTCUT_BYTES {
+            return Err(format!(
+                "A shortcut prompt can contain at most {MAX_SHORTCUT_BYTES} bytes."
+            ));
+        }
+        cleaned.push(prompt.to_owned());
+    }
+    Ok(cleaned)
+}
+
 fn turn_duration_label(value: &str) -> Option<String> {
     let seconds = value.trim().parse::<u64>().ok()?;
     let duration = if seconds >= 3_600 {
@@ -15301,6 +15888,22 @@ fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_management_matches_daemon_cleaning_and_bounds() {
+        assert_eq!(
+            clean_shortcut_prompts(&[
+                "  Review diff  ".into(),
+                "".into(),
+                "Review diff".into(),
+                "Run tests".into(),
+            ])
+            .unwrap(),
+            vec!["Review diff", "Run tests"]
+        );
+        assert!(clean_shortcut_prompts(&vec!["x".into(); MAX_SHORTCUTS + 1]).is_err());
+        assert!(clean_shortcut_prompts(&["x".repeat(MAX_SHORTCUT_BYTES + 1)]).is_err());
+    }
 
     #[test]
     fn endpoint_routing_keeps_identical_chat_ids_isolated() {

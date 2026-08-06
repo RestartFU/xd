@@ -126,7 +126,7 @@ pub enum RequestKind {
         terminal_id: String,
     },
     Shortcuts {
-        folder_id: String,
+        folder_id: Option<String>,
     },
     FolderContext {
         folder_id: String,
@@ -197,7 +197,9 @@ pub enum RequestKind {
     SetOption {
         chat_id: String,
     },
-    SetShortcuts,
+    SetShortcuts {
+        folder_id: Option<String>,
+    },
     RemoveWorktree {
         chat_id: String,
     },
@@ -518,12 +520,16 @@ impl DaemonHandle {
         )
     }
 
-    pub fn shortcuts(&self, folder_id: &str) -> Result<(), String> {
+    pub fn shortcuts(&self, folder_id: Option<&str>) -> Result<(), String> {
+        let mut body = json!({"op": "shortcuts"});
+        if let Some(folder_id) = folder_id {
+            body["folder"] = Value::String(folder_id.to_owned());
+        }
         self.send(
             RequestKind::Shortcuts {
-                folder_id: folder_id.to_owned(),
+                folder_id: folder_id.map(str::to_owned),
             },
-            json!({"op": "shortcuts", "folder": folder_id}),
+            body,
         )
     }
 
@@ -600,7 +606,12 @@ impl DaemonHandle {
         if let Some(folder_id) = folder_id {
             body["folder"] = Value::String(folder_id.to_owned());
         }
-        self.send(RequestKind::SetShortcuts, body)
+        self.send(
+            RequestKind::SetShortcuts {
+                folder_id: folder_id.map(str::to_owned),
+            },
+            body,
+        )
     }
 
     pub fn new_folder(
