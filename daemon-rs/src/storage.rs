@@ -151,6 +151,15 @@ pub(crate) struct GitDraftSpec {
     pub effort: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WorktreeNameSpec {
+    pub backend: String,
+    pub prompt: String,
+    pub workdir: String,
+    pub model: String,
+    pub effort: String,
+}
+
 pub enum SendDisposition {
     Queued { reply: Value, event: Value },
     Start { reply: Value, turn: TurnSpec },
@@ -894,6 +903,84 @@ impl StateStore {
             reply: json!({"ok": true, "queued": false}),
             turn,
         })
+    }
+
+    pub(crate) fn prepare_worktree_name(
+        &self,
+        request: &Value,
+    ) -> Result<Option<WorktreeNameSpec>, StorageError> {
+        if request
+            .get("generate_worktree_name")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Ok(None);
+        }
+        let chat_id = required_string(
+            request,
+            "chat",
+            "A message needs a chat and something to say.",
+        )?;
+        let prompt = optional_string(request, "text")?.unwrap_or("");
+        if prompt.is_empty() {
+            return Ok(None);
+        }
+        let (chat_backend, chat_model, chat_effort, eligible, workdir) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let (backend, model, effort, new_worktree, working, has_messages) = database
+                .query_row(
+                    "SELECT backend, model, effort, new_worktree, daemon_working, \
+                     EXISTS (SELECT 1 FROM messages WHERE chat_id = chats.id) \
+                     FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, bool>(3)?,
+                            row.get::<_, bool>(4)?,
+                            row.get::<_, bool>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+            let eligible = new_worktree && !working && !has_messages;
+            let workdir = eligible
+                .then(|| resolve_chat_workdir(&database, &self.workspace_root, chat_id))
+                .transpose()?;
+            (backend, model, effort, eligible, workdir)
+        };
+        if !eligible {
+            return Ok(None);
+        }
+        validate_backend(&chat_backend)?;
+        let requested_backend = optional_string(request, "worktree_backend")?;
+        let backend = requested_backend.unwrap_or(&chat_backend).to_owned();
+        validate_backend(&backend)?;
+        let requested_model = optional_string(request, "worktree_model")?;
+        let model = requested_model
+            .map(str::to_owned)
+            .or_else(|| {
+                (backend == chat_backend)
+                    .then(|| chat_model.clone())
+                    .flatten()
+            })
+            .unwrap_or_else(|| default_model(&backend).into());
+        validate_model(&backend, &model)?;
+        let effort = (backend == chat_backend)
+            .then_some(chat_effort)
+            .flatten()
+            .filter(|effort| effort_supported(&backend, effort))
+            .unwrap_or_else(|| "high".into());
+        Ok(Some(WorktreeNameSpec {
+            backend,
+            prompt: prompt.chars().take(8_000).collect(),
+            workdir: workdir.expect("eligible worktree naming has a working directory"),
+            model,
+            effort,
+        }))
     }
 
     fn materialize_message(
@@ -5098,6 +5185,30 @@ mod tests {
             .unwrap();
         drop(database);
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        assert!(
+            store
+                .prepare_worktree_name(&json!({
+                    "chat": "chat-worktree",
+                    "text": "review it"
+                }))
+                .unwrap()
+                .is_none()
+        );
+        let naming = store
+            .prepare_worktree_name(&json!({
+                "chat": "chat-worktree",
+                "text": "review it",
+                "generate_worktree_name": true,
+                "worktree_backend": "claude",
+                "worktree_model": "claude-sonnet-5"
+            }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(naming.backend, "claude");
+        assert_eq!(naming.model, "claude-sonnet-5");
+        assert_eq!(naming.prompt, "review it");
+        assert_eq!(naming.workdir, repository.to_string_lossy());
 
         let turn = match store
             .prepare_send(&json!({

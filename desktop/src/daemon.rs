@@ -827,6 +827,8 @@ impl DaemonHandle {
         chat_id: &str,
         text: &str,
         attachments: &[Attachment],
+        worktree_backend: Option<&str>,
+        worktree_model: Option<&str>,
     ) -> Result<(), String> {
         let attachments = attachments
             .iter()
@@ -838,9 +840,20 @@ impl DaemonHandle {
                 })
             })
             .collect::<Vec<_>>();
-        let mut body = json!({"op": "send", "chat": chat_id, "text": text});
+        let mut body = json!({
+            "op": "send",
+            "chat": chat_id,
+            "text": text,
+            "generate_worktree_name": true,
+        });
         if !attachments.is_empty() {
             body["attachments"] = Value::Array(attachments);
+        }
+        if let Some(backend) = worktree_backend {
+            body["worktree_backend"] = Value::String(backend.to_owned());
+        }
+        if let Some(model) = worktree_model {
+            body["worktree_model"] = Value::String(model.to_owned());
         }
         self.send(
             RequestKind::Send {
@@ -1316,6 +1329,57 @@ mod tests {
                 },
                 ..
             } if chat_id == "chat-1" && old_text == "before" && new_text == "after"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn sends_the_configured_git_writer_for_worktree_naming() {
+        let directory =
+            env::temp_dir().join(format!("xd-dev-worktree-name-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "send");
+            assert_eq!(request["chat"], "chat-1");
+            assert_eq!(request["text"], "fix the queue");
+            assert_eq!(request["generate_worktree_name"], true);
+            assert_eq!(request["worktree_backend"], "claude");
+            assert_eq!(request["worktree_model"], "claude-sonnet-5");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .send_message(
+                "chat-1",
+                "fix the queue",
+                &[],
+                Some("claude"),
+                Some("claude-sonnet-5"),
+            )
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::Send { chat_id, text },
+                ..
+            } if chat_id == "chat-1" && text == "fix the queue"
         ));
 
         server.join().unwrap();

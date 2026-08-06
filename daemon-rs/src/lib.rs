@@ -28,6 +28,7 @@ mod storage;
 mod terminal;
 mod voice;
 mod workflow;
+mod worktree_name;
 
 use auth::AuthManager;
 use git_draft::GitDraftService;
@@ -494,7 +495,18 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust daemon state storage is not configured.");
         };
-        match store.prepare_send(request) {
+        let mut request = request.clone();
+        if request.get("worktree_name").is_none() {
+            match store.prepare_worktree_name(&request) {
+                Ok(Some(spec)) => match worktree_name::generate(spec) {
+                    Ok(name) => request["worktree_name"] = Value::String(name),
+                    Err(error) => eprintln!("xd-dev: AI worktree naming failed: {error}"),
+                },
+                Ok(None) => {}
+                Err(error) => eprintln!("xd-dev: cannot prepare AI worktree naming: {error}"),
+            }
+        }
+        match store.prepare_send(&request) {
             Ok(SendDisposition::Queued { reply, event }) => {
                 self.events.publish(event);
                 reply

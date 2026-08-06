@@ -3988,7 +3988,13 @@ impl XdDesktop {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return;
         };
-        if let Err(error) = daemon.send_message(&chat_id, &text, &attachments) {
+        if let Err(error) = daemon.send_message(
+            &chat_id,
+            &text,
+            &attachments,
+            self.settings.git_writer.backend(),
+            self.settings.git_writer_model.as_deref(),
+        ) {
             self.model.connection_error = Some(error);
             return;
         }
@@ -4040,7 +4046,13 @@ impl XdDesktop {
             self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
             return false;
         };
-        if let Err(error) = daemon.send_message(&chat_id, &prompt, &[]) {
+        if let Err(error) = daemon.send_message(
+            &chat_id,
+            &prompt,
+            &[],
+            self.settings.git_writer.backend(),
+            self.settings.git_writer_model.as_deref(),
+        ) {
             self.model.connection_error = Some(error);
             return false;
         }
