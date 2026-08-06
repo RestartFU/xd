@@ -1,9 +1,7 @@
 # xd desktop (GPUI)
 
-This is the incremental Rust/GPUI replacement for xd's GTK desktop client.
-The dev package runs its own Rust daemon using the documented JSON Lines
-protocol; the Crystal desktop remains the production client until this path
-reaches feature parity.
+This is xd's Rust/GPUI desktop. It runs the Rust daemon using the documented
+JSON Lines protocol and is the production Linux client.
 
 GPUI is pinned because it is pre-1.0. Only the published Apache-2.0 `gpui`
 crate is used. Zed's GPL component library is not a dependency.
@@ -11,7 +9,7 @@ crate is used. Zed's GPL component library is not a dependency.
 Current milestone:
 
 - native GPUI application shell;
-- an isolated, app-owned Rust daemon and first-run state initialization;
+- an app-owned Rust daemon and first-run state initialization;
 - clickable workspace/chat sidebar backed by real daemon tree data;
 - direct chat/workspace drag-and-drop with root drops and cycle-safe nesting;
 - persisted active-chat restoration with deletion-safe fallback;
@@ -48,7 +46,7 @@ Current milestone:
   bidirectional paging and a bounded retained message window;
 - bounded full-duplex protocol framing and request-id matching;
 - off-thread daemon startup with bounded automatic reconnection and manual retry;
-- mobile-compatible, explicit install/restart self-update for bundled xd-dev daemons;
+- mobile-compatible daemon update state and restart controls;
 - certificate-pinned TLS pairing backed by private remote-session IPC and revocation;
 - daemon snapshot/event state reducers with unit tests.
 
@@ -58,35 +56,30 @@ Build and test this crate through the repository Dockerfile:
 docker build --target gpui-desktop-check .
 ```
 
-Every push to `feat/gpui-desktop` replaces the rolling `dev` GitHub
-prerelease with the tested Linux x86_64 prototype. This channel is deliberately
-separate from the production `nightly` release while daemon connectivity and
-feature parity are still in progress.
+Every push to `feat/gpui-desktop` also replaces the rolling `dev` prerelease so
+the branch can be tested before it reaches the Linux nightly.
 
-The archive carries `xd-daemon-dev`, a pinned Codex package, the pinned
+The archive carries `xd-daemon`, a pinned Codex package, the pinned
 Claude Code executable, and a private pinned whisper.cpp runtime. The Rust daemon
 owns persisted workspaces, chats, messages, drafts, options, shortcuts, queue
-mutations, and Codex/Claude turn execution. The GPUI dev build does not require an
-installed Crystal daemon.
+mutations, and Codex/Claude turn execution.
 
 The app connects to `XD_SOCKET` when set. Otherwise it uses
-`$XDG_DATA_HOME/xd-dev/daemon.sock` (normally
-`~/.local/share/xd-dev/daemon.sock`), starts its sibling `xd-daemon-dev`, and
-owns that process for the lifetime of the GPUI app. Its database and Workspaces
-directory live beside that socket, separate from `xd` and `xd-nightly`.
+`$XDG_DATA_HOME/xd/daemon.sock` by default, starts its bundled `xd-daemon`, and
+owns that process for the lifetime of the app. Nightly bundles set the data
+name to `xd-nightly` in their launcher.
 
 The bundled Rust daemon also supports the established headless pairing flow:
 
 ```sh
-xd-daemon-dev serve --socket /path/to/daemon.sock --pair
+xd-daemon serve --socket /path/to/daemon.sock --pair
 ```
 
-To explicitly run the Rust daemon against an existing xd data directory during
-the migration, stop the previous daemon first and adopt all of its state paths
-as one unit:
+To run the daemon against a specific data directory, stop the previous daemon
+first and adopt all of its state paths as one unit:
 
 ```sh
-xd-daemon-dev serve --data ~/.local/share/xd-nightly
+xd-daemon serve --data ~/.local/share/xd-nightly
 ```
 
 This keeps the existing database, managed workspace paths, and compatible
@@ -96,20 +89,12 @@ cannot be combined with individual socket, database, or workspace overrides,
 and the Rust daemon refuses to open the database while another daemon is
 listening on that data root's socket.
 
-On its first launch, GPUI also imports compatible nightly (or stable) dconf
-preferences—window and pane geometry, the last local chat, favorite models,
-Git-writing selection, and per-chat pane state. It never replaces an existing
-`xd-dev/settings.json` file.
-
-This is still a development channel. Several production-client management
-surfaces have not yet been ported.
-
 Selective spoken replies are disabled by default. On Linux, install
 `espeak-ng` (or the older `espeak`) to enable local text-to-speech; no text is
 sent to a speech service.
 
-Install it beside `xd` and `xd-nightly` as `xd-dev`:
+Install the Linux nightly:
 
 ```sh
-curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install-dev.sh | sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 ```

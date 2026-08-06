@@ -78,7 +78,7 @@ impl WorkflowStatuses {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(10)))
-            .user_agent("xd-dev/0.1")
+            .user_agent("xd/0.1")
             .build()
             .into();
         let tokens = Arc::new(TokenCache::new(resolve_token));

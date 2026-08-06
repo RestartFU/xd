@@ -33,7 +33,7 @@ enum CliCommand {
 fn main() -> ExitCode {
     match arguments(env::args().skip(1)) {
         Ok(CliCommand::Version) => {
-            println!("xd-daemon-dev {}", version_string());
+            println!("xd-daemon {}", version_string());
             ExitCode::SUCCESS
         }
         Ok(CliCommand::Help) => {
@@ -43,12 +43,12 @@ fn main() -> ExitCode {
         Ok(CliCommand::Serve(options)) => match serve(options) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("xd-daemon-dev: {error}");
+                eprintln!("xd-daemon: {error}");
                 ExitCode::FAILURE
             }
         },
         Err(error) => {
-            eprintln!("xd-daemon-dev: {error}");
+            eprintln!("xd-daemon: {error}");
             eprintln!("{}", usage());
             ExitCode::FAILURE
         }
@@ -91,7 +91,7 @@ fn serve(options: Options) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     if let Some(endpoint) = pairing_endpoint {
         println!(
-            "xd-daemon-dev serve: {}, listening on {}, workspaces at {}",
+            "xd-daemon serve: {}, listening on {}, workspaces at {}",
             version_string(),
             endpoint.port,
             options.workspaces.display()
@@ -106,7 +106,7 @@ fn serve(options: Options) -> Result<(), String> {
     } else if let Some((bind, port)) = saved_listener
         && let Err(error) = proxy.listen(&bind, port)
     {
-        eprintln!("xd-daemon-dev: cannot restore remote listener: {error}");
+        eprintln!("xd-daemon: cannot restore remote listener: {error}");
     }
     server.run().map_err(|error| error.to_string())
 }
@@ -190,7 +190,7 @@ fn pair_with_running_daemon(options: &Options) -> Result<bool, String> {
         .and_then(Value::as_str)
         .filter(|code| !code.is_empty())
         .ok_or("the running daemon returned no pairing code")?;
-    println!("xd-daemon-dev serve: attached to running daemon at {host}:{port}");
+    println!("xd-daemon serve: attached to running daemon at {host}:{port}");
     println!("pairing code (5 minutes, one use): {code}");
     Ok(true)
 }
@@ -312,7 +312,7 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-daemon-dev serve (--socket PATH | --data DIR) [options]\n\
+    "usage: xd-daemon serve (--socket PATH | --data DIR) [options]\n\
      \n\
      options:\n\
        --data DIR         adopt one xd data root atomically\n\

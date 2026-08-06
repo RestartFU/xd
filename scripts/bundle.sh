@@ -70,8 +70,8 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 # enough. NSS modules are added by hand: they are opened by name, never linked.
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
-  "$OUT/libexec/xd-daemon-dev" \
-  "$OUT/libexec/xd-tls-proxy-dev" \
+  "$OUT/libexec/xd-daemon" \
+  "$OUT/libexec/xd-tls-proxy" \
   "$OUT/libexec/claude-bin" \
   "$OUT/libexec/claude-code-proxy" \
   "$OUT/libexec/curl-bin" \

@@ -38,7 +38,7 @@ jobs:
           test -f gpui-dist/rust-daemon-tests-passed
           test -x gpui-dist/xd-desktop
           test -x gpui-dist/xd-daemon
-          test -x gpui-dist/xd-tls-proxy-dev
+          test -x gpui-dist/xd-tls-proxy
           test -x gpui-dist/codex-package/bin/codex
           test -x gpui-dist/claude
           test -x gpui-dist/claude-code-proxy
@@ -46,8 +46,8 @@ jobs:
 
           install -d package/xd-dev
           install -m0755 gpui-dist/xd-desktop package/xd-dev/xd-dev
-          install -m0755 gpui-dist/xd-daemon package/xd-dev/xd-daemon-dev
-          install -m0755 gpui-dist/xd-tls-proxy-dev package/xd-dev/xd-tls-proxy-dev
+          install -m0755 gpui-dist/xd-daemon package/xd-dev/xd-daemon
+          install -m0755 gpui-dist/xd-tls-proxy package/xd-dev/xd-tls-proxy
           cp -a gpui-dist/codex-package package/xd-dev/codex-package
           install -m0755 gpui-dist/claude package/xd-dev/claude
           install -m0755 gpui-dist/claude-code-proxy package/xd-dev/claude-code-proxy

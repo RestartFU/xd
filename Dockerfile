@@ -108,7 +108,7 @@ RUN cargo fmt --check \
 FROM rust-tls-proxy-source AS rust-tls-proxy-release
 
 RUN cargo build --release \
- && test -x target/release/xd-tls-proxy-dev
+ && test -x target/release/xd-tls-proxy
 
 # --- local speech engine ---------------------------------------------------
 #
@@ -297,7 +297,7 @@ COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desk
 COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 COPY --from=rust-tls-proxy-tests /rust-tls-proxy-tests-passed /rust-tls-proxy-tests-passed
-COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy-dev /xd-tls-proxy-dev
+COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /xd-tls-proxy
 COPY --from=agent-binaries /agents/codex-package /codex-package
 COPY --from=agent-binaries /agents/claude-bin /claude
 COPY --from=agent-binaries /agents/claude-code-proxy /claude-code-proxy
@@ -370,8 +370,8 @@ COPY scripts/openssl.sh /stage/usr/libexec/openssl
 COPY scripts/whisper.sh /stage/usr/libexec/whisper
 COPY scripts/whisper-server.sh /stage/usr/libexec/whisper-server
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
-COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /stage/usr/libexec/xd-daemon-dev
-COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy-dev /stage/usr/libexec/xd-tls-proxy-dev
+COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /stage/usr/libexec/xd-daemon
+COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /stage/usr/libexec/xd-tls-proxy
 COPY --from=agent-binaries /agents/ /stage/usr/libexec/
 COPY --from=voice-build /voice/libexec/ /stage/usr/libexec/
 COPY --from=voice-build /voice/lib/ /stage/usr/lib/

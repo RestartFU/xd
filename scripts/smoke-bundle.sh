@@ -34,8 +34,8 @@ require_file \
   share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 require_file \
   share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
-require_file libexec/xd-daemon-dev
-require_file libexec/xd-tls-proxy-dev
+require_file libexec/xd-daemon
+require_file libexec/xd-tls-proxy
 require_file libexec/codex-package/bin/codex
 require_file libexec/claude
 require_file libexec/whisper-server-bin
@@ -63,7 +63,7 @@ env -i \
 
 "$BUNDLE/lib/ld-linux-x86-64.so.2" \
   --library-path "$BUNDLE/lib" \
-  "$BUNDLE/libexec/xd-daemon-dev" --version | grep -E '^xd-daemon-dev [0-9]'
+  "$BUNDLE/libexec/xd-daemon" --version | grep -E '^xd-daemon [0-9]'
 
 git_clean()
 {

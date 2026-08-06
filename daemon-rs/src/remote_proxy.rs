@@ -224,9 +224,9 @@ fn executable() -> PathBuf {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        return parent.join("xd-tls-proxy-dev");
+        return parent.join("xd-tls-proxy");
     }
-    Path::new("xd-tls-proxy-dev").to_owned()
+    Path::new("xd-tls-proxy").to_owned()
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("xd-tls-proxy-dev: {error}");
+            eprintln!("xd-tls-proxy: {error}");
             ExitCode::FAILURE
         }
     }

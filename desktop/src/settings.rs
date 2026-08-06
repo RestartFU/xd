@@ -180,7 +180,7 @@ fn read_dconf(path: &str) -> Option<String> {
         return None;
     };
     let reader = match thread::Builder::new()
-        .name("xd-dev-dconf-import".into())
+        .name("xd-dconf-import".into())
         .spawn(move || {
             let mut bytes = Vec::new();
             stdout
@@ -446,7 +446,7 @@ fn settings_path() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(".config"))
         })
         .unwrap_or_else(|| PathBuf::from(".config"));
-    config_home.join("xd-dev/settings.json")
+    config_home.join("xd/settings.json")
 }
 
 fn load_from(path: &Path) -> Result<AppSettings, String> {
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn settings_round_trip_and_unknown_fields_are_ignored() {
         let directory = env::temp_dir().join(format!(
-            "xd-dev-settings-{}-{}",
+            "xd-settings-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

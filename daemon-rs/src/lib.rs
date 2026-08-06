@@ -868,10 +868,10 @@ impl Engine {
             match store.prepare_worktree_name(&request) {
                 Ok(Some(spec)) => match worktree_name::generate(spec) {
                     Ok(name) => request["worktree_name"] = Value::String(name),
-                    Err(error) => eprintln!("xd-dev: AI worktree naming failed: {error}"),
+                    Err(error) => eprintln!("xd: AI worktree naming failed: {error}"),
                 },
                 Ok(None) => {}
-                Err(error) => eprintln!("xd-dev: cannot prepare AI worktree naming: {error}"),
+                Err(error) => eprintln!("xd: cannot prepare AI worktree naming: {error}"),
             }
         }
         match store.prepare_send(&request) {

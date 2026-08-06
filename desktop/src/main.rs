@@ -1769,7 +1769,7 @@ impl XdDesktop {
         self.connecting = false;
         self.reconnect_attempt = 0;
         self.endpoint_model_mut(ChatEndpoint::Local)
-            .connection_error = Some("Reconnecting to xd-dev…".into());
+            .connection_error = Some("Reconnecting to xd…".into());
         self.schedule_connect(Duration::ZERO, cx);
         cx.notify();
     }
@@ -4174,7 +4174,7 @@ impl XdDesktop {
             }
             None => {
                 panel.busy = false;
-                panel.error = Some("xd-dev is not connected to a daemon.".into());
+                panel.error = Some("xd is not connected to a daemon.".into());
             }
         }
     }
@@ -4322,7 +4322,7 @@ impl XdDesktop {
             }
         } else if let Some(browser) = &mut self.directory_browser {
             browser.loading = false;
-            browser.error = Some("xd-dev is not connected to a daemon.".into());
+            browser.error = Some("xd is not connected to a daemon.".into());
         }
         cx.notify();
     }
@@ -4345,7 +4345,7 @@ impl XdDesktop {
             }
         } else if let Some(browser) = &mut self.directory_browser {
             browser.loading = false;
-            browser.error = Some("xd-dev is not connected to a daemon.".into());
+            browser.error = Some("xd is not connected to a daemon.".into());
         }
         cx.notify();
     }
@@ -4460,7 +4460,7 @@ impl XdDesktop {
             WorkspacePathTarget::CreateChat { folder_id, title } => {
                 let result = self
                     .active_daemon()
-                    .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+                    .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
                     .and_then(|daemon| daemon.new_chat(&folder_id, &title, Some(&path)));
                 if let Err(error) = result {
                     self.chat_create_submitting = false;
@@ -4478,7 +4478,7 @@ impl XdDesktop {
         if let Some(WorkspacePathTarget::CreateChat { folder_id, title }) = target.as_ref() {
             let result = self
                 .active_daemon()
-                .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+                .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
                 .and_then(|daemon| daemon.new_chat(folder_id, title, None));
             if let Err(error) = result {
                 self.chat_create_submitting = false;
@@ -4510,7 +4510,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.new_folder(name, repo.as_deref(), repo_url.as_deref()));
         match result {
             Ok(()) => {
@@ -4578,7 +4578,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.folder_settings(&folder_id));
         match result {
             Ok(()) => {
@@ -4615,7 +4615,7 @@ impl XdDesktop {
             }
         } else {
             self.workspace_context_loading = false;
-            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a daemon.".into());
         }
         cx.notify();
     }
@@ -4640,7 +4640,7 @@ impl XdDesktop {
         let context = optional_trimmed(&self.workspace_context_text).map(str::to_owned);
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.set_folder_context(&folder_id, context.as_deref()));
         match result {
             Ok(()) => {
@@ -4665,7 +4665,7 @@ impl XdDesktop {
     fn begin_workspace_defaults(&mut self, folder_id: String, cx: &mut Context<Self>) {
         self.workspace_path_generation = self.workspace_path_generation.saturating_add(1);
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a daemon.".into());
             cx.notify();
             return;
         };
@@ -4747,7 +4747,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.set_folder_settings(
                     &defaults.folder_id,
@@ -4819,7 +4819,7 @@ impl XdDesktop {
                     }
                     None => {
                         this.model.connection_error =
-                            Some("xd-dev is not connected to a daemon.".into());
+                            Some("xd is not connected to a daemon.".into());
                         if let Some(search) = &mut this.search {
                             search.loading = false;
                         }
@@ -4953,7 +4953,7 @@ impl XdDesktop {
             None => {
                 if let Some(panel) = &mut self.secrets_panel {
                     panel.loading = false;
-                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -5216,7 +5216,7 @@ impl XdDesktop {
             }
             None => {
                 panel.loading = false;
-                panel.error = Some("xd-dev is not connected to a daemon.".into());
+                panel.error = Some("xd is not connected to a daemon.".into());
             }
         }
         cx.notify();
@@ -5242,7 +5242,7 @@ impl XdDesktop {
             None => {
                 if let Some(panel) = &mut self.devices_panel {
                     panel.loading = false;
-                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -5329,7 +5329,7 @@ impl XdDesktop {
             },
             None => {
                 if let Some(panel) = &mut self.devices_panel {
-                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -5366,7 +5366,7 @@ impl XdDesktop {
             },
             None => {
                 if let Some(panel) = &mut self.devices_panel {
-                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -5430,7 +5430,7 @@ impl XdDesktop {
             },
             None => {
                 if let Some(current) = &mut self.secrets_panel {
-                    current.error = Some("xd-dev is not connected to a daemon.".into());
+                    current.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -5466,7 +5466,7 @@ impl XdDesktop {
             },
             None => {
                 if let Some(current) = &mut self.secrets_panel {
-                    current.error = Some("xd-dev is not connected to a daemon.".into());
+                    current.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -5533,7 +5533,7 @@ impl XdDesktop {
             return;
         };
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a daemon.".into());
             return;
         };
         if let Err(error) = daemon.voice_model(&chat_id) {
@@ -5568,7 +5568,7 @@ impl XdDesktop {
         let chat_id = self.voice_input.chat_id.clone();
         let token = self.voice_input.token.clone();
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.fail_voice("xd-dev is not connected to a daemon.".into(), cx);
+            self.fail_voice("xd is not connected to a daemon.".into(), cx);
             return;
         };
         if let Err(error) = daemon.voice_action("voice-stream-start", &chat_id, &token, None) {
@@ -5606,7 +5606,7 @@ impl XdDesktop {
         }
         let chat_id = self.voice_input.chat_id.clone();
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.fail_voice("xd-dev is not connected to a daemon.".into(), cx);
+            self.fail_voice("xd is not connected to a daemon.".into(), cx);
             return;
         };
         match event {
@@ -5927,7 +5927,7 @@ impl XdDesktop {
                 Ok(())
             }
         } else {
-            Err("xd-dev is not connected to a daemon.".into())
+            Err("xd is not connected to a daemon.".into())
         };
         if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
@@ -5991,7 +5991,7 @@ impl XdDesktop {
         panel.error = None;
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.terminal_open(&chat_id, columns, rows, false));
         if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
@@ -6154,7 +6154,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.file_browse_list(&chat_id, &path, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -6209,7 +6209,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.file_browse_read(&chat_id, &path, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -6270,7 +6270,7 @@ impl XdDesktop {
         let generation = self.diff_generation;
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.file_browse_write(&chat_id, &path, &original, &content, generation)
             });
@@ -6376,7 +6376,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_commit(&chat_id, &message, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -6409,7 +6409,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.git_draft(
                     &chat_id,
@@ -6454,7 +6454,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| {
                 daemon.git_draft(
                     &chat_id,
@@ -6496,7 +6496,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_create_pull_request(&chat_id, &title, &body, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -6537,7 +6537,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
             .and_then(|daemon| daemon.git_push(&chat_id, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -6619,7 +6619,7 @@ impl XdDesktop {
                 if let Some(diff) = &mut self.diff_panel {
                     diff.loading = false;
                     diff.status_loading = false;
-                    diff.error = Some("xd-dev is not connected to a daemon.".into());
+                    diff.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -6731,7 +6731,7 @@ impl XdDesktop {
                             file.lines = prepared.lines;
                         } else if !empty {
                             file.error =
-                                Some("Git returned a diff that xd-dev could not parse.".into());
+                                Some("Git returned a diff that xd could not parse.".into());
                             cx.notify();
                             return;
                         }
@@ -6785,7 +6785,7 @@ impl XdDesktop {
         if let Some((read, base)) = request {
             let result = self
                 .active_daemon()
-                .ok_or_else(|| "xd-dev is not connected to a daemon.".to_owned())
+                .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
                 .and_then(|daemon| {
                     daemon.diff_read(
                         &chat_id,
@@ -6900,9 +6900,7 @@ impl XdDesktop {
                 }
             }
             Some(Err(error)) => self.model.connection_error = Some(error),
-            None => {
-                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
-            }
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
         cx.notify();
     }
@@ -6934,9 +6932,7 @@ impl XdDesktop {
         match result {
             Some(Ok(())) => self.sidebar_delete_submitting = true,
             Some(Err(error)) => self.model.connection_error = Some(error),
-            None => {
-                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
-            }
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
         cx.notify();
     }
@@ -7011,9 +7007,7 @@ impl XdDesktop {
                 self.sidebar_move_destination = Some(destination);
             }
             Some(Err(error)) => self.model.connection_error = Some(error),
-            None => {
-                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
-            }
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
         cx.notify();
     }
@@ -7156,9 +7150,7 @@ impl XdDesktop {
         };
         match result {
             Some(Err(error)) => self.model.connection_error = Some(error),
-            None => {
-                self.model.connection_error = Some("xd-dev is not connected to a daemon.".into())
-            }
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
             Some(Ok(())) => {}
         }
         cx.notify();
@@ -7467,7 +7459,7 @@ impl XdDesktop {
             return;
         }
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a daemon.".into());
             return;
         };
         if let Err(error) = daemon.send_message(
@@ -7525,7 +7517,7 @@ impl XdDesktop {
             return false;
         };
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd-dev is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a daemon.".into());
             return false;
         };
         if let Err(error) = daemon.send_message(
@@ -7774,7 +7766,7 @@ impl XdDesktop {
             None => {
                 if let Some(panel) = &mut self.shortcut_panel {
                     panel.loading = false;
-                    panel.error = Some("xd-dev is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a daemon.".into());
                 }
             }
         }
@@ -7845,7 +7837,7 @@ impl XdDesktop {
         let folder_id = panel.folder_id.clone();
         let Some(daemon) = self.active_daemon().cloned() else {
             if let Some(panel) = &mut self.shortcut_panel {
-                panel.error = Some("xd-dev is not connected to a daemon.".into());
+                panel.error = Some("xd is not connected to a daemon.".into());
             }
             cx.notify();
             return;
@@ -13902,7 +13894,7 @@ impl Render for XdDesktop {
                                                         .child("Bundled assistant CLIs"),
                                                 )
                                                 .child(div().text_xs().text_color(rgb(MUTED)).child(
-                                                    "Updated only when xd-dev updates.",
+                                                    "Updated only when xd updates.",
                                                 )),
                                         )
                                         .child(
@@ -14463,7 +14455,7 @@ impl Render for XdDesktop {
                                             div()
                                                 .text_sm()
                                                 .text_color(rgb(TEXT))
-                                                .child("Update xd-dev"),
+                                                .child("Update xd"),
                                         )
                                         .child(div().text_xs().text_color(rgb(MUTED)).child(
                                             "Check, install, and explicitly restart this daemon.",
@@ -14936,7 +14928,7 @@ impl Render for XdDesktop {
                                     div()
                                         .text_lg()
                                         .text_color(rgb(TEXT))
-                                        .child("Update xd-dev"),
+                                        .child("Update xd"),
                                 )
                                 .child(
                                     div()
@@ -16715,7 +16707,7 @@ impl Render for XdDesktop {
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(MUTED))
-                    .child("xd-dev"),
+                    .child("xd"),
             )
             .child(
                 div()
@@ -17073,7 +17065,7 @@ fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
         files.push(file);
     }
     if files.is_empty() && !output.trim().is_empty() {
-        return Err("Git returned a diff that xd-dev could not parse.".into());
+        return Err("Git returned a diff that xd could not parse.".into());
     }
     Ok((files, truncated))
 }
@@ -17095,7 +17087,7 @@ fn parse_diff_file_list(output: &str, branch: bool) -> Result<(Vec<DiffFile>, bo
             (status, path)
         } else {
             if line.len() < 4 || line.as_bytes().get(2) != Some(&b' ') {
-                return Err("Git returned a file list that xd-dev could not parse.".into());
+                return Err("Git returned a file list that xd could not parse.".into());
             }
             let status = &line[..2];
             let mut path = &line[3..];
@@ -17107,7 +17099,7 @@ fn parse_diff_file_list(output: &str, branch: bool) -> Result<(Vec<DiffFile>, bo
             (status, path)
         };
         if status.is_empty() || raw_path.is_empty() {
-            return Err("Git returned a file list that xd-dev could not parse.".into());
+            return Err("Git returned a file list that xd could not parse.".into());
         }
         let path = decode_git_path(raw_path)?;
         if path.is_empty() || !seen.insert(path.clone()) {
@@ -17347,7 +17339,7 @@ fn notify_turn_finished(title: &str) {
         .replace('>', "&gt;");
     let body = format!("{title} finished");
     if let Ok(mut child) = Command::new("notify-send")
-        .args(["--app-name=xd-dev", "--", "xd-dev", &body])
+        .args(["--app-name=xd", "--", "xd", &body])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -258,7 +258,7 @@ pub enum ConnectError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("could not start the xd-dev Rust daemon ({0})")]
+    #[error("could not start the xd Rust daemon ({0})")]
     Start(String),
 }
 
@@ -1302,7 +1302,7 @@ fn spawn_writer(
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
 ) {
     thread::Builder::new()
-        .name("xd-dev-daemon-writer".into())
+        .name("xd-daemon-writer".into())
         .spawn(move || {
             let mut codec = ProtocolCodec::new();
             while let Ok(command) = commands.recv() {
@@ -1337,7 +1337,7 @@ fn spawn_reader(
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
 ) {
     thread::Builder::new()
-        .name("xd-dev-daemon-reader".into())
+        .name("xd-daemon-reader".into())
         .spawn(move || {
             let mut reader = BufReader::new(stream);
             loop {
@@ -1469,7 +1469,7 @@ fn socket_candidates_for(
     if let Some(socket) = explicit_socket.filter(|path| !path.is_empty()) {
         return vec![PathBuf::from(socket)];
     }
-    let data_name = data_name.unwrap_or_else(|| "xd-dev".into());
+    let data_name = data_name.unwrap_or_else(|| "xd".into());
     vec![data_home.join(data_name).join("daemon.sock")]
 }
 
@@ -1494,12 +1494,12 @@ fn launcher_candidates() -> Vec<PathBuf> {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        let sibling = parent.join("xd-daemon-dev");
+        let sibling = parent.join("xd-daemon");
         if sibling.is_file() {
             candidates.push(sibling);
         }
     }
-    candidates.push(PathBuf::from("xd-daemon-dev"));
+    candidates.push(PathBuf::from("xd-daemon"));
     candidates
 }
 
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn correlates_replies_and_continues_delivering_events() {
-        let directory = env::temp_dir().join(format!("xd-dev-daemon-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-daemon-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1555,8 +1555,7 @@ mod tests {
 
     #[test]
     fn sends_stable_bidirectional_message_cursors() {
-        let directory =
-            env::temp_dir().join(format!("xd-dev-message-cursors-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-message-cursors-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1617,7 +1616,7 @@ mod tests {
 
     #[test]
     fn sends_remote_pair_and_resume_authentication_before_other_requests() {
-        let directory = env::temp_dir().join(format!("xd-dev-remote-auth-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-remote-auth-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1675,7 +1674,7 @@ mod tests {
 
     #[test]
     fn edits_queued_messages_with_the_original_text_guard() {
-        let directory = env::temp_dir().join(format!("xd-dev-edit-queue-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-edit-queue-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1721,8 +1720,7 @@ mod tests {
 
     #[test]
     fn sends_the_configured_git_writer_for_worktree_naming() {
-        let directory =
-            env::temp_dir().join(format!("xd-dev-worktree-name-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-worktree-name-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1772,7 +1770,7 @@ mod tests {
 
     #[test]
     fn sends_conflict_guarded_workspace_file_writes() {
-        let directory = env::temp_dir().join(format!("xd-dev-file-write-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-file-write-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1821,8 +1819,7 @@ mod tests {
 
     #[test]
     fn requests_daemon_side_directories_for_remote_safe_browsing() {
-        let directory =
-            env::temp_dir().join(format!("xd-dev-list-directory-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-list-directory-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1863,8 +1860,7 @@ mod tests {
 
     #[test]
     fn new_chats_send_selected_workdirs_and_omit_workspace_defaults() {
-        let directory =
-            env::temp_dir().join(format!("xd-dev-new-chat-workdir-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-new-chat-workdir-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1937,7 +1933,7 @@ mod tests {
 
     #[test]
     fn streams_voice_chunks_with_chat_and_request_identity() {
-        let directory = env::temp_dir().join(format!("xd-dev-voice-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-voice-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -1984,7 +1980,7 @@ mod tests {
 
     #[test]
     fn sends_scoped_secret_updates_without_placeholder_values() {
-        let directory = env::temp_dir().join(format!("xd-dev-secrets-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-secrets-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("daemon.sock");
@@ -2034,10 +2030,10 @@ mod tests {
     }
 
     #[test]
-    fn dev_socket_is_isolated_from_production_state() {
+    fn default_socket_uses_the_production_data_root() {
         assert_eq!(
             socket_candidates_for(PathBuf::from("/data"), None, None),
-            vec![PathBuf::from("/data/xd-dev/daemon.sock")]
+            vec![PathBuf::from("/data/xd/daemon.sock")]
         );
         assert_eq!(
             socket_candidates_for(

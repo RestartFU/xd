@@ -485,7 +485,7 @@ impl VoiceService {
         let result = (|| {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(15 * 60)))
-                .user_agent("xd-dev/0.1")
+                .user_agent("xd/0.1")
                 .build()
                 .into();
             let mut response = agent
@@ -853,7 +853,7 @@ fn default_data_directory() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(".local/share"))
         })
         .unwrap_or_else(|| PathBuf::from(".local/share"))
-        .join("xd-dev")
+        .join("xd")
 }
 
 fn whisper_server() -> PathBuf {

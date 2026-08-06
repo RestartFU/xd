@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::EventBus;
 
-const RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/dev";
+const RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
 const MAX_RELEASE_BYTES: u64 = 256 * 1024;
 const INSTALL_OUTPUT_LIMIT: usize = 16 * 1024;
 
@@ -74,7 +74,7 @@ impl SelfUpdate {
         }
         let updater = self.clone();
         thread::Builder::new()
-            .name("xd-dev-update-check".into())
+            .name("xd-update-check".into())
             .spawn(move || match latest_release() {
                 Ok(latest) => updater.finish("idle", Some(latest), None),
                 Err(error) => updater.finish("failed", None, Some(error)),
@@ -98,7 +98,7 @@ impl SelfUpdate {
         }
         let updater = self.clone();
         thread::Builder::new()
-            .name("xd-dev-update-install".into())
+            .name("xd-update-install".into())
             .spawn(move || match run_installer(&location.installer) {
                 Ok(()) => updater.finish("installed", None, None),
                 Err(error) => updater.finish("failed", None, Some(error)),
@@ -120,11 +120,11 @@ impl SelfUpdate {
         let arguments = env::args_os().skip(1).collect::<Vec<_>>();
         self.publish();
         thread::Builder::new()
-            .name("xd-dev-update-restart".into())
+            .name("xd-update-restart".into())
             .spawn(move || {
                 thread::sleep(Duration::from_millis(250));
                 let error = Command::new(location.daemon).args(arguments).exec();
-                eprintln!("xd-daemon-dev: cannot restart after update: {error}");
+                eprintln!("xd-daemon: cannot restart after update: {error}");
             })
             .map(|_| ())
             .map_err(|error| format!("Cannot schedule the daemon restart: {error}"))
@@ -189,7 +189,7 @@ fn snapshot_value(
     let mut value = json!({
         "ok": true,
         "version": current,
-        "channel": "dev",
+        "channel": "nightly",
         "supported": supported,
         "state": state,
         "available": latest.is_some_and(|latest| latest != current),
@@ -218,23 +218,23 @@ fn latest_release() -> Result<String, String> {
     let mut response = agent
         .get(RELEASE_URL)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "xd-dev")
+        .header("User-Agent", "xd")
         .call()
-        .map_err(|_| "Could not reach the dev release feed.".to_owned())?;
+        .map_err(|_| "Could not reach the nightly release feed.".to_owned())?;
     let body = response
         .body_mut()
         .with_config()
         .limit(MAX_RELEASE_BYTES)
         .read_to_string()
-        .map_err(|_| "The dev release feed was unreadable.".to_owned())?;
+        .map_err(|_| "The nightly release feed was unreadable.".to_owned())?;
     let release: Value = serde_json::from_str(&body)
-        .map_err(|_| "The dev release feed returned invalid data.".to_owned())?;
+        .map_err(|_| "The nightly release feed returned invalid data.".to_owned())?;
     release
         .get("target_commitish")
         .and_then(Value::as_str)
         .filter(|target| !target.is_empty() && target.len() <= 128)
         .map(str::to_owned)
-        .ok_or_else(|| "The dev release feed did not identify its build.".to_owned())
+        .ok_or_else(|| "The nightly release feed did not identify its build.".to_owned())
 }
 
 fn run_installer(installer: &Path) -> Result<(), String> {
@@ -244,7 +244,7 @@ fn run_installer(installer: &Path) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("Cannot run the xd-dev installer: {error}"))?;
+        .map_err(|error| format!("Cannot run the xd installer: {error}"))?;
     let stderr = child.stderr.take().map(|mut stderr| {
         thread::spawn(move || {
             let mut kept = Vec::new();
@@ -264,7 +264,7 @@ fn run_installer(installer: &Path) -> Result<(), String> {
     });
     let status = child
         .wait()
-        .map_err(|error| format!("Cannot wait for the xd-dev installer: {error}"))?;
+        .map_err(|error| format!("Cannot wait for the xd installer: {error}"))?;
     let stderr = stderr
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
@@ -274,22 +274,20 @@ fn run_installer(installer: &Path) -> Result<(), String> {
     let detail = String::from_utf8_lossy(&stderr);
     let detail = detail.trim();
     Err(if detail.is_empty() {
-        "The xd-dev installer failed.".into()
+        "The xd installer failed.".into()
     } else {
         detail.into()
     })
 }
 
 fn install_location() -> Option<InstallLocation> {
-    let home = env::var_os("HOME")?;
-    let expected = fs::canonicalize(PathBuf::from(home).join(".local/opt/xd-dev")).ok()?;
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
-    let directory = executable.parent()?;
-    if directory != expected {
+    let root = executable.parent()?.parent()?;
+    if !matches!(root.file_name()?.to_str()?, "xd" | "xd-nightly") {
         return None;
     }
-    let installer = directory.join("install-dev.sh");
-    let daemon = directory.join("xd-daemon-dev");
+    let installer = root.join("libexec/install.sh");
+    let daemon = root.join("libexec/xd-daemon");
     if !executable_file(&installer) || !executable_file(&daemon) {
         return None;
     }
@@ -313,7 +311,7 @@ mod tests {
         );
         let available = snapshot_value("abc", true, "idle", Some("def"), None);
         assert_eq!(available["available"], true);
-        assert_eq!(available["channel"], "dev");
+        assert_eq!(available["channel"], "nightly");
         assert_eq!(available["latest"], "def");
     }
 

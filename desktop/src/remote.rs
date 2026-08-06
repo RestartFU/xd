@@ -141,7 +141,7 @@ impl CredentialsFile {
             })?;
         let data_name = env::var_os("XD_DATA_NAME")
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "xd-dev".into());
+            .unwrap_or_else(|| "xd".into());
         Ok(data_home.join(data_name).join("remote.json"))
     }
 
@@ -663,12 +663,12 @@ fn helper_candidates() -> Vec<PathBuf> {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        let sibling = parent.join("xd-tls-proxy-dev");
+        let sibling = parent.join("xd-tls-proxy");
         if sibling.is_file() {
             candidates.push(sibling);
         }
     }
-    candidates.push(PathBuf::from("xd-tls-proxy-dev"));
+    candidates.push(PathBuf::from("xd-tls-proxy"));
     candidates
 }
 
@@ -678,7 +678,7 @@ fn private_bridge_directory() -> Result<PathBuf, RemoteError> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
         .unwrap_or_else(env::temp_dir)
-        .join("xd-dev");
+        .join("xd");
     fs::create_dir_all(&parent).map_err(|error| RemoteError::Bridge(error.to_string()))?;
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
         .map_err(|error| RemoteError::Bridge(error.to_string()))?;
@@ -716,7 +716,7 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         let path = env::temp_dir().join(format!(
-            "xd-dev-remote-{name}-{}-{}",
+            "xd-remote-{name}-{}-{}",
             std::process::id(),
             TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
         ));
