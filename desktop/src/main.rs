@@ -491,6 +491,10 @@ struct XdDesktop {
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
+    connection_generation: u64,
+    reconnect_attempt: u32,
+    connecting: bool,
+    connection_in_flight: bool,
     transcript: ListState,
     transcript_snapshot: TranscriptSnapshot,
     transcript_loading: bool,
@@ -770,6 +774,10 @@ impl XdDesktop {
             pending_speech: None,
             daemon: None,
             _started_daemon: None,
+            connection_generation: 0,
+            reconnect_attempt: 0,
+            connecting: false,
+            connection_in_flight: false,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loading: false,
@@ -844,46 +852,129 @@ impl XdDesktop {
             live_markdown_scheduled: None,
             pane_resize: None,
         };
-        desktop.connect(cx);
+        desktop.schedule_connect(Duration::ZERO, cx);
         desktop
     }
 
-    fn connect(&mut self, cx: &mut Context<Self>) {
-        match DaemonHandle::connect_or_start() {
-            Ok((daemon, updates, started_daemon)) => {
-                self.daemon = Some(daemon);
-                self._started_daemon = started_daemon;
-                self.model.connection_error = None;
-                cx.spawn(async move |this, cx| {
-                    while let Ok(update) = updates.recv().await {
-                        if this
-                            .update(cx, |this, cx| this.handle_daemon_update(update, cx))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-            }
-            Err(error) => {
-                self.model.connected = false;
-                self.model.connection_error = Some(error.to_string());
-            }
+    fn schedule_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.connecting || self.model.connected {
+            return;
         }
+        self.connecting = true;
+        self.connection_in_flight = false;
+        self.connection_generation = self.connection_generation.saturating_add(1);
+        let generation = self.connection_generation;
+        cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                Timer::after(delay).await;
+            }
+            let _ = this.update(cx, |this, cx| this.begin_connect(generation, cx));
+        })
+        .detach();
     }
 
-    fn handle_daemon_update(&mut self, update: DaemonUpdate, cx: &mut Context<Self>) {
+    fn begin_connect(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.connection_generation != generation || !self.connecting || self.connection_in_flight
+        {
+            return;
+        }
+        self.connection_in_flight = true;
+        let connection = cx
+            .background_executor()
+            .spawn(async { DaemonHandle::connect_or_start() });
+        cx.spawn(async move |this, cx| {
+            let result = connection.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.connection_generation != generation {
+                    return;
+                }
+                this.connecting = false;
+                this.connection_in_flight = false;
+                match result {
+                    Ok((daemon, updates, started_daemon)) => {
+                        this.daemon = Some(daemon);
+                        if started_daemon.is_some() {
+                            this._started_daemon = started_daemon;
+                        }
+                        this.reconnect_attempt = 0;
+                        this.model.connection_error = None;
+                        this.listen_for_daemon(updates, generation, cx);
+                    }
+                    Err(error) => {
+                        this.model.connected = false;
+                        this.model.connection_error =
+                            Some(format!("{error}. Retrying automatically…"));
+                        this.schedule_reconnect(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn listen_for_daemon(
+        &mut self,
+        updates: async_channel::Receiver<DaemonUpdate>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Ok(update) = updates.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.connection_generation == generation {
+                            this.handle_daemon_update(update, generation, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
+        self.schedule_connect(reconnect_delay(self.reconnect_attempt), cx);
+    }
+
+    fn retry_connection(&mut self, cx: &mut Context<Self>) {
+        if self.connection_in_flight {
+            return;
+        }
+        self.connecting = false;
+        self.reconnect_attempt = 0;
+        self.model.connection_error = Some("Reconnecting to xd-dev…".into());
+        self.schedule_connect(Duration::ZERO, cx);
+        cx.notify();
+    }
+
+    fn handle_daemon_update(
+        &mut self,
+        update: DaemonUpdate,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
         match update {
             DaemonUpdate::Connected { .. } => {
                 self.model.connected = true;
+                self.connecting = false;
+                self.connection_in_flight = false;
+                self.reconnect_attempt = 0;
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
             }
             DaemonUpdate::Disconnected { message } => {
+                if self.connection_generation != generation {
+                    return;
+                }
+                self.daemon = None;
                 self.model.connected = false;
-                self.model.connection_error = Some(message);
+                self.model.connection_error = Some(format!("{message} Reconnecting…"));
                 self.sending = false;
                 self.transcript_loading = false;
                 self.workspace_create_submitting = false;
@@ -930,6 +1021,7 @@ impl XdDesktop {
                     self.cli_versions_error = Some("Assistant versions disconnected.".into());
                 }
                 self.restore_pending_send(cx);
+                self.schedule_reconnect(cx);
             }
             DaemonUpdate::Reply {
                 kind,
@@ -6160,11 +6252,15 @@ impl Render for XdDesktop {
         };
         let status_text = if self.model.connected {
             "connected"
+        } else if self.connecting {
+            "reconnecting"
         } else {
             "offline"
         };
         let status_color = if self.model.connected {
             0x92d5a5
+        } else if self.connecting {
+            0xe8c982
         } else {
             0xe49a9a
         };
@@ -8497,6 +8593,8 @@ impl Render for XdDesktop {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let daemon_offline = !self.model.connected;
+        let connection_in_flight = self.connection_in_flight;
 
         let composer = div()
             .flex_shrink_0()
@@ -8518,7 +8616,38 @@ impl Render for XdDesktop {
                         .bg(rgb(0x382126))
                         .text_xs()
                         .text_color(rgb(0xefb1b1))
-                        .child(error),
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().min_w_0().flex_1().child(error))
+                        .when(daemon_offline, |banner| {
+                            banner.child(
+                                div()
+                                    .id("retry-daemon-connection")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(SURFACE_HIGH))
+                                    .text_color(rgb(if connection_in_flight {
+                                        MUTED
+                                    } else {
+                                        TEXT
+                                    }))
+                                    .when(!connection_in_flight, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x242428)))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.retry_connection(cx);
+                                            }))
+                                    })
+                                    .child(if connection_in_flight {
+                                        "Connecting…"
+                                    } else {
+                                        "Retry now"
+                                    }),
+                            )
+                        }),
                 )
             })
             .when(queue_count > 0, |element| {
@@ -11793,6 +11922,17 @@ fn auth_operation(state: &str) -> Option<&'static str> {
     }
 }
 
+fn reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_millis(match attempt {
+        0 => 0,
+        1 => 250,
+        2 => 500,
+        3 => 1_000,
+        4 => 2_000,
+        _ => 5_000,
+    })
+}
+
 fn voice_request_token() -> String {
     format!(
         "desktop-{}-{}",
@@ -12263,6 +12403,16 @@ mod tests {
         assert_eq!(relative_time(now - 7_200, now), "2h ago");
         assert_eq!(relative_time(now - 259_200, now), "3d ago");
         assert_eq!(relative_time(now + 10, now), "just now");
+    }
+
+    #[test]
+    fn daemon_reconnect_backoff_is_fast_then_bounded() {
+        assert_eq!(reconnect_delay(0), Duration::ZERO);
+        assert_eq!(reconnect_delay(1), Duration::from_millis(250));
+        assert_eq!(reconnect_delay(2), Duration::from_millis(500));
+        assert_eq!(reconnect_delay(4), Duration::from_secs(2));
+        assert_eq!(reconnect_delay(5), Duration::from_secs(5));
+        assert_eq!(reconnect_delay(u32::MAX), Duration::from_secs(5));
     }
 
     #[test]

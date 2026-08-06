@@ -40,6 +40,7 @@ Current milestone:
 - bounded Markdown rendering with language-aware fenced-code highlighting;
 - variable-height virtualized transcript list;
 - bounded full-duplex protocol framing and request-id matching;
+- off-thread daemon startup with bounded automatic reconnection and manual retry;
 - daemon snapshot/event state reducers with unit tests.
 
 Build and test this crate through the repository Dockerfile:
