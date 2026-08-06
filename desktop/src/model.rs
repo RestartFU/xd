@@ -93,6 +93,23 @@ impl Message {
         }
     }
 
+    pub fn new_plain(
+        id: Option<i64>,
+        role: impl Into<String>,
+        content: impl Into<String>,
+        label: Option<String>,
+    ) -> Self {
+        let content = content.into();
+        let markdown = Some(Arc::new(markdown::plain_document(&content)));
+        Self {
+            id,
+            role: role.into(),
+            content,
+            label,
+            markdown,
+        }
+    }
+
     pub fn markdown(&self) -> Arc<Document> {
         self.markdown
             .clone()

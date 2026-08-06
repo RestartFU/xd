@@ -171,6 +171,18 @@ pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> D
     }
 }
 
+pub fn plain_document(source: &str) -> Document {
+    let display = display_text(source);
+    let (display, truncated) = bounded_prefix(&display, MAX_MARKDOWN_BYTES);
+    Document {
+        blocks: vec![Block::Paragraph(InlineText {
+            text: display.to_owned(),
+            spans: Vec::new(),
+        })],
+        truncated,
+    }
+}
+
 pub fn display_text(source: &str) -> String {
     let source = display_without_ask_blocks(source);
     let mut output = String::with_capacity(source.len());
@@ -908,6 +920,23 @@ mod tests {
         };
         assert_eq!(code.language.as_deref(), Some("python"));
         assert_eq!(code.code, "def answer():\n    return 42");
+    }
+
+    #[test]
+    fn plain_streaming_documents_defer_markdown_work_without_losing_text() {
+        let document = plain_document("A **streaming** reply");
+        let Block::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("paragraph")
+        };
+        assert_eq!(paragraph.text, "A **streaming** reply");
+        assert!(paragraph.spans.is_empty());
+
+        let parsed = parse("A **streaming** reply");
+        let Block::Paragraph(paragraph) = &parsed.blocks[0] else {
+            panic!("paragraph")
+        };
+        assert_eq!(paragraph.text, "A streaming reply");
+        assert_eq!(paragraph.spans.len(), 1);
     }
 
     #[test]

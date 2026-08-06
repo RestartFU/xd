@@ -329,7 +329,7 @@ impl TranscriptSnapshot {
 
     fn sync_live_text(&mut self, model: &AppModel) {
         self.live_text = (!model.live_text.is_empty()).then(|| {
-            Arc::new(Message::new(
+            Arc::new(Message::new_plain(
                 None,
                 "assistant",
                 model.live_text.clone(),
@@ -340,12 +340,6 @@ impl TranscriptSnapshot {
 
     fn sync_live_activity(&mut self, model: &AppModel) {
         self.live_activity = Arc::new(model.live_activity.clone());
-    }
-
-    fn sync_all(&mut self, model: &AppModel) {
-        self.sync_messages(model);
-        self.sync_live_text(model);
-        self.sync_live_activity(model);
     }
 
     fn get(&self, index: usize) -> Option<&Message> {
@@ -514,6 +508,8 @@ struct XdDesktop {
     expanded_activity: Arc<HashSet<String>>,
     workflow_statuses: Arc<HashMap<String, Value>>,
     workflow_pending: Arc<HashSet<String>>,
+    live_markdown_generation: u64,
+    live_markdown_scheduled: Option<u64>,
     pane_resize: Option<PaneResize>,
 }
 
@@ -772,6 +768,8 @@ impl XdDesktop {
             expanded_activity: Arc::new(HashSet::new()),
             workflow_statuses: Arc::new(HashMap::new()),
             workflow_pending: Arc::new(HashSet::new()),
+            live_markdown_generation: 0,
+            live_markdown_scheduled: None,
             pane_resize: None,
         };
         desktop.connect(cx);
@@ -1230,6 +1228,7 @@ impl XdDesktop {
                     return;
                 }
                 if selected_before.is_some() && self.model.selected_chat.is_none() {
+                    self.invalidate_live_markdown_work();
                     self.transcript_snapshot = TranscriptSnapshot::default();
                     self.transcript.reset(0);
                 }
@@ -1878,7 +1877,11 @@ impl XdDesktop {
                     self.model.live_text.clear();
                     self.model.live_activity.clear();
                 }
-                self.transcript_snapshot.sync_all(&self.model);
+                self.transcript_snapshot.sync_messages(&self.model);
+                self.transcript_snapshot.sync_live_activity(&self.model);
+                if !self.model.working {
+                    self.transcript_snapshot.sync_live_text(&self.model);
+                }
                 self.sync_question_from_history(&chat_id, cx);
                 if self
                     .pending_speech
@@ -2170,6 +2173,7 @@ impl XdDesktop {
                 self.composer_menu = None;
                 self.clear_question(cx);
                 self.model.apply_event(name, &body);
+                self.invalidate_live_markdown_work();
                 self.transcript_snapshot.sync_live_text(&self.model);
                 self.transcript_snapshot.sync_live_activity(&self.model);
                 self.sync_transcript_count(false);
@@ -2183,6 +2187,7 @@ impl XdDesktop {
                 self.model.apply_event(name, &body);
                 if name == "text" {
                     self.transcript_snapshot.sync_live_text(&self.model);
+                    self.schedule_live_markdown_parse(cx);
                 } else {
                     self.transcript_snapshot.sync_live_activity(&self.model);
                 }
@@ -4305,6 +4310,7 @@ impl XdDesktop {
             return;
         }
         self.model.select_chat(chat_id.clone());
+        self.invalidate_live_markdown_work();
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.settings.last_chat = Some(chat_id.clone());
         if let Err(error) = self.settings.save() {
@@ -4800,6 +4806,67 @@ impl XdDesktop {
         } else if count < old_count {
             self.transcript.splice(count..old_count, 0);
         }
+    }
+
+    fn invalidate_live_markdown_work(&mut self) {
+        self.live_markdown_generation = self.live_markdown_generation.saturating_add(1);
+        self.live_markdown_scheduled = None;
+    }
+
+    fn schedule_live_markdown_parse(&mut self, cx: &mut Context<Self>) {
+        self.live_markdown_generation = self.live_markdown_generation.saturating_add(1);
+        if self.live_markdown_scheduled.is_some() {
+            return;
+        }
+        let token = self.live_markdown_generation;
+        let chat_id = self.model.selected_chat.clone();
+        self.live_markdown_scheduled = Some(token);
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(16)).await;
+            let preparation = this
+                .update(cx, |this, cx| {
+                    if this.live_markdown_scheduled != Some(token)
+                        || this.model.selected_chat != chat_id
+                    {
+                        return None;
+                    }
+                    this.live_markdown_scheduled = None;
+                    let generation = this.live_markdown_generation;
+                    let content = this.model.live_text.clone();
+                    if content.is_empty() {
+                        return None;
+                    }
+                    let label = this
+                        .model
+                        .selected_summary()
+                        .map(|chat| chat.backend.clone());
+                    let parse = cx
+                        .background_executor()
+                        .spawn(async move { Message::new(None, "assistant", content, label) });
+                    Some((generation, parse))
+                })
+                .ok()
+                .flatten();
+            let Some((generation, parse)) = preparation else {
+                return;
+            };
+            let message = parse.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.live_markdown_generation != generation
+                    || this.model.selected_chat != chat_id
+                    || this.model.live_text != message.content
+                {
+                    return;
+                }
+                this.transcript_snapshot.live_text = Some(Arc::new(message));
+                let index = this.model.messages.len();
+                let anchor = this.transcript.logical_scroll_top();
+                this.transcript.splice(index..index + 1, 1);
+                this.transcript.scroll_to(anchor);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn invalidate_workflow_rows(&self, marker: &str) {
@@ -10749,7 +10816,9 @@ mod tests {
             ..Default::default()
         };
         let mut snapshot = TranscriptSnapshot::default();
-        snapshot.sync_all(&model);
+        snapshot.sync_messages(&model);
+        snapshot.sync_live_text(&model);
+        snapshot.sync_live_activity(&model);
         let persisted = snapshot.messages.clone();
 
         model.live_text = "second partial".into();
