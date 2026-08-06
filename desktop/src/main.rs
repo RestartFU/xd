@@ -373,6 +373,12 @@ enum SidebarTarget {
     Chat(String),
 }
 
+#[derive(Clone, Debug)]
+struct SidebarContextMenu {
+    target: Option<SidebarTarget>,
+    position: Point<gpui::Pixels>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerMenu {
     Model,
@@ -469,6 +475,7 @@ struct XdDesktop {
     composer_menu: Option<ComposerMenu>,
     sidebar_edit: Option<SidebarEdit>,
     sidebar_menu: Option<SidebarTarget>,
+    sidebar_context_menu: Option<SidebarContextMenu>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -729,6 +736,7 @@ impl XdDesktop {
             composer_menu: None,
             sidebar_edit: None,
             sidebar_menu: None,
+            sidebar_context_menu: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -1256,6 +1264,14 @@ impl XdDesktop {
                     .is_some_and(|target| !self.sidebar_target_exists(target))
                 {
                     self.sidebar_menu = None;
+                }
+                if self
+                    .sidebar_context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.target.as_ref())
+                    .is_some_and(|target| !self.sidebar_target_exists(target))
+                {
+                    self.sidebar_context_menu = None;
                 }
                 if self
                     .pending_sidebar_delete
@@ -3954,6 +3970,7 @@ impl XdDesktop {
     }
 
     fn toggle_sidebar_menu(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
+        self.sidebar_context_menu = None;
         self.sidebar_menu = if self.sidebar_menu.as_ref() == Some(&target) {
             None
         } else {
@@ -3965,6 +3982,37 @@ impl XdDesktop {
         self.sidebar_move_submitting = false;
         self.sidebar_move_destination = None;
         cx.notify();
+    }
+
+    fn open_sidebar_context_menu(
+        &mut self,
+        target: Option<SidebarTarget>,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_sidebar_edit(cx);
+        self.sidebar_menu = None;
+        if self.pending_sidebar_delete.as_ref() != target.as_ref() {
+            self.pending_sidebar_delete = None;
+            self.sidebar_delete_submitting = false;
+        }
+        if self.sidebar_move.as_ref() != target.as_ref() {
+            self.sidebar_move = None;
+            self.sidebar_move_submitting = false;
+            self.sidebar_move_destination = None;
+        }
+        self.sidebar_context_menu = Some(SidebarContextMenu { target, position });
+        cx.notify();
+    }
+
+    fn close_sidebar_context_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.sidebar_context_menu.take() {
+            if self.pending_sidebar_delete.as_ref() == menu.target.as_ref() {
+                self.pending_sidebar_delete = None;
+                self.sidebar_delete_submitting = false;
+            }
+            cx.notify();
+        }
     }
 
     fn sidebar_edit_changed(&mut self, text: String, cx: &mut Context<Self>) {
@@ -5286,6 +5334,321 @@ impl XdDesktop {
         });
         StyledText::new(content.text).with_highlights(highlights)
     }
+
+    fn sidebar_context_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.sidebar_context_menu.clone()?;
+        let menu_height = match &menu.target {
+            None => 44.0,
+            Some(SidebarTarget::Folder(_)) => 260.0,
+            Some(SidebarTarget::Chat(_)) => 116.0,
+        };
+        let cursor_y = f32::from(menu.position.y);
+        let menu_y = px(if cursor_y > 430.0 {
+            (cursor_y - menu_height).max(8.0)
+        } else {
+            cursor_y
+        });
+        let mut items = Vec::new();
+        match menu.target.clone() {
+            None => {
+                items.push(
+                    div()
+                        .id("context-new-workspace")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.sidebar_context_menu = None;
+                            if !this.creating_workspace {
+                                this.begin_workspace_create(cx);
+                                let focus = this.workspace_create_input.read(cx).focus_handle(cx);
+                                window.focus(&focus);
+                            }
+                        }))
+                        .child("New Workspace")
+                        .into_any_element(),
+                );
+            }
+            Some(SidebarTarget::Folder(folder_id)) => {
+                let folder = self
+                    .model
+                    .folders
+                    .iter()
+                    .find(|folder| folder.id == folder_id)?
+                    .clone();
+                let new_chat_id = folder.id.clone();
+                items.push(
+                    div()
+                        .id("context-new-chat")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.sidebar_context_menu = None;
+                            this.begin_chat_create(new_chat_id.clone(), cx);
+                            let focus = this.chat_create_input.read(cx).focus_handle(cx);
+                            window.focus(&focus);
+                        }))
+                        .child("New Chat")
+                        .into_any_element(),
+                );
+                let rename_target = SidebarTarget::Folder(folder.id.clone());
+                let folder_name = folder.name.clone();
+                items.push(
+                    div()
+                        .id("context-rename-folder")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.sidebar_context_menu = None;
+                            this.begin_sidebar_edit(rename_target.clone(), folder_name.clone(), cx);
+                            let focus = this.sidebar_edit_input.read(cx).focus_handle(cx);
+                            window.focus(&focus);
+                        }))
+                        .child("Rename")
+                        .into_any_element(),
+                );
+                let context_folder = folder.id.clone();
+                items.push(
+                    div()
+                        .id("context-folder-context")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.sidebar_context_menu = None;
+                            this.begin_workspace_context(context_folder.clone(), cx);
+                            let focus = this.workspace_context_input.read(cx).focus_handle(cx);
+                            window.focus(&focus);
+                        }))
+                        .child("Context")
+                        .into_any_element(),
+                );
+                let defaults_folder = folder.id.clone();
+                items.push(
+                    div()
+                        .id("context-folder-agent")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar_context_menu = None;
+                            this.begin_workspace_defaults(defaults_folder.clone(), cx);
+                        }))
+                        .child("Agent Defaults")
+                        .into_any_element(),
+                );
+                let secrets_folder = folder.id.clone();
+                let secrets_name = folder.name.clone();
+                items.push(
+                    div()
+                        .id("context-folder-secrets")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.sidebar_context_menu = None;
+                            this.open_secrets(
+                                Some(secrets_folder.clone()),
+                                Some(secrets_name.clone()),
+                                window,
+                                cx,
+                            );
+                        }))
+                        .child("Secrets")
+                        .into_any_element(),
+                );
+                let move_target = SidebarTarget::Folder(folder.id.clone());
+                items.push(
+                    div()
+                        .id("context-move-folder")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar_context_menu = None;
+                            this.toggle_sidebar_move(move_target.clone(), cx);
+                        }))
+                        .child("Move")
+                        .into_any_element(),
+                );
+                let delete_target = SidebarTarget::Folder(folder.id);
+                let confirming = self.pending_sidebar_delete.as_ref() == Some(&delete_target);
+                let deleting = confirming && self.sidebar_delete_submitting;
+                items.push(
+                    div()
+                        .id("context-trash-folder")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(0xefaaaa))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x3b282e)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.delete_sidebar_item(delete_target.clone(), cx);
+                        }))
+                        .child(if deleting {
+                            "Trashing…"
+                        } else if confirming {
+                            "Confirm Trash"
+                        } else {
+                            "Trash"
+                        })
+                        .into_any_element(),
+                );
+            }
+            Some(SidebarTarget::Chat(chat_id)) => {
+                let chat = self
+                    .model
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == chat_id)?
+                    .clone();
+                let rename_target = SidebarTarget::Chat(chat.id.clone());
+                let title = chat.title.clone().unwrap_or_else(|| "New Chat".into());
+                items.push(
+                    div()
+                        .id("context-rename-chat")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.sidebar_context_menu = None;
+                            this.begin_sidebar_edit(rename_target.clone(), title.clone(), cx);
+                            let focus = this.sidebar_edit_input.read(cx).focus_handle(cx);
+                            window.focus(&focus);
+                        }))
+                        .child("Rename")
+                        .into_any_element(),
+                );
+                let move_target = SidebarTarget::Chat(chat.id.clone());
+                items.push(
+                    div()
+                        .id("context-move-chat")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar_context_menu = None;
+                            this.toggle_sidebar_move(move_target.clone(), cx);
+                        }))
+                        .child("Move")
+                        .into_any_element(),
+                );
+                let delete_target = SidebarTarget::Chat(chat.id);
+                let confirming = self.pending_sidebar_delete.as_ref() == Some(&delete_target);
+                let deleting = confirming && self.sidebar_delete_submitting;
+                items.push(
+                    div()
+                        .id("context-delete-chat")
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(0xefaaaa))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x3b282e)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.delete_sidebar_item(delete_target.clone(), cx);
+                        }))
+                        .child(if deleting {
+                            "Deleting…"
+                        } else if confirming {
+                            "Confirm Delete"
+                        } else {
+                            "Delete"
+                        })
+                        .into_any_element(),
+                );
+            }
+        }
+
+        Some(
+            div()
+                .absolute()
+                .top(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .left(px(0.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.close_sidebar_context_menu(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| this.close_sidebar_context_menu(cx)),
+                )
+                .child(
+                    div()
+                        .id("sidebar-context-menu")
+                        .absolute()
+                        .left(menu.position.x)
+                        .top(menu_y)
+                        .w(px(190.0))
+                        .p_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .children(items),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for XdDesktop {
@@ -5517,6 +5880,17 @@ impl Render for XdDesktop {
                         .gap_1()
                         .text_sm()
                         .text_color(rgb(TEXT))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.open_sidebar_context_menu(
+                                    Some(context_menu_target.clone()),
+                                    event.position,
+                                    cx,
+                                );
+                            }),
+                        )
                         .child(
                             div()
                                 .id(("collapse-folder", folder_row_index))
@@ -5526,9 +5900,7 @@ impl Render for XdDesktop {
                                 .cursor_pointer()
                                 .hover(|style| style.text_color(rgb(0xb9c7ff)))
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    if event.is_right_click() {
-                                        this.toggle_sidebar_menu(context_menu_target.clone(), cx);
-                                    } else {
+                                    if !event.is_right_click() {
                                         this.toggle_folder_collapsed(
                                             collapse_folder_id.clone(),
                                             cx,
@@ -6359,6 +6731,17 @@ impl Render for XdDesktop {
                         .flex()
                         .items_center()
                         .gap_1()
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.open_sidebar_context_menu(
+                                    Some(context_menu_target.clone()),
+                                    event.position,
+                                    cx,
+                                );
+                            }),
+                        )
                         .child(
                             div()
                                 .id(("select-chat", row_id))
@@ -6367,9 +6750,7 @@ impl Render for XdDesktop {
                                 .overflow_hidden()
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    if event.is_right_click() {
-                                        this.toggle_sidebar_menu(context_menu_target.clone(), cx);
-                                    } else {
+                                    if !event.is_right_click() {
                                         this.select_chat(chat_id.clone(), cx);
                                     }
                                 }))
@@ -6807,6 +7188,12 @@ impl Render for XdDesktop {
                     .id("workspace-tree")
                     .flex_1()
                     .overflow_y_scroll()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.open_sidebar_context_menu(None, event.position, cx);
+                        }),
+                    )
                     .children(tree_rows),
             );
 
@@ -10210,6 +10597,7 @@ impl Render for XdDesktop {
                     cx.listener(XdDesktop::finish_pane_resize),
                 )
         });
+        let sidebar_context_overlay = self.sidebar_context_overlay(cx);
 
         let content = div()
             .flex_1()
@@ -10325,7 +10713,9 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                if this.secrets_panel.is_some() {
+                if this.sidebar_context_menu.is_some() {
+                    this.close_sidebar_context_menu(cx);
+                } else if this.secrets_panel.is_some() {
                     this.close_secrets(cx);
                 } else if this.auth_open {
                     this.auth_open = false;
@@ -10341,6 +10731,7 @@ impl Render for XdDesktop {
             .font_family("Inter")
             .when(client_decorations, |root| root.child(titlebar))
             .child(content)
+            .when_some(sidebar_context_overlay, |root, overlay| root.child(overlay))
             .child(
                 div()
                     .absolute()
