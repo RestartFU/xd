@@ -1199,6 +1199,7 @@ impl XdDesktop {
                 | RequestKind::Chat { .. }
                 | RequestKind::Messages { .. }
                 | RequestKind::Shortcuts { .. }
+                | RequestKind::Search { .. }
                 | RequestKind::WorkflowStatus { .. }
                 | RequestKind::ImageRead { .. }
                 | RequestKind::Send { .. }
@@ -4016,7 +4017,7 @@ impl XdDesktop {
                 let Some(query) = this.search.as_ref().map(|search| search.query.clone()) else {
                     return;
                 };
-                match this.daemon.as_ref() {
+                match this.active_daemon().cloned() {
                     Some(daemon) => {
                         if let Err(error) = daemon.search(query.trim()) {
                             this.model.connection_error = Some(error);
@@ -14931,6 +14932,9 @@ mod tests {
         }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
             folder_id: Some("workspace".into()),
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::Search {
+            query: "needle".into(),
         }));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
             folder_id: None,
