@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use std::io::{Read, Write};
 
 #[cfg(unix)]
@@ -15,23 +15,34 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(any(unix, test))]
+#[cfg(windows)]
+use std::{
+    fs::{File, OpenOptions},
+    os::windows::fs::OpenOptionsExt,
+    os::windows::io::AsRawHandle,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+#[cfg(any(unix, windows, test))]
 use serde_json::json;
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const APPLICATION_ID: &str = "1531361363522490489";
 const DEFAULT_STATE: &str = "Browsing workspaces";
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const DETAILS: &str = "Building with AI";
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const MAX_FRAME: usize = 1024 * 1024;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 enum Opcode {
@@ -42,7 +53,7 @@ enum Opcode {
     Pong = 4,
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 impl Opcode {
     fn from_raw(value: u32) -> Option<Self> {
         Some(match value {
@@ -117,7 +128,7 @@ impl Drop for DiscordPresence {
     }
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn activity(state: &str, started_at: u64, process_id: u32, nonce: u64) -> String {
     json!({
         "cmd": "SET_ACTIVITY",
@@ -134,12 +145,12 @@ fn activity(state: &str, started_at: u64, process_id: u32, nonce: u64) -> String
     .to_string()
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn handshake() -> String {
     json!({"v": 1, "client_id": APPLICATION_ID}).to_string()
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn clear_activity(process_id: u32, nonce: u64) -> String {
     json!({
         "cmd": "SET_ACTIVITY",
@@ -149,7 +160,7 @@ fn clear_activity(process_id: u32, nonce: u64) -> String {
     .to_string()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn run_presence(shared: Arc<SharedPresence>) {
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -203,7 +214,7 @@ fn run_presence(shared: Arc<SharedPresence>) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn run_presence(shared: Arc<SharedPresence>) {
     loop {
         if snapshot(&shared).2 {
@@ -258,7 +269,19 @@ fn connect() -> Option<UnixStream> {
     None
 }
 
-#[cfg(any(unix, test))]
+#[cfg(windows)]
+fn connect() -> Option<File> {
+    (0..10).find_map(|index| {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(format!(r"\\?\pipe\discord-ipc-{index}"))
+            .ok()
+    })
+}
+
+#[cfg(any(unix, windows, test))]
 fn send_frame(connection: &mut impl Write, opcode: Opcode, payload: &str) -> bool {
     let Ok(length) = u32::try_from(payload.len()) else {
         return false;
@@ -272,7 +295,7 @@ fn send_frame(connection: &mut impl Write, opcode: Opcode, payload: &str) -> boo
         && connection.flush().is_ok()
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn read_frame(connection: &mut impl Read) -> Option<(Opcode, String)> {
     let mut header = [0_u8; 8];
     connection.read_exact(&mut header).ok()?;
@@ -307,6 +330,71 @@ fn read_reply(connection: &mut (impl Read + Write)) -> bool {
         return root.get("evt").and_then(serde_json::Value::as_str) != Some("ERROR");
     }
     false
+}
+
+#[cfg(windows)]
+fn read_reply(connection: &mut File) -> bool {
+    for _ in 0..8 {
+        if !wait_for_frame(connection) {
+            return false;
+        }
+        let Some((opcode, payload)) = read_frame(connection) else {
+            return false;
+        };
+        if opcode == Opcode::Ping {
+            if !send_frame(connection, Opcode::Pong, &payload) {
+                return false;
+            }
+            continue;
+        }
+        if opcode != Opcode::Frame {
+            return false;
+        }
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            return false;
+        };
+        return root.get("evt").and_then(serde_json::Value::as_str) != Some("ERROR");
+    }
+    false
+}
+
+#[cfg(windows)]
+fn wait_for_frame(connection: &File) -> bool {
+    let deadline = Instant::now() + IO_TIMEOUT;
+    loop {
+        let mut header = [0_u8; 8];
+        let mut header_bytes = 0_u32;
+        let mut available = 0_u32;
+        let success = unsafe {
+            PeekNamedPipe(
+                connection.as_raw_handle(),
+                header.as_mut_ptr().cast(),
+                header.len() as u32,
+                &mut header_bytes,
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if success == 0 {
+            return false;
+        }
+        if header_bytes as usize == header.len() {
+            let length = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
+            if length > MAX_FRAME {
+                return false;
+            }
+            if 8_usize
+                .checked_add(length)
+                .is_some_and(|frame_bytes| available as usize >= frame_bytes)
+            {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(test)]

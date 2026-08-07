@@ -7079,6 +7079,7 @@ dependencies = [
  "thiserror 2.0.19",
  "uds_windows",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -17,6 +17,7 @@ unicode-segmentation = "1.12"
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2.1"
+windows-sys = { version = "0.61.2", features = ["Win32_System_Pipes"] }
 
 [profile.release]
 lto = "thin"
