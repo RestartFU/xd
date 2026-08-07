@@ -45,6 +45,7 @@ RUN mkdir -p src \
  && touch src/lib.rs \
  && cargo fetch --locked \
  && rm -rf src
+COPY desktop/assets ./assets
 COPY desktop/src ./src
 
 FROM gpui-desktop-source AS gpui-desktop-tests

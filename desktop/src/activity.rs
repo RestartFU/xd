@@ -1,5 +1,7 @@
 const SUBAGENT_PREFIX: &str = "subagent\n";
 const WORKFLOW_PREFIX: &str = "workflow_run\n";
+const FILE_CHANGE_PREFIX: &str = "file_change\n";
+const PATCH_MARKER: &str = "diff --git ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivityCard {
@@ -12,6 +14,8 @@ pub struct ActivityCard {
     pub footer: Option<String>,
     pub url: Option<String>,
     pub items: Vec<ActivityItem>,
+    /// The unified patch an edit carries, rendered inline instead of `detail`.
+    pub patch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,12 +35,23 @@ pub enum ActivityKind {
     Finished,
 }
 
+/// Plain tool activity, the kind that arrives several times in a row. Runs of it
+/// are stitched into one card so a burst of commands reads as a single block.
+pub fn is_plain_activity(content: &str) -> bool {
+    !content.starts_with(SUBAGENT_PREFIX)
+        && !content.starts_with(WORKFLOW_PREFIX)
+        && !content.starts_with(FILE_CHANGE_PREFIX)
+}
+
 impl ActivityCard {
     pub fn parse(content: &str) -> Self {
         if let Some(card) = parse_subagent(content) {
             return card;
         }
         if let Some(card) = parse_workflow(content) {
+            return card;
+        }
+        if let Some(card) = parse_file_change(content) {
             return card;
         }
         let summary = compact(content, 180, "Used a tool");
@@ -51,14 +66,15 @@ impl ActivityCard {
             name: if summary.eq_ignore_ascii_case("error") {
                 "Error".into()
             } else {
-                summary.clone()
+                summary
             },
             status: if failure { "Failed" } else { "Done" }.into(),
             elapsed: None,
-            detail: summary,
+            detail: compact(content, 4_000, "Used a tool"),
             footer: None,
             url: None,
             items: Vec::new(),
+            patch: None,
         }
     }
 
@@ -246,6 +262,7 @@ fn parse_subagent(content: &str) -> Option<ActivityCard> {
         footer: None,
         url: None,
         items: Vec::new(),
+        patch: None,
     })
 }
 
@@ -272,7 +289,63 @@ fn parse_workflow(content: &str) -> Option<ActivityCard> {
         footer: Some("GitHub Actions".into()),
         url: Some(url.into()),
         items: Vec::new(),
+        patch: None,
     })
+}
+
+/// A file edit arrives as the marker `file_change`, a newline, and a unified
+/// patch — the shape the daemon writes and every client reads.
+fn parse_file_change(content: &str) -> Option<ActivityCard> {
+    let patch = content.strip_prefix(FILE_CHANGE_PREFIX)?;
+    if !patch.starts_with(PATCH_MARKER) {
+        return None;
+    }
+    let files = changed_files(patch);
+    let (added, removed) = change_counts(patch);
+    Some(ActivityCard {
+        kind: ActivityKind::Finished,
+        title: "File change".into(),
+        name: match files.len() {
+            0 => "Edited files".into(),
+            1 => files[0].clone(),
+            count => format!("{count} files changed"),
+        },
+        status: format!("+{added} −{removed}"),
+        elapsed: None,
+        detail: String::new(),
+        footer: None,
+        url: None,
+        items: Vec::new(),
+        patch: Some(patch.to_owned()),
+    })
+}
+
+/// The `b/` paths a patch touches, in order. A rename reports its destination,
+/// which is what someone scanning the change is looking for.
+fn changed_files(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix(PATCH_MARKER))
+        .filter_map(|header| header.split_once(" b/"))
+        .map(|(_, path)| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+fn change_counts(patch: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in patch.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
 }
 
 fn compact(value: &str, limit: usize, fallback: &str) -> String {
@@ -409,7 +482,62 @@ mod tests {
         let card = ActivityCard::parse(&"read  ".repeat(1_000));
         assert_eq!(card.title, "Activity");
         assert!(card.name.chars().count() <= 180);
+        assert!(card.detail.chars().count() <= 4_000);
         assert_eq!(card.kind, ActivityKind::Finished);
+    }
+
+    #[test]
+    fn expanding_a_command_shows_more_than_its_truncated_header() {
+        let command = format!(
+            "$ docker run --rm debian:trixie-slim sh -c '{}'",
+            "x".repeat(400)
+        );
+        let card = ActivityCard::parse(&command);
+
+        assert!(card.name.ends_with('…'));
+        assert_eq!(card.detail, command);
+        assert_ne!(card.detail, card.name);
+    }
+
+    #[test]
+    fn file_changes_carry_their_patch_and_a_counted_header() {
+        let patch = "diff --git a/src/main.rs b/src/main.rs\n\
+                     --- a/src/main.rs\n\
+                     +++ b/src/main.rs\n\
+                     @@ -1,2 +1,3 @@\n\
+                     context\n\
+                     -removed\n\
+                     +added\n\
+                     +also added\n";
+        let card = ActivityCard::parse(&format!("file_change\n{patch}"));
+
+        assert_eq!(card.title, "File change");
+        assert_eq!(card.name, "src/main.rs");
+        assert_eq!(card.status, "+2 −1");
+        assert_eq!(card.patch.as_deref(), Some(patch));
+        assert!(card.detail.is_empty(), "the patch replaces the detail text");
+
+        let two = ActivityCard::parse(&format!(
+            "file_change\n{patch}diff --git a/b.rs b/b.rs\n+one\n"
+        ));
+        assert_eq!(two.name, "2 files changed");
+        assert_eq!(two.status, "+3 −1");
+    }
+
+    #[test]
+    fn malformed_file_change_markers_fall_back_to_plain_activity() {
+        let card = ActivityCard::parse("file_change\nnot a patch");
+        assert_eq!(card.title, "Activity");
+        assert_eq!(card.patch, None);
+    }
+
+    #[test]
+    fn only_plain_activity_stacks_into_a_run() {
+        assert!(is_plain_activity("$ make build"));
+        assert!(!is_plain_activity("subagent\nExplore\nRunning · Tracing"));
+        assert!(!is_plain_activity(
+            "workflow_run\n123\nhttps://github.com/RestartFU/xd/actions/runs/123"
+        ));
     }
 
     #[test]

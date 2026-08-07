@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     env, fs,
     hash::{Hash, Hasher},
@@ -23,17 +24,18 @@ use std::{io::Write, os::windows::process::CommandExt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    App, Application, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations, Entity,
-    Focusable, FontStyle, FontWeight, HighlightStyle, Image, InteractiveText, KeyBinding,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, Point, Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
-    list, prelude::*, px, relative, rgb, rgba, size,
+    App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
+    Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle, Image, InteractiveText,
+    KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Point, Render, ResizeEdge, SharedString,
+    StyledText, TextRun, Timer, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowOptions, canvas, div, img, list, prelude::*, px, relative, rgb, rgba,
+    size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
-    activity::{ActivityCard, ActivityKind},
+    activity::{self, ActivityCard, ActivityKind},
     context_usage::{self, Severity as ContextSeverity},
     daemon::{DaemonHandle, DaemonUpdate, MessageCursor, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
@@ -44,6 +46,7 @@ use xd_desktop::{
 mod editor;
 mod input;
 mod presence;
+mod selection;
 mod settings;
 mod source_build;
 mod speech;
@@ -52,16 +55,19 @@ mod voice_input;
 
 use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
+    DeleteWord as EditorDeleteWord, DeleteWordForward as EditorDeleteWordForward,
     Down as EditorDown, EditorEvent, End as EditorEnd, FileEditor, Home as EditorHome,
     Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
     Save as EditorSave, SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft,
     SelectRight as EditorSelectRight, Submit as EditorSubmit, Tab as EditorTab, Up as EditorUp,
 };
 use input::{
-    Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, Down, End, Escape, Home, Interrupt,
-    Left, Paste, Right, SelectAll, SelectLeft, SelectRight, ShowCharacterPalette, Submit, Tab, Up,
+    Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, DeleteWord, DeleteWordForward,
+    Down, End, Escape, Home, Interrupt, Left, Paste, Right, SelectAll, SelectLeft, SelectRight,
+    ShowCharacterPalette, Submit, Tab, Up,
 };
 use presence::DiscordPresence;
+use selection::selectable;
 use settings::{AccentPreset, AppSettings, GitWriter};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
@@ -78,6 +84,12 @@ const SURFACE_HIGH: u32 = 0x1a1a1e;
 const BORDER: u32 = 0x2a2a2d;
 const TEXT: u32 = 0xf2f2f4;
 const MUTED: u32 = 0xa8a8ad;
+// The bundle ships this face and points fontconfig at itself. The generic
+// `monospace` alias resolves through the host's fontconfig instead, which lands
+// on DejaVu Sans Mono and reads nothing like the rest of the shell.
+pub(crate) const MONO: &str = "JetBrains Mono";
+const CLAUDE_ICON: &str = "icons/claude.svg";
+const CODEX_ICON: &str = "icons/codex.svg";
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -85,6 +97,7 @@ const MAX_CACHED_MESSAGE_IMAGES: usize = 8;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
+const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn plus_icon(color: u32) -> gpui::AnyElement {
@@ -558,6 +571,14 @@ struct PendingSpeech {
     previous_assistant_id: Option<i64>,
 }
 
+/// Where a row sits inside a run of consecutive plain activity, so the run reads
+/// as one card instead of one card per command.
+#[derive(Clone, Copy, Default)]
+struct ActivityRun {
+    continues_above: bool,
+    continues_below: bool,
+}
+
 #[derive(Clone, Default)]
 struct TranscriptSnapshot {
     messages: Arc<Vec<Message>>,
@@ -583,6 +604,22 @@ impl TranscriptSnapshot {
 
     fn sync_live_activity(&mut self, model: &AppModel) {
         self.live_activity = Arc::new(model.live_activity.clone());
+    }
+
+    fn stacks_activity(&self, index: usize) -> bool {
+        self.get(index).is_some_and(|message| {
+            message.role == "tool" && activity::is_plain_activity(&message.content)
+        })
+    }
+
+    fn activity_run(&self, index: usize) -> ActivityRun {
+        if !self.stacks_activity(index) {
+            return ActivityRun::default();
+        }
+        ActivityRun {
+            continues_above: index > 0 && self.stacks_activity(index - 1),
+            continues_below: self.stacks_activity(index + 1),
+        }
     }
 
     fn get(&self, index: usize) -> Option<&Message> {
@@ -1035,6 +1072,10 @@ struct XdDesktop {
     live_markdown_scheduled: Option<u64>,
     pane_resize: Option<PaneResize>,
     window_settings_generation: u64,
+    /// The banner text a dismissal timer is counting down, so a newer error
+    /// restarts the clock instead of inheriting the old one's.
+    expiring_error: Option<String>,
+    error_generation: u64,
     next_shortcut_row_id: u64,
 }
 
@@ -1468,6 +1509,8 @@ impl XdDesktop {
             live_markdown_scheduled: None,
             pane_resize: None,
             window_settings_generation: 0,
+            expiring_error: None,
+            error_generation: 0,
             next_shortcut_row_id: 0,
         };
         cx.observe_window_bounds(window, |this, window, cx| {
@@ -1531,6 +1574,41 @@ impl XdDesktop {
             });
         })
         .detach();
+    }
+
+    /// An error about one action says a keystroke did not land, not that xd is
+    /// broken, so it clears itself. A connection error stays put: what it
+    /// reports is still true, and its banner carries the retry control.
+    fn expire_action_error(&mut self, cx: &mut Context<Self>) {
+        if self.model.connection_error == self.expiring_error {
+            return;
+        }
+        self.expiring_error = self.model.connection_error.clone();
+        let Some(error) = self.expiring_error.clone() else {
+            return;
+        };
+        if !self.model.connected {
+            return;
+        }
+        self.error_generation = self.error_generation.saturating_add(1);
+        let generation = self.error_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(ACTION_ERROR_LIFETIME).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.error_generation == generation
+                    && this.model.connection_error.as_deref() == Some(error.as_str())
+                {
+                    this.dismiss_error(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn dismiss_error(&mut self, cx: &mut Context<Self>) {
+        self.model.connection_error = None;
+        self.expiring_error = None;
+        cx.notify();
     }
 
     fn active_daemon(&self) -> Option<&DaemonHandle> {
@@ -7320,10 +7398,6 @@ impl XdDesktop {
             cx.notify();
             return;
         };
-        if self.model.working {
-            cx.notify();
-            return;
-        }
         let result = match choice {
             ComposerChoice::Model { backend, model }
                 if self.model.agent_backends.iter().any(|candidate| {
@@ -7353,8 +7427,10 @@ impl XdDesktop {
                 self.active_daemon()
                     .map(|daemon| daemon.set_access(&chat_id, &access))
             }
+            // A turn runs inside the workspace, so this one waits for it.
             ComposerChoice::Workspace(path)
-                if !self.model.has_messages
+                if !self.model.working
+                    && !self.model.has_messages
                     && self
                         .model
                         .worktrees
@@ -7381,9 +7457,6 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if self.model.working {
-            return;
-        }
         if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.set_plan(&chat_id, !self.model.plan)
         {
@@ -7395,7 +7468,7 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if self.model.working || self.model.backend != "codex" {
+        if self.model.backend != "codex" {
             return;
         }
         if let Some(daemon) = self.active_daemon().cloned()
@@ -7409,7 +7482,7 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if self.model.working || self.model.backend != "codex" {
+        if self.model.backend != "codex" {
             return;
         }
         if let Some(daemon) = self.active_daemon().cloned()
@@ -8537,6 +8610,7 @@ impl XdDesktop {
         expanded_sections: &HashSet<String>,
         workflow_status: Option<&Value>,
         workflow_pending: bool,
+        run: ActivityRun,
         desktop: Entity<Self>,
         daemon: Option<&DaemonHandle>,
         image_cache: &Arc<Mutex<MessageImageCache>>,
@@ -8575,6 +8649,7 @@ impl XdDesktop {
                 key,
                 index,
                 expanded,
+                run,
                 desktop.clone(),
             );
         }
@@ -8650,6 +8725,7 @@ impl XdDesktop {
         key: String,
         index: usize,
         expanded: bool,
+        run: ActivityRun,
         desktop: Entity<Self>,
     ) -> gpui::AnyElement {
         let status_color = activity_status_color(card.kind);
@@ -8701,12 +8777,19 @@ impl XdDesktop {
             })
             .collect::<Vec<_>>();
         let toggle_key = key.clone();
+        let title = (!run.continues_above).then(|| card.title.clone());
         let mut body = div()
             .w_full()
             .max_w(px(920.0))
             .mx_auto()
-            .rounded_lg()
-            .border_1()
+            .when(!run.continues_above, |card| {
+                card.rounded_t_lg().border_t_1()
+            })
+            .when(!run.continues_below, |card| {
+                card.rounded_b_lg().border_b_1()
+            })
+            .border_l_1()
+            .border_r_1()
             .border_color(rgb(BORDER))
             .bg(rgb(SURFACE))
             .overflow_hidden()
@@ -8715,7 +8798,9 @@ impl XdDesktop {
                     .id(("activity-card", index))
                     .w_full()
                     .px_4()
-                    .py_3()
+                    .when(title.is_some(), |header| header.pt_3())
+                    .when(title.is_none(), |header| header.pt_2())
+                    .pb_2()
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                     .on_click(move |_, _, cx| {
@@ -8730,28 +8815,18 @@ impl XdDesktop {
                             cx.notify();
                         });
                     })
+                    .when_some(title, |header, title| {
+                        header.child(
+                            div()
+                                .mb_2()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MUTED))
+                                .child(title),
+                        )
+                    })
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(MUTED))
-                                    .child(card.title.clone()),
-                            )
-                            .child(div().flex_1())
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(if expanded {
-                                "▾"
-                            } else {
-                                "▸"
-                            })),
-                    )
-                    .child(
-                        div()
-                            .mt_2()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -8771,10 +8846,16 @@ impl XdDesktop {
                                     .text_xs()
                                     .text_color(rgb(status_color))
                                     .child(card.status.clone()),
-                            ),
+                            )
+                            .child(div().text_xs().text_color(rgb(MUTED)).child(if expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            })),
                     ),
             );
         if expanded {
+            let patch = card.patch.as_deref().map(Self::activity_diff);
             body = body.child(
                 div()
                     .w_full()
@@ -8785,7 +8866,10 @@ impl XdDesktop {
                     .border_color(rgb(BORDER))
                     .text_sm()
                     .text_color(rgb(MUTED))
-                    .child(card.detail)
+                    .when(!card.detail.is_empty(), |details| {
+                        details.child(card.detail)
+                    })
+                    .when_some(patch, |details, patch| details.child(patch))
                     .when(has_items, |details| {
                         details.mt_2().flex().flex_col().gap_2().children(item_rows)
                     }),
@@ -8822,9 +8906,95 @@ impl XdDesktop {
         div()
             .w_full()
             .px_6()
-            .py_2()
+            .when(!run.continues_above, |row| row.pt_2())
+            .when(!run.continues_below, |row| row.pb_2())
             .text_color(rgb(TEXT))
             .child(body)
+            .into_any_element()
+    }
+
+    /// The unified patch a file edit carries, drawn the way the diff panel draws
+    /// one. The file header already names the file, so its patch headers are
+    /// dropped and only the hunks remain.
+    fn activity_diff(patch: &str) -> gpui::AnyElement {
+        let Ok((files, truncated)) = parse_unified_diff(patch) else {
+            return div()
+                .mt_2()
+                .font_family(MONO)
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(patch.to_owned())
+                .into_any_element();
+        };
+        let mut block = div().mt_2().w_full().flex().flex_col().gap_2();
+        for file in files {
+            let mut section = div()
+                .w_full()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .bg(rgb(SURFACE_HIGH))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .child(file.path.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xa9d8b5))
+                                .child(format!("+{}", file.additions)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xf0a8b3))
+                                .child(format!("−{}", file.deletions)),
+                        ),
+                );
+            for line in file.lines {
+                let (background, color) = match line.kind {
+                    DiffLineKind::Added => (0x172b20, 0xa9d8b5),
+                    DiffLineKind::Removed => (0x332025, 0xf0a8b3),
+                    DiffLineKind::Hunk => (0x1d2940, 0xaec4ff),
+                    DiffLineKind::Header => (0x1d222b, 0xaab2c0),
+                    DiffLineKind::Context => (0x14171c, 0xc9ced8),
+                };
+                section = section.child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py(px(1.0))
+                        .bg(rgb(background))
+                        .font_family(MONO)
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(rgb(color))
+                        .child(line.text),
+                );
+            }
+            block = block.child(section);
+        }
+        block
+            .when(truncated, |block| {
+                block.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("… diff truncated …"),
+                )
+            })
             .into_any_element()
     }
 
@@ -8893,6 +9063,7 @@ impl XdDesktop {
                     let language = code.language.unwrap_or_else(|| "text".into());
                     let source = code.code;
                     let copied_source = source.clone();
+                    let code_text = StyledText::new(source);
                     let highlights = code.spans.into_iter().map(|span| {
                         let color = match span.kind {
                             CodeKind::Keyword => 0xc792ea,
@@ -8951,11 +9122,15 @@ impl XdDesktop {
                                 .w_full()
                                 .overflow_scroll()
                                 .p_3()
-                                .font_family("monospace")
+                                .font_family(MONO)
                                 .text_sm()
                                 .line_height(px(20.0))
                                 .whitespace_nowrap()
-                                .child(StyledText::new(source).with_highlights(highlights)),
+                                .child({
+                                    let code_text = code_text.with_highlights(highlights);
+                                    let layout = code_text.layout().clone();
+                                    selectable(block_id, layout, code_text)
+                                }),
                         )
                         .into_any_element()
                 }
@@ -8968,17 +9143,21 @@ impl XdDesktop {
                     .border_color(rgb(BORDER))
                     .bg(rgb(BG))
                     .p_3()
-                    .font_family("monospace")
+                    .font_family(MONO)
                     .text_sm()
                     .line_height(px(20.0))
                     .whitespace_nowrap()
-                    .child(StyledText::new(table.text).with_highlights([(
-                        table.header,
-                        HighlightStyle {
-                            font_weight: Some(FontWeight::BOLD),
-                            ..Default::default()
-                        },
-                    )]))
+                    .child({
+                        let table_text = StyledText::new(table.text).with_highlights([(
+                            table.header,
+                            HighlightStyle {
+                                font_weight: Some(FontWeight::BOLD),
+                                ..Default::default()
+                            },
+                        )]);
+                        let layout = table_text.layout().clone();
+                        selectable(block_id, layout, table_text)
+                    })
                     .into_any_element(),
                 Block::Analysis(blocks) => {
                     let section_key = format!("{scope}-analysis-{block_index}");
@@ -9084,18 +9263,21 @@ impl XdDesktop {
             (span.range, style)
         });
         let text = StyledText::new(content.text).with_highlights(highlights);
+        let layout = text.layout().clone();
         if links.is_empty() {
-            return text.into_any_element();
+            return selectable(id, layout, text).into_any_element();
         }
         let ranges = links.iter().map(|(range, _)| range.clone()).collect();
         let urls = links.into_iter().map(|(_, url)| url).collect::<Vec<_>>();
-        InteractiveText::new(("markdown-inline", id), text)
-            .on_click(ranges, move |index, _, cx| {
+        let links = InteractiveText::new(("markdown-inline", id), text).on_click(
+            ranges,
+            move |index, _, cx| {
                 if let Some(url) = urls.get(index) {
                     cx.open_url(url);
                 }
-            })
-            .into_any_element()
+            },
+        );
+        selectable(id, layout, links).into_any_element()
     }
 
     fn sidebar_context_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -9460,6 +9642,7 @@ impl XdDesktop {
 
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.expire_action_error(cx);
         if !self.transcript_scroll_handler_attached {
             self.transcript_scroll_handler_attached = true;
             let desktop = cx.entity();
@@ -9534,8 +9717,10 @@ impl Render for XdDesktop {
             &self.model.effort
         }
         .to_owned();
-        let can_change_agent =
-            selected.is_some() && !working && !self.model.agent_backends.is_empty();
+        // The daemon reads a chat's agent, effort, access and toggles when it
+        // starts a turn, so changing them mid-turn lands on the next one. The
+        // workspace is not in this set: the running agent is inside it.
+        let can_change_agent = selected.is_some() && !self.model.agent_backends.is_empty();
         let context_meter =
             context_usage::meter(self.model.context_used, self.model.context_window);
         let fast = self.model.fast;
@@ -10505,6 +10690,9 @@ impl Render for XdDesktop {
                                 .id(("select-chat", row_id))
                                 .min_w_0()
                                 .flex_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .overflow_hidden()
                                 .cursor_move()
                                 .on_drag(dragged_chat, |drag: &SidebarDrag, position, _, cx| {
@@ -10515,11 +10703,22 @@ impl Render for XdDesktop {
                                         this.select_chat(chat_id.clone(), cx);
                                     }
                                 }))
-                                .child(if chat.working || unread {
-                                    format!("●  {title}")
-                                } else {
-                                    format!("   {title}")
-                                }),
+                                .when_some(agent_icon(&chat.backend), |row, (icon, color)| {
+                                    row.child(
+                                        svg()
+                                            .flex_shrink_0()
+                                            .path(icon)
+                                            .size(px(13.0))
+                                            .text_color(rgb(color)),
+                                    )
+                                })
+                                .child(div().min_w_0().flex_1().overflow_hidden().child(
+                                    if chat.working || unread {
+                                        format!("● {title}")
+                                    } else {
+                                        title.clone()
+                                    },
+                                )),
                         )
                         .into_any_element(),
                 );
@@ -11826,6 +12025,7 @@ impl Render for XdDesktop {
                     &expanded_activity,
                     workflow_statuses.get(&message.content),
                     workflow_pending.contains(&message.content),
+                    messages.activity_run(index),
                     desktop.clone(),
                     transcript_daemon.as_ref(),
                     &image_cache,
@@ -12032,8 +12232,8 @@ impl Render for XdDesktop {
                     .py_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0x3a3348))
-                    .bg(rgb(0x1d1a25))
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE_HIGH))
                     .child(
                         div()
                             .flex()
@@ -12043,7 +12243,7 @@ impl Render for XdDesktop {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xc8b6e8))
+                                    .text_color(rgb(accent))
                                     .child(format!("Queued {}", index + 1)),
                             )
                             .child(div().flex_1())
@@ -12054,9 +12254,9 @@ impl Render for XdDesktop {
                                     .py_1()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(0xd7cede))
+                                    .text_color(rgb(MUTED))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x302b3a)))
+                                    .hover(|style| style.bg(rgb(0x242428)))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.begin_queue_edit(index, cx);
                                         let focus = this.queue_edit_input.read(cx).focus_handle(cx);
@@ -12071,9 +12271,9 @@ impl Render for XdDesktop {
                                     .py_1()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(0xb9c7ff))
+                                    .text_color(rgb(accent))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0x302b3a)))
+                                    .hover(|style| style.bg(rgb(0x242428)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.steer_queued(index);
                                         cx.notify();
@@ -12104,7 +12304,7 @@ impl Render for XdDesktop {
                             .overflow_hidden()
                             .text_sm()
                             .line_height(px(21.0))
-                            .text_color(rgb(0xd7cede))
+                            .text_color(rgb(TEXT))
                             .child(preview),
                     )
                     .into_any_element()
@@ -12366,6 +12566,21 @@ impl Render for XdDesktop {
                                     } else {
                                         "Retry now"
                                     }),
+                            )
+                        })
+                        .when(!daemon_offline, |banner| {
+                            banner.child(
+                                div()
+                                    .id("dismiss-error")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x4a2b31)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dismiss_error(cx);
+                                    }))
+                                    .child("×"),
                             )
                         }),
                 )
@@ -12770,7 +12985,7 @@ impl Render for XdDesktop {
                                     .px_2()
                                     .py(px(1.0))
                                     .bg(rgb(background))
-                                    .font_family("monospace")
+                                    .font_family(MONO)
                                     .text_xs()
                                     .line_height(px(18.0))
                                     .text_color(rgb(color))
@@ -13779,7 +13994,7 @@ impl Render for XdDesktop {
                         .min_h_0()
                         .overflow_y_scroll()
                         .p_3()
-                        .font_family("monospace")
+                        .font_family(MONO)
                         .text_size(px(13.0))
                         .line_height(px(19.0))
                         .text_color(rgb(0xd8dee9))
@@ -13953,7 +14168,7 @@ impl Render for XdDesktop {
                                     .child(
                                         div()
                                             .flex_1()
-                                            .font_family("monospace")
+                                            .font_family(MONO)
                                             .text_sm()
                                             .text_color(rgb(TEXT))
                                             .child(format!("One-time code: {code}")),
@@ -14042,7 +14257,7 @@ impl Render for XdDesktop {
                         .child(
                             div()
                                 .min_w_0()
-                                .font_family("monospace")
+                                .font_family(MONO)
                                 .text_xs()
                                 .text_color(rgb(if failed { 0xefaaaa } else { TEXT }))
                                 .child(detail),
@@ -14924,7 +15139,7 @@ impl Render for XdDesktop {
                             div()
                                 .min_w_0()
                                 .flex_1()
-                                .font_family("monospace")
+                                .font_family(MONO)
                                 .text_sm()
                                 .text_color(rgb(TEXT))
                                 .child(name),
@@ -15312,7 +15527,7 @@ impl Render for XdDesktop {
                                     .p_3()
                                     .rounded_lg()
                                     .bg(rgb(SIDEBAR))
-                                    .font_family("JetBrains Mono")
+                                    .font_family(MONO)
                                     .text_xs()
                                     .text_color(rgb(MUTED))
                                     .child(output),
@@ -17526,15 +17741,20 @@ fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
         let Some(file) = &mut current else {
             continue;
         };
+        // Every file is drawn under a header naming it, so Git's own file
+        // headers say nothing the reader cannot already see.
+        if line.starts_with("diff --git ")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+        {
+            continue;
+        }
         if rendered_lines >= MAX_LINES {
             truncated = true;
             continue;
         }
-        let kind = if line.starts_with("diff --git ")
-            || line.starts_with("index ")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with("new file ")
+        let kind = if line.starts_with("new file ")
             || line.starts_with("deleted file ")
             || line.starts_with("similarity index ")
             || line.starts_with("rename from ")
@@ -17740,6 +17960,38 @@ fn auth_operation(state: &str) -> Option<&'static str> {
         "signing-in" => Some("agent-auth-cancel"),
         "checking" | "signing-out" => None,
         _ => Some("agent-auth-start"),
+    }
+}
+
+/// The vendor mark for an agent, and the colour it is drawn in. GPUI paints an
+/// SVG as a mask, so the colour lives here rather than in the file.
+fn agent_icon(backend: &str) -> Option<(&'static str, u32)> {
+    match backend {
+        "claude" => Some((CLAUDE_ICON, 0xd97757)),
+        "codex" => Some((CODEX_ICON, 0xbebebe)),
+        _ => None,
+    }
+}
+
+/// Serves the agent marks compiled into the binary, so a bundle needs no icon
+/// theme on the host.
+struct EmbeddedIcons;
+
+impl AssetSource for EmbeddedIcons {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(match path {
+            CLAUDE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/claude.svg").as_slice(),
+            )),
+            CODEX_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/codex.svg").as_slice(),
+            )),
+            _ => None,
+        })
+    }
+
+    fn list(&self, _: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(vec![CLAUDE_ICON.into(), CODEX_ICON.into()])
     }
 }
 
@@ -18607,6 +18859,49 @@ mod tests {
     }
 
     #[test]
+    fn every_agent_mark_is_embedded_and_drawable() {
+        for backend in ["claude", "codex"] {
+            let (path, _) = agent_icon(backend).expect("a known agent has a mark");
+            let bytes = EmbeddedIcons
+                .load(path)
+                .expect("embedded marks load")
+                .expect("a known agent has a mark on disk");
+            assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
+        }
+        assert_eq!(agent_icon("gemini"), None);
+        assert!(EmbeddedIcons.load("icons/missing.svg").unwrap().is_none());
+    }
+
+    #[test]
+    fn consecutive_plain_activity_is_stitched_into_one_card() {
+        let marker = "workflow_run\n123\nhttps://github.com/RestartFU/xd/actions/runs/123";
+        let model = AppModel {
+            messages: vec![
+                Message::new(Some(1), "user", "run it", None),
+                Message::new(Some(2), "tool", "$ make build", None),
+                Message::new(Some(3), "tool", "$ make test", None),
+                Message::new(Some(4), "tool", "$ git status", None),
+                Message::new(Some(5), "tool", marker, None),
+                Message::new(Some(6), "assistant", "done", None),
+            ],
+            ..Default::default()
+        };
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+
+        let run = |index: usize| {
+            let run = snapshot.activity_run(index);
+            (run.continues_above, run.continues_below)
+        };
+        assert_eq!(run(0), (false, false));
+        assert_eq!(run(1), (false, true));
+        assert_eq!(run(2), (true, true));
+        assert_eq!(run(3), (true, false));
+        assert_eq!(run(4), (false, false), "workflow cards stay standalone");
+        assert_eq!(run(5), (false, false));
+    }
+
+    #[test]
     fn queued_message_previews_bound_text_without_changing_the_source() {
         let prompt = format!("first\nsecond\nthird\nfourth {}", "x".repeat(1_000));
         let preview = queue_preview(&prompt);
@@ -19099,6 +19394,16 @@ mod tests {
         assert_eq!((files[0].additions, files[0].deletions), (1, 1));
         assert_eq!(files[1].path, "two.rs");
         assert_eq!((files[1].additions, files[1].deletions), (1, 0));
+        assert_eq!(
+            files[0]
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@@ -1 +1 @@", "-old", "+new"],
+            "Git's file headers repeat the section header"
+        );
+        assert_eq!(files[1].lines[0].text, "new file mode 100644");
     }
 
     #[test]
@@ -19143,138 +19448,156 @@ fn main() {
         println!("xd {}", desktop_version());
         return;
     }
-    Application::new().run(|cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("ctrl-k", OpenSearch, Some("XdDesktop")),
-            KeyBinding::new("ctrl-f", OpenSearch, Some("XdDesktop")),
-            KeyBinding::new("cmd-k", OpenSearch, Some("XdDesktop")),
-            KeyBinding::new("cmd-f", OpenSearch, Some("XdDesktop")),
-            KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
-            KeyBinding::new("ctrl-1", SelectModel1, Some("XdDesktop")),
-            KeyBinding::new("ctrl-2", SelectModel2, Some("XdDesktop")),
-            KeyBinding::new("ctrl-3", SelectModel3, Some("XdDesktop")),
-            KeyBinding::new("ctrl-4", SelectModel4, Some("XdDesktop")),
-            KeyBinding::new("ctrl-5", SelectModel5, Some("XdDesktop")),
-            KeyBinding::new("ctrl-6", SelectModel6, Some("XdDesktop")),
-            KeyBinding::new("ctrl-7", SelectModel7, Some("XdDesktop")),
-            KeyBinding::new("ctrl-8", SelectModel8, Some("XdDesktop")),
-            KeyBinding::new("ctrl-9", SelectModel9, Some("XdDesktop")),
-            KeyBinding::new("up", DirectoryPrevious, Some("XdDesktop")),
-            KeyBinding::new("down", DirectoryNext, Some("XdDesktop")),
-            KeyBinding::new("enter", DirectoryOpen, Some("XdDesktop")),
-            KeyBinding::new("backspace", DirectoryParent, Some("XdDesktop")),
-            KeyBinding::new("ctrl-enter", DirectoryChoose, Some("XdDesktop")),
-            KeyBinding::new("cmd-enter", DirectoryChoose, Some("XdDesktop")),
-            KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
-            KeyBinding::new("delete", Delete, Some("ComposerInput")),
-            KeyBinding::new("left", Left, Some("ComposerInput")),
-            KeyBinding::new("right", Right, Some("ComposerInput")),
-            KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
-            KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
-            KeyBinding::new("home", Home, Some("ComposerInput")),
-            KeyBinding::new("end", End, Some("ComposerInput")),
-            KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
-            KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
-            KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
-            KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
-            KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
-            KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
-            KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
-            KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
-            KeyBinding::new("enter", Submit, Some("ComposerInput")),
-            KeyBinding::new(
-                "ctrl-cmd-space",
-                ShowCharacterPalette,
-                Some("ComposerInput"),
-            ),
-            KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
-            KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
-            KeyBinding::new("left", EditorLeft, Some("FileEditor")),
-            KeyBinding::new("right", EditorRight, Some("FileEditor")),
-            KeyBinding::new("up", EditorUp, Some("FileEditor")),
-            KeyBinding::new("down", EditorDown, Some("FileEditor")),
-            KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
-            KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
-            KeyBinding::new("home", EditorHome, Some("FileEditor")),
-            KeyBinding::new("end", EditorEnd, Some("FileEditor")),
-            KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
-            KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
-            KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
-            KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
-            KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
-            KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
-            KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
-            KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
-            KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
-            KeyBinding::new("tab", EditorTab, Some("FileEditor")),
-            KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
-            KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
-            KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
-            KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
-            KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
-            KeyBinding::new("right", EditorRight, Some("MessageEditor")),
-            KeyBinding::new("up", EditorUp, Some("MessageEditor")),
-            KeyBinding::new("down", EditorDown, Some("MessageEditor")),
-            KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
-            KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
-            KeyBinding::new("home", EditorHome, Some("MessageEditor")),
-            KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
-            KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
-            KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
-            KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
-            KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
-            KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
-            KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
-            KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
-            KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
-            KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
-            KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
-            KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
-            KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
-            KeyBinding::new("delete", Delete, Some("TerminalInput")),
-            KeyBinding::new("left", Left, Some("TerminalInput")),
-            KeyBinding::new("right", Right, Some("TerminalInput")),
-            KeyBinding::new("up", Up, Some("TerminalInput")),
-            KeyBinding::new("down", Down, Some("TerminalInput")),
-            KeyBinding::new("home", Home, Some("TerminalInput")),
-            KeyBinding::new("end", End, Some("TerminalInput")),
-            KeyBinding::new("enter", Submit, Some("TerminalInput")),
-            KeyBinding::new("tab", Tab, Some("TerminalInput")),
-            KeyBinding::new("escape", Escape, Some("TerminalInput")),
-            KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
-            KeyBinding::new("ctrl-v", Paste, Some("TerminalInput")),
-            KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
-        ]);
-        let settings = AppSettings::load();
-        let bounds = Bounds::centered(
-            None,
-            size(
-                px(f32::from(settings.window_width.max(760))),
-                px(f32::from(settings.window_height.max(560))),
-            ),
-            cx,
-        );
-        let window_bounds = if settings.window_maximized {
-            WindowBounds::Maximized(bounds)
-        } else {
-            WindowBounds::Windowed(bounds)
-        };
-        cx.open_window(
-            WindowOptions {
-                focus: true,
-                window_bounds: Some(window_bounds),
-                is_resizable: true,
-                window_min_size: Some(size(px(760.0), px(560.0))),
-                window_background: WindowBackgroundAppearance::Opaque,
-                window_decorations: Some(WindowDecorations::Client),
-                app_id: Some(xd_desktop::channel::app_id().into()),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
-        )
-        .expect("open xd GPUI window");
-        cx.activate(true);
-    });
+    Application::new()
+        .with_assets(EmbeddedIcons)
+        .run(|cx: &mut App| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-k", OpenSearch, Some("XdDesktop")),
+                KeyBinding::new("ctrl-f", OpenSearch, Some("XdDesktop")),
+                KeyBinding::new("cmd-k", OpenSearch, Some("XdDesktop")),
+                KeyBinding::new("cmd-f", OpenSearch, Some("XdDesktop")),
+                KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
+                KeyBinding::new("ctrl-1", SelectModel1, Some("XdDesktop")),
+                KeyBinding::new("ctrl-2", SelectModel2, Some("XdDesktop")),
+                KeyBinding::new("ctrl-3", SelectModel3, Some("XdDesktop")),
+                KeyBinding::new("ctrl-4", SelectModel4, Some("XdDesktop")),
+                KeyBinding::new("ctrl-5", SelectModel5, Some("XdDesktop")),
+                KeyBinding::new("ctrl-6", SelectModel6, Some("XdDesktop")),
+                KeyBinding::new("ctrl-7", SelectModel7, Some("XdDesktop")),
+                KeyBinding::new("ctrl-8", SelectModel8, Some("XdDesktop")),
+                KeyBinding::new("ctrl-9", SelectModel9, Some("XdDesktop")),
+                KeyBinding::new("up", DirectoryPrevious, Some("XdDesktop")),
+                KeyBinding::new("down", DirectoryNext, Some("XdDesktop")),
+                KeyBinding::new("enter", DirectoryOpen, Some("XdDesktop")),
+                KeyBinding::new("backspace", DirectoryParent, Some("XdDesktop")),
+                KeyBinding::new("ctrl-enter", DirectoryChoose, Some("XdDesktop")),
+                KeyBinding::new("cmd-enter", DirectoryChoose, Some("XdDesktop")),
+                KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
+                KeyBinding::new("delete", Delete, Some("ComposerInput")),
+                KeyBinding::new("ctrl-backspace", DeleteWord, Some("ComposerInput")),
+                KeyBinding::new("alt-backspace", DeleteWord, Some("ComposerInput")),
+                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("ComposerInput")),
+                KeyBinding::new("alt-delete", DeleteWordForward, Some("ComposerInput")),
+                KeyBinding::new("left", Left, Some("ComposerInput")),
+                KeyBinding::new("right", Right, Some("ComposerInput")),
+                KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
+                KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
+                KeyBinding::new("home", Home, Some("ComposerInput")),
+                KeyBinding::new("end", End, Some("ComposerInput")),
+                KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
+                KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
+                KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
+                KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
+                KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
+                KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
+                KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
+                KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
+                KeyBinding::new("enter", Submit, Some("ComposerInput")),
+                KeyBinding::new(
+                    "ctrl-cmd-space",
+                    ShowCharacterPalette,
+                    Some("ComposerInput"),
+                ),
+                KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
+                KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("FileEditor")),
+                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("FileEditor")),
+                KeyBinding::new("ctrl-delete", EditorDeleteWordForward, Some("FileEditor")),
+                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("FileEditor")),
+                KeyBinding::new("left", EditorLeft, Some("FileEditor")),
+                KeyBinding::new("right", EditorRight, Some("FileEditor")),
+                KeyBinding::new("up", EditorUp, Some("FileEditor")),
+                KeyBinding::new("down", EditorDown, Some("FileEditor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
+                KeyBinding::new("home", EditorHome, Some("FileEditor")),
+                KeyBinding::new("end", EditorEnd, Some("FileEditor")),
+                KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
+                KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
+                KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
+                KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
+                KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
+                KeyBinding::new("tab", EditorTab, Some("FileEditor")),
+                KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
+                KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
+                KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
+                KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("MessageEditor")),
+                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("MessageEditor")),
+                KeyBinding::new(
+                    "ctrl-delete",
+                    EditorDeleteWordForward,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("MessageEditor")),
+                KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
+                KeyBinding::new("right", EditorRight, Some("MessageEditor")),
+                KeyBinding::new("up", EditorUp, Some("MessageEditor")),
+                KeyBinding::new("down", EditorDown, Some("MessageEditor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
+                KeyBinding::new("home", EditorHome, Some("MessageEditor")),
+                KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
+                KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
+                KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
+                KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
+                KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
+                KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
+                KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
+                KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
+                KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
+                KeyBinding::new("delete", Delete, Some("TerminalInput")),
+                KeyBinding::new("left", Left, Some("TerminalInput")),
+                KeyBinding::new("right", Right, Some("TerminalInput")),
+                KeyBinding::new("up", Up, Some("TerminalInput")),
+                KeyBinding::new("down", Down, Some("TerminalInput")),
+                KeyBinding::new("home", Home, Some("TerminalInput")),
+                KeyBinding::new("end", End, Some("TerminalInput")),
+                KeyBinding::new("enter", Submit, Some("TerminalInput")),
+                KeyBinding::new("tab", Tab, Some("TerminalInput")),
+                KeyBinding::new("escape", Escape, Some("TerminalInput")),
+                KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
+                KeyBinding::new("ctrl-v", Paste, Some("TerminalInput")),
+                KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
+            ]);
+            let settings = AppSettings::load();
+            let bounds = Bounds::centered(
+                None,
+                size(
+                    px(f32::from(settings.window_width.max(760))),
+                    px(f32::from(settings.window_height.max(560))),
+                ),
+                cx,
+            );
+            let window_bounds = if settings.window_maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            };
+            cx.open_window(
+                WindowOptions {
+                    focus: true,
+                    window_bounds: Some(window_bounds),
+                    is_resizable: true,
+                    window_min_size: Some(size(px(760.0), px(560.0))),
+                    window_background: WindowBackgroundAppearance::Opaque,
+                    window_decorations: Some(WindowDecorations::Client),
+                    app_id: Some(xd_desktop::channel::app_id().into()),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
+            )
+            .expect("open xd GPUI window");
+            cx.activate(true);
+        });
 }
 
 fn desktop_version() -> String {

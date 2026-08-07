@@ -6431,6 +6431,46 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_switched_mid_turn_takes_the_next_turn() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "first"}))
+            .unwrap()
+        else {
+            panic!("idle send should start");
+        };
+        assert_eq!(turn.backend, "codex");
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "second"}))
+            .unwrap();
+
+        // Switching while the turn runs leaves it alone and lands on the next.
+        store
+            .set_option(&json!({
+                "chat": "chat-1", "option": "model",
+                "backend": "claude", "value": "claude-opus-5"
+            }))
+            .unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["backend"], "claude");
+
+        let next = store
+            .finish_turn("chat-1", true, None, 2, false)
+            .unwrap()
+            .next
+            .expect("queued turn");
+        assert_eq!(next.prompt, "second");
+        assert_eq!(next.backend, "claude");
+        assert_eq!(next.model, "claude-opus-5");
+    }
+
+    #[test]
     fn first_send_creates_and_persists_a_named_git_worktree() {
         let fixture = Fixture::new();
         let repository = fixture.workspaces.join("Repo");
