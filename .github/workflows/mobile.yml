@@ -33,7 +33,7 @@ jobs:
 
       - name: Test shared code and build Android app
         run: >-
-          docker build
+          ./scripts/runner-docker-build.sh
           --target verify
           --progress plain
           --file mobile/Dockerfile
@@ -51,6 +51,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "GRADLE_OPTS=-Dorg.gradle.workers.max=$jobs" >> "$GITHUB_ENV"
 
       - name: Compile iOS targets and run the shared suite on the simulator
         working-directory: mobile

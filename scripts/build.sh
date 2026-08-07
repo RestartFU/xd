@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
 
 rm -rf dist
-docker buildx build \
+./scripts/runner-docker-build.sh \
   --target bundle \
   --build-arg COMMIT="$COMMIT" \
   --output "type=local,dest=dist" \

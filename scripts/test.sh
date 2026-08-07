@@ -6,4 +6,4 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-docker build --target test --progress plain "$@" .
+./scripts/runner-docker-build.sh --target test --progress plain "$@" .

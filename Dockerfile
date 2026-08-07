@@ -34,6 +34,9 @@ RUN rustup component add rustfmt \
       pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
+ARG BUILD_JOBS=1
+ENV CARGO_BUILD_JOBS=$BUILD_JOBS
+
 FROM gpui-toolchain AS gpui-desktop-source
 
 WORKDIR /src/desktop
@@ -93,7 +96,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && rustup target add x86_64-pc-windows-gnu
 
-RUN cargo check --locked --target x86_64-pc-windows-gnu \
+RUN cargo build --locked --target x86_64-pc-windows-gnu \
  && touch /rust-daemon-windows-check-passed
 
 FROM rust-daemon-source AS rust-daemon-release
@@ -159,6 +162,8 @@ RUN apt-get update \
       make \
  && rm -rf /var/lib/apt/lists/*
 
+ARG BUILD_JOBS=1
+
 RUN set -eux; \
     curl --fail --location --silent --show-error \
       "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v${WHISPER_VERSION}.tar.gz" \
@@ -178,7 +183,7 @@ RUN set -eux; \
       -DGGML_CPU_ALL_VARIANTS=ON \
       -DGGML_OPENMP=OFF \
       -DGGML_CCACHE=OFF; \
-    cmake --build /build --target whisper-cli whisper-server --parallel 4; \
+    cmake --build /build --target whisper-cli whisper-server --parallel "$BUILD_JOBS"; \
     install -d /voice/lib /voice/libexec; \
     install -m0755 /build/bin/whisper-cli /voice/libexec/whisper-bin; \
     install -m0755 /build/bin/whisper-server /voice/libexec/whisper-server-bin; \

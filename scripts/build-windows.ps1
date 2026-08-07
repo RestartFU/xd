@@ -25,6 +25,13 @@ $workDirectory = Join-Path ([IO.Path]::GetTempPath()) (
     'xd-windows-build-' + [guid]::NewGuid().ToString('N')
 )
 $cacheDirectory = Join-Path $repositoryRoot 'desktop\target\windows-assets'
+$buildJobs = if ($env:XD_BUILD_JOBS -match '^[1-9][0-9]*$') {
+    [Math]::Min([int] $env:XD_BUILD_JOBS, [Environment]::ProcessorCount)
+} else {
+    [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * 0.75))
+}
+$env:CARGO_BUILD_JOBS = $buildJobs.ToString()
+$env:CMAKE_BUILD_PARALLEL_LEVEL = $buildJobs.ToString()
 
 $codexVersion = '0.146.0'
 $codexAsset = 'codex-package-x86_64-pc-windows-msvc.tar.gz'
@@ -196,7 +203,8 @@ try {
         -DGGML_OPENMP=OFF `
         -DGGML_CCACHE=OFF
     Assert-LastExitCode 'whisper.cpp configuration'
-    & cmake --build $whisperBuild --config Release --target whisper-server --parallel 3
+    & cmake --build $whisperBuild --config Release --target whisper-server `
+        --parallel $buildJobs
     Assert-LastExitCode 'whisper.cpp build'
     $whisperServer = Get-ChildItem -LiteralPath $whisperBuild `
         -Filter 'whisper-server.exe' -File -Recurse | Select-Object -First 1

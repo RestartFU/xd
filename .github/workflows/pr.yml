@@ -65,6 +65,12 @@ jobs:
           --component rustfmt
           --no-self-update
 
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
+
       - name: Test the native Rust targets
         env:
           RUSTUP_TOOLCHAIN: 1.95.0
@@ -99,6 +105,16 @@ jobs:
           --profile minimal
           --component rustfmt
           --no-self-update
+
+      - name: Limit build parallelism
+        shell: pwsh
+        run: |
+          $jobs = [Math]::Max(
+            1,
+            [Math]::Floor([Environment]::ProcessorCount * 0.75)
+          )
+          "CARGO_BUILD_JOBS=$jobs" >> $env:GITHUB_ENV
+          "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> $env:GITHUB_ENV
 
       - name: Test the native Rust targets
         env:

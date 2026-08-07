@@ -87,6 +87,9 @@ make mobile-test       # shared Kotlin tests
 make mobile-android    # -> ./dist/mobile/xd-mobile-debug.apk
 ```
 
+Build scripts use at most 75% of the runner's logical CPUs by default. Set
+`XD_BUILD_JOBS` to a smaller positive number for a stricter local limit.
+
 Native macOS builds require Rust, `librsvg` from Homebrew, and Apple command
 line tools:
 

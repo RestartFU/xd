@@ -9,6 +9,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${PROFILE:-release}"
+BUILD_JOBS="${XD_BUILD_JOBS:-$("$ROOT/scripts/runner-jobs.sh" --jobs)}"
+export CARGO_BUILD_JOBS="$BUILD_JOBS"
+export CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS"
 CODEX_VERSION=0.146.0
 CLAUDE_VERSION=2.1.220
 CLAUDE_PROXY_VERSION=0.1.30
@@ -132,7 +135,7 @@ if [ ! -x "$WHISPER_CACHE/whisper-server-bin" ]; then
     -DGGML_OPENMP=OFF \
     -DGGML_CCACHE=OFF
   cmake --build "$WORK/whisper-build" \
-    --target whisper-server --parallel 3
+    --target whisper-server --parallel "$BUILD_JOBS"
   install -m0755 "$WORK/whisper-build/bin/whisper-server" \
     "$WHISPER_CACHE/whisper-server-bin"
 fi
