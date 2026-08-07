@@ -1153,7 +1153,8 @@ impl DaemonHandle {
                 "op": "edit-queue",
                 "chat": chat_id,
                 "index": index,
-                "old_text": old_text,
+                // The daemon guards the edit against this key, hyphenated.
+                "old-text": old_text,
                 "text": new_text,
             }),
         )
@@ -1740,7 +1741,7 @@ mod tests {
             assert_eq!(request["op"], "edit-queue");
             assert_eq!(request["chat"], "chat-1");
             assert_eq!(request["index"], 2);
-            assert_eq!(request["old_text"], "before");
+            assert_eq!(request["old-text"], "before");
             assert_eq!(request["text"], "after");
             let request_id = request["_xd_request"].as_u64().unwrap();
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();

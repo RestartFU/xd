@@ -33,6 +33,7 @@ mod terminal;
 #[cfg(windows)]
 #[path = "terminal_windows.rs"]
 mod terminal;
+mod tool_diff;
 mod voice;
 mod workflow;
 mod worktree_name;
