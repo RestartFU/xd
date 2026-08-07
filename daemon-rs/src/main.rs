@@ -25,6 +25,7 @@ struct Options {
 
 enum CliCommand {
     Serve(Options),
+    Pair(Options),
     Version,
     Help,
 }
@@ -40,6 +41,13 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(CliCommand::Serve(options)) => match serve(options) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("xd-daemon: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(CliCommand::Pair(options)) => match pair(options) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("xd-daemon: {error}");
@@ -108,6 +116,17 @@ fn serve(options: Options) -> Result<(), String> {
         eprintln!("xd-daemon: cannot restore remote listener: {error}");
     }
     server.run().map_err(|error| error.to_string())
+}
+
+fn pair(options: Options) -> Result<(), String> {
+    if pair_with_running_daemon(&options)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "no xd daemon is listening on {}",
+            options.socket.display()
+        ))
+    }
 }
 
 fn refuse_live_daemon(socket: &Path) -> Result<(), String> {
@@ -196,12 +215,13 @@ fn pair_with_running_daemon(options: &Options) -> Result<bool, String> {
 
 fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, String> {
     let mut arguments = arguments.into_iter();
-    match arguments.next().as_deref() {
+    let pair_command = match arguments.next().as_deref() {
         Some("--version" | "-v") if arguments.next().is_none() => return Ok(CliCommand::Version),
         Some("--help" | "-h") if arguments.next().is_none() => return Ok(CliCommand::Help),
-        Some("serve") => {}
-        _ => return Err("expected the serve command".into()),
-    }
+        Some("serve") => false,
+        Some("pair") => true,
+        _ => return Err("expected the serve or pair command".into()),
+    };
     let mut socket = None;
     let mut database = None;
     let mut workspaces = None;
@@ -283,14 +303,19 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
     if bind.is_empty() {
         return Err("--bind cannot be empty".into());
     }
-    Ok(CliCommand::Serve(Options {
+    let options = Options {
         database: database.unwrap_or_else(|| data_directory.join("chats.db")),
         workspaces: workspaces.unwrap_or_else(|| data_directory.join("Workspaces")),
         socket,
         bind,
         port,
-        pair,
-    }))
+        pair: pair || pair_command,
+    };
+    Ok(if pair_command {
+        CliCommand::Pair(options)
+    } else {
+        CliCommand::Serve(options)
+    })
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -311,7 +336,7 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-daemon serve (--socket PATH | --data DIR) [options]\n\
+    "usage: xd-daemon (serve | pair) (--socket PATH | --data DIR) [options]\n\
      \n\
      options:\n\
        --data DIR         adopt one xd data root atomically\n\
@@ -408,6 +433,23 @@ mod tests {
         assert!(arguments(["serve".into()]).is_err());
     }
 
+    #[test]
+    fn parses_pair_as_an_existing_daemon_only_command() {
+        let CliCommand::Pair(options) = arguments([
+            "pair".into(),
+            "--socket=/tmp/xd.sock".into(),
+            "--bind=127.0.0.1".into(),
+            "--port=4444".into(),
+        ])
+        .unwrap() else {
+            panic!("expected pair options");
+        };
+        assert_eq!(options.socket, PathBuf::from("/tmp/xd.sock"));
+        assert_eq!(options.bind, "127.0.0.1");
+        assert_eq!(options.port, 4444);
+        assert!(options.pair);
+    }
+
     /// A scratch directory whose name is short enough that a socket inside it
     /// still fits.
     ///
@@ -477,8 +519,27 @@ mod tests {
             port: 4444,
             pair: true,
         };
-        assert!(pair_with_running_daemon(&options).unwrap());
+        pair(options).unwrap();
         server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn pair_never_starts_a_daemon_when_none_is_running() {
+        let directory = scratch("cli-no-pair");
+        let socket = directory.join("daemon.sock");
+        let error = pair(Options {
+            socket,
+            database: directory.join("chats.db"),
+            workspaces: directory.join("Workspaces"),
+            bind: "127.0.0.1".into(),
+            port: 4444,
+            pair: true,
+        })
+        .unwrap_err();
+        assert!(error.contains("no xd daemon is listening"));
+        assert!(!directory.join("chats.db").exists());
+        assert!(!directory.join("Workspaces").exists());
         let _ = fs::remove_dir_all(directory);
     }
 }

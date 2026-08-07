@@ -107,7 +107,7 @@ with `Not authenticated. Say hello first.`
 
 ### Pair
 
-Pairing is armed by `xd serve --pair`, or from the desktop app's **Add a
+Pairing is armed by `xd pair`, `xd serve --pair`, or from the desktop app's **Add a
 Device…** panel. The pairing window has no device name; the connecting client
 supplies its automatic name when it submits the code:
 

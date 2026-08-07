@@ -2,7 +2,9 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::{
@@ -19090,6 +19092,23 @@ mod tests {
     }
 
     #[test]
+    fn pair_shortcuts_select_the_headless_pairing_command() {
+        assert_eq!(
+            headless_arguments(vec!["pair".into()]),
+            Some(vec![OsString::from("pair")])
+        );
+        assert_eq!(
+            headless_arguments(vec!["--pair".into()]),
+            Some(vec![OsString::from("pair")])
+        );
+        assert_eq!(
+            headless_arguments(vec!["pair".into(), "--port=4002".into()]),
+            Some(vec![OsString::from("pair"), OsString::from("--port=4002"),])
+        );
+        assert_eq!(headless_arguments(vec!["settings".into()]), None);
+    }
+
+    #[test]
     fn unified_diffs_are_split_into_bounded_collapsible_files() {
         let patch = "diff --git a/one.go b/one.go\n--- a/one.go\n+++ b/one.go\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/two.rs b/two.rs\nnew file mode 100644\n--- /dev/null\n+++ b/two.rs\n@@ -0,0 +1 @@\n+ready\n";
         let (files, truncated) = parse_unified_diff(patch).unwrap();
@@ -19135,13 +19154,35 @@ mod tests {
     }
 }
 
+fn headless_arguments(mut arguments: Vec<OsString>) -> Option<Vec<OsString>> {
+    match arguments.first().and_then(|argument| argument.to_str()) {
+        Some("serve") => Some(arguments),
+        Some("pair") => Some(arguments),
+        Some("--pair") => {
+            arguments[0] = "pair".into();
+            Some(arguments)
+        }
+        _ => None,
+    }
+}
+
 fn main() {
-    if env::args_os()
-        .skip(1)
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .iter()
         .any(|argument| argument == "--version" || argument == "-v")
     {
         println!("xd {}", desktop_version());
         return;
+    }
+    if let Some(arguments) = headless_arguments(arguments) {
+        match xd_desktop::daemon::run_headless(arguments) {
+            Ok(status) => std::process::exit(status),
+            Err(error) => {
+                eprintln!("xd: {error}");
+                std::process::exit(1);
+            }
+        }
     }
     Application::new().run(|cx: &mut App| {
         cx.bind_keys([

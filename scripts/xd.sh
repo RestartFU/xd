@@ -170,30 +170,33 @@ export __EGL_VENDOR_LIBRARY_FILENAMES="$RUNTIME/egl_vendor.json"
 export LIBGL_DRIVERS_PATH="$HERE/lib/dri"
 
 # The window is drawn through Vulkan, and the Vulkan loader finds its driver
-# through JSON manifests rather than by looking for libraries. A machine with
-# none installed has no device to offer and the app dies in GPU init, so the
-# bundle's own Mesa drivers stand in -- lavapipe among them, which needs no
-# GPU at all. Only when the host has nothing: a working host driver, including
-# a proprietary one no bundle could carry, is left to do its job.
+# through JSON manifests rather than by looking for libraries. Host Mesa ICDs
+# cannot safely be loaded into this relocatable runtime: their dependencies
+# may require a newer host glibc while the process deliberately uses the
+# bundle's libc. Use the matching bundled Mesa drivers on AMD, Intel, and
+# machines without a GPU; lavapipe gives the last case a software device.
+# Proprietary NVIDIA has no bundled equivalent, so NVIDIA-only systems retain
+# host discovery.
 # XD_HOST_VULKAN=1 leaves discovery alone either way, and
-# XD_BUNDLED_VULKAN=1 takes the bundle's drivers even where the host has its
-# own -- which is the answer when a host driver is installed but broken.
+# XD_BUNDLED_VULKAN=1 forces the bundle even on an NVIDIA system.
 if [ -z "${XD_HOST_VULKAN-}" ] \
   && [ -z "${VK_DRIVER_FILES-}${VK_ICD_FILENAMES-}" ]; then
-  host_icd=
-  if [ -z "${XD_BUNDLED_VULKAN-}" ]; then
-    for directory in /etc/vulkan/icd.d /usr/local/share/vulkan/icd.d \
-                     /usr/share/vulkan/icd.d; do
-      for manifest in "$directory"/*.json; do
-        [ -e "$manifest" ] || continue
-        host_icd=1
+  bundled_vulkan=${XD_BUNDLED_VULKAN-}
+  if [ -z "$bundled_vulkan" ]; then
+    nvidia_gpu=
+    for vendor_file in /sys/class/drm/card*/device/vendor; do
+      [ -r "$vendor_file" ] || continue
+      vendor=
+      IFS= read -r vendor < "$vendor_file" || true
+      if [ "$vendor" = "0x10de" ]; then
+        nvidia_gpu=1
         break
-      done
-      [ -n "$host_icd" ] && break
+      fi
     done
+    [ -n "$nvidia_gpu" ] || bundled_vulkan=1
   fi
 
-  if [ -z "$host_icd" ]; then
+  if [ -n "$bundled_vulkan" ]; then
     mkdir -p "$RUNTIME/vulkan"
     bundled_icd=
     for template in "$HERE/etc/vulkan"/*.json.in; do

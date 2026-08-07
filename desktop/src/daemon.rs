@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
@@ -275,6 +276,46 @@ pub struct DaemonHandle {
 
 pub struct StartedDaemon {
     child: Child,
+}
+
+/// Run a public headless command through the daemon binary bundled with the
+/// desktop client. Keep the old public CLI's no-argument data defaults even
+/// though `xd-daemon` requires an explicit socket when invoked directly.
+pub fn run_headless(arguments: Vec<OsString>) -> Result<i32, String> {
+    let arguments = headless_arguments(arguments, socket_candidates().into_iter().next());
+    let mut failures = Vec::new();
+    for launcher in launcher_candidates() {
+        let mut command = ProcessCommand::new(&launcher);
+        command.args(&arguments);
+        channel::configure_daemon(&mut command, &launcher);
+        match command.status() {
+            Ok(status) => return Ok(status.code().unwrap_or(1)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                failures.push(format!("{} is not installed", launcher.display()));
+            }
+            Err(error) => {
+                failures.push(format!("cannot launch {}: {error}", launcher.display()));
+            }
+        }
+    }
+    Err(failures.join("; "))
+}
+
+fn headless_arguments(
+    mut arguments: Vec<OsString>,
+    default_socket: Option<PathBuf>,
+) -> Vec<OsString> {
+    let has_socket = arguments.iter().any(|argument| {
+        argument == "--socket"
+            || argument == "--data"
+            || argument.to_string_lossy().starts_with("--socket=")
+            || argument.to_string_lossy().starts_with("--data=")
+    });
+    if !has_socket && let Some(socket) = default_socket {
+        arguments.push("--socket".into());
+        arguments.push(socket.into_os_string());
+    }
+    arguments
 }
 
 impl Drop for StartedDaemon {
@@ -2056,6 +2097,51 @@ mod tests {
         assert_eq!(
             socket_candidates_for(PathBuf::from("/data"), None, Some("preview".into())),
             vec![PathBuf::from("/data/preview/daemon.sock")]
+        );
+    }
+
+    #[test]
+    fn public_headless_commands_get_a_default_socket_without_overriding_paths() {
+        assert_eq!(
+            headless_arguments(
+                vec!["serve".into(), "--pair".into()],
+                Some(PathBuf::from("/data/xd/daemon.sock")),
+            ),
+            vec![
+                OsString::from("serve"),
+                OsString::from("--pair"),
+                OsString::from("--socket"),
+                OsString::from("/data/xd/daemon.sock"),
+            ]
+        );
+        assert_eq!(
+            headless_arguments(
+                vec!["serve".into(), "--data=/srv/xd".into()],
+                Some(PathBuf::from("/data/xd/daemon.sock")),
+            ),
+            vec![OsString::from("serve"), OsString::from("--data=/srv/xd")]
+        );
+        assert_eq!(
+            headless_arguments(
+                vec!["serve".into(), "--socket".into(), "/run/xd.sock".into(),],
+                Some(PathBuf::from("/data/xd/daemon.sock")),
+            ),
+            vec![
+                OsString::from("serve"),
+                OsString::from("--socket"),
+                OsString::from("/run/xd.sock"),
+            ]
+        );
+        assert_eq!(
+            headless_arguments(
+                vec!["pair".into()],
+                Some(PathBuf::from("/data/xd/daemon.sock")),
+            ),
+            vec![
+                OsString::from("pair"),
+                OsString::from("--socket"),
+                OsString::from("/data/xd/daemon.sock"),
+            ]
         );
     }
 

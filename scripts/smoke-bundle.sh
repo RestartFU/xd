@@ -70,6 +70,28 @@ env -i \
   XDG_CONFIG_HOME="$WORK/launcher-home/config" \
   "$BUNDLE/xd.sh" --version | grep -E '^xd [0-9]'
 
+# `xd serve` is a headless public mode. Keep it away from GPUI so it works on
+# servers with neither a display nor a GPU and continues to reach the daemon.
+env -i \
+  HOME="$WORK/launcher-home" \
+  PATH="${PATH:-/usr/bin:/bin}" \
+  XDG_RUNTIME_DIR="$WORK/launcher-runtime" \
+  XDG_DATA_HOME="$WORK/launcher-home/data" \
+  XDG_CACHE_HOME="$WORK/launcher-home/cache" \
+  XDG_CONFIG_HOME="$WORK/launcher-home/config" \
+  "$BUNDLE/xd.sh" serve --help | grep -F 'usage: xd-daemon (serve | pair)'
+
+# The pairing shorthand must take the same headless route. `--help` makes the
+# daemon validate and print the command without starting a long-lived server.
+env -i \
+  HOME="$WORK/launcher-home" \
+  PATH="${PATH:-/usr/bin:/bin}" \
+  XDG_RUNTIME_DIR="$WORK/launcher-runtime" \
+  XDG_DATA_HOME="$WORK/launcher-home/data" \
+  XDG_CACHE_HOME="$WORK/launcher-home/cache" \
+  XDG_CONFIG_HOME="$WORK/launcher-home/config" \
+  "$BUNDLE/xd.sh" pair --help | grep -F 'usage: xd-daemon (serve | pair)'
+
 "$BUNDLE/lib/ld-linux-x86-64.so.2" \
   --library-path "$BUNDLE/lib" \
   "$BUNDLE/libexec/xd-daemon" --version | grep -E '^xd-daemon [0-9]'

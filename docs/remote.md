@@ -11,11 +11,13 @@ and the agent processes -- backends, folder inheritance and the ask-block
 parser are the same code either way, not a reimplementation.
 
     xd serve                 # listens on 4001
-    xd serve --pair          # starts or attaches, then prints a pairing code
+    xd pair                  # pairs with the already-running local daemon
 
-When the desktop app already owns the local daemon, `xd serve --pair` attaches
-through its private local IPC endpoint. It asks that same daemon to enable TLS
-and exits after printing the code; it never tries to start a competing daemon.
+When the desktop app already owns the local daemon, `xd pair` attaches through
+its private local IPC endpoint. It asks that same daemon to enable TLS and exits
+after printing the code. If no daemon is running, it fails instead of starting
+one. `xd serve --pair` remains available when starting a headless host and
+printing its first pairing code in one command.
 The app exposes the same action as **Add a Device…**. On the other machine,
 choose **Connect to a Machine…** and enter the shown address, port, and code.
 Both clients then attach to one Engine: they see the same saved chat and the
