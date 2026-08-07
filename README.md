@@ -8,6 +8,25 @@ backend, model, and project instructions.
 
 ## Install
 
+Stable and nightly install side by side with separate application identities,
+settings, chats, and workspaces.
+
+### Stable
+
+Linux x86_64:
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install.sh | sh -s -- --release
+```
+
+macOS (Apple Silicon or Intel):
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
+```
+
+### Nightly
+
 Linux x86_64:
 
 ```sh
@@ -24,9 +43,10 @@ Both desktop installers require no root access. The bundles include the GPUI
 desktop, Rust daemon, Codex, Claude Code, local Whisper speech input, and their
 native runtime helpers. Windows desktop artifacts are not currently published.
 
-Nightly data lives in `~/.local/share/xd-nightly` on Linux and
-`~/Library/Application Support/xd-nightly` on macOS. Uninstalling the app does
-not delete chats or workspaces.
+Stable data lives in `~/.local/share/xd` on Linux and
+`~/Library/Application Support/xd` on macOS. Nightly uses the corresponding
+`xd-nightly` directories. Uninstalling either app does not delete its chats or
+workspaces.
 
 ## What it does
 

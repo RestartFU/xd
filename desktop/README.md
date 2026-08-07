@@ -1,7 +1,7 @@
 # xd desktop (GPUI)
 
 This is xd's Rust/GPUI desktop. It runs the Rust daemon using the documented
-JSON Lines protocol and is the production Linux client.
+JSON Lines protocol and is the production Linux and macOS client.
 
 GPUI is pinned because it is pre-1.0. Only the published Apache-2.0 `gpui`
 crate is used. Zed's GPL component library is not a dependency.
@@ -34,7 +34,8 @@ Current milestone:
 - lazy, sandboxed previews and a dismissible full-size viewer for persisted sent images;
 - live assistant text, activity, turn state, and queue event handling;
 - structured agent questions with option buttons and custom-answer input;
-- opt-in local Linux speech for completed `<speak>` sections (`espeak-ng` or `espeak`);
+- opt-in local speech for completed `<speak>` sections (`espeak-ng`/`espeak`
+  on Linux and the native `say` synthesizer on macOS);
 - best-effort Discord Rich Presence with private, fixed conversation-state labels;
 - shared Rust-owned PTY terminal with bounded replay and GPUI input controls;
 - simultaneously visible repository and terminal panes with draggable, persisted dividers;
@@ -48,9 +49,9 @@ Current milestone:
 - off-thread daemon startup with bounded automatic reconnection and manual retry;
 - mobile-compatible daemon update state and restart controls;
 - certificate-pinned TLS pairing backed by private remote-session IPC and revocation;
-- daemon snapshot/event state reducers with unit tests.
+- daemon snapshot/event state reducers with unit tests;
 - nightly-only source builds for validated GitHub branches, pull requests, and
-  commits, with bounded output and process-group cancellation.
+  commits on Linux and macOS, with bounded output and process-group cancellation.
 
 Build and test this crate through the repository Dockerfile:
 
@@ -58,8 +59,8 @@ Build and test this crate through the repository Dockerfile:
 docker build --target gpui-desktop-check .
 ```
 
-Every push to `master` replaces the rolling Linux nightly. Tagged releases use
-the stable application id and install beside the nightly.
+Every push to `master` replaces the rolling Linux and macOS nightly. Tagged
+releases use the stable application id and install beside the nightly.
 
 The archive carries `xd-daemon`, a pinned Codex package, the pinned
 Claude Code executable, and a private pinned whisper.cpp runtime. The Rust daemon
@@ -91,12 +92,9 @@ cannot be combined with individual socket, database, or workspace overrides,
 and the Rust daemon refuses to open the database while another daemon is
 listening on that data root's socket.
 
-Selective spoken replies are disabled by default. On Linux, install
-`espeak-ng` (or the older `espeak`) to enable local text-to-speech; no text is
-sent to a speech service.
+Selective spoken replies are disabled by default. Linux uses `espeak-ng` (or
+the older `espeak`) when installed; macOS uses its built-in speech synthesizer.
+No text is sent to a speech service.
 
-Install the Linux nightly:
-
-```sh
-curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
-```
+Stable and nightly install commands for both platforms are in the repository's
+main [README](../README.md#install).
