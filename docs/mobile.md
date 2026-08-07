@@ -155,8 +155,8 @@ Direct wrapper use requires a local JDK 21 and Android SDK 35.
 
 Assistant messages are parsed as CommonMark with GitHub tables and
 strikethrough, using `org.jetbrains:markdown` -- multiplatform down to the
-Apple targets. The desktop uses the `markd` shard for the same job; a correct
-parser is not something to hand-roll on either side.
+Apple targets. A correct parser is not something to hand-roll in the mobile
+client.
 
 Parsing produces a document of blocks and spans in `shared/.../markdown`, not
 styled text, so each client draws it natively from one interpretation of the
@@ -192,10 +192,9 @@ Code in the transcript is coloured with the desktop's palette and language
 list: expanded inline diffs, and fenced code blocks in assistant messages.
 `mobile/shared/.../syntax` holds it, so an iOS client gets it unchanged.
 
-Two things are shared with the desktop by construction rather than by hand:
-the token colours come from `Xd::SyntaxToken#colour`, and the keyword, type
-and constant sets in `Words.kt` are generated from `src/xd/syntax.cr` (899
-words across 40 sets). Regenerate them when that file changes.
+The token colours and language rules mirror `desktop/src/markdown.rs`; the
+keyword, type, and constant sets live in `Words.kt` so every mobile target uses
+one table. Update both implementations together when a language changes.
 
 `languageForPath` is an exact port, so a file resolves to the same language on
 both clients.
@@ -311,8 +310,8 @@ way to answer it but retyping. They disappear as soon as a turn starts, a
 message is queued, or anything else is said, because by then the buttons would
 answer the wrong question.
 
-`AskBlock` in `shared` mirrors `src/xd/agent/ask.cr` case for case, against the
-same assertions its Crystal spec makes. Stripping the block is not optional:
+`AskBlock` in `shared` mirrors `daemon-rs/src/ask.rs` case for case. Stripping
+the block is not optional:
 left alone the tags render as literal text in the transcript. The question
 itself stays, in bold, so the conversation still reads in order after the
 buttons are gone.
@@ -327,7 +326,7 @@ all — the composer is already there.
 The microphone button dictates into the composer. Capture is the only part that
 happens on the phone: `AudioRecord` at 16 kHz mono PCM16 sends ordered half-second
 chunks while recording, followed by the complete WAV that
-`src/xd/voice/data.cr` validates. The daemon keeps the English `base.en` model
+`daemon-rs/src/voice.rs` validates. The daemon keeps the English `base.en` model
 resident, coalesces live windows to one inference at a time, and returns
 provisional text before the authoritative final transcript. A remote chat still
 transcribes on the remote machine — the phone never downloads the 148 MB model
@@ -359,8 +358,9 @@ Sending an attachment stores the PNG on the daemon and leaves
 otherwise read as that literal text. The transcript recognises those markers
 and draws the image, keeping prose and images in the order they were written.
 
-The rule matches `Xd::Agent::ImageReference`: the whole line, and nothing else
-on it. A message that merely mentions `[image: ...]` mid-sentence stays prose.
+The rule matches the desktop transcript parser: the whole line, and nothing
+else on it. A message that merely mentions `[image: ...]` mid-sentence stays
+prose.
 
 Bytes live on the daemon, so each one is fetched with `image-read`, which
 serves only paths inside its own remote-paste directory. The scaled preview is

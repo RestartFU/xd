@@ -1,29 +1,29 @@
 # Remote wire protocol
 
 This document is the normative contract between `xd serve` and every remote
-client. The implementation is the Crystal daemon: `src/xd/protocol/` defines
-framing and the operation vocabulary, and `src/xd/daemon/engine.cr` is the sole
-dispatcher for local and remote clients alike. Protocol version 1 is reported
-by a successful `hello`.
+client. The Rust daemon in `daemon-rs/src/lib.rs` owns framing and dispatch for
+local and remote clients alike; `desktop/src/protocol.rs` and the Kotlin
+`shared/.../protocol` package implement the client side. Protocol version 1 is
+reported by a successful `hello`.
 
-Any wire change must update `spec/xd/protocol/` and the Kotlin `commonTest`
-fixtures together. Server and clients must ignore unknown object members unless
-a later protocol version explicitly says otherwise.
+Any wire change must update the Rust daemon/desktop tests and the Kotlin
+`commonTest` fixtures together. Server and clients must ignore unknown object
+members unless a later protocol version explicitly says otherwise.
 
 ## Transport and framing
 
 - TCP port 4001 by default.
 - TLS begins immediately after the TCP connection. There is no plaintext mode
   and no upgrade handshake.
-- The daemon uses a self-signed certificate (`src/xd/daemon/certificate.cr`:
-  RSA-2048, `CN=xd`, 3650 days). During pairing a client accepts the presented
+- The TLS helper creates and persists a self-signed certificate
+  (`tls-proxy-rs/src/main.rs`). During pairing a client accepts the presented
   leaf and persists it alongside the issued token. Every later connection must
   require that exact leaf.
 - Application data is UTF-8 JSON Lines: one JSON object followed by `LF`
   (`0x0a`). Empty lines are ignored.
 - Requests, replies, and events share one ordered, full-duplex connection.
 - Frames are limited to 64 KiB before authentication and 96 MiB afterwards
-  (`Xd::Protocol::AUTH_FRAME_LIMIT` and `FRAME_LIMIT`). An oversized frame is a
+  (`AUTH_FRAME_LIMIT` and `FRAME_LIMIT` in `daemon-rs/src/lib.rs`). An oversized frame is a
   protocol error and closes the connection.
 - Each session holds a bounded 256-event outbound queue
   (`Session::EVENT_QUEUE_SIZE`). **A client that stops draining its socket is
@@ -61,9 +61,9 @@ rather than by arrival position:
 
 This matters because the daemon answers requests concurrently. The operations
 that must stay responsive — `cancel`, `voice-cancel`, `agent-auth-cancel`, and
-`ping` — bypass the serialized command path entirely
-(`Engine#control_operation?`). Without ids, a `cancel` answered promptly by the
-daemon would still sit behind a slow `diff-read` in the reply stream.
+`ping` — bypass the serialized command path entirely. Without ids, a `cancel`
+answered promptly by the daemon would still sit behind a slow `diff-read` in
+the reply stream.
 
 A daemon that does not echo the id answers strictly in order. A client
 supporting that compatibility path must keep a FIFO slot for every request
@@ -80,7 +80,7 @@ between a request and its reply and do not consume a reply slot:
 ```
 
 `id` is a monotonic counter assigned at publication. **It is per-process and
-in-memory only** (`Xd::Daemon::EventBus`): it does not survive a daemon
+in-memory only**: it does not survive a daemon
 restart, and there is no resume-from-id operation. A reconnecting client must
 take a fresh snapshot rather than try to replay what it missed.
 
@@ -172,7 +172,7 @@ and requires pairing again.
 ### What a remote client cannot do
 
 `peer-pairing` requires an authenticated connection **and** local transport
-(`Engine#peer_pairing`). A paired remote device cannot mint pairing codes for
+(`Engine::peer_pairing`). A paired remote device cannot mint pairing codes for
 further devices, cannot open listeners, enable TLS, or manage other paired
 devices. Pairing and device-management authority stays on the daemon machine.
 
@@ -270,7 +270,10 @@ optional nonnegative `offset` changes the request to a zero-based, oldest-first
 slice through the active transcript boundary. Offset requests require a
 positive limit and return the actual clamped offset in the response;
 `turn_start` may still identify the preceding user message when a slice begins
-in the middle of a turn.
+in the middle of a turn. Cursor-aware clients may instead send one positive
+message id as `before` or `after`; the two cursors are mutually exclusive,
+cannot be combined with `offset`, and require a positive limit. Cursor pages
+remain oldest-to-newest and do not shift when another device appends a turn.
 
 ```json
 {
@@ -278,17 +281,21 @@ in the middle of a turn.
   "total_messages": 2,
   "last_message_id": 42,
   "offset": 0,
+  "has_older": false,
+  "has_newer": false,
   "messages": [
-    {"role":"user","content":"Hello","at":1753700000},
-    {"role":"assistant","content":"Hi","at":1753700001,"label":"Codex"}
+    {"id":41,"role":"user","content":"Hello","at":1753700000},
+    {"id":42,"role":"assistant","content":"Hi","at":1753700001,"label":"Codex"}
   ]
 }
 ```
 
-Messages are oldest-to-newest within the returned slice. `at` is Unix seconds
-and `label` is optional. Roles include `user`, `assistant`, `tool`, `event`,
-`error`, and `duration`; render an unknown role as system text. `duration` rows
-carry an elapsed-seconds string and are normally hidden.
+Messages are oldest-to-newest within the returned slice. `id` is the stable
+persisted cursor, `at` is Unix seconds, and `label` is optional. Roles include
+`user`, `assistant`, `tool`, `event`, `error`, and `duration`; render an unknown
+role as system text. `duration` rows carry an elapsed-seconds string and are
+normally hidden. `has_older` and `has_newer` describe rows outside the returned
+cursor page.
 
 For recent requests, `total_messages` greater than the returned count means
 older messages exist. Offset slices may have both older and newer messages
@@ -305,7 +312,7 @@ boundary, not an event cursor.
 | `folder-settings` | `folder: string` | inherited folder settings |
 | `shortcuts` | optional `folder: string` | daemon-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to daemon home, lists non-hidden directories |
-| `file-browse` | `chat`, `action`, optional relative `path` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB |
+| `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
 | `agent-clis` | none | bundled assistant versions |
 | `daemon-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
@@ -314,7 +321,7 @@ boundary, not an event cursor.
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
 | `voice-model` | `chat` | `available: boolean` — whether *this daemon* has the speech model on disk |
 | `search` | `query` | matching stored messages |
-| `diff-read` | `chat` plus one `read` of `base`, `working-status`, or `branch-status` (with `base`) | `output: string`, limited to 8 MiB |
+| `diff-read` | `chat` plus one `read` of `base`, `working-status`, `branch-status` (with `base`), `working-all`, `branch-all` (with `base`), `working-file`/`untracked-file` (with a safe relative `path`), or `branch-file` (with `base` and `path`) | `output: string`, limited to 8 MiB |
 | `ping` | none | no members beyond `ok` |
 
 `file-browse` paths are relative to the chat workdir and may not escape it.
@@ -329,12 +336,14 @@ acting at once are therefore ordered by the daemon rather than racing.
 ### `new-chat`
 
 ```json
-{"op":"new-chat","folder":"folder-1","title":"Optional"}
+{"op":"new-chat","folder":"folder-1","title":"Optional","workdir":"/optional/path"}
 {"ok":true,"id":"chat-9"}
 ```
 
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
-its folder's backend and model.
+its folder's backend and model. When `workdir` is omitted it also inherits the
+folder's effective working directory; a supplied path selects a per-chat
+working directory on the daemon machine.
 
 ### `set-shortcuts`
 
@@ -455,9 +464,13 @@ transcript event.
 bring a machine forward without a shell on it. `install` replaces the files,
 which is safe while turns run because the process keeps the binary it already
 mapped; `restart` drops every connection and loses any running turn, so the
-two are separate actions and neither happens on its own. `supported` is false
-where the installation cannot replace itself -- anything but a Linux bundle
-install -- and both `install` and `restart` are refused there.
+two are separate actions and neither happens on its own. Native Linux bundles,
+macOS apps, and the installed Windows MSI payload support this flow. Windows
+runs the MSI quietly without forcing a reboot; if Windows reports that a reboot
+is required, the in-app install fails instead of claiming that a daemon restart
+completed the update. `supported` is false where the installation cannot
+replace itself, such as source builds, and both `install` and `restart` are
+refused there.
 
 `agent-catalog` lists the assistants and models this daemon can run. The
 desktop reads its own compiled-in catalog because it ships with the daemon; a
@@ -528,8 +541,8 @@ authoritative `transcribed` result after the final WAV. The legacy
 complete WAV.
 
 Decoded audio is limited to 64 MiB. The daemon does not resample; the final WAV
-must contain 16 kHz mono PCM16. `src/xd/voice/data.cr` writes and validates this
-header.
+must contain 16 kHz mono PCM16. `desktop/src/voice_input.rs` writes this header
+and `daemon-rs/src/voice.rs` validates it.
 
 ### Folder and chat mutations
 
@@ -539,6 +552,21 @@ reply with `ok` alone and broadcast a `tree` event.
 
 `set-shortcuts` replies with the resulting shortcut sets and broadcasts a
 `shortcuts-changed` event so open chats can refresh their buttons.
+
+### Git actions
+
+`git-state` takes a `chat` and an optional request correlation string. It
+acknowledges immediately, reads repository state away from the connection
+loop, and publishes `git-state` with `visible`, `action`, `label`, `enabled`,
+and an optional pull-request `url`.
+
+`git-action` takes a `chat`, one of `commit`, `push`, `create-pr`, or `view-pr`,
+and an optional request correlation string. Commits also require `message`;
+pull-request creation requires `title` and accepts `body`. It acknowledges
+immediately and publishes `git-action-finished`. Successful events contain the
+new repository action state and an optional URL; failures contain `success:
+false` and `error`. The daemon rechecks the advertised action before mutating
+the repository so a stale client cannot run the wrong operation.
 
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
@@ -589,7 +617,7 @@ The block is **also stored with the message, verbatim** — unlike workspace
 blocks, which the daemon strips before storage. That is deliberate: it lets
 every client render its own buttons, and lets a client that reopens a chat find
 the question without having seen the event. A client must therefore strip these
-blocks before rendering, or show raw tags. `src/xd/agent/ask.cr` is the
+blocks before rendering, or show raw tags. `daemon-rs/src/ask.rs` is the
 reference parser; the mobile client mirrors it in
 `shared/.../model/Ask.kt`.
 

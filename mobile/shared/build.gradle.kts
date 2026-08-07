@@ -35,8 +35,8 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             // CommonMark parsing, multiplatform down to the Apple targets.
-            // The desktop uses the markd shard for the same job; a correct
-            // parser is not something to hand-roll on either side.
+            // A correct parser is not something to hand-roll in the mobile
+            // client.
             implementation(libs.jetbrains.markdown)
         }
 

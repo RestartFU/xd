@@ -1,6 +1,6 @@
 # xd
 
-xd is a GTK4 desktop client for workspace-organized Codex and Claude Code
+xd is a Rust/GPUI desktop client for workspace-organized Codex and Claude Code
 conversations. Chats inherit their folder's working directory, repository,
 backend, model, and project instructions.
 
@@ -8,13 +8,38 @@ backend, model, and project instructions.
 
 ## Install
 
+Stable and nightly install side by side with separate application identities,
+settings, chats, and workspaces.
+
+### Stable
+
+Linux x86_64:
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install.sh | sh -s -- --release
+```
+
+macOS (Apple Silicon or Intel):
+
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
+```
+
+Windows x86_64 (PowerShell):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/RestartFU/xd/releases/latest/download/install.ps1))) -Release
+```
+
+### Nightly
+
 Linux x86_64:
 
 ```sh
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 ```
 
-macOS Apple Silicon:
+macOS (Apple Silicon or Intel):
 
 ```sh
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
@@ -26,18 +51,15 @@ Windows x86_64 (PowerShell):
 irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 ```
 
-The Linux and macOS installers require no root access; Windows uses the
-standard MSI installer and may request UAC approval. Every platform receives a
-self-contained app with GTK, Git, Codex, Claude Code, speech support, and native
-runtime libraries. No system package-manager installation is required. Installed
-Linux builds check for new releases in the background and only download an
-update after you click the update button. Linux nightly builds can also build
-and install a branch, pull request, or commit; that source-build action requires
-Docker.
+The Linux and macOS installers require no root access; Windows uses the normal
+Windows Installer elevation prompt. The bundles include the GPUI desktop, Rust
+daemon, Codex, Claude Code, local Whisper speech input, and their native
+runtime helpers.
 
-Nightly data lives in `~/.local/share/xd-nightly` on Linux and the equivalent
-platform data directory on macOS and Windows. Uninstalling the app does not
-delete chats or workspaces.
+Stable data lives in `~/.local/share/xd` on Linux and
+`~/Library/Application Support/xd` on macOS, and `%LOCALAPPDATA%\xd` on
+Windows. Nightly uses the corresponding `xd-nightly` directories. Uninstalling
+either app does not delete its chats or workspaces.
 
 ## What it does
 
@@ -65,19 +87,27 @@ make mobile-test       # shared Kotlin tests
 make mobile-android    # -> ./dist/mobile/xd-mobile-debug.apk
 ```
 
+Build scripts use at most 75% of the runner's logical CPUs by default. Set
+`XD_BUILD_JOBS` to a smaller positive number for a stricter local limit.
+
+Native macOS builds require Rust, `librsvg` from Homebrew, and Apple command
+line tools:
+
+```sh
+PROFILE=nightly ./scripts/build-macos.sh
+# -> ./dist/macos/xd-nightly-macos-{arm64,x86_64}.zip
+```
+
+Native Windows builds require Rust, CMake, 7-Zip, the Windows SDK, and .NET:
+
+```powershell
+./scripts/build-windows.ps1 -OutputDirectory windows-dist -Profile nightly
+./scripts/package-windows.ps1 -Payload windows-dist -OutputDirectory artifacts -Profile nightly
+# -> ./artifacts/xd-nightly-windows-x86_64.msi
+```
+
 Mobile builds use their own Docker image and also require nothing beyond
 Docker. See [mobile development](docs/mobile.md).
 
-Native release builders:
-
-```sh
-./scripts/build-macos.sh ./macos-dist nightly
-./scripts/build-windows.sh ./windows-dist nightly
-```
-
-The macOS builder requires Apple Silicon and its Homebrew build dependencies.
-The Windows builder runs in an x86_64 MSYS2 UCRT64 shell. Their outputs are
-self-contained; end users do not need those build dependencies.
-
-xd is written in Crystal. The client and daemon are built from `src/xd.cr`;
-behavior and protocol specs live under `spec/`.
+The Linux desktop lives in `desktop/`, the daemon in `daemon-rs/`, and the
+private remote TLS helper in `tls-proxy-rs/`.

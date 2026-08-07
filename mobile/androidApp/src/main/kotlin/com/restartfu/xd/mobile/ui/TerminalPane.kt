@@ -61,7 +61,7 @@ import com.restartfu.xd.terminal.TerminalKey
 
 /** The xterm 16-colour palette, so SGR codes land on recognisable colours. */
 private val PALETTE = listOf(
-    // Xd::UI::TerminalPanel::PALETTE, colour for colour.
+    // The desktop terminal palette, colour for colour.
     Color(0xFF23232A), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFD19A66),
     Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFB8BCC8),
     Color(0xFF5C6370), Color(0xFFE06C75), Color(0xFF98C379), Color(0xFFD19A66),

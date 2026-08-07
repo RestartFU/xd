@@ -1,6 +1,10 @@
 /build/
 /dist/
 /lib/
+/desktop/target/
+/daemon-rs/target/
+/tls-proxy-rs/target/
+/tls-proxy-rs/Cargo.lock
 /.payload-cache/
 *.o
 *.swp

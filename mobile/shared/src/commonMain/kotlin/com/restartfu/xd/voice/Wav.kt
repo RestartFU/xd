@@ -4,8 +4,8 @@ package com.restartfu.xd.voice
  * The one audio shape the daemon accepts: 16 kHz mono 16-bit PCM in a WAV
  * container.
  *
- * `src/xd/voice/data.cr` writes this header on the desktop and validates it
- * field by field, so the phone has to produce the same 44 bytes rather than
+ * `daemon-rs/src/voice.rs` validates this header field by field, so the phone
+ * has to produce the same 44 bytes rather than
  * whatever an encoder feels like emitting. Whisper wants 16 kHz mono, and the
  * daemon does not resample.
  */

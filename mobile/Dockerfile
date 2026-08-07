@@ -30,6 +30,8 @@ RUN curl --fail --location --retry 3 \
 
 FROM android-sdk AS source
 
+ARG BUILD_JOBS=1
+ENV GRADLE_OPTS=-Dorg.gradle.workers.max=${BUILD_JOBS}
 WORKDIR /src
 COPY . .
 

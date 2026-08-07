@@ -151,13 +151,27 @@ else
     || die "cannot download $BASE/$ASSET"
 
   # Published beside the tarball, so a truncated or tampered download is caught
-  # before anything is unpacked.
-  if "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET.sha256" \
-       "$BASE/$ASSET.sha256" 2>/dev/null; then
-    if command -v sha256sum >/dev/null 2>&1; then
-      ( cd "$WORK" && sha256sum -c "$ASSET.sha256" >/dev/null ) \
-        || die "the download does not match its checksum."
-    fi
+  # before anything is unpacked. Never silently install an unchecked archive.
+  "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$ASSET.sha256" \
+    "$BASE/$ASSET.sha256" 2>/dev/null \
+    || die "cannot download the checksum."
+  if command -v sha256sum >/dev/null 2>&1; then
+    ( cd "$WORK" && sha256sum -c "$ASSET.sha256" >/dev/null ) \
+      || die "the download does not match its checksum."
+  else
+    OPENSSL=${XD_OPENSSL:-openssl}
+    command -v "$OPENSSL" >/dev/null 2>&1 || [ -x "$OPENSSL" ] \
+      || die "sha256sum or openssl is needed to verify the download."
+    expected=$(sed -n '1{s/[[:space:]].*//;p;}' "$WORK/$ASSET.sha256")
+    case "$expected" in
+      *[!0123456789abcdefABCDEF]*|'') die "the checksum is malformed." ;;
+    esac
+    [ "${#expected}" -eq 64 ] || die "the checksum is malformed."
+    actual=$("$OPENSSL" dgst -sha256 "$WORK/$ASSET") \
+      || die "cannot calculate the download checksum."
+    actual=${actual##* }
+    [ "$actual" = "$expected" ] \
+      || die "the download does not match its checksum."
   fi
 
   say "Unpacking…"

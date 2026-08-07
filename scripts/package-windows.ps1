@@ -1,6 +1,7 @@
 #!/usr/bin/env pwsh
 #
-# Turn a validated Crystal Windows payload into the MSI consumed by install.ps1.
+# Turn a validated native Rust/GPUI Windows payload into the MSI consumed by
+# install.ps1.
 #
 #   package-windows.ps1 -Payload windows-dist -OutputDirectory artifacts
 #                       [-Profile nightly|release] [-Version 0.1.0]
@@ -28,8 +29,20 @@ $toolDirectory = Join-Path ([IO.Path]::GetTempPath()) (
     'xd-wix-' + [guid]::NewGuid().ToString('N')
 )
 
-if (-not (Test-Path -LiteralPath (Join-Path $payloadPath 'bin\xd.exe'))) {
-    throw "Crystal Windows payload is missing bin\xd.exe: $payloadPath"
+foreach ($relativePath in @(
+    'bin\xd.exe',
+    'bin\xd-daemon.exe',
+    'bin\xd-tls-proxy.exe',
+    'bin\install.ps1',
+    'bin\codex-package\bin\codex.exe',
+    'bin\claude.exe',
+    'bin\claude-code-proxy.exe',
+    'bin\whisper-server-bin.exe',
+    'git\cmd\git.exe'
+)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $payloadPath $relativePath))) {
+        throw "Windows payload is missing $relativePath`: $payloadPath"
+    }
 }
 
 if ($Profile -eq 'nightly') {
@@ -49,7 +62,8 @@ if ($Profile -eq 'nightly') {
 try {
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
     New-Item -ItemType Directory -Force -Path $toolDirectory | Out-Null
-    dotnet tool install --tool-path $toolDirectory wix --version 6.0.2
+    & dotnet tool install --tool-path $toolDirectory wix --version 6.0.2
+    if ($LASTEXITCODE -ne 0) { throw 'Installing WiX failed.' }
 
     $wix = Join-Path $toolDirectory 'wix.exe'
     $output = Join-Path $outputPath $asset

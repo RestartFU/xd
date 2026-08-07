@@ -8,8 +8,8 @@ import kotlin.test.assertFailsWith
 class WavTest {
     @Test
     fun writesTheHeaderTheDaemonValidates() {
-        // src/xd/voice/data.cr checks every one of these fields before it will
-        // read a recording, so they are a contract rather than a detail.
+        // The Rust daemon checks every one of these fields before it will read
+        // a recording, so they are a contract rather than a detail.
         val wav = Wav.fromPcm16(ByteArray(4))
 
         assertEquals("RIFF", wav.ascii(0, 4))

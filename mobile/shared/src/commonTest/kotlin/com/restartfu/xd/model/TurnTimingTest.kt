@@ -6,8 +6,7 @@ import kotlin.test.assertEquals
 class TurnTimingTest {
     @Test
     fun matchesTheDesktopAtEveryBoundary() {
-        // The same cases spec/xd/ui/turn_timing_spec.cr asserts, so the two
-        // clients cannot drift apart on wording.
+        // These boundaries keep the two clients from drifting on wording.
         assertEquals("Working for 0s", TurnTiming.format("Working", 0))
         assertEquals("Worked for 59s", TurnTiming.format("Worked", 59))
         assertEquals("Worked for 1m 00s", TurnTiming.format("Worked", 60))

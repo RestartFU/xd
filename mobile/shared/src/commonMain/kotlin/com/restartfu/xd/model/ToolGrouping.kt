@@ -25,7 +25,7 @@ public sealed interface TranscriptRow {
  * is less information in the same space. A run is where a transcript actually
  * gets buried, so that is what folds away.
  *
- * The same rule is in `Xd::UI::ToolCallGroup` on the desktop.
+ * The same rule is in the desktop transcript renderer.
  */
 public object ToolGrouping {
     public fun rows(items: List<TranscriptItem>): List<TranscriptRow> {

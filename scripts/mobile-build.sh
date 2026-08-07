@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 mkdir -p dist/mobile
-docker buildx build \
+./scripts/runner-docker-build.sh \
   --target apk \
   --output type=local,dest=dist/mobile \
   --file mobile/Dockerfile \

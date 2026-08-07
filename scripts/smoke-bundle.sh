@@ -6,7 +6,7 @@
 set -eu
 
 BUNDLE=${1:?bundle directory}
-BUNDLE=$(CDPATH= cd -- "$BUNDLE" && pwd)
+BUNDLE=$(CDPATH='' cd -- "$BUNDLE" && pwd)
 GIT="$BUNDLE/bin/git"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -34,6 +34,14 @@ require_file \
   share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 require_file \
   share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
+require_file libexec/xd-daemon
+require_file libexec/xd-tls-proxy
+require_file libexec/install.sh
+require_file libexec/curl
+require_file libexec/openssl
+require_file libexec/codex-package/bin/codex
+require_file libexec/claude
+require_file libexec/whisper-server-bin
 
 svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \
   -name 'libpixbufloader*svg*.so' -print -quit)
@@ -56,6 +64,10 @@ env -i \
   XDG_CONFIG_HOME="$WORK/launcher-home/config" \
   "$BUNDLE/xd.sh" --version | grep -E '^xd [0-9]'
 
+"$BUNDLE/lib/ld-linux-x86-64.so.2" \
+  --library-path "$BUNDLE/lib" \
+  "$BUNDLE/libexec/xd-daemon" --version | grep -E '^xd-daemon [0-9]'
+
 git_clean()
 {
   env -i \
@@ -76,6 +88,8 @@ git_clean -C "$WORK/repository" add file.txt
 git_clean -C "$WORK/repository" commit -qm initial
 
 "$BUNDLE/libexec/curl" --version | grep -F 'curl '
+"$BUNDLE/libexec/openssl" dgst -sha256 "$BUNDLE/libexec/install.sh" \
+  | grep -Eq '= [[:xdigit:]]{64}$'
 "$BUNDLE/libexec/claude-code-proxy" --version | grep -F '0.1.30'
 test -f "$BUNDLE/share/licenses/xd/claude-code-proxy-LICENSE"
 printf 'after\n' > "$WORK/repository/file.txt"
