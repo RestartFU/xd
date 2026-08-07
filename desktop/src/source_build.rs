@@ -14,6 +14,9 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const REPOSITORY: &str = "RestartFU/xd";
 const READ_CHUNK_BYTES: usize = 1_024;
 
@@ -44,12 +47,13 @@ struct RunControl {
 enum BuildPlatform {
     Linux,
     Macos,
+    Windows,
 }
 
 impl SourceBuildRun {
     pub fn start(target: SourceTarget) -> Result<Self, String> {
         if !supported() {
-            return Err("Source builds require an installed nightly on Linux or macOS.".into());
+            return Err("Source builds require an installed nightly.".into());
         }
         let checkout = checkout_dir()?;
         // Backpressure keeps a noisy or hostile build from queuing unbounded
@@ -105,6 +109,8 @@ fn build_platform() -> Option<BuildPlatform> {
         any(target_arch = "aarch64", target_arch = "x86_64")
     )) {
         Some(BuildPlatform::Macos)
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some(BuildPlatform::Windows)
     } else {
         None
     }
@@ -238,9 +244,15 @@ fn digits(value: &str) -> bool {
 }
 
 fn checkout_dir() -> Result<PathBuf, String> {
+    #[cfg(unix)]
     let cache = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .ok_or_else(|| "Cannot locate the source-build cache directory.".to_owned())?;
+    #[cfg(windows)]
+    let cache = env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
         .ok_or_else(|| "Cannot locate the source-build cache directory.".to_owned())?;
     let data_name = env::var("XD_DATA_NAME").unwrap_or_else(|_| "xd-nightly".into());
     Ok(cache.join(data_name).join("source"))
@@ -248,24 +260,29 @@ fn checkout_dir() -> Result<PathBuf, String> {
 
 fn installed_nightly_root() -> Option<PathBuf> {
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
-    let home = PathBuf::from(env::var_os("HOME")?);
     let platform = build_platform()?;
-    let root = installed_nightly_root_for_executable(&executable, &home, platform)?;
+    let base = match platform {
+        BuildPlatform::Linux | BuildPlatform::Macos => PathBuf::from(env::var_os("HOME")?),
+        BuildPlatform::Windows => PathBuf::from(env::var_os("ProgramFiles")?),
+    };
+    let root = installed_nightly_root_for_executable(&executable, &base, platform)?;
     let marker = match platform {
         BuildPlatform::Linux => root.join("xd.sh"),
         BuildPlatform::Macos => root.join("Contents/MacOS/xd"),
+        BuildPlatform::Windows => root.join("bin/install.ps1"),
     };
     marker.is_file().then_some(root)
 }
 
 fn installed_nightly_root_for_executable(
     executable: &Path,
-    home: &Path,
+    base: &Path,
     platform: BuildPlatform,
 ) -> Option<PathBuf> {
     let expected = match platform {
-        BuildPlatform::Linux => home.join(".local/opt/xd-nightly"),
-        BuildPlatform::Macos => home.join("Applications/xd-nightly.app"),
+        BuildPlatform::Linux => base.join(".local/opt/xd-nightly"),
+        BuildPlatform::Macos => base.join("Applications/xd-nightly.app"),
+        BuildPlatform::Windows => base.join("RestartFU/xd-nightly"),
     };
     let root = match platform {
         BuildPlatform::Linux => {
@@ -284,6 +301,12 @@ fn installed_nightly_root_for_executable(
             }
             macos.parent()?.parent()?
         }
+        BuildPlatform::Windows => {
+            if executable.file_name()?.to_str()? != "xd.exe" {
+                return None;
+            }
+            executable.parent()?.parent()?
+        }
     };
     (root == expected).then(|| root.to_path_buf())
 }
@@ -297,7 +320,7 @@ fn build_and_install(
     prepare_checkout(checkout)?;
     output(sender, "Fetching source…\n");
     run(
-        Command::new("git")
+        Command::new(git_executable())
             .args([
                 "-C",
                 path_text(checkout)?,
@@ -314,7 +337,7 @@ fn build_and_install(
     )?;
     output(sender, "Checking out source…\n");
     run(
-        Command::new("git").args([
+        Command::new(git_executable()).args([
             "-C",
             path_text(checkout)?,
             "checkout",
@@ -328,7 +351,7 @@ fn build_and_install(
         control,
     )?;
     run(
-        Command::new("git").args(["-C", path_text(checkout)?, "clean", "-qfdx"]),
+        Command::new(git_executable()).args(["-C", path_text(checkout)?, "clean", "-qfdx"]),
         "clean the source checkout",
         sender,
         control,
@@ -348,24 +371,81 @@ fn build_and_install(
             command.env("PROFILE", "nightly");
             command
         }
+        BuildPlatform::Windows => {
+            output(sender, "Building the native Windows nightly payload…\n");
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                "scripts/build-windows.ps1",
+                "-OutputDirectory",
+                "windows-dist",
+                "-Profile",
+                "nightly",
+            ]);
+            command
+        }
     };
     build.current_dir(checkout);
     run(&mut build, "build the source", sender, control)?;
+    if platform == BuildPlatform::Windows {
+        output(sender, "Packaging the Windows nightly installer…\n");
+        let mut package = Command::new("powershell.exe");
+        package.current_dir(checkout).args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            "scripts/package-windows.ps1",
+            "-Payload",
+            "windows-dist",
+            "-OutputDirectory",
+            "artifacts",
+            "-Profile",
+            "nightly",
+            "-Version",
+            "0.1.0",
+        ]);
+        run(&mut package, "package the source build", sender, control)?;
+    }
     output(sender, "Installing the nightly bundle…\n");
-    let mut install = Command::new("sh");
-    install.current_dir(checkout);
-    match platform {
+    let mut install = match platform {
         BuildPlatform::Linux => {
-            install.args(["scripts/install.sh", "--from", "dist"]);
+            let mut command = Command::new("sh");
+            command.current_dir(checkout);
+            command.args(["scripts/install.sh", "--from", "dist"]);
+            command
         }
         BuildPlatform::Macos => {
-            install.args([
+            let mut command = Command::new("sh");
+            command.current_dir(checkout);
+            command.args([
                 "scripts/install-macos.sh",
                 "--from",
                 "dist/macos/xd-nightly.app",
             ]);
+            command
         }
-    }
+        BuildPlatform::Windows => {
+            let mut command = Command::new("powershell.exe");
+            command.current_dir(checkout);
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                "scripts/install.ps1",
+                "-MsiPath",
+                "artifacts/xd-nightly-windows-x86_64.msi",
+                "-ChecksumPath",
+                "artifacts/xd-nightly-windows-x86_64.msi.sha256",
+                "-Quiet",
+            ]);
+            command
+        }
+    };
     install.env("XD_ALLOW_RUNNING_INSTALL", "1");
     run(&mut install, "install the source build", sender, control)
 }
@@ -387,7 +467,7 @@ fn prepare_checkout(checkout: &Path) -> Result<(), String> {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
         Ok(_) => Err("The source-build Git directory is unsafe.".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let status = Command::new("git")
+            let status = Command::new(git_executable())
                 .args(["init", "-q"])
                 .arg(checkout)
                 .stdin(Stdio::null())
@@ -412,6 +492,11 @@ fn run(
 ) -> Result<(), String> {
     if control.cancelled.load(Ordering::Acquire) {
         return Err("Source build stopped.".into());
+    }
+    #[cfg(windows)]
+    {
+        configure_windows_path(command);
+        command.creation_flags(0x0800_0000);
     }
     command
         .stdin(Stdio::null())
@@ -448,6 +533,38 @@ fn run(
         .success()
         .then_some(())
         .ok_or_else(|| format!("Could not {action} ({}).", status_text(status)))
+}
+
+fn git_executable() -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(executable) = env::current_exe()
+        && let Some(root) = executable.parent().and_then(Path::parent)
+    {
+        let bundled = root.join("git/cmd/git.exe");
+        if bundled.is_file() {
+            return bundled;
+        }
+    }
+    PathBuf::from("git")
+}
+
+#[cfg(windows)]
+fn configure_windows_path(command: &mut Command) {
+    let Ok(executable) = env::current_exe() else {
+        return;
+    };
+    let Some(root) = executable.parent().and_then(Path::parent) else {
+        return;
+    };
+    let git = root.join("git/cmd");
+    if !git.join("git.exe").is_file() {
+        return;
+    }
+    let mut paths = vec![git];
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    if let Ok(path) = env::join_paths(paths) {
+        command.env("PATH", path);
+    }
 }
 
 enum OutputReader {
@@ -517,7 +634,13 @@ fn terminate_process_group(pid: u32) {
         .stderr(Stdio::null())
         .status();
     #[cfg(windows)]
-    let _ = pid;
+    let _ = Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(0x0800_0000)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn output(sender: &async_channel::Sender<SourceBuildEvent>, text: &str) {
@@ -588,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_installed_linux_and_macos_nightlies() {
+    fn recognizes_only_installed_nightlies() {
         let linux_home = Path::new("/home/person");
         let linux = Path::new("/home/person/.local/opt/xd-nightly/bin/xd");
         assert_eq!(
@@ -603,6 +726,28 @@ mod tests {
             installed_nightly_root_for_executable(macos, macos_home, BuildPlatform::Macos),
             Some(PathBuf::from("/Users/person/Applications/xd-nightly.app"))
         );
+
+        #[cfg(windows)]
+        {
+            let program_files = Path::new(r"C:\Program Files");
+            let windows = Path::new(r"C:\Program Files\RestartFU\xd-nightly\bin\xd.exe");
+            assert_eq!(
+                installed_nightly_root_for_executable(
+                    windows,
+                    program_files,
+                    BuildPlatform::Windows,
+                ),
+                Some(PathBuf::from(r"C:\Program Files\RestartFU\xd-nightly"))
+            );
+            assert!(
+                installed_nightly_root_for_executable(
+                    Path::new(r"C:\Program Files\RestartFU\xd\bin\xd.exe"),
+                    program_files,
+                    BuildPlatform::Windows,
+                )
+                .is_none()
+            );
+        }
 
         for (executable, home, platform) in [
             (
