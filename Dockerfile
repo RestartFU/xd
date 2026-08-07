@@ -288,6 +288,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev \
       libvulkan1 \
       libvte-2.91-gtk4-dev \
+      mesa-vulkan-drivers \
       libwayland-client0 \
       libx11-data \
       libx11-xcb1 \

@@ -168,6 +168,51 @@ fi
 # XD_SOFTWARE_GL=1 forces both GTK and Mesa software paths for comparison.
 export __EGL_VENDOR_LIBRARY_FILENAMES="$RUNTIME/egl_vendor.json"
 export LIBGL_DRIVERS_PATH="$HERE/lib/dri"
+
+# The window is drawn through Vulkan, and the Vulkan loader finds its driver
+# through JSON manifests rather than by looking for libraries. A machine with
+# none installed has no device to offer and the app dies in GPU init, so the
+# bundle's own Mesa drivers stand in -- lavapipe among them, which needs no
+# GPU at all. Only when the host has nothing: a working host driver, including
+# a proprietary one no bundle could carry, is left to do its job.
+# XD_HOST_VULKAN=1 leaves discovery alone either way, and
+# XD_BUNDLED_VULKAN=1 takes the bundle's drivers even where the host has its
+# own -- which is the answer when a host driver is installed but broken.
+if [ -z "${XD_HOST_VULKAN-}" ] \
+  && [ -z "${VK_DRIVER_FILES-}${VK_ICD_FILENAMES-}" ]; then
+  host_icd=
+  if [ -z "${XD_BUNDLED_VULKAN-}" ]; then
+    for directory in /etc/vulkan/icd.d /usr/local/share/vulkan/icd.d \
+                     /usr/share/vulkan/icd.d; do
+      for manifest in "$directory"/*.json; do
+        [ -e "$manifest" ] || continue
+        host_icd=1
+        break
+      done
+      [ -n "$host_icd" ] && break
+    done
+  fi
+
+  if [ -z "$host_icd" ]; then
+    mkdir -p "$RUNTIME/vulkan"
+    bundled_icd=
+    for template in "$HERE/etc/vulkan"/*.json.in; do
+      [ -e "$template" ] || continue
+      manifest="$RUNTIME/vulkan/$(basename "${template%.in}")"
+      sed "s|@BUNDLE@|$HERE|g" "$template" > "$manifest"
+      if [ -z "$bundled_icd" ]; then
+        bundled_icd="$manifest"
+      else
+        bundled_icd="$bundled_icd:$manifest"
+      fi
+    done
+    if [ -n "$bundled_icd" ]; then
+      # Both names: the loader renamed this variable in 1.3.207.
+      export VK_DRIVER_FILES="$bundled_icd"
+      export VK_ICD_FILENAMES="$bundled_icd"
+    fi
+  fi
+fi
 if [ -n "${XD_SOFTWARE_GL-}" ]; then
   export GSK_RENDERER=cairo
   export XD_RENDER_SAFE_MODE=1

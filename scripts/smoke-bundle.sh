@@ -43,6 +43,12 @@ require_file libexec/codex-package/bin/codex
 require_file libexec/claude
 require_file libexec/whisper-server-bin
 
+# GPUI has no window without a Vulkan driver, and the loader finds one only
+# through these manifests. lavapipe is the one that works anywhere.
+require_file lib/libvulkan.so.1
+require_file lib/libvulkan_lvp.so
+require_file etc/vulkan/libvulkan_lvp.json.in
+
 svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \
   -name 'libpixbufloader*svg*.so' -print -quit)
 test -n "$svg_loader" || {

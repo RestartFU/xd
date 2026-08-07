@@ -143,7 +143,7 @@ cp -a "$ARCH_DIR"/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/" 2>/dev/nul
 for extra in $(ldd /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so \
                  | awk '/=> \//{print $3}'); do
   base=$(basename "$extra")
-  [ -e "$OUT/lib/$base" ] || cp -a "$extra" "$OUT/lib/"
+  [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
 done
 
 # --- software GL ------------------------------------------------------------
@@ -163,8 +163,41 @@ cp -aL "$ARCH_LIB"/dri/*.so "$OUT/lib/dri/" 2>/dev/null || true
 for extra in $(ldd "$ARCH_LIB"/libEGL_mesa.so.0 "$OUT"/lib/dri/*.so 2>/dev/null \
                  | awk '/=> \//{print $3}' | sort -u); do
   base=$(basename "$extra")
-  [ -e "$OUT/lib/$base" ] || cp -a "$extra" "$OUT/lib/"
+  [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
 done
+# --- Vulkan -----------------------------------------------------------------
+# GPUI renders through Vulkan, and unlike GL the loader finds its driver
+# through JSON manifests on the host. A machine with no manifests -- no
+# mesa-vulkan-drivers installed -- gave the app no device at all and it died
+# in the GPU init with nothing a reader could act on. Mesa's drivers are
+# carried here, lavapipe among them, so there is always one that works; the
+# launcher only points at them when the host offers nothing itself.
+# The loader is opened by name at runtime, never linked, so the closure above
+# cannot see it: carry it deliberately rather than by way of whatever else
+# happens to link it.
+cp -aL "$ARCH_LIB"/libvulkan.so.1 "$OUT/lib/"
+
+mkdir -p "$OUT/etc/vulkan"
+for icd in "$ARCH_LIB"/libvulkan_*.so; do
+  [ -e "$icd" ] || continue
+  cp -aL "$icd" "$OUT/lib/"
+  name=$(basename "$icd")
+  cat > "$OUT/etc/vulkan/${name%.so}.json.in" <<JSON
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "@BUNDLE@/lib/$name",
+        "api_version": "1.3.0"
+    }
+}
+JSON
+done
+for extra in $(ldd "$OUT"/lib/libvulkan_*.so 2>/dev/null \
+                 | awk '/=> \//{print $3}' | sort -u); do
+  base=$(basename "$extra")
+  [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
+done
+
 cat > "$OUT/etc/egl_vendor.json.in" <<'JSON'
 {
     "file_format_version" : "1.0.0",
