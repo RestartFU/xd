@@ -56,8 +56,6 @@ jobs:
           path: |
             xd-nightly-linux-x86_64.tar.gz
             xd-nightly-linux-x86_64.tar.gz.sha256
-            scripts/install.sh
-            scripts/install-macos.sh
 
   macos:
     strategy:
@@ -145,13 +143,17 @@ jobs:
             -ChecksumPath artifacts/xd-nightly-windows-x86_64.msi.sha256 `
             -Quiet
 
+          # Only what this job built. An artifact is rooted at the deepest
+          # directory shared by everything in it, so listing a payload under
+          # `artifacts/` beside a file under `scripts/` roots it at the
+          # checkout and the payload arrives still nested. The installer
+          # scripts come from publish's own checkout instead.
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
             artifacts/xd-nightly-windows-x86_64.msi
             artifacts/xd-nightly-windows-x86_64.msi.sha256
-            scripts/install.ps1
 
   android:
     runs-on: [self-hosted, linux, x64, xd]

@@ -187,8 +187,6 @@ jobs:
           path: |
             xd-linux-x86_64.tar.gz
             xd-linux-x86_64.tar.gz.sha256
-            scripts/install.sh
-            scripts/install-macos.sh
 
   macos:
     needs: prepare
@@ -282,13 +280,17 @@ jobs:
             -ChecksumPath artifacts/xd-windows-x86_64.msi.sha256 `
             -Quiet
 
+          # Only what this job built. An artifact is rooted at the deepest
+          # directory shared by everything in it, so listing a payload under
+          # `artifacts/` beside a file under `scripts/` roots it at the
+          # checkout and the payload arrives still nested. The installer
+          # scripts come from publish's own checkout instead.
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
             artifacts/xd-windows-x86_64.msi
             artifacts/xd-windows-x86_64.msi.sha256
-            scripts/install.ps1
 
   publish:
     needs: [prepare, linux, macos, windows]
