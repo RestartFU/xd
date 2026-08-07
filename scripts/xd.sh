@@ -128,6 +128,10 @@ export XD_CODEX_EXECUTABLE="$HERE/libexec/codex-package/bin/codex"
 export XD_CLAUDE_EXECUTABLE="$HERE/libexec/claude"
 export XD_CLAUDE_PROXY_EXECUTABLE="$HERE/libexec/claude-code-proxy"
 export XD_WHISPER_SERVER="$HERE/libexec/whisper-server-bin"
+# The in-app updater must remain self-contained too. Its installer honors
+# these paths instead of selecting unrelated host network or crypto tools.
+export XD_CURL="$HERE/libexec/curl"
+export XD_OPENSSL="$HERE/libexec/openssl"
 
 # The keyfile backend keeps settings in $XDG_CONFIG_HOME/glib-2.0/settings and
 # is built into GIO, so the bundle needs no dconf module or D-Bus round trip.
