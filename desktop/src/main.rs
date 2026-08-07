@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     process::{Command, Stdio},
     thread,
@@ -17813,7 +17813,39 @@ fn notify_turn_finished(title: &str) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn notify_turn_finished(title: &str) {
+    let body = format!(
+        "{} finished",
+        title
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(120)
+            .collect::<String>()
+    );
+    if let Ok(mut child) = Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 1 of argv) with title \"xd\"",
+            "-e",
+            "end run",
+            "--",
+            &body,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn notify_turn_finished(_: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
