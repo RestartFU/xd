@@ -328,6 +328,7 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::{fs, thread};
     use xd_daemon::local_socket::UnixListener;
 
@@ -407,15 +408,29 @@ mod tests {
         assert!(arguments(["serve".into()]).is_err());
     }
 
-    #[test]
-    fn refuses_a_live_socket_before_opening_state() {
+    /// A scratch directory whose name is short enough that a socket inside it
+    /// still fits.
+    ///
+    /// `sun_path` is 104 bytes on macOS, and a temp directory there is already
+    /// half of that: `/var/folders/` plus two hashed components. A name built
+    /// from the test's own thread name spends the rest of the budget and the
+    /// bind fails with `SUN_LEN`, which says nothing about what was too long.
+    fn scratch(tag: &str) -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+
         let directory = env::temp_dir().join(format!(
-            "xd-rust-cli-live-check-{}-{}",
+            "xd-{tag}-{}-{}",
             std::process::id(),
-            thread::current().name().unwrap_or("test")
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn refuses_a_live_socket_before_opening_state() {
+        let directory = scratch("cli-live");
         let socket = directory.join("daemon.sock");
         let listener = UnixListener::bind(&socket).unwrap();
 
@@ -429,9 +444,7 @@ mod tests {
 
     #[test]
     fn pairing_attaches_to_an_already_running_daemon() {
-        let directory = env::temp_dir().join(format!("xd-rust-cli-pair-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+        let directory = scratch("cli-pair");
         let socket = directory.join("daemon.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
