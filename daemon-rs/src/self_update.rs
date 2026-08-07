@@ -347,16 +347,44 @@ fn run_installer(installer: &Path, channel: UpdateChannel) -> Result<(), String>
 
 fn install_location() -> Option<InstallLocation> {
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
-    let root = executable.parent()?.parent()?;
-    if !matches!(root.file_name()?.to_str()?, "xd" | "xd-nightly") {
-        return None;
-    }
-    let installer = root.join("libexec/install.sh");
-    let daemon = root.join("libexec/xd-daemon");
+    let home = PathBuf::from(env::var_os("HOME")?);
+    let location = install_location_for_executable(&executable, &home)?;
+    let installer = location.installer;
+    let daemon = location.daemon;
     if !executable_file(&installer) || !executable_file(&daemon) {
         return None;
     }
     Some(InstallLocation { installer, daemon })
+}
+
+fn install_location_for_executable(executable: &Path, home: &Path) -> Option<InstallLocation> {
+    if executable.file_name()?.to_str()? != "xd-daemon" {
+        return None;
+    }
+    let libexec = executable.parent()?;
+    if libexec.file_name()?.to_str()? != "libexec" {
+        return None;
+    }
+    let parent = libexec.parent()?;
+    let linux_parent = home.join(".local/opt");
+    let linux_layout = matches!(parent.file_name()?.to_str()?, "xd" | "xd-nightly")
+        && parent.parent() == Some(linux_parent.as_path());
+    let applications = home.join("Applications");
+    let macos_layout = parent.file_name()?.to_str()? == "Resources"
+        && parent.parent()?.file_name()?.to_str()? == "Contents"
+        && matches!(
+            parent.parent()?.parent()?.file_name()?.to_str()?,
+            "xd.app" | "xd-nightly.app"
+        )
+        && parent.parent()?.parent()?.parent() == Some(applications.as_path());
+    let recognized = linux_layout || macos_layout;
+    if !recognized {
+        return None;
+    }
+    Some(InstallLocation {
+        installer: libexec.join("install.sh"),
+        daemon: libexec.join("xd-daemon"),
+    })
 }
 
 fn executable_file(path: &Path) -> bool {
@@ -423,5 +451,40 @@ mod tests {
         assert_eq!(updater.snapshot()["supported"], false);
         assert!(updater.perform(Some("install")).is_err());
         assert!(updater.perform(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn recognizes_linux_and_macos_release_layouts_only() {
+        for executable in [
+            "/home/person/.local/opt/xd/libexec/xd-daemon",
+            "/home/person/.local/opt/xd-nightly/libexec/xd-daemon",
+            "/Users/person/Applications/xd.app/Contents/Resources/libexec/xd-daemon",
+            "/Users/person/Applications/xd-nightly.app/Contents/Resources/libexec/xd-daemon",
+        ] {
+            let home = if executable.starts_with("/Users/") {
+                Path::new("/Users/person")
+            } else {
+                Path::new("/home/person")
+            };
+            let location = install_location_for_executable(Path::new(executable), home).unwrap();
+            assert_eq!(location.daemon, Path::new(executable));
+            assert_eq!(
+                location.installer,
+                Path::new(executable).parent().unwrap().join("install.sh")
+            );
+        }
+
+        for executable in [
+            "/tmp/xd-daemon",
+            "/tmp/xd/libexec/not-the-daemon",
+            "/tmp/source/xd/libexec/xd-daemon",
+            "/Users/person/Applications/other.app/Contents/Resources/libexec/xd-daemon",
+            "/Users/person/Applications/xd.app/Contents/MacOS/xd-daemon",
+        ] {
+            assert!(
+                install_location_for_executable(Path::new(executable), Path::new("/tmp/home"))
+                    .is_none()
+            );
+        }
     }
 }

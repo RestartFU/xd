@@ -12,6 +12,7 @@ APP="${1:?macOS app bundle}"
 [ -x "$APP/Contents/MacOS/xd-desktop" ]
 [ -x "$APP/Contents/Resources/libexec/xd-daemon" ]
 [ -x "$APP/Contents/Resources/libexec/xd-tls-proxy" ]
+[ -x "$APP/Contents/Resources/libexec/install.sh" ]
 [ -x "$APP/Contents/Resources/libexec/codex-package/bin/codex" ]
 [ -x "$APP/Contents/Resources/libexec/claude" ]
 [ -x "$APP/Contents/Resources/libexec/claude-code-proxy" ]

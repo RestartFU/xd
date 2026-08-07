@@ -159,6 +159,8 @@ install -m0755 daemon-rs/target/release/xd-daemon \
   "$APP/Contents/Resources/libexec/xd-daemon"
 install -m0755 tls-proxy-rs/target/release/xd-tls-proxy \
   "$APP/Contents/Resources/libexec/xd-tls-proxy"
+install -m0755 scripts/install-macos.sh \
+  "$APP/Contents/Resources/libexec/install.sh"
 install -m0755 "$CLAUDE_BINARY" \
   "$APP/Contents/Resources/libexec/claude"
 tar -xzf "$CODEX_ARCHIVE" \
