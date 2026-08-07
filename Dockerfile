@@ -299,7 +299,7 @@ RUN set -eux; \
     else \
       app_id=com.restartfu.Xd; \
       app_name=xd; \
-      settings_path=/com/restartfu/Hy/; \
+      settings_path=/com/restartfu/Xd/; \
     fi; \
     install -d \
       /stage/usr/share/applications \
