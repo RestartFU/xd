@@ -73,9 +73,7 @@ for command in cargo cmake codesign curl iconutil rsvg-convert shasum sips tar; 
   }
 done
 
-VERSION=$(sed -nE \
-  '0,/^[[:space:]]*version = "([0-9]+\.[0-9]+\.[0-9]+)"/{s//\1/p}' \
-  "$ROOT/desktop/Cargo.toml")
+VERSION=$("$ROOT/scripts/bump-version.sh" --current)
 COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
 OUT="$ROOT/dist/macos"
 CACHE="$ROOT/desktop/target/macos-assets/$ARCH"
