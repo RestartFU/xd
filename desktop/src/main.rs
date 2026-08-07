@@ -12,11 +12,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::{
     process::{Command, Stdio},
     thread,
 };
+
+#[cfg(target_os = "windows")]
+use std::{io::Write, os::windows::process::CommandExt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
@@ -17847,7 +17850,102 @@ fn notify_turn_finished(title: &str) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn notify_turn_finished(title: &str) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    static CURRENT: OnceLock<Arc<Mutex<Option<std::process::Child>>>> = OnceLock::new();
+    const NOTIFY_SCRIPT: &str = r#"
+$text = [Console]::In.ReadToEnd()
+if ($text.Length -eq 0) { exit 0 }
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$icon = New-Object System.Windows.Forms.NotifyIcon
+$icon.Icon = [System.Drawing.SystemIcons]::Information
+$icon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+$icon.BalloonTipTitle = 'xd'
+$icon.BalloonTipText = $text
+$icon.Visible = $true
+try {
+    $icon.ShowBalloonTip(8000)
+    Start-Sleep -Seconds 9
+} finally {
+    $icon.Dispose()
+}
+"#;
+    let body = format!(
+        "{} finished",
+        title
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(120)
+            .collect::<String>()
+    );
+    let current = CURRENT.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    if let Ok(mut active) = current.lock()
+        && let Some(mut child) = active.take()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let Ok(mut child) = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            NOTIFY_SCRIPT,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let wrote_text = child
+        .stdin
+        .take()
+        .is_some_and(|mut input| input.write_all(body.as_bytes()).is_ok());
+    if !wrote_text {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+    let id = child.id();
+    let Ok(mut active) = current.lock() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+    *active = Some(child);
+    drop(active);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(50));
+            let Ok(mut child) = current.lock() else {
+                return;
+            };
+            let Some(active) = child.as_mut() else {
+                return;
+            };
+            if active.id() != id {
+                return;
+            }
+            match active.try_wait() {
+                Ok(Some(_)) | Err(_) => {
+                    child.take();
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn notify_turn_finished(_: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
