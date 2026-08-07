@@ -26,7 +26,6 @@ const REPLAY_ITEM_LIMIT: usize = 65_536;
 const INPUT_LIMIT: usize = 1024 * 1024;
 const READ_SIZE: usize = 8_192;
 const LIMIT_NOTICE: &[u8] = b"\r\n[xd: terminal closed after exceeding its replay limit]\r\n";
-const TIOCSWINSZ: usize = 0x5414;
 const SIGHUP: c_int = 1;
 const SIGKILL: c_int = 9;
 const WNOHANG: c_int = 1;
@@ -192,7 +191,7 @@ impl TerminalManager {
             y_pixels: 0,
         };
         // SAFETY: file owns a live PTY master and size points to initialized memory.
-        if unsafe { ioctl(file.as_raw_fd(), TIOCSWINSZ, &size) } != 0 {
+        if unsafe { ioctl(file.as_raw_fd(), libc::TIOCSWINSZ as usize, &size) } != 0 {
             return Err(format!(
                 "Cannot resize terminal: {}.",
                 std::io::Error::last_os_error()

@@ -43,7 +43,33 @@ mod settings;
 mod source_build;
 mod speech;
 mod terminal;
+#[cfg(target_os = "linux")]
 mod voice_input;
+
+#[cfg(not(target_os = "linux"))]
+mod voice_input {
+    use async_channel::Receiver;
+
+    pub const AVAILABLE: bool = false;
+
+    pub enum CaptureEvent {
+        Chunk(Vec<u8>),
+        Finished(Vec<u8>),
+        Failed(String),
+    }
+
+    pub struct VoiceRecorder;
+
+    impl VoiceRecorder {
+        pub fn start() -> Result<(Self, Receiver<CaptureEvent>), String> {
+            Err("Microphone capture is not available on this platform.".into())
+        }
+
+        pub fn stop(&self) {}
+
+        pub fn cancel(&self) {}
+    }
+}
 
 use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
@@ -11806,7 +11832,10 @@ impl Render for XdDesktop {
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
-        let can_voice = self.model.selected_chat.is_some() && self.model.connected && !self.sending;
+        let can_voice = voice_input::AVAILABLE
+            && self.model.selected_chat.is_some()
+            && self.model.connected
+            && !self.sending;
         let (voice_label, voice_active, voice_error) = match &self.voice_input.state {
             VoiceState::Idle => ("● Voice".to_owned(), false, None),
             VoiceState::Checking => ("Checking…".to_owned(), true, None),
@@ -12515,27 +12544,29 @@ impl Render for XdDesktop {
                             }))
                             .child("+ Attach"),
                     )
-                    .child(
-                        div()
-                            .id("voice-input")
-                            .px_2()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(if voice_active { 0x26354d } else { SURFACE }))
-                            .text_sm()
-                            .text_color(rgb(if can_voice { TEXT } else { MUTED }))
-                            .when(can_voice, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_voice {
-                                    this.toggle_voice(cx);
-                                }
-                            }))
-                            .child(voice_label),
-                    )
+                    .when(voice_input::AVAILABLE, |composer| {
+                        composer.child(
+                            div()
+                                .id("voice-input")
+                                .px_2()
+                                .py_2()
+                                .rounded_lg()
+                                .bg(rgb(if voice_active { 0x26354d } else { SURFACE }))
+                                .text_sm()
+                                .text_color(rgb(if can_voice { TEXT } else { MUTED }))
+                                .when(can_voice, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if can_voice {
+                                        this.toggle_voice(cx);
+                                    }
+                                }))
+                                .child(voice_label),
+                        )
+                    })
                     .child(
                         div()
                             .id("message-editor-scroll")

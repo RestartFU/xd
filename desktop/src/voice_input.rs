@@ -9,6 +9,8 @@ use std::{
 
 use async_channel::{Receiver, Sender};
 
+pub const AVAILABLE: bool = true;
+
 const SAMPLE_RATE: u32 = 16_000;
 const MAX_PCM_BYTES: usize = 64 * 1024 * 1024;
 const CAPTURE_FRAMES: usize = 2_048;
