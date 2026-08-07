@@ -15,6 +15,9 @@ rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "
 rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "=0.10.9"
 
+[target.'cfg(windows)'.dependencies]
+uds_windows = "=1.2.1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

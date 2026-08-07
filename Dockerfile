@@ -125,6 +125,16 @@ RUN cargo fmt --check \
  && cargo test \
  && touch /rust-tls-proxy-tests-passed
 
+FROM rust-tls-proxy-source AS rust-tls-proxy-windows-check
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup target add x86_64-pc-windows-gnu
+
+RUN cargo check --target x86_64-pc-windows-gnu \
+ && touch /rust-tls-proxy-windows-check-passed
+
 FROM rust-tls-proxy-source AS rust-tls-proxy-release
 
 RUN cargo build --release \
@@ -232,6 +242,7 @@ COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passe
 COPY --from=rust-daemon-windows-check /rust-daemon-windows-check-passed /rust-daemon-windows-check-passed
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 COPY --from=rust-tls-proxy-tests /rust-tls-proxy-tests-passed /rust-tls-proxy-tests-passed
+COPY --from=rust-tls-proxy-windows-check /rust-tls-proxy-windows-check-passed /rust-tls-proxy-windows-check-passed
 COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /xd-tls-proxy
 COPY --from=agent-binaries /agents/codex-package /codex-package
 COPY --from=agent-binaries /agents/claude-bin /claude

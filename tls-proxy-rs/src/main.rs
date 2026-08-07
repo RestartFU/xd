@@ -2,10 +2,6 @@ use std::{
     env, fs,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    os::unix::{
-        fs::{OpenOptionsExt, PermissionsExt},
-        net::UnixStream,
-    },
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{
@@ -16,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use crate::{local_socket::UnixStream, private_fs::*};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::{
@@ -26,6 +23,8 @@ use rustls::{
 };
 
 mod client;
+mod local_socket;
+mod private_fs;
 
 const IO_TIMEOUT: Duration = Duration::from_millis(50);
 const COPY_BUFFER: usize = 64 * 1024;
@@ -176,9 +175,9 @@ fn ensure_identity(certificate_path: &Path, private_key_path: &Path) -> Result<I
         read_regular(private_key_path),
     ) {
         (Ok(Some(certificate)), Ok(Some(private_key))) => {
-            fs::set_permissions(private_key_path, fs::Permissions::from_mode(0o600)).map_err(
-                |error| format!("cannot secure {}: {error}", private_key_path.display()),
-            )?;
+            secure_file(private_key_path, 0o600).map_err(|error| {
+                format!("cannot secure {}: {error}", private_key_path.display())
+            })?;
             return parse_identity(&certificate, &private_key);
         }
         (Err(error), _) | (_, Err(error)) => return Err(error),
@@ -302,7 +301,7 @@ fn write_private_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), S
         .ok_or_else(|| format!("{} must have a parent directory", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+    secure_directory(parent)
         .map_err(|error| format!("cannot secure {}: {error}", parent.display()))?;
 
     let temporary = parent.join(format!(
@@ -311,18 +310,14 @@ fn write_private_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), S
         TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temporary)
+        let mut file = create_private_file(&temporary, mode)
             .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
         file.write_all(contents)
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
         fs::rename(&temporary, path)
             .map_err(|error| format!("cannot install {}: {error}", path.display()))?;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        secure_file(path, mode)
             .map_err(|error| format!("cannot secure {}: {error}", path.display()))
     })();
     if result.is_err() {
@@ -380,6 +375,7 @@ mod tests {
     use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
     use std::{
         net::IpAddr,
+        os::unix::fs::PermissionsExt,
         sync::atomic::{AtomicU64, Ordering},
     };
 

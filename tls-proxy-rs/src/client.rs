@@ -2,16 +2,13 @@ use std::{
     fmt, fs,
     io::{self, Read, Write},
     net::{TcpStream, ToSocketAddrs},
-    os::unix::{
-        fs::{FileTypeExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
     path::{Path, PathBuf},
     sync::Arc,
     thread,
     time::Duration,
 };
 
+use crate::local_socket::{UnixListener, UnixStream, existing_socket, make_private};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, Error as TlsError, SignatureScheme,
@@ -261,7 +258,7 @@ fn bind_private_socket(path: &Path) -> Result<UnixListener, String> {
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
+        Ok(metadata) if existing_socket(path, &metadata) => {
             if UnixStream::connect(path).is_ok() {
                 return Err(format!(
                     "a remote bridge is already listening on {}",
@@ -282,8 +279,7 @@ fn bind_private_socket(path: &Path) -> Result<UnixListener, String> {
     }
     let listener = UnixListener::bind(path)
         .map_err(|error| format!("cannot bind {}: {error}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("cannot secure {}: {error}", path.display()))?;
+    make_private(path).map_err(|error| format!("cannot secure {}: {error}", path.display()))?;
     Ok(listener)
 }
 
