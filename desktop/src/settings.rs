@@ -160,6 +160,7 @@ fn settings_path() -> PathBuf {
     if let Some(path) = env::var_os("XD_SETTINGS_PATH").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }
+    #[cfg(unix)]
     let config_home = env::var_os("XDG_CONFIG_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
@@ -169,7 +170,15 @@ fn settings_path() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(".config"))
         })
         .unwrap_or_else(|| PathBuf::from(".config"));
-    config_home.join("xd/settings.json")
+    #[cfg(windows)]
+    let config_home = env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let data_name = env::var_os("XD_DATA_NAME")
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "xd".into());
+    config_home.join(data_name).join("settings.json")
 }
 
 fn load_from(path: &Path) -> Result<AppSettings, String> {

@@ -1,7 +1,6 @@
 use std::{
     env,
     io::{BufRead, BufReader, ErrorKind, Read, Write},
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -13,7 +12,7 @@ use serde_json::{Value, json};
 mod remote_proxy;
 
 use remote_proxy::RemoteProxy;
-use xd_daemon::{Engine, LocalServer, StateStore, remote_socket_path};
+use xd_daemon::{Engine, LocalServer, StateStore, local_socket::UnixStream, remote_socket_path};
 
 struct Options {
     socket: PathBuf,
@@ -329,7 +328,8 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::net::UnixListener, thread};
+    use std::{fs, thread};
+    use xd_daemon::local_socket::UnixListener;
 
     #[test]
     fn parses_the_compatible_serve_command() {

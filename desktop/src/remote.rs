@@ -1,10 +1,6 @@
 use std::{
     env, fmt, fs,
     io::{self, Read, Write},
-    os::unix::{
-        fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt},
-        process::ExitStatusExt,
-    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -21,6 +17,10 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::daemon::{DaemonHandle, DaemonUpdate, RequestKind};
+use crate::private_fs::{
+    create_private_directory, create_private_file, secure_directory, secure_file,
+    socket_is_private, socket_path_exists,
+};
 
 const CREDENTIALS_VERSION: u32 = 1;
 const STARTUP_LIMIT: usize = 4 * 1024;
@@ -131,9 +131,19 @@ impl CredentialsFile {
         {
             return Ok(PathBuf::from(path));
         }
+        #[cfg(unix)]
         let data_home = env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .ok_or_else(|| {
+                RemoteError::Credentials(
+                    "Cannot locate the data directory for remote credentials.".into(),
+                )
+            })?;
+        #[cfg(windows)]
+        let data_home = env::var_os("LOCALAPPDATA")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
             .ok_or_else(|| {
                 RemoteError::Credentials(
                     "Cannot locate the data directory for remote credentials.".into(),
@@ -175,8 +185,7 @@ impl CredentialsFile {
         credentials
             .validate()
             .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
+        secure_file(&self.path).map_err(|error| RemoteError::ReadCredentials(error.to_string()))?;
         Ok(Some(credentials))
     }
 
@@ -189,7 +198,7 @@ impl CredentialsFile {
         })?;
         fs::create_dir_all(parent)
             .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        secure_directory(parent)
             .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
         let temporary = parent.join(format!(
             ".xd-remote-{}-{}.tmp",
@@ -200,19 +209,14 @@ impl CredentialsFile {
             let mut bytes = serde_json::to_vec_pretty(credentials)
                 .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
             bytes.push(b'\n');
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)
+            let mut file = create_private_file(&temporary)
                 .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
             file.write_all(&bytes)
                 .and_then(|()| file.sync_all())
                 .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
             fs::rename(&temporary, &self.path)
                 .map_err(|error| RemoteError::SaveCredentials(error.to_string()))?;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| RemoteError::SaveCredentials(error.to_string()))
+            secure_file(&self.path).map_err(|error| RemoteError::SaveCredentials(error.to_string()))
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -472,8 +476,7 @@ impl Drop for RemoteBridge {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if fs::symlink_metadata(&self.socket).is_ok_and(|metadata| metadata.file_type().is_socket())
-        {
+        if socket_path_exists(&self.socket) {
             let _ = fs::remove_file(&self.socket);
         }
         let _ = fs::remove_dir(&self.directory);
@@ -562,8 +565,8 @@ fn launch_helper(
             return Err(format!("cannot inspect the TLS bridge: {error}"));
         }
     }
-    let metadata = match fs::symlink_metadata(socket) {
-        Ok(metadata) => metadata,
+    match fs::symlink_metadata(socket) {
+        Ok(_) => {}
         Err(error) => {
             stop_child(&mut child);
             return Err(with_stderr(
@@ -571,8 +574,8 @@ fn launch_helper(
                 &errors,
             ));
         }
-    };
-    if !metadata.file_type().is_socket() || metadata.permissions().mode() & 0o077 != 0 {
+    }
+    if !socket_is_private(socket) {
         stop_child(&mut child);
         return Err("TLS bridge did not create a private Unix socket".into());
     }
@@ -648,11 +651,17 @@ fn stop_child(child: &mut Child) {
 }
 
 fn status_text(status: std::process::ExitStatus) -> String {
-    status
-        .code()
-        .map(|code| code.to_string())
-        .or_else(|| status.signal().map(|signal| format!("signal {signal}")))
-        .unwrap_or_else(|| "an unknown status".into())
+    if let Some(code) = status.code() {
+        return code.to_string();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("signal {signal}");
+        }
+    }
+    "an unknown status".into()
 }
 
 fn helper_candidates() -> Vec<PathBuf> {
@@ -663,12 +672,20 @@ fn helper_candidates() -> Vec<PathBuf> {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        let sibling = parent.join("xd-tls-proxy");
+        let sibling = parent.join(if cfg!(windows) {
+            "xd-tls-proxy.exe"
+        } else {
+            "xd-tls-proxy"
+        });
         if sibling.is_file() {
             candidates.push(sibling);
         }
     }
-    candidates.push(PathBuf::from("xd-tls-proxy"));
+    candidates.push(PathBuf::from(if cfg!(windows) {
+        "xd-tls-proxy.exe"
+    } else {
+        "xd-tls-proxy"
+    }));
     candidates
 }
 
@@ -680,15 +697,14 @@ fn private_bridge_directory() -> Result<PathBuf, RemoteError> {
         .unwrap_or_else(env::temp_dir)
         .join("xd");
     fs::create_dir_all(&parent).map_err(|error| RemoteError::Bridge(error.to_string()))?;
-    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
-        .map_err(|error| RemoteError::Bridge(error.to_string()))?;
+    secure_directory(&parent).map_err(|error| RemoteError::Bridge(error.to_string()))?;
     for _ in 0..32 {
         let directory = parent.join(format!(
             "remote-{}-{}",
             std::process::id(),
             TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed)
         ));
-        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        match create_private_directory(&directory) {
             Ok(()) => return Ok(directory),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(RemoteError::Bridge(error.to_string())),

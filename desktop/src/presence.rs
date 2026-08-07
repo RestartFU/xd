@@ -1,24 +1,37 @@
 use std::{
-    env,
-    io::{Read, Write},
     sync::{Arc, Condvar, Mutex},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
-#[cfg(unix)]
-use std::{os::unix::net::UnixStream, path::PathBuf};
+#[cfg(any(unix, test))]
+use std::io::{Read, Write};
 
+#[cfg(unix)]
+use std::{
+    env,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(any(unix, test))]
 use serde_json::json;
 
+#[cfg(any(unix, test))]
 const APPLICATION_ID: &str = "1531361363522490489";
 const DEFAULT_STATE: &str = "Browsing workspaces";
+#[cfg(any(unix, test))]
 const DETAILS: &str = "Building with AI";
+#[cfg(any(unix, test))]
 const MAX_FRAME: usize = 1024 * 1024;
+#[cfg(any(unix, test))]
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(any(unix, test))]
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+#[cfg(any(unix, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 enum Opcode {
@@ -29,6 +42,7 @@ enum Opcode {
     Pong = 4,
 }
 
+#[cfg(any(unix, test))]
 impl Opcode {
     fn from_raw(value: u32) -> Option<Self> {
         Some(match value {
@@ -103,6 +117,7 @@ impl Drop for DiscordPresence {
     }
 }
 
+#[cfg(any(unix, test))]
 fn activity(state: &str, started_at: u64, process_id: u32, nonce: u64) -> String {
     json!({
         "cmd": "SET_ACTIVITY",
@@ -119,10 +134,12 @@ fn activity(state: &str, started_at: u64, process_id: u32, nonce: u64) -> String
     .to_string()
 }
 
+#[cfg(any(unix, test))]
 fn handshake() -> String {
     json!({"v": 1, "client_id": APPLICATION_ID}).to_string()
 }
 
+#[cfg(any(unix, test))]
 fn clear_activity(process_id: u32, nonce: u64) -> String {
     json!({
         "cmd": "SET_ACTIVITY",
@@ -241,6 +258,7 @@ fn connect() -> Option<UnixStream> {
     None
 }
 
+#[cfg(any(unix, test))]
 fn send_frame(connection: &mut impl Write, opcode: Opcode, payload: &str) -> bool {
     let Ok(length) = u32::try_from(payload.len()) else {
         return false;
@@ -254,6 +272,7 @@ fn send_frame(connection: &mut impl Write, opcode: Opcode, payload: &str) -> boo
         && connection.flush().is_ok()
 }
 
+#[cfg(any(unix, test))]
 fn read_frame(connection: &mut impl Read) -> Option<(Opcode, String)> {
     let mut header = [0_u8; 8];
     connection.read_exact(&mut header).ok()?;
@@ -267,6 +286,7 @@ fn read_frame(connection: &mut impl Read) -> Option<(Opcode, String)> {
     Some((opcode, String::from_utf8(payload).ok()?))
 }
 
+#[cfg(any(unix, test))]
 fn read_reply(connection: &mut (impl Read + Write)) -> bool {
     for _ in 0..8 {
         let Some((opcode, payload)) = read_frame(connection) else {

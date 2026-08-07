@@ -1,8 +1,7 @@
 use std::{
     collections::HashMap,
-    env, fs,
+    env,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex, mpsc},
@@ -15,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use crate::local_socket::{UnixStream, path_is_socket};
 use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
@@ -1433,10 +1433,7 @@ fn disconnect(updates: &Sender<DaemonUpdate>, message: String) {
 }
 
 fn is_socket(path: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    fs::metadata(path)
-        .map(|metadata| metadata.file_type().is_socket())
-        .unwrap_or(false)
+    path_is_socket(path)
 }
 
 pub fn socket_candidates() -> Vec<PathBuf> {
@@ -1444,6 +1441,7 @@ pub fn socket_candidates() -> Vec<PathBuf> {
         return vec![PathBuf::from(path)];
     }
 
+    #[cfg(unix)]
     let data_home = env::var_os("XDG_DATA_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
@@ -1453,6 +1451,11 @@ pub fn socket_candidates() -> Vec<PathBuf> {
                 .map(|home| PathBuf::from(home).join(".local/share"))
         })
         .unwrap_or_else(|| PathBuf::from(".local/share"));
+    #[cfg(windows)]
+    let data_home = env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     socket_candidates_for(
         data_home,
@@ -1494,19 +1497,28 @@ fn launcher_candidates() -> Vec<PathBuf> {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        let sibling = parent.join("xd-daemon");
+        let sibling = parent.join(if cfg!(windows) {
+            "xd-daemon.exe"
+        } else {
+            "xd-daemon"
+        });
         if sibling.is_file() {
             candidates.push(sibling);
         }
     }
-    candidates.push(PathBuf::from("xd-daemon"));
+    candidates.push(PathBuf::from(if cfg!(windows) {
+        "xd-daemon.exe"
+    } else {
+        "xd-daemon"
+    }));
     candidates
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use crate::local_socket::UnixListener;
+    use std::fs;
 
     #[test]
     fn correlates_replies_and_continues_delivering_events() {

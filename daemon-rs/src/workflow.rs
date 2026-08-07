@@ -647,9 +647,10 @@ fn terminal(status: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_socket::UnixStream;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::{os::unix::net::UnixStream, sync::mpsc::sync_channel};
+    use std::sync::mpsc::sync_channel;
 
     #[test]
     fn marker_parser_accepts_only_the_captured_github_run() {

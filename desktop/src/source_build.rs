@@ -1,7 +1,6 @@
 use std::{
     env, fs,
     io::Read,
-    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -11,6 +10,9 @@ use std::{
     thread,
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 const REPOSITORY: &str = "RestartFU/xd";
 const READ_CHUNK_BYTES: usize = 1_024;
@@ -414,8 +416,9 @@ fn run(
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|error| format!("Cannot {action}: {error}"))?;
@@ -506,12 +509,15 @@ fn wait_for_child(control: &Arc<RunControl>) -> Result<ExitStatus, String> {
 }
 
 fn terminate_process_group(pid: u32) {
+    #[cfg(unix)]
     let _ = Command::new("kill")
         .args(["-KILL", &format!("-{pid}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    #[cfg(windows)]
+    let _ = pid;
 }
 
 fn output(sender: &async_channel::Sender<SourceBuildEvent>, text: &str) {

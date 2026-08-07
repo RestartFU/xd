@@ -2,10 +2,6 @@ use std::{
     collections::HashMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::{
-        fs::{FileTypeExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -24,12 +20,18 @@ mod auth;
 mod claude_proxy;
 mod cli_versions;
 mod git_draft;
+pub mod local_socket;
 mod pairing;
+mod private_fs;
 mod repository_monitor;
 mod runtime;
 mod secrets;
 mod self_update;
 mod storage;
+#[cfg(unix)]
+mod terminal;
+#[cfg(windows)]
+#[path = "terminal_windows.rs"]
 mod terminal;
 mod voice;
 mod workflow;
@@ -38,6 +40,7 @@ mod worktree_name;
 use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
+use local_socket::{UnixListener, UnixStream, make_private, path_is_socket};
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
 pub use runtime::TurnRuntime;
@@ -1063,7 +1066,7 @@ fn bind_daemon_socket(path: &Path) -> Result<UnixListener, ServerError> {
         })?;
     }
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
+        Ok(_) if path_is_socket(path) => {
             if UnixStream::connect(path).is_ok() {
                 return Err(ServerError::AlreadyRunning(path.to_owned()));
             }
@@ -1085,7 +1088,7 @@ fn bind_daemon_socket(path: &Path) -> Result<UnixListener, ServerError> {
         path: path.to_owned(),
         source,
     })?;
-    if let Err(source) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+    if let Err(source) = make_private(path) {
         drop(listener);
         let _ = fs::remove_file(path);
         return Err(ServerError::Bind {
@@ -1295,10 +1298,11 @@ fn hidden_git_state() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         env,
         io::{BufRead, BufReader},
-        os::unix::net::UnixStream,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -1601,14 +1605,17 @@ mod tests {
         assert!(path.exists());
         let remote = server.remote_socket_path().to_owned();
         assert!(remote.exists());
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(
-            fs::metadata(&remote).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&remote).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         drop(server);
         assert!(!path.exists());
         assert!(!remote.exists());

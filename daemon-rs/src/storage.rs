@@ -3,7 +3,6 @@ use std::{
     env,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
@@ -16,6 +15,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::private_fs::{create_private_file, secure_directory};
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
@@ -667,6 +668,7 @@ impl StateStore {
             .filter(|path| !path.is_empty())
             .map(PathBuf::from)
             .or_else(|| env::var_os("HOME").map(PathBuf::from))
+            .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
             .ok_or_else(|| {
                 StorageError::InvalidRequest("The daemon home directory is unavailable.".into())
             })?;
@@ -1225,12 +1227,10 @@ impl StateStore {
             context: "Cannot create the remote image cache".into(),
             source,
         })?;
-        fs::set_permissions(&self.paste_root, fs::Permissions::from_mode(0o700)).map_err(
-            |source| StorageError::Filesystem {
-                context: "Cannot secure the remote image cache".into(),
-                source,
-            },
-        )?;
+        secure_directory(&self.paste_root).map_err(|source| StorageError::Filesystem {
+            context: "Cannot secure the remote image cache".into(),
+            source,
+        })?;
 
         let mut materialized = MaterializedMessage {
             prompt: text.to_owned(),
@@ -1241,12 +1241,8 @@ impl StateStore {
             let path = self
                 .paste_root
                 .join(format!("paste-{}.png", Uuid::new_v4()));
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .map_err(|source| StorageError::Filesystem {
+            let mut file =
+                create_private_file(&path).map_err(|source| StorageError::Filesystem {
                     context: "Cannot create a remote image".into(),
                     source,
                 })?;
@@ -2100,12 +2096,8 @@ impl StateStore {
         })?;
         let temporary = parent.join(format!(".xd-save-{}", Uuid::new_v4()));
         let result = (|| -> Result<(), StorageError> {
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|source| StorageError::Filesystem {
+            let mut output =
+                create_private_file(&temporary).map_err(|source| StorageError::Filesystem {
                     context: "Cannot create a temporary repository file".into(),
                     source,
                 })?;
@@ -2502,11 +2494,9 @@ impl StateStore {
             context: "Cannot prepare workspace trash".into(),
             source,
         })?;
-        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).map_err(|source| {
-            StorageError::Filesystem {
-                context: "Cannot secure workspace trash".into(),
-                source,
-            }
+        secure_directory(&trash).map_err(|source| StorageError::Filesystem {
+            context: "Cannot secure workspace trash".into(),
+            source,
         })?;
         let name = source
             .file_name()
@@ -3655,11 +3645,9 @@ fn register_worktree_container(
         source,
     })?;
     if !existed {
-        fs::set_permissions(container, fs::Permissions::from_mode(0o700)).map_err(|source| {
-            StorageError::Filesystem {
-                context: "Cannot secure the generated worktree container".into(),
-                source,
-            }
+        secure_directory(container).map_err(|source| StorageError::Filesystem {
+            context: "Cannot secure the generated worktree container".into(),
+            source,
         })?;
     }
     let normalized = normalize_existing_path(container);
@@ -4958,7 +4946,7 @@ mod tests {
     use super::*;
     use std::{
         env,
-        os::unix::fs::symlink,
+        os::unix::fs::{PermissionsExt, symlink},
         sync::atomic::{AtomicU64, Ordering},
     };
 

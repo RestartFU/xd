@@ -15,6 +15,9 @@ serde_json = "1.0"
 thiserror = "2.0"
 unicode-segmentation = "1.12"
 
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.2.1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

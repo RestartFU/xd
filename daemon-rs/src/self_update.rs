@@ -1,7 +1,6 @@
 use std::{
     env, fs,
     io::Read,
-    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -11,7 +10,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::EventBus;
+use crate::{EventBus, private_fs::executable_file};
 
 const NIGHTLY_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
 const STABLE_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/latest";
@@ -151,8 +150,17 @@ impl SelfUpdate {
             .name("xd-update-restart".into())
             .spawn(move || {
                 thread::sleep(Duration::from_millis(250));
-                let error = Command::new(location.daemon).args(arguments).exec();
-                eprintln!("xd-daemon: cannot restart after update: {error}");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    let error = Command::new(location.daemon).args(arguments).exec();
+                    eprintln!("xd-daemon: cannot restart after update: {error}");
+                }
+                #[cfg(windows)]
+                match Command::new(location.daemon).args(arguments).spawn() {
+                    Ok(_) => std::process::exit(0),
+                    Err(error) => eprintln!("xd-daemon: cannot restart after update: {error}"),
+                }
             })
             .map(|_| ())
             .map_err(|error| format!("Cannot schedule the daemon restart: {error}"))
@@ -385,11 +393,6 @@ fn install_location_for_executable(executable: &Path, home: &Path) -> Option<Ins
         installer: libexec.join("install.sh"),
         daemon: libexec.join("xd-daemon"),
     })
-}
-
-fn executable_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]

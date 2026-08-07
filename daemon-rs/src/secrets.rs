@@ -2,13 +2,14 @@ use std::{
     collections::{BTreeMap, HashSet},
     env, fs,
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+use crate::private_fs::{create_private_file, secure_directory, secure_file};
 
 const MAX_ENTRIES: usize = 256;
 
@@ -153,8 +154,7 @@ impl SecretsStore {
                 .ok_or_else(|| format!("{} contains an invalid secret entry", path.display()))?;
             values.insert(name.clone(), value.to_owned());
         }
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Cannot secure {}: {error}", path.display()))?;
+        secure_file(path).map_err(|error| format!("Cannot secure {}: {error}", path.display()))?;
         Ok(values)
     }
 }
@@ -165,15 +165,11 @@ fn save(path: &Path, values: &BTreeMap<String, String>) -> Result<(), String> {
         .ok_or_else(|| "Agent secrets path has no parent directory.".to_string())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+    secure_directory(parent)
         .map_err(|error| format!("Cannot secure {}: {error}", parent.display()))?;
     let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)
+        let mut file = create_private_file(&temporary)
             .map_err(|error| format!("Cannot save {}: {error}", path.display()))?;
         serde_json::to_writer_pretty(&mut file, &json!({"version": 1, "secrets": values}))
             .map_err(|error| format!("Cannot save {}: {error}", path.display()))?;
@@ -182,8 +178,7 @@ fn save(path: &Path, values: &BTreeMap<String, String>) -> Result<(), String> {
             .map_err(|error| format!("Cannot save {}: {error}", path.display()))?;
         fs::rename(&temporary, path)
             .map_err(|error| format!("Cannot save {}: {error}", path.display()))?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Cannot secure {}: {error}", path.display()))
+        secure_file(path).map_err(|error| format!("Cannot secure {}: {error}", path.display()))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

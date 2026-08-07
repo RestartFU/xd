@@ -844,7 +844,8 @@ fn sha256(path: &Path) -> Result<String, String> {
 }
 
 fn default_data_directory() -> PathBuf {
-    env::var_os("XDG_DATA_HOME")
+    #[cfg(unix)]
+    let data_home = env::var_os("XDG_DATA_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
@@ -852,8 +853,16 @@ fn default_data_directory() -> PathBuf {
                 .filter(|path| !path.is_empty())
                 .map(|home| PathBuf::from(home).join(".local/share"))
         })
-        .unwrap_or_else(|| PathBuf::from(".local/share"))
-        .join("xd")
+        .unwrap_or_else(|| PathBuf::from(".local/share"));
+    #[cfg(windows)]
+    let data_home = env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let data_name = env::var_os("XD_DATA_NAME")
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "xd".into());
+    data_home.join(data_name)
 }
 
 fn whisper_server() -> PathBuf {
@@ -863,12 +872,20 @@ fn whisper_server() -> PathBuf {
     if let Ok(executable) = env::current_exe()
         && let Some(parent) = executable.parent()
     {
-        let bundled = parent.join("libexec/whisper-server-bin");
+        let bundled = parent.join(if cfg!(windows) {
+            "whisper-server-bin.exe"
+        } else {
+            "libexec/whisper-server-bin"
+        });
         if bundled.is_file() {
             return bundled;
         }
     }
-    PathBuf::from("whisper-server")
+    PathBuf::from(if cfg!(windows) {
+        "whisper-server.exe"
+    } else {
+        "whisper-server"
+    })
 }
 
 fn thread_count() -> usize {

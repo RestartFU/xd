@@ -50,6 +50,16 @@ RUN cargo fmt --check \
  && cargo test --locked \
  && touch /gpui-tests-passed
 
+FROM gpui-desktop-source AS gpui-desktop-windows-check
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup target add x86_64-pc-windows-gnu
+
+RUN cargo check --locked --target x86_64-pc-windows-gnu \
+ && touch /gpui-windows-check-passed
+
 FROM gpui-desktop-source AS gpui-desktop-release
 
 ARG COMMIT=development
@@ -75,6 +85,16 @@ FROM rust-daemon-source AS rust-daemon-tests
 RUN cargo fmt --check \
  && cargo test --locked \
  && touch /rust-daemon-tests-passed
+
+FROM rust-daemon-source AS rust-daemon-windows-check
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup target add x86_64-pc-windows-gnu
+
+RUN cargo check --locked --target x86_64-pc-windows-gnu \
+ && touch /rust-daemon-windows-check-passed
 
 FROM rust-daemon-source AS rust-daemon-release
 
@@ -206,8 +226,10 @@ RUN set -eux; \
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS gpui-desktop-check
 
 COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
+COPY --from=gpui-desktop-windows-check /gpui-windows-check-passed /gpui-windows-check-passed
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
 COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
+COPY --from=rust-daemon-windows-check /rust-daemon-windows-check-passed /rust-daemon-windows-check-passed
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
 COPY --from=rust-tls-proxy-tests /rust-tls-proxy-tests-passed /rust-tls-proxy-tests-passed
 COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /xd-tls-proxy
