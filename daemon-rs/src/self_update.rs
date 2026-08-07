@@ -203,7 +203,7 @@ impl SelfUpdate {
                 .ok()
                 .and_then(|staged| staged.clone())
                 .ok_or_else(|| "Install the update before restarting the daemon.".to_owned())?;
-            spawn_windows_update_handoff(&location, &staged)?;
+            spawn_windows_update_handoff(&location, &staged, self.inner.channel)?;
             if let Ok(mut current) = self.inner.staged.lock() {
                 let _ = current.take();
             }
@@ -541,37 +541,85 @@ fn windows_installer_arguments(
     arguments
 }
 
-#[cfg(windows)]
-fn spawn_windows_update_handoff(
-    location: &InstallLocation,
-    staged: &StagedUpdate,
-) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
+/// Everything the handoff names on the installer's command line.
+///
+/// Borrowed rather than taken from `InstallLocation` and `StagedUpdate`
+/// directly, because those carry fields that only exist on Windows and this
+/// has to stay checkable everywhere the tests run.
+#[cfg(any(windows, test))]
+struct WindowsHandoff<'a> {
+    installer: &'a Path,
+    msi: &'a Path,
+    checksum: &'a Path,
+    cleanup: &'a Path,
+    root: &'a Path,
+    desktop: &'a Path,
+}
 
-    let mut command = Command::new(windows_powershell_path());
-    command.args([
+/// What the handoff tells the installer to do.
+///
+/// The channel goes with it. The installer defaults to nightly when nobody
+/// says otherwise, and it is the same script that decides which product it is
+/// installing over, which running processes belong to it, and what to call
+/// what it installed. The staged package is the right one either way, so what
+/// this prevents is an installer whose idea of the product disagrees with the
+/// package it was handed.
+#[cfg(any(windows, test))]
+fn windows_handoff_arguments(
+    handoff: &WindowsHandoff<'_>,
+    channel: UpdateChannel,
+) -> Vec<OsString> {
+    let mut arguments = [
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-    ]);
-    command.arg(&location.installer);
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    arguments.push(handoff.installer.as_os_str().to_owned());
+    if channel == UpdateChannel::Release {
+        arguments.push("-Release".into());
+    }
+    for (flag, value) in [
+        ("-MsiPath", handoff.msi),
+        ("-ChecksumPath", handoff.checksum),
+        ("-CleanupDirectory", handoff.cleanup),
+        ("-InstallRoot", handoff.root),
+    ] {
+        arguments.push(flag.into());
+        arguments.push(value.as_os_str().to_owned());
+    }
+    arguments.push("-Quiet".into());
+    arguments.push("-InApp".into());
+    arguments.push("-WaitForInstalledExit".into());
+    arguments.push("-RelaunchPath".into());
+    arguments.push(handoff.desktop.as_os_str().to_owned());
+    arguments
+}
+
+#[cfg(windows)]
+fn spawn_windows_update_handoff(
+    location: &InstallLocation,
+    staged: &StagedUpdate,
+    channel: UpdateChannel,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let handoff = WindowsHandoff {
+        installer: &location.installer,
+        msi: &staged.msi,
+        checksum: &staged.checksum,
+        cleanup: &staged.directory,
+        root: &location.root,
+        desktop: &location.desktop,
+    };
+    let mut command = Command::new(windows_powershell_path());
     command
-        .args(["-MsiPath"])
-        .arg(&staged.msi)
-        .args(["-ChecksumPath"])
-        .arg(&staged.checksum)
-        .args(["-CleanupDirectory"])
-        .arg(&staged.directory)
-        .args(["-InstallRoot"])
-        .arg(&location.root)
-        .arg("-Quiet")
-        .arg("-InApp")
-        .arg("-WaitForInstalledExit")
-        .args(["-RelaunchPath"])
-        .arg(&location.desktop)
+        .args(windows_handoff_arguments(&handoff, channel))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -894,6 +942,40 @@ mod tests {
             )),
             nightly_expected
         );
+    }
+
+    #[test]
+    fn the_windows_handoff_names_the_channel_it_is_installing() {
+        let handoff = WindowsHandoff {
+            installer: Path::new("C:/Program Files/RestartFU/xd/bin/install.ps1"),
+            msi: Path::new("C:/Temp/xd-update/xd-windows-x86_64.msi"),
+            checksum: Path::new("C:/Temp/xd-update/xd-windows-x86_64.msi.sha256"),
+            cleanup: Path::new("C:/Temp/xd-update"),
+            root: Path::new("C:/Program Files/RestartFU/xd"),
+            desktop: Path::new("C:/Program Files/RestartFU/xd/bin/xd.exe"),
+        };
+        let strings = |arguments: Vec<OsString>| {
+            arguments
+                .into_iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        // Without this the installer takes its default, which is the nightly,
+        // and a release would be updated as though it were one.
+        let release = strings(windows_handoff_arguments(&handoff, UpdateChannel::Release));
+        assert!(release.contains(&"-Release".to_owned()));
+        assert_eq!(
+            release.iter().position(|argument| argument == "-Release"),
+            Some(7),
+            "the channel belongs to the script, not to one of its parameters"
+        );
+        assert!(release.contains(&"C:/Program Files/RestartFU/xd".to_owned()));
+        assert!(release.contains(&"C:/Program Files/RestartFU/xd/bin/xd.exe".to_owned()));
+
+        let nightly = strings(windows_handoff_arguments(&handoff, UpdateChannel::Nightly));
+        assert!(!nightly.contains(&"-Release".to_owned()));
+        assert_eq!(nightly.len() + 1, release.len());
     }
 
     #[test]
