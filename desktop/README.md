@@ -49,6 +49,8 @@ Current milestone:
 - mobile-compatible daemon update state and restart controls;
 - certificate-pinned TLS pairing backed by private remote-session IPC and revocation;
 - daemon snapshot/event state reducers with unit tests.
+- nightly-only source builds for validated GitHub branches, pull requests, and
+  commits, with bounded output and process-group cancellation.
 
 Build and test this crate through the repository Dockerfile:
 

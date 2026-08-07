@@ -40,6 +40,7 @@ mod editor;
 mod input;
 mod presence;
 mod settings;
+mod source_build;
 mod speech;
 mod terminal;
 mod voice_input;
@@ -57,6 +58,7 @@ use input::{
 };
 use presence::DiscordPresence;
 use settings::{AccentPreset, AppSettings, GitWriter};
+use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 use voice_input::{CaptureEvent, VoiceRecorder};
@@ -77,6 +79,7 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_CACHED_MESSAGE_IMAGES: usize = 8;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
+const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn plus_icon(color: u32) -> gpui::AnyElement {
@@ -240,6 +243,47 @@ struct SelfUpdatePanel {
     status: Option<SelfUpdateStatus>,
     busy: bool,
     error: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SourceBuildPanel {
+    text: String,
+    target: Option<SourceTarget>,
+    running: bool,
+    stopping: bool,
+    installed: bool,
+    message: Option<String>,
+    output: VecDeque<String>,
+    output_bytes: usize,
+}
+
+impl SourceBuildPanel {
+    fn set_text(&mut self, text: String) {
+        self.target = source_build::parse_target(&text);
+        self.text = text;
+        if !self.running {
+            self.message = None;
+            self.installed = false;
+        }
+    }
+
+    fn append_output(&mut self, chunk: String) {
+        let chunk = strip_source_build_controls(&chunk);
+        if chunk.is_empty() {
+            return;
+        }
+        self.output_bytes = self.output_bytes.saturating_add(chunk.len());
+        self.output.push_back(chunk);
+        while self.output_bytes > MAX_SOURCE_BUILD_OUTPUT_BYTES && self.output.len() > 1 {
+            if let Some(removed) = self.output.pop_front() {
+                self.output_bytes = self.output_bytes.saturating_sub(removed.len());
+            }
+        }
+    }
+
+    fn output_text(&self) -> String {
+        self.output.iter().cloned().collect()
+    }
 }
 
 #[derive(Default)]
@@ -921,6 +965,7 @@ struct XdDesktop {
     remote_code_input: Entity<ComposerInput>,
     remote_name_input: Entity<ComposerInput>,
     question_input: Entity<ComposerInput>,
+    source_build_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
     composer_menu: Option<ComposerMenu>,
@@ -971,6 +1016,10 @@ struct XdDesktop {
     pending_send: Option<PendingSend>,
     open_question: Option<OpenQuestion>,
     question_answer: String,
+    source_build_open: bool,
+    source_build_panel: SourceBuildPanel,
+    source_build_run: Option<SourceBuildRun>,
+    source_build_generation: u64,
     expanded_activity: Arc<HashSet<String>>,
     workflow_statuses: Arc<HashMap<String, Value>>,
     workflow_pending: Arc<HashSet<String>>,
@@ -1231,6 +1280,31 @@ impl XdDesktop {
         })
         .detach();
         let settings = AppSettings::load();
+        let source_build_input =
+            cx.new(|cx| ComposerInput::new(cx, "main, #128, GitHub URL, or commit SHA…"));
+        cx.subscribe(&source_build_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if this.source_build_panel.running {
+                    let value = this.source_build_panel.text.clone();
+                    this.source_build_input
+                        .update(cx, |input, cx| input.set_text(value, cx));
+                } else {
+                    this.source_build_panel.set_text(text.clone());
+                }
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.start_source_build(cx),
+            ComposerEvent::Bytes(_) => {}
+        })
+        .detach();
+        source_build_input.update(cx, |input, cx| {
+            input.set_text(settings.build_source.clone(), cx)
+        });
+        let source_build_panel = SourceBuildPanel {
+            text: settings.build_source.clone(),
+            target: source_build::parse_target(&settings.build_source),
+            ..Default::default()
+        };
         let collapsed_folders = settings.collapsed_folders.iter().cloned().collect();
         let (remote_credentials_file, remote_credentials, remote_error) =
             match CredentialsFile::default_path() {
@@ -1322,6 +1396,7 @@ impl XdDesktop {
             remote_code_input,
             remote_name_input,
             question_input,
+            source_build_input,
             composer: String::new(),
             queue_edit: None,
             composer_menu: None,
@@ -1372,6 +1447,10 @@ impl XdDesktop {
             pending_send: None,
             open_question: None,
             question_answer: String::new(),
+            source_build_open: false,
+            source_build_panel,
+            source_build_run: None,
+            source_build_generation: 0,
             expanded_activity: Arc::new(HashSet::new()),
             workflow_statuses: Arc::new(HashMap::new()),
             workflow_pending: Arc::new(HashSet::new()),
@@ -4199,6 +4278,110 @@ impl XdDesktop {
             self.request_self_update("restart");
             cx.notify();
         }
+    }
+
+    fn open_source_build(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.source_build_open = true;
+        let focus = self.source_build_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn close_source_build(&mut self, cx: &mut Context<Self>) {
+        self.settings.build_source = self.source_build_panel.text.clone();
+        let _ = self.settings.save();
+        self.source_build_open = false;
+        cx.notify();
+    }
+
+    fn start_source_build(&mut self, cx: &mut Context<Self>) {
+        if self.source_build_panel.running {
+            return;
+        }
+        let Some(target) = self.source_build_panel.target.clone() else {
+            self.source_build_panel.message = Some("Source is not valid.".into());
+            cx.notify();
+            return;
+        };
+        self.settings.build_source = self.source_build_panel.text.clone();
+        let _ = self.settings.save();
+        self.source_build_panel.output.clear();
+        self.source_build_panel.output_bytes = 0;
+        self.source_build_panel.message = None;
+        self.source_build_panel.installed = false;
+        self.source_build_panel.stopping = false;
+        match SourceBuildRun::start(target) {
+            Ok(run) => {
+                self.source_build_run = Some(run);
+                self.source_build_panel.running = true;
+                self.source_build_generation = self.source_build_generation.saturating_add(1);
+                self.schedule_source_build_poll(self.source_build_generation, cx);
+            }
+            Err(error) => {
+                self.source_build_panel.message = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn stop_source_build(&mut self, cx: &mut Context<Self>) {
+        if !self.source_build_panel.running || self.source_build_panel.stopping {
+            return;
+        }
+        self.source_build_panel.stopping = true;
+        if let Some(run) = &self.source_build_run {
+            run.cancel();
+        }
+        cx.notify();
+    }
+
+    fn schedule_source_build_poll(&mut self, generation: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(100)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.source_build_generation != generation {
+                    return;
+                }
+                let mut events = Vec::new();
+                if let Some(run) = &this.source_build_run {
+                    while let Some(event) = run.try_recv() {
+                        events.push(event);
+                    }
+                }
+                let mut finished = false;
+                for event in events {
+                    match event {
+                        SourceBuildEvent::Output(output) => {
+                            this.source_build_panel.append_output(output)
+                        }
+                        SourceBuildEvent::Finished(result) => {
+                            finished = true;
+                            this.source_build_panel.running = false;
+                            this.source_build_panel.stopping = false;
+                            match result {
+                                Ok(()) => {
+                                    this.source_build_panel.installed = true;
+                                    this.source_build_panel.message = Some(
+                                        "Installed. Quit and reopen xd to run this build.".into(),
+                                    );
+                                }
+                                Err(error) => {
+                                    this.source_build_panel.message = Some(error);
+                                }
+                            }
+                        }
+                    }
+                }
+                if finished {
+                    this.source_build_run = None;
+                } else if this.source_build_panel.running {
+                    this.schedule_source_build_poll(generation, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn sync_active_auth_state(&mut self) {
@@ -14429,6 +14612,51 @@ impl Render for XdDesktop {
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
                                         )
+                                        .when(source_build::supported(), |column| {
+                                            column.child(
+                                                div()
+                                                    .id("open-source-build")
+                                                    .p_3()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_3()
+                                                    .rounded_lg()
+                                                    .border_1()
+                                                    .border_color(rgb(BORDER))
+                                                    .bg(rgb(SURFACE))
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.open_source_build(window, cx);
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(rgb(TEXT))
+                                                                    .child("Build XD Source"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(MUTED))
+                                                                    .child(
+                                                                        "Build and install a branch, PR, or commit.",
+                                                                    ),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div().text_color(rgb(MUTED)).child("›"),
+                                                    ),
+                                            )
+                                        })
                                         .child(
                             div()
                                 .id("open-daemon-update")
@@ -14880,6 +15108,234 @@ impl Render for XdDesktop {
                                             "Replace secret"
                                         } else {
                                             "Add secret"
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let source_build_overlay = self.source_build_open.then(|| {
+            let panel = self.source_build_panel.clone();
+            let input = self.source_build_input.clone();
+            let focus = self.source_build_input.read(cx).focus_handle(cx);
+            let target_label = panel.target.as_ref().map(|target| target.label.clone());
+            let can_build = !panel.running && panel.target.is_some() && source_build::supported();
+            let running = panel.running;
+            let stopping = panel.stopping;
+            let output = panel.output_text();
+            let activity = output
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.chars().take(180).collect::<String>());
+            let status = if panel.running {
+                if panel.stopping {
+                    "Stopping the source build…".to_owned()
+                } else {
+                    activity.unwrap_or_else(|| {
+                        format!(
+                            "Building {}…",
+                            target_label.as_deref().unwrap_or("source")
+                        )
+                    })
+                }
+            } else if let Some(message) = &panel.message {
+                message.clone()
+            } else if let Some(label) = &target_label {
+                label.clone()
+            } else if panel.text.trim().is_empty() {
+                "Enter a branch, pull request, commit, or GitHub URL.".into()
+            } else {
+                "Source is not valid.".into()
+            };
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(680.0))
+                        .max_h(px(720.0))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(TEXT))
+                                                .child("Build XD Source"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(
+                                                    "Fetch, build, and install a Linux nightly through Docker.",
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("close-source-build")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_source_build(cx);
+                                        }))
+                                        .child("×"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("source-build-input-field")
+                                .track_focus(&focus)
+                                .h(px(42.0))
+                                .w_full()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(if focus.is_focused(window) {
+                                    accent
+                                } else {
+                                    BORDER
+                                }))
+                                .bg(rgb(if running { SURFACE_HIGH } else { SURFACE }))
+                                .when(!running, |field| {
+                                    field.cursor_text().on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            let focus = this
+                                                .source_build_input
+                                                .read(cx)
+                                                .focus_handle(cx);
+                                            window.focus(&focus);
+                                        },
+                                    ))
+                                })
+                                .child(input),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_lg()
+                                .bg(rgb(if panel.installed { 0x173423 } else { SURFACE }))
+                                .text_sm()
+                                .text_color(rgb(if panel.installed { 0x8bd5a0 } else { TEXT }))
+                                .child(status),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_lg()
+                                .bg(rgb(0x30291b))
+                                .text_xs()
+                                .text_color(rgb(0xe8c780))
+                                .child(
+                                    "Only build source you trust. Its scripts receive Docker access to this machine.",
+                                ),
+                        )
+                        .when(!output.trim().is_empty(), |dialog| {
+                            dialog.child(
+                                div()
+                                    .id("source-build-output")
+                                    .max_h(px(300.0))
+                                    .overflow_y_scroll()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(rgb(SIDEBAR))
+                                    .font_family("JetBrains Mono")
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(output),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("dismiss-source-build")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.close_source_build(cx);
+                                        }))
+                                        .child("Close"),
+                                )
+                                .child(
+                                    div()
+                                        .id("run-source-build")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if running {
+                                            0x6b3038
+                                        } else if can_build {
+                                            accent
+                                        } else {
+                                            SURFACE_HIGH
+                                        }))
+                                        .text_sm()
+                                        .text_color(rgb(if running || can_build {
+                                            0xffffff
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .when(running || can_build, |button| {
+                                            button.cursor_pointer().hover(move |style| {
+                                                style.bg(rgb(if running {
+                                                    0x7b3943
+                                                } else {
+                                                    accent_hover
+                                                }))
+                                            })
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if running {
+                                                this.stop_source_build(cx);
+                                            } else if can_build {
+                                                this.start_source_build(cx);
+                                            }
+                                        }))
+                                        .child(if running {
+                                            if stopping { "Stopping…" } else { "Stop" }
+                                        } else {
+                                            "Build and Install"
                                         }),
                                 ),
                         ),
@@ -16674,6 +17130,7 @@ impl Render for XdDesktop {
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
             .when_some(self_update_overlay, |root, overlay| root.child(overlay))
+            .when_some(source_build_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
@@ -17629,6 +18086,25 @@ fn self_update_action(panel: &SelfUpdatePanel) -> Option<&'static str> {
     (status.available || status.state == "failed").then_some("install")
 }
 
+fn strip_source_build_controls(text: &str) -> String {
+    let mut clean = Vec::with_capacity(text.len());
+    let mut bytes = text.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == 0x1b {
+            if bytes.next() == Some(b'[') {
+                for next in bytes.by_ref() {
+                    if (0x40..=0x7e).contains(&next) {
+                        break;
+                    }
+                }
+            }
+        } else if byte == b'\n' || byte == b'\t' || byte >= 0x20 {
+            clean.push(byte);
+        }
+    }
+    String::from_utf8_lossy(&clean).into_owned()
+}
+
 fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
     if let Some(error) = &panel.error {
         return error.clone();
@@ -18429,6 +18905,18 @@ mod tests {
         assert_eq!(pane_state_mask(true, false), PANE_DIFF);
         assert_eq!(pane_state_mask(false, true), PANE_TERMINAL);
         assert_eq!(pane_state_mask(true, true), PANE_DIFF | PANE_TERMINAL);
+    }
+
+    #[test]
+    fn source_build_output_is_control_clean_and_bounded() {
+        let mut panel = SourceBuildPanel::default();
+        panel.append_output("start\u{1b}[31m red\u{1b}[0m\r\n".into());
+        assert_eq!(panel.output_text(), "start red\n");
+        for _ in 0..20 {
+            panel.append_output("x".repeat(1_024));
+        }
+        assert!(panel.output_bytes <= MAX_SOURCE_BUILD_OUTPUT_BYTES);
+        assert!(panel.output_text().len() <= MAX_SOURCE_BUILD_OUTPUT_BYTES);
     }
 
     #[test]
