@@ -16,8 +16,8 @@ curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh 
 
 The Linux installer requires no root access. The bundle includes the GPUI
 desktop, Rust daemon, Git, Codex, Claude Code, speech support, and its native
-runtime libraries. macOS and Windows desktop artifacts are paused while their
-Rust packaging replaces the retired Crystal client.
+runtime libraries. macOS and Windows desktop artifacts are not currently
+published.
 
 Nightly data lives in `~/.local/share/xd-nightly`. Uninstalling the app does not
 delete chats or workspaces.

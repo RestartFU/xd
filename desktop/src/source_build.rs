@@ -524,17 +524,26 @@ mod tests {
                 &worker_control,
             )
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline
+        let child_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < child_deadline
             && control.child.lock().is_ok_and(|child| child.is_none())
         {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(control.child.lock().is_ok_and(|child| child.is_some()));
         let run = SourceBuildRun { receiver, control };
+        let output_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut saw_output = false;
+        while std::time::Instant::now() < output_deadline {
+            if matches!(run.try_recv(), Some(SourceBuildEvent::Output(_))) {
+                saw_output = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_output);
         run.cancel();
         let error = worker.join().unwrap().unwrap_err();
         assert_eq!(error, "Source build stopped.");
-        assert!(matches!(run.try_recv(), Some(SourceBuildEvent::Output(_))));
     }
 }

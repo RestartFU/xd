@@ -4,8 +4,8 @@ on:
   pull_request:
     paths:
       - 'mobile/**'
-      - 'src/xd/protocol/**'
-      - 'src/xd/daemon/**'
+      - 'daemon-rs/**'
+      - 'desktop/src/protocol.rs'
       - 'docs/protocol.md'
       - 'scripts/mobile-*.sh'
       - 'Makefile'

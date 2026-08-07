@@ -63,7 +63,7 @@ use speech::SpeechOutput;
 use terminal::TerminalScreen;
 use voice_input::{CaptureEvent, VoiceRecorder};
 
-// Keep the GPUI shell visually continuous with the established Crystal app.
+// Keep the GPUI shell visually continuous across every surface.
 // These are the same near-black surfaces and quiet separators used by its GTK
 // stylesheet; the configurable accent remains reserved for active controls.
 const BG: u32 = 0x0a0a0c;

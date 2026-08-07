@@ -202,8 +202,7 @@ fn folder_path(global: &Path, folder_id: &str) -> PathBuf {
     directory.join(format!("{}.json", sha256_hex(folder_id.as_bytes())))
 }
 
-// Kept local to avoid adding a dependency (and changing the committed lockfile)
-// for the one compatibility hash used by the Crystal secrets store.
+// Kept local to avoid a dependency for the persisted folder-secret filename.
 fn sha256_hex(input: &[u8]) -> String {
     const INITIAL: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
@@ -285,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_the_crystal_folder_filename() {
+    fn sha256_matches_the_persisted_folder_filename() {
         assert_eq!(
             sha256_hex(b"folder-1"),
             "77a70a8db9013a7bc1fe10eef636f80f615dae8a11ed4eb4833c62daf59fb39c"

@@ -10,7 +10,7 @@ import androidx.compose.ui.graphics.Color
  * Material's own dark scheme is built around a violet, which is nothing to do
  * with anything else here: put the phone beside the desktop and they read as
  * two applications that happen to show the same chats. These values are the
- * ones in `Xd::UI::STYLE` — near-black surfaces, one blue accent, and the same
+ * desktop palette — near-black surfaces, one blue accent, and the same
  * greens and reds the desktop uses for state.
  *
  * Dark only, and not because a light scheme would be hard: the desktop has no

@@ -13,7 +13,7 @@ public sealed interface MessagePart {
  * `[image: /path.png]` on its own line in the message, so without this a sent
  * image reads as that literal text.
  *
- * The rule matches `Xd::Agent::ImageReference`: the whole line, and nothing
+ * The rule matches the desktop transcript parser: the whole line, and nothing
  * else on it. Prose that merely mentions `[image: ...]` mid-sentence stays
  * prose, exactly as on the desktop.
  */

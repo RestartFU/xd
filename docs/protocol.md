@@ -1,29 +1,29 @@
 # Remote wire protocol
 
 This document is the normative contract between `xd serve` and every remote
-client. The implementation is the Crystal daemon: `src/xd/protocol/` defines
-framing and the operation vocabulary, and `src/xd/daemon/engine.cr` is the sole
-dispatcher for local and remote clients alike. Protocol version 1 is reported
-by a successful `hello`.
+client. The Rust daemon in `daemon-rs/src/lib.rs` owns framing and dispatch for
+local and remote clients alike; `desktop/src/protocol.rs` and the Kotlin
+`shared/.../protocol` package implement the client side. Protocol version 1 is
+reported by a successful `hello`.
 
-Any wire change must update `spec/xd/protocol/` and the Kotlin `commonTest`
-fixtures together. Server and clients must ignore unknown object members unless
-a later protocol version explicitly says otherwise.
+Any wire change must update the Rust daemon/desktop tests and the Kotlin
+`commonTest` fixtures together. Server and clients must ignore unknown object
+members unless a later protocol version explicitly says otherwise.
 
 ## Transport and framing
 
 - TCP port 4001 by default.
 - TLS begins immediately after the TCP connection. There is no plaintext mode
   and no upgrade handshake.
-- The daemon uses a self-signed certificate (`src/xd/daemon/certificate.cr`:
-  RSA-2048, `CN=xd`, 3650 days). During pairing a client accepts the presented
+- The TLS helper creates and persists a self-signed certificate
+  (`tls-proxy-rs/src/main.rs`). During pairing a client accepts the presented
   leaf and persists it alongside the issued token. Every later connection must
   require that exact leaf.
 - Application data is UTF-8 JSON Lines: one JSON object followed by `LF`
   (`0x0a`). Empty lines are ignored.
 - Requests, replies, and events share one ordered, full-duplex connection.
 - Frames are limited to 64 KiB before authentication and 96 MiB afterwards
-  (`Xd::Protocol::AUTH_FRAME_LIMIT` and `FRAME_LIMIT`). An oversized frame is a
+  (`AUTH_FRAME_LIMIT` and `FRAME_LIMIT` in `daemon-rs/src/lib.rs`). An oversized frame is a
   protocol error and closes the connection.
 - Each session holds a bounded 256-event outbound queue
   (`Session::EVENT_QUEUE_SIZE`). **A client that stops draining its socket is
@@ -61,9 +61,9 @@ rather than by arrival position:
 
 This matters because the daemon answers requests concurrently. The operations
 that must stay responsive — `cancel`, `voice-cancel`, `agent-auth-cancel`, and
-`ping` — bypass the serialized command path entirely
-(`Engine#control_operation?`). Without ids, a `cancel` answered promptly by the
-daemon would still sit behind a slow `diff-read` in the reply stream.
+`ping` — bypass the serialized command path entirely. Without ids, a `cancel`
+answered promptly by the daemon would still sit behind a slow `diff-read` in
+the reply stream.
 
 A daemon that does not echo the id answers strictly in order. A client
 supporting that compatibility path must keep a FIFO slot for every request
@@ -80,7 +80,7 @@ between a request and its reply and do not consume a reply slot:
 ```
 
 `id` is a monotonic counter assigned at publication. **It is per-process and
-in-memory only** (`Xd::Daemon::EventBus`): it does not survive a daemon
+in-memory only**: it does not survive a daemon
 restart, and there is no resume-from-id operation. A reconnecting client must
 take a fresh snapshot rather than try to replay what it missed.
 
@@ -172,7 +172,7 @@ and requires pairing again.
 ### What a remote client cannot do
 
 `peer-pairing` requires an authenticated connection **and** local transport
-(`Engine#peer_pairing`). A paired remote device cannot mint pairing codes for
+(`Engine::peer_pairing`). A paired remote device cannot mint pairing codes for
 further devices, cannot open listeners, enable TLS, or manage other paired
 devices. Pairing and device-management authority stays on the daemon machine.
 
@@ -537,8 +537,8 @@ authoritative `transcribed` result after the final WAV. The legacy
 complete WAV.
 
 Decoded audio is limited to 64 MiB. The daemon does not resample; the final WAV
-must contain 16 kHz mono PCM16. `src/xd/voice/data.cr` writes and validates this
-header.
+must contain 16 kHz mono PCM16. `desktop/src/voice_input.rs` writes this header
+and `daemon-rs/src/voice.rs` validates it.
 
 ### Folder and chat mutations
 
@@ -613,7 +613,7 @@ The block is **also stored with the message, verbatim** — unlike workspace
 blocks, which the daemon strips before storage. That is deliberate: it lets
 every client render its own buttons, and lets a client that reopens a chat find
 the question without having seen the event. A client must therefore strip these
-blocks before rendering, or show raw tags. `src/xd/agent/ask.cr` is the
+blocks before rendering, or show raw tags. `daemon-rs/src/ask.rs` is the
 reference parser; the mobile client mirrors it in
 `shared/.../model/Ask.kt`.
 

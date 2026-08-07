@@ -18,7 +18,7 @@ public val WireJson: Json = Json {
 /**
  * Private request-id member the daemon echoes back on every reply.
  *
- * Mirrors `Xd::Protocol::REQUEST_ID`. Sending it opts this client into reply
+ * Mirrors `REQUEST_ID` in `daemon-rs/src/lib.rs`. Sending it opts this client into reply
  * multiplexing, so a slow `diff-read` cannot hold a `cancel` behind it.
  */
 public const val REQUEST_ID: String = "_xd_request"

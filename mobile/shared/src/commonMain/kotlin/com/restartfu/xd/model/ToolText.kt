@@ -4,8 +4,8 @@ package com.restartfu.xd.model
  * Reads the `tool` payloads the daemon stores.
  *
  * A tool row carrying an inline diff is the text `file_change`, a newline, and
- * a unified patch -- the same marker `Xd::Agent::ToolDiff::PREFIX` writes and
- * the GTK client reads. Everything else is free text whose first line reads as
+ * a unified patch -- the same marker the daemon writes and the desktop reads.
+ * Everything else is free text whose first line reads as
  * a summary.
  *
  * This lives in the shared module because it is protocol knowledge, not

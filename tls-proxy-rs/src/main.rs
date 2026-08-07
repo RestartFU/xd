@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_existing_crystal_pem_identity_without_changing_its_certificate() {
+    fn loads_a_pem_identity_without_changing_its_certificate() {
         let root = fixture();
         let certificate_path = root.join("server-cert.pem");
         let key_path = root.join("server-key.pem");

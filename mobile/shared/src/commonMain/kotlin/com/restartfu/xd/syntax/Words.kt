@@ -1,7 +1,7 @@
 package com.restartfu.xd.syntax
 
-// Generated from src/xd/syntax.cr. The desktop highlighter is the source of
-// truth for these; transcribing them by hand would only invite drift.
+// Mirrors the language tables in desktop/src/markdown.rs. The desktop
+// highlighter is the source of truth; update both copies together.
 
 internal object Words {
     val cKeywords: Set<String> = setOf(

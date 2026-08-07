@@ -17,7 +17,7 @@ public data class ParsedAsk(
  * `<ask>` blocks in an assistant reply.
  *
  * The daemon stores the reply verbatim and every client parses it, so this
- * mirrors `src/xd/agent/ask.cr` line for line. Getting it wrong shows raw tags
+ * mirrors `daemon-rs/src/ask.rs` line for line. Getting it wrong shows raw tags
  * to the reader rather than the buttons the assistant asked for.
  *
  * Streaming needs no equivalent of the daemon's `visible_bytes`: `text` deltas

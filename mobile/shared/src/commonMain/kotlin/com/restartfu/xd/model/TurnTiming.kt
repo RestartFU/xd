@@ -7,8 +7,8 @@ package com.restartfu.xd.model
  * should not disagree about how long it has been going, and the phrasing is
  * the one thing a reader compares between them.
  *
- * Unlike the Crystal original this clamps a negative elapsed time rather than
- * leaving that to the caller. A phone's clock can disagree with the daemon's,
+ * This clamps a negative elapsed time rather than leaving that to the caller.
+ * A phone's clock can disagree with the daemon's,
  * and "Working for -3s" is worse than a moment of "0s".
  */
 public object TurnTiming {

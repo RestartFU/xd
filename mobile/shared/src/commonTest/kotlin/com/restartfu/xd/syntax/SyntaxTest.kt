@@ -16,7 +16,7 @@ class SyntaxTest {
 
     @Test
     fun resolvesLanguagesByExtension() {
-        assertEquals(SyntaxLanguage.CRYSTAL, Syntax.languageForPath("src/xd/cli.cr"))
+        assertEquals(SyntaxLanguage.CRYSTAL, Syntax.languageForPath("src/example.cr"))
         assertEquals(SyntaxLanguage.KOTLIN, Syntax.languageForPath("a\\b\\Main.kt"))
         assertEquals(SyntaxLanguage.C, Syntax.languageForPath("x.h"))
         assertEquals(SyntaxLanguage.NONE, Syntax.languageForPath("notes.txt"))
