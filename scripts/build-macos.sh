@@ -76,7 +76,7 @@ done
 VERSION=$("$ROOT/scripts/bump-version.sh" --current)
 COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
 OUT="$ROOT/dist/macos"
-CACHE="$ROOT/desktop/target/macos-assets/$ARCH"
+CACHE="$ROOT/.build-cache/macos-assets/$ARCH"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-build.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
@@ -101,7 +101,7 @@ CODEX_ARCHIVE="$CACHE/codex-package-$CODEX_VERSION.tar.gz"
 CLAUDE_BINARY="$CACHE/claude-$CLAUDE_VERSION"
 PROXY_ARCHIVE="$CACHE/claude-code-proxy-$CLAUDE_PROXY_VERSION.tar.gz"
 WHISPER_ARCHIVE="$CACHE/whisper.cpp-$WHISPER_VERSION.tar.gz"
-WHISPER_CACHE="$ROOT/desktop/target/macos-whisper/$ARCH/$WHISPER_VERSION"
+WHISPER_CACHE="$ROOT/.build-cache/macos-whisper/$ARCH/$WHISPER_VERSION"
 
 fetch \
   "https://releases.openai.com/codex/releases/$CODEX_VERSION/codex-package-$CODEX_ARCH-apple-darwin.tar.gz" \

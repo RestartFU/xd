@@ -84,6 +84,32 @@ jobs:
           echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
 
+      # The dependency compile is most of this job, and a hosted runner keeps
+      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
+      # come back already built and cargo works out the rest.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            daemon-rs/target
+            tls-proxy-rs/target
+          key: >-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
+
+      # whisper.cpp, the agent downloads and WiX are pinned by version, so what
+      # lands here is decided by the scripts that put it there.
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-macos.sh') }}
+          restore-keys: payload-${{ runner.os }}-${{ matrix.arch }}-
+
       - name: Build and smoke-test the native app bundle
         env:
           PROFILE: nightly
@@ -122,6 +148,32 @@ jobs:
           )
           "CARGO_BUILD_JOBS=$jobs" >> $env:GITHUB_ENV
           "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> $env:GITHUB_ENV
+
+      # The dependency compile is most of this job, and a hosted runner keeps
+      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
+      # come back already built and cargo works out the rest.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            daemon-rs/target
+            tls-proxy-rs/target
+          key: >-
+            cargo-${{ runner.os }}-x86_64-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-x86_64-1.95.0-
+
+      # whisper.cpp, the agent downloads and WiX are pinned by version, so what
+      # lands here is decided by the scripts that put it there.
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-x86_64-${{ hashFiles('scripts/build-windows.ps1', 'scripts/package-windows.ps1') }}
+          restore-keys: payload-${{ runner.os }}-x86_64-
 
       - name: Build the self-contained native payload
         env:

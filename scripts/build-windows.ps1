@@ -24,7 +24,7 @@ $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 $workDirectory = Join-Path ([IO.Path]::GetTempPath()) (
     'xd-windows-build-' + [guid]::NewGuid().ToString('N')
 )
-$cacheDirectory = Join-Path $repositoryRoot 'desktop\target\windows-assets'
+$cacheDirectory = Join-Path $repositoryRoot '.build-cache\windows-assets'
 $buildJobs = if ($env:XD_BUILD_JOBS -match '^[1-9][0-9]*$') {
     [Math]::Min([int] $env:XD_BUILD_JOBS, [Environment]::ProcessorCount)
 } else {
@@ -186,30 +186,39 @@ try {
         Assert-LastExitCode 'PortableGit post-install'
     }
 
+    # Kept between runs the way the macOS build keeps it: whisper.cpp is
+    # pinned by version and compiled the same way every time, so a machine
+    # that has built it once has nothing to learn from building it again.
     $whisperSource = Join-Path $workDirectory 'whisper-source'
-    $whisperBuild = Join-Path $workDirectory 'whisper-build'
     New-Item -ItemType Directory -Path $whisperSource | Out-Null
     & tar -xzf $whisperArchive -C $whisperSource --strip-components=1
     Assert-LastExitCode 'whisper.cpp extraction'
-    & cmake -S $whisperSource -B $whisperBuild `
-        -A x64 `
-        -DCMAKE_BUILD_TYPE=Release `
-        -DBUILD_SHARED_LIBS=OFF `
-        -DWHISPER_BUILD_TESTS=OFF `
-        -DWHISPER_BUILD_EXAMPLES=ON `
-        -DWHISPER_BUILD_SERVER=ON `
-        -DGGML_NATIVE=OFF `
-        -DGGML_BACKEND_DL=OFF `
-        -DGGML_OPENMP=OFF `
-        -DGGML_CCACHE=OFF
-    Assert-LastExitCode 'whisper.cpp configuration'
-    & cmake --build $whisperBuild --config Release --target whisper-server `
-        --parallel $buildJobs
-    Assert-LastExitCode 'whisper.cpp build'
-    $whisperServer = Get-ChildItem -LiteralPath $whisperBuild `
-        -Filter 'whisper-server.exe' -File -Recurse | Select-Object -First 1
-    if ($null -eq $whisperServer) { throw 'whisper-server.exe was not built.' }
-    Copy-Item -LiteralPath $whisperServer.FullName `
+    $whisperCache = Join-Path $cacheDirectory "whisper-$whisperVersion"
+    $whisperCached = Join-Path $whisperCache 'whisper-server.exe'
+    if (-not (Test-Path -LiteralPath $whisperCached -PathType Leaf)) {
+        $whisperBuild = Join-Path $workDirectory 'whisper-build'
+        & cmake -S $whisperSource -B $whisperBuild `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_BUILD_EXAMPLES=ON `
+            -DWHISPER_BUILD_SERVER=ON `
+            -DGGML_NATIVE=OFF `
+            -DGGML_BACKEND_DL=OFF `
+            -DGGML_OPENMP=OFF `
+            -DGGML_CCACHE=OFF
+        Assert-LastExitCode 'whisper.cpp configuration'
+        & cmake --build $whisperBuild --config Release --target whisper-server `
+            --parallel $buildJobs
+        Assert-LastExitCode 'whisper.cpp build'
+        $whisperServer = Get-ChildItem -LiteralPath $whisperBuild `
+            -Filter 'whisper-server.exe' -File -Recurse | Select-Object -First 1
+        if ($null -eq $whisperServer) { throw 'whisper-server.exe was not built.' }
+        New-Item -ItemType Directory -Force -Path $whisperCache | Out-Null
+        Copy-Item -LiteralPath $whisperServer.FullName -Destination $whisperCached
+    }
+    Copy-Item -LiteralPath $whisperCached `
         -Destination (Join-Path $outputPath 'bin\whisper-server-bin.exe')
     Copy-Item -LiteralPath (Join-Path $whisperSource 'LICENSE') `
         -Destination (Join-Path $outputPath 'share\licenses\xd\whisper.cpp-LICENSE')

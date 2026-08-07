@@ -1,5 +1,6 @@
 /build/
 /dist/
+/.build-cache/
 /lib/
 /desktop/target/
 /daemon-rs/target/

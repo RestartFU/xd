@@ -25,9 +25,10 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $payloadPath = (Resolve-Path -LiteralPath $Payload).Path
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
-$toolDirectory = Join-Path ([IO.Path]::GetTempPath()) (
-    'xd-wix-' + [guid]::NewGuid().ToString('N')
-)
+# Beside the other build caches rather than in a fresh temp directory: the
+# tool is pinned, so installing it again on every run buys nothing.
+$wixVersion = '6.0.2'
+$toolDirectory = Join-Path $repositoryRoot ".build-cache\wix-$wixVersion"
 
 foreach ($relativePath in @(
     'bin\xd.exe',
@@ -59,34 +60,32 @@ if ($Profile -eq 'nightly') {
     $shortcutGuid = '4E2C6D60-BBC8-4E6F-B230-C9824E0D1715'
 }
 
-try {
-    New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
+New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
+
+$wix = Join-Path $toolDirectory 'wix.exe'
+if (-not (Test-Path -LiteralPath $wix -PathType Leaf)) {
     New-Item -ItemType Directory -Force -Path $toolDirectory | Out-Null
-    & dotnet tool install --tool-path $toolDirectory wix --version 6.0.2
+    & dotnet tool install --tool-path $toolDirectory wix --version $wixVersion
     if ($LASTEXITCODE -ne 0) { throw 'Installing WiX failed.' }
-
-    $wix = Join-Path $toolDirectory 'wix.exe'
-    $output = Join-Path $outputPath $asset
-    & $wix build (Join-Path $repositoryRoot 'installer\windows\xd.wxs') `
-        -arch x64 `
-        -d "Payload=$payloadPath" `
-        -d "Version=$Version" `
-        -d "ProductName=$productName" `
-        -d "InstallName=$installName" `
-        -d "UpgradeCode=$upgradeCode" `
-        -d "ShortcutGuid=$shortcutGuid" `
-        -o $output
-    if ($LASTEXITCODE -ne 0) {
-        throw "WiX failed with exit code $LASTEXITCODE."
-    }
-
-    $hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash
-    $checksum = Join-Path $outputPath "$asset.sha256"
-    "$($hash.ToLowerInvariant())  $asset" |
-        Set-Content -LiteralPath $checksum -Encoding ascii
-
-    Write-Host "Windows artifact: $output"
-} finally {
-    Remove-Item -LiteralPath $toolDirectory -Recurse -Force `
-        -ErrorAction SilentlyContinue
 }
+
+$output = Join-Path $outputPath $asset
+& $wix build (Join-Path $repositoryRoot 'installer\windows\xd.wxs') `
+    -arch x64 `
+    -d "Payload=$payloadPath" `
+    -d "Version=$Version" `
+    -d "ProductName=$productName" `
+    -d "InstallName=$installName" `
+    -d "UpgradeCode=$upgradeCode" `
+    -d "ShortcutGuid=$shortcutGuid" `
+    -o $output
+if ($LASTEXITCODE -ne 0) {
+    throw "WiX failed with exit code $LASTEXITCODE."
+}
+
+$hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash
+$checksum = Join-Path $outputPath "$asset.sha256"
+"$($hash.ToLowerInvariant())  $asset" |
+    Set-Content -LiteralPath $checksum -Encoding ascii
+
+Write-Host "Windows artifact: $output"
