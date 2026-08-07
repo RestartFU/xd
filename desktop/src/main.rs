@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     env, fs,
@@ -19134,11 +19136,7 @@ fn main() {
                 window_min_size: Some(size(px(760.0), px(560.0))),
                 window_background: WindowBackgroundAppearance::Opaque,
                 window_decorations: Some(WindowDecorations::Client),
-                app_id: Some(
-                    env::var("XD_APP_ID")
-                        .unwrap_or_else(|_| "com.restartfu.Xd".into())
-                        .into(),
-                ),
+                app_id: Some(xd_desktop::channel::app_id().into()),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),

@@ -16,10 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::daemon::{DaemonHandle, DaemonUpdate, RequestKind};
 use crate::private_fs::{
     create_private_directory, create_private_file, secure_directory, secure_file,
     socket_is_private, socket_path_exists,
+};
+use crate::{
+    channel,
+    daemon::{DaemonHandle, DaemonUpdate, RequestKind},
 };
 
 const CREDENTIALS_VERSION: u32 = 1;
@@ -149,9 +152,7 @@ impl CredentialsFile {
                     "Cannot locate the data directory for remote credentials.".into(),
                 )
             })?;
-        let data_name = env::var_os("XD_DATA_NAME")
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "xd".into());
+        let data_name = channel::data_name();
         Ok(data_home.join(data_name).join("remote.json"))
     }
 

@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod channel;
 pub mod context_usage;
 pub mod daemon;
 pub mod local_socket;

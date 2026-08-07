@@ -482,7 +482,11 @@ pub(crate) fn resolve_codex() -> PathBuf {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        for relative in ["codex-package/bin/codex", "libexec/codex-package/bin/codex"] {
+        for relative in [
+            "codex-package/bin/codex.exe",
+            "codex-package/bin/codex",
+            "libexec/codex-package/bin/codex",
+        ] {
             let candidate = parent.join(relative);
             if candidate.is_file() {
                 return candidate;
@@ -500,6 +504,7 @@ pub(crate) fn resolve_claude() -> PathBuf {
         && let Some(parent) = current.parent()
     {
         for relative in [
+            "claude.exe",
             "claude",
             "claude-bin",
             "libexec/claude",

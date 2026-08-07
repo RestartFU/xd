@@ -96,6 +96,47 @@ jobs:
             dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip
             dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip.sha256
 
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Build the self-contained native payload
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: >-
+          ./scripts/build-windows.ps1
+          -OutputDirectory windows-dist
+          -Profile nightly
+
+      - name: Build and exercise the MSI
+        run: |
+          ./scripts/package-windows.ps1 `
+            -Payload windows-dist `
+            -OutputDirectory artifacts `
+            -Profile nightly `
+            -Version 0.1.0
+          ./scripts/install.ps1 `
+            -MsiPath artifacts/xd-nightly-windows-x86_64.msi `
+            -ChecksumPath artifacts/xd-nightly-windows-x86_64.msi.sha256 `
+            -Quiet
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            artifacts/xd-nightly-windows-x86_64.msi
+            artifacts/xd-nightly-windows-x86_64.msi.sha256
+            scripts/install.ps1
+
   android:
     runs-on: [self-hosted, linux, x64, xd]
 
@@ -122,7 +163,7 @@ jobs:
             xd-nightly-android.apk.sha256
 
   publish:
-    needs: [linux, macos, android]
+    needs: [linux, macos, windows, android]
     # GitHub's own runner, deliberately: this job downloads every artifact and
     # uploads it again as a release asset -- about a gigabyte each way. On a
     # self-hosted runner that gigabyte crosses a home connection twice; here it
@@ -159,6 +200,12 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install-macos.sh | sh
           \`\`\`
 
+          Windows (PowerShell):
+
+          \`\`\`
+          irm https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.ps1 | iex
+          \`\`\`
+
           Or unpack it yourself:
 
           \`\`\`
@@ -192,7 +239,10 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256 \
             xd-nightly-macos-*.zip \
             xd-nightly-macos-*.zip.sha256 \
+            xd-nightly-windows-x86_64.msi \
+            xd-nightly-windows-x86_64.msi.sha256 \
             xd-nightly-android.apk \
             xd-nightly-android.apk.sha256 \
             scripts/install.sh \
-            scripts/install-macos.sh
+            scripts/install-macos.sh \
+            scripts/install.ps1

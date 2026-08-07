@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use crate::channel;
 use crate::local_socket::{UnixStream, path_is_socket};
 use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
@@ -293,13 +294,14 @@ impl DaemonHandle {
         let mut failures = Vec::new();
         for (path, launcher) in startup_candidates() {
             let socket = path.to_string_lossy().into_owned();
-            let mut child = match ProcessCommand::new(&launcher)
+            let mut command = ProcessCommand::new(&launcher);
+            command
                 .args(["serve", "--socket", &socket])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
+                .stderr(Stdio::null());
+            channel::configure_daemon(&mut command, &launcher);
+            let mut child = match command.spawn() {
                 Ok(child) => child,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     failures.push(format!("{} is not installed", launcher.display()));
@@ -1457,11 +1459,7 @@ pub fn socket_candidates() -> Vec<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    socket_candidates_for(
-        data_home,
-        None,
-        env::var_os("XD_DATA_NAME").filter(|name| !name.is_empty()),
-    )
+    socket_candidates_for(data_home, None, Some(channel::data_name()))
 }
 
 fn socket_candidates_for(

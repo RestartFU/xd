@@ -175,9 +175,7 @@ fn settings_path() -> PathBuf {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let data_name = env::var_os("XD_DATA_NAME")
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "xd".into());
+    let data_name = xd_desktop::channel::data_name();
     config_home.join(data_name).join("settings.json")
 }
 

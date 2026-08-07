@@ -25,6 +25,12 @@ macOS (Apple Silicon or Intel):
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 ```
 
+Windows x86_64 (PowerShell):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/RestartFU/xd/releases/latest/download/install.ps1))) -Release
+```
+
 ### Nightly
 
 Linux x86_64:
@@ -39,14 +45,21 @@ macOS (Apple Silicon or Intel):
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
 ```
 
-Both desktop installers require no root access. The bundles include the GPUI
-desktop, Rust daemon, Codex, Claude Code, local Whisper speech input, and their
-native runtime helpers. Windows desktop artifacts are not currently published.
+Windows x86_64 (PowerShell):
+
+```powershell
+irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
+```
+
+The Linux and macOS installers require no root access; Windows uses the normal
+Windows Installer elevation prompt. The bundles include the GPUI desktop, Rust
+daemon, Codex, Claude Code, local Whisper speech input, and their native
+runtime helpers.
 
 Stable data lives in `~/.local/share/xd` on Linux and
-`~/Library/Application Support/xd` on macOS. Nightly uses the corresponding
-`xd-nightly` directories. Uninstalling either app does not delete its chats or
-workspaces.
+`~/Library/Application Support/xd` on macOS, and `%LOCALAPPDATA%\xd` on
+Windows. Nightly uses the corresponding `xd-nightly` directories. Uninstalling
+either app does not delete its chats or workspaces.
 
 ## What it does
 
@@ -80,6 +93,14 @@ line tools:
 ```sh
 PROFILE=nightly ./scripts/build-macos.sh
 # -> ./dist/macos/xd-nightly-macos-{arm64,x86_64}.zip
+```
+
+Native Windows builds require Rust, CMake, 7-Zip, the Windows SDK, and .NET:
+
+```powershell
+./scripts/build-windows.ps1 -OutputDirectory windows-dist -Profile nightly
+./scripts/package-windows.ps1 -Payload windows-dist -OutputDirectory artifacts -Profile nightly
+# -> ./artifacts/xd-nightly-windows-x86_64.msi
 ```
 
 Mobile builds use their own Docker image and also require nothing beyond

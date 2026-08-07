@@ -232,8 +232,52 @@ jobs:
             dist/macos/xd-macos-${{ matrix.arch }}.zip
             dist/macos/xd-macos-${{ matrix.arch }}.zip.sha256
 
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Build the self-contained native payload
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: >-
+          ./scripts/build-windows.ps1
+          -OutputDirectory windows-dist
+          -Profile release
+
+      - name: Build and exercise the MSI
+        run: |
+          ./scripts/package-windows.ps1 `
+            -Payload windows-dist `
+            -OutputDirectory artifacts `
+            -Profile release `
+            -Version '${{ needs.prepare.outputs.version }}'
+          ./scripts/install.ps1 `
+            -MsiPath artifacts/xd-windows-x86_64.msi `
+            -ChecksumPath artifacts/xd-windows-x86_64.msi.sha256 `
+            -Quiet
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            artifacts/xd-windows-x86_64.msi
+            artifacts/xd-windows-x86_64.msi.sha256
+            scripts/install.ps1
+
   publish:
-    needs: [prepare, linux, macos]
+    needs: [prepare, linux, macos, windows]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -269,7 +313,13 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
           \`\`\`
 
-          Both desktop bundles are self-contained.
+          Windows (PowerShell):
+
+          \`\`\`
+          & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
+          \`\`\`
+
+          All desktop bundles are self-contained.
           EOF
           )
 
@@ -280,7 +330,8 @@ jobs:
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip xd-macos-*.zip.sha256 \
-              scripts/install.sh scripts/install-macos.sh
+              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
+              scripts/install.sh scripts/install-macos.sh scripts/install.ps1
           else
             gh release create "$tag" \
               --verify-tag \
@@ -290,6 +341,9 @@ jobs:
               xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip \
               xd-macos-*.zip.sha256 \
+              xd-windows-x86_64.msi \
+              xd-windows-x86_64.msi.sha256 \
               scripts/install.sh \
-              scripts/install-macos.sh
+              scripts/install-macos.sh \
+              scripts/install.ps1
           fi

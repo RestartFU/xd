@@ -13,7 +13,11 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
-pub const AVAILABLE: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+pub const AVAILABLE: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+));
 
 const SAMPLE_RATE: u32 = 16_000;
 const MAX_PCM_BYTES: usize = 64 * 1024 * 1024;

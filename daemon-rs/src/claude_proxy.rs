@@ -173,7 +173,11 @@ pub(crate) fn resolve_claude_proxy() -> PathBuf {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        for relative in ["claude-code-proxy", "libexec/claude-code-proxy"] {
+        for relative in [
+            "claude-code-proxy.exe",
+            "claude-code-proxy",
+            "libexec/claude-code-proxy",
+        ] {
             let candidate = parent.join(relative);
             if candidate.is_file() {
                 return candidate;

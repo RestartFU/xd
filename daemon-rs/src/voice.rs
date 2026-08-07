@@ -16,6 +16,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::EventBus;
 
@@ -829,18 +830,20 @@ fn marker_path(model: &Path) -> PathBuf {
 }
 
 fn sha256(path: &Path) -> Result<String, String> {
-    let output = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .map_err(|error| format!("Cannot verify speech model: {error}"))?;
-    if !output.status.success() {
-        return Err("Cannot verify speech model.".into());
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("Cannot verify speech model: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Cannot verify speech model: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
     }
-    String::from_utf8(output.stdout)
-        .ok()
-        .and_then(|output| output.split_whitespace().next().map(str::to_owned))
-        .filter(|digest| digest.len() == 64)
-        .ok_or_else(|| "Speech model verification returned invalid output.".into())
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn default_data_directory() -> PathBuf {

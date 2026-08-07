@@ -84,3 +84,32 @@ jobs:
           brew install librsvg
           ./scripts/build-macos.sh
           ./scripts/smoke-macos.sh dist/macos/xd-nightly.app
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Test the native Rust targets
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          cargo fmt --check --manifest-path desktop/Cargo.toml
+          cargo test --locked --manifest-path desktop/Cargo.toml
+          cargo build --locked --release --manifest-path desktop/Cargo.toml
+          cargo fmt --check --manifest-path daemon-rs/Cargo.toml
+          cargo test --locked --manifest-path daemon-rs/Cargo.toml
+          cargo build --locked --release --manifest-path daemon-rs/Cargo.toml
+          cargo fmt --check --manifest-path tls-proxy-rs/Cargo.toml
+          cargo test --manifest-path tls-proxy-rs/Cargo.toml
+          cargo build --release --manifest-path tls-proxy-rs/Cargo.toml
