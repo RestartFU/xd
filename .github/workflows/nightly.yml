@@ -1,5 +1,6 @@
-# A runnable Rust/GPUI xd for every commit on master, published for Linux with
-# the independent Android client under one rolling nightly tag.
+# A runnable Rust/GPUI xd for every commit on master, published for Linux and
+# both Mac architectures with the independent Android client under one rolling
+# nightly tag.
 #
 # Built as the nightly profile, which gives it its own application id, settings,
 # data directory and workspaces -- so installing it does not disturb a release
@@ -56,6 +57,44 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz
             xd-nightly-linux-x86_64.tar.gz.sha256
             scripts/install.sh
+            scripts/install-macos.sh
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Build and smoke-test the native app bundle
+        env:
+          PROFILE: nightly
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install librsvg
+          ./scripts/build-macos.sh
+          ./scripts/smoke-macos.sh dist/macos/xd-nightly.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip
+            dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip.sha256
 
   android:
     runs-on: [self-hosted, linux, x64, xd]
@@ -83,7 +122,7 @@ jobs:
             xd-nightly-android.apk.sha256
 
   publish:
-    needs: [linux, android]
+    needs: [linux, macos, android]
     # GitHub's own runner, deliberately: this job downloads every artifact and
     # uploads it again as a release asset -- about a gigabyte each way. On a
     # self-hosted runner that gigabyte crosses a home connection twice; here it
@@ -108,10 +147,16 @@ jobs:
           notes=$(cat <<EOF
           Built from \`${GITHUB_SHA:0:7}\` — $subject
 
-          Install it:
+          Linux:
 
           \`\`\`
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.sh | sh
+          \`\`\`
+
+          macOS:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install-macos.sh | sh
           \`\`\`
 
           Or unpack it yourself:
@@ -129,7 +174,7 @@ jobs:
           It is a test build signed with a per-build key, so uninstall the
           previous one before installing a newer APK.
 
-          The Linux bundle is self-contained and installs beside a release.
+          Both desktop bundles are self-contained and install beside a release.
           EOF
           )
 
@@ -145,6 +190,9 @@ jobs:
             --notes "$notes" \
             xd-nightly-linux-x86_64.tar.gz \
             xd-nightly-linux-x86_64.tar.gz.sha256 \
+            xd-nightly-macos-*.zip \
+            xd-nightly-macos-*.zip.sha256 \
             xd-nightly-android.apk \
             xd-nightly-android.apk.sha256 \
-            scripts/install.sh
+            scripts/install.sh \
+            scripts/install-macos.sh

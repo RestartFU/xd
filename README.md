@@ -14,13 +14,20 @@ Linux x86_64:
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
 ```
 
-The Linux installer requires no root access. The bundle includes the GPUI
-desktop, Rust daemon, Git, Codex, Claude Code, speech support, and its native
-runtime libraries. macOS and Windows desktop artifacts are not currently
-published.
+macOS (Apple Silicon or Intel):
 
-Nightly data lives in `~/.local/share/xd-nightly`. Uninstalling the app does not
-delete chats or workspaces.
+```sh
+curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
+```
+
+Both desktop installers require no root access. The bundles include the GPUI
+desktop, Rust daemon, Codex, Claude Code, and their native runtime helpers.
+The Linux build also includes speech input; macOS microphone capture is still
+being ported. Windows desktop artifacts are not currently published.
+
+Nightly data lives in `~/.local/share/xd-nightly` on Linux and
+`~/Library/Application Support/xd-nightly` on macOS. Uninstalling the app does
+not delete chats or workspaces.
 
 ## What it does
 
@@ -46,6 +53,14 @@ Linux builds require Docker only and do not install dependencies on the host:
 ./dist/xd.sh           # run the built app
 make mobile-test       # shared Kotlin tests
 make mobile-android    # -> ./dist/mobile/xd-mobile-debug.apk
+```
+
+Native macOS builds require Rust, `librsvg` from Homebrew, and Apple command
+line tools:
+
+```sh
+PROFILE=nightly ./scripts/build-macos.sh
+# -> ./dist/macos/xd-nightly-macos-{arm64,x86_64}.zip
 ```
 
 Mobile builds use their own Docker image and also require nothing beyond

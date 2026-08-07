@@ -190,9 +190,50 @@ jobs:
             xd-linux-x86_64.tar.gz
             xd-linux-x86_64.tar.gz.sha256
             scripts/install.sh
+            scripts/install-macos.sh
+
+  macos:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Build and smoke-test the native app bundle
+        env:
+          PROFILE: release
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install librsvg
+          ./scripts/build-macos.sh
+          ./scripts/smoke-macos.sh dist/macos/xd.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/xd-macos-${{ matrix.arch }}.zip
+            dist/macos/xd-macos-${{ matrix.arch }}.zip.sha256
 
   publish:
-    needs: [prepare, linux]
+    needs: [prepare, linux, macos]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -216,13 +257,19 @@ jobs:
           tag="${{ needs.prepare.outputs.tag }}"
 
           notes=$(cat <<EOF
-          Install it:
+          Linux:
 
           \`\`\`
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh | sh -s -- --release
           \`\`\`
 
-          The Linux bundle is self-contained.
+          macOS:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
+          \`\`\`
+
+          Both desktop bundles are self-contained.
           EOF
           )
 
@@ -232,7 +279,8 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
-              scripts/install.sh
+              xd-macos-*.zip xd-macos-*.zip.sha256 \
+              scripts/install.sh scripts/install-macos.sh
           else
             gh release create "$tag" \
               --verify-tag \
@@ -240,5 +288,8 @@ jobs:
               --notes "$notes" \
               xd-linux-x86_64.tar.gz \
               xd-linux-x86_64.tar.gz.sha256 \
-              scripts/install.sh
+              xd-macos-*.zip \
+              xd-macos-*.zip.sha256 \
+              scripts/install.sh \
+              scripts/install-macos.sh
           fi
