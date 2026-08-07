@@ -464,9 +464,13 @@ transcript event.
 bring a machine forward without a shell on it. `install` replaces the files,
 which is safe while turns run because the process keeps the binary it already
 mapped; `restart` drops every connection and loses any running turn, so the
-two are separate actions and neither happens on its own. `supported` is false
-where the installation cannot replace itself -- anything but a Linux bundle
-install -- and both `install` and `restart` are refused there.
+two are separate actions and neither happens on its own. Native Linux bundles,
+macOS apps, and the installed Windows MSI payload support this flow. Windows
+runs the MSI quietly without forcing a reboot; if Windows reports that a reboot
+is required, the in-app install fails instead of claiming that a daemon restart
+completed the update. `supported` is false where the installation cannot
+replace itself, such as source builds, and both `install` and `restart` are
+refused there.
 
 `agent-catalog` lists the assistants and models this daemon can run. The
 desktop reads its own compiled-in catalog because it ships with the daemon; a

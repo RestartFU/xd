@@ -1465,10 +1465,8 @@ mod tests {
             engine.dispatch(json!({"op": "revoke-device", "device": device}))["ok"],
             true
         );
-        assert_eq!(
-            peer.write(b"probe").unwrap_err().kind(),
-            std::io::ErrorKind::BrokenPipe
-        );
+        let mut buffer = [0_u8; 1];
+        assert_eq!(peer.read(&mut buffer).unwrap(), 0);
         engine.unsubscribe(resumed);
         drop(engine);
         fs::remove_dir_all(root).unwrap();

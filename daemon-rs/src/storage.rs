@@ -6527,7 +6527,7 @@ mod tests {
             SendDisposition::Start { turn, .. } => turn,
             SendDisposition::Queued { .. } => panic!("first send unexpectedly queued"),
         };
-        let expected = adopted_parent.join("Repo");
+        let expected = fs::canonicalize(adopted_parent.join("Repo")).unwrap();
         assert_eq!(Path::new(&turn.workdir), expected);
         assert!(expected.join(".git").exists());
         assert!(adopted_parent.join("keep.txt").is_file());
@@ -6548,7 +6548,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             registered,
-            fixture.workspaces.join("worktrees").to_string_lossy()
+            fs::canonicalize(fixture.workspaces.join("worktrees"))
+                .unwrap()
+                .to_string_lossy()
         );
         database
             .execute(

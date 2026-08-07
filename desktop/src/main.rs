@@ -923,6 +923,8 @@ struct XdDesktop {
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
     _started_daemon: Option<StartedDaemon>,
+    #[cfg(windows)]
+    restarting_for_update: bool,
     connection_generation: u64,
     reconnect_attempt: u32,
     connecting: bool,
@@ -1354,6 +1356,8 @@ impl XdDesktop {
             pending_speech: None,
             daemon: None,
             _started_daemon: None,
+            #[cfg(windows)]
+            restarting_for_update: false,
             connection_generation: 0,
             reconnect_attempt: 0,
             connecting: false,
@@ -2199,6 +2203,11 @@ impl XdDesktop {
                 if self.connection_generation != generation {
                     return;
                 }
+                #[cfg(windows)]
+                if self.restarting_for_update {
+                    cx.quit();
+                    return;
+                }
                 self.daemon = None;
                 self.model.connected = false;
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
@@ -2698,7 +2707,13 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
-                RequestKind::DaemonUpdate { .. } => {
+                RequestKind::DaemonUpdate { action } => {
+                    #[cfg(not(windows))]
+                    let _ = action;
+                    #[cfg(windows)]
+                    if action == "restart" {
+                        self.restarting_for_update = false;
+                    }
                     if let Some(panel) = &mut self.self_update_panel {
                         panel.busy = false;
                         panel.error = Some(
@@ -2909,7 +2924,18 @@ impl XdDesktop {
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
-            RequestKind::DaemonUpdate { .. } => self.apply_self_update(&value),
+            RequestKind::DaemonUpdate { action } => {
+                self.apply_self_update(&value);
+                #[cfg(not(windows))]
+                let _ = action;
+                #[cfg(windows)]
+                if action == "restart"
+                    && self.restarting_for_update
+                    && value.get("ok").and_then(Value::as_bool) == Some(true)
+                {
+                    cx.quit();
+                }
+            }
             RequestKind::AgentSecrets { folder_id }
                 if self
                     .secrets_panel
@@ -4280,6 +4306,13 @@ impl XdDesktop {
             .as_ref()
             .is_some_and(|panel| self_update_action(panel) == Some("restart"))
         {
+            #[cfg(windows)]
+            {
+                if self.daemon.is_none() {
+                    return;
+                }
+                self.restarting_for_update = true;
+            }
             self.request_self_update("restart");
             cx.notify();
         }

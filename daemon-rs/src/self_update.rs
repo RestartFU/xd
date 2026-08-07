@@ -9,6 +9,10 @@ use std::{
 };
 
 use serde_json::{Value, json};
+#[cfg(any(windows, test))]
+use std::ffi::OsString;
+#[cfg(any(windows, test))]
+use uuid::Uuid;
 
 use crate::{EventBus, private_fs::executable_file};
 
@@ -28,6 +32,8 @@ struct SelfUpdateInner {
     install: Option<InstallLocation>,
     channel: UpdateChannel,
     current: String,
+    #[cfg(windows)]
+    staged: Mutex<Option<StagedUpdate>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +62,18 @@ impl UpdateChannel {
 struct InstallLocation {
     installer: PathBuf,
     daemon: PathBuf,
+    #[cfg(windows)]
+    desktop: PathBuf,
+    #[cfg(windows)]
+    root: PathBuf,
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct StagedUpdate {
+    directory: PathBuf,
+    msi: PathBuf,
+    checksum: PathBuf,
 }
 
 struct UpdateState {
@@ -78,6 +96,8 @@ impl SelfUpdate {
                 install: install_location(),
                 channel,
                 current: current_version(channel),
+                #[cfg(windows)]
+                staged: Mutex::new(None),
             }),
         }
     }
@@ -126,7 +146,7 @@ impl SelfUpdate {
         let channel = self.inner.channel;
         thread::Builder::new()
             .name("xd-update-install".into())
-            .spawn(move || match run_installer(&location.installer, channel) {
+            .spawn(move || match updater.install_update(&location, channel) {
                 Ok(()) => updater.finish("installed", None, None),
                 Err(error) => updater.finish("failed", None, Some(error)),
             })
@@ -138,32 +158,78 @@ impl SelfUpdate {
             })
     }
 
+    #[cfg(unix)]
+    fn install_update(
+        &self,
+        location: &InstallLocation,
+        channel: UpdateChannel,
+    ) -> Result<(), String> {
+        run_installer(&location.installer, channel)
+    }
+
+    #[cfg(windows)]
+    fn install_update(
+        &self,
+        location: &InstallLocation,
+        channel: UpdateChannel,
+    ) -> Result<(), String> {
+        let staged = stage_windows_update(&location.installer, channel)?;
+        self.replace_staged(staged);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn replace_staged(&self, staged: StagedUpdate) {
+        if let Ok(mut current) = self.inner.staged.lock() {
+            if let Some(previous) = current.replace(staged) {
+                let _ = fs::remove_dir_all(previous.directory);
+            }
+        }
+    }
+
     fn restart(&self) -> Result<(), String> {
         let location = self
             .inner
             .install
             .clone()
             .ok_or_else(|| "This daemon's installation cannot restart itself.".to_owned())?;
-        let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-        self.publish();
-        thread::Builder::new()
-            .name("xd-update-restart".into())
-            .spawn(move || {
-                thread::sleep(Duration::from_millis(250));
-                #[cfg(unix)]
-                {
+
+        #[cfg(windows)]
+        {
+            let staged = self
+                .inner
+                .staged
+                .lock()
+                .ok()
+                .and_then(|staged| staged.clone())
+                .ok_or_else(|| "Install the update before restarting the daemon.".to_owned())?;
+            spawn_windows_update_handoff(&location, &staged)?;
+            if let Ok(mut current) = self.inner.staged.lock() {
+                let _ = current.take();
+            }
+            self.publish();
+            thread::spawn(|| {
+                thread::sleep(Duration::from_millis(500));
+                std::process::exit(0);
+            });
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        {
+            let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+            self.publish();
+            thread::Builder::new()
+                .name("xd-update-restart".into())
+                .spawn(move || {
+                    thread::sleep(Duration::from_millis(250));
                     use std::os::unix::process::CommandExt;
                     let error = Command::new(location.daemon).args(arguments).exec();
                     eprintln!("xd-daemon: cannot restart after update: {error}");
-                }
-                #[cfg(windows)]
-                match Command::new(location.daemon).args(arguments).spawn() {
-                    Ok(_) => std::process::exit(0),
-                    Err(error) => eprintln!("xd-daemon: cannot restart after update: {error}"),
-                }
-            })
-            .map(|_| ())
-            .map_err(|error| format!("Cannot schedule the daemon restart: {error}"))
+                })
+                .map(|_| ())
+                .map_err(|error| format!("Cannot schedule the daemon restart: {error}"))
+        }
     }
 
     fn begin(&self, phase: &'static str) -> bool {
@@ -305,14 +371,61 @@ fn release_identity(channel: UpdateChannel, release: &Value) -> Result<String, S
         })
 }
 
+#[allow(dead_code)]
+#[derive(Clone)]
+enum InstallerMode {
+    Install,
+    #[cfg(any(windows, test))]
+    Stage(PathBuf),
+}
+
+#[cfg(unix)]
 fn run_installer(installer: &Path, channel: UpdateChannel) -> Result<(), String> {
-    let mut command = Command::new("sh");
-    command.arg(installer);
-    if channel == UpdateChannel::Release {
-        command.arg("--release");
+    run_installer_process(
+        installer_command(installer, channel, InstallerMode::Install),
+        true,
+    )
+}
+
+#[cfg(windows)]
+fn stage_windows_update(installer: &Path, channel: UpdateChannel) -> Result<StagedUpdate, String> {
+    let directory = env::temp_dir().join(format!("xd-update-{}", Uuid::new_v4()));
+    if let Err(error) = fs::create_dir(&directory) {
+        return Err(format!(
+            "Cannot create the update staging directory: {error}"
+        ));
+    }
+    let asset = if channel == UpdateChannel::Release {
+        "xd-windows-x86_64.msi"
+    } else {
+        "xd-nightly-windows-x86_64.msi"
+    };
+    let msi = directory.join(asset);
+    let checksum = directory.join(format!("{asset}.sha256"));
+    let result = run_installer_process(
+        installer_command(installer, channel, InstallerMode::Stage(directory.clone())),
+        false,
+    );
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&directory);
+        return Err(error);
+    }
+    if !regular_file(&msi) || !regular_file(&checksum) {
+        let _ = fs::remove_dir_all(&directory);
+        return Err("The Windows installer did not produce a complete staged update.".into());
+    }
+    Ok(StagedUpdate {
+        directory,
+        msi,
+        checksum,
+    })
+}
+
+fn run_installer_process(mut command: Command, allow_running_install: bool) -> Result<(), String> {
+    if allow_running_install {
+        command.env("XD_ALLOW_RUNNING_INSTALL", "1");
     }
     let mut child = command
-        .env("XD_ALLOW_RUNNING_INSTALL", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -353,18 +466,160 @@ fn run_installer(installer: &Path, channel: UpdateChannel) -> Result<(), String>
     })
 }
 
+#[cfg(windows)]
+fn regular_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+#[cfg(unix)]
+fn installer_command(installer: &Path, channel: UpdateChannel, _mode: InstallerMode) -> Command {
+    let mut command = Command::new("sh");
+    command.arg(installer);
+    if channel == UpdateChannel::Release {
+        command.arg("--release");
+    }
+    command
+}
+
+#[cfg(windows)]
+fn installer_command(installer: &Path, channel: UpdateChannel, mode: InstallerMode) -> Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = Command::new(windows_powershell_path());
+    command.args(windows_installer_arguments(installer, channel, mode));
+    command.creation_flags(0x0800_0000);
+    command
+}
+
+#[cfg(any(windows, test))]
+fn windows_powershell_path_from(system_root: Option<OsString>) -> PathBuf {
+    system_root
+        .map(PathBuf::from)
+        .map(|root| root.join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("powershell.exe"))
+}
+
+#[cfg(windows)]
+fn windows_powershell_path() -> PathBuf {
+    windows_powershell_path_from(env::var_os("SystemRoot"))
+}
+
+#[cfg(any(windows, test))]
+fn windows_installer_arguments(
+    installer: &Path,
+    channel: UpdateChannel,
+    mode: InstallerMode,
+) -> Vec<OsString> {
+    let mut arguments = [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    arguments.push(installer.as_os_str().to_owned());
+    match channel {
+        UpdateChannel::Release => arguments.push("-Release".into()),
+        UpdateChannel::Nightly => {}
+    }
+    match mode {
+        InstallerMode::Install => {
+            arguments.push("-Quiet".into());
+            arguments.push("-InApp".into());
+        }
+        InstallerMode::Stage(directory) => {
+            arguments.push("-StageDirectory".into());
+            arguments.push(directory.into_os_string());
+            arguments.push("-StageOnly".into());
+        }
+    }
+    arguments
+}
+
+#[cfg(windows)]
+fn spawn_windows_update_handoff(
+    location: &InstallLocation,
+    staged: &StagedUpdate,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = Command::new(windows_powershell_path());
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(&location.installer);
+    command
+        .args(["-MsiPath"])
+        .arg(&staged.msi)
+        .args(["-ChecksumPath"])
+        .arg(&staged.checksum)
+        .args(["-CleanupDirectory"])
+        .arg(&staged.directory)
+        .args(["-InstallRoot"])
+        .arg(&location.root)
+        .arg("-Quiet")
+        .arg("-InApp")
+        .arg("-WaitForInstalledExit")
+        .args(["-RelaunchPath"])
+        .arg(&location.desktop)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Cannot start the Windows update handoff: {error}"))
+}
+
 fn install_location() -> Option<InstallLocation> {
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
-    let home = PathBuf::from(env::var_os("HOME")?);
-    let location = install_location_for_executable(&executable, &home)?;
+    #[cfg(windows)]
+    let location = {
+        let program_files = env::var_os("ProgramW6432")
+            .or_else(|| env::var_os("ProgramFiles"))
+            .map(PathBuf::from)?;
+        windows_install_location_for_executable(&executable, &program_files)?
+    };
+    #[cfg(not(windows))]
+    let location = {
+        let home = PathBuf::from(env::var_os("HOME")?);
+        install_location_for_executable(&executable, &home)?
+    };
+    #[cfg(windows)]
+    let desktop = location.desktop;
+    #[cfg(windows)]
+    let root = location.root;
     let installer = location.installer;
     let daemon = location.daemon;
     if !executable_file(&installer) || !executable_file(&daemon) {
         return None;
     }
-    Some(InstallLocation { installer, daemon })
+    #[cfg(windows)]
+    if !executable_file(&desktop) {
+        return None;
+    }
+    Some(InstallLocation {
+        installer,
+        daemon,
+        #[cfg(windows)]
+        desktop,
+        #[cfg(windows)]
+        root,
+    })
 }
 
+#[cfg(not(windows))]
 fn install_location_for_executable(executable: &Path, home: &Path) -> Option<InstallLocation> {
     if executable.file_name()?.to_str()? != "xd-daemon" {
         return None;
@@ -393,6 +648,65 @@ fn install_location_for_executable(executable: &Path, home: &Path) -> Option<Ins
         installer: libexec.join("install.sh"),
         daemon: libexec.join("xd-daemon"),
     })
+}
+
+#[cfg(any(windows, test))]
+fn windows_install_location_for_executable(
+    executable: &Path,
+    program_files: &Path,
+) -> Option<InstallLocation> {
+    if !path_name_is(executable, "xd-daemon.exe") {
+        return None;
+    }
+    let bin = executable.parent()?;
+    if !path_name_is(bin, "bin") {
+        return None;
+    }
+    let product = bin.parent()?;
+    if !matches_path_name(product, &["xd", "xd-nightly"]) {
+        return None;
+    }
+    let manufacturer = product.parent()?;
+    if !path_name_is(manufacturer, "RestartFU")
+        || !windows_path_eq(manufacturer.parent()?, program_files)
+    {
+        return None;
+    }
+    Some(InstallLocation {
+        installer: bin.join("install.ps1"),
+        daemon: executable.to_owned(),
+        #[cfg(windows)]
+        desktop: bin.join("xd.exe"),
+        #[cfg(windows)]
+        root: product.to_owned(),
+    })
+}
+
+#[cfg(any(windows, test))]
+fn path_name_is(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
+
+#[cfg(any(windows, test))]
+fn matches_path_name(path: &Path, expected: &[&str]) -> bool {
+    expected.iter().any(|name| path_name_is(path, name))
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_eq(left: &Path, right: &Path) -> bool {
+    let normalize = |path: &Path| {
+        let mut value = path.to_string_lossy().replace('/', "\\");
+        if let Some(stripped) = value.strip_prefix(r"\\?\") {
+            value = stripped.to_owned();
+        }
+        while value.ends_with('\\') {
+            value.pop();
+        }
+        value.to_ascii_lowercase()
+    };
+    normalize(left) == normalize(right)
 }
 
 #[cfg(test)]
@@ -456,6 +770,7 @@ mod tests {
         assert!(updater.perform(Some("unknown")).is_err());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn recognizes_linux_and_macos_release_layouts_only() {
         for executable in [
@@ -489,5 +804,125 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn recognizes_windows_release_layouts_only() {
+        let program_files = Path::new("/Program Files");
+        for executable in [
+            "/Program Files/RestartFU/xd/bin/xd-daemon.exe",
+            "/Program Files/RestartFU/xd-nightly/bin/xd-daemon.exe",
+            "/Program Files/RestartFU/XD/bin/XD-DAEMON.EXE",
+        ] {
+            let location =
+                windows_install_location_for_executable(Path::new(executable), program_files)
+                    .unwrap();
+            assert_eq!(location.daemon, Path::new(executable));
+            assert_eq!(
+                location.installer,
+                Path::new(executable).parent().unwrap().join("install.ps1")
+            );
+        }
+
+        for executable in [
+            "/Program Files/RestartFU/other/bin/xd-daemon.exe",
+            "/Program Files/Other/xd/bin/xd-daemon.exe",
+            "/Program Files/RestartFU/xd/libexec/xd-daemon.exe",
+            "/Program Files/RestartFU/xd/bin/xd-daemon",
+            "/tmp/RestartFU/xd/bin/xd-daemon.exe",
+        ] {
+            assert!(
+                windows_install_location_for_executable(Path::new(executable), program_files)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn windows_installer_arguments_select_channel_and_mode() {
+        let installer = Path::new(r"C:\Program Files\RestartFU\xd\bin\install.ps1");
+        let stage = Path::new(r"C:\Users\person\AppData\Local\Temp\xd-update");
+        let strings = |arguments: Vec<OsString>| {
+            arguments
+                .into_iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let expected = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let mut stable_expected = expected(&[
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]);
+        stable_expected.push(installer.to_string_lossy().into_owned());
+        stable_expected.extend(expected(&["-Release", "-Quiet", "-InApp"]));
+        assert_eq!(
+            strings(windows_installer_arguments(
+                installer,
+                UpdateChannel::Release,
+                InstallerMode::Install,
+            )),
+            stable_expected
+        );
+
+        let mut nightly_expected = expected(&[
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]);
+        nightly_expected.push(installer.to_string_lossy().into_owned());
+        nightly_expected.push("-StageDirectory".into());
+        nightly_expected.push(stage.to_string_lossy().into_owned());
+        nightly_expected.push("-StageOnly".into());
+        assert_eq!(
+            strings(windows_installer_arguments(
+                installer,
+                UpdateChannel::Nightly,
+                InstallerMode::Stage(stage.to_owned()),
+            )),
+            nightly_expected
+        );
+    }
+
+    #[test]
+    fn windows_powershell_path_prefers_existing_system_path() {
+        let root = env::temp_dir().join(format!("xd-powershell-test-{}", Uuid::new_v4()));
+        let executable = root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"").unwrap();
+
+        assert_eq!(
+            windows_powershell_path_from(Some(root.as_os_str().to_owned())),
+            executable
+        );
+        assert_eq!(
+            windows_powershell_path_from(None),
+            PathBuf::from("powershell.exe")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_paths_normalize_prefixes_and_separators() {
+        assert!(windows_path_eq(
+            Path::new("\\\\?\\C:\\Program Files\\RestartFU\\xd\\"),
+            Path::new("c:/Program Files/RestartFU/xd")
+        ));
+        assert!(!windows_path_eq(
+            Path::new("C:/Program Files/RestartFU/xd"),
+            Path::new("C:/Program Files/RestartFU/xd-nightly")
+        ));
     }
 }
