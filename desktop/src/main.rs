@@ -43,33 +43,7 @@ mod settings;
 mod source_build;
 mod speech;
 mod terminal;
-#[cfg(target_os = "linux")]
 mod voice_input;
-
-#[cfg(not(target_os = "linux"))]
-mod voice_input {
-    use async_channel::Receiver;
-
-    pub const AVAILABLE: bool = false;
-
-    pub enum CaptureEvent {
-        Chunk(Vec<u8>),
-        Finished(Vec<u8>),
-        Failed(String),
-    }
-
-    pub struct VoiceRecorder;
-
-    impl VoiceRecorder {
-        pub fn start() -> Result<(Self, Receiver<CaptureEvent>), String> {
-            Err("Microphone capture is not available on this platform.".into())
-        }
-
-        pub fn stop(&self) {}
-
-        pub fn cancel(&self) {}
-    }
-}
 
 use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,

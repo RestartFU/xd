@@ -21,9 +21,8 @@ curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-mac
 ```
 
 Both desktop installers require no root access. The bundles include the GPUI
-desktop, Rust daemon, Codex, Claude Code, and their native runtime helpers.
-The Linux build also includes speech input; macOS microphone capture is still
-being ported. Windows desktop artifacts are not currently published.
+desktop, Rust daemon, Codex, Claude Code, local Whisper speech input, and their
+native runtime helpers. Windows desktop artifacts are not currently published.
 
 Nightly data lives in `~/.local/share/xd-nightly` on Linux and
 `~/Library/Application Support/xd-nightly` on macOS. Uninstalling the app does

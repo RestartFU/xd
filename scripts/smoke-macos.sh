@@ -15,6 +15,7 @@ APP="${1:?macOS app bundle}"
 [ -x "$APP/Contents/Resources/libexec/codex-package/bin/codex" ]
 [ -x "$APP/Contents/Resources/libexec/claude" ]
 [ -x "$APP/Contents/Resources/libexec/claude-code-proxy" ]
+[ -x "$APP/Contents/Resources/libexec/whisper-server-bin" ]
 [ -f "$APP/Contents/Resources/xd.icns" ]
 
 plutil -lint "$APP/Contents/Info.plist"
@@ -27,6 +28,7 @@ for binary in \
   "$APP/Contents/Resources/libexec/xd-daemon" \
   "$APP/Contents/Resources/libexec/xd-tls-proxy" \
   "$APP/Contents/Resources/libexec/claude" \
-  "$APP/Contents/Resources/libexec/claude-code-proxy"; do
+  "$APP/Contents/Resources/libexec/claude-code-proxy" \
+  "$APP/Contents/Resources/libexec/whisper-server-bin"; do
   file "$binary" | grep -F "$expected"
 done

@@ -12,6 +12,8 @@ PROFILE="${PROFILE:-release}"
 CODEX_VERSION=0.146.0
 CLAUDE_VERSION=2.1.220
 CLAUDE_PROXY_VERSION=0.1.30
+WHISPER_VERSION=1.9.1
+WHISPER_SHA256=147267177eef7b22ec3d2476dd514d1b12e160e176230b740e3d1bd600118447
 
 [ "$(uname -s)" = Darwin ] || {
   echo "build-macos: macOS is required" >&2
@@ -61,7 +63,7 @@ case "$(uname -m)" in
     ;;
 esac
 
-for command in cargo codesign curl iconutil rsvg-convert shasum sips tar; do
+for command in cargo cmake codesign curl iconutil rsvg-convert shasum sips tar; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "build-macos: $command is required" >&2
     exit 1
@@ -97,6 +99,8 @@ fetch () {
 CODEX_ARCHIVE="$CACHE/codex-package-$CODEX_VERSION.tar.gz"
 CLAUDE_BINARY="$CACHE/claude-$CLAUDE_VERSION"
 PROXY_ARCHIVE="$CACHE/claude-code-proxy-$CLAUDE_PROXY_VERSION.tar.gz"
+WHISPER_ARCHIVE="$CACHE/whisper.cpp-$WHISPER_VERSION.tar.gz"
+WHISPER_CACHE="$ROOT/desktop/target/macos-whisper/$ARCH/$WHISPER_VERSION"
 
 fetch \
   "https://releases.openai.com/codex/releases/$CODEX_VERSION/codex-package-$CODEX_ARCH-apple-darwin.tar.gz" \
@@ -107,6 +111,32 @@ fetch \
 fetch \
   "https://github.com/raine/claude-code-proxy/releases/download/v$CLAUDE_PROXY_VERSION/claude-code-proxy-darwin-$PROXY_ARCH.tar.gz" \
   "$PROXY_ARCHIVE" "$PROXY_SHA256"
+fetch \
+  "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$WHISPER_VERSION.tar.gz" \
+  "$WHISPER_ARCHIVE" "$WHISPER_SHA256"
+
+if [ ! -x "$WHISPER_CACHE/whisper-server-bin" ]; then
+  mkdir -p "$WORK/whisper-source" "$WHISPER_CACHE"
+  tar -xzf "$WHISPER_ARCHIVE" \
+    -C "$WORK/whisper-source" --strip-components=1
+  cmake \
+    -S "$WORK/whisper-source" \
+    -B "$WORK/whisper-build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DWHISPER_BUILD_TESTS=OFF \
+    -DWHISPER_BUILD_EXAMPLES=ON \
+    -DWHISPER_BUILD_SERVER=ON \
+    -DGGML_NATIVE=OFF \
+    -DGGML_BACKEND_DL=OFF \
+    -DGGML_OPENMP=OFF \
+    -DGGML_CCACHE=OFF
+  cmake --build "$WORK/whisper-build" \
+    --target whisper-server --parallel 3
+  install -m0755 "$WORK/whisper-build/bin/whisper-server" \
+    "$WHISPER_CACHE/whisper-server-bin"
+fi
+"$WHISPER_CACHE/whisper-server-bin" --help >/dev/null
 
 cd "$ROOT"
 XD_COMMIT="$COMMIT" cargo build --locked --release --manifest-path desktop/Cargo.toml
@@ -118,7 +148,8 @@ rm -rf "$APP"
 mkdir -p \
   "$APP/Contents/MacOS" \
   "$APP/Contents/Resources/libexec/codex-package" \
-  "$APP/Contents/Resources/fonts"
+  "$APP/Contents/Resources/fonts" \
+  "$APP/Contents/Resources/licenses"
 
 install -m0755 desktop/target/release/xd-desktop \
   "$APP/Contents/MacOS/xd-desktop"
@@ -135,8 +166,12 @@ tar -xzf "$CODEX_ARCHIVE" \
 tar -xzf "$PROXY_ARCHIVE" -C "$WORK"
 install -m0755 "$WORK/claude-code-proxy" \
   "$APP/Contents/Resources/libexec/claude-code-proxy"
+install -m0755 "$WHISPER_CACHE/whisper-server-bin" \
+  "$APP/Contents/Resources/libexec/whisper-server-bin"
 install -m0644 data/fonts/DMSans-Variable.ttf \
   "$APP/Contents/Resources/fonts/DMSans-Variable.ttf"
+tar -xOf "$WHISPER_ARCHIVE" "whisper.cpp-$WHISPER_VERSION/LICENSE" \
+  > "$APP/Contents/Resources/licenses/whisper.cpp-LICENSE"
 
 sed \
   -e "s|@BUNDLE_NAME@|$BUNDLE_NAME|g" \
@@ -175,6 +210,7 @@ codesign --verify --deep --strict "$APP"
   | grep -F "$CLAUDE_VERSION"
 "$APP/Contents/Resources/libexec/claude-code-proxy" --version \
   | grep -F "$CLAUDE_PROXY_VERSION"
+"$APP/Contents/Resources/libexec/whisper-server-bin" --help >/dev/null
 
 ASSET="$BUNDLE_NAME-macos-$ARCH.zip"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT/$ASSET"

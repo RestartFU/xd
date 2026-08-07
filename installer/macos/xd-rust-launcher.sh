@@ -35,5 +35,6 @@ export XD_TLS_PROXY_EXECUTABLE="$RESOURCES/libexec/xd-tls-proxy"
 export XD_CODEX_EXECUTABLE="$RESOURCES/libexec/codex-package/bin/codex"
 export XD_CLAUDE_EXECUTABLE="$RESOURCES/libexec/claude"
 export XD_CLAUDE_PROXY_EXECUTABLE="$RESOURCES/libexec/claude-code-proxy"
+export XD_WHISPER_SERVER="$RESOURCES/libexec/whisper-server-bin"
 
 exec "$CONTENTS/MacOS/xd-desktop" "$@"

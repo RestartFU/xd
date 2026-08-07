@@ -1,22 +1,26 @@
 use std::{
-    ffi::{CStr, c_char, c_int, c_uint, c_void},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use async_channel::{Receiver, Sender};
+use cpal::{
+    FromSample, I24, Sample, SampleFormat, SizedSample, Stream, StreamConfig, U24,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+};
 
-pub const AVAILABLE: bool = true;
+pub const AVAILABLE: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 
 const SAMPLE_RATE: u32 = 16_000;
 const MAX_PCM_BYTES: usize = 64 * 1024 * 1024;
-const CAPTURE_FRAMES: usize = 2_048;
-const STREAM_CAPTURE: c_int = 1;
-const ACCESS_RW_INTERLEAVED: c_int = 3;
-const FORMAT_S16_LE: c_int = 2;
+const STREAM_CHUNK_BYTES: usize = 4_096;
+const MAX_CHANNELS: usize = 32;
+const MIN_INPUT_RATE: u32 = 8_000;
+const MAX_INPUT_RATE: u32 = 384_000;
 
 pub enum CaptureEvent {
     Chunk(Vec<u8>),
@@ -31,6 +35,9 @@ pub struct VoiceRecorder {
 
 impl VoiceRecorder {
     pub fn start() -> Result<(Self, Receiver<CaptureEvent>), String> {
+        if !AVAILABLE {
+            return Err("Microphone capture is not available on this platform.".into());
+        }
         let (sender, receiver) = async_channel::bounded(16);
         let stop = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -69,88 +76,207 @@ fn record(sender: Sender<CaptureEvent>, stop: Arc<AtomicBool>, cancel: Arc<Atomi
 
 fn capture(
     sender: &Sender<CaptureEvent>,
-    stop: &AtomicBool,
+    stop: &Arc<AtomicBool>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let mut handle = std::ptr::null_mut();
-    let device = c"default";
-    // SAFETY: ALSA initializes `handle` on success and does not retain the
-    // device string. The handle remains owned by this worker thread.
-    alsa(unsafe { snd_pcm_open(&mut handle, device.as_ptr(), STREAM_CAPTURE, 0) })
-        .map_err(|error| format!("Cannot open the default microphone: {error}"))?;
-    let _capture = CaptureHandle(handle);
-    // SAFETY: `handle` is a valid capture PCM. These values request exactly
-    // the daemon's 16 kHz mono signed-16-bit streaming contract.
-    alsa(unsafe {
-        snd_pcm_set_params(
-            handle,
-            FORMAT_S16_LE,
-            ACCESS_RW_INTERLEAVED,
-            1,
-            SAMPLE_RATE,
-            1,
-            100_000,
-        )
-    })
-    .map_err(|error| format!("Cannot configure the microphone: {error}"))?;
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "No default microphone is available.".to_owned())?;
+    let supported = device
+        .default_input_config()
+        .map_err(|error| format!("Cannot read the default microphone format: {error}"))?;
+    let channels = supported.channels() as usize;
+    let input_rate = supported.sample_rate();
+    if channels == 0 || channels > MAX_CHANNELS {
+        return Err(format!("The microphone reported {channels} channels."));
+    }
+    if !(MIN_INPUT_RATE..=MAX_INPUT_RATE).contains(&input_rate) {
+        return Err(format!(
+            "The microphone reported an unsupported {input_rate} Hz sample rate."
+        ));
+    }
 
-    let mut pcm = Vec::new();
-    let mut buffer = vec![0_i16; CAPTURE_FRAMES];
+    let state = Arc::new(Mutex::new(CaptureBuffer::new(channels, input_rate)));
+    let config: StreamConfig = supported.clone().into();
+    let stream = match supported.sample_format() {
+        SampleFormat::F32 => build_stream::<f32>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::F64 => build_stream::<f64>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::I8 => build_stream::<i8>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::I16 => build_stream::<i16>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::I24 => build_stream::<I24>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::I32 => build_stream::<i32>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::I64 => build_stream::<i64>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::U8 => build_stream::<u8>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::U16 => build_stream::<u16>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::U24 => build_stream::<U24>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::U32 => build_stream::<u32>(&device, &config, state.clone(), sender, stop)?,
+        SampleFormat::U64 => build_stream::<u64>(&device, &config, state.clone(), sender, stop)?,
+        format => return Err(format!("The microphone uses unsupported {format} samples.")),
+    };
+    stream
+        .play()
+        .map_err(|error| format!("Cannot start the microphone stream: {error}"))?;
+
     while !cancel.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
-        // SAFETY: the buffer holds CAPTURE_FRAMES i16 samples and the valid
-        // ALSA handle is used only by this capture thread.
-        let frames = unsafe {
-            snd_pcm_readi(
-                handle,
-                buffer.as_mut_ptr().cast::<c_void>(),
-                CAPTURE_FRAMES as _,
-            )
-        };
-        if frames < 0 {
-            // SAFETY: recovering this thread-owned handle from ALSA's own
-            // negative error code is the documented xrun/interruption path.
-            let recovered = unsafe { snd_pcm_recover(handle, frames as c_int, 1) };
-            alsa(recovered).map_err(|error| format!("Microphone capture failed: {error}"))?;
-            continue;
-        }
-        let byte_count = frames as usize * 2;
-        if pcm.len() > MAX_PCM_BYTES.saturating_sub(byte_count) {
-            stop.store(true, Ordering::Release);
-            break;
-        }
-        // SAFETY: ALSA initialized `frames` i16 values in the buffer; viewing
-        // them as native little-endian bytes is correct on supported Linux x64.
-        let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), byte_count) };
-        pcm.extend_from_slice(bytes);
-        if sender
-            .send_blocking(CaptureEvent::Chunk(bytes.to_vec()))
-            .is_err()
-        {
-            return Ok(());
-        }
+        thread::sleep(Duration::from_millis(20));
     }
-    // SAFETY: dropping a prepared capture stream wakes a blocked read before
-    // the handle guard closes it.
-    unsafe { snd_pcm_drop(handle) };
-    if !cancel.load(Ordering::Acquire) {
-        if pcm.is_empty() {
-            let _ = sender.send_blocking(CaptureEvent::Failed(
-                "The microphone did not return any audio.".into(),
-            ));
-        } else {
-            let _ = sender.send_blocking(CaptureEvent::Finished(wav_from_pcm(&pcm)));
-        }
+    drop(stream);
+    if cancel.load(Ordering::Acquire) {
+        return Ok(());
     }
+
+    let mut state = state
+        .lock()
+        .map_err(|_| "Microphone capture state is unavailable.".to_owned())?;
+    if let Some(error) = state.failure.take() {
+        return Err(error);
+    }
+    if !state.pending_chunk.is_empty() {
+        let chunk = std::mem::take(&mut state.pending_chunk);
+        let _ = sender.try_send(CaptureEvent::Chunk(chunk));
+    }
+    if state.pcm.is_empty() {
+        return Err("The microphone did not return any audio.".into());
+    }
+    let wav = wav_from_pcm(&state.pcm);
+    drop(state);
+    let _ = sender.send_blocking(CaptureEvent::Finished(wav));
     Ok(())
 }
 
-struct CaptureHandle(*mut c_void);
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    state: Arc<Mutex<CaptureBuffer>>,
+    sender: &Sender<CaptureEvent>,
+    stop: &Arc<AtomicBool>,
+) -> Result<Stream, String>
+where
+    T: Sample + SizedSample + Send + 'static,
+    f32: FromSample<T>,
+{
+    let data_sender = sender.clone();
+    let data_stop = stop.clone();
+    let error_state = state.clone();
+    let error_stop = stop.clone();
+    device
+        .build_input_stream(
+            config.clone(),
+            move |samples: &[T], _| {
+                let (chunk, failed) = state
+                    .lock()
+                    .map(|mut state| {
+                        let chunk = state.push(samples);
+                        (chunk, state.failure.is_some())
+                    })
+                    .unwrap_or((None, true));
+                if let Some(chunk) = chunk {
+                    let _ = data_sender.try_send(CaptureEvent::Chunk(chunk));
+                }
+                if failed {
+                    data_stop.store(true, Ordering::Release);
+                }
+            },
+            move |error| {
+                if let Ok(mut state) = error_state.lock() {
+                    state.failure = Some(format!("Microphone capture failed: {error}"));
+                }
+                error_stop.store(true, Ordering::Release);
+            },
+            None,
+        )
+        .map_err(|error| format!("Cannot open the default microphone: {error}"))
+}
 
-impl Drop for CaptureHandle {
-    fn drop(&mut self) {
-        // SAFETY: this guard uniquely owns the ALSA handle returned by open.
-        unsafe { snd_pcm_close(self.0) };
+struct CaptureBuffer {
+    channels: usize,
+    resampler: LinearResampler,
+    pcm: Vec<u8>,
+    pending_chunk: Vec<u8>,
+    failure: Option<String>,
+}
+
+impl CaptureBuffer {
+    fn new(channels: usize, input_rate: u32) -> Self {
+        Self {
+            channels,
+            resampler: LinearResampler::new(input_rate),
+            pcm: Vec::new(),
+            pending_chunk: Vec::new(),
+            failure: None,
+        }
     }
+
+    fn push<T>(&mut self, samples: &[T]) -> Option<Vec<u8>>
+    where
+        T: Sample + Copy,
+        f32: FromSample<T>,
+    {
+        if self.failure.is_some() {
+            return None;
+        }
+        let mut output = Vec::new();
+        for frame in samples.chunks_exact(self.channels) {
+            let mono = frame
+                .iter()
+                .map(|sample| f32::from_sample(*sample))
+                .sum::<f32>()
+                / self.channels as f32;
+            self.resampler.push(mono, &mut output);
+        }
+        let byte_count = output.len().saturating_mul(2);
+        if self.pcm.len() > MAX_PCM_BYTES.saturating_sub(byte_count) {
+            self.failure = Some("Microphone capture exceeded its size limit.".into());
+            return None;
+        }
+        self.pcm.reserve(byte_count);
+        self.pending_chunk.reserve(byte_count);
+        for sample in output {
+            let bytes = sample.to_le_bytes();
+            self.pcm.extend_from_slice(&bytes);
+            self.pending_chunk.extend_from_slice(&bytes);
+        }
+        (self.pending_chunk.len() >= STREAM_CHUNK_BYTES)
+            .then(|| std::mem::take(&mut self.pending_chunk))
+    }
+}
+
+struct LinearResampler {
+    input_per_output: f64,
+    input_index: u64,
+    next_output: f64,
+    previous: Option<f32>,
+}
+
+impl LinearResampler {
+    fn new(input_rate: u32) -> Self {
+        Self {
+            input_per_output: input_rate as f64 / SAMPLE_RATE as f64,
+            input_index: 0,
+            next_output: 0.0,
+            previous: None,
+        }
+    }
+
+    fn push(&mut self, sample: f32, output: &mut Vec<i16>) {
+        let Some(previous) = self.previous.replace(sample) else {
+            output.push(pcm_sample(sample));
+            self.next_output = self.input_per_output;
+            return;
+        };
+        self.input_index = self.input_index.saturating_add(1);
+        let index = self.input_index as f64;
+        while self.next_output <= index {
+            let fraction = (self.next_output - (index - 1.0)).clamp(0.0, 1.0) as f32;
+            output.push(pcm_sample(previous + (sample - previous) * fraction));
+            self.next_output += self.input_per_output;
+        }
+    }
+}
+
+fn pcm_sample(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16
 }
 
 fn wav_from_pcm(pcm: &[u8]) -> Vec<u8> {
@@ -169,39 +295,6 @@ fn wav_from_pcm(pcm: &[u8]) -> Vec<u8> {
     wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
     wav.extend_from_slice(pcm);
     wav
-}
-
-fn alsa(code: c_int) -> Result<(), String> {
-    if code >= 0 {
-        return Ok(());
-    }
-    // SAFETY: ALSA returns a process-lifetime error string for its own code.
-    let message = unsafe { CStr::from_ptr(snd_strerror(code)) };
-    Err(message.to_string_lossy().into_owned())
-}
-
-#[link(name = "asound")]
-unsafe extern "C" {
-    fn snd_pcm_open(
-        pcm: *mut *mut c_void,
-        name: *const c_char,
-        stream: c_int,
-        mode: c_int,
-    ) -> c_int;
-    fn snd_pcm_set_params(
-        pcm: *mut c_void,
-        format: c_int,
-        access: c_int,
-        channels: c_uint,
-        rate: c_uint,
-        soft_resample: c_int,
-        latency: c_uint,
-    ) -> c_int;
-    fn snd_pcm_readi(pcm: *mut c_void, buffer: *mut c_void, size: usize) -> isize;
-    fn snd_pcm_recover(pcm: *mut c_void, error: c_int, silent: c_int) -> c_int;
-    fn snd_pcm_drop(pcm: *mut c_void) -> c_int;
-    fn snd_pcm_close(pcm: *mut c_void) -> c_int;
-    fn snd_strerror(error: c_int) -> *const c_char;
 }
 
 #[cfg(test)]
@@ -224,5 +317,33 @@ mod tests {
             u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize,
             pcm.len()
         );
+    }
+
+    #[test]
+    fn resampler_converts_native_stereo_to_bounded_whisper_pcm() {
+        let mut capture = CaptureBuffer::new(2, 48_000);
+        let stereo = (0..48_000)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 0.5_f32 } else { -0.5 };
+                [sample, sample]
+            })
+            .collect::<Vec<_>>();
+        let _ = capture.push(&stereo);
+        assert!(capture.failure.is_none());
+        assert_eq!(capture.pcm.len(), SAMPLE_RATE as usize * 2);
+        assert!(capture.pending_chunk.len() < STREAM_CHUNK_BYTES);
+    }
+
+    #[test]
+    fn resampler_interpolates_when_the_input_rate_is_lower() {
+        let mut resampler = LinearResampler::new(8_000);
+        let mut output = Vec::new();
+        for sample in [0.0, 1.0, 0.0] {
+            resampler.push(sample, &mut output);
+        }
+        assert_eq!(output.len(), 5);
+        assert_eq!(output[0], 0);
+        assert!(output[1] > 0 && output[1] < i16::MAX);
+        assert_eq!(output[2], i16::MAX);
     }
 }
