@@ -38,10 +38,16 @@ struct RunControl {
     child: Mutex<Option<Child>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildPlatform {
+    Linux,
+    Macos,
+}
+
 impl SourceBuildRun {
     pub fn start(target: SourceTarget) -> Result<Self, String> {
         if !supported() {
-            return Err("Source builds require an installed Linux x86_64 nightly.".into());
+            return Err("Source builds require an installed nightly on Linux or macOS.".into());
         }
         let checkout = checkout_dir()?;
         // Backpressure keeps a noisy or hostile build from queuing unbounded
@@ -84,9 +90,22 @@ impl Drop for SourceBuildRun {
 }
 
 pub fn supported() -> bool {
-    cfg!(all(target_os = "linux", target_arch = "x86_64"))
+    build_platform().is_some()
         && env::var("XD_UPDATE_CHANNEL").as_deref() == Ok("nightly")
         && installed_nightly_root().is_some()
+}
+
+fn build_platform() -> Option<BuildPlatform> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some(BuildPlatform::Linux)
+    } else if cfg!(all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )) {
+        Some(BuildPlatform::Macos)
+    } else {
+        None
+    }
 }
 
 pub fn parse_target(text: &str) -> Option<SourceTarget> {
@@ -227,9 +246,44 @@ fn checkout_dir() -> Result<PathBuf, String> {
 
 fn installed_nightly_root() -> Option<PathBuf> {
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
-    let root = executable.parent()?.parent()?;
-    (root.file_name()?.to_str()? == "xd-nightly" && root.join("xd.sh").is_file())
-        .then(|| root.to_path_buf())
+    let home = PathBuf::from(env::var_os("HOME")?);
+    let platform = build_platform()?;
+    let root = installed_nightly_root_for_executable(&executable, &home, platform)?;
+    let marker = match platform {
+        BuildPlatform::Linux => root.join("xd.sh"),
+        BuildPlatform::Macos => root.join("Contents/MacOS/xd"),
+    };
+    marker.is_file().then_some(root)
+}
+
+fn installed_nightly_root_for_executable(
+    executable: &Path,
+    home: &Path,
+    platform: BuildPlatform,
+) -> Option<PathBuf> {
+    let expected = match platform {
+        BuildPlatform::Linux => home.join(".local/opt/xd-nightly"),
+        BuildPlatform::Macos => home.join("Applications/xd-nightly.app"),
+    };
+    let root = match platform {
+        BuildPlatform::Linux => {
+            if executable.file_name()?.to_str()? != "xd" {
+                return None;
+            }
+            executable.parent()?.parent()?
+        }
+        BuildPlatform::Macos => {
+            let macos = executable.parent()?;
+            if executable.file_name()?.to_str()? != "xd-desktop"
+                || macos.file_name()?.to_str()? != "MacOS"
+                || macos.parent()?.file_name()?.to_str()? != "Contents"
+            {
+                return None;
+            }
+            macos.parent()?.parent()?
+        }
+    };
+    (root == expected).then(|| root.to_path_buf())
 }
 
 fn build_and_install(
@@ -277,18 +331,40 @@ fn build_and_install(
         sender,
         control,
     )?;
-    output(sender, "Building the nightly bundle through Docker…\n");
-    let mut build = Command::new("./scripts/build.sh");
-    build
-        .current_dir(checkout)
-        .args(["--build-arg", "PROFILE=nightly"]);
+    let platform =
+        build_platform().ok_or_else(|| "Source builds are not supported here.".to_owned())?;
+    let mut build = match platform {
+        BuildPlatform::Linux => {
+            output(sender, "Building the nightly bundle through Docker…\n");
+            let mut command = Command::new("./scripts/build.sh");
+            command.args(["--build-arg", "PROFILE=nightly"]);
+            command
+        }
+        BuildPlatform::Macos => {
+            output(sender, "Building the native macOS nightly bundle…\n");
+            let mut command = Command::new("./scripts/build-macos.sh");
+            command.env("PROFILE", "nightly");
+            command
+        }
+    };
+    build.current_dir(checkout);
     run(&mut build, "build the source", sender, control)?;
     output(sender, "Installing the nightly bundle…\n");
     let mut install = Command::new("sh");
-    install
-        .current_dir(checkout)
-        .args(["scripts/install.sh", "--from", "dist"])
-        .env("XD_ALLOW_RUNNING_INSTALL", "1");
+    install.current_dir(checkout);
+    match platform {
+        BuildPlatform::Linux => {
+            install.args(["scripts/install.sh", "--from", "dist"]);
+        }
+        BuildPlatform::Macos => {
+            install.args([
+                "scripts/install-macos.sh",
+                "--from",
+                "dist/macos/xd-nightly.app",
+            ]);
+        }
+    }
+    install.env("XD_ALLOW_RUNNING_INSTALL", "1");
     run(&mut install, "install the source build", sender, control)
 }
 
@@ -502,6 +578,56 @@ mod tests {
             "#1234567890",
         ] {
             assert!(parse_target(value).is_none(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn recognizes_only_installed_linux_and_macos_nightlies() {
+        let linux_home = Path::new("/home/person");
+        let linux = Path::new("/home/person/.local/opt/xd-nightly/bin/xd");
+        assert_eq!(
+            installed_nightly_root_for_executable(linux, linux_home, BuildPlatform::Linux),
+            Some(PathBuf::from("/home/person/.local/opt/xd-nightly"))
+        );
+
+        let macos_home = Path::new("/Users/person");
+        let macos =
+            Path::new("/Users/person/Applications/xd-nightly.app/Contents/MacOS/xd-desktop");
+        assert_eq!(
+            installed_nightly_root_for_executable(macos, macos_home, BuildPlatform::Macos),
+            Some(PathBuf::from("/Users/person/Applications/xd-nightly.app"))
+        );
+
+        for (executable, home, platform) in [
+            (
+                "/tmp/xd-nightly/bin/xd",
+                "/home/person",
+                BuildPlatform::Linux,
+            ),
+            (
+                "/Users/person/Applications/xd.app/Contents/MacOS/xd-desktop",
+                "/Users/person",
+                BuildPlatform::Macos,
+            ),
+            (
+                "/Users/person/Applications/xd-nightly.app/Contents/MacOS/other",
+                "/Users/person",
+                BuildPlatform::Macos,
+            ),
+            (
+                "/home/person/.local/opt/xd-nightly/bin/other",
+                "/home/person",
+                BuildPlatform::Linux,
+            ),
+        ] {
+            assert!(
+                installed_nightly_root_for_executable(
+                    Path::new(executable),
+                    Path::new(home),
+                    platform,
+                )
+                .is_none()
+            );
         }
     }
 

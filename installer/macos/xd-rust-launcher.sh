@@ -21,7 +21,7 @@ esac
 # Finder launches applications with a small PATH. Keep the original value for
 # terminal sessions, then put the app's native agent helpers first for xd.
 export XD_HOST_PATH="${PATH-}"
-export PATH="$RESOURCES/libexec/codex-package/bin:$RESOURCES/libexec:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$RESOURCES/libexec/codex-package/bin:$RESOURCES/libexec:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Use the native macOS data locations. The channel name keeps a release and a
 # nightly completely independent when both applications are installed.
