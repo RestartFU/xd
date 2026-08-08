@@ -45,6 +45,12 @@ public interface VoiceTransport {
 }
 
 /**
+ * Partials saying the same thing that end an utterance, at about half a second
+ * of audio each.
+ */
+private const val STEADY_PARTIALS_TO_END = 4
+
+/**
  * One recording, from tapping the microphone to text in the composer.
  *
  * The phone captures audio and the daemon does everything after that: it owns
@@ -89,6 +95,19 @@ public class VoiceSession internal constructor(
      * recording instead.
      */
     private var recorder: VoiceRecorder? = null
+
+    /**
+     * How many partial transcripts in a row said the same thing.
+     *
+     * The end of an utterance, decided by the recognizer rather than by how
+     * loud the room is. The daemon sends a partial every half second of audio
+     * and goes on sending them through silence, so text that stops changing is
+     * someone who stopped talking. Amplitude cannot answer this on a phone:
+     * automatic gain control lifts the room the moment a voice stops, and the
+     * pause is then as loud as the speech was.
+     */
+    private var steadyPartials = 0
+    private var lastPartial = ""
 
     public constructor(
         transport: VoiceTransport,
@@ -213,10 +232,25 @@ public class VoiceSession internal constructor(
             }
             is VoiceEvent.Ready ->
                 if (_state.value is VoiceState.Downloading) beginRecording(generation)
-            is VoiceEvent.Partial ->
+            is VoiceEvent.Partial -> {
                 if (_state.value is VoiceState.Recording || _state.value is VoiceState.Transcribing) {
                     _partial.value = event.text
                 }
+                if (_handsFree.value && _state.value is VoiceState.Recording) {
+                    if (event.text == lastPartial) {
+                        steadyPartials++
+                        // Nothing said yet is not a pause, however long it runs.
+                        if (lastPartial.isNotBlank() && steadyPartials >= STEADY_PARTIALS_TO_END) {
+                            // On the scope's dispatcher, which owns this state.
+                            // `record` returning does the rest.
+                            recorder?.stop()
+                        }
+                    } else {
+                        lastPartial = event.text
+                        steadyPartials = 0
+                    }
+                }
+            }
             is VoiceEvent.Transcribed ->
                 if (_state.value is VoiceState.Transcribing) {
                     reset()
@@ -245,6 +279,8 @@ public class VoiceSession internal constructor(
 
             val active = recorders()
             recorder = active
+            steadyPartials = 0
+            lastPartial = ""
             _partial.value = ""
             _state.value = VoiceState.Recording(nowMillis())
             val chunks = Channel<ByteArray>(Channel.UNLIMITED)
@@ -318,6 +354,8 @@ public class VoiceSession internal constructor(
     private fun reset() {
         generation++
         token = null
+        steadyPartials = 0
+        lastPartial = ""
         _partial.value = ""
         _state.value = VoiceState.Idle
     }

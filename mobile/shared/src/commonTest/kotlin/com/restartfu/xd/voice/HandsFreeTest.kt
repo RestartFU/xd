@@ -186,6 +186,48 @@ class HandsFreeTest {
     }
 
     @Test
+    fun a_recognizer_that_stops_hearing_new_words_ends_the_utterance() = runTest {
+        val transport = FakeVoiceTransport()
+        val recorders = mutableListOf<ScriptedRecorder>()
+        // Audio that never goes quiet, so nothing about its loudness could end
+        // this -- which is what a phone's gain control produces after a voice
+        // stops. The recognizer is the one that knows nobody is talking.
+        val voice = handsFreeSession(transport, {
+            ScriptedRecorder(List(400) { chunk(9_000) }).also { recorders += it }
+        })
+
+        voice.setHandsFree(true)
+        testScheduler.runCurrent()
+        voice.onEvent(VoiceEvent.Partial("token", "rename the parser"))
+        testScheduler.runCurrent()
+        assertEquals(0, recorders.single().cancels)
+
+        // The same text arriving again is half a second in which nothing new
+        // was said.
+        repeat(4) { voice.onEvent(VoiceEvent.Partial("token", "rename the parser")) }
+        testScheduler.runCurrent()
+
+        assertEquals(1, transport.finished.size, "the utterance should have been sent")
+    }
+
+    @Test
+    fun steady_silence_before_any_words_never_ends_anything() = runTest {
+        val transport = FakeVoiceTransport()
+        val voice = handsFreeSession(transport, { ScriptedRecorder(List(400) { chunk(0) }) })
+
+        voice.setHandsFree(true)
+        testScheduler.runCurrent()
+        // Whisper hears nothing and keeps saying so. Somebody thinking before
+        // they speak is not somebody who has finished.
+        repeat(20) { voice.onEvent(VoiceEvent.Partial("token", "")) }
+        testScheduler.runCurrent()
+
+        assertEquals(0, transport.finished.size)
+        assertIs<VoiceState.Recording>(voice.state.value)
+        voice.cancel()
+    }
+
+    @Test
     fun a_failure_drops_out_of_hands_free_rather_than_spinning_on_it() = runTest {
         val transport = FakeVoiceTransport()
         val voice = handsFreeSession(transport, { ScriptedRecorder(utterance()) })
