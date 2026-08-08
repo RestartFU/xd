@@ -477,7 +477,9 @@ internal class ChatSessionCore(
             }
             "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
                 if (apply(TranscriptInput.Tool(text, turnId, turnSequence), arrivalGate)) {
-                    speechMutex.withLock { speakParser.reset() }
+                    // A tool ends the block, but what was already said is said.
+                    speechMutex.withLock { speakParser.finish() }
+                        .forEach { _speech.tryEmit(it) }
                 }
             }
             "turn-finished" -> {
@@ -486,7 +488,11 @@ internal class ChatSessionCore(
                         arrivalGate,
                     )
                 ) {
-                    speechMutex.withLock { speakParser.reset() }
+                    // The last sentence of a reply often has no trailing space
+                    // for the parser to close on, and a turn that ended without
+                    // its closing tag still has something worth hearing.
+                    speechMutex.withLock { speakParser.finish() }
+                        .forEach { _speech.tryEmit(it) }
                 }
             }
             "changed" -> apply(TranscriptInput.Changed, event.sequence)

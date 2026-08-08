@@ -32,22 +32,29 @@ class SpeakTagParserTest {
     }
 
     @Test
-    fun dropsIncompleteAndWhitespaceOnlyBlocksOnFinish() {
+    fun saysAnIncompleteBlockAndDropsAWhitespaceOnlyOne() {
         val parser = SpeakTagParser()
 
+        // Written but never closed -- by a tool call, or the end of the turn.
+        // Saying it beats saying nothing.
         assertEquals(emptyList(), parser.feed("<speak>unfinished"))
-        assertEquals(emptyList(), parser.finish())
+        assertEquals(listOf("unfinished"), parser.finish())
+        // Whitespace is not something to read out, closed or not.
         assertEquals(emptyList(), parser.feed("<speak> \n </speak>"))
+        assertEquals(emptyList(), parser.finish())
     }
 
     @Test
     fun malformedAndNestedBlocksAreNeverSpoken() {
         val parser = SpeakTagParser()
 
+        // A nested block is not an unambiguous speech request, and stays unsaid
+        // even when the turn ends on it.
         assertEquals(emptyList(), parser.feed("<speak>one <speak>two</speak>"))
+        assertEquals(emptyList(), parser.finish())
         parser.reset()
+        // Nor is anything that merely looks like the tag.
         assertEquals(emptyList(), parser.feed("<spreak>not speech</spreak>"))
-        assertEquals(emptyList(), parser.feed("<speak>still unfinished"))
         assertEquals(emptyList(), parser.finish())
     }
 
@@ -67,5 +74,49 @@ class SpeakTagParserTest {
         val parser = SpeakTagParser()
 
         assertEquals(emptyList(), parser.feed("2 < 3 and HTML <span>text</span>"))
+    }
+}
+
+class SpeakTagStreamingTest {
+    @Test
+    fun a_finished_sentence_is_said_before_the_block_closes() {
+        val parser = SpeakTagParser()
+        // Nothing yet: the sentence has not ended.
+        assertEquals(emptyList(), parser.feed("<speak>Let me look at "))
+        // It has now, and waiting for the closing tag would be waiting for the
+        // whole reply to be written.
+        assertEquals(listOf("Let me look at the recorder."), parser.feed("the recorder. And"))
+    }
+
+    @Test
+    fun a_mark_only_ends_a_sentence_once_what_follows_it_arrives() {
+        val parser = SpeakTagParser()
+        // A number is not a sentence: "3." must wait for the next character.
+        assertEquals(emptyList(), parser.feed("<speak>It took 3."))
+        assertEquals(emptyList(), parser.feed("5 seconds"))
+        assertEquals(listOf("It took 3.5 seconds."), parser.feed(". "))
+    }
+
+    @Test
+    fun the_tail_after_the_last_sentence_is_said_when_the_block_closes() {
+        val parser = SpeakTagParser()
+        assertEquals(listOf("One."), parser.feed("<speak>One.  Two"))
+        assertEquals(listOf("Two"), parser.feed("</speak>"))
+    }
+
+    @Test
+    fun a_block_cut_short_still_says_what_it_had() {
+        val parser = SpeakTagParser()
+        parser.feed("<speak>Reading the parser now")
+        // A tool call or the end of the turn. It was written; silence is worse.
+        assertEquals(listOf("Reading the parser now"), parser.finish())
+        assertEquals(emptyList(), parser.finish())
+    }
+
+    @Test
+    fun there_is_nothing_to_flush_outside_a_block() {
+        val parser = SpeakTagParser()
+        parser.feed("ordinary prose nobody asked to hear")
+        assertEquals(emptyList(), parser.finish())
     }
 }

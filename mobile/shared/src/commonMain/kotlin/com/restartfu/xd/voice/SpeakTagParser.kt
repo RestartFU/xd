@@ -3,10 +3,18 @@ package com.restartfu.xd.voice
 /**
  * Extracts complete, explicit speech blocks from streamed assistant text.
  *
- * Ordinary assistant text is ignored. A block is emitted only after its exact
- * closing tag arrives, so a reconnect or an interrupted turn cannot make a
- * partial response audible. Fenced and inline code are ignored while looking
- * for an opening tag, and nested speech blocks invalidate the outer block.
+ * Ordinary assistant text is ignored. Inside a block, whole sentences are
+ * emitted as they are written rather than the block being held until its
+ * closing tag: a reply is spoken while it is still being typed, which is the
+ * difference between hearing an answer and waiting for one. Only a completed
+ * sentence is emitted, so nothing is ever said half-formed.
+ *
+ * What remains when a block is cut short -- by a tool call, or the end of the
+ * turn -- is flushed by [finish] rather than dropped. It was written; the only
+ * question was whether the closing tag arrived, and silence is the worse answer.
+ *
+ * Fenced and inline code are ignored while looking for an opening tag, and
+ * nested speech blocks invalidate the outer block.
  */
 public class SpeakTagParser {
     private enum class Mode {
@@ -61,6 +69,7 @@ public class SpeakTagParser {
                         val safe = pending.length - keep
                         if (safe > 0) content.append(pending, 0, safe)
                         pending = pending.drop(safe)
+                        drainSentences(output)
                         break
                     }
 
@@ -85,10 +94,48 @@ public class SpeakTagParser {
         content.clear()
     }
 
-    /** An unfinished block is deliberately never spoken. */
+    /**
+     * Says what an unfinished block had got to, and clears the parser.
+     *
+     * For a block cut short by a tool call or the end of a turn. Whatever is
+     * left has already been written, so the alternative to saying it is saying
+     * nothing at all.
+     */
     public fun finish(): List<String> {
+        val tail = if (mode == Mode.SPEAK) {
+            content.toString().trim().takeIf(String::isNotEmpty)
+        } else {
+            null
+        }
         reset()
-        return emptyList()
+        return listOfNotNull(tail)
+    }
+
+    /**
+     * Moves every finished sentence out of the open block and into [output].
+     *
+     * A sentence ends at a line break, or at `.`, `!` or `?` followed by
+     * whitespace. The character after the mark has to have arrived: without it
+     * a number like 3.5 splits mid-word, and the stream is about to supply it
+     * either way.
+     */
+    private fun drainSentences(output: MutableList<String>) {
+        while (true) {
+            val end = sentenceEnd() ?: return
+            val said = content.substring(0, end).trim()
+            content.delete(0, end)
+            if (said.isNotEmpty()) output.add(said)
+        }
+    }
+
+    private fun sentenceEnd(): Int? {
+        for (at in content.indices) {
+            if (content[at] == '\n') return at + 1
+            if (content[at] !in SENTENCE_MARKS) continue
+            val next = content.getOrNull(at + 1) ?: return null
+            if (next.isWhitespace()) return at + 1
+        }
+        return null
     }
 
     private fun scanOutside() {
@@ -175,5 +222,6 @@ public class SpeakTagParser {
         const val OPEN_TAG = "<speak>"
         const val CLOSE_TAG = "</speak>"
         const val FENCE = "```"
+        val SENTENCE_MARKS = charArrayOf('.', '!', '?')
     }
 }
