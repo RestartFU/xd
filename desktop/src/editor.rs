@@ -11,11 +11,15 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
+use crate::{MONO, selection::TextSelection};
+
 actions!(
     file_editor,
     [
         Backspace,
         Delete,
+        DeleteWord,
+        DeleteWordForward,
         Left,
         Right,
         Up,
@@ -120,7 +124,11 @@ impl FileEditor {
     }
 
     fn refresh_syntax(&mut self) {
-        self.syntax_spans = markdown::code_spans(self.syntax_language.as_deref(), &self.content);
+        self.syntax_spans = syntax_spans(
+            self.composer,
+            self.syntax_language.as_deref(),
+            &self.content,
+        );
     }
 
     fn changed(&self, cx: &mut Context<Self>) {
@@ -138,6 +146,27 @@ impl FileEditor {
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word(&mut self, _: &DeleteWord, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let offset = previous_word_boundary(&self.content, self.cursor_offset());
+            self.select_to(offset, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let offset = next_word_boundary(&self.content, self.cursor_offset());
+            self.select_to(offset, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -238,6 +267,12 @@ impl FileEditor {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
+            return;
+        }
+        // The transcript cannot take focus, so a copy typed at an editor with
+        // nothing selected is meant for the text selected out there.
+        if let Some(text) = TextSelection::selected(cx) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
@@ -675,6 +710,8 @@ impl Render for FileEditor {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word))
+            .on_action(cx.listener(Self::delete_word_forward))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::up))
@@ -695,7 +732,7 @@ impl Render for FileEditor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .font_family("monospace")
+            .font_family(MONO)
             .child(EditorElement { input: cx.entity() })
     }
 }
@@ -735,6 +772,54 @@ fn text_runs(
         runs.push(text_run(range.len(), style, default_color));
     }
     runs
+}
+
+/// Where a word-wise delete behind `offset` lands: the whitespace under the
+/// cursor, then the run of word characters — or of punctuation — behind it.
+pub(crate) fn previous_word_boundary(content: &str, offset: usize) -> usize {
+    let text = &content[..offset];
+    let trimmed = text.trim_end_matches(char::is_whitespace);
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let word = trimmed.trim_end_matches(is_word_character);
+    if word.len() < trimmed.len() {
+        return word.len();
+    }
+    trimmed.trim_end_matches(is_punctuation).len()
+}
+
+/// Where a word-wise delete ahead of `offset` lands, by the same rules.
+pub(crate) fn next_word_boundary(content: &str, offset: usize) -> usize {
+    let text = &content[offset..];
+    let trimmed = text.trim_start_matches(char::is_whitespace);
+    if trimmed.is_empty() {
+        return content.len();
+    }
+    let skipped = text.len() - trimmed.len();
+    let word = trimmed.trim_start_matches(is_word_character);
+    if word.len() < trimmed.len() {
+        return offset + skipped + trimmed.len() - word.len();
+    }
+    let rest = trimmed.trim_start_matches(is_punctuation);
+    offset + skipped + trimmed.len() - rest.len()
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn is_punctuation(character: char) -> bool {
+    !is_word_character(character) && !character.is_whitespace()
+}
+
+/// Message editors hold prose, not code: an apostrophe in "it's" must not open a
+/// string span and paint the rest of the line green.
+fn syntax_spans(composer: bool, language: Option<&str>, content: &str) -> Vec<CodeSpan> {
+    if composer {
+        return Vec::new();
+    }
+    markdown::code_spans(language, content)
 }
 
 fn text_run(len: usize, style: &gpui::TextStyle, color: u32) -> TextRun {
@@ -782,5 +867,35 @@ mod tests {
     fn line_ranges_preserve_empty_and_trailing_lines() {
         assert_eq!(line_ranges(""), vec![0..0]);
         assert_eq!(line_ranges("a\n\nb\n"), vec![0..1, 2..2, 3..4, 5..5]);
+    }
+
+    #[test]
+    fn word_deletes_take_one_word_and_never_stall() {
+        let text = "let value = compute(one, two);";
+        let end = text.len();
+        assert_eq!(
+            &text[..previous_word_boundary(text, end)],
+            "let value = compute(one, two"
+        );
+        assert_eq!(
+            &text[..previous_word_boundary(text, end - 2)],
+            "let value = compute(one, "
+        );
+        // A run of punctuation is its own word, so `=` goes on its own.
+        assert_eq!(&text[..previous_word_boundary(text, 12)], "let value ");
+        assert_eq!(previous_word_boundary("   ", 3), 0);
+        assert_eq!(previous_word_boundary(text, 0), 0);
+
+        assert_eq!(next_word_boundary(text, 0), 3);
+        assert_eq!(next_word_boundary(text, 3), 9);
+        assert_eq!(next_word_boundary("word   ", 4), 7);
+        assert_eq!(next_word_boundary(text, end), end);
+    }
+
+    #[test]
+    fn message_editors_leave_prose_uncolored() {
+        let prose = "it's just making a card for every command";
+        assert!(syntax_spans(true, None, prose).is_empty());
+        assert!(!syntax_spans(false, Some("rust"), "let x = \"hi\";").is_empty());
     }
 }

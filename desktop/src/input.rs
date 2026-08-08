@@ -1,19 +1,26 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
     fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::{
+    editor::{next_word_boundary, previous_word_boundary},
+    selection::TextSelection,
+};
+
 actions!(
     composer_input,
     [
         Backspace,
         Delete,
+        DeleteWord,
+        DeleteWordForward,
         Left,
         Right,
         SelectLeft,
@@ -31,6 +38,23 @@ actions!(
 
 actions!(terminal_input, [Up, Down, Interrupt, Escape, Tab]);
 
+const CARET_WIDTH: Pixels = px(2.);
+
+/// How far to scroll a single-line box so the caret stays inside it: never past
+/// what the text overflows by, and only when the caret would otherwise leave.
+fn caret_scroll(current: Pixels, caret: Pixels, text: Pixels, visible: Pixels) -> Pixels {
+    let overflow = (text - visible + CARET_WIDTH).max(px(0.));
+    let mut scroll = current.clamp(px(0.), overflow);
+    if caret < scroll {
+        scroll = caret;
+    }
+    let last_column = (visible - CARET_WIDTH).max(px(0.));
+    if caret - scroll > last_column {
+        scroll = caret - last_column;
+    }
+    scroll.clamp(px(0.), overflow)
+}
+
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
     Changed(String),
@@ -47,6 +71,9 @@ pub struct ComposerInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// How far the single visible line is scrolled left, so text longer than the
+    /// box follows the caret instead of running past the border.
+    scroll: Pixels,
     is_selecting: bool,
     terminal: bool,
     concealed: bool,
@@ -65,6 +92,7 @@ impl ComposerInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll: px(0.),
             is_selecting: false,
             terminal: false,
             concealed: false,
@@ -180,6 +208,34 @@ impl ComposerInput {
         self.replace_text_in_range(None, "", window, cx);
     }
 
+    fn delete_word(&mut self, _: &DeleteWord, window: &mut Window, cx: &mut Context<Self>) {
+        // A shell deletes the word behind the cursor on ctrl-w.
+        if self.terminal_bytes(vec![0x17], cx) {
+            return;
+        }
+        if self.selected_range.is_empty() {
+            let offset = previous_word_boundary(&self.content, self.cursor_offset());
+            self.select_to(offset, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal_bytes(b"\x1bd".to_vec(), cx) {
+            return;
+        }
+        if self.selected_range.is_empty() {
+            let offset = next_word_boundary(&self.content, self.cursor_offset());
+            self.select_to(offset, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_bytes(b"\r".to_vec(), cx) {
             return;
@@ -248,10 +304,18 @@ impl ComposerInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.concealed && !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
-            ));
+        if !self.selected_range.is_empty() {
+            if !self.concealed {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    self.content[self.selected_range.clone()].to_string(),
+                ));
+            }
+            return;
+        }
+        // The transcript cannot take focus, so a copy typed at an input with
+        // nothing selected is meant for the text selected out there.
+        if let Some(text) = TextSelection::selected(cx) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
@@ -294,7 +358,7 @@ impl ComposerInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -460,11 +524,11 @@ impl EntityInputHandler for ComposerInput {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + layout.x_for_index(range.start),
+                bounds.left() + layout.x_for_index(range.start) - self.scroll,
                 bounds.top(),
             ),
             point(
-                bounds.left() + layout.x_for_index(range.end),
+                bounds.left() + layout.x_for_index(range.end) - self.scroll,
                 bounds.bottom(),
             ),
         ))
@@ -584,17 +648,21 @@ impl Element for TextElement {
             vec![run]
         };
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let previous_scroll = input.scroll;
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
         let cursor_x = line.x_for_index(cursor_offset);
+        let scroll = caret_scroll(previous_scroll, cursor_x, line.width, bounds.size.width);
+        self.input.update(cx, |input, _| input.scroll = scroll);
+        let left = bounds.left() - scroll;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_x, bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
+                        point(left + cursor_x, bounds.top()),
+                        size(CARET_WIDTH, bounds.bottom() - bounds.top()),
                     ),
                     rgb(0x6b8cff),
                 )),
@@ -603,14 +671,8 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
+                        point(left + line.x_for_index(selected_range.start), bounds.top()),
+                        point(left + line.x_for_index(selected_range.end), bounds.bottom()),
                     ),
                     rgba(0x6b8cff55),
                 )),
@@ -640,21 +702,26 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
         let line = prepaint.line.take().expect("input line was shaped");
         let terminal = self.input.read(cx).terminal;
-        if !terminal {
-            line.paint(bounds.origin, window.line_height(), window, cx)
-                .expect("paint input line");
-        }
-        if !terminal
-            && focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+        let scroll = self.input.read(cx).scroll;
+        let origin = point(bounds.left() - scroll, bounds.top());
+        // Text longer than the box is scrolled, so nothing may paint past it.
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
+            if !terminal {
+                line.paint(origin, window.line_height(), window, cx)
+                    .expect("paint input line");
+            }
+            if !terminal
+                && focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+        });
         self.input.update(cx, |input, _| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
@@ -682,6 +749,8 @@ impl Render for ComposerInput {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word))
+            .on_action(cx.listener(Self::delete_word_forward))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
@@ -719,5 +788,28 @@ impl Render for ComposerInput {
 impl Focusable for ComposerInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_caret_stays_inside_a_box_narrower_than_its_text() {
+        let visible = px(100.);
+        // Text that fits never scrolls.
+        assert_eq!(caret_scroll(px(0.), px(40.), px(80.), visible), px(0.));
+        // Typing at the end pulls the tail into view.
+        assert_eq!(caret_scroll(px(0.), px(300.), px(300.), visible), px(202.));
+        // Moving back to the start returns to it.
+        assert_eq!(caret_scroll(px(202.), px(0.), px(300.), visible), px(0.));
+        // A caret already in view leaves the scroll alone.
+        assert_eq!(
+            caret_scroll(px(150.), px(200.), px(300.), visible),
+            px(150.)
+        );
+        // Deleting text never leaves a gap past its end.
+        assert_eq!(caret_scroll(px(202.), px(20.), px(20.), visible), px(0.));
     }
 }

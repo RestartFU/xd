@@ -318,6 +318,7 @@ impl TurnRuntime {
         let mut streamed_text = String::new();
         let mut assistant_text = String::new();
         let mut visible_streamed_bytes = 0;
+        let mut published_text = false;
         let mut context_usage = None;
         let mut parked = Instant::now();
 
@@ -363,13 +364,17 @@ impl TurnRuntime {
                                 had_activity = true;
                                 let visible = ask::visible_bytes(&text);
                                 if visible > 0 {
+                                    // Each block is stored as its own message, so
+                                    // the live view needs the same break.
+                                    let separator = if published_text { "\n\n" } else { "" };
                                     self.publish_sequenced(
                                         "text",
                                         &turn,
                                         turn_id,
                                         &progress,
-                                        json!({"text": &text[..visible]}),
+                                        json!({"text": format!("{separator}{}", &text[..visible])}),
                                     );
+                                    published_text = true;
                                 }
                             }
                             Err(error) => latest_error = Some(error.to_string()),
@@ -388,6 +393,7 @@ impl TurnRuntime {
                                 json!({"text": &streamed_text[visible_streamed_bytes..visible]}),
                             );
                             visible_streamed_bytes = visible;
+                            published_text = true;
                             // A client that loads the chat now has to be handed
                             // the same text the live events already carried.
                             progress.set_segment(&streamed_text[..visible_streamed_bytes]);

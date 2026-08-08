@@ -7,6 +7,8 @@ use std::{
 
 use serde_json::Value;
 
+use crate::tool_diff;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
     Session(String),
@@ -227,6 +229,9 @@ fn append_system_prompt(command: &mut Command, prompt: Option<&str>) {
 pub struct ClaudeParser {
     saw_streamed_text: bool,
     saw_text: bool,
+    /// Newlines the text so far already ends with, so a new block is separated
+    /// by a blank line rather than running into the previous one.
+    trailing_newlines: usize,
     pending_tools: HashMap<u64, PendingClaudeTool>,
 }
 
@@ -239,6 +244,23 @@ struct PendingClaudeTool {
 impl ClaudeParser {
     const MAX_PENDING_TOOLS: usize = 64;
     const ARGUMENT_LIMIT: usize = 2 * 1024 * 1024;
+
+    fn record_text(&mut self, text: &str) {
+        self.saw_text = true;
+        self.trailing_newlines = if text.chars().all(|character| character == '\n') {
+            self.trailing_newlines + text.len()
+        } else {
+            text.chars().rev().take_while(|c| *c == '\n').count()
+        };
+    }
+
+    /// The blank line that keeps a new text block off the end of the last one.
+    fn block_break(&self) -> Option<String> {
+        if !self.saw_text || self.trailing_newlines >= 2 {
+            return None;
+        }
+        Some("\n".repeat(2 - self.trailing_newlines))
+    }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(root) = serde_json::from_str::<Value>(line) else {
@@ -277,7 +299,7 @@ impl ClaudeParser {
                     && let Some(text) = root.get("result").and_then(Value::as_str)
                     && !text.is_empty()
                 {
-                    self.saw_text = true;
+                    self.record_text(text);
                     events.push(AgentEvent::TextDelta(text.to_owned()));
                 }
                 if failed {
@@ -336,6 +358,18 @@ impl ClaudeParser {
                 let Some(block) = event.get("content_block") else {
                     return Vec::new();
                 };
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    // Claude opens a fresh text block after each tool call. Left
+                    // alone its first delta lands against the previous block's
+                    // last word.
+                    return self
+                        .block_break()
+                        .map(|separator| {
+                            self.record_text(&separator);
+                            vec![AgentEvent::TextDelta(separator)]
+                        })
+                        .unwrap_or_default();
+                }
                 if block.get("type").and_then(Value::as_str) == Some("tool_use")
                     && (self.pending_tools.contains_key(&index)
                         || self.pending_tools.len() < Self::MAX_PENDING_TOOLS)
@@ -366,7 +400,7 @@ impl ClaudeParser {
                         .filter(|text| !text.is_empty())
                         .map(|text| {
                             self.saw_streamed_text = true;
-                            self.saw_text = true;
+                            self.record_text(text);
                             vec![AgentEvent::TextDelta(text.to_owned())]
                         })
                         .unwrap_or_default(),
@@ -416,16 +450,25 @@ impl ClaudeParser {
         else {
             return Vec::new();
         };
-        content
+        let blocks = content
             .iter()
             .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|block| block.get("text").and_then(Value::as_str))
             .filter(|text| !text.is_empty())
-            .map(|text| {
-                self.saw_text = true;
-                AgentEvent::TextDelta(text.to_owned())
-            })
-            .collect()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for text in blocks {
+            // Without streaming, a whole assistant message arrives at once, so
+            // each one is its own paragraph.
+            if let Some(separator) = self.block_break() {
+                self.record_text(&separator);
+                events.push(AgentEvent::TextDelta(separator));
+            }
+            self.record_text(&text);
+            events.push(AgentEvent::TextDelta(text));
+        }
+        events
     }
 }
 
@@ -520,6 +563,11 @@ pub(crate) fn resolve_claude() -> PathBuf {
 }
 
 fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
+    // A file-editing call carries its own diff, so the row shows the change
+    // rather than the path alone.
+    if let Some(patch) = tool_diff::build(name, arguments) {
+        return patch;
+    }
     if let Some(workflow) = workflow_marker(arguments) {
         return workflow;
     }
@@ -570,6 +618,9 @@ fn tool_summary(item: &Value) -> String {
         return workflow;
     }
     let kind = item.get("type").and_then(Value::as_str).unwrap_or("tool");
+    if let Some(patch) = tool_diff::build(kind, Some(item)) {
+        return patch;
+    }
     if matches!(kind, "collab_tool_call" | "collab_agent_tool_call")
         && matches!(
             item.get("tool").and_then(Value::as_str),
@@ -751,6 +802,50 @@ mod tests {
         assert!(matches!(events[0], AgentEvent::Error(_)));
         assert_eq!(events[1], AgentEvent::Text("still working".into()));
         assert_eq!(events.last(), Some(&AgentEvent::Completed));
+    }
+
+    #[test]
+    fn separates_claude_text_blocks_that_a_tool_call_interrupts() {
+        let mut parser = ClaudeParser::default();
+        let mut events = Vec::new();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Now the renderer."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"text"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Now the card."}}}"#,
+        ] {
+            events.extend(parser.feed(line));
+        }
+
+        let text = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "Now the renderer.\n\nNow the card.");
+    }
+
+    #[test]
+    fn separates_whole_assistant_messages_without_doubling_existing_breaks() {
+        let mut parser = ClaudeParser::default();
+        let text = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First."}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Second.\n\n"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Third."}]}}"#,
+        ]
+        .into_iter()
+        .flat_map(|line| parser.feed(line))
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta(text) => Some(text),
+            _ => None,
+        })
+        .collect::<String>();
+
+        assert_eq!(text, "First.\n\nSecond.\n\nThird.");
     }
 
     #[test]
