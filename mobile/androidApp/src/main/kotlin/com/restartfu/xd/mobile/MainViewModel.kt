@@ -332,7 +332,7 @@ class ChatViewModel(
         transport = session,
         recorders = ::AndroidVoiceRecorder,
         scope = viewModelScope,
-        onTranscript = ::appendToDraft,
+        onTranscript = ::dictated,
     )
 
     suspend fun resetSpeech() {
@@ -367,6 +367,22 @@ class ChatViewModel(
     fun updateDraft(value: String) {
         _draft.value = value
         scheduleDraftSync()
+    }
+
+    /**
+     * What one finished utterance does.
+     *
+     * Dictation leaves it in the composer to be read and sent. Hands-free
+     * cannot: there is no button press coming, so the utterance is the message.
+     * It still goes through the draft first, so anything already typed there is
+     * carried along rather than dropped.
+     */
+    private fun dictated(transcript: String) {
+        appendToDraft(transcript)
+        if (!voice.handsFree.value) return
+        // The same choice the composer's own action key makes: a turn already
+        // running is steered rather than interrupted.
+        if (state.value.working) enqueue() else send()
     }
 
     private fun appendToDraft(transcript: String) {

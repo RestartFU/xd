@@ -71,6 +71,10 @@ public class VoiceSession internal constructor(
     public val state: StateFlow<VoiceState> = _state.asStateFlow()
     private val _partial = MutableStateFlow("")
     public val partial: StateFlow<String> = _partial.asStateFlow()
+    private val _handsFree = MutableStateFlow(false)
+
+    /** Whether each pause sends what was said and opens the microphone again. */
+    public val handsFree: StateFlow<Boolean> = _handsFree.asStateFlow()
 
     /** Bumped by anything that abandons a job, so late results are ignored. */
     private var generation = 0L
@@ -144,6 +148,21 @@ public class VoiceSession internal constructor(
         }
     }
 
+    /**
+     * Turns hands-free dictation on or off.
+     *
+     * On, this starts listening at once and keeps going: each pause ends an
+     * utterance, which is transcribed, handed over, and followed by the next
+     * recording. Off cancels whatever is in flight rather than letting it land
+     * -- someone switching this off is asking not to be listened to, and the
+     * half-sentence they were saying is not a message they meant to send.
+     */
+    public fun setHandsFree(on: Boolean) {
+        if (_handsFree.value == on) return
+        _handsFree.value = on
+        if (on) start() else cancel()
+    }
+
     /** Ends the recording and sends it to be transcribed. */
     public fun stop() {
         if (_state.value !is VoiceState.Recording) return
@@ -156,6 +175,10 @@ public class VoiceSession internal constructor(
         val request = token
         val daemonJob = _state.value !is VoiceState.Idle &&
             _state.value !is VoiceState.NeedsModel
+        // Nothing restarts the loop except a finished utterance, so leaving the
+        // flag set here would leave hands-free on and deaf. Discarding what is
+        // being said is a way of saying stop.
+        _handsFree.value = false
         reset()
         recorder?.cancel()
         recorder = null
@@ -198,6 +221,9 @@ public class VoiceSession internal constructor(
                 if (_state.value is VoiceState.Transcribing) {
                     reset()
                     onTranscript(event.text)
+                    // The whole point of hands-free: the next thing said is
+                    // caught without anyone reaching for the phone.
+                    if (_handsFree.value) start()
                 }
             is VoiceEvent.Cancelled -> reset()
             is VoiceEvent.Failed -> fail(generation, event.message)
@@ -236,8 +262,15 @@ public class VoiceSession internal constructor(
                     active.cancel()
                 }
             }
+            // Only the recorder is signalled from the capture thread. Ending
+            // the utterance any harder would touch state that belongs to the
+            // scope's dispatcher; `record` returning does the rest below.
+            val listener = if (_handsFree.value) EndOfSpeech() else null
             val pcm = try {
-                active.record { chunk -> chunks.trySend(chunk) }
+                active.record { chunk ->
+                    chunks.trySend(chunk)
+                    if (listener?.accept(chunk) == true) active.stop()
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -275,6 +308,10 @@ public class VoiceSession internal constructor(
     private fun fail(mark: Long, message: String) {
         if (mark != generation) return
         reset()
+        // A hands-free loop that restarts through failures is a loop that spins
+        // on a broken microphone and buries the reason under the next attempt.
+        // Drop out and let the error be read.
+        _handsFree.value = false
         _state.value = VoiceState.Failed(message)
     }
 
