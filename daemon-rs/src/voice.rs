@@ -677,15 +677,22 @@ impl Transcriber {
             "--prompt",
             PROMPT,
         ]);
-        if let Some(bundle) = executable.parent().and_then(Path::parent) {
-            command.env("LD_LIBRARY_PATH", bundle.join("lib"));
-        }
-        let child = command
+        // Deliberately no LD_LIBRARY_PATH. What is spawned on Linux is the
+        // bundle's `whisper-server` wrapper, which runs the binary under the
+        // bundle's own loader with an explicit --library-path; handing that a
+        // library path through the environment as well crashes it before it
+        // prints anything. Elsewhere the variable never applied: Windows has no
+        // wrapper and macOS reads DYLD_*.
+        // stderr is kept rather than discarded so a recognizer that dies on
+        // startup can say why. Twice now the only report has been that it
+        // exited, which is the one thing that was already obvious.
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Cannot start local voice recognizer: {error}"))?;
+        let complaint = child.stderr.take();
         self.process = Some(child);
         self.port = Some(port);
         self.model_path = Some(model.to_owned());
@@ -706,7 +713,12 @@ impl Transcriber {
                 .is_some()
             {
                 self.stop();
-                return Err("Local voice recognizer exited while starting.".into());
+                return Err(match last_words(complaint) {
+                    Some(said) => {
+                        format!("Local voice recognizer exited while starting: {said}")
+                    }
+                    None => "Local voice recognizer exited while starting.".into(),
+                });
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -866,6 +878,28 @@ fn default_data_directory() -> PathBuf {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "xd".into());
     data_home.join(data_name)
+}
+
+/// The tail of what a dead recognizer printed, for the message that reports it.
+///
+/// Only ever read once the process has gone, so this cannot block on a pipe
+/// that is still open. A crash before any output -- a segfault in the loader,
+/// say -- leaves nothing, and then the caller says only that it exited.
+fn last_words(complaint: Option<std::process::ChildStderr>) -> Option<String> {
+    let mut said = String::new();
+    complaint?
+        .take(16 * 1024)
+        .read_to_string(&mut said)
+        .ok()
+        .filter(|_| !said.trim().is_empty())?;
+    Some(
+        said.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+    )
 }
 
 fn whisper_server() -> PathBuf {
