@@ -46,6 +46,7 @@ use xd_desktop::{
 };
 
 mod editor;
+mod files;
 mod input;
 mod presence;
 mod selection;
