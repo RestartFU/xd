@@ -40,7 +40,15 @@ public class EndOfSpeech(
     public fun accept(pcm: ByteArray): Boolean {
         if (ended) return true
         val level = amplitude(pcm)
-        loudest = max(level, loudest * DECAY_PER_SECOND.pow(seconds(pcm.size)))
+        // The peak decays only while speech is still being tracked, and is
+        // frozen once a pause is being counted. Decay exists so one slammed
+        // door does not deafen this to a normal voice -- a problem that only
+        // arises while someone is talking. Keeping it running through the
+        // pause walks the threshold down to the room's own noise, which then
+        // reads as speech and restarts the count, and the pause never ends.
+        if (quietBytes == 0) {
+            loudest = max(level, loudest * DECAY_PER_SECOND.pow(seconds(pcm.size)))
+        }
         val speaking = loudest >= FLOOR && level >= loudest * QUIET_FRACTION
         if (speaking) {
             spokenBytes += pcm.size

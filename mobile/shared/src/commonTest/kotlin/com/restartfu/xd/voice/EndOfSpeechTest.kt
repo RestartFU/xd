@@ -62,6 +62,21 @@ class EndOfSpeechTest {
     }
 
     @Test
+    fun a_pause_into_a_room_that_is_not_silent_still_ends() {
+        // The recorder streams every 500 ms, so the pause is only three chunks
+        // wide. A peak that kept decaying through them would walk the speech
+        // threshold down onto this room tone, which would read as talking and
+        // restart the count -- and the utterance would never be sent.
+        val detector = EndOfSpeech()
+        val speech = tone(6_000, 500)
+        val room = tone(90, 500)
+        repeat(3) { assertFalse(detector.accept(speech), "speaking") }
+        var ended = false
+        repeat(4) { ended = detector.accept(room) }
+        assertTrue(ended, "a quiet room is still a pause")
+    }
+
+    @Test
     fun one_loud_noise_does_not_deafen_it_to_a_normal_voice() {
         val detector = EndOfSpeech()
         assertFalse(feed(detector, tone(30_000), 200), "a door slams")

@@ -32,7 +32,9 @@ Which approach should I take?
 </ask>
 Use two to six options. When the answer must be free-form text, put <input> on its own line inside the block; options and <input> may be combined. Do not ask more than one question per reply.
 
-For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap ordinary prose, code, tool output, status updates, analysis, or questions. The client may ignore speech tags when speech is disabled."#;
+For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap code, tool output, analysis, or questions. The client may ignore speech tags when speech is disabled.
+
+Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all."#;
 const INTERRUPTED_TURN: &str = "The daemon stopped before this turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
