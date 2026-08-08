@@ -17,6 +17,9 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.syntax.CodeBlocks
@@ -48,6 +51,21 @@ internal fun CodeText(
         fontFamily = FontFamily.Monospace,
         style = MaterialTheme.typography.bodySmall,
         softWrap = false,
+    )
+}
+
+/**
+ * Colours editable source without changing its characters or offsets. Keeping
+ * an identity mapping is important: selection handles, cursor movement and
+ * IME edits continue to address the original file text.
+ */
+internal class SyntaxVisualTransformation(
+    private val language: SyntaxLanguage,
+    private val fallback: Color,
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText = TransformedText(
+        highlight(text.text, language, fallback),
+        OffsetMapping.Identity,
     )
 }
 

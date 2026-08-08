@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +27,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
@@ -394,6 +396,7 @@ private fun Composer(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .imePadding()
             .padding(12.dp),
     ) {
@@ -650,6 +653,12 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
     }
 }
 
+/** Native long-press selection, scoped to one message at a time. */
+@Composable
+private fun SelectableMessageBody(item: TranscriptItem, model: ChatViewModel) {
+    SelectionContainer { MessageBody(item, model) }
+}
+
 /**
  * Assistant prose with its client-side presentation blocks lifted out.
  *
@@ -846,7 +855,7 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
-            MessageBody(item, model)
+            SelectableMessageBody(item, model)
         }
         return
     }
@@ -867,7 +876,7 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
                 item.label?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall)
                 }
-                MessageBody(item, model)
+                SelectableMessageBody(item, model)
             }
         }
     }

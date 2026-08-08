@@ -16,12 +16,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -32,6 +34,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.files.FileTab
 import com.restartfu.xd.files.TreeRow
 import com.restartfu.xd.mobile.FilesViewModel
+import com.restartfu.xd.syntax.Syntax
 
 /** How far one level of nesting shifts a row. */
 private val INDENT = 12.dp
@@ -91,6 +94,7 @@ internal fun FilesPaneContent(model: FilesViewModel) {
                 } else {
                     FileEditor(
                         text = file.text,
+                        path = tab.path,
                         dirty = file.dirty,
                         saving = file.saving,
                         error = file.error,
@@ -224,12 +228,19 @@ private fun TreeEntry(row: TreeRow, onClick: () -> Unit) {
 @Composable
 private fun FileEditor(
     text: String,
+    path: String,
     dirty: Boolean,
     saving: Boolean,
     error: String?,
     onChange: (String) -> Unit,
     onSave: () -> Unit,
 ) {
+    val language = remember(path) { Syntax.languageForPath(path) }
+    val fallback = LocalContentColor.current
+    val syntaxColours = remember(language, fallback) {
+        SyntaxVisualTransformation(language, fallback)
+    }
+
     Column(Modifier.fillMaxSize()) {
         error?.let { message ->
             Text(
@@ -247,6 +258,7 @@ private fun FileEditor(
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp),
             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            visualTransformation = syntaxColours,
         )
         Row(
             modifier = Modifier
