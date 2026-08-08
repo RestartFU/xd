@@ -1366,7 +1366,8 @@ impl StateStore {
             Some(serde_json::to_string(&queue).unwrap())
         };
         transaction.execute(
-            "UPDATE chats SET queued = ?, daemon_working = ?, updated_at = ? WHERE id = ?",
+            "UPDATE chats SET queued = ?, daemon_working = ?, partial_reply = '', \
+             partial_reply_label = NULL, updated_at = ? WHERE id = ?",
             params![encoded, next_text.is_some(), now_seconds(), chat_id],
         )?;
         let last_message_id = transaction.query_row(
@@ -1384,6 +1385,26 @@ impl StateStore {
             next,
             queue_event: next_text.map(|_| queued_event(chat_id, &queue)),
         })
+    }
+
+    /// Streamed replies only become a message once the turn ends, so a daemon
+    /// that dies mid-reply used to take the whole answer with it while every
+    /// tool call it had already stored survived. Park the text so far on the
+    /// chat instead; recovery turns it into a real message. This deliberately
+    /// stays out of `messages` so a mid-turn transcript reload cannot render
+    /// the partial reply on top of the text the client is already streaming.
+    pub fn set_partial_reply(
+        &self,
+        chat_id: &str,
+        text: &str,
+        label: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chats SET partial_reply = ?, partial_reply_label = ? WHERE id = ?",
+            params![text, label, chat_id],
+        )?;
+        Ok(())
     }
 
     /// A killed daemon leaves `daemon_working` set with no process behind it:
@@ -1437,7 +1458,8 @@ impl StateStore {
             params![chat_id, error, now_seconds()],
         )?;
         transaction.execute(
-            "UPDATE chats SET daemon_working = 0, updated_at = ? WHERE id = ?",
+            "UPDATE chats SET daemon_working = 0, partial_reply = '', \
+             partial_reply_label = NULL, updated_at = ? WHERE id = ?",
             params![now_seconds(), chat_id],
         )?;
         transaction.commit()?;
@@ -2957,6 +2979,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
         }
         if version > 0 {
             ensure_chat_session_context_columns(database)?;
+            ensure_chat_partial_reply_columns(database)?;
             return Ok(());
         }
     }
@@ -2978,6 +3001,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            resume_after_restart INTEGER NOT NULL DEFAULT 0, original_workdir TEXT, \
            daemon_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
+           partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, \
            last_user_message_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, \
            updated_at INTEGER NOT NULL, FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
          CREATE INDEX IF NOT EXISTS chats_folder ON chats (folder_id, updated_at DESC); \
@@ -3035,6 +3059,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     )?;
     transaction.commit()?;
     ensure_chat_session_context_columns(database)?;
+    ensure_chat_partial_reply_columns(database)?;
     Ok(())
 }
 
@@ -3071,6 +3096,34 @@ fn ensure_chat_session_context_columns(database: &Connection) -> Result<(), Stor
             "ALTER TABLE chat_sessions ADD COLUMN context_model TEXT",
             [],
         )?;
+    }
+    Ok(())
+}
+
+fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), StorageError> {
+    let has_chats: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chats')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_chats {
+        return Ok(());
+    }
+
+    let mut statement = database.prepare("PRAGMA table_info(chats)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
+
+    if !columns.contains("partial_reply") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN partial_reply TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !columns.contains("partial_reply_label") {
+        database.execute("ALTER TABLE chats ADD COLUMN partial_reply_label TEXT", [])?;
     }
     Ok(())
 }
@@ -4738,12 +4791,28 @@ fn end_interrupted_turn(
     transaction: &rusqlite::Transaction<'_>,
     chat_id: &str,
 ) -> Result<(), rusqlite::Error> {
+    let partial = transaction
+        .query_row(
+            "SELECT COALESCE(partial_reply, ''), partial_reply_label FROM chats WHERE id = ?",
+            [chat_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+        .filter(|(text, _)| !text.is_empty());
+    if let Some((text, label)) = partial {
+        transaction.execute(
+            "INSERT INTO messages (chat_id, role, content, created_at, label) \
+             VALUES (?, 'assistant', ?, ?, ?)",
+            params![chat_id, text, now_seconds(), label],
+        )?;
+    }
     transaction.execute(
         "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
         params![chat_id, INTERRUPTED_TURN, now_seconds()],
     )?;
     transaction.execute(
-        "UPDATE chats SET daemon_working = 0, updated_at = ? WHERE id = ?",
+        "UPDATE chats SET daemon_working = 0, partial_reply = '', partial_reply_label = NULL, \
+         updated_at = ? WHERE id = ?",
         params![now_seconds(), chat_id],
     )?;
     Ok(())
@@ -6527,6 +6596,83 @@ mod tests {
         else {
             panic!("a recovered chat should start a turn");
         };
+    }
+
+    #[test]
+    fn a_streamed_reply_survives_the_daemon_that_was_writing_it() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "go"}))
+            .unwrap();
+        store
+            .append_turn_message("chat-1", "tool", "Read a file", None)
+            .unwrap();
+        store
+            .set_partial_reply("chat-1", "Half an ans", Some("codex"))
+            .unwrap();
+
+        // While the turn is live the parked reply stays out of the transcript,
+        // so a reload cannot double it up with the streaming text.
+        assert_eq!(
+            roles_and_text(&store),
+            pairs(&[("user", "go"), ("tool", "Read a file")])
+        );
+
+        assert_eq!(store.recover_interrupted_turns().unwrap(), vec!["chat-1"]);
+        assert_eq!(
+            roles_and_text(&store),
+            pairs(&[
+                ("user", "go"),
+                ("tool", "Read a file"),
+                ("assistant", "Half an ans"),
+                ("error", INTERRUPTED_TURN),
+            ])
+        );
+
+        // A turn that ends normally stores its own reply, so whatever was
+        // parked must not surface a second time.
+        store
+            .set_partial_reply("chat-1", "leftover", Some("codex"))
+            .unwrap();
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "again"}))
+            .unwrap();
+        assert!(store.clear_interrupted_turn("chat-1").unwrap());
+        let transcript = roles_and_text(&store);
+        assert!(!transcript.iter().any(|(_, text)| text == "leftover"));
+        assert_eq!(
+            transcript.last().unwrap(),
+            &("error".to_owned(), INTERRUPTED_TURN.to_owned())
+        );
+    }
+
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(role, text)| ((*role).to_owned(), (*text).to_owned()))
+            .collect()
+    }
+
+    fn roles_and_text(store: &StateStore) -> Vec<(String, String)> {
+        store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| {
+                (
+                    message["role"].as_str().unwrap().to_owned(),
+                    message["content"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
     }
 
     #[test]

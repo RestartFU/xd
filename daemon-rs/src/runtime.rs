@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -20,6 +20,10 @@ use crate::{
     secrets::SecretsStore,
     storage::TurnSpec,
 };
+
+/// How often a streamed reply is parked on the chat so an interrupted turn
+/// keeps most of its text without turning every token into a database write.
+const PARK_STREAMED_REPLY_EVERY: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub struct TurnRuntime {
@@ -249,6 +253,7 @@ impl TurnRuntime {
         let mut assistant_text = String::new();
         let mut visible_streamed_bytes = 0;
         let mut context_usage = None;
+        let mut parked = Instant::now();
 
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else {
@@ -319,6 +324,19 @@ impl TurnRuntime {
                                 json!({"text": &streamed_text[visible_streamed_bytes..visible]}),
                             );
                             visible_streamed_bytes = visible;
+                        }
+                        // Park the reply so far, throttled so a token stream is
+                        // not a write storm. Only an interrupted turn ever
+                        // reads it back.
+                        if parked.elapsed() >= PARK_STREAMED_REPLY_EVERY {
+                            if let Err(error) = self.inner.store.set_partial_reply(
+                                &turn.chat_id,
+                                &streamed_text,
+                                Some(&turn.label),
+                            ) {
+                                latest_error = Some(error.to_string());
+                            }
+                            parked = Instant::now();
                         }
                     }
                     AgentEvent::Tool(text) => {
