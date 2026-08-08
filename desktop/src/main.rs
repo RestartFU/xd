@@ -1004,6 +1004,8 @@ struct XdDesktop {
     git_commit_input: Entity<ComposerInput>,
     repo_file_filter_input: Entity<ComposerInput>,
     file_editor: Entity<FileEditor>,
+    /// The editor behind whichever file tab is in front.
+    tab_editor: Entity<FileEditor>,
     terminal_input: Entity<ComposerInput>,
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
@@ -1054,6 +1056,12 @@ struct XdDesktop {
     terminal_panel: Option<TerminalPanel>,
     terminal_cursor_visible: bool,
     diff_generation: u64,
+    /// The working directory as a folding tree, in the sidebar.
+    file_tree: files::FileTree,
+    /// The files opened out of it, as tabs beside the chat.
+    open_files: files::OpenFiles,
+    /// Bumped when the chat changes, so listings for the old one are dropped.
+    tree_generation: u64,
     collapsed_diff_files: HashSet<String>,
     git_commit_message: String,
     repo_file_filter: String,
@@ -1196,6 +1204,16 @@ impl XdDesktop {
         })
         .detach();
         let file_editor = cx.new(FileEditor::new);
+        let tab_editor = cx.new(FileEditor::new);
+        cx.subscribe(&tab_editor, |this, _, event, cx| {
+            if let EditorEvent::Changed(text) = event {
+                if let files::FileTab::File(path) = this.open_files.active.clone() {
+                    this.open_files.edit(&path, text.clone());
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
         cx.subscribe(&file_editor, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => {
                 if let Some(preview) = this
@@ -1441,6 +1459,7 @@ impl XdDesktop {
             git_commit_input,
             repo_file_filter_input,
             file_editor,
+            tab_editor,
             terminal_input,
             auth_input,
             secret_name_input,
@@ -1491,6 +1510,9 @@ impl XdDesktop {
             terminal_panel: None,
             terminal_cursor_visible: true,
             diff_generation: 0,
+            file_tree: files::FileTree::default(),
+            open_files: files::OpenFiles::default(),
+            tree_generation: 0,
             collapsed_diff_files: HashSet::new(),
             git_commit_message: String::new(),
             repo_file_filter: String::new(),
@@ -3376,6 +3398,61 @@ impl XdDesktop {
                     });
                 }
             }
+            RequestKind::FileTreeList {
+                chat_id,
+                path,
+                generation,
+            } => {
+                if generation != self.tree_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                match serde_json::from_value::<Vec<BrowseEntry>>(
+                    value.get("entries").cloned().unwrap_or_default(),
+                ) {
+                    Ok(entries) => self.file_tree.set_children(&path, entries),
+                    Err(error) => {
+                        self.file_tree.set_failed(&path);
+                        self.model.connection_error =
+                            Some(format!("Invalid directory listing: {error}"));
+                    }
+                }
+            }
+            RequestKind::FileTabRead {
+                chat_id,
+                path,
+                generation,
+            } => {
+                if generation != self.tree_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                let Some(content) = value.get("content").and_then(Value::as_str) else {
+                    self.model.connection_error = Some("Invalid file response.".into());
+                    return;
+                };
+                self.open_files.open(&path, content.to_owned());
+                self.tab_editor.update(cx, |editor, cx| {
+                    editor.set_file(&path, content.to_owned(), cx);
+                });
+            }
+            RequestKind::FileTabWrite {
+                chat_id,
+                path,
+                content,
+                generation,
+            } => {
+                if generation != self.tree_generation
+                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+                {
+                    return;
+                }
+                // What was sent, not what is on screen: typing carries on
+                // during the round trip and is not part of what landed.
+                self.open_files.set_saved(&path, content);
+            }
             RequestKind::FileBrowseWrite {
                 chat_id,
                 path,
@@ -4772,6 +4849,124 @@ impl XdDesktop {
                 }
             }
             _ => {}
+        }
+        cx.notify();
+    }
+
+    // --- the file tree and its tabs -----------------------------------------
+
+    /// Starts the tree over for the chat now selected.
+    ///
+    /// Open files are dropped with it: their paths are relative to a working
+    /// directory that has just changed, so keeping them would leave tabs
+    /// pointing at files in a repository nobody is looking at.
+    fn reset_file_tree(&mut self, cx: &mut Context<Self>) {
+        self.tree_generation = self.tree_generation.saturating_add(1);
+        self.file_tree = files::FileTree::default();
+        self.open_files = files::OpenFiles::default();
+        self.tab_editor
+            .update(cx, |editor, cx| editor.set_file("", String::new(), cx));
+        self.list_tree_directory(String::new(), cx);
+    }
+
+    fn list_tree_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.file_tree.set_loading(&path);
+        let generation = self.tree_generation;
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.file_tree_list(&chat_id, &path, generation));
+        if let Err(error) = result {
+            self.file_tree.set_failed(&path);
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    /// Opens or closes a folder, fetching its entries the first time.
+    fn toggle_tree_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        let opening = !self.file_tree.is_expanded(&path);
+        let loaded = self.file_tree.is_loaded(&path);
+        self.file_tree.toggle(&path);
+        if opening && !loaded {
+            self.list_tree_directory(path, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Brings a file to the front, reading it only if it is not open yet.
+    fn open_file_tab(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.open_files.files.iter().any(|file| file.path == path) {
+            self.show_file_tab(files::FileTab::File(path), cx);
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let generation = self.tree_generation;
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.file_tab_read(&chat_id, &path, generation));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn show_file_tab(&mut self, tab: files::FileTab, cx: &mut Context<Self>) {
+        self.open_files.active = tab;
+        // The editor is one entity behind whichever tab is in front, so moving
+        // between tabs is what reloads its text.
+        let showing = self
+            .open_files
+            .current()
+            .map(|file| (file.path.clone(), file.text.clone()));
+        if let Some((path, text)) = showing {
+            self.tab_editor
+                .update(cx, |editor, cx| editor.set_file(&path, text, cx));
+        }
+        cx.notify();
+    }
+
+    fn close_file_tab(&mut self, path: String, cx: &mut Context<Self>) {
+        self.open_files.close(&path);
+        let showing = self
+            .open_files
+            .current()
+            .map(|file| (file.path.clone(), file.text.clone()));
+        if let Some((path, text)) = showing {
+            self.tab_editor
+                .update(cx, |editor, cx| editor.set_file(&path, text, cx));
+        }
+        cx.notify();
+    }
+
+    fn save_file_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(file) = self.open_files.current() else {
+            return;
+        };
+        if file.saving || !file.dirty() {
+            return;
+        }
+        let (path, original, sending) = (file.path.clone(), file.saved.clone(), file.text.clone());
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.open_files.set_saving(&path);
+        let generation = self.tree_generation;
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| {
+                daemon.file_tab_write(&chat_id, &path, &original, &sending, generation)
+            });
+        if let Err(error) = result {
+            self.open_files.set_failed(&path, error);
         }
         cx.notify();
     }
@@ -7696,6 +7891,7 @@ impl XdDesktop {
         self.message_image_viewer = None;
         self.model.select_chat(chat_id.clone());
         self.invalidate_live_markdown_work();
+        self.reset_file_tree(cx);
         self.transcript_snapshot = TranscriptSnapshot::default();
         if self.active_endpoint == ChatEndpoint::Local {
             self.settings.last_chat = Some(chat_id.clone());
@@ -17365,6 +17561,206 @@ impl Render for XdDesktop {
         });
         let sidebar_context_overlay = self.sidebar_context_overlay(cx);
 
+        // --- the tab strip, the tree, and whichever of them is in front ------
+        let active_tab = self.open_files.active.clone();
+        let showing_chat = active_tab == files::FileTab::Chat;
+        let tab_button = |label: String,
+                          id: usize,
+                          selected: bool,
+                          dirty: bool,
+                          close: Option<String>,
+                          cx: &mut Context<Self>,
+                          tab: files::FileTab| {
+            div()
+                .id(("file-tab", id))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .cursor_pointer()
+                .bg(rgb(if selected { SURFACE_HIGH } else { SURFACE }))
+                .text_color(rgb(if selected { TEXT } else { MUTED }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_file_tab(tab.clone(), cx);
+                }))
+                .child(if dirty { format!("{label} •") } else { label })
+                .when_some(close, |row, path| {
+                    row.child(
+                        div()
+                            .id(("close-file-tab", id))
+                            .px_1()
+                            .text_color(rgb(MUTED))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_file_tab(path.clone(), cx);
+                            }))
+                            .child("×"),
+                    )
+                })
+        };
+        let mut tabs = vec![
+            tab_button(
+                "Chat".into(),
+                0,
+                showing_chat,
+                false,
+                None,
+                cx,
+                files::FileTab::Chat,
+            ),
+            tab_button(
+                "Files".into(),
+                1,
+                active_tab == files::FileTab::Tree,
+                false,
+                None,
+                cx,
+                files::FileTab::Tree,
+            ),
+        ];
+        for (index, file) in self.open_files.files.iter().enumerate() {
+            tabs.push(tab_button(
+                file.name().to_owned(),
+                index + 2,
+                active_tab == files::FileTab::File(file.path.clone()),
+                file.dirty(),
+                Some(file.path.clone()),
+                cx,
+                files::FileTab::File(file.path.clone()),
+            ));
+        }
+        let tab_strip = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_px()
+            .px_2()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .children(tabs);
+
+        let tree_rows = self
+            .file_tree
+            .rows()
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let path = row.path.clone();
+                let directory = row.directory;
+                div()
+                    .id(("tree-row", index))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .py_0p5()
+                    .pr_2()
+                    .pl(px(8.0 + 12.0 * row.depth as f32))
+                    .text_xs()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if directory {
+                            this.toggle_tree_directory(path.clone(), cx);
+                        } else {
+                            this.open_file_tab(path.clone(), cx);
+                        }
+                    }))
+                    .child(div().w(px(12.0)).text_color(rgb(MUTED)).child(
+                        match (row.directory, row.loading, row.expanded) {
+                            (_, true, _) => "·",
+                            (true, false, true) => "▾",
+                            (true, false, false) => "▸",
+                            _ => "",
+                        },
+                    ))
+                    .text_color(rgb(if row.directory { TEXT } else { MUTED }))
+                    .child(row.name)
+            })
+            .collect::<Vec<_>>();
+        let tree_body = div()
+            .id("file-tree")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .children(tree_rows);
+
+        let saving_tab = self.open_files.current().map(|file| {
+            (
+                file.path.clone(),
+                file.dirty(),
+                file.saving,
+                file.error.clone(),
+            )
+        });
+        let editor_body = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .when_some(
+                saving_tab
+                    .as_ref()
+                    .and_then(|(_, _, _, error)| error.clone()),
+                |column, error| {
+                    column.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(0xf0a8b3))
+                            .child(error),
+                    )
+                },
+            )
+            .child(
+                div()
+                    .id("file-tab-editor")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_2()
+                    .child(self.tab_editor.clone()),
+            )
+            .when_some(saving_tab.clone(), |column, (path, dirty, saving, _)| {
+                column.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .child(div().text_xs().text_color(rgb(MUTED)).child(path.clone()))
+                        .child(
+                            div()
+                                .id("save-file-tab")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .bg(rgb(if dirty && !saving {
+                                    SURFACE_HIGH
+                                } else {
+                                    SURFACE
+                                }))
+                                .text_color(rgb(if dirty && !saving { TEXT } else { MUTED }))
+                                .when(dirty && !saving, |button| {
+                                    button.cursor_pointer().on_click(
+                                        cx.listener(|this, _, _, cx| this.save_file_tab(cx)),
+                                    )
+                                })
+                                .child(if saving { "Saving…" } else { "Save" }),
+                        ),
+                )
+            });
+
         let content = div()
             .flex_1()
             .min_h_0()
@@ -17381,8 +17777,14 @@ impl Render for XdDesktop {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .child(div().flex_1().min_h_0().child(transcript))
-                    .child(composer)
+                    .child(tab_strip)
+                    .map(|column| match active_tab {
+                        files::FileTab::Chat => column
+                            .child(div().flex_1().min_h_0().child(transcript))
+                            .child(composer),
+                        files::FileTab::Tree => column.child(tree_body),
+                        files::FileTab::File(_) => column.child(editor_body),
+                    })
                     .when_some(terminal_splitter, |column, splitter| column.child(splitter))
                     .when_some(terminal_pane, |column, pane| column.child(pane)),
             )

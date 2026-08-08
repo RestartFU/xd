@@ -119,6 +119,25 @@ pub enum RequestKind {
         content: String,
         generation: u64,
     },
+    // The tree and its tabs run on their own generation. They outlive the diff
+    // panel being opened and closed, and sharing its counter would have every
+    // toggle of that panel discard listings the tree still wants.
+    FileTreeList {
+        chat_id: String,
+        path: String,
+        generation: u64,
+    },
+    FileTabRead {
+        chat_id: String,
+        path: String,
+        generation: u64,
+    },
+    FileTabWrite {
+        chat_id: String,
+        path: String,
+        content: String,
+        generation: u64,
+    },
     GitCommit {
         chat_id: String,
         message: String,
@@ -979,6 +998,54 @@ impl DaemonHandle {
                 generation,
             },
             json!({"op": "file-browse", "chat": chat_id, "action": "read", "path": path}),
+        )
+    }
+
+    pub fn file_tree_list(&self, chat_id: &str, path: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::FileTreeList {
+                chat_id: chat_id.to_owned(),
+                path: path.to_owned(),
+                generation,
+            },
+            json!({"op": "file-browse", "chat": chat_id, "action": "list", "path": path}),
+        )
+    }
+
+    pub fn file_tab_read(&self, chat_id: &str, path: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::FileTabRead {
+                chat_id: chat_id.to_owned(),
+                path: path.to_owned(),
+                generation,
+            },
+            json!({"op": "file-browse", "chat": chat_id, "action": "read", "path": path}),
+        )
+    }
+
+    pub fn file_tab_write(
+        &self,
+        chat_id: &str,
+        path: &str,
+        original: &str,
+        content: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::FileTabWrite {
+                chat_id: chat_id.to_owned(),
+                path: path.to_owned(),
+                content: content.to_owned(),
+                generation,
+            },
+            json!({
+                "op": "file-browse",
+                "chat": chat_id,
+                "action": "write",
+                "path": path,
+                "original": original,
+                "content": content,
+            }),
         )
     }
 

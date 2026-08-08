@@ -161,6 +161,10 @@ impl OpenFile {
 pub enum FileTab {
     #[default]
     Chat,
+    /// The tree itself, which is a tab here rather than a dock: the window
+    /// already has a sidebar of chats and a panel of diffs, and a third region
+    /// competing for the same width helps nobody.
+    Tree,
     File(String),
 }
 
