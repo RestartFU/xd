@@ -92,6 +92,8 @@ const MUTED: u32 = 0xa8a8ad;
 pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
+/// What a chat is called when nobody chose a name for it.
+const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
@@ -3900,7 +3902,7 @@ impl XdDesktop {
                         self.workspace_clone_status = Some("Repository cloned".into());
                     }
                     if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-                        && let Err(error) = daemon.new_chat(folder_id, "New Chat", None)
+                        && let Err(error) = daemon.new_chat(folder_id, DEFAULT_CHAT_TITLE, None)
                     {
                         self.endpoint_model_mut(endpoint).connection_error = Some(error);
                     }
@@ -3919,7 +3921,7 @@ impl XdDesktop {
                 }
             }
         } else if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-            && let Err(error) = daemon.new_chat(folder_id, "New Chat", None)
+            && let Err(error) = daemon.new_chat(folder_id, DEFAULT_CHAT_TITLE, None)
         {
             self.endpoint_model_mut(endpoint).connection_error = Some(error);
         }
@@ -3954,7 +3956,7 @@ impl XdDesktop {
                     && self.pending_clone_chats.remove(key)
                 {
                     if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-                        && let Err(error) = daemon.new_chat(&key.1, "New Chat", None)
+                        && let Err(error) = daemon.new_chat(&key.1, DEFAULT_CHAT_TITLE, None)
                     {
                         self.endpoint_model_mut(endpoint).connection_error = Some(error);
                     }
@@ -4850,10 +4852,14 @@ impl XdDesktop {
 
     fn begin_chat_create(&mut self, folder_id: String, cx: &mut Context<Self>) {
         self.creating_chat_folder = Some(folder_id);
-        self.chat_create_title.clear();
+        // Naming a chat up front is busywork: the title is renamed later or
+        // never. Open on the name the chat would have had anyway, selected, so
+        // Enter takes it and typing replaces it.
+        self.chat_create_title = DEFAULT_CHAT_TITLE.into();
         self.chat_create_submitting = false;
-        self.chat_create_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.chat_create_input.update(cx, |input, cx| {
+            input.set_text_selected(DEFAULT_CHAT_TITLE, cx)
+        });
         cx.notify();
     }
 
@@ -4871,12 +4877,7 @@ impl XdDesktop {
         if self.chat_create_submitting {
             return;
         }
-        let title = self.chat_create_title.trim();
-        if title.is_empty() {
-            self.model.connection_error = Some("A chat title cannot be empty.".into());
-            cx.notify();
-            return;
-        }
+        let title = chat_create_title(&self.chat_create_title);
         let result = self
             .active_daemon()
             .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
@@ -9761,10 +9762,10 @@ impl Render for XdDesktop {
         let sidebar_move_submitting = self.sidebar_move_submitting;
         let creating_chat_folder = self.creating_chat_folder.clone();
         let chat_create_submitting = self.chat_create_submitting;
-        let can_save_chat = creating_chat_folder.is_some()
-            && !chat_create_submitting
-            && !self.chat_create_title.trim().is_empty()
-            && self.model.connected;
+        // An empty title is not a reason to withhold Save: it falls back to
+        // the default the field opened with.
+        let can_save_chat =
+            creating_chat_folder.is_some() && !chat_create_submitting && self.model.connected;
         let chat_create_input = self.chat_create_input.clone();
         let chat_create_focus = self.chat_create_input.read(cx).focus_handle(cx);
         let workspace_context_folder = self.workspace_context_folder.clone();
@@ -18240,6 +18241,15 @@ fn optional_trimmed(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// The title to create a chat under, given whatever is in the field.
+///
+/// The field opens holding [`DEFAULT_CHAT_TITLE`], selected. Clearing it is a
+/// way of asking for that default back, not an error to be corrected: naming a
+/// chat before it exists is busywork, and the name is renamed later or never.
+fn chat_create_title(entered: &str) -> &str {
+    optional_trimmed(entered).unwrap_or(DEFAULT_CHAT_TITLE)
+}
+
 fn directory_child_path(path: &str, entry: &str) -> String {
     if path.ends_with('/') {
         format!("{path}{entry}")
@@ -18558,6 +18568,16 @@ fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_chat_takes_the_default_title_unless_one_was_typed() {
+        assert_eq!(chat_create_title("Ship the parser"), "Ship the parser");
+        // Nobody has to name a chat: an untouched, cleared, or blank field all
+        // mean the same thing.
+        assert_eq!(chat_create_title(""), DEFAULT_CHAT_TITLE);
+        assert_eq!(chat_create_title("   "), DEFAULT_CHAT_TITLE);
+        assert_eq!(chat_create_title("  Ship it  "), "Ship it");
+    }
 
     #[test]
     fn model_shortcuts_follow_the_visible_provider_search_and_favorites() {

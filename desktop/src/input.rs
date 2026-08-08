@@ -134,6 +134,19 @@ impl ComposerInput {
         cx.notify();
     }
 
+    /// Set the text and select all of it, so the first keypress replaces it.
+    ///
+    /// For a field that opens with a usable default rather than a blank: the
+    /// default is there to be accepted, and typing over it is how it is
+    /// declined. `set_text` alone leaves the caret past the end, where typing
+    /// appends to a word the user never chose.
+    pub fn set_text_selected(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.set_text(text, cx);
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     fn changed(&self, cx: &mut Context<Self>) {
         cx.emit(ComposerEvent::Changed(self.content.to_string()));
         cx.notify();
