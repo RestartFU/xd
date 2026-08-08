@@ -49,6 +49,22 @@ require_file lib/libvulkan.so.1
 require_file lib/libvulkan_lvp.so
 require_file etc/vulkan/libvulkan_lvp.json.in
 
+# The unit is named for the profile's command, so match rather than spell it:
+# one unit, and an ExecStart= the installer can rewrite into an absolute path.
+unit=$(find "$BUNDLE/share/systemd/user" -maxdepth 1 -type f -name '*.service')
+test "$(printf '%s\n' "$unit" | grep -c .)" = 1 || {
+  echo "bundle smoke: expected exactly one systemd user unit, got: $unit" >&2
+  exit 1
+}
+grep -q '^ExecStart=' "$unit" || {
+  echo "bundle smoke: $unit has no ExecStart= for the installer to rewrite" >&2
+  exit 1
+}
+grep -q '^WantedBy=default.target$' "$unit" || {
+  echo "bundle smoke: $unit would not be started by a user manager" >&2
+  exit 1
+}
+
 svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \
   -name 'libpixbufloader*svg*.so' -print -quit)
 test -n "$svg_loader" || {

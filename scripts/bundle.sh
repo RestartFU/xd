@@ -241,6 +241,8 @@ cp /etc/ssl/openssl.cnf "$OUT/etc/ssl/openssl.cnf"
 # --- desktop metadata + launcher -------------------------------------------
 mkdir -p "$OUT/share/applications"
 cp -a "$STAGE/usr/share/applications/." "$OUT/share/applications/" 2>/dev/null || true
+mkdir -p "$OUT/share/systemd/user"
+cp -a "$STAGE/usr/share/systemd/user/." "$OUT/share/systemd/user/" 2>/dev/null || true
 mkdir -p "$OUT/share/licenses"
 cp -a "$STAGE/usr/share/licenses/." "$OUT/share/licenses/"
 

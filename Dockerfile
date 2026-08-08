@@ -335,10 +335,12 @@ RUN set -eux; \
     if [ "$PROFILE" = nightly ]; then \
       app_id=com.restartfu.Xd.Nightly; \
       app_name='xd (Nightly)'; \
+      data_name=xd-nightly; \
       settings_path=/com/restartfu/XdNightly/; \
     else \
       app_id=com.restartfu.Xd; \
       app_name=xd; \
+      data_name=xd; \
       settings_path=/com/restartfu/Xd/; \
     fi; \
     install -d \
@@ -346,6 +348,7 @@ RUN set -eux; \
       /stage/usr/share/fonts/xd \
       /stage/usr/share/glib-2.0/schemas \
       /stage/usr/share/licenses/xd \
+      /stage/usr/share/systemd/user \
       /stage/usr/share/icons/hicolor/scalable/apps \
       /stage/usr/share/icons/hicolor/symbolic/apps; \
     install -m0644 \
@@ -359,6 +362,10 @@ RUN set -eux; \
       -e "s|@APP_NAME@|$app_name|g" \
       data/com.restartfu.Xd.desktop.in \
       > "/stage/usr/share/applications/$app_id.desktop"; \
+    sed \
+      -e "s|@APP_NAME@|$app_name|g" \
+      data/xd.service.in \
+      > "/stage/usr/share/systemd/user/$data_name.service"; \
     sed \
       -e "s|@APP_ID@|$app_id|g" \
       -e "s|@SETTINGS_PATH@|$settings_path|g" \

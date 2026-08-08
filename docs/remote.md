@@ -21,8 +21,27 @@ printing its first pairing code in one command.
 The app exposes the same action as **Add a Device…**. On the other machine,
 choose **Connect to a Machine…** and enter the shown address, port, and code.
 Both clients then attach to one Engine: they see the same saved chat and the
-same in-progress turn. The host desktop or foreground `xd serve` process must
-remain open while another device uses it.
+same in-progress turn. Some daemon must be running for another device to use
+it -- the desktop starts one when it finds none.
+
+On a machine that uses systemd, the installer writes a *user* unit
+(`~/.config/systemd/user/xd.service`, or `xd-nightly.service`) and leaves it
+switched off. Turning it on puts the daemon under the user manager, so it is up
+at login and stays up after the window is closed: a paired phone still reaches
+the machine, and a turn started from the desktop keeps running once the desktop
+quits. The window attaches to that daemon rather than starting its own. A saved
+remote listener is restored on start, so a machine that has been paired once
+goes on answering across reboots without `--pair`.
+
+    systemctl --user enable --now xd      # or xd-nightly
+    systemctl --user status xd
+    systemctl --user disable --now xd     # back to the window owning it
+
+Enabling it is a choice about what runs at login, so the installer does not make
+it: until then the window starts the daemon itself, exactly as before. Upgrading
+does not change the answer either way — a unit that was running is put back, and
+one that was off stays off. `install.sh --no-service` skips writing the unit at
+all; elsewhere — no systemd, macOS, Windows — there is nothing to write.
 
 A remote appears in the sidebar as its own root beside the local workspaces,
 its folders and chats underneath, drawn from the same XdNode model with a
