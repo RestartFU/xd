@@ -57,6 +57,11 @@ pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
 
+/// Consecutive refused accepts that mean the listener itself is finished, not
+/// the connection. Anything less is transient and worth another try.
+const ACCEPT_REFUSAL_LIMIT: u32 = 64;
+const ACCEPT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("cannot prepare daemon socket directory {path}: {source}")]
@@ -1113,16 +1118,43 @@ fn bind_daemon_socket(path: &Path) -> Result<UnixListener, ServerError> {
     Ok(listener)
 }
 
+/// Serves this listener until it cannot possibly serve anything again.
+///
+/// A listener that stops accepting is indistinguishable from a daemon that is
+/// gone -- to every client that is not already connected. The clients holding a
+/// connection carry on, so the desktop looks fine while the phone cannot reach
+/// it at all, and nothing short of a restart brings it back.
+///
+/// So one bad accept does not end this. The kernel refuses a connection for
+/// reasons that pass: the peer went away between connect and accept, a signal
+/// interrupted the call, or the process is briefly out of descriptors. Each of
+/// those used to be permanent.
 fn accept_connections(listener: UnixListener, engine: Arc<Engine>, transport: Transport) {
-    for connection in listener.incoming() {
-        let Ok(stream) = connection else {
-            break;
+    let name = match transport {
+        Transport::Local => "xd-rust-local-client",
+        Transport::Remote => "xd-rust-remote-client",
+    };
+    let mut refusals = 0_u32;
+    loop {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => {
+                refusals = 0;
+                stream
+            }
+            Err(error) => {
+                refusals += 1;
+                eprintln!("xd: cannot accept a connection: {error}");
+                if refusals >= ACCEPT_REFUSAL_LIMIT {
+                    eprintln!("xd: giving up on this listener after {refusals} refusals in a row");
+                    return;
+                }
+                // Long enough for a descriptor to come back, short enough that
+                // a client retrying does not notice.
+                thread::sleep(ACCEPT_RETRY_PAUSE);
+                continue;
+            }
         };
         let engine = engine.clone();
-        let name = match transport {
-            Transport::Local => "xd-rust-local-client",
-            Transport::Remote => "xd-rust-remote-client",
-        };
         if thread::Builder::new()
             .name(name.into())
             .spawn(move || {
@@ -1130,7 +1162,10 @@ fn accept_connections(listener: UnixListener, engine: Arc<Engine>, transport: Tr
             })
             .is_err()
         {
-            break;
+            // No thread for this client, but the next one may fare better. The
+            // connection is dropped, which closes it; the listener lives on.
+            eprintln!("xd: cannot serve a connection: out of threads");
+            thread::sleep(ACCEPT_RETRY_PAUSE);
         }
     }
 }
@@ -1335,6 +1370,41 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn a_listener_survives_a_client_that_vanishes_before_it_is_served() {
+        let root = test_directory();
+        let path = root.join("daemon.sock");
+        let server = LocalServer::bind(&path).unwrap();
+        let socket = server.socket_path().to_owned();
+        thread::spawn(move || {
+            let _ = server.run();
+        });
+
+        // Connect and drop at once, repeatedly. A peer that goes away between
+        // connect and accept is what the kernel refuses an accept for, and a
+        // listener that took that as final would never answer anyone again.
+        for _ in 0..50 {
+            if let Ok(stream) = UnixStream::connect(&socket) {
+                drop(stream);
+            }
+        }
+
+        // Still answering, which is the whole point: an unreachable daemon
+        // looks exactly like a dead one to anything not already connected.
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{}", json!({"op": "ping", "_xd_request": 7})).unwrap();
+        let mut reply = String::new();
+        BufReader::new(&stream).read_line(&mut reply).unwrap();
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply[REQUEST_ID], 7);
+
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn a_loaded_chat_carries_where_its_live_turn_already_is() {
