@@ -898,8 +898,18 @@ impl Engine {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
         };
-        if let Some(runtime) = &self.runtime {
-            runtime.cancel(chat_id);
+        let killed = self
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.cancel(chat_id));
+        // Nothing to kill but the chat still reads as working: the turn died
+        // with a previous daemon. Stop should still get the chat back.
+        if !killed
+            && let Some(store) = self.store.as_ref()
+            && store.clear_interrupted_turn(chat_id).unwrap_or(false)
+        {
+            self.events
+                .publish(json!({"event": "changed", "chat": chat_id}));
         }
         json!({"ok": true})
     }

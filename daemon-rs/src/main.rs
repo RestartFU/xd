@@ -69,6 +69,14 @@ fn serve(options: Options) -> Result<(), String> {
     refuse_live_daemon(&options.socket)?;
     let store = StateStore::open(&options.database, &options.workspaces)
         .map_err(|error| error.to_string())?;
+    match store.recover_interrupted_turns() {
+        Ok(chats) if !chats.is_empty() => eprintln!(
+            "xd-daemon serve: released {} chat(s) left working by an earlier daemon",
+            chats.len()
+        ),
+        Ok(_) => {}
+        Err(error) => eprintln!("xd-daemon serve: cannot release interrupted chats: {error}"),
+    }
     let saved_listener = store.remote_listener().map_err(|error| error.to_string())?;
     let data_directory = options
         .database

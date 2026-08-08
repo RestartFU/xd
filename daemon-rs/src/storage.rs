@@ -33,6 +33,7 @@ Which approach should I take?
 Use two to six options. When the answer must be free-form text, put <input> on its own line inside the block; options and <input> may be combined. Do not ask more than one question per reply.
 
 For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap ordinary prose, code, tool output, status updates, analysis, or questions. The client may ignore speech tags when speech is disabled."#;
+const INTERRUPTED_TURN: &str = "The daemon stopped before this turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -1383,6 +1384,49 @@ impl StateStore {
             next,
             queue_event: next_text.map(|_| queued_event(chat_id, &queue)),
         })
+    }
+
+    /// A killed daemon leaves `daemon_working` set with no process behind it:
+    /// the chat looks busy forever, further messages only pile into the queue,
+    /// and Stop has nothing to kill. Clear those rows when the daemon comes
+    /// back and say so in the transcript. Queued messages are kept — they run
+    /// on the next turn rather than being started behind the user's back.
+    pub fn recover_interrupted_turns(&self) -> Result<Vec<String>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let interrupted = {
+            let mut statement =
+                transaction.prepare("SELECT id FROM chats WHERE daemon_working = 1")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for chat_id in &interrupted {
+            end_interrupted_turn(&transaction, chat_id)?;
+        }
+        transaction.commit()?;
+        Ok(interrupted)
+    }
+
+    /// Same repair as [`StateStore::recover_interrupted_turns`], for the single
+    /// chat the user just pressed Stop on. Reports whether anything was stuck.
+    pub fn clear_interrupted_turn(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let working = transaction
+            .query_row(
+                "SELECT daemon_working FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if !working {
+            return Ok(false);
+        }
+        end_interrupted_turn(&transaction, chat_id)?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn abort_turn_start(&self, chat_id: &str, error: &str) -> Result<(), StorageError> {
@@ -4690,6 +4734,21 @@ fn effort_label(effort: &str) -> &str {
     }
 }
 
+fn end_interrupted_turn(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
+        params![chat_id, INTERRUPTED_TURN, now_seconds()],
+    )?;
+    transaction.execute(
+        "UPDATE chats SET daemon_working = 0, updated_at = ? WHERE id = ?",
+        params![now_seconds(), chat_id],
+    )?;
+    Ok(())
+}
+
 fn queued_event(chat_id: &str, queue: &[String]) -> Value {
     let mut event = json!({"event": "queued", "chat": chat_id, "queue": queue});
     if let Some(first) = queue.first() {
@@ -6428,6 +6487,106 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn a_turn_lost_with_the_daemon_is_released_on_the_next_start() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "first"}))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "queued"}))
+            .unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["working"], true);
+        drop(store);
+
+        // The daemon died mid-turn; the next one has to hand the chat back.
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["working"], true);
+        assert_eq!(store.recover_interrupted_turns().unwrap(), vec!["chat-1"]);
+        let chat = store.chat("chat-1").unwrap();
+        assert_eq!(chat["working"], false);
+        assert_eq!(chat["queue"], json!(["queued"]));
+        let messages = store.messages(&json!({"chat": "chat-1"})).unwrap();
+        let last = messages["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["role"], "error");
+        assert_eq!(last["content"], INTERRUPTED_TURN);
+
+        // A recovered chat starts turns again instead of only queueing them.
+        let SendDisposition::Start { .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "after"}))
+            .unwrap()
+        else {
+            panic!("a recovered chat should start a turn");
+        };
+    }
+
+    #[test]
+    fn stopping_a_chat_only_clears_a_turn_that_is_still_marked_working() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        assert!(!store.clear_interrupted_turn("chat-1").unwrap());
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "first"}))
+            .unwrap();
+        assert!(store.clear_interrupted_turn("chat-1").unwrap());
+        assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+        assert!(!store.clear_interrupted_turn("chat-1").unwrap());
+        assert!(store.clear_interrupted_turn("missing").is_err());
+    }
+
+    #[test]
+    fn an_agent_switched_mid_turn_takes_the_next_turn() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "first"}))
+            .unwrap()
+        else {
+            panic!("idle send should start");
+        };
+        assert_eq!(turn.backend, "codex");
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "second"}))
+            .unwrap();
+
+        // Switching while the turn runs leaves it alone and lands on the next.
+        store
+            .set_option(&json!({
+                "chat": "chat-1", "option": "model",
+                "backend": "claude", "value": "claude-opus-5"
+            }))
+            .unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["backend"], "claude");
+
+        let next = store
+            .finish_turn("chat-1", true, None, 2, false)
+            .unwrap()
+            .next
+            .expect("queued turn");
+        assert_eq!(next.prompt, "second");
+        assert_eq!(next.backend, "claude");
+        assert_eq!(next.model, "claude-opus-5");
     }
 
     #[test]
