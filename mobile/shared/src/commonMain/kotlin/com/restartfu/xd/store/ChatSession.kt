@@ -111,6 +111,11 @@ public class ChatSession internal constructor(
             it.decodeReply<BrowseReadReply>().content
         }
 
+    /** Saves [content], which the daemon refuses unless the file still reads as [original]. */
+    public suspend fun writeFile(path: String, original: String, content: String) {
+        core.read(Ops.writeFile(core.chatId, path, original, content)) { }
+    }
+
     public suspend fun terminals(): List<TerminalReply> =
         core.read(Ops.terminalList(core.chatId)) {
             it.decodeReply<TerminalListReply>().terminals

@@ -461,6 +461,28 @@ public object Ops {
         put("path", path)
     }
 
+    /**
+     * Saves a file.
+     *
+     * [original] is what was read, and the daemon refuses the write if the file
+     * no longer matches it: the agent edits the same tree, and a save that
+     * simply overwrote would silently drop whatever it had just done.
+     */
+    public fun writeFile(
+        chatId: String,
+        path: String,
+        original: String,
+        content: String,
+    ): JsonObject = buildJsonObject {
+        require(path.isNotBlank()) { "A file path is required" }
+        put("op", "file-browse")
+        put("chat", chatId)
+        put("action", "write")
+        put("path", path)
+        put("original", original)
+        put("content", content)
+    }
+
     public fun terminalList(chatId: String): JsonObject = withChat("terminal-list", chatId)
 
     public fun terminalOpen(

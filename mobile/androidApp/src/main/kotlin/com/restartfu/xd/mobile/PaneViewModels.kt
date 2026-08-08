@@ -3,7 +3,9 @@ package com.restartfu.xd.mobile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.restartfu.xd.protocol.FileEntryReply
+import com.restartfu.xd.files.FileTab
+import com.restartfu.xd.files.FileTree
+import com.restartfu.xd.files.OpenFiles
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,19 +80,18 @@ class DiffViewModel(
 }
 
 public data class FilesPane(
-    val path: String = "",
-    val entries: List<FileEntryReply> = emptyList(),
-    val preview: String? = null,
-    val previewPath: String = "",
+    val tree: FileTree = FileTree(),
+    val open: OpenFiles = OpenFiles(),
     val loading: Boolean = false,
     val error: String? = null,
 )
 
 /**
- * A directory listing, or one previewed file.
+ * The working directory as a tree, and the files opened out of it.
  *
- * Paths stay relative to the chat's working directory because the daemon
- * refuses anything else; going up means dropping the last segment.
+ * The daemon lists one directory per call, so the tree is filled in as folders
+ * are opened rather than walked up front -- a repository is far too big to send
+ * whole, and most of it is never looked at.
  */
 class FilesViewModel(
     private val session: ChatSession,
@@ -99,56 +100,31 @@ class FilesViewModel(
     val state: StateFlow<FilesPane> = _state.asStateFlow()
 
     init {
-        open(null)
+        list("")
     }
 
-    fun open(path: String?) {
-        _state.value = _state.value.copy(loading = true, error = null, preview = null)
-        viewModelScope.launch {
-            try {
-                val entries = session.listDirectory(path)
-                _state.value = FilesPane(path = path.orEmpty(), entries = entries)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _state.value = _state.value.copy(
-                    loading = false,
-                    error = error.message ?: "Could not list that directory",
-                )
-            }
-        }
-    }
-
-    fun enter(entry: FileEntryReply) {
-        val next = join(_state.value.path, entry.name)
-        if (entry.directory) open(next) else preview(next)
-    }
-
-    fun up() {
+    /** Opens or closes a folder, fetching its entries the first time. */
+    fun toggle(path: String) {
         val current = _state.value
-        if (current.preview != null) {
-            open(current.path.takeIf { it.isNotEmpty() })
+        val opening = !current.tree.isExpanded(path)
+        _state.value = current.copy(tree = current.tree.toggled(path), error = null)
+        if (opening && !current.tree.isLoaded(path)) list(path)
+    }
+
+    /** Opens a file in a tab, or brings it forward if it is already open. */
+    fun open(path: String) {
+        val already = _state.value.open.files.any { it.path == path }
+        if (already) {
+            show(FileTab.File(path))
             return
         }
-        if (current.path.isEmpty()) return
-        open(current.path.substringBeforeLast('/', "").takeIf { it.isNotEmpty() })
-    }
-
-    fun refresh() {
-        val current = _state.value
-        if (current.preview != null) preview(current.previewPath) else open(current.path.takeIf { it.isNotEmpty() })
-    }
-
-    private fun preview(path: String) {
         _state.value = _state.value.copy(loading = true, error = null)
         viewModelScope.launch {
             try {
                 val content = session.readFile(path)
-                _state.value = _state.value.copy(
-                    preview = content,
-                    previewPath = path,
-                    loading = false,
-                )
+                _state.value = _state.value.let {
+                    it.copy(open = it.open.opened(path, content), loading = false)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -162,8 +138,86 @@ class FilesViewModel(
         }
     }
 
-    private fun join(base: String, name: String): String =
-        if (base.isEmpty()) name else "$base/$name"
+    fun show(tab: FileTab) {
+        _state.value = _state.value.let { it.copy(open = it.open.showing(tab)) }
+    }
+
+    fun close(path: String) {
+        _state.value = _state.value.let { it.copy(open = it.open.closed(path)) }
+    }
+
+    fun edit(path: String, text: String) {
+        _state.value = _state.value.let { it.copy(open = it.open.edited(path, text)) }
+    }
+
+    /**
+     * Writes the open file back.
+     *
+     * The text is captured before the round trip and reported as what landed,
+     * so anything typed while it was in flight stays unsaved rather than being
+     * marked written.
+     */
+    fun save(path: String) {
+        val file = _state.value.open.files.find { it.path == path } ?: return
+        if (file.saving || !file.dirty) return
+        val sending = file.text
+        val against = file.saved
+        _state.value = _state.value.let { it.copy(open = it.open.saving(path)) }
+        viewModelScope.launch {
+            try {
+                session.writeFile(path, against, sending)
+                _state.value = _state.value.let { it.copy(open = it.open.saved(path, sending)) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.value = _state.value.let {
+                    it.copy(
+                        open = it.open.failed(
+                            path,
+                            error.message ?: "Could not save that file",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Re-reads the tree, keeping every folder open.
+     *
+     * Open files are left alone: the agent edits the same tree, and dropping
+     * what someone has typed because a sibling directory changed would be a
+     * poor trade.
+     */
+    fun refresh() {
+        val current = _state.value
+        _state.value = current.copy(tree = current.tree.invalidated(), error = null)
+        list("")
+        for (row in current.tree.rows()) {
+            if (row.directory && row.expanded) list(row.path)
+        }
+    }
+
+    private fun list(path: String) {
+        _state.value = _state.value.let { it.copy(tree = it.tree.loading(path)) }
+        viewModelScope.launch {
+            try {
+                val entries = session.listDirectory(path.takeIf { it.isNotEmpty() })
+                _state.value = _state.value.let {
+                    it.copy(tree = it.tree.withChildren(path, entries))
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.value = _state.value.let {
+                    it.copy(
+                        tree = it.tree.failed(path),
+                        error = error.message ?: "Could not list that directory",
+                    )
+                }
+            }
+        }
+    }
 
     class Factory(private val session: ChatSession) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
