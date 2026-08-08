@@ -57,6 +57,49 @@ struct ActiveProcess {
     turn_id: u64,
     child: Arc<Mutex<Child>>,
     cancelled: Arc<AtomicBool>,
+    started: Instant,
+    label: String,
+    progress: Arc<TurnProgress>,
+}
+
+/// What a turn has published so far, readable from outside the turn thread.
+///
+/// A client that opens a chat mid-turn has to be told where the turn already
+/// is, or it shows a turn that started an unknown time ago with none of the
+/// text it has produced.
+#[derive(Default)]
+struct TurnProgress {
+    sequence: AtomicU64,
+    segment: Mutex<String>,
+}
+
+impl TurnProgress {
+    fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::Relaxed)
+    }
+
+    fn set_segment(&self, text: &str) {
+        if let Ok(mut segment) = self.segment.lock() {
+            segment.clear();
+            segment.push_str(text);
+        }
+    }
+}
+
+/// Where a live turn has got to, for a client that just loaded the chat.
+pub struct LiveTurn {
+    pub turn_id: u64,
+    pub sequence: u64,
+    pub label: String,
+    /// Seconds the turn has been running.
+    pub working_for: u64,
+    /// The streamed reply so far. Blocks and tool calls are already stored as
+    /// messages, so only the text that is not yet a message belongs here.
+    pub segment: String,
 }
 
 impl TurnRuntime {
@@ -138,6 +181,7 @@ impl TurnRuntime {
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
         let child = Arc::new(Mutex::new(child));
         let cancelled = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(TurnProgress::default());
         {
             let mut active = self
                 .inner
@@ -156,6 +200,9 @@ impl TurnRuntime {
                     turn_id,
                     child: child.clone(),
                     cancelled: cancelled.clone(),
+                    started: Instant::now(),
+                    label: turn.label.clone(),
+                    progress: progress.clone(),
                 },
             );
         }
@@ -168,7 +215,8 @@ impl TurnRuntime {
             .spawn({
                 let child = child.clone();
                 let cancelled = cancelled.clone();
-                move || runtime.run(turn, turn_id, child, cancelled, stdout, stderr)
+                let progress = progress.clone();
+                move || runtime.run(turn, turn_id, child, cancelled, progress, stdout, stderr)
             })
         {
             if let Ok(mut active) = self.inner.active.lock() {
@@ -204,6 +252,24 @@ impl TurnRuntime {
             .is_ok_and(|mut child| child.kill().is_ok())
     }
 
+    /// Where the chat's turn has got to, or `None` when nothing is running.
+    pub fn live_turn(&self, chat_id: &str) -> Option<LiveTurn> {
+        let active = self.inner.active.lock().ok()?;
+        let process = active.get(chat_id)?;
+        Some(LiveTurn {
+            turn_id: process.turn_id,
+            sequence: process.progress.sequence(),
+            label: process.label.clone(),
+            working_for: process.started.elapsed().as_secs(),
+            segment: process
+                .progress
+                .segment
+                .lock()
+                .map(|segment| segment.clone())
+                .unwrap_or_default(),
+        })
+    }
+
     pub fn commands(&self, chat_id: &str, backend: &str) -> Vec<String> {
         self.inner
             .commands
@@ -221,6 +287,7 @@ impl TurnRuntime {
         turn_id: u64,
         child: Arc<Mutex<Child>>,
         cancelled: Arc<AtomicBool>,
+        progress: Arc<TurnProgress>,
         stdout: impl Read,
         mut stderr: impl Read + Send + 'static,
     ) {
@@ -247,7 +314,6 @@ impl TurnRuntime {
         };
         let mut completed = false;
         let mut latest_error = None;
-        let mut sequence = 0_u64;
         let mut had_activity = false;
         let mut streamed_text = String::new();
         let mut assistant_text = String::new();
@@ -297,12 +363,11 @@ impl TurnRuntime {
                                 had_activity = true;
                                 let visible = ask::visible_bytes(&text);
                                 if visible > 0 {
-                                    sequence += 1;
                                     self.publish_sequenced(
                                         "text",
                                         &turn,
                                         turn_id,
-                                        sequence,
+                                        &progress,
                                         json!({"text": &text[..visible]}),
                                     );
                                 }
@@ -315,15 +380,17 @@ impl TurnRuntime {
                         assistant_text.push_str(&text);
                         let visible = ask::visible_bytes(&streamed_text);
                         if visible > visible_streamed_bytes {
-                            sequence += 1;
                             self.publish_sequenced(
                                 "text",
                                 &turn,
                                 turn_id,
-                                sequence,
+                                &progress,
                                 json!({"text": &streamed_text[visible_streamed_bytes..visible]}),
                             );
                             visible_streamed_bytes = visible;
+                            // A client that loads the chat now has to be handed
+                            // the same text the live events already carried.
+                            progress.set_segment(&streamed_text[..visible_streamed_bytes]);
                         }
                         // Park the reply so far, throttled so a token stream is
                         // not a write storm. Only an interrupted turn ever
@@ -348,12 +415,11 @@ impl TurnRuntime {
                         ) {
                             Ok(_) => {
                                 had_activity = true;
-                                sequence += 1;
                                 self.publish_sequenced(
                                     "tool",
                                     &turn,
                                     turn_id,
-                                    sequence,
+                                    &progress,
                                     json!({
                                         "text": text,
                                         "workdir": turn.workdir,
@@ -423,7 +489,7 @@ impl TurnRuntime {
         self.finish(
             turn,
             turn_id,
-            sequence,
+            progress.sequence(),
             success,
             error,
             started.elapsed().as_secs(),
@@ -502,9 +568,10 @@ impl TurnRuntime {
         name: &str,
         turn: &TurnSpec,
         turn_id: u64,
-        sequence: u64,
+        progress: &TurnProgress,
         fields: Value,
     ) {
+        let sequence = progress.next_sequence();
         let mut event = fields.as_object().cloned().unwrap_or_default();
         event.insert("event".into(), name.into());
         event.insert("chat".into(), turn.chat_id.clone().into());
@@ -574,6 +641,21 @@ fn usage_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_progress_numbers_every_published_event_and_holds_the_latest_segment() {
+        let progress = TurnProgress::default();
+        assert_eq!(progress.sequence(), 0);
+        assert_eq!(progress.next_sequence(), 1);
+        assert_eq!(progress.next_sequence(), 2);
+        assert_eq!(progress.sequence(), 2);
+
+        // The segment is the whole reply so far, not the last delta: a client
+        // that loads mid-turn gets one snapshot and no chance to accumulate.
+        progress.set_segment("Half");
+        progress.set_segment("Half an ans");
+        assert_eq!(*progress.segment.lock().unwrap(), "Half an ans");
+    }
 
     #[test]
     fn routes_codex_models_through_the_proxy_alias() {

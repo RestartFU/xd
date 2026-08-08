@@ -43,7 +43,7 @@ use git_draft::GitDraftService;
 use local_socket::{UnixListener, UnixStream, make_private, path_is_socket};
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
-pub use runtime::TurnRuntime;
+pub use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
 pub use storage::{SendDisposition, StateStore, StorageError};
@@ -524,6 +524,9 @@ impl Engine {
                     .map(Value::String)
                     .collect(),
             );
+            if let Some(live) = runtime.live_turn(chat_id) {
+                merge_live_turn(&mut response, live);
+            }
         }
         response
     }
@@ -1292,6 +1295,20 @@ fn required_string<'a>(request: &'a Value, key: &str, message: &str) -> Result<&
         .ok_or_else(|| message.into())
 }
 
+/// Tell a client that just loaded a chat where its live turn already is.
+///
+/// A chat row only records *that* a turn is running. Without the rest, a client
+/// counts the turn's age from the moment it looked, and shows none of the reply
+/// streamed before then. `segment` carries only text that is not a message yet:
+/// blocks and tool calls are stored as they arrive and come back in `messages`.
+fn merge_live_turn(response: &mut Value, live: LiveTurn) {
+    response["turn_id"] = live.turn_id.into();
+    response["turn_sequence"] = live.sequence.into();
+    response["working_for"] = live.working_for.into();
+    response["label"] = Value::String(live.label);
+    response["segment"] = Value::String(live.segment);
+}
+
 fn error_reply(error: impl std::fmt::Display) -> Value {
     json!({"ok": false, "error": error.to_string()})
 }
@@ -1317,6 +1334,28 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn a_loaded_chat_carries_where_its_live_turn_already_is() {
+        let mut response = json!({"ok": true, "working": true, "label": null});
+        merge_live_turn(
+            &mut response,
+            LiveTurn {
+                turn_id: 7,
+                sequence: 12,
+                label: "Codex".into(),
+                working_for: 41,
+                segment: "Half an ans".into(),
+            },
+        );
+        // A client counts the turn's age from this, so it has to be the age of
+        // the turn and not of the request.
+        assert_eq!(response["working_for"], 41);
+        assert_eq!(response["turn_id"], 7);
+        assert_eq!(response["turn_sequence"], 12);
+        assert_eq!(response["label"], "Codex");
+        assert_eq!(response["segment"], "Half an ans");
+    }
 
     #[test]
     fn ping_echoes_the_private_request_id() {
