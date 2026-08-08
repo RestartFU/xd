@@ -120,3 +120,24 @@ class SpeakTagStreamingTest {
         assertEquals(emptyList(), parser.finish())
     }
 }
+
+class SpeakTagSecondBlockTest {
+    @Test
+    fun a_second_block_in_the_same_turn_is_spoken_too() {
+        val parser = SpeakTagParser()
+        assertEquals(listOf("Looking now."), parser.feed("<speak>Looking now.</speak>"))
+        // Prose, then a tool, then the closing line -- one turn, two blocks.
+        assertEquals(emptyList(), parser.feed("\nSome ordinary prose.\n"))
+        assertEquals(emptyList(), parser.finish())
+        assertEquals(listOf("Here is what I found."), parser.feed("<speak>Here is what I found.</speak>"))
+    }
+
+    @Test
+    fun two_blocks_arriving_in_one_chunk_are_both_spoken() {
+        val parser = SpeakTagParser()
+        assertEquals(
+            listOf("First.", "Second."),
+            parser.feed("<speak>First.</speak> middle <speak>Second.</speak>"),
+        )
+    }
+}

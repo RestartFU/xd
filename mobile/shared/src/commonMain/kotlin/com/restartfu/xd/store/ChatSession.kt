@@ -470,10 +470,15 @@ internal class ChatSessionCore(
                 }
             }
             "text" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
-                if (apply(TranscriptInput.Text(text, turnId, turnSequence), arrivalGate)) {
-                    val spoken = speechMutex.withLock { speakParser.feed(text) }
-                    spoken.forEach { _speech.tryEmit(it) }
-                }
+                // Fed whatever the transcript makes of it. `apply` answers "did
+                // the drawn state change", which is not the same question: a
+                // reload that already covered this sequence, or a delta the
+                // machine folds into what it has, both come back false and used
+                // to take the speech with them -- so a second block in a turn
+                // that touched files was simply never heard.
+                val spoken = speechMutex.withLock { speakParser.feed(text) }
+                apply(TranscriptInput.Text(text, turnId, turnSequence), arrivalGate)
+                spoken.forEach { _speech.tryEmit(it) }
             }
             "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
                 if (apply(TranscriptInput.Tool(text, turnId, turnSequence), arrivalGate)) {
