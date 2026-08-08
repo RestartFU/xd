@@ -5,7 +5,7 @@ use std::{
     process::Command,
 };
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::tool_diff;
 
@@ -186,14 +186,40 @@ impl AgentCommand<'_> {
         command
     }
 
+    /// Whether this backend takes its turns on stdin and stays up between them.
+    ///
+    /// Only claude. `codex exec` reads stdin as the initial prompt only, so
+    /// there is no equivalent short of its experimental app-server.
+    pub fn keeps_its_process(backend: &str) -> bool {
+        backend == "claude"
+    }
+
+    /// One turn, as the line `--input-format stream-json` expects on stdin.
+    ///
+    /// The prompt is not in argv for a kept process: argv was fixed when the
+    /// process started, and every turn after the first arrives this way.
+    pub fn encode_turn(prompt: &str) -> String {
+        json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        })
+        .to_string()
+    }
+
     fn build_claude(&self) -> Command {
         let mut command = Command::new(resolve_claude());
         if let Some(session_id) = self.session_id {
             command.args(["--resume", session_id]);
         }
+        // The first turn goes in on stdin like every one after it, so the
+        // process is identical whether it is new or resumed.
         command.args([
             "-p",
-            self.prompt,
+            "--input-format",
+            "stream-json",
             "--output-format",
             "stream-json",
             "--verbose",
@@ -764,6 +790,27 @@ fn error_message(root: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_claude_keeps_its_process_between_turns() {
+        assert!(AgentCommand::keeps_its_process("claude"));
+        // `codex exec` reads stdin as the initial prompt only, so there is
+        // nothing to keep and nothing to send down it a second time.
+        assert!(!AgentCommand::keeps_its_process("codex"));
+    }
+
+    #[test]
+    fn a_turn_is_encoded_as_one_line_the_cli_accepts() {
+        let line = AgentCommand::encode_turn("make it\nfaster");
+        // One line, whatever the prompt contains: the stream is newline
+        // delimited and a raw newline in the middle would end the turn early.
+        assert_eq!(line.lines().count(), 1);
+        let parsed: Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"][0]["type"], "text");
+        assert_eq!(parsed["message"]["content"][0]["text"], "make it\nfaster");
+    }
 
     #[test]
     fn parses_captured_codex_exec_stream_without_duplicate_commands() {

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read},
-    process::{Child, Stdio},
+    io::{BufRead, BufReader, Read, Write},
+    process::{Child, ChildStdin, ChildStdout, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -25,6 +25,9 @@ use crate::{
 /// keeps most of its text without turning every token into a database write.
 const PARK_STREAMED_REPLY_EVERY: Duration = Duration::from_millis(500);
 
+/// How much of a process's stderr is kept for the message that reports it.
+const STDERR_KEPT_BYTES: usize = 64 * 1024;
+
 #[derive(Clone)]
 pub struct TurnRuntime {
     inner: Arc<RuntimeInner>,
@@ -38,6 +41,30 @@ struct RuntimeInner {
     secrets: Arc<SecretsStore>,
     commands: Mutex<HashMap<String, (String, Vec<String>)>>,
     claude_proxy: ClaudeProxy,
+    /// Agent processes kept between a chat's turns, by chat.
+    sessions: Mutex<HashMap<String, AgentSession>>,
+}
+
+/// An agent process that outlives the turn it was started for.
+///
+/// `claude -p <prompt>` answers once and exits, and everything it started goes
+/// with it: a background shell, a watch, a build. The next message then meets a
+/// process that never heard of any of it. With `--input-format stream-json` the
+/// turns arrive on stdin instead and the process stays up, so what it started
+/// is still running when the next one arrives.
+struct AgentSession {
+    child: Arc<Mutex<Child>>,
+    stdin: ChildStdin,
+    /// Lent to the turn being answered, and handed back when it ends. Absent
+    /// while a turn holds it.
+    stdout: Option<ChildStdout>,
+    /// What this process was started with. A turn that wants anything else --
+    /// another model, another directory -- needs its own process, because all
+    /// of it was fixed in argv when this one started.
+    fingerprint: String,
+    /// Filled by a drain thread for the process's whole life: stderr has to be
+    /// read continuously or it fills and the agent blocks on it.
+    complaint: Arc<Mutex<String>>,
 }
 
 impl Drop for RuntimeInner {
@@ -49,6 +76,16 @@ impl Drop for RuntimeInner {
                     let _ = child.kill();
                 }
             }
+        }
+        // Kept processes are idle rather than active, and nothing else will
+        // reap them once this runtime is gone.
+        if let Ok(mut sessions) = self.sessions.lock() {
+            for session in sessions.values_mut() {
+                if let Ok(mut child) = session.child.lock() {
+                    let _ = child.kill();
+                }
+            }
+            sessions.clear();
         }
     }
 }
@@ -117,6 +154,7 @@ impl TurnRuntime {
                 secrets,
                 commands: Mutex::new(HashMap::new()),
                 claude_proxy: ClaudeProxy::new(),
+                sessions: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -151,7 +189,7 @@ impl TurnRuntime {
                 set_environment(&mut turn.environment, name, value);
             }
         }
-        let mut command = AgentCommand {
+        let specification = AgentCommand {
             backend: &command_backend,
             prompt: &turn.prompt,
             system_prompt: turn.system_prompt.as_deref(),
@@ -162,24 +200,46 @@ impl TurnRuntime {
             fast: turn.fast && !turn.claude_mode,
             session_id: turn.session_id.as_deref(),
             environment: &turn.environment,
-        }
-        .build();
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("Cannot start {command_backend}: {error}"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| format!("Cannot read {command_backend} output."))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| format!("Cannot read {command_backend} errors."))?;
+        };
+        let keeps_process = AgentCommand::keeps_its_process(&command_backend);
+        // Everything baked into argv when a process starts. A turn that wants
+        // any of it different cannot be answered by the process already up.
+        let fingerprint = format!(
+            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{:?}",
+            turn.access,
+            turn.workdir,
+            turn.system_prompt.as_deref().unwrap_or_default(),
+            turn.environment,
+        );
+        let mut command = specification.build();
+        let (child, stdout, complaint) = if keeps_process {
+            self.session_for(
+                &turn.chat_id,
+                &fingerprint,
+                &turn.prompt,
+                &mut command,
+                &command_backend,
+            )?
+        } else {
+            let mut child = command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("Cannot start {command_backend}: {error}"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| format!("Cannot read {command_backend} output."))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| format!("Cannot read {command_backend} errors."))?;
+            let complaint = Arc::new(Mutex::new(String::new()));
+            drain_stderr(stderr, complaint.clone());
+            (Arc::new(Mutex::new(child)), stdout, complaint)
+        };
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
-        let child = Arc::new(Mutex::new(child));
         let cancelled = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(TurnProgress::default());
         {
@@ -216,7 +276,18 @@ impl TurnRuntime {
                 let child = child.clone();
                 let cancelled = cancelled.clone();
                 let progress = progress.clone();
-                move || runtime.run(turn, turn_id, child, cancelled, progress, stdout, stderr)
+                move || {
+                    runtime.run(
+                        turn,
+                        turn_id,
+                        child,
+                        cancelled,
+                        progress,
+                        stdout,
+                        complaint,
+                        keeps_process,
+                    )
+                }
             })
         {
             if let Ok(mut active) = self.inner.active.lock() {
@@ -238,18 +309,29 @@ impl TurnRuntime {
         Ok(())
     }
 
+    /// Stops the running turn, which for every backend means killing it.
+    ///
+    /// A kept process cannot survive that -- there is no way to interrupt one
+    /// turn and leave the process ready for the next -- so its session goes
+    /// too, and the next message starts a fresh one.
     pub fn cancel(&self, chat_id: &str) -> bool {
-        let Ok(active) = self.inner.active.lock() else {
-            return false;
+        let killed = {
+            let Ok(active) = self.inner.active.lock() else {
+                return false;
+            };
+            let Some(process) = active.get(chat_id) else {
+                return false;
+            };
+            process.cancelled.store(true, Ordering::Release);
+            process
+                .child
+                .lock()
+                .is_ok_and(|mut child| child.kill().is_ok())
         };
-        let Some(process) = active.get(chat_id) else {
-            return false;
-        };
-        process.cancelled.store(true, Ordering::Release);
-        process
-            .child
-            .lock()
-            .is_ok_and(|mut child| child.kill().is_ok())
+        if killed {
+            self.drop_session(chat_id);
+        }
+        killed
     }
 
     /// Where the chat's turn has got to, or `None` when nothing is running.
@@ -281,6 +363,109 @@ impl TurnRuntime {
             .unwrap_or_default()
     }
 
+    /// The process answering this chat: the one already up, or a new one.
+    ///
+    /// A kept process is reused only when the turn wants exactly what it was
+    /// started with, and only when it is still alive and not mid-turn. Anything
+    /// else takes its place.
+    fn session_for(
+        &self,
+        chat_id: &str,
+        fingerprint: &str,
+        prompt: &str,
+        command: &mut std::process::Command,
+        backend: &str,
+    ) -> Result<(Arc<Mutex<Child>>, ChildStdout, Arc<Mutex<String>>), String> {
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .map_err(|_| "Agent sessions are unavailable.".to_string())?;
+
+        if let Some(session) = sessions.get_mut(chat_id) {
+            let dead = session
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.try_wait().ok().flatten())
+                .is_some();
+            let usable = !dead && session.fingerprint == fingerprint && session.stdout.is_some();
+            if usable {
+                // Writing the turn is also the test of whether the pipe is
+                // still there; a broken one falls through to a fresh process.
+                let written = writeln!(session.stdin, "{}", AgentCommand::encode_turn(prompt))
+                    .and_then(|()| session.stdin.flush())
+                    .is_ok();
+                if written {
+                    let stdout = session.stdout.take().expect("checked above");
+                    return Ok((session.child.clone(), stdout, session.complaint.clone()));
+                }
+            }
+            if let Some(mut gone) = sessions.remove(chat_id)
+                && let Ok(mut child) = gone.child.lock()
+            {
+                let _ = child.kill();
+                gone.stdout.take();
+            }
+        }
+
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Cannot start {backend}: {error}"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("Cannot write to {backend}."))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("Cannot read {backend} output."))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("Cannot read {backend} errors."))?;
+        writeln!(stdin, "{}", AgentCommand::encode_turn(prompt))
+            .and_then(|()| stdin.flush())
+            .map_err(|error| format!("Cannot send the turn to {backend}: {error}"))?;
+        let complaint = Arc::new(Mutex::new(String::new()));
+        drain_stderr(stderr, complaint.clone());
+        let child = Arc::new(Mutex::new(child));
+        sessions.insert(
+            chat_id.to_owned(),
+            AgentSession {
+                child: child.clone(),
+                stdin,
+                stdout: None,
+                fingerprint: fingerprint.to_owned(),
+                complaint: complaint.clone(),
+            },
+        );
+        Ok((child, stdout, complaint))
+    }
+
+    /// Hands a kept process's output back, so the next turn can have it.
+    fn return_stdout(&self, chat_id: &str, stdout: ChildStdout) {
+        if let Ok(mut sessions) = self.inner.sessions.lock()
+            && let Some(session) = sessions.get_mut(chat_id)
+        {
+            session.stdout = Some(stdout);
+        }
+    }
+
+    /// Ends the kept process for a chat, if there is one.
+    fn drop_session(&self, chat_id: &str) {
+        if let Ok(mut sessions) = self.inner.sessions.lock()
+            && let Some(session) = sessions.remove(chat_id)
+            && let Ok(mut child) = session.child.lock()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     fn run(
         &self,
         turn: TurnSpec,
@@ -288,18 +473,11 @@ impl TurnRuntime {
         child: Arc<Mutex<Child>>,
         cancelled: Arc<AtomicBool>,
         progress: Arc<TurnProgress>,
-        stdout: impl Read,
-        mut stderr: impl Read + Send + 'static,
+        stdout: ChildStdout,
+        complaint: Arc<Mutex<String>>,
+        keeps_process: bool,
     ) {
         let started = Instant::now();
-        let stderr_reader = thread::spawn(move || {
-            let mut output = String::new();
-            let _ = stderr
-                .by_ref()
-                .take(1024 * 1024)
-                .read_to_string(&mut output);
-            output
-        });
         let parser_backend = if turn.claude_mode {
             "claude"
         } else {
@@ -322,11 +500,22 @@ impl TurnRuntime {
         let mut context_usage = None;
         let mut parked = Instant::now();
 
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else {
-                latest_error = Some(format!("Cannot read {} output.", turn.backend));
-                break;
-            };
+        // Owned back after the loop so a kept process can be lent out again.
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                // End of output. For a process that answers once this is the
+                // end of the turn; for a kept one it means it died.
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    latest_error = Some(format!("Cannot read {} output.", turn.backend));
+                    break;
+                }
+            }
+            let line = line.trim_end_matches(['\r', '\n']).to_owned();
             for event in parser.feed(&line) {
                 match event {
                     AgentEvent::Session(session) => {
@@ -454,6 +643,11 @@ impl TurnRuntime {
                     }
                 }
             }
+            // A kept process does not close its output between turns, so the
+            // turn ends at the result event rather than at end of file.
+            if keeps_process && (completed || latest_error.is_some()) {
+                break;
+            }
         }
 
         if !streamed_text.is_empty() {
@@ -468,10 +662,29 @@ impl TurnRuntime {
             }
         }
 
-        let status = child.lock().ok().and_then(|mut child| child.wait().ok());
-        let stderr = stderr_reader.join().unwrap_or_default();
         let was_cancelled = cancelled.load(Ordering::Acquire);
-        let success = was_cancelled || (completed && status.is_some_and(|status| status.success()));
+        let success = if keeps_process {
+            // Nothing to wait for: it is still up, ready for the next turn.
+            // Whether the turn worked is what it said, not how it exited.
+            let alive = child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.try_wait().ok().flatten())
+                .is_none();
+            if alive && completed && !was_cancelled {
+                self.return_stdout(&turn.chat_id, reader.into_inner());
+            } else {
+                self.drop_session(&turn.chat_id);
+            }
+            was_cancelled || completed
+        } else {
+            let status = child.lock().ok().and_then(|mut child| child.wait().ok());
+            was_cancelled || (completed && status.is_some_and(|status| status.success()))
+        };
+        let stderr = complaint
+            .lock()
+            .map(|said| said.clone())
+            .unwrap_or_default();
         let error = if success {
             None
         } else {
@@ -585,6 +798,34 @@ impl TurnRuntime {
         event.insert("turn_sequence".into(), sequence.into());
         self.inner.events.publish(Value::Object(event));
     }
+}
+
+/// Reads a process's stderr for as long as it lives, keeping the tail.
+///
+/// A kept process outlives every turn, and stderr that nobody reads fills its
+/// pipe and blocks the agent behind it. The cap is on what is remembered, not
+/// on what is read.
+fn drain_stderr(stderr: impl Read + Send + 'static, into: Arc<Mutex<String>>) {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let Ok(mut said) = into.lock() else { return };
+            said.push_str(&line);
+            if said.len() > STDERR_KEPT_BYTES {
+                let cut = said.len() - STDERR_KEPT_BYTES;
+                let cut = (cut..said.len())
+                    .find(|at| said.is_char_boundary(*at))
+                    .unwrap_or(said.len());
+                said.replace_range(..cut, "");
+            }
+        }
+    });
 }
 
 fn claude_mode_model(model: &str, fast: bool) -> String {
