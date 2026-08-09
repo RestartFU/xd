@@ -36,7 +36,7 @@ pub enum ActivityKind {
 }
 
 /// Plain tool activity, the kind that arrives several times in a row. Runs of it
-/// are stitched into one card so a burst of commands reads as a single block.
+/// are collapsed into one summary card so a burst of commands reads as a block.
 pub fn is_plain_activity(content: &str) -> bool {
     !content.starts_with(SUBAGENT_PREFIX)
         && !content.starts_with(WORKFLOW_PREFIX)

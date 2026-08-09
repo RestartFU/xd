@@ -22,10 +22,14 @@ actions!(
         DeleteWordForward,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         Up,
         Down,
         SelectLeft,
         SelectRight,
+        SelectWordLeft,
+        SelectWordRight,
         SelectAll,
         Home,
         End,
@@ -189,6 +193,24 @@ impl FileEditor {
         self.move_to(offset, cx);
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let offset = if self.selected_range.is_empty() {
+            previous_word_boundary(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.start
+        };
+        self.move_to(offset, cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let offset = if self.selected_range.is_empty() {
+            next_word_boundary(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.end
+        };
+        self.move_to(offset, cx);
+    }
+
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         self.move_vertical(-1, cx);
     }
@@ -203,6 +225,17 @@ impl FileEditor {
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(
+            previous_word_boundary(&self.content, self.cursor_offset()),
+            cx,
+        );
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(next_word_boundary(&self.content, self.cursor_offset()), cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -714,10 +747,14 @@ impl Render for FileEditor {
             .on_action(cx.listener(Self::delete_word_forward))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -745,7 +782,11 @@ fn text_runs(
 ) -> Vec<TextRun> {
     let default_color = if placeholder { 0xa8a8ad } else { 0xdde1ea };
     if placeholder || range.is_empty() || input.syntax_spans.is_empty() {
-        return vec![text_run(range.len(), style, default_color)];
+        return vec![text_run(
+            display_run_len(range, placeholder.then_some(input.placeholder.len())),
+            style,
+            default_color,
+        )];
     }
 
     let mut runs = Vec::new();
@@ -772,6 +813,10 @@ fn text_runs(
         runs.push(text_run(range.len(), style, default_color));
     }
     runs
+}
+
+fn display_run_len(range: &Range<usize>, placeholder_len: Option<usize>) -> usize {
+    placeholder_len.unwrap_or_else(|| range.len())
 }
 
 /// Where a word-wise delete behind `offset` lands: the whitespace under the
@@ -897,5 +942,11 @@ mod tests {
         let prose = "it's just making a card for every command";
         assert!(syntax_spans(true, None, prose).is_empty());
         assert!(!syntax_spans(false, Some("rust"), "let x = \"hi\";").is_empty());
+    }
+
+    #[test]
+    fn an_empty_message_editor_styles_its_whole_placeholder() {
+        assert_eq!(display_run_len(&(0..0), Some("Message xd…".len())), 13);
+        assert_eq!(display_run_len(&(4..9), None), 5);
     }
 }

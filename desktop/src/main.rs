@@ -37,7 +37,7 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
-    activity::{self, ActivityCard, ActivityKind},
+    activity::{self, ActivityCard, ActivityItem, ActivityKind},
     context_usage::{self, Severity as ContextSeverity},
     daemon::{DaemonHandle, DaemonUpdate, MessageCursor, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, InlineKind, InlineText},
@@ -62,12 +62,14 @@ use editor::{
     Down as EditorDown, EditorEvent, End as EditorEnd, FileEditor, Home as EditorHome,
     Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
     Save as EditorSave, SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft,
-    SelectRight as EditorSelectRight, Submit as EditorSubmit, Tab as EditorTab, Up as EditorUp,
+    SelectRight as EditorSelectRight, SelectWordLeft as EditorSelectWordLeft,
+    SelectWordRight as EditorSelectWordRight, Submit as EditorSubmit, Tab as EditorTab,
+    Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
 };
 use input::{
     Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, DeleteWord, DeleteWordForward,
     Down, End, Escape, Home, Interrupt, Left, Paste, Right, SelectAll, SelectLeft, SelectRight,
-    ShowCharacterPalette, Submit, Tab, Up,
+    SelectWordLeft, SelectWordRight, ShowCharacterPalette, Submit, Tab, Up, WordLeft, WordRight,
 };
 use presence::DiscordPresence;
 use selection::selectable;
@@ -580,8 +582,8 @@ struct PendingSpeech {
 /// as one card instead of one card per command.
 #[derive(Clone, Copy, Default)]
 struct ActivityRun {
-    continues_above: bool,
-    continues_below: bool,
+    position: usize,
+    len: usize,
 }
 
 #[derive(Clone, Default)]
@@ -619,12 +621,77 @@ impl TranscriptSnapshot {
 
     fn activity_run(&self, index: usize) -> ActivityRun {
         if !self.stacks_activity(index) {
-            return ActivityRun::default();
+            return ActivityRun {
+                len: 1,
+                ..Default::default()
+            };
+        }
+        let mut start = index;
+        while start > 0 && self.stacks_activity(start - 1) {
+            start -= 1;
+        }
+        let mut end = index + 1;
+        while self.stacks_activity(end) {
+            end += 1;
         }
         ActivityRun {
-            continues_above: index > 0 && self.stacks_activity(index - 1),
-            continues_below: self.stacks_activity(index + 1),
+            position: index - start,
+            len: end - start,
         }
+    }
+
+    /// One summary card for the head of a plain activity run. The remaining
+    /// transcript rows render empty; expanding this card reveals every command
+    /// without adding a second disclosure level to each one.
+    fn grouped_activity(&self, index: usize, run: ActivityRun) -> Option<ActivityCard> {
+        if run.len < 2 || run.position != 0 {
+            return None;
+        }
+        let cards = (index..index + run.len)
+            .filter_map(|index| self.get(index))
+            .map(|message| ActivityCard::parse(&message.content))
+            .collect::<Vec<_>>();
+        if cards.len() != run.len {
+            return None;
+        }
+        let failures = cards
+            .iter()
+            .filter(|card| card.kind == ActivityKind::Failure)
+            .count();
+        let running = cards.iter().any(|card| card.kind == ActivityKind::Running);
+        let kind = if failures > 0 {
+            ActivityKind::Failure
+        } else if running {
+            ActivityKind::Running
+        } else {
+            ActivityKind::Finished
+        };
+        Some(ActivityCard {
+            kind,
+            title: "Activity".into(),
+            name: format!("{} commands", cards.len()),
+            status: match failures {
+                0 if running => "Running".into(),
+                0 => "Done".into(),
+                1 => "1 failed".into(),
+                count => format!("{count} failed"),
+            },
+            elapsed: None,
+            detail: String::new(),
+            footer: None,
+            url: None,
+            items: cards
+                .into_iter()
+                .map(|card| ActivityItem {
+                    kind: card.kind,
+                    name: card.detail,
+                    status: card.status,
+                    elapsed: card.elapsed,
+                    detail: None,
+                })
+                .collect(),
+            patch: None,
+        })
     }
 
     fn get(&self, index: usize) -> Option<&Message> {
@@ -4271,6 +4338,15 @@ impl XdDesktop {
                     self.transcript.splice(new_count - 1..new_count, 1);
                 }
                 if name == "tool" {
+                    // A new tail row can change the count and status displayed
+                    // by the run's head, which is a different virtualized row.
+                    if new_count > 0 {
+                        let run = self.transcript_snapshot.activity_run(new_count - 1);
+                        if run.position > 0 {
+                            let head = new_count - 1 - run.position;
+                            self.transcript.splice(head..head + 1, 1);
+                        }
+                    }
                     self.request_workflow_statuses();
                 }
             }
@@ -8807,6 +8883,7 @@ impl XdDesktop {
         message: &Message,
         index: usize,
         expanded: bool,
+        grouped_activity: Option<ActivityCard>,
         expanded_sections: &HashSet<String>,
         workflow_status: Option<&Value>,
         workflow_pending: bool,
@@ -8843,15 +8920,14 @@ impl XdDesktop {
                 .id
                 .map(|id| format!("message-{id}"))
                 .unwrap_or_else(|| format!("live-{index}"));
-            return Self::activity_card(
+            if run.len > 1 && run.position > 0 {
+                return div().into_any_element();
+            }
+            let card = grouped_activity.unwrap_or_else(|| {
                 ActivityCard::parse(&message.content)
-                    .with_workflow_status(workflow_status, workflow_pending),
-                key,
-                index,
-                expanded,
-                run,
-                desktop.clone(),
-            );
+                    .with_workflow_status(workflow_status, workflow_pending)
+            });
+            return Self::activity_card(card, key, index, expanded, desktop.clone());
         }
         let markdown_scope = message
             .id
@@ -8925,7 +9001,6 @@ impl XdDesktop {
         key: String,
         index: usize,
         expanded: bool,
-        run: ActivityRun,
         desktop: Entity<Self>,
     ) -> gpui::AnyElement {
         let status_color = activity_status_color(card.kind);
@@ -8977,19 +9052,12 @@ impl XdDesktop {
             })
             .collect::<Vec<_>>();
         let toggle_key = key.clone();
-        let title = (!run.continues_above).then(|| card.title.clone());
         let mut body = div()
             .w_full()
             .max_w(px(920.0))
             .mx_auto()
-            .when(!run.continues_above, |card| {
-                card.rounded_t_lg().border_t_1()
-            })
-            .when(!run.continues_below, |card| {
-                card.rounded_b_lg().border_b_1()
-            })
-            .border_l_1()
-            .border_r_1()
+            .rounded_lg()
+            .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(SURFACE))
             .overflow_hidden()
@@ -8998,8 +9066,7 @@ impl XdDesktop {
                     .id(("activity-card", index))
                     .w_full()
                     .px_4()
-                    .when(title.is_some(), |header| header.pt_3())
-                    .when(title.is_none(), |header| header.pt_2())
+                    .pt_3()
                     .pb_2()
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(SURFACE_HIGH)))
@@ -9015,16 +9082,14 @@ impl XdDesktop {
                             cx.notify();
                         });
                     })
-                    .when_some(title, |header, title| {
-                        header.child(
-                            div()
-                                .mb_2()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(MUTED))
-                                .child(title),
-                        )
-                    })
+                    .child(
+                        div()
+                            .mb_2()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(MUTED))
+                            .child(card.title.clone()),
+                    )
                     .child(
                         div()
                             .flex()
@@ -9106,8 +9171,7 @@ impl XdDesktop {
         div()
             .w_full()
             .px_6()
-            .when(!run.continues_above, |row| row.pt_2())
-            .when(!run.continues_below, |row| row.pb_2())
+            .py_2()
             .text_color(rgb(TEXT))
             .child(body)
             .into_any_element()
@@ -12218,14 +12282,17 @@ impl Render for XdDesktop {
                     .id
                     .map(|id| format!("message-{id}"))
                     .unwrap_or_else(|| format!("live-{index}"));
+                let run = messages.activity_run(index);
+                let grouped_activity = messages.grouped_activity(index, run);
                 Self::message_row(
                     message,
                     index,
                     expanded_activity.contains(&key),
+                    grouped_activity,
                     &expanded_activity,
                     workflow_statuses.get(&message.content),
                     workflow_pending.contains(&message.content),
-                    messages.activity_run(index),
+                    run,
                     desktop.clone(),
                     transcript_daemon.as_ref(),
                     &image_cache,
@@ -19298,7 +19365,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_plain_activity_is_stitched_into_one_card() {
+    fn consecutive_plain_activity_forms_one_collapsible_group() {
         let marker = "workflow_run\n123\nhttps://github.com/RestartFU/xd/actions/runs/123";
         let model = AppModel {
             messages: vec![
@@ -19316,14 +19383,28 @@ mod tests {
 
         let run = |index: usize| {
             let run = snapshot.activity_run(index);
-            (run.continues_above, run.continues_below)
+            (run.position, run.len)
         };
-        assert_eq!(run(0), (false, false));
-        assert_eq!(run(1), (false, true));
-        assert_eq!(run(2), (true, true));
-        assert_eq!(run(3), (true, false));
-        assert_eq!(run(4), (false, false), "workflow cards stay standalone");
-        assert_eq!(run(5), (false, false));
+        assert_eq!(run(0), (0, 1));
+        assert_eq!(run(1), (0, 3));
+        assert_eq!(run(2), (1, 3));
+        assert_eq!(run(3), (2, 3));
+        assert_eq!(run(4), (0, 1), "workflow cards stay standalone");
+        assert_eq!(run(5), (0, 1));
+
+        let group = snapshot
+            .grouped_activity(1, snapshot.activity_run(1))
+            .expect("the head renders the group");
+        assert_eq!(group.name, "3 commands");
+        assert_eq!(group.status, "Done");
+        assert_eq!(group.items.len(), 3);
+        assert_eq!(group.items[0].name, "$ make build");
+        assert!(
+            snapshot
+                .grouped_activity(2, snapshot.activity_run(2))
+                .is_none(),
+            "tail rows render empty instead of another disclosure"
+        );
     }
 
     #[test]
@@ -19944,8 +20025,16 @@ fn main() {
                 KeyBinding::new("alt-delete", DeleteWordForward, Some("ComposerInput")),
                 KeyBinding::new("left", Left, Some("ComposerInput")),
                 KeyBinding::new("right", Right, Some("ComposerInput")),
+                KeyBinding::new("ctrl-left", WordLeft, Some("ComposerInput")),
+                KeyBinding::new("alt-left", WordLeft, Some("ComposerInput")),
+                KeyBinding::new("ctrl-right", WordRight, Some("ComposerInput")),
+                KeyBinding::new("alt-right", WordRight, Some("ComposerInput")),
                 KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
                 KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
+                KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some("ComposerInput")),
+                KeyBinding::new("alt-shift-left", SelectWordLeft, Some("ComposerInput")),
+                KeyBinding::new("ctrl-shift-right", SelectWordRight, Some("ComposerInput")),
+                KeyBinding::new("alt-shift-right", SelectWordRight, Some("ComposerInput")),
                 KeyBinding::new("home", Home, Some("ComposerInput")),
                 KeyBinding::new("end", End, Some("ComposerInput")),
                 KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
@@ -19970,10 +20059,22 @@ fn main() {
                 KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("FileEditor")),
                 KeyBinding::new("left", EditorLeft, Some("FileEditor")),
                 KeyBinding::new("right", EditorRight, Some("FileEditor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("FileEditor")),
+                KeyBinding::new("alt-left", EditorWordLeft, Some("FileEditor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("FileEditor")),
+                KeyBinding::new("alt-right", EditorWordRight, Some("FileEditor")),
                 KeyBinding::new("up", EditorUp, Some("FileEditor")),
                 KeyBinding::new("down", EditorDown, Some("FileEditor")),
                 KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
                 KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
+                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("FileEditor")),
+                KeyBinding::new("alt-shift-left", EditorSelectWordLeft, Some("FileEditor")),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    EditorSelectWordRight,
+                    Some("FileEditor"),
+                ),
+                KeyBinding::new("alt-shift-right", EditorSelectWordRight, Some("FileEditor")),
                 KeyBinding::new("home", EditorHome, Some("FileEditor")),
                 KeyBinding::new("end", EditorEnd, Some("FileEditor")),
                 KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
@@ -20000,10 +20101,34 @@ fn main() {
                 KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("MessageEditor")),
                 KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
                 KeyBinding::new("right", EditorRight, Some("MessageEditor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("MessageEditor")),
+                KeyBinding::new("alt-left", EditorWordLeft, Some("MessageEditor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("MessageEditor")),
+                KeyBinding::new("alt-right", EditorWordRight, Some("MessageEditor")),
                 KeyBinding::new("up", EditorUp, Some("MessageEditor")),
                 KeyBinding::new("down", EditorDown, Some("MessageEditor")),
                 KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
                 KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
+                KeyBinding::new(
+                    "ctrl-shift-left",
+                    EditorSelectWordLeft,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-left",
+                    EditorSelectWordLeft,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    EditorSelectWordRight,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-right",
+                    EditorSelectWordRight,
+                    Some("MessageEditor"),
+                ),
                 KeyBinding::new("home", EditorHome, Some("MessageEditor")),
                 KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
                 KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),

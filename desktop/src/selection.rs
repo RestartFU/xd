@@ -1,9 +1,9 @@
 //! Mouse text selection for rendered text.
 //!
 //! GPUI paints text; it has no notion of selecting it. This wraps an already
-//! laid-out text element so dragging across it highlights a range and Ctrl+C
-//! copies that range. Each block of text is laid out on its own, so a selection
-//! belongs to exactly one block.
+//! laid-out text element so dragging across it highlights a range, double-click
+//! selects a word, and Ctrl+C copies that range. Each block of text is laid out
+//! on its own, so a selection belongs to exactly one block.
 
 use std::ops::Range;
 
@@ -131,12 +131,20 @@ impl Selectable {
                 return;
             }
             let index = index_at(&layout, event.position);
+            let text = layout.text();
+            let range = if event.click_count > 1 {
+                word_range(&text, index)
+            } else {
+                index..index
+            };
             cx.set_global(TextSelection {
                 block: Some(block),
-                text: layout.text().into(),
-                anchor: index,
-                head: index,
-                dragging: true,
+                text: text.into(),
+                anchor: range.start,
+                head: range.end,
+                // A small pointer movement between the two presses should not
+                // collapse the word that the second press just selected.
+                dragging: event.click_count == 1,
             });
             window.refresh();
         });
@@ -192,6 +200,67 @@ fn paint_row(window: &mut Window, start: Point<Pixels>, end: Point<Pixels>) {
 fn index_at(layout: &TextLayout, position: Point<Pixels>) -> usize {
     match layout.index_for_position(position) {
         Ok(index) | Err(index) => index,
+    }
+}
+
+/// The run a double-click selects. Words include Unicode letters and numbers
+/// plus underscores; whitespace and punctuation each form their own runs, but
+/// a newline never carries selection onto another visual line.
+fn word_range(text: &str, index: usize) -> Range<usize> {
+    if text.is_empty() {
+        return 0..0;
+    }
+
+    let mut target = index.min(text.len());
+    while target > 0 && !text.is_char_boundary(target) {
+        target -= 1;
+    }
+    if target == text.len() {
+        target = text
+            .char_indices()
+            .next_back()
+            .map_or(0, |(offset, _)| offset);
+    }
+
+    let character = text[target..]
+        .chars()
+        .next()
+        .expect("a clamped character boundary has a character");
+    let class = character_class(character);
+    let mut start = target;
+    for (offset, character) in text[..target].char_indices().rev() {
+        if character_class(character) != class {
+            break;
+        }
+        start = offset;
+    }
+
+    let mut end = target + character.len_utf8();
+    let following = end;
+    for (offset, character) in text[following..].char_indices() {
+        if character_class(character) != class {
+            break;
+        }
+        end = following + offset + character.len_utf8();
+    }
+    start..end
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharacterClass {
+    Word,
+    Whitespace,
+    Newline,
+    Punctuation,
+}
+
+fn character_class(character: char) -> CharacterClass {
+    match character {
+        '\n' | '\r' => CharacterClass::Newline,
+        '_' => CharacterClass::Word,
+        character if character.is_alphanumeric() => CharacterClass::Word,
+        character if character.is_whitespace() => CharacterClass::Whitespace,
+        _ => CharacterClass::Punctuation,
     }
 }
 
@@ -295,5 +364,23 @@ mod tests {
         };
         assert_eq!(empty.range(), 2..2);
         assert!(empty.text.get(empty.range()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_double_click_selects_the_word_under_it() {
+        assert_eq!(word_range("select this_text now", 9), 7..16);
+        assert_eq!(word_range("select this_text now", 16), 16..17);
+    }
+
+    #[test]
+    fn a_word_selection_uses_utf8_byte_offsets() {
+        assert_eq!(word_range("say café now", 6), 4..9);
+        assert_eq!(&"say café now"[word_range("say café now", 6)], "café");
+    }
+
+    #[test]
+    fn a_word_selection_does_not_cross_a_newline() {
+        assert_eq!(word_range("one\n  two", 3), 3..4);
+        assert_eq!(word_range("one\n  two", 4), 4..6);
     }
 }
