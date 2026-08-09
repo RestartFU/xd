@@ -40,7 +40,7 @@ use xd_desktop::{
     activity::{self, ActivityCard, ActivityItem, ActivityKind},
     context_usage::{self, Severity as ContextSeverity},
     daemon::{DaemonHandle, DaemonUpdate, MessageCursor, RequestKind, StartedDaemon},
-    markdown::{self, Block, CodeKind, InlineKind, InlineText},
+    markdown::{self, Block, CodeKind, CodeSpan, InlineKind, InlineText},
     model::{AgentBackend, AppModel, Attachment, Folder, Message, MessagePageDirection},
     remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
 };
@@ -9235,6 +9235,7 @@ impl XdDesktop {
                     DiffLineKind::Header => (0x1d222b, 0xaab2c0),
                     DiffLineKind::Context => (0x14171c, 0xc9ced8),
                 };
+                let text = syntax_colored_diff_line(&file.path, &line);
                 section = section.child(
                     div()
                         .w_full()
@@ -9245,7 +9246,7 @@ impl XdDesktop {
                         .text_xs()
                         .line_height(px(18.0))
                         .text_color(rgb(color))
-                        .child(line.text),
+                        .child(text),
                 );
             }
             block = block.child(section);
@@ -13245,6 +13246,7 @@ impl Render for XdDesktop {
                                 DiffLineKind::Header => (0x1d222b, 0xaab2c0),
                                 DiffLineKind::Context => (0x14171c, 0xc9ced8),
                             };
+                            let text = syntax_colored_diff_line(&file.path, line);
                             lines.push(
                                 div()
                                     .id(("diff-line", index * 10_000 + line_index))
@@ -13256,7 +13258,7 @@ impl Render for XdDesktop {
                                     .text_xs()
                                     .line_height(px(18.0))
                                     .text_color(rgb(color))
-                                    .child(line.text.clone())
+                                    .child(text)
                                     .into_any_element(),
                             );
                         }
@@ -18173,6 +18175,53 @@ fn parent_browse_path(path: &str) -> String {
         .unwrap_or_default()
 }
 
+fn syntax_colored_diff_line(path: &str, line: &DiffLine) -> StyledText {
+    let highlights = diff_syntax_spans(path, line).into_iter().map(|span| {
+        let color = match span.kind {
+            CodeKind::Keyword => 0xc792ea,
+            CodeKind::String => 0xc3e88d,
+            CodeKind::Comment => 0x758195,
+            CodeKind::Number => 0xf78c6c,
+        };
+        (
+            span.range,
+            HighlightStyle {
+                color: Some(rgb(color).into()),
+                ..Default::default()
+            },
+        )
+    });
+    StyledText::new(line.text.clone()).with_highlights(highlights)
+}
+
+/// Highlight the source portion of a diff line while leaving its `+`, `-`, or
+/// context marker in the diff color supplied by the surrounding element.
+fn diff_syntax_spans(path: &str, line: &DiffLine) -> Vec<CodeSpan> {
+    let (source, marker_len) = match line.kind {
+        DiffLineKind::Added => line.text.strip_prefix('+').map(|text| (text, 1)),
+        DiffLineKind::Removed => line.text.strip_prefix('-').map(|text| (text, 1)),
+        DiffLineKind::Context => Some(
+            line.text
+                .strip_prefix(' ')
+                .map_or((line.text.as_str(), 0), |text| (text, 1)),
+        ),
+        DiffLineKind::Header | DiffLineKind::Hunk => None,
+    }
+    .unwrap_or((line.text.as_str(), 0));
+    if matches!(line.kind, DiffLineKind::Header | DiffLineKind::Hunk) {
+        return Vec::new();
+    }
+    let language = markdown::language_for_path(path);
+    markdown::code_spans(language.as_deref(), source)
+        .into_iter()
+        .map(|mut span| {
+            span.range.start += marker_len;
+            span.range.end += marker_len;
+            span
+        })
+        .collect()
+}
+
 fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
     const MAX_FILES: usize = 500;
     const MAX_LINES: usize = 1_600;
@@ -19927,6 +19976,33 @@ mod tests {
             "Git's file headers repeat the section header"
         );
         assert_eq!(files[1].lines[0].text, "new file mode 100644");
+    }
+
+    #[test]
+    fn diff_source_keeps_its_language_colors_after_the_line_marker() {
+        let line = DiffLine {
+            kind: DiffLineKind::Added,
+            text: "+func answer() string { return \"yes\" }".into(),
+        };
+        let spans = diff_syntax_spans("internal/answer.go", &line);
+        assert!(spans.iter().any(|span| {
+            span.kind == CodeKind::Keyword
+                && line.text.get(span.range.clone()) == Some("func")
+                && span.range.start == 1
+        }));
+        assert!(spans.iter().any(|span| {
+            span.kind == CodeKind::String && line.text.get(span.range.clone()) == Some("\"yes\"")
+        }));
+        assert!(
+            diff_syntax_spans(
+                "internal/answer.go",
+                &DiffLine {
+                    kind: DiffLineKind::Hunk,
+                    text: "@@ -0,0 +1 @@".into(),
+                },
+            )
+            .is_empty()
+        );
     }
 
     #[test]
