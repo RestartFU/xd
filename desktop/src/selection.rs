@@ -258,6 +258,14 @@ fn index_at(layout: &TextLayout, position: Point<Pixels>) -> usize {
     }
 }
 
+fn cursor_for_hover(is_link: bool) -> CursorStyle {
+    if is_link {
+        CursorStyle::OpenHand
+    } else {
+        CursorStyle::IBeam
+    }
+}
+
 /// The run a double-click selects. Words include Unicode letters and numbers
 /// plus underscores; whitespace and punctuation each form their own runs, but
 /// a newline never carries selection onto another visual line.
@@ -378,15 +386,11 @@ impl Element for Selectable {
         cx: &mut App,
     ) {
         self.paint_selection(window, cx);
-        let cursor = if self
-            .links
-            .iter()
-            .any(|range| range.contains(&index_at(&self.layout, window.mouse_position())))
-        {
-            CursorStyle::PointingHand
-        } else {
-            CursorStyle::IBeam
-        };
+        let cursor = cursor_for_hover(
+            self.links
+                .iter()
+                .any(|range| range.contains(&index_at(&self.layout, window.mouse_position()))),
+        );
         window.set_cursor_style(cursor, hitbox);
         element.paint(window, cx);
         let link_listener = self.link_listener.take();
@@ -401,6 +405,12 @@ mod tests {
         Context, ListAlignment, ListState, Modifiers, Render, Styled, StyledText, TestAppContext,
         list, px,
     };
+
+    #[test]
+    fn hovering_a_link_uses_an_open_hand_cursor() {
+        assert_eq!(cursor_for_hover(true), CursorStyle::OpenHand);
+        assert_eq!(cursor_for_hover(false), CursorStyle::IBeam);
+    }
 
     #[gpui::test]
     fn a_selectable_interactive_range_still_receives_click(cx: &mut TestAppContext) {
