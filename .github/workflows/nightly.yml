@@ -183,7 +183,7 @@ jobs:
           -OutputDirectory windows-dist
           -Profile nightly
 
-      - name: Build the Windows downloader and exercise the MSI
+      - name: Build and exercise the Windows downloader
         run: |
           ./scripts/package-windows.ps1 `
             -Payload windows-dist `
@@ -191,10 +191,8 @@ jobs:
             -Profile nightly `
             -Version 0.1.0
           ./scripts/install.ps1 `
-            -MsiPath artifacts/xd-nightly-windows-x86_64.msi `
-            -ChecksumPath artifacts/xd-nightly-windows-x86_64.msi.sha256 `
-            -CabPath artifacts/xd1.cab `
-            -CabChecksumPath artifacts/xd1.cab.sha256 `
+            -SetupPath artifacts/xd-nightly-windows-x86_64-setup.exe `
+            -SetupChecksumPath artifacts/xd-nightly-windows-x86_64-setup.exe.sha256 `
             -Quiet
 
           # Only what this job built. An artifact is rooted at the deepest

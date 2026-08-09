@@ -24,7 +24,12 @@
         SourceFile="$(MsiPath)"
         Compressed="no"
         DownloadUrl="$(DownloadBase)/{2}"
-        Vital="yes" />
+        Vital="yes">
+        <Payload
+          SourceFile="$(CabPath)"
+          Compressed="no"
+          DownloadUrl="$(DownloadBase)/{2}" />
+      </MsiPackage>
     </Chain>
   </Bundle>
 </Wix>

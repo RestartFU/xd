@@ -124,6 +124,7 @@ if (-not (Test-Path -LiteralPath $cabOutput -PathType Leaf)) {
     -arch x64 `
     -ext $bootstrapperExtension `
     -d "MsiPath=$output" `
+    -d "CabPath=$cabOutput" `
     -d "Version=$BundleVersion" `
     -d "ProductName=$productName" `
     -d "BundleUpgradeCode=$bundleUpgradeCode" `
