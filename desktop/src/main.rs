@@ -12144,6 +12144,30 @@ impl Render for XdDesktop {
                     .into_any_element(),
             )
         });
+        let composer_selector_overlay = composer_selector_menu.map(|menu| {
+            div()
+                .absolute()
+                .inset_0()
+                .p_4()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(1040.0))
+                        .max_h(px(680.0))
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(BG))
+                        .shadow_lg()
+                        .overflow_hidden()
+                        .child(menu),
+                )
+                .into_any_element()
+        });
 
         let composer_controls = div()
             .h(px(42.0))
@@ -13277,7 +13301,6 @@ impl Render for XdDesktop {
                     .border_color(rgb(BORDER))
                     .bg(rgb(SURFACE))
                     .overflow_hidden()
-                    .when_some(composer_selector_menu, |panel, menu| panel.child(menu))
                     .child(composer_controls),
             );
 
@@ -18068,6 +18091,9 @@ impl Render for XdDesktop {
             )
             .when_some(diff_splitter, |root, splitter| root.child(splitter))
             .when_some(diff_pane, |root, pane| root.child(pane))
+            .when_some(composer_selector_overlay, |root, overlay| {
+                root.child(overlay)
+            })
             .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(settings_overlay, |root, overlay| root.child(overlay))
             .when_some(secrets_overlay, |root, overlay| root.child(overlay))
@@ -19662,6 +19688,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("the composer action icon {path} is embedded"));
             assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
         }
+    }
+
+    #[test]
+    fn composer_selector_is_mounted_as_a_content_overlay() {
+        let source = include_str!("main.rs");
+        let composer = source
+            .split_once("let composer =")
+            .expect("composer render section")
+            .1
+            .split_once("let git_commit_input")
+            .expect("end of composer render section")
+            .0;
+        assert!(!composer.contains("when_some(composer_selector_menu"));
+
+        let content = source
+            .split_once("        let content = div()")
+            .expect("content render section")
+            .1
+            .split_once("let titlebar =")
+            .expect("end of content render section")
+            .0;
+        assert!(content.contains("when_some(composer_selector_overlay"));
     }
 
     #[test]
