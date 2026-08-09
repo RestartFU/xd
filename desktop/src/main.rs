@@ -3930,7 +3930,7 @@ impl XdDesktop {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if !queued {
-                    self.model.working = true;
+                    self.model.start_working();
                     self.request_messages(&chat_id);
                 }
                 if self.composer.is_empty() {
@@ -10084,6 +10084,7 @@ impl Render for XdDesktop {
         let messages = self.transcript_snapshot.clone();
         let queue_count = self.model.queue.len();
         let working = self.model.working;
+        let working_for = self.model.working_for();
         let working_dot_frame = self.working_dot_frame;
         let selected = self.model.selected_summary().cloned();
         let diff_open = self.diff_panel.is_some();
@@ -18034,6 +18035,21 @@ impl Render for XdDesktop {
                     .map(|column| match active_tab {
                         files::FileTab::Chat => column
                             .child(div().flex_1().min_h_0().child(transcript))
+                            .when_some(working_for, |column, seconds| {
+                                column.child(
+                                    div()
+                                        .w_full()
+                                        .px_4()
+                                        .pb_2()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(turn_working_label(seconds))
+                                        .child(working_dots(working_dot_frame, MUTED)),
+                                )
+                            })
                             .child(composer),
                         files::FileTab::Tree => column.child(tree_body),
                         files::FileTab::File(_) => column.child(editor_body),
@@ -19038,14 +19054,21 @@ fn clean_shortcut_prompts(prompts: &[String]) -> Result<Vec<String>, String> {
 
 fn turn_duration_label(value: &str) -> Option<String> {
     let seconds = value.trim().parse::<u64>().ok()?;
-    let duration = if seconds >= 3_600 {
+    Some(format!("Worked for {}", turn_duration(seconds)))
+}
+
+fn turn_working_label(seconds: u64) -> String {
+    format!("Working for {}", turn_duration(seconds))
+}
+
+fn turn_duration(seconds: u64) -> String {
+    if seconds >= 3_600 {
         format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60)
     } else if seconds >= 60 {
         format!("{}m {:02}s", seconds / 60, seconds % 60)
     } else {
         format!("{seconds}s")
-    };
-    Some(format!("Worked for {duration}"))
+    }
 }
 
 fn pairing_details(value: &Value) -> Result<(String, u16, String), String> {
@@ -19915,6 +19938,9 @@ mod tests {
             Some("Worked for 1h 01m")
         );
         assert_eq!(turn_duration_label("not-a-duration"), None);
+        assert_eq!(turn_working_label(5), "Working for 5s");
+        assert_eq!(turn_working_label(65), "Working for 1m 05s");
+        assert_eq!(turn_working_label(3661), "Working for 1h 01m");
     }
 
     #[test]

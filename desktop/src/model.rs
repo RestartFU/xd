@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{Image, ImageFormat};
@@ -202,6 +206,7 @@ pub struct AppModel {
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
     pub working: bool,
+    pub working_started_at: Option<Instant>,
     pub new_worktree: bool,
     pub has_messages: bool,
     pub worktrees: Vec<Worktree>,
@@ -278,6 +283,7 @@ impl AppModel {
             self.messages.clear();
             self.queue.clear();
             self.working = false;
+            self.working_started_at = None;
             self.new_worktree = false;
             self.has_messages = false;
             self.worktrees.clear();
@@ -310,6 +316,7 @@ impl AppModel {
         self.messages.clear();
         self.queue.clear();
         self.working = false;
+        self.working_started_at = None;
         self.new_worktree = false;
         self.has_messages = false;
         self.worktrees.clear();
@@ -402,6 +409,16 @@ impl AppModel {
             .get("working")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let now = Instant::now();
+        self.working_started_at = if self.working {
+            body.get("working_for")
+                .and_then(Value::as_u64)
+                .and_then(|elapsed| now.checked_sub(Duration::from_secs(elapsed)))
+                .or(self.working_started_at)
+                .or(Some(now))
+        } else {
+            None
+        };
         self.new_worktree = body
             .get("new_worktree")
             .and_then(Value::as_bool)
@@ -544,7 +561,7 @@ impl AppModel {
                 }
             }
             "turn-started" if self.event_is_active(body) => {
-                self.working = true;
+                self.start_working();
                 self.live_text.clear();
                 self.live_activity.clear();
             }
@@ -564,7 +581,7 @@ impl AppModel {
                     None,
                 ));
             }
-            "turn-finished" if self.event_is_active(body) => self.working = false,
+            "turn-finished" if self.event_is_active(body) => self.stop_working(),
             _ => {}
         }
     }
@@ -572,6 +589,23 @@ impl AppModel {
     pub fn selected_summary(&self) -> Option<&ChatSummary> {
         let selected = self.selected_chat.as_deref()?;
         self.chats.iter().find(|chat| chat.id == selected)
+    }
+
+    pub fn start_working(&mut self) {
+        self.working = true;
+        self.working_started_at.get_or_insert_with(Instant::now);
+    }
+
+    pub fn stop_working(&mut self) {
+        self.working = false;
+        self.working_started_at = None;
+    }
+
+    pub fn working_for(&self) -> Option<u64> {
+        self.working.then(|| {
+            self.working_started_at
+                .map_or(0, |started_at| started_at.elapsed().as_secs())
+        })
     }
 
     pub fn display_messages(&self) -> Vec<Message> {
@@ -662,6 +696,7 @@ impl AppModel {
             ],
             queue: vec!["Port workspace and chat shortcuts".into()],
             working: true,
+            working_started_at: Some(Instant::now()),
             new_worktree: false,
             has_messages: true,
             worktrees: Vec::new(),
@@ -703,6 +738,18 @@ fn string_array(values: &[Value]) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn chat_snapshots_restore_the_live_turn_age() {
+        let mut model = AppModel::default();
+        model.apply_chat(&json!({"working": true, "working_for": 41}));
+
+        assert!(matches!(model.working_for(), Some(41..=42)));
+
+        model.selected_chat = Some("chat-1".into());
+        model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
+        assert_eq!(model.working_for(), None);
+    }
 
     #[test]
     fn applies_complete_tree_snapshots_and_retires_deleted_selection() {
