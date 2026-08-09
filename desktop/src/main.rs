@@ -77,7 +77,7 @@ use settings::{AccentPreset, AppSettings, GitWriter};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
-use voice_input::{CaptureEvent, VoiceRecorder};
+use voice_input::{CaptureEvent, EndOfSpeech, VoiceRecorder};
 
 // Keep the GPUI shell visually continuous across every surface.
 // These are the same near-black surfaces and quiet separators used by its GTK
@@ -107,6 +107,7 @@ const MAX_CACHED_MESSAGE_IMAGES: usize = 8;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
+const STEADY_PARTIALS_TO_END: usize = 4;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -169,6 +170,19 @@ fn plus_icon(color: u32) -> gpui::AnyElement {
                 .rounded_full()
                 .bg(rgb(color)),
         )
+        .into_any_element()
+}
+
+fn hands_free_icon(color: u32) -> gpui::AnyElement {
+    div()
+        .size(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_lg()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(color))
+        .child("∞")
         .into_any_element()
 }
 
@@ -369,6 +383,25 @@ struct VoiceInput {
     base_text: String,
     partial: String,
     recorder: Option<VoiceRecorder>,
+    hands_free: bool,
+    end_of_speech: Option<EndOfSpeech>,
+    last_partial: String,
+    steady_partials: usize,
+}
+
+impl VoiceInput {
+    fn hands_free_partial_ended(&mut self, text: &str) -> bool {
+        if !self.hands_free || !matches!(self.state, VoiceState::Recording) {
+            return false;
+        }
+        if text != self.last_partial {
+            self.last_partial = text.to_owned();
+            self.steady_partials = 0;
+            return false;
+        }
+        self.steady_partials = self.steady_partials.saturating_add(1);
+        !text.trim().is_empty() && self.steady_partials >= STEADY_PARTIALS_TO_END
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6148,7 +6181,7 @@ impl XdDesktop {
 
     fn toggle_voice(&mut self, cx: &mut Context<Self>) {
         match self.voice_input.state {
-            VoiceState::Idle | VoiceState::Failed(_) => self.check_voice_model(cx),
+            VoiceState::Idle | VoiceState::Failed(_) => self.check_voice_model(false, cx),
             VoiceState::NeedsModel => self.download_voice_model(cx),
             VoiceState::Recording => {
                 if let Some(recorder) = &self.voice_input.recorder {
@@ -6163,7 +6196,22 @@ impl XdDesktop {
         }
     }
 
-    fn check_voice_model(&mut self, cx: &mut Context<Self>) {
+    fn toggle_hands_free(&mut self, cx: &mut Context<Self>) {
+        if self.voice_input.hands_free {
+            if matches!(self.voice_input.state, VoiceState::NeedsModel) {
+                self.download_voice_model(cx);
+            } else {
+                self.cancel_voice(true, cx);
+            }
+        } else if matches!(
+            self.voice_input.state,
+            VoiceState::Idle | VoiceState::Failed(_)
+        ) {
+            self.check_voice_model(true, cx);
+        }
+    }
+
+    fn check_voice_model(&mut self, hands_free: bool, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -6182,6 +6230,10 @@ impl XdDesktop {
             base_text: self.composer.clone(),
             partial: String::new(),
             recorder: None,
+            hands_free,
+            end_of_speech: None,
+            last_partial: String::new(),
+            steady_partials: 0,
         };
         cx.notify();
     }
@@ -6220,6 +6272,9 @@ impl XdDesktop {
         };
         self.voice_input.recorder = Some(recorder);
         self.voice_input.partial.clear();
+        self.voice_input.end_of_speech = self.voice_input.hands_free.then(EndOfSpeech::default);
+        self.voice_input.last_partial.clear();
+        self.voice_input.steady_partials = 0;
         self.voice_input.state = VoiceState::Recording;
         cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
@@ -6255,6 +6310,18 @@ impl XdDesktop {
                     daemon.voice_action("voice-stream-chunk", &chat_id, token, Some(&audio))
                 {
                     self.fail_voice(error, cx);
+                    return;
+                }
+                let utterance_ended = self
+                    .voice_input
+                    .end_of_speech
+                    .as_mut()
+                    .is_some_and(|detector| detector.accept(&audio));
+                if utterance_ended {
+                    self.voice_input.end_of_speech = None;
+                    if let Some(recorder) = &self.voice_input.recorder {
+                        recorder.stop();
+                    }
                 }
             }
             CaptureEvent::Finished(audio) => {
@@ -6291,6 +6358,11 @@ impl XdDesktop {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                if self.voice_input.hands_free_partial_ended(&text) {
+                    if let Some(recorder) = &self.voice_input.recorder {
+                        recorder.stop();
+                    }
+                }
                 self.voice_input.partial = text.clone();
                 let composer = merge_dictation(&self.voice_input.base_text, &text);
                 self.apply_voice_text(composer, cx);
@@ -6302,8 +6374,13 @@ impl XdDesktop {
                     .unwrap_or_default()
                     .to_owned();
                 let composer = merge_dictation(&self.voice_input.base_text, &text);
+                let hands_free = self.voice_input.hands_free;
                 self.voice_input = VoiceInput::default();
                 self.apply_voice_text(composer, cx);
+                if hands_free {
+                    self.send_composer(cx);
+                    self.check_voice_model(true, cx);
+                }
             }
             Some("cancelled") => self.cancel_voice(true, cx),
             Some("error") => self.fail_voice(
@@ -12472,10 +12549,18 @@ impl Render for XdDesktop {
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
-        let can_voice = voice_input::AVAILABLE
+        let voice_available = voice_input::AVAILABLE
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
+        let hands_free_active = self.voice_input.hands_free;
+        let can_voice = voice_available && !hands_free_active;
+        let can_hands_free = hands_free_active
+            || (voice_available
+                && matches!(
+                    self.voice_input.state,
+                    VoiceState::Idle | VoiceState::Failed(_)
+                ));
         let (voice_icon, voice_active, voice_error) = match &self.voice_input.state {
             VoiceState::Idle => (MIC_ICON, false, None),
             VoiceState::NeedsModel => (MIC_ICON, true, None),
@@ -12488,6 +12573,25 @@ impl Render for XdDesktop {
             }
             VoiceState::Failed(error) => (MIC_ICON, false, Some(error.clone())),
         };
+        let voice_icon = if hands_free_active {
+            MIC_ICON
+        } else {
+            voice_icon
+        };
+        let voice_active = voice_active && !hands_free_active;
+        let hands_free_status = hands_free_active.then(|| match &self.voice_input.state {
+            VoiceState::Recording => "Hands-free — speak, then pause to send".to_owned(),
+            VoiceState::Transcribing => "Hands-free — sending…".to_owned(),
+            VoiceState::NeedsModel => {
+                "Hands-free — select again to download the speech model".to_owned()
+            }
+            VoiceState::Downloading(progress) if *progress >= 0 => {
+                format!("Hands-free — downloading speech model ({progress}%)")
+            }
+            VoiceState::Downloading(_) => "Hands-free — downloading speech model…".to_owned(),
+            VoiceState::Checking => "Hands-free — listening again…".to_owned(),
+            VoiceState::Idle | VoiceState::Failed(_) => "Hands-free".to_owned(),
+        });
         let shortcuts_enabled =
             self.model.selected_chat.is_some() && self.model.connected && !self.sending;
         let shortcut_buttons = self
@@ -13132,6 +13236,20 @@ impl Render for XdDesktop {
                         .children(attachment_previews),
                 )
             })
+            .when_some(hands_free_status, |element, status| {
+                element.child(
+                    div()
+                        .id("hands-free-status")
+                        .w_full()
+                        .max_w(px(1040.0))
+                        .mx_auto()
+                        .mb_2()
+                        .px_3()
+                        .text_xs()
+                        .text_color(rgb(accent))
+                        .child(status),
+                )
+            })
             .when_some(voice_error, |element, error| {
                 element.child(
                     div()
@@ -13194,33 +13312,64 @@ impl Render for XdDesktop {
                             .child(plus_icon(if can_attach { TEXT } else { MUTED })),
                     )
                     .when(voice_input::AVAILABLE, |composer| {
-                        composer.child(
-                            div()
-                                .id("voice-input")
-                                .size(px(40.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_lg()
-                                .bg(rgb(if voice_active { 0x26354d } else { SURFACE }))
-                                .when(can_voice, |button| {
-                                    button
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if can_voice {
-                                        this.toggle_voice(cx);
-                                    }
-                                }))
-                                .child(
-                                    svg()
-                                        .path(voice_icon)
-                                        .size(px(18.0))
-                                        .text_color(rgb(if can_voice { TEXT } else { MUTED })),
-                                ),
-                        )
+                        composer
+                            .child(
+                                div()
+                                    .id("voice-input")
+                                    .size(px(40.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_lg()
+                                    .bg(rgb(if voice_active { 0x26354d } else { SURFACE }))
+                                    .when(can_voice, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_voice {
+                                            this.toggle_voice(cx);
+                                        }
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(voice_icon)
+                                            .size(px(18.0))
+                                            .text_color(rgb(if can_voice { TEXT } else { MUTED })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("hands-free-input")
+                                    .size(px(40.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_lg()
+                                    .bg(rgb(if hands_free_active { 0x26354d } else { SURFACE }))
+                                    .when(can_hands_free, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_hands_free {
+                                            this.toggle_hands_free(cx);
+                                        }
+                                    }))
+                                    .child(if hands_free_active {
+                                        svg()
+                                            .path(STOP_ICON)
+                                            .size(px(18.0))
+                                            .text_color(rgb(TEXT))
+                                            .into_any_element()
+                                    } else {
+                                        hands_free_icon(if can_hands_free { TEXT } else { MUTED })
+                                    }),
+                            )
                     })
                     .child(
                         div()
@@ -19662,6 +19811,34 @@ mod tests {
             merge_dictation("Please\n", "open the diff"),
             "Please\nopen the diff"
         );
+    }
+
+    #[test]
+    fn hands_free_ends_when_recognition_stops_changing() {
+        let mut voice = VoiceInput {
+            state: VoiceState::Recording,
+            hands_free: true,
+            ..VoiceInput::default()
+        };
+
+        assert!(!voice.hands_free_partial_ended("rename the parser"));
+        for _ in 0..STEADY_PARTIALS_TO_END - 1 {
+            assert!(!voice.hands_free_partial_ended("rename the parser"));
+        }
+        assert!(voice.hands_free_partial_ended("rename the parser"));
+    }
+
+    #[test]
+    fn hands_free_does_not_treat_empty_partials_as_an_utterance() {
+        let mut voice = VoiceInput {
+            state: VoiceState::Recording,
+            hands_free: true,
+            ..VoiceInput::default()
+        };
+
+        for _ in 0..20 {
+            assert!(!voice.hands_free_partial_ended(""));
+        }
     }
 
     #[test]

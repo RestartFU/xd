@@ -42,6 +42,27 @@ require_file libexec/openssl
 require_file libexec/codex-package/bin/codex
 require_file libexec/claude
 require_file libexec/whisper-server-bin
+require_file lib/alsa-lib/libasound_module_pcm_pipewire.so
+require_file lib/spa-0.2/support/libspa-support.so
+require_file lib/pipewire-0.3/libpipewire-module-protocol-native.so
+require_file share/pipewire/client.conf
+
+grep -F 'ALSA_PLUGIN_DIR="$HERE/lib/alsa-lib"' "$BUNDLE/xd.sh" >/dev/null || {
+  echo "bundle smoke: launcher does not use its PipeWire ALSA plugin" >&2
+  exit 1
+}
+grep -F 'SPA_PLUGIN_DIR="$HERE/lib/spa-0.2"' "$BUNDLE/xd.sh" >/dev/null || {
+  echo "bundle smoke: launcher does not use its PipeWire SPA modules" >&2
+  exit 1
+}
+grep -F 'PIPEWIRE_MODULE_DIR="$HERE/lib/pipewire-0.3"' "$BUNDLE/xd.sh" >/dev/null || {
+  echo "bundle smoke: launcher does not use its PipeWire client modules" >&2
+  exit 1
+}
+grep -F 'PIPEWIRE_CONFIG_DIR="$HERE/share/pipewire"' "$BUNDLE/xd.sh" >/dev/null || {
+  echo "bundle smoke: launcher does not use its PipeWire configuration" >&2
+  exit 1
+}
 
 # GPUI has no window without a Vulkan driver, and the loader finds one only
 # through these manifests. lavapipe is the one that works anywhere.

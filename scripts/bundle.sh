@@ -27,6 +27,23 @@ mkdir -p "$OUT/lib/gio/modules"
 mkdir -p "$OUT/lib/ossl-modules"
 cp -a "$ARCH_DIR"/ossl-modules/*.so "$OUT/lib/ossl-modules/" 2>/dev/null || true
 
+# CPAL opens Linux microphones through ALSA. GNOME routes ALSA's `default`
+# device into PipeWire, but that route is a dlopened plugin rather than a
+# dependency ldd can discover from the desktop binary. Bundle the plugin built
+# for our own libasound; loading the host's copy is not ABI-safe across distros.
+mkdir -p "$OUT/lib/alsa-lib"
+for plugin in \
+  libasound_module_ctl_pipewire.so \
+  libasound_module_pcm_pipewire.so
+do
+  install -m0755 "$ARCH_DIR/alsa-lib/$plugin" "$OUT/lib/alsa-lib/$plugin"
+done
+mkdir -p "$OUT/lib/spa-0.2"
+cp -a "$ARCH_DIR/spa-0.2/." "$OUT/lib/spa-0.2/"
+mkdir -p "$OUT/lib/pipewire-0.3"
+cp -a "$ARCH_DIR/pipewire-0.3/." "$OUT/lib/pipewire-0.3/"
+cp -a /usr/share/pipewire "$OUT/share/"
+
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
 install -Dm755 "$STAGE/usr/bin/git" "$OUT/bin/git"
 cp -a "$STAGE/usr/libexec/." "$OUT/libexec/"
@@ -81,6 +98,9 @@ mapfile -t roots < <(printf '%s\n' \
   "$OUT/libexec/whisper-bin" \
   "$OUT/libexec/whisper-server-bin" \
   "$OUT/lib/ossl-modules"/*.so \
+  "$OUT/lib/alsa-lib"/*.so \
+  "$OUT/lib/spa-0.2"/*/*.so \
+  "$OUT/lib/pipewire-0.3"/*.so \
   "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \
   "$ARCH_DIR"/libnss_dns.so.2)

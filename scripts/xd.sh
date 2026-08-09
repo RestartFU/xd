@@ -94,6 +94,14 @@ unset GTK_THEME
 export GIO_MODULE_DIR="$HERE/lib/gio/modules"
 export GTK_IM_MODULE=gtk-im-context-simple
 
+# libasound plugins are loaded by name and are coupled to the libasound ABI.
+# Use the PipeWire bridge shipped beside our bundled libasound instead of a
+# Fedora/NixOS/other host plugin that may be newer or live in another path.
+export ALSA_PLUGIN_DIR="$HERE/lib/alsa-lib"
+export SPA_PLUGIN_DIR="$HERE/lib/spa-0.2"
+export PIPEWIRE_MODULE_DIR="$HERE/lib/pipewire-0.3"
+export PIPEWIRE_CONFIG_DIR="$HERE/share/pipewire"
+
 # Both matter: without FONTCONFIG_PATH, fontconfig also reads the host's
 # /etc/fonts. It still scans the conf.avail template dir compiled into the
 # library (/usr/share/fontconfig), which on a non-Debian host may hold

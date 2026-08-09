@@ -285,6 +285,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgtk-4-dev \
       libportaudio2 \
       libpulse-dev \
+      pipewire-alsa \
       libsqlite3-dev \
       libssl-dev \
       libvulkan1 \

@@ -26,6 +26,70 @@ const MAX_CHANNELS: usize = 32;
 const MIN_INPUT_RATE: u32 = 8_000;
 const MAX_INPUT_RATE: u32 = 384_000;
 
+fn default_input_config_error(error: &str) -> String {
+    let unavailable = error.to_ascii_lowercase();
+    if unavailable.contains("no such device or address")
+        || unavailable.contains("audio device is not available")
+        || unavailable.contains("device not found")
+        || unavailable.contains("device disconnected")
+    {
+        "No microphone is available. Connect or select an input device, then try again.".into()
+    } else {
+        format!("Cannot read the default microphone format: {error}")
+    }
+}
+
+#[derive(Default)]
+pub struct EndOfSpeech {
+    loudest: f64,
+    spoken_bytes: usize,
+    quiet_bytes: usize,
+    ended: bool,
+}
+
+impl EndOfSpeech {
+    const LEAD_IN_BYTES: usize = SAMPLE_RATE as usize * 2 * 300 / 1_000;
+    const SILENCE_BYTES: usize = SAMPLE_RATE as usize * 2 * 1_500 / 1_000;
+    const FLOOR: f64 = 350.0;
+    const QUIET_FRACTION: f64 = 0.10;
+    const DECAY_PER_SECOND: f64 = 0.4;
+
+    pub fn accept(&mut self, pcm: &[u8]) -> bool {
+        if self.ended {
+            return true;
+        }
+        let level = pcm_amplitude(pcm);
+        if self.quiet_bytes == 0 {
+            let seconds = pcm.len() as f64 / (SAMPLE_RATE as f64 * 2.0);
+            self.loudest = level.max(self.loudest * Self::DECAY_PER_SECOND.powf(seconds));
+        }
+        let speaking = self.loudest >= Self::FLOOR && level >= self.loudest * Self::QUIET_FRACTION;
+        if speaking {
+            self.spoken_bytes = self.spoken_bytes.saturating_add(pcm.len());
+            self.quiet_bytes = 0;
+        } else if self.spoken_bytes >= Self::LEAD_IN_BYTES {
+            self.quiet_bytes = self.quiet_bytes.saturating_add(pcm.len());
+            self.ended = self.quiet_bytes >= Self::SILENCE_BYTES;
+        }
+        self.ended
+    }
+}
+
+fn pcm_amplitude(pcm: &[u8]) -> f64 {
+    let mut sum = 0.0;
+    let mut samples = 0_usize;
+    for bytes in pcm.chunks_exact(2) {
+        let sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f64;
+        sum += sample * sample;
+        samples += 1;
+    }
+    if samples == 0 {
+        0.0
+    } else {
+        (sum / samples as f64).sqrt()
+    }
+}
+
 pub enum CaptureEvent {
     Chunk(Vec<u8>),
     Finished(Vec<u8>),
@@ -89,7 +153,7 @@ fn capture(
         .ok_or_else(|| "No default microphone is available.".to_owned())?;
     let supported = device
         .default_input_config()
-        .map_err(|error| format!("Cannot read the default microphone format: {error}"))?;
+        .map_err(|error| default_input_config_error(&error.to_string()))?;
     let channels = supported.channels() as usize;
     let input_rate = supported.sample_rate();
     if channels == 0 || channels > MAX_CHANNELS {
@@ -304,6 +368,52 @@ fn wav_from_pcm(pcm: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pcm_chunk(amplitude: i16, millis: usize) -> Vec<u8> {
+        let samples = SAMPLE_RATE as usize * millis / 1_000;
+        (0..samples)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 {
+                    amplitude
+                } else {
+                    -amplitude
+                };
+                sample.to_le_bytes()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hands_free_ends_after_speech_followed_by_a_pause() {
+        let mut detector = EndOfSpeech::default();
+
+        for _ in 0..10 {
+            assert!(!detector.accept(&pcm_chunk(9_000, 100)));
+        }
+        for _ in 0..14 {
+            assert!(!detector.accept(&pcm_chunk(0, 100)));
+        }
+        assert!(detector.accept(&pcm_chunk(0, 100)));
+    }
+
+    #[test]
+    fn hands_free_waits_through_silence_before_speech() {
+        let mut detector = EndOfSpeech::default();
+
+        for _ in 0..100 {
+            assert!(!detector.accept(&pcm_chunk(0, 100)));
+        }
+    }
+
+    #[test]
+    fn missing_microphones_do_not_expose_alsa_backend_errors() {
+        assert_eq!(
+            default_input_config_error(
+                "ALSA function 'snd_pcm_open' failed with error 'No such device or address (6)'"
+            ),
+            "No microphone is available. Connect or select an input device, then try again."
+        );
+    }
 
     #[test]
     fn recorder_wav_matches_the_daemon_contract() {
