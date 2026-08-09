@@ -9190,6 +9190,7 @@ impl XdDesktop {
                 .child(patch.to_owned())
                 .into_any_element();
         };
+        let single_file = files.len() == 1;
         let mut block = div().mt_2().w_full().flex().flex_col().gap_2();
         for file in files {
             let mut section = div()
@@ -9197,8 +9198,9 @@ impl XdDesktop {
                 .rounded_md()
                 .border_1()
                 .border_color(rgb(BORDER))
-                .overflow_hidden()
-                .child(
+                .overflow_hidden();
+            if !single_file {
+                section = section.child(
                     div()
                         .w_full()
                         .px_2()
@@ -9227,6 +9229,7 @@ impl XdDesktop {
                                 .child(format!("−{}", file.deletions)),
                         ),
                 );
+            }
             for line in file.lines {
                 let (background, color) = match line.kind {
                     DiffLineKind::Added => (0x172b20, 0xa9d8b5),

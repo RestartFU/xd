@@ -94,7 +94,12 @@ fn codex(input: &Value) -> Option<String> {
         let Some(path) = string(change, "path").or_else(|| string(change, "filePath")) else {
             continue;
         };
-        let diff = string(change, "diff").unwrap_or_default();
+        // Codex names this field `unified_diff` in its file-change payload.
+        // Keep the older spellings for compatibility with previous clients.
+        let diff = string(change, "unified_diff")
+            .or_else(|| string(change, "unifiedDiff"))
+            .or_else(|| string(change, "diff"))
+            .unwrap_or_default();
         let kind_node = change.get("kind");
         let kind = kind_node
             .and_then(Value::as_str)
@@ -112,16 +117,21 @@ fn codex(input: &Value) -> Option<String> {
             .to_ascii_lowercase();
 
         let rendered_change = match kind.as_str() {
-            "add" => new_file(&path, diff),
-            "delete" => deleted_file(&path, diff),
+            "add" => Some(new_file(&path, diff)),
+            "delete" => Some(deleted_file(&path, diff)),
             _ => {
                 let move_path = kind_node.and_then(|kind| {
                     string(kind, "move_path")
                         .or_else(|| string(kind, "movePath"))
                         .or_else(|| string(kind, "path"))
                 });
-                updated_file(&path, move_path.unwrap_or_else(|| path.clone()), diff)
+                let move_path = move_path.unwrap_or_else(|| path.clone());
+                (!diff.is_empty() || move_path != path)
+                    .then(|| updated_file(&path, move_path, diff))
             }
+        };
+        let Some(rendered_change) = rendered_change else {
+            continue;
         };
         if rendered {
             out.push("\n");
@@ -596,7 +606,7 @@ mod tests {
                     {
                         "path": "src/old.rs",
                         "kind": {"type": "update", "move_path": null},
-                        "diff": "@@ -1 +1 @@\n-old\n+new\n"
+                        "unified_diff": "@@ -1 +1 @@\n-old\n+new\n"
                     }
                 ]
             })),
@@ -608,6 +618,21 @@ mod tests {
         assert!(summary.contains("+println!();"));
         assert!(summary.contains("@@ -1 +1 @@"));
         assert!(summary.contains("-old"));
+        assert!(summary.contains("+new"));
+
+        assert_eq!(
+            build(
+                "file_change",
+                Some(&serde_json::json!({
+                    "changes": [{
+                        "path": "src/empty.rs",
+                        "kind": {"type": "update"}
+                    }]
+                }))
+            ),
+            None,
+            "an update without a diff must not become a misleading +0 −0 card"
+        );
     }
 
     #[test]
