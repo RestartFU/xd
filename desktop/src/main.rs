@@ -18075,19 +18075,7 @@ impl Render for XdDesktop {
                         files::FileTab::Chat => column
                             .child(div().flex_1().min_h_0().child(transcript))
                             .when_some(working_for, |column, seconds| {
-                                column.child(
-                                    div()
-                                        .w_full()
-                                        .px_4()
-                                        .pb_2()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(turn_working_label(seconds))
-                                        .child(working_dots(working_dot_frame, MUTED)),
-                                )
+                                column.child(turn_working_row(seconds, working_dot_frame))
                             })
                             .child(composer),
                         files::FileTab::Tree => column.child(tree_body),
@@ -19118,6 +19106,28 @@ fn turn_working_label(seconds: u64) -> String {
     format!("Working for {}", turn_duration(seconds))
 }
 
+fn turn_working_row(seconds: u64, dot_frame: usize) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .px_4()
+        .pb_2()
+        .child(
+            div()
+                .debug_selector(|| "turn-working-content".into())
+                .w_full()
+                .max_w(px(1040.0))
+                .mx_auto()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(turn_working_label(seconds))
+                .child(working_dots(dot_frame, MUTED)),
+        )
+        .into_any_element()
+}
+
 fn turn_duration(seconds: u64) -> String {
     if seconds >= 3_600 {
         format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60)
@@ -19351,6 +19361,27 @@ fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn working_row_aligns_with_the_transcript_column(cx: &mut gpui::TestAppContext) {
+        struct WorkingRowFixture;
+
+        impl Render for WorkingRowFixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(turn_working_row(5, 0))
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| WorkingRowFixture);
+        cx.simulate_resize(size(px(1_400.0), px(200.0)));
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("turn-working-content")
+            .expect("working row content is rendered");
+        assert_eq!(bounds.origin.x, px(180.0));
+        assert_eq!(bounds.size.width, px(1_040.0));
+    }
 
     #[test]
     fn working_dots_cycle_from_dim_to_three_lit() {
