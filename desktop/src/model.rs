@@ -537,6 +537,17 @@ impl AppModel {
     }
 
     pub fn apply_event(&mut self, name: &str, body: &Value) {
+        let chat_working = match name {
+            "turn-started" => Some(true),
+            "turn-finished" => Some(false),
+            _ => None,
+        };
+        if let Some(working) = chat_working
+            && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
+            && let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id)
+        {
+            chat.working = working;
+        }
         if name == "turn-finished"
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
             && self.selected_chat.as_deref() != Some(chat_id)
@@ -822,6 +833,41 @@ mod tests {
         assert!(model.working);
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert!(!model.working);
+    }
+
+    #[test]
+    fn turn_lifecycle_updates_the_background_chat_summary() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {
+                        "id": "selected",
+                        "folder": "folder",
+                        "title": "Selected",
+                        "backend": "codex"
+                    },
+                    {
+                        "id": "background",
+                        "folder": "folder",
+                        "title": "Background",
+                        "backend": "codex"
+                    }
+                ]
+            }))
+            .unwrap();
+        model.select_chat("selected");
+
+        model.apply_event("turn-started", &json!({"chat": "background"}));
+
+        assert!(model.chats[1].working);
+        assert!(!model.working);
+
+        model.apply_event("turn-finished", &json!({"chat": "background"}));
+
+        assert!(!model.chats[1].working);
+        assert!(model.unread_chats.contains("background"));
     }
 
     #[test]

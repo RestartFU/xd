@@ -1788,15 +1788,6 @@ impl XdDesktop {
             let _ = model.apply_tree(body);
             return;
         }
-        if let Some(chat_id) = body.get("chat").and_then(Value::as_str)
-            && let Some(chat) = model.chats.iter_mut().find(|chat| chat.id == chat_id)
-        {
-            if name == "turn-started" {
-                chat.working = true;
-            } else if name == "turn-finished" {
-                chat.working = false;
-            }
-        }
         model.apply_event(name, body);
     }
 
