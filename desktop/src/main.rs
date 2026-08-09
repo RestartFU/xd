@@ -94,6 +94,7 @@ const MUTED: u32 = 0xa8a8ad;
 pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
+const SEND_ICON: &str = "icons/send.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
@@ -12754,13 +12755,6 @@ impl Render for XdDesktop {
                 .iter()
                 .any(|prompt| prompt == draft_prompt);
         let can_edit_shortcuts = !draft_prompt.is_empty() && selected.is_some();
-        let send_label = if self.sending {
-            "Sending…"
-        } else if working {
-            "Queue"
-        } else {
-            "Send"
-        };
         let open_question = self.open_question.clone().filter(|question| {
             self.model.selected_chat.as_deref() == Some(question.chat_id.as_str())
         });
@@ -13238,12 +13232,13 @@ impl Render for XdDesktop {
                     .child(
                         div()
                             .id("send")
-                            .px_4()
-                            .py_2()
+                            .size(px(40.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .rounded_lg()
                             .bg(rgb(if can_send { accent } else { SURFACE_HIGH }))
-                            .text_sm()
-                            .text_color(rgb(if can_send { 0xffffff } else { MUTED }))
                             .when(can_send, |button| {
                                 button
                                     .cursor_pointer()
@@ -13254,7 +13249,12 @@ impl Render for XdDesktop {
                                     this.send_composer(cx);
                                 }
                             }))
-                            .child(send_label),
+                            .child(
+                                svg()
+                                    .path(SEND_ICON)
+                                    .size(px(18.0))
+                                    .text_color(rgb(if can_send { 0xffffff } else { MUTED })),
+                            ),
                     ),
             )
             .child(
@@ -18708,12 +18708,19 @@ impl AssetSource for EmbeddedIcons {
             CODEX_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/codex.svg").as_slice(),
             )),
+            SEND_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/send.svg").as_slice(),
+            )),
             _ => None,
         })
     }
 
     fn list(&self, _: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(vec![CLAUDE_ICON.into(), CODEX_ICON.into()])
+        Ok(vec![
+            CLAUDE_ICON.into(),
+            CODEX_ICON.into(),
+            SEND_ICON.into(),
+        ])
     }
 }
 
@@ -19627,6 +19634,15 @@ mod tests {
         }
         assert_eq!(agent_icon("gemini"), None);
         assert!(EmbeddedIcons.load("icons/missing.svg").unwrap().is_none());
+    }
+
+    #[test]
+    fn composer_send_icon_is_embedded_and_drawable() {
+        let bytes = EmbeddedIcons
+            .load("icons/send.svg")
+            .expect("embedded icons load")
+            .expect("the composer send icon is embedded");
+        assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
     }
 
     #[test]
