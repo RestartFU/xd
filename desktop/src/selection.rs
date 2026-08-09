@@ -24,6 +24,7 @@ pub struct TextSelection {
     anchor: usize,
     head: usize,
     dragging: bool,
+    pressed_link: Option<usize>,
 }
 
 impl Global for TextSelection {}
@@ -69,13 +70,38 @@ pub fn selectable(block: u64, layout: TextLayout, element: impl IntoElement) -> 
         block,
         layout,
         element: Some(element.into_any_element()),
+        links: Vec::new(),
+        link_listener: None,
     }
 }
+
+/// Makes text selectable while preserving clickable character ranges. Keeping
+/// selection and link activation on one hit target avoids competing cursors and
+/// lets the pressed link survive redraws between mouse-down and mouse-up.
+pub fn selectable_links(
+    block: u64,
+    layout: TextLayout,
+    element: impl IntoElement,
+    links: Vec<Range<usize>>,
+    listener: impl Fn(usize, &mut Window, &mut App) + 'static,
+) -> Selectable {
+    Selectable {
+        block,
+        layout,
+        element: Some(element.into_any_element()),
+        links,
+        link_listener: Some(Box::new(listener)),
+    }
+}
+
+type LinkListener = Box<dyn Fn(usize, &mut Window, &mut App)>;
 
 pub struct Selectable {
     block: u64,
     layout: TextLayout,
     element: Option<AnyElement>,
+    links: Vec<Range<usize>>,
+    link_listener: Option<LinkListener>,
 }
 
 impl Selectable {
@@ -119,9 +145,16 @@ impl Selectable {
         );
     }
 
-    fn listen(&self, hitbox: &Hitbox, window: &mut Window, cx: &App) {
+    fn listen(
+        &self,
+        hitbox: &Hitbox,
+        link_listener: Option<LinkListener>,
+        window: &mut Window,
+        cx: &App,
+    ) {
         let block = self.block;
         let layout = self.layout.clone();
+        let links = self.links.clone();
         let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble
@@ -145,6 +178,7 @@ impl Selectable {
                 // A small pointer movement between the two presses should not
                 // collapse the word that the second press just selected.
                 dragging: event.click_count == 1,
+                pressed_link: links.iter().position(|range| range.contains(&index)),
             });
             window.refresh();
         });
@@ -169,9 +203,30 @@ impl Selectable {
             window.refresh();
         });
 
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-            if phase == DispatchPhase::Bubble && TextSelection::owns(cx, block) {
-                cx.global_mut::<TextSelection>().dragging = false;
+        let layout = self.layout.clone();
+        let links = self.links.clone();
+        let released = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble
+                || event.button != MouseButton::Left
+                || !TextSelection::owns(cx, block)
+            {
+                return;
+            }
+            let pressed_link = {
+                let selection = cx.global_mut::<TextSelection>();
+                selection.dragging = false;
+                selection.pressed_link.take()
+            };
+            if released.is_hovered(window)
+                && let (Some(link), Some(listener)) = (pressed_link, link_listener.as_ref())
+                && links.get(link).is_some_and(|range| {
+                    layout
+                        .index_for_position(event.position)
+                        .is_ok_and(|index| range.contains(&index))
+                })
+            {
+                listener(link, window, cx);
             }
         });
 
@@ -323,15 +378,71 @@ impl Element for Selectable {
         cx: &mut App,
     ) {
         self.paint_selection(window, cx);
+        let cursor = if self
+            .links
+            .iter()
+            .any(|range| range.contains(&index_at(&self.layout, window.mouse_position())))
+        {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::IBeam
+        };
+        window.set_cursor_style(cursor, hitbox);
         element.paint(window, cx);
-        window.set_cursor_style(CursorStyle::IBeam, hitbox);
-        self.listen(hitbox, window, cx);
+        let link_listener = self.link_listener.take();
+        self.listen(hitbox, link_listener, window, cx);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{
+        Context, ListAlignment, ListState, Modifiers, Render, Styled, StyledText, TestAppContext,
+        list, px,
+    };
+
+    #[gpui::test]
+    fn a_selectable_interactive_range_still_receives_click(cx: &mut TestAppContext) {
+        struct SelectableLinkList {
+            list: ListState,
+        }
+
+        impl Render for SelectableLinkList {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.list.clone(), move |_, _, _| {
+                    let text = StyledText::new("open link");
+                    let layout = text.layout().clone();
+                    selectable_links(1, layout, text, vec![0..9], |_, _, cx| {
+                        cx.open_url("https://example.com")
+                    })
+                    .into_any_element()
+                })
+                .size_full()
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| SelectableLinkList {
+            list: ListState::new(1, ListAlignment::Top, px(100.0)),
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            cx.set_global(TextSelection {
+                block: Some(1),
+                text: "open link".into(),
+                anchor: 0,
+                head: 9,
+                dragging: false,
+                pressed_link: None,
+            });
+        });
+        let link = point(px(10.0), px(10.0));
+        cx.simulate_mouse_move(link, None, Modifiers::default());
+        cx.simulate_mouse_down(link, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(link, MouseButton::Left, Modifiers::default());
+
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+    }
 
     #[test]
     fn a_selection_reads_the_same_either_way_it_was_dragged() {
@@ -341,6 +452,7 @@ mod tests {
             anchor: 7,
             head: 11,
             dragging: false,
+            pressed_link: None,
         };
         let backward = TextSelection {
             anchor: 11,
@@ -361,6 +473,7 @@ mod tests {
             anchor: 2,
             head: 2,
             dragging: false,
+            pressed_link: None,
         };
         assert_eq!(empty.range(), 2..2);
         assert!(empty.text.get(empty.range()).unwrap().is_empty());

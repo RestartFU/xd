@@ -27,12 +27,11 @@ use std::{io::Write, os::windows::process::CommandExt, sync::OnceLock};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
-    Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle, Image, InteractiveText,
-    KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PathPromptOptions, Point, Render, ResizeEdge, SharedString,
-    StyledText, TextRun, Timer, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowOptions, canvas, div, img, list, prelude::*, px, relative, rgb, rgba,
-    size, svg,
+    Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle, Image, KeyBinding,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Point, Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
+    list, prelude::*, px, relative, rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -72,7 +71,7 @@ use input::{
     SelectWordLeft, SelectWordRight, ShowCharacterPalette, Submit, Tab, Up, WordLeft, WordRight,
 };
 use presence::DiscordPresence;
-use selection::selectable;
+use selection::{selectable, selectable_links};
 use settings::{AccentPreset, AppSettings, GitWriter};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
@@ -9684,15 +9683,12 @@ impl XdDesktop {
         }
         let ranges = links.iter().map(|(range, _)| range.clone()).collect();
         let urls = links.into_iter().map(|(_, url)| url).collect::<Vec<_>>();
-        let links = InteractiveText::new(("markdown-inline", id), text).on_click(
-            ranges,
-            move |index, _, cx| {
-                if let Some(url) = urls.get(index) {
-                    cx.open_url(url);
-                }
-            },
-        );
-        selectable(id, layout, links).into_any_element()
+        selectable_links(id, layout, text, ranges, move |index, _, cx| {
+            if let Some(url) = urls.get(index) {
+                cx.open_url(url);
+            }
+        })
+        .into_any_element()
     }
 
     fn sidebar_context_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
