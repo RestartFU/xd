@@ -65,6 +65,7 @@ pub struct FileEditor {
     placeholder: SharedString,
     syntax_language: Option<String>,
     syntax_spans: Vec<CodeSpan>,
+    line_ranges: Vec<Range<usize>>,
 }
 
 #[derive(Clone)]
@@ -94,6 +95,7 @@ impl FileEditor {
             placeholder: "".into(),
             syntax_language: None,
             syntax_spans: Vec::new(),
+            line_ranges: vec![0..0],
         }
     }
 
@@ -114,7 +116,7 @@ impl FileEditor {
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = text.into();
-        self.refresh_syntax();
+        self.refresh_document();
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
@@ -133,6 +135,11 @@ impl FileEditor {
             self.syntax_language.as_deref(),
             &self.content,
         );
+    }
+
+    fn refresh_document(&mut self) {
+        self.line_ranges = line_ranges(&self.content);
+        self.refresh_syntax();
     }
 
     fn changed(&self, cx: &mut Context<Self>) {
@@ -346,11 +353,10 @@ impl FileEditor {
 
     fn move_vertical(&mut self, direction: isize, cx: &mut Context<Self>) {
         let cursor = self.cursor_offset();
-        let ranges = line_ranges(&self.content);
+        let ranges = &self.line_ranges;
         let current = ranges
-            .iter()
-            .position(|range| cursor >= range.start && cursor <= range.end)
-            .unwrap_or(0);
+            .partition_point(|range| range.end < cursor)
+            .min(ranges.len() - 1);
         let target = current
             .saturating_add_signed(direction)
             .min(ranges.len() - 1);
@@ -392,17 +398,18 @@ impl FileEditor {
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
+        self.content[..offset]
             .grapheme_indices(true)
-            .rev()
-            .find_map(|(index, _)| (index < offset).then_some(index))
+            .next_back()
+            .map(|(index, _)| index)
             .unwrap_or(0)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
-        self.content
+        self.content[offset..]
             .grapheme_indices(true)
-            .find_map(|(index, _)| (index > offset).then_some(index))
+            .nth(1)
+            .map(|(index, _)| offset + index)
             .unwrap_or(self.content.len())
     }
 
@@ -502,7 +509,7 @@ impl EntityInputHandler for FileEditor {
             .unwrap_or(self.selected_range.clone());
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
-        self.refresh_syntax();
+        self.refresh_document();
         let cursor = range.start + text.len();
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
@@ -525,7 +532,7 @@ impl EntityInputHandler for FileEditor {
             .unwrap_or(self.selected_range.clone());
         self.content =
             (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
-        self.refresh_syntax();
+        self.refresh_document();
         self.marked_range = (!text.is_empty()).then_some(range.start..range.start + text.len());
         self.selected_range = selected
             .as_ref()
@@ -605,7 +612,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let count = line_ranges(&self.input.read(cx).content).len().max(1);
+        let count = self.input.read(cx).line_ranges.len().max(1);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = px(count as f32 * FileEditor::LINE_HEIGHT).into();
@@ -622,14 +629,20 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> PrepaintState {
         let input = self.input.read(cx);
-        let ranges = line_ranges(&input.content);
+        let visible = visible_line_range(
+            input.line_ranges.len(),
+            bounds.top(),
+            window.content_mask().bounds.top(),
+            window.content_mask().bounds.bottom(),
+        );
         let font_size = px(13.);
         let style = window.text_style();
-        let mut lines = Vec::with_capacity(ranges.len());
+        let mut lines = Vec::with_capacity(visible.len());
         let mut selection = Vec::new();
         let cursor_offset = input.cursor_offset();
         let mut cursor = None;
-        for (index, range) in ranges.into_iter().enumerate() {
+        for index in visible {
+            let range = input.line_ranges[index].clone();
             let placeholder =
                 input.content.is_empty() && index == 0 && !input.placeholder.is_empty();
             let text: SharedString = if placeholder {
@@ -791,10 +804,12 @@ fn text_runs(
 
     let mut runs = Vec::new();
     let mut cursor = range.start;
-    for span in input
+    let first_span = input
         .syntax_spans
+        .partition_point(|span| span.range.end <= range.start);
+    for span in input.syntax_spans[first_span..]
         .iter()
-        .filter(|span| span.range.end > range.start && span.range.start < range.end)
+        .take_while(|span| span.range.start < range.end)
     {
         let start = span.range.start.max(range.start).max(cursor);
         let end = span.range.end.min(range.end);
@@ -904,6 +919,34 @@ fn line_ranges(content: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+/// The lines close enough to the clip to be worth shaping this frame.
+///
+/// The editor element stays as tall as the whole document so the ordinary
+/// scroll container retains its scrollbar. Its bounds move underneath the
+/// fixed content mask; translating that intersection into indices lets a
+/// 20,000-line file cost roughly the same to paint as a 40-line file.
+fn visible_line_range(
+    line_count: usize,
+    document_top: Pixels,
+    viewport_top: Pixels,
+    viewport_bottom: Pixels,
+) -> Range<usize> {
+    const OVERSCAN: usize = 3;
+    let line_height = px(FileEditor::LINE_HEIGHT);
+    let first = (((viewport_top - document_top) / line_height)
+        .floor()
+        .max(0.0) as usize)
+        .saturating_sub(OVERSCAN)
+        .min(line_count);
+    let last = (((viewport_bottom - document_top) / line_height)
+        .ceil()
+        .max(0.0) as usize)
+        .saturating_add(OVERSCAN)
+        .min(line_count)
+        .max(first);
+    first..last
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,6 +955,18 @@ mod tests {
     fn line_ranges_preserve_empty_and_trailing_lines() {
         assert_eq!(line_ranges(""), vec![0..0]);
         assert_eq!(line_ranges("a\n\nb\n"), vec![0..1, 2..2, 3..4, 5..5]);
+    }
+
+    #[test]
+    fn large_editors_shape_only_the_visible_window() {
+        let top = visible_line_range(20_000, px(0.), px(4_000.), px(4_800.));
+        assert_eq!(top, 197..243);
+        assert!(top.len() < 50);
+
+        assert_eq!(
+            visible_line_range(20_000, px(-100_000.), px(0.), px(800.)),
+            4_997..5_043,
+        );
     }
 
     #[test]

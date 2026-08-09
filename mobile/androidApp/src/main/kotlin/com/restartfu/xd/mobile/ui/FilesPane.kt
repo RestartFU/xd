@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -23,11 +25,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -35,9 +43,13 @@ import com.restartfu.xd.files.FileTab
 import com.restartfu.xd.files.TreeRow
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.syntax.Syntax
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** How far one level of nesting shifts a row. */
 private val INDENT = 12.dp
+private const val LARGE_FILE_CHARACTERS = 128 * 1024
+private const val LARGE_FILE_LINES = 4_000
 
 /**
  * The working directory as a folding tree, and the files opened out of it.
@@ -237,6 +249,8 @@ private fun FileEditor(
 ) {
     val language = remember(path) { Syntax.languageForPath(path) }
     val fallback = LocalContentColor.current
+    val large = remember(text) { isLargeFile(text) }
+    var editingLargeFile by rememberSaveable(path) { mutableStateOf(false) }
     val syntaxColours = remember(language, fallback) {
         SyntaxVisualTransformation(language, fallback)
     }
@@ -250,16 +264,48 @@ private fun FileEditor(
                 color = MaterialTheme.colorScheme.error,
             )
         }
-        OutlinedTextField(
-            value = text,
-            onValueChange = onChange,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp),
-            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            visualTransformation = syntaxColours,
-        )
+        if (large) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (editingLargeFile) {
+                        "Large file · plain edit mode"
+                    } else {
+                        "Large file · optimized view"
+                    },
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                TextButton(onClick = { editingLargeFile = !editingLargeFile }) {
+                    Text(if (editingLargeFile) "Done" else "Edit")
+                }
+            }
+        }
+        if (large && !editingLargeFile) {
+            LargeFileView(
+                text = text,
+                path = path,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            OutlinedTextField(
+                value = text,
+                onValueChange = onChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                // Re-transforming an 800 KiB document on every selection or
+                // keystroke defeats the explicit large-file edit escape hatch.
+                visualTransformation = if (large) VisualTransformation.None else syntaxColours,
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -273,3 +319,46 @@ private fun FileEditor(
         }
     }
 }
+
+@Composable
+private fun LargeFileView(
+    text: String,
+    path: String,
+    modifier: Modifier = Modifier,
+) {
+    val language = remember(path) { Syntax.languageForPath(path) }
+    val fallback = LocalContentColor.current
+    val lines = remember(text) { text.split('\n') }
+    val highlighted by produceState<List<AnnotatedString>?>(
+        initialValue = null,
+        key1 = text,
+        key2 = language,
+        key3 = fallback,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            highlightLines(text, language, fallback)
+        }
+    }
+    val horizontal = rememberScrollState()
+
+    SelectionContainer(modifier) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .horizontalScroll(horizontal),
+        ) {
+            itemsIndexed(lines, key = { index, _ -> index }) { index, line ->
+                Text(
+                    highlighted?.getOrNull(index) ?: AnnotatedString(line),
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    softWrap = false,
+                )
+            }
+        }
+    }
+}
+
+private fun isLargeFile(text: String): Boolean =
+    text.length >= LARGE_FILE_CHARACTERS || text.count { it == '\n' } >= LARGE_FILE_LINES

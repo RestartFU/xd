@@ -138,6 +138,18 @@ private fun highlight(
     }
 }
 
+/** Syntax-coloured lines for a lazy large-file view. */
+internal fun highlightLines(
+    code: String,
+    language: SyntaxLanguage,
+    fallback: Color,
+): List<AnnotatedString> {
+    val state = SyntaxState()
+    return code.split('\n').map { line ->
+        buildAnnotatedString { appendHighlighted(line, language, state, fallback) }
+    }
+}
+
 private fun AnnotatedString.Builder.appendHighlighted(
     line: String,
     language: SyntaxLanguage,
