@@ -28,6 +28,7 @@ pub enum AgentEvent {
 #[derive(Default)]
 pub struct CodexParser {
     started_commands: HashSet<String>,
+    started_file_changes: HashMap<String, Vec<tool_diff::CodexSnapshot>>,
 }
 
 pub struct AgentCommand<'a> {
@@ -80,13 +81,22 @@ impl CodexParser {
                 let Some(item) = root.get("item") else {
                     return Vec::new();
                 };
-                if item.get("type").and_then(Value::as_str) != Some("command_execution") {
-                    return Vec::new();
+                match item.get("type").and_then(Value::as_str) {
+                    Some("command_execution") => {
+                        if let Some(id) = item.get("id").and_then(Value::as_str) {
+                            self.started_commands.insert(id.to_owned());
+                        }
+                        vec![AgentEvent::Tool(tool_summary(item))]
+                    }
+                    Some("file_change") => {
+                        if let Some(id) = item.get("id").and_then(Value::as_str) {
+                            self.started_file_changes
+                                .insert(id.to_owned(), tool_diff::capture_codex(item));
+                        }
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
                 }
-                if let Some(id) = item.get("id").and_then(Value::as_str) {
-                    self.started_commands.insert(id.to_owned());
-                }
-                vec![AgentEvent::Tool(tool_summary(item))]
             }
             Some("item.completed") => {
                 let Some(item) = root.get("item") else {
@@ -98,6 +108,15 @@ impl CodexParser {
                     .is_some_and(|id| self.started_commands.remove(id))
                 {
                     return Vec::new();
+                }
+                if item.get("type").and_then(Value::as_str) == Some("file_change")
+                    && let Some(snapshots) = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| self.started_file_changes.remove(id))
+                    && let Some(diff) = tool_diff::build_captured_codex(snapshots)
+                {
+                    return vec![AgentEvent::Tool(diff)];
                 }
                 match item.get("type").and_then(Value::as_str) {
                     Some("agent_message") => item
@@ -849,6 +868,74 @@ mod tests {
         assert!(matches!(events[0], AgentEvent::Error(_)));
         assert_eq!(events[1], AgentEvent::Text("still working".into()));
         assert_eq!(events.last(), Some(&AgentEvent::Completed));
+    }
+
+    #[test]
+    fn captures_codex_file_changes_when_exec_omits_the_diff() {
+        let path =
+            std::env::temp_dir().join(format!("xd-codex-file-change-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "before\nkeep\n").expect("write original fixture");
+        let path = path.to_string_lossy().into_owned();
+        let started = serde_json::json!({
+            "type": "item.started",
+            "item": {
+                "id": "edit-1",
+                "type": "file_change",
+                "changes": [{"path": path, "kind": "update"}],
+                "status": "in_progress"
+            }
+        });
+        let completed = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "edit-1",
+                "type": "file_change",
+                "changes": [{"path": path, "kind": "update"}],
+                "status": "completed"
+            }
+        });
+
+        let mut parser = CodexParser::default();
+        assert!(parser.feed(&started.to_string()).is_empty());
+        std::fs::write(&path, "after\nkeep\n").expect("write changed fixture");
+        let events = parser.feed(&completed.to_string());
+        std::fs::remove_file(&path).expect("remove fixture");
+
+        let AgentEvent::Tool(diff) = &events[0] else {
+            panic!("expected a file-change tool event, got {events:?}");
+        };
+        assert!(diff.starts_with("file_change\ndiff --git "));
+        assert!(diff.contains("-before"));
+        assert!(diff.contains("+after"));
+        assert!(!diff.contains("Diff content wasn’t captured"));
+
+        let started = serde_json::json!({
+            "type": "item.started",
+            "item": {
+                "id": "add-1",
+                "type": "file_change",
+                "changes": [{"path": path, "kind": "add"}],
+                "status": "in_progress"
+            }
+        });
+        let completed = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "add-1",
+                "type": "file_change",
+                "changes": [{"path": path, "kind": "add"}],
+                "status": "completed"
+            }
+        });
+        assert!(parser.feed(&started.to_string()).is_empty());
+        std::fs::write(&path, "created\n").expect("write added fixture");
+        let events = parser.feed(&completed.to_string());
+        std::fs::remove_file(&path).expect("remove added fixture");
+        let AgentEvent::Tool(diff) = &events[0] else {
+            panic!("expected an added-file tool event, got {events:?}");
+        };
+        assert!(diff.contains("new file mode 100644"));
+        assert!(diff.contains("+created"));
     }
 
     #[test]

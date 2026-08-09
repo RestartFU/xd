@@ -11,6 +11,7 @@ libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1.0"
 sha2 = "0.10"
+similar = "2.7"
 thiserror = "2.0"
 ureq = "3.3"
 uuid = { version = "1.18", features = ["v4"] }

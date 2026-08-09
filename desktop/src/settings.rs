@@ -105,6 +105,7 @@ pub struct AppSettings {
     pub favorite_models: Vec<String>,
     pub last_chat: Option<String>,
     pub collapsed_folders: Vec<String>,
+    pub collapsed_diff_files: HashMap<String, Vec<String>>,
     pub sidebar_width: u16,
     pub diff_width: u16,
     pub terminal_height: u16,
@@ -126,6 +127,7 @@ impl Default for AppSettings {
             favorite_models: Vec::new(),
             last_chat: None,
             collapsed_folders: Vec::new(),
+            collapsed_diff_files: HashMap::new(),
             sidebar_width: 272,
             diff_width: 460,
             terminal_height: 320,
@@ -245,6 +247,10 @@ mod tests {
             favorite_models: vec!["claude/claude-opus-5".into()],
             last_chat: Some("chat-restore".into()),
             collapsed_folders: vec!["folder-a".into(), "folder-b".into()],
+            collapsed_diff_files: HashMap::from([(
+                "local/chat-restore/working".into(),
+                vec!["desktop/src/main.rs".into()],
+            )]),
             sidebar_width: 318,
             diff_width: 512,
             terminal_height: 280,
@@ -264,6 +270,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_from(&path).unwrap().accent, AccentPreset::Green);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn collapsed_diff_files_survive_settings_round_trip() {
+        let directory = env::temp_dir().join(format!(
+            "xd-diff-settings-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("settings.json");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            &path,
+            br#"{
+                "collapsed_diff_files": {
+                    "local/chat-one/working": ["src/main.rs", "README.md"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = load_from(&path).unwrap();
+        save_to(&path, &settings).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["collapsed_diff_files"]["local/chat-one/working"],
+            serde_json::json!(["src/main.rs", "README.md"])
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

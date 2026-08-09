@@ -623,6 +623,10 @@ fn pane_state_mask(diff_open: bool, terminal_open: bool) -> u8 {
     (if terminal_open { PANE_TERMINAL } else { 0 }) | (if diff_open { PANE_DIFF } else { 0 })
 }
 
+fn diff_collapse_key(pane_key: &str, branch: bool) -> String {
+    format!("{pane_key}/{}", if branch { "branch" } else { "working" })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PaneResize {
     kind: PaneResizeKind,
@@ -2276,7 +2280,20 @@ impl XdDesktop {
                     let value = Value::Object(body);
                     if !self.handle_workspace_create_reply(ChatEndpoint::Remote, &kind, &value, cx)
                     {
+                        let select_remote_startup_chat = matches!(kind, RequestKind::Tree)
+                            && value.get("ok").and_then(Value::as_bool) == Some(true)
+                            && self.model.selected_chat.is_none()
+                            && self.model.chats.is_empty();
                         Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
+                        if select_remote_startup_chat
+                            && let Some(chat_id) = self
+                                .inactive_model
+                                .chats
+                                .first()
+                                .map(|chat| chat.id.clone())
+                        {
+                            self.select_endpoint_chat(ChatEndpoint::Remote, chat_id, cx);
+                        }
                     }
                 }
             }
@@ -6488,6 +6505,7 @@ impl XdDesktop {
             }
         } else {
             self.diff_panel = Some(DiffPanel::default());
+            self.restore_collapsed_diff_files(false);
             self.refresh_diff(cx);
         }
         self.remember_panes();
@@ -6554,6 +6572,7 @@ impl XdDesktop {
         let state = self.settings.pane_states.get(&key).copied().unwrap_or(0);
         if state & PANE_DIFF != 0 {
             self.diff_panel = Some(DiffPanel::default());
+            self.restore_collapsed_diff_files(false);
             self.refresh_diff(cx);
         }
         if state & PANE_TERMINAL != 0
@@ -6818,6 +6837,7 @@ impl XdDesktop {
             diff.branch = branch;
             diff.files_mode = false;
         }
+        self.restore_collapsed_diff_files(branch);
         self.refresh_diff(cx);
     }
 
@@ -7390,18 +7410,26 @@ impl XdDesktop {
                 if this.diff_generation != generation {
                     return;
                 }
+                let mut load_paths = Vec::new();
                 if let Some(diff) = &mut this.diff_panel {
                     diff.loading = false;
                     match result {
                         Ok((files, truncated)) => {
-                            this.collapsed_diff_files =
-                                files.iter().map(|file| file.path.clone()).collect();
+                            load_paths.extend(
+                                files
+                                    .iter()
+                                    .filter(|file| !this.collapsed_diff_files.contains(&file.path))
+                                    .map(|file| file.path.clone()),
+                            );
                             diff.files = files;
                             diff.truncated = truncated;
                             diff.error = None;
                         }
                         Err(error) => diff.error = Some(error),
                     }
+                }
+                for path in load_paths {
+                    this.load_diff_file(path, cx);
                 }
                 cx.notify();
             });
@@ -7483,9 +7511,52 @@ impl XdDesktop {
                 file.loaded = false;
                 file.error = None;
             }
+            self.persist_collapsed_diff_files();
             cx.notify();
             return;
         }
+        self.persist_collapsed_diff_files();
+        self.load_diff_file(path, cx);
+    }
+
+    fn restore_collapsed_diff_files(&mut self, branch: bool) {
+        let Some(pane_key) = self.current_pane_key() else {
+            self.collapsed_diff_files.clear();
+            return;
+        };
+        self.collapsed_diff_files = self
+            .settings
+            .collapsed_diff_files
+            .get(&diff_collapse_key(&pane_key, branch))
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+    }
+
+    fn persist_collapsed_diff_files(&mut self) {
+        let branch = self.diff_panel.as_ref().is_some_and(|diff| diff.branch);
+        let Some(pane_key) = self.current_pane_key() else {
+            return;
+        };
+        let key = diff_collapse_key(&pane_key, branch);
+        let mut paths = self
+            .collapsed_diff_files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        if paths.is_empty() {
+            self.settings.collapsed_diff_files.remove(&key);
+        } else {
+            self.settings.collapsed_diff_files.insert(key, paths);
+        }
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn load_diff_file(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             cx.notify();
             return;
@@ -7705,6 +7776,46 @@ impl XdDesktop {
         self.sidebar_move = Some(target.clone());
         self.sidebar_move_destination = None;
         self.submit_sidebar_move(target, destination, cx);
+    }
+
+    fn reorder_sidebar_folder(
+        &mut self,
+        target: SidebarTarget,
+        anchor_id: String,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_move_submitting
+            || !sidebar_reorder_allowed(&self.model, &target, &anchor_id)
+        {
+            return;
+        }
+        let SidebarTarget::Folder(folder_id) = &target else {
+            return;
+        };
+        let destination = self
+            .model
+            .folders
+            .iter()
+            .find(|folder| folder.id == anchor_id)
+            .and_then(|folder| folder.parent.clone());
+        let result = self
+            .active_daemon()
+            .map(|daemon| daemon.reorder_folder(folder_id, &anchor_id, after));
+        match result {
+            Some(Ok(())) => {
+                self.cancel_sidebar_edit(cx);
+                self.sidebar_context_menu = None;
+                self.pending_sidebar_delete = None;
+                self.sidebar_delete_submitting = false;
+                self.sidebar_move = Some(target);
+                self.sidebar_move_submitting = true;
+                self.sidebar_move_destination = Some(destination);
+            }
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
+        }
+        cx.notify();
     }
 
     fn submit_sidebar_move(
@@ -9038,6 +9149,7 @@ impl XdDesktop {
         desktop: Entity<Self>,
         daemon: Option<&DaemonHandle>,
         image_cache: &Arc<Mutex<MessageImageCache>>,
+        workspace_root: Option<&str>,
     ) -> gpui::AnyElement {
         if message.role == "duration" {
             return turn_duration_label(&message.content)
@@ -9078,7 +9190,14 @@ impl XdDesktop {
                 return Self::activity_line(card);
             }
             let expanded = card.starts_expanded() != expansion_toggled;
-            return Self::activity_card(card, key, index, expanded, desktop.clone());
+            return Self::activity_card(
+                card,
+                key,
+                index,
+                expanded,
+                desktop.clone(),
+                workspace_root,
+            );
         }
         let markdown_scope = message
             .id
@@ -9182,12 +9301,16 @@ impl XdDesktop {
     }
 
     fn activity_card(
-        card: ActivityCard,
+        mut card: ActivityCard,
         key: String,
         index: usize,
         expanded: bool,
         desktop: Entity<Self>,
+        workspace_root: Option<&str>,
     ) -> gpui::AnyElement {
+        if card.patch.is_some() {
+            card.name = inline_diff_display_path(&card.name, workspace_root);
+        }
         let status_color = activity_status_color(card.kind);
         let has_items = !card.items.is_empty();
         let item_rows = card
@@ -9307,7 +9430,10 @@ impl XdDesktop {
                     ),
             );
         if expanded {
-            let patch = card.patch.as_deref().map(Self::activity_diff);
+            let patch = card
+                .patch
+                .as_deref()
+                .map(|patch| Self::activity_diff(patch, workspace_root));
             body = body.child(
                 div()
                     .w_full()
@@ -9367,7 +9493,7 @@ impl XdDesktop {
     /// The unified patch a file edit carries, drawn the way the diff panel draws
     /// one. The file header already names the file, so its patch headers are
     /// dropped and only the hunks remain.
-    fn activity_diff(patch: &str) -> gpui::AnyElement {
+    fn activity_diff(patch: &str, workspace_root: Option<&str>) -> gpui::AnyElement {
         let Ok((files, truncated)) = parse_unified_diff(patch) else {
             return div()
                 .mt_2()
@@ -9380,6 +9506,7 @@ impl XdDesktop {
         let single_file = files.len() == 1;
         let mut block = div().mt_2().w_full().flex().flex_col().gap_2();
         for file in files {
+            let display_path = inline_diff_display_path(&file.path, workspace_root);
             let mut section = div()
                 .w_full()
                 .rounded_md()
@@ -9401,7 +9528,7 @@ impl XdDesktop {
                                 .flex_1()
                                 .text_xs()
                                 .text_color(rgb(TEXT))
-                                .child(file.path.clone()),
+                                .child(display_path),
                         )
                         .child(
                             div()
@@ -10343,95 +10470,177 @@ impl Render for XdDesktop {
                 let dragged_folder = SidebarDrag::new(folder_target.clone(), folder_name.clone());
                 let drop_folder_id = folder.id.clone();
                 let drop_model = self.model.clone();
+                let reorder_before_model = self.model.clone();
+                let reorder_after_model = self.model.clone();
+                let reorder_before_anchor = folder.id.clone();
+                let reorder_after_anchor = folder.id.clone();
                 let moving_folder = sidebar_move.as_ref() == Some(&folder_target);
                 tree_rows.push(
                     div()
-                        .id(("folder-row", folder_row_index))
-                        .min_w_0()
-                        .px_3()
-                        .ml(px(indent))
-                        .mr_2()
-                        .pt_2()
-                        .pb_1()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(rgb(TEXT))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.open_sidebar_context_menu(
-                                    Some(context_menu_target.clone()),
-                                    event.position,
-                                    cx,
-                                );
-                            }),
-                        )
+                        .relative()
                         .child(
                             div()
-                                .id(("collapse-folder", folder_row_index))
+                                .id(("folder-row", folder_row_index))
                                 .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .cursor_move()
-                                .hover(|style| style.text_color(rgb(0xb9c7ff)))
-                                .on_drag(dragged_folder, |drag: &SidebarDrag, position, _, cx| {
-                                    cx.new(|_| drag.clone().position(position))
+                                .px_3()
+                                .ml(px(indent))
+                                .mr_2()
+                                .pt_2()
+                                .pb_1()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_sm()
+                                .text_color(rgb(TEXT))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_sidebar_context_menu(
+                                            Some(context_menu_target.clone()),
+                                            event.position,
+                                            cx,
+                                        );
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .id(("collapse-folder", folder_row_index))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .cursor_move()
+                                        .hover(|style| style.text_color(rgb(0xb9c7ff)))
+                                        .on_drag(
+                                            dragged_folder,
+                                            |drag: &SidebarDrag, position, _, cx| {
+                                                cx.new(|_| drag.clone().position(position))
+                                            },
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, _, cx| {
+                                                if !event.is_right_click() {
+                                                    this.toggle_folder_collapsed(
+                                                        collapse_folder_id.clone(),
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        ))
+                                        .child(format!(
+                                            "{}  {folder_name}",
+                                            if folder_collapsed { "▸" } else { "▾" }
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id(("new-chat", folder_row_index))
+                                        .px_2()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if !chat_create_submitting {
+                                                this.begin_chat_create(
+                                                    new_chat_folder_id.clone(),
+                                                    cx,
+                                                );
+                                                let focus = this
+                                                    .chat_create_input
+                                                    .read(cx)
+                                                    .focus_handle(cx);
+                                                window.focus(&focus);
+                                            }
+                                        }))
+                                        .child("+"),
+                                )
+                                .can_drop(move |value, _, _| {
+                                    value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                                        sidebar_drop_allowed(
+                                            &drop_model,
+                                            &drag.target,
+                                            Some(&drop_folder_id),
+                                        )
+                                    })
                                 })
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    if !event.is_right_click() {
-                                        this.toggle_folder_collapsed(
-                                            collapse_folder_id.clone(),
+                                .drag_over::<SidebarDrag>(move |style, _, _, _| {
+                                    style.bg(rgb(SURFACE_HIGH)).border_color(rgb(accent))
+                                })
+                                .on_drop(cx.listener({
+                                    let destination = folder.id.clone();
+                                    move |this, drag: &SidebarDrag, _, cx| {
+                                        this.drop_sidebar_item(
+                                            drag.target.clone(),
+                                            Some(destination.clone()),
                                             cx,
                                         );
                                     }
-                                }))
-                                .child(format!(
-                                    "{}  {folder_name}",
-                                    if folder_collapsed { "▸" } else { "▾" }
-                                )),
+                                })),
                         )
                         .child(
                             div()
-                                .id(("new-chat", folder_row_index))
-                                .px_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if !chat_create_submitting {
-                                        this.begin_chat_create(new_chat_folder_id.clone(), cx);
-                                        let focus =
-                                            this.chat_create_input.read(cx).focus_handle(cx);
-                                        window.focus(&focus);
+                                .id(("reorder-folder-before", folder_row_index))
+                                .absolute()
+                                .top(px(0.0))
+                                .left(px(indent))
+                                .right(px(8.0))
+                                .h(px(7.0))
+                                .can_drop(move |value, _, _| {
+                                    value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                                        sidebar_reorder_allowed(
+                                            &reorder_before_model,
+                                            &drag.target,
+                                            &reorder_before_anchor,
+                                        )
+                                    })
+                                })
+                                .drag_over::<SidebarDrag>(move |style, _, _, _| {
+                                    style.border_t_2().border_color(rgb(accent))
+                                })
+                                .on_drop(cx.listener({
+                                    let anchor = folder.id.clone();
+                                    move |this, drag: &SidebarDrag, _, cx| {
+                                        this.reorder_sidebar_folder(
+                                            drag.target.clone(),
+                                            anchor.clone(),
+                                            false,
+                                            cx,
+                                        );
                                     }
-                                }))
-                                .child("+"),
+                                })),
                         )
-                        .can_drop(move |value, _, _| {
-                            value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
-                                sidebar_drop_allowed(
-                                    &drop_model,
-                                    &drag.target,
-                                    Some(&drop_folder_id),
-                                )
-                            })
-                        })
-                        .drag_over::<SidebarDrag>(move |style, _, _, _| {
-                            style.bg(rgb(SURFACE_HIGH)).border_color(rgb(accent))
-                        })
-                        .on_drop(cx.listener({
-                            let destination = folder.id.clone();
-                            move |this, drag: &SidebarDrag, _, cx| {
-                                this.drop_sidebar_item(
-                                    drag.target.clone(),
-                                    Some(destination.clone()),
-                                    cx,
-                                );
-                            }
-                        }))
+                        .child(
+                            div()
+                                .id(("reorder-folder-after", folder_row_index))
+                                .absolute()
+                                .bottom(px(0.0))
+                                .left(px(indent))
+                                .right(px(8.0))
+                                .h(px(7.0))
+                                .can_drop(move |value, _, _| {
+                                    value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                                        sidebar_reorder_allowed(
+                                            &reorder_after_model,
+                                            &drag.target,
+                                            &reorder_after_anchor,
+                                        )
+                                    })
+                                })
+                                .drag_over::<SidebarDrag>(move |style, _, _, _| {
+                                    style.border_b_2().border_color(rgb(accent))
+                                })
+                                .on_drop(cx.listener({
+                                    let anchor = folder.id.clone();
+                                    move |this, drag: &SidebarDrag, _, cx| {
+                                        this.reorder_sidebar_folder(
+                                            drag.target.clone(),
+                                            anchor.clone(),
+                                            true,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
                         .into_any_element(),
                 );
                 if moving_folder {
@@ -12217,15 +12426,7 @@ impl Render for XdDesktop {
                 .into_any_element()
         });
 
-        let composer_controls = div()
-            .h(px(42.0))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_4()
-            .border_t_1()
-            .border_color(rgb(BORDER))
+        let composer_controls_row = composer_controls_row()
             .child(
                 div()
                     .id("assistant-menu")
@@ -12494,12 +12695,19 @@ impl Render for XdDesktop {
                     }))
                     .child(if working { "■ Stop turn" } else { "Ready" }),
             );
+        let composer_controls = composer_controls_shell().child(composer_controls_row);
 
         let expanded_activity = self.expanded_activity.clone();
         let workflow_statuses = self.workflow_statuses.clone();
         let workflow_pending = self.workflow_pending.clone();
         let image_cache = self.message_images.clone();
         let transcript_daemon = self.active_daemon().cloned();
+        let inline_diff_workspace_root = self
+            .model
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.current)
+            .map(|worktree| worktree.path.clone());
         let desktop = cx.entity();
         let transcript = if self.transcript_loading {
             div()
@@ -12534,6 +12742,7 @@ impl Render for XdDesktop {
                     desktop.clone(),
                     transcript_daemon.as_ref(),
                     &image_cache,
+                    inline_diff_workspace_root.as_deref(),
                 )
             })
             .size_full()
@@ -12758,16 +12967,11 @@ impl Render for XdDesktop {
                         .into_any_element();
                 }
                 let preview = queue_preview(prompt);
-                div()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(SURFACE_HIGH))
+                queue_message_shell()
                     .child(
                         div()
+                            .min_w_0()
+                            .w_full()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -12782,6 +12986,7 @@ impl Render for XdDesktop {
                             .child(
                                 div()
                                     .id(("edit-queue", index))
+                                    .flex_shrink_0()
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
@@ -12799,6 +13004,7 @@ impl Render for XdDesktop {
                             .child(
                                 div()
                                     .id(("steer-queue", index))
+                                    .flex_shrink_0()
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
@@ -12815,6 +13021,7 @@ impl Render for XdDesktop {
                             .child(
                                 div()
                                     .id(("drop-queue", index))
+                                    .flex_shrink_0()
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
@@ -12829,16 +13036,7 @@ impl Render for XdDesktop {
                                     .child("Remove"),
                             ),
                     )
-                    .child(
-                        div()
-                            .mt_1()
-                            .max_h(px(63.0))
-                            .overflow_hidden()
-                            .text_sm()
-                            .line_height(px(21.0))
-                            .text_color(rgb(TEXT))
-                            .child(preview),
-                    )
+                    .child(queue_preview_element(preview))
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -13114,6 +13312,7 @@ impl Render for XdDesktop {
                 element.child(
                     div()
                         .id("queue-panel")
+                        .min_w_0()
                         .w_full()
                         .max_w(px(1040.0))
                         .mx_auto()
@@ -18791,6 +18990,68 @@ fn compact_label(value: &str, limit: usize) -> String {
     shortened
 }
 
+fn inline_diff_display_path(path: &str, workspace_root: Option<&str>) -> String {
+    let path = path.replace('\\', "/");
+    let Some(workspace_root) = workspace_root else {
+        return path;
+    };
+    let workspace_root = workspace_root.replace('\\', "/");
+    let workspace_root = workspace_root.trim_end_matches('/');
+    if workspace_root.is_empty() {
+        return path;
+    }
+    path.strip_prefix(workspace_root)
+        .and_then(|relative| relative.strip_prefix('/'))
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or(&path)
+        .to_owned()
+}
+
+fn queue_message_shell() -> gpui::Div {
+    div()
+        .min_w_0()
+        .w_full()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE_HIGH))
+}
+
+fn composer_controls_shell() -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("composer-controls")
+        .min_w_0()
+        .w_full()
+        .h(px(42.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .overflow_x_scroll()
+        .px_4()
+        .border_t_1()
+        .border_color(rgb(BORDER))
+}
+
+fn composer_controls_row() -> gpui::Div {
+    div().flex_none().flex().items_center().gap_2()
+}
+
+fn queue_preview_element(preview: String) -> gpui::Div {
+    div()
+        .min_w_0()
+        .w_full()
+        .mt_1()
+        .max_h(px(63.0))
+        .overflow_hidden()
+        .whitespace_normal()
+        .text_sm()
+        .line_height(px(21.0))
+        .text_color(rgb(TEXT))
+        .child(preview)
+}
+
 fn queue_preview(value: &str) -> String {
     const MAX_CHARS: usize = 280;
     const MAX_LINES: usize = 3;
@@ -19405,6 +19666,33 @@ fn sidebar_drop_allowed(
     }
 }
 
+fn sidebar_reorder_allowed(model: &AppModel, target: &SidebarTarget, anchor_id: &str) -> bool {
+    let SidebarTarget::Folder(folder_id) = target else {
+        return false;
+    };
+    let Some(anchor) = model.folders.iter().find(|folder| folder.id == anchor_id) else {
+        return false;
+    };
+    if folder_id == anchor_id {
+        return false;
+    }
+    let mut current = anchor.parent.as_deref();
+    for _ in 0..=model.folders.len() {
+        let Some(id) = current else {
+            return true;
+        };
+        if id == folder_id {
+            return false;
+        }
+        current = model
+            .folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .and_then(|folder| folder.parent.as_deref());
+    }
+    false
+}
+
 fn folder_hidden_by_collapse(
     folders: &[Folder],
     collapsed: &HashSet<String>,
@@ -19627,6 +19915,38 @@ mod tests {
         assert!(remote.chats[0].working);
         assert_eq!(ChatEndpoint::Local.other(), ChatEndpoint::Remote);
         assert_eq!(ChatEndpoint::Remote.other(), ChatEndpoint::Local);
+    }
+
+    #[gpui::test]
+    fn remote_startup_selects_a_chat_when_local_has_none(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.remote_state = RemoteState::Connected;
+            desktop.handle_remote_update(
+                DaemonUpdate::Reply {
+                    kind: RequestKind::Tree,
+                    body: serde_json::json!({
+                        "ok": true,
+                        "folders": [{"id": "folder", "name": "Remote workspace"}],
+                        "chats": [{
+                            "id": "remote-chat",
+                            "folder": "folder",
+                            "title": "Loaded on startup",
+                            "backend": "codex"
+                        }]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    attachments: None,
+                },
+                desktop.remote_generation,
+                cx,
+            );
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("remote-chat"));
+        });
     }
 
     #[test]
@@ -19981,6 +20301,51 @@ mod tests {
     }
 
     #[test]
+    fn queued_message_cards_can_shrink_and_wrap_inside_the_panel() {
+        let mut shell = queue_message_shell();
+        let mut preview = queue_preview_element("a long queued message".into());
+
+        assert_eq!(shell.style().min_size.width, Some(px(0.0).into()));
+        assert_eq!(preview.style().min_size.width, Some(px(0.0).into()));
+        assert_eq!(
+            preview
+                .style()
+                .text
+                .as_ref()
+                .and_then(|text| text.white_space),
+            Some(gpui::WhiteSpace::Normal)
+        );
+    }
+
+    #[test]
+    fn composer_controls_scroll_instead_of_leaving_their_bounds() {
+        let mut shell = composer_controls_shell();
+        let mut row = composer_controls_row();
+
+        assert_eq!(shell.style().min_size.width, Some(px(0.0).into()));
+        assert_eq!(shell.style().overflow.x, Some(gpui::Overflow::Scroll));
+        assert_eq!(row.style().flex_shrink, Some(0.0));
+    }
+
+    #[test]
+    fn inline_diff_paths_start_at_the_workspace_root() {
+        let root = "/home/danick/work/xd";
+
+        assert_eq!(
+            inline_diff_display_path("/home/danick/work/xd/desktop/src/main.rs", Some(root)),
+            "desktop/src/main.rs"
+        );
+        assert_eq!(
+            inline_diff_display_path("desktop/src/main.rs", Some(root)),
+            "desktop/src/main.rs"
+        );
+        assert_eq!(
+            inline_diff_display_path("/home/danick/work/xd-other/main.rs", Some(root)),
+            "/home/danick/work/xd-other/main.rs"
+        );
+    }
+
+    #[test]
     fn markdown_code_controls_have_stable_scoped_ids() {
         let first = scoped_element_id("message-1", 0);
         assert_eq!(first, scoped_element_id("message-1", 0));
@@ -20198,6 +20563,56 @@ mod tests {
             &model,
             &SidebarTarget::Chat("chat".into()),
             None
+        ));
+    }
+
+    #[test]
+    fn sidebar_reorder_accepts_siblings_and_rejects_descendant_cycles() {
+        let model = AppModel {
+            folders: vec![
+                Folder {
+                    id: "root".into(),
+                    name: "Root".into(),
+                    parent: None,
+                },
+                Folder {
+                    id: "sibling".into(),
+                    name: "Sibling".into(),
+                    parent: None,
+                },
+                Folder {
+                    id: "child".into(),
+                    name: "Child".into(),
+                    parent: Some("root".into()),
+                },
+                Folder {
+                    id: "grandchild".into(),
+                    name: "Grandchild".into(),
+                    parent: Some("child".into()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(sidebar_reorder_allowed(
+            &model,
+            &SidebarTarget::Folder("root".into()),
+            "sibling"
+        ));
+        assert!(!sidebar_reorder_allowed(
+            &model,
+            &SidebarTarget::Folder("root".into()),
+            "grandchild"
+        ));
+        assert!(!sidebar_reorder_allowed(
+            &model,
+            &SidebarTarget::Folder("root".into()),
+            "root"
+        ));
+        assert!(!sidebar_reorder_allowed(
+            &model,
+            &SidebarTarget::Chat("chat".into()),
+            "sibling"
         ));
     }
 
@@ -20462,6 +20877,8 @@ mod tests {
         assert_eq!(pane_state_mask(true, false), PANE_DIFF);
         assert_eq!(pane_state_mask(false, true), PANE_TERMINAL);
         assert_eq!(pane_state_mask(true, true), PANE_DIFF | PANE_TERMINAL);
+        assert_eq!(diff_collapse_key("local/chat", false), "local/chat/working");
+        assert_eq!(diff_collapse_key("local/chat", true), "local/chat/branch");
     }
 
     #[test]
@@ -20573,6 +20990,54 @@ mod tests {
             ]
         );
         assert!(decode_git_path("\"unterminated").is_err());
+    }
+
+    #[gpui::test]
+    fn changes_listing_starts_with_files_expanded(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.diff_panel = Some(DiffPanel::default());
+            desktop.diff_generation = 7;
+            desktop.prepare_diff_listing(" M src/main.rs\n?? notes.txt\n".into(), false, 7, cx);
+        });
+        cx.run_until_parked();
+
+        desktop.read_with(cx, |desktop, _| {
+            assert!(
+                desktop.collapsed_diff_files.is_empty(),
+                "a freshly loaded Changes pane should expand every file"
+            );
+            assert_eq!(
+                desktop.diff_panel.as_ref().expect("diff panel").files.len(),
+                2
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn collapsed_diff_state_restores_per_chat_and_scope(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop.model.selected_chat = Some("chat-one".into());
+            desktop.settings.collapsed_diff_files = HashMap::from([
+                (
+                    "local/chat-one/working".into(),
+                    vec!["src/working.rs".into()],
+                ),
+                ("local/chat-one/branch".into(), vec!["src/branch.rs".into()]),
+            ]);
+
+            desktop.restore_collapsed_diff_files(false);
+            assert_eq!(
+                desktop.collapsed_diff_files,
+                HashSet::from(["src/working.rs".into()])
+            );
+            desktop.restore_collapsed_diff_files(true);
+            assert_eq!(
+                desktop.collapsed_diff_files,
+                HashSet::from(["src/branch.rs".into()])
+            );
+        });
     }
 }
 

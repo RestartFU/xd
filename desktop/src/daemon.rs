@@ -762,6 +762,23 @@ impl DaemonHandle {
         )
     }
 
+    pub fn reorder_folder(
+        &self,
+        folder_id: &str,
+        anchor_id: &str,
+        after: bool,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "move-folder", "folder": folder_id});
+        body[if after { "after" } else { "before" }] = Value::String(anchor_id.to_owned());
+        self.send(
+            RequestKind::MoveFolder {
+                folder_id: folder_id.to_owned(),
+                parent_id: None,
+            },
+            body,
+        )
+    }
+
     pub fn trash_folder(&self, folder_id: &str) -> Result<(), String> {
         self.send(
             RequestKind::TrashFolder {

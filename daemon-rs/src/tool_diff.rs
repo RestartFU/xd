@@ -1,16 +1,32 @@
 //! Display-only unified patches built from tool payloads.
 //!
-//! A file-editing tool call already carries everything an inline diff needs, so
-//! this path wants no repository, Git executable, filesystem read, or post-tool
-//! snapshot. The result is the marker `file_change`, a newline, and the patch —
-//! the shape every client reads.
+//! Most file-editing tool calls carry everything an inline diff needs. Current
+//! `codex exec --json` file-change events carry only paths, though, so their
+//! started/completed pair is snapshotted to recover the omitted patch. The
+//! result is the marker `file_change`, a newline, and the patch — the shape
+//! every client reads.
+
+use std::{fs, io::ErrorKind};
 
 use serde_json::Value;
+use similar::TextDiff;
 
 pub const PREFIX: &str = "file_change\n";
 pub const LIMIT: usize = 256 * 1024;
 const BUILD_LIMIT: usize = LIMIT + 1;
+const SNAPSHOT_LIMIT: u64 = 4 * 1024 * 1024;
 const TRUNCATION_NOTICE: &str = "… diff truncated …";
+
+pub struct CodexSnapshot {
+    path: String,
+    before: SnapshotText,
+}
+
+enum SnapshotText {
+    Missing,
+    Text(String),
+    Unavailable,
+}
 
 /// Keeps patch construction bounded before the final truncation pass. Tool
 /// payloads can carry multi-megabyte files.
@@ -86,6 +102,79 @@ pub fn build(name: &str, input: Option<&Value>) -> Option<String> {
     Some(format!("{PREFIX}{patch}"))
 }
 
+/// Captures files named by a lossy Codex `item.started` event. Codex emits the
+/// event before applying the edit, so the matching completion can reconstruct
+/// the exact change without depending on Git state.
+pub fn capture_codex(input: &Value) -> Vec<CodexSnapshot> {
+    input
+        .get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|change| {
+            let path = string(change, "path").or_else(|| string(change, "filePath"))?;
+            let before = read_snapshot(&path);
+            Some(CodexSnapshot { path, before })
+        })
+        .collect()
+}
+
+/// Builds the real patch after a Codex file-change item completes.
+pub fn build_captured_codex(snapshots: Vec<CodexSnapshot>) -> Option<String> {
+    let mut out = Patch::new();
+    let mut rendered = false;
+    for snapshot in snapshots {
+        let after = read_snapshot(&snapshot.path);
+        let change = match (snapshot.before, after) {
+            (SnapshotText::Missing, SnapshotText::Text(after)) => {
+                Some(new_file(&snapshot.path, after))
+            }
+            (SnapshotText::Text(before), SnapshotText::Missing) => {
+                Some(deleted_file(&snapshot.path, before))
+            }
+            (SnapshotText::Text(before), SnapshotText::Text(after)) if before != after => {
+                let old_path = format!("a/{}", safe_path(&snapshot.path));
+                let new_path = format!("b/{}", safe_path(&snapshot.path));
+                let diff = TextDiff::from_lines(&before, &after)
+                    .unified_diff()
+                    .context_radius(3)
+                    .header(&old_path, &new_path)
+                    .to_string();
+                Some(updated_file(&snapshot.path, snapshot.path.clone(), diff))
+            }
+            _ => None,
+        };
+        let Some(change) = change else {
+            continue;
+        };
+        if rendered {
+            out.push("\n");
+        }
+        out.push(&change);
+        rendered = true;
+        if out.full() {
+            break;
+        }
+    }
+    rendered.then(|| format!("{PREFIX}{}", truncate(out.finish()).trim_end()))
+}
+
+fn read_snapshot(path: &str) -> SnapshotText {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= SNAPSHOT_LIMIT => metadata,
+        Ok(_) => return SnapshotText::Unavailable,
+        Err(error) if error.kind() == ErrorKind::NotFound => return SnapshotText::Missing,
+        Err(_) => return SnapshotText::Unavailable,
+    };
+    debug_assert!(metadata.is_file());
+    match fs::read(path) {
+        Ok(bytes) if bytes.len() as u64 <= SNAPSHOT_LIMIT => String::from_utf8(bytes)
+            .map(SnapshotText::Text)
+            .unwrap_or(SnapshotText::Unavailable),
+        _ => SnapshotText::Unavailable,
+    }
+}
+
 fn codex(input: &Value) -> Option<String> {
     let changes = input.get("changes")?.as_array()?;
     let mut out = Patch::new();
@@ -117,8 +206,8 @@ fn codex(input: &Value) -> Option<String> {
             .to_ascii_lowercase();
 
         let rendered_change = match kind.as_str() {
-            "add" => Some(new_file(&path, diff)),
-            "delete" => Some(deleted_file(&path, diff)),
+            "add" => (!diff.is_empty()).then(|| new_file(&path, diff)),
+            "delete" => (!diff.is_empty()).then(|| deleted_file(&path, diff)),
             _ => {
                 let move_path = kind_node.and_then(|kind| {
                     string(kind, "move_path")
@@ -632,6 +721,19 @@ mod tests {
             ),
             None,
             "an update without a diff must not become a misleading +0 −0 card"
+        );
+        assert_eq!(
+            build(
+                "file_change",
+                Some(&serde_json::json!({
+                    "changes": [{
+                        "path": "src/empty-add.rs",
+                        "kind": "add"
+                    }]
+                }))
+            ),
+            None,
+            "a lossy add event must wait for its captured filesystem change"
         );
     }
 
