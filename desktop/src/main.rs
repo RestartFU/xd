@@ -105,7 +105,34 @@ const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
+const WORKING_DOT_FRAME: Duration = Duration::from_millis(400);
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+fn working_dot_alphas(frame: usize) -> [u8; 3] {
+    let lit = frame % 4;
+    std::array::from_fn(|index| if index < lit { 0xff } else { 0x4d })
+}
+
+fn working_dots(frame: usize, color: u32) -> gpui::AnyElement {
+    let highlights = working_dot_alphas(frame)
+        .into_iter()
+        .enumerate()
+        .map(|(index, alpha)| {
+            (
+                index..index + 1,
+                HighlightStyle {
+                    color: Some(rgba((color << 8) | u32::from(alpha)).into()),
+                    ..Default::default()
+                },
+            )
+        });
+    div()
+        .w(px(13.0))
+        .flex_none()
+        .text_sm()
+        .child(StyledText::new("...").with_highlights(highlights))
+        .into_any_element()
+}
 
 fn plus_icon(color: u32) -> gpui::AnyElement {
     div()
@@ -1129,6 +1156,8 @@ struct XdDesktop {
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
     terminal_cursor_visible: bool,
+    working_dot_frame: usize,
+    working_dots_ticking: bool,
     diff_generation: u64,
     /// The working directory as a folding tree, in the sidebar.
     file_tree: files::FileTree,
@@ -1583,6 +1612,8 @@ impl XdDesktop {
             diff_panel: None,
             terminal_panel: None,
             terminal_cursor_visible: true,
+            working_dot_frame: 0,
+            working_dots_ticking: false,
             diff_generation: 0,
             file_tree: files::FileTree::default(),
             open_files: files::OpenFiles::default(),
@@ -7980,6 +8011,45 @@ impl XdDesktop {
         .detach();
     }
 
+    fn has_working_chat(&self) -> bool {
+        self.model.working
+            || self.inactive_model.working
+            || self
+                .model
+                .chats
+                .iter()
+                .chain(self.inactive_model.chats.iter())
+                .any(|chat| chat.working)
+    }
+
+    fn schedule_working_dots(&mut self, cx: &mut Context<Self>) {
+        if self.working_dots_ticking || !self.has_working_chat() {
+            return;
+        }
+        self.working_dots_ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(WORKING_DOT_FRAME).await;
+                let keep_ticking = this
+                    .update(cx, |this, cx| {
+                        if !this.has_working_chat() {
+                            this.working_dot_frame = 0;
+                            this.working_dots_ticking = false;
+                            return false;
+                        }
+                        this.working_dot_frame = (this.working_dot_frame + 1) % 4;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_ticking {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn select_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
             return;
@@ -9988,6 +10058,7 @@ impl XdDesktop {
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.expire_action_error(cx);
+        self.schedule_working_dots(cx);
         if !self.transcript_scroll_handler_attached {
             self.transcript_scroll_handler_attached = true;
             let desktop = cx.entity();
@@ -10017,6 +10088,7 @@ impl Render for XdDesktop {
         let messages = self.transcript_snapshot.clone();
         let queue_count = self.model.queue.len();
         let working = self.model.working;
+        let working_dot_frame = self.working_dot_frame;
         let selected = self.model.selected_summary().cloned();
         let diff_open = self.diff_panel.is_some();
         let terminal_open = self.terminal_panel.is_some();
@@ -11048,22 +11120,30 @@ impl Render for XdDesktop {
                                         this.select_chat(chat_id.clone(), cx);
                                     }
                                 }))
-                                .when_some(agent_icon(&chat.backend), |row, (icon, color)| {
-                                    row.child(
-                                        svg()
-                                            .flex_shrink_0()
-                                            .path(icon)
-                                            .size(px(13.0))
-                                            .text_color(rgb(color)),
+                                .when(chat.working, |row| {
+                                    row.child(working_dots(working_dot_frame, MUTED))
+                                })
+                                .when(!chat.working, |row| {
+                                    row.when_some(
+                                        agent_icon(&chat.backend),
+                                        |row, (icon, color)| {
+                                            row.child(
+                                                svg()
+                                                    .flex_shrink_0()
+                                                    .path(icon)
+                                                    .size(px(13.0))
+                                                    .text_color(rgb(color)),
+                                            )
+                                        },
                                     )
                                 })
-                                .child(div().min_w_0().flex_1().overflow_hidden().child(
-                                    if chat.working || unread {
-                                        format!("● {title}")
-                                    } else {
-                                        title.clone()
-                                    },
-                                )),
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .child(title.clone()),
+                                ),
                         )
                         .into_any_element(),
                 );
@@ -11236,6 +11316,9 @@ impl Render for XdDesktop {
                                 .text_sm()
                                 .text_color(rgb(if chat.working || unread { TEXT } else { MUTED }))
                                 .when(unread, |row| row.font_weight(FontWeight::BOLD))
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
@@ -11247,11 +11330,13 @@ impl Render for XdDesktop {
                                         );
                                     }
                                 }))
-                                .child(if chat.working || unread {
-                                    format!("●  {title}")
-                                } else {
-                                    format!("   {title}")
+                                .when(chat.working, |row| {
+                                    row.child(working_dots(working_dot_frame, MUTED))
                                 })
+                                .when(!chat.working, |row| {
+                                    row.child(div().w(px(13.0)).flex_none())
+                                })
+                                .child(div().min_w_0().flex_1().overflow_hidden().child(title))
                                 .into_any_element(),
                         );
                     }
@@ -19190,6 +19275,15 @@ fn self_update_status_text(panel: &SelfUpdatePanel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn working_dots_cycle_from_dim_to_three_lit() {
+        assert_eq!(working_dot_alphas(0), [0x4d, 0x4d, 0x4d]);
+        assert_eq!(working_dot_alphas(1), [0xff, 0x4d, 0x4d]);
+        assert_eq!(working_dot_alphas(2), [0xff, 0xff, 0x4d]);
+        assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
+        assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
+    }
 
     #[test]
     fn a_new_chat_takes_the_default_title_unless_one_was_typed() {
