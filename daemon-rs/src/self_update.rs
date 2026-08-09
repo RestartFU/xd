@@ -50,6 +50,13 @@ impl UpdateChannel {
         }
     }
 
+    fn feed_name(self) -> &'static str {
+        match self {
+            Self::Nightly => "nightly release feed",
+            Self::Release => "release feed",
+        }
+    }
+
     fn release_url(self) -> &'static str {
         match self {
             Self::Nightly => NIGHTLY_RELEASE_URL,
@@ -334,19 +341,15 @@ fn latest_release(channel: UpdateChannel) -> Result<String, String> {
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "xd")
         .call()
-        .map_err(|_| format!("Could not reach the {} release feed.", channel.as_str()))?;
+        .map_err(|_| format!("Could not reach the {}.", channel.feed_name()))?;
     let body = response
         .body_mut()
         .with_config()
         .limit(MAX_RELEASE_BYTES)
         .read_to_string()
-        .map_err(|_| format!("The {} release feed was unreadable.", channel.as_str()))?;
-    let release: Value = serde_json::from_str(&body).map_err(|_| {
-        format!(
-            "The {} release feed returned invalid data.",
-            channel.as_str()
-        )
-    })?;
+        .map_err(|_| format!("The {} was unreadable.", channel.feed_name()))?;
+    let release: Value = serde_json::from_str(&body)
+        .map_err(|_| format!("The {} returned invalid data.", channel.feed_name()))?;
     release_identity(channel, &release)
 }
 
@@ -363,12 +366,7 @@ fn release_identity(channel: UpdateChannel, release: &Value) -> Result<String, S
             UpdateChannel::Nightly => identity.to_owned(),
             UpdateChannel::Release => identity.strip_prefix('v').unwrap_or(identity).to_owned(),
         })
-        .ok_or_else(|| {
-            format!(
-                "The {} release feed did not identify its build.",
-                channel.as_str()
-            )
-        })
+        .ok_or_else(|| format!("The {} did not identify its build.", channel.feed_name()))
 }
 
 #[allow(dead_code)]
@@ -808,6 +806,14 @@ mod tests {
         );
         assert_eq!(snapshot["channel"], "release");
         assert_eq!(snapshot["available"], false);
+    }
+
+    #[test]
+    fn stable_release_feed_errors_do_not_repeat_release() {
+        assert_eq!(
+            release_identity(UpdateChannel::Release, &json!({})).unwrap_err(),
+            "The release feed did not identify its build."
+        );
     }
 
     #[test]

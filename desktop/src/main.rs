@@ -16065,6 +16065,7 @@ impl Render for XdDesktop {
         let self_update_overlay = self.self_update_panel.clone().map(|panel| {
             let action = self_update_action(&panel);
             let can_install = action == Some("install");
+            let can_retry = action == Some("check");
             let can_restart = action == Some("restart");
             let status_text = self_update_status_text(&panel);
             let version_text = panel.status.as_ref().map(|status| {
@@ -16177,21 +16178,34 @@ impl Render for XdDesktop {
                                         .px_3()
                                         .py_2()
                                         .rounded_lg()
-                                        .bg(rgb(if can_install { accent } else { SURFACE_HIGH }))
+                                        .bg(rgb(if can_install || can_retry {
+                                            accent
+                                        } else {
+                                            SURFACE_HIGH
+                                        }))
                                         .text_sm()
-                                        .text_color(rgb(if can_install { 0xffffff } else { MUTED }))
-                                        .when(can_install, |button| {
+                                        .text_color(rgb(if can_install || can_retry {
+                                            0xffffff
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .when(can_install || can_retry, |button| {
                                             button
                                                 .cursor_pointer()
                                                 .hover(|style| style.bg(rgb(accent_hover)))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_install {
+                                            if can_retry {
+                                                this.request_self_update("check");
+                                                cx.notify();
+                                            } else if can_install {
                                                 this.install_self_update(cx);
                                             }
                                         }))
                                         .child(if panel.busy && !can_restart {
                                             "Working…"
+                                        } else if can_retry {
+                                            "Retry"
                                         } else {
                                             "Install"
                                         }),
@@ -19301,6 +19315,9 @@ fn self_update_action(panel: &SelfUpdatePanel) -> Option<&'static str> {
     if status.state == "installed" {
         return Some("restart");
     }
+    if status.state == "failed" && status.latest.is_none() {
+        return Some("check");
+    }
     (status.available || status.state == "failed").then_some("install")
 }
 
@@ -19633,6 +19650,16 @@ mod tests {
         panel.busy = true;
         assert_eq!(self_update_action(&panel), None);
         panel.busy = false;
+        panel.status.as_mut().unwrap().state = "failed".into();
+        panel.status.as_mut().unwrap().available = false;
+        panel.status.as_mut().unwrap().latest = None;
+        panel.status.as_mut().unwrap().error = Some("Could not reach the release feed.".into());
+        assert_eq!(self_update_action(&panel), Some("check"));
+        assert_eq!(
+            self_update_status_text(&panel),
+            "Could not reach the release feed."
+        );
+
         panel.status.as_mut().unwrap().state = "installed".into();
         assert_eq!(self_update_action(&panel), Some("restart"));
         assert!(self_update_status_text(&panel).contains("Restart"));
