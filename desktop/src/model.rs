@@ -231,7 +231,7 @@ pub struct AppModel {
     pub draft_attachments: Vec<Attachment>,
     pub draft_revision: i64,
     pub live_text: String,
-    pub live_activity: Vec<Message>,
+    pub live_items: Vec<Message>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,7 +304,7 @@ impl AppModel {
             self.draft.clear();
             self.draft_attachments.clear();
             self.live_text.clear();
-            self.live_activity.clear();
+            self.live_items.clear();
         }
         Ok(())
     }
@@ -338,7 +338,7 @@ impl AppModel {
         self.draft_attachments.clear();
         self.draft_revision = -1;
         self.live_text.clear();
-        self.live_activity.clear();
+        self.live_items.clear();
     }
 
     pub fn apply_chat(&mut self, body: &Value) {
@@ -563,7 +563,7 @@ impl AppModel {
             "turn-started" if self.event_is_active(body) => {
                 self.start_working();
                 self.live_text.clear();
-                self.live_activity.clear();
+                self.live_items.clear();
             }
             "text" if self.event_is_active(body) => {
                 if let Some(text) = body.get("text").and_then(Value::as_str) {
@@ -571,7 +571,13 @@ impl AppModel {
                 }
             }
             "tool" if self.event_is_active(body) => {
-                self.live_activity.push(Message::new(
+                if !self.live_text.is_empty() {
+                    let text = std::mem::take(&mut self.live_text);
+                    let label = self.selected_summary().map(|chat| chat.backend.clone());
+                    self.live_items
+                        .push(Message::new(None, "assistant", text, label));
+                }
+                self.live_items.push(Message::new(
                     None,
                     "tool",
                     body.get("text")
@@ -610,6 +616,7 @@ impl AppModel {
 
     pub fn display_messages(&self) -> Vec<Message> {
         let mut messages = self.messages.clone();
+        messages.extend(self.live_items.iter().cloned());
         if !self.live_text.is_empty() {
             messages.push(Message::new(
                 None,
@@ -618,12 +625,11 @@ impl AppModel {
                 self.selected_summary().map(|chat| chat.backend.clone()),
             ));
         }
-        messages.extend(self.live_activity.iter().cloned());
         messages
     }
 
     pub fn display_message_count(&self) -> usize {
-        self.messages.len() + usize::from(!self.live_text.is_empty()) + self.live_activity.len()
+        self.messages.len() + self.live_items.len() + usize::from(!self.live_text.is_empty())
     }
 
     pub fn apply_draft_snapshot(&mut self, body: &Value) {
@@ -721,7 +727,7 @@ impl AppModel {
             draft_attachments: Vec::new(),
             draft_revision: 0,
             live_text: String::new(),
-            live_activity: Vec::new(),
+            live_items: Vec::new(),
         }
     }
 }
@@ -925,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_text_and_tools_are_live_rows_until_history_is_reloaded() {
+    fn streaming_text_and_tools_preserve_wire_order_like_mobile() {
         let mut model = AppModel {
             selected_chat: Some("chat-1".into()),
             ..Default::default()
@@ -934,10 +940,21 @@ mod tests {
         model.apply_event("text", &json!({"chat":"chat-1", "text":"hello"}));
         model.apply_event("text", &json!({"chat":"chat-1", "text":" world"}));
         model.apply_event("tool", &json!({"chat":"chat-1", "text":"Read file"}));
+        model.apply_event("text", &json!({"chat":"chat-1", "text":"done"}));
 
-        assert_eq!(model.live_text, "hello world");
-        assert_eq!(model.display_message_count(), 2);
-        assert_eq!(model.display_messages()[1].content, "Read file");
+        let displayed = model.display_messages();
+        assert_eq!(displayed.len(), 3);
+        assert_eq!(
+            displayed
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("assistant", "hello world"),
+                ("tool", "Read file"),
+                ("assistant", "done"),
+            ],
+        );
     }
 
     #[test]

@@ -619,7 +619,7 @@ struct ActivityRun {
 struct TranscriptSnapshot {
     messages: Arc<Vec<Message>>,
     live_text: Option<Arc<Message>>,
-    live_activity: Arc<Vec<Message>>,
+    live_items: Arc<Vec<Message>>,
 }
 
 impl TranscriptSnapshot {
@@ -638,8 +638,8 @@ impl TranscriptSnapshot {
         });
     }
 
-    fn sync_live_activity(&mut self, model: &AppModel) {
-        self.live_activity = Arc::new(model.live_activity.clone());
+    fn sync_live_items(&mut self, model: &AppModel) {
+        self.live_items = Arc::new(model.live_items.clone());
     }
 
     fn stacks_activity(&self, index: usize) -> bool {
@@ -735,13 +735,16 @@ impl TranscriptSnapshot {
             return Some(message);
         }
         let mut live_index = index.saturating_sub(self.messages.len());
+        if let Some(item) = self.live_items.get(live_index) {
+            return Some(item);
+        }
+        live_index = live_index.saturating_sub(self.live_items.len());
         if let Some(live_text) = self.live_text.as_deref() {
             if live_index == 0 {
                 return Some(live_text);
             }
-            live_index = live_index.saturating_sub(1);
         }
-        self.live_activity.get(live_index)
+        None
     }
 }
 
@@ -3863,10 +3866,10 @@ impl XdDesktop {
                 self.transcript_has_newer = change.has_newer;
                 if !self.model.working {
                     self.model.live_text.clear();
-                    self.model.live_activity.clear();
+                    self.model.live_items.clear();
                 }
                 self.transcript_snapshot.sync_messages(&self.model);
-                self.transcript_snapshot.sync_live_activity(&self.model);
+                self.transcript_snapshot.sync_live_items(&self.model);
                 if !self.model.working {
                     self.transcript_snapshot.sync_live_text(&self.model);
                 }
@@ -4211,7 +4214,7 @@ impl XdDesktop {
                         .model
                         .messages
                         .iter()
-                        .chain(self.model.live_activity.iter())
+                        .chain(self.model.live_items.iter())
                         .any(|message| message.role == "tool" && message.content == marker)
                 {
                     Arc::make_mut(&mut self.workflow_pending).remove(&marker);
@@ -4364,7 +4367,7 @@ impl XdDesktop {
                 self.model.apply_event(name, &body);
                 self.invalidate_live_markdown_work();
                 self.transcript_snapshot.sync_live_text(&self.model);
-                self.transcript_snapshot.sync_live_activity(&self.model);
+                self.transcript_snapshot.sync_live_items(&self.model);
                 self.sync_transcript_count(false);
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.request_messages(&chat_id);
@@ -4373,15 +4376,19 @@ impl XdDesktop {
             }
             "text" | "tool" if self.event_is_active(&body) => {
                 let old_count = self.model.display_message_count();
+                let closed_live_text = name == "tool" && !self.model.live_text.is_empty();
                 self.model.apply_event(name, &body);
                 if name == "text" {
                     self.transcript_snapshot.sync_live_text(&self.model);
                     self.schedule_live_markdown_parse(cx);
                 } else {
-                    self.transcript_snapshot.sync_live_activity(&self.model);
+                    self.transcript_snapshot.sync_live_items(&self.model);
+                    self.transcript_snapshot.sync_live_text(&self.model);
                 }
                 let new_count = self.model.display_message_count();
-                if new_count > old_count {
+                if closed_live_text {
+                    self.transcript.splice(old_count - 1..old_count, 2);
+                } else if new_count > old_count {
                     self.transcript
                         .splice(old_count..old_count, new_count - old_count);
                 } else if new_count > 0 {
@@ -7915,7 +7922,7 @@ impl XdDesktop {
             .model
             .messages
             .iter()
-            .chain(self.model.live_activity.iter())
+            .chain(self.model.live_items.iter())
             .filter(|message| message.role == "tool")
             .map(|message| message.content.clone())
             .filter(|content| content.starts_with("workflow_run\n"))
@@ -7962,7 +7969,7 @@ impl XdDesktop {
                         .model
                         .messages
                         .iter()
-                        .chain(this.model.live_activity.iter())
+                        .chain(this.model.live_items.iter())
                         .any(|message| message.role == "tool" && message.content == marker);
                 if still_visible {
                     this.request_workflow_status(marker);
@@ -7989,7 +7996,7 @@ impl XdDesktop {
                             .model
                             .messages
                             .iter()
-                            .chain(this.model.live_activity.iter())
+                            .chain(this.model.live_items.iter())
                             .any(|message| message.role == "tool" && message.content == marker);
                         let active = visible
                             && this
@@ -18809,7 +18816,7 @@ fn workflow_clock_active(status: &Value) -> bool {
 }
 
 fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
-    let live_offset = model.messages.len() + usize::from(!model.live_text.is_empty());
+    let live_offset = model.messages.len();
     model
         .messages
         .iter()
@@ -18819,7 +18826,7 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
         })
         .chain(
             model
-                .live_activity
+                .live_items
                 .iter()
                 .enumerate()
                 .filter_map(|(index, message)| {
@@ -19644,14 +19651,14 @@ mod tests {
                 Message::new(Some(2), "tool", marker, None),
             ],
             live_text: "Still working".into(),
-            live_activity: vec![
+            live_items: vec![
                 Message::new(None, "tool", "read file", None),
                 Message::new(None, "tool", marker, None),
             ],
             ..Default::default()
         };
 
-        assert_eq!(workflow_row_indices(&model, marker), [1, 4]);
+        assert_eq!(workflow_row_indices(&model, marker), [1, 3]);
         assert!(workflow_clock_active(&serde_json::json!({
             "ok": true,
             "state": "in_progress",
@@ -19778,13 +19785,13 @@ mod tests {
         let mut model = AppModel {
             messages: vec![Message::new(Some(1), "user", "history", None)],
             live_text: "first partial".into(),
-            live_activity: vec![Message::new(None, "tool", "read file", None)],
+            live_items: vec![Message::new(None, "tool", "read file", None)],
             ..Default::default()
         };
         let mut snapshot = TranscriptSnapshot::default();
         snapshot.sync_messages(&model);
         snapshot.sync_live_text(&model);
-        snapshot.sync_live_activity(&model);
+        snapshot.sync_live_items(&model);
         let persisted = snapshot.messages.clone();
 
         model.live_text = "second partial".into();
@@ -19792,8 +19799,8 @@ mod tests {
 
         assert!(Arc::ptr_eq(&persisted, &snapshot.messages));
         assert_eq!(snapshot.get(0).unwrap().content, "history");
-        assert_eq!(snapshot.get(1).unwrap().content, "second partial");
-        assert_eq!(snapshot.get(2).unwrap().content, "read file");
+        assert_eq!(snapshot.get(1).unwrap().content, "read file");
+        assert_eq!(snapshot.get(2).unwrap().content, "second partial");
     }
 
     #[test]
