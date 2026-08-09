@@ -177,6 +177,18 @@ impl TerminalManager {
         let session = self.session(text(request, "terminal", "A terminal id is required.")?)?;
         let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
         let rows = geometry(request, "rows", DEFAULT_ROWS)?;
+        {
+            let state = session
+                .state
+                .lock()
+                .map_err(|_| "Terminal state is unavailable.".to_string())?;
+            if state.closing {
+                return Err("The terminal is closed.".into());
+            }
+            if state.columns == columns && state.rows == rows {
+                return Ok(json!({"ok": true, "changed": false}));
+            }
+        }
         let writer = session
             .writer
             .lock()
@@ -226,7 +238,7 @@ impl TerminalManager {
             "columns": columns,
             "rows": rows,
         }));
-        Ok(json!({"ok": true}))
+        Ok(json!({"ok": true, "changed": true}))
     }
 
     pub fn kill(&self, request: &Value) -> Result<Value, String> {
@@ -568,5 +580,24 @@ mod tests {
                 .unwrap_err()
                 .contains("No such terminal")
         );
+    }
+
+    #[test]
+    fn resizing_to_the_current_geometry_is_a_no_op() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(
+                &json!({"chat": "chat-1", "columns": 92, "rows": 31}),
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+
+        let resized = manager
+            .resize(&json!({"terminal": terminal, "columns": 92, "rows": 31}))
+            .unwrap();
+
+        assert_eq!(resized["changed"], false);
+        manager.kill(&json!({"terminal": terminal})).unwrap();
     }
 }

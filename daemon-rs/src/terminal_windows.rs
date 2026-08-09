@@ -146,6 +146,18 @@ impl TerminalManager {
         let session = self.session(text(request, "terminal", "A terminal id is required.")?)?;
         let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
         let rows = geometry(request, "rows", DEFAULT_ROWS)?;
+        {
+            let state = session
+                .state
+                .lock()
+                .map_err(|_| "Terminal state is unavailable.".to_string())?;
+            if state.closing {
+                return Err("The terminal is closed.".into());
+            }
+            if state.columns == columns && state.rows == rows {
+                return Ok(json!({"ok": true, "changed": false}));
+            }
+        }
         session
             .master
             .lock()
@@ -182,7 +194,7 @@ impl TerminalManager {
             "columns": columns,
             "rows": rows,
         }));
-        Ok(json!({"ok": true}))
+        Ok(json!({"ok": true, "changed": true}))
     }
 
     pub fn kill(&self, request: &Value) -> Result<Value, String> {
