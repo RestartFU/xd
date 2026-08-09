@@ -409,6 +409,14 @@ impl AppModel {
             .get("working")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        if let Some(selected_chat) = self.selected_chat.as_deref()
+            && let Some(summary) = self
+                .chats
+                .iter_mut()
+                .find(|summary| summary.id == selected_chat)
+        {
+            summary.working = self.working;
+        }
         let now = Instant::now();
         self.working_started_at = if self.working {
             body.get("working_for")
@@ -766,6 +774,26 @@ mod tests {
         model.selected_chat = Some("chat-1".into());
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert_eq!(model.working_for(), None);
+    }
+
+    #[test]
+    fn chat_snapshots_keep_the_selected_sidebar_summary_in_sync() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "folders": [{"id": "folder-1", "name": "xd"}],
+                "chats": [{
+                    "id": "chat-1", "folder": "folder-1", "title": "GPUI",
+                    "backend": "codex", "working": true
+                }]
+            }))
+            .unwrap();
+        model.select_chat("chat-1");
+
+        model.apply_chat(&json!({"working": false}));
+
+        assert!(!model.working);
+        assert!(!model.selected_summary().unwrap().working);
     }
 
     #[test]
