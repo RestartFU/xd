@@ -26,12 +26,13 @@ use std::{io::Write, os::windows::process::CommandExt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
-    Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle, Image, KeyBinding,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, Point, Render, ResizeEdge, SharedString, StyledText, TextRun, Timer, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, canvas, div, img,
-    list, prelude::*, px, relative, rgb, rgba, size, svg,
+    Animation, AnimationExt, App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem,
+    Context, CursorStyle, Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
+    Image, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Point, Render, ResizeEdge, SharedString,
+    StyledText, TextRun, Timer, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowOptions, canvas, div, img, list, prelude::*, px, relative, rgb, rgba,
+    size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -107,7 +108,7 @@ const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
-const WORKING_DOT_FRAME: Duration = Duration::from_millis(400);
+const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
@@ -115,24 +116,32 @@ fn working_dot_alphas(frame: usize) -> [u8; 3] {
     std::array::from_fn(|index| if index < lit { 0xff } else { 0x4d })
 }
 
-fn working_dots(frame: usize, color: u32) -> gpui::AnyElement {
-    let highlights = working_dot_alphas(frame)
-        .into_iter()
-        .enumerate()
-        .map(|(index, alpha)| {
-            (
-                index..index + 1,
-                HighlightStyle {
-                    color: Some(rgba((color << 8) | u32::from(alpha)).into()),
-                    ..Default::default()
-                },
-            )
-        });
+fn working_dots(animation_instance: usize, color: u32) -> gpui::AnyElement {
     div()
         .w(px(13.0))
         .flex_none()
         .text_sm()
-        .child(StyledText::new("...").with_highlights(highlights))
+        .with_animation(
+            ("working-dots", animation_instance),
+            Animation::new(WORKING_DOT_CYCLE).repeat(),
+            move |dots, progress| {
+                let frame = ((progress * 4.0).floor() as usize).min(3);
+                let highlights =
+                    working_dot_alphas(frame)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, alpha)| {
+                            (
+                                index..index + 1,
+                                HighlightStyle {
+                                    color: Some(rgba((color << 8) | u32::from(alpha)).into()),
+                                    ..Default::default()
+                                },
+                            )
+                        });
+                dots.child(StyledText::new("...").with_highlights(highlights))
+            },
+        )
         .into_any_element()
 }
 
@@ -1161,8 +1170,6 @@ struct XdDesktop {
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
     terminal_cursor_visible: bool,
-    working_dot_frame: usize,
-    working_dots_ticking: bool,
     diff_generation: u64,
     /// The working directory as a folding tree, in the sidebar.
     file_tree: files::FileTree,
@@ -1617,8 +1624,6 @@ impl XdDesktop {
             diff_panel: None,
             terminal_panel: None,
             terminal_cursor_visible: true,
-            working_dot_frame: 0,
-            working_dots_ticking: false,
             diff_generation: 0,
             file_tree: files::FileTree::default(),
             open_files: files::OpenFiles::default(),
@@ -8011,45 +8016,6 @@ impl XdDesktop {
         .detach();
     }
 
-    fn has_working_chat(&self) -> bool {
-        self.model.working
-            || self.inactive_model.working
-            || self
-                .model
-                .chats
-                .iter()
-                .chain(self.inactive_model.chats.iter())
-                .any(|chat| chat.working)
-    }
-
-    fn schedule_working_dots(&mut self, cx: &mut Context<Self>) {
-        if self.working_dots_ticking || !self.has_working_chat() {
-            return;
-        }
-        self.working_dots_ticking = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                Timer::after(WORKING_DOT_FRAME).await;
-                let keep_ticking = this
-                    .update(cx, |this, cx| {
-                        if !this.has_working_chat() {
-                            this.working_dot_frame = 0;
-                            this.working_dots_ticking = false;
-                            return false;
-                        }
-                        this.working_dot_frame = (this.working_dot_frame + 1) % 4;
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep_ticking {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
     fn select_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
             return;
@@ -10055,7 +10021,6 @@ impl XdDesktop {
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.expire_action_error(cx);
-        self.schedule_working_dots(cx);
         if !self.transcript_scroll_handler_attached {
             self.transcript_scroll_handler_attached = true;
             let desktop = cx.entity();
@@ -10086,7 +10051,6 @@ impl Render for XdDesktop {
         let queue_count = self.model.queue.len();
         let working = self.model.working;
         let working_for = self.model.working_for();
-        let working_dot_frame = self.working_dot_frame;
         let selected = self.model.selected_summary().cloned();
         let diff_open = self.diff_panel.is_some();
         let terminal_open = self.terminal_panel.is_some();
@@ -11118,9 +11082,7 @@ impl Render for XdDesktop {
                                         this.select_chat(chat_id.clone(), cx);
                                     }
                                 }))
-                                .when(chat.working, |row| {
-                                    row.child(working_dots(working_dot_frame, MUTED))
-                                })
+                                .when(chat.working, |row| row.child(working_dots(row_id, MUTED)))
                                 .when(!chat.working, |row| {
                                     row.when_some(
                                         agent_icon(&chat.backend),
@@ -11298,6 +11260,8 @@ impl Render for XdDesktop {
                         .iter()
                         .filter(|chat| chat.folder == folder.id)
                     {
+                        let working_dot_instance = chat_row_index;
+                        chat_row_index += 1;
                         let chat_id = chat.id.clone();
                         let title = chat.title.clone().unwrap_or_else(|| "New Chat".into());
                         let unread = self.inactive_model.unread_chats.contains(&chat.id);
@@ -11329,7 +11293,7 @@ impl Render for XdDesktop {
                                     }
                                 }))
                                 .when(chat.working, |row| {
-                                    row.child(working_dots(working_dot_frame, MUTED))
+                                    row.child(working_dots(working_dot_instance, MUTED))
                                 })
                                 .when(!chat.working, |row| {
                                     row.child(div().w(px(13.0)).flex_none())
@@ -18080,7 +18044,7 @@ impl Render for XdDesktop {
                         files::FileTab::Chat => column
                             .child(div().flex_1().min_h_0().child(transcript))
                             .when_some(working_for, |column, seconds| {
-                                column.child(turn_working_row(seconds, working_dot_frame))
+                                column.child(turn_working_row(seconds))
                             })
                             .child(composer),
                         files::FileTab::Tree => column.child(tree_body),
@@ -19111,7 +19075,7 @@ fn turn_working_label(seconds: u64) -> String {
     format!("Working for {}", turn_duration(seconds))
 }
 
-fn turn_working_row(seconds: u64, dot_frame: usize) -> gpui::AnyElement {
+fn turn_working_row(seconds: u64) -> gpui::AnyElement {
     div()
         .w_full()
         .px_4()
@@ -19128,7 +19092,7 @@ fn turn_working_row(seconds: u64, dot_frame: usize) -> gpui::AnyElement {
                 .text_xs()
                 .text_color(rgb(MUTED))
                 .child(turn_working_label(seconds))
-                .child(working_dots(dot_frame, MUTED)),
+                .child(working_dots(usize::MAX, MUTED)),
         )
         .into_any_element()
 }
@@ -19376,7 +19340,7 @@ mod tests {
 
         impl Render for WorkingRowFixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(turn_working_row(5, 0))
+                div().size_full().child(turn_working_row(5))
             }
         }
 
@@ -19398,6 +19362,15 @@ mod tests {
         assert_eq!(working_dot_alphas(2), [0xff, 0xff, 0x4d]);
         assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
+    }
+
+    #[test]
+    fn working_dots_are_mounted_as_a_native_animation() {
+        assert!(
+            working_dots(0, MUTED)
+                .downcast_mut::<gpui::AnimationElement<gpui::Div>>()
+                .is_some()
+        );
     }
 
     #[test]
