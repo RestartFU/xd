@@ -682,12 +682,19 @@ impl TranscriptSnapshot {
             url: None,
             items: cards
                 .into_iter()
-                .map(|card| ActivityItem {
-                    kind: card.kind,
-                    name: card.detail,
-                    status: card.status,
-                    elapsed: card.elapsed,
-                    detail: None,
+                .map(|card| {
+                    let name = if card.detail.is_empty() {
+                        card.name
+                    } else {
+                        card.detail
+                    };
+                    ActivityItem {
+                        kind: card.kind,
+                        name,
+                        status: card.status,
+                        elapsed: card.elapsed,
+                        detail: None,
+                    }
                 })
                 .collect(),
             patch: None,
@@ -8945,6 +8952,9 @@ impl XdDesktop {
                 ActivityCard::parse(&message.content)
                     .with_workflow_status(workflow_status, workflow_pending)
             });
+            if run.len == 1 && activity::is_plain_activity(&message.content) && !card.can_expand() {
+                return Self::activity_line(card);
+            }
             let expanded = card.starts_expanded() != expansion_toggled;
             return Self::activity_card(card, key, index, expanded, desktop.clone());
         }
@@ -9010,6 +9020,40 @@ impl XdDesktop {
                                     )
                                     .children(images),
                             ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn activity_line(card: ActivityCard) -> gpui::AnyElement {
+        let status_color = activity_status_color(card.kind);
+        div()
+            .w_full()
+            .px_6()
+            .py_1()
+            .text_color(rgb(TEXT))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(920.0))
+                    .mx_auto()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(status_color)).child("●"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_sm()
+                            .child(card.name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(status_color))
+                            .child(card.status),
                     ),
             )
             .into_any_element()

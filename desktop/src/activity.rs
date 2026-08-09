@@ -50,6 +50,14 @@ impl ActivityCard {
         self.patch.is_some()
     }
 
+    pub fn can_expand(&self) -> bool {
+        !self.detail.is_empty()
+            || self.footer.is_some()
+            || self.url.is_some()
+            || !self.items.is_empty()
+            || self.patch.is_some()
+    }
+
     pub fn parse(content: &str) -> Self {
         if let Some(card) = parse_subagent(content) {
             return card;
@@ -62,6 +70,8 @@ impl ActivityCard {
         }
         let summary = compact(content, 180, "Used a tool");
         let failure = generic_failure(&summary);
+        let detail = compact(content, 4_000, "Used a tool");
+        let detail = (detail != summary).then_some(detail).unwrap_or_default();
         Self {
             kind: if failure {
                 ActivityKind::Failure
@@ -76,7 +86,7 @@ impl ActivityCard {
             },
             status: if failure { "Failed" } else { "Done" }.into(),
             elapsed: None,
-            detail: compact(content, 4_000, "Used a tool"),
+            detail,
             footer: None,
             url: None,
             items: Vec::new(),
@@ -503,6 +513,17 @@ mod tests {
         assert!(card.name.ends_with('…'));
         assert_eq!(card.detail, command);
         assert_ne!(card.detail, card.name);
+        assert!(card.can_expand());
+    }
+
+    #[test]
+    fn a_short_single_command_has_no_duplicate_disclosure_content() {
+        let command = "$ git status --short && git log -3 --oneline";
+        let card = ActivityCard::parse(command);
+
+        assert_eq!(card.name, command);
+        assert!(card.detail.is_empty());
+        assert!(!card.can_expand());
     }
 
     #[test]
