@@ -44,6 +44,12 @@ pub fn is_plain_activity(content: &str) -> bool {
 }
 
 impl ActivityCard {
+    /// File edits lead with their useful content on desktop. Other activity
+    /// stays compact until the user asks for its details.
+    pub fn starts_expanded(&self) -> bool {
+        self.patch.is_some()
+    }
+
     pub fn parse(content: &str) -> Self {
         if let Some(card) = parse_subagent(content) {
             return card;
@@ -515,6 +521,7 @@ mod tests {
         assert_eq!(card.name, "src/main.rs");
         assert_eq!(card.status, "+2 −1");
         assert_eq!(card.patch.as_deref(), Some(patch));
+        assert!(card.starts_expanded());
         assert!(card.detail.is_empty(), "the patch replaces the detail text");
 
         let two = ActivityCard::parse(&format!(
@@ -529,6 +536,7 @@ mod tests {
         let card = ActivityCard::parse("file_change\nnot a patch");
         assert_eq!(card.title, "Activity");
         assert_eq!(card.patch, None);
+        assert!(!card.starts_expanded());
     }
 
     #[test]

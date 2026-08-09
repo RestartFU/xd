@@ -8900,7 +8900,7 @@ impl XdDesktop {
     fn message_row(
         message: &Message,
         index: usize,
-        expanded: bool,
+        expansion_toggled: bool,
         grouped_activity: Option<ActivityCard>,
         expanded_sections: &HashSet<String>,
         workflow_status: Option<&Value>,
@@ -8945,6 +8945,7 @@ impl XdDesktop {
                 ActivityCard::parse(&message.content)
                     .with_workflow_status(workflow_status, workflow_pending)
             });
+            let expanded = card.starts_expanded() != expansion_toggled;
             return Self::activity_card(card, key, index, expanded, desktop.clone());
         }
         let markdown_scope = message
@@ -9116,7 +9117,9 @@ impl XdDesktop {
                             .child(div().text_xs().text_color(rgb(status_color)).child("●"))
                             .child(
                                 div()
+                                    .min_w_0()
                                     .flex_1()
+                                    .overflow_hidden()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(card.name.clone()),
@@ -9246,6 +9249,18 @@ impl XdDesktop {
                                 .text_color(rgb(0xf0a8b3))
                                 .child(format!("−{}", file.deletions)),
                         ),
+                );
+            }
+            if file.lines.is_empty() {
+                section = section.child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_2()
+                        .bg(rgb(0x14171c))
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("Diff content wasn’t captured for this edit."),
                 );
             }
             for line in file.lines {
