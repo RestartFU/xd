@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId,
+    App, AvailableSpace, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, ImageFormat, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
@@ -612,11 +612,37 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let count = self.input.read(cx).line_ranges.len().max(1);
+        let (composer, count) = {
+            let input = self.input.read(cx);
+            (input.composer, input.line_ranges.len().max(1))
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = px(count as f32 * FileEditor::LINE_HEIGHT).into();
-        (window.request_layout(style, [], cx), ())
+        if composer {
+            let input = self.input.clone();
+            let layout = window.request_measured_layout(
+                style,
+                move |known_dimensions, available_space, window, cx| {
+                    let width = known_dimensions
+                        .width
+                        .or(match available_space.width {
+                            AvailableSpace::Definite(width) => Some(width),
+                            AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+                        })
+                        .unwrap_or(px(1.));
+                    let input = input.read(cx);
+                    let text_style = window.text_style();
+                    let rows = visual_line_ranges(&input, width, &text_style, window)
+                        .len()
+                        .max(1);
+                    size(width, px(rows as f32 * FileEditor::LINE_HEIGHT))
+                },
+            );
+            (layout, ())
+        } else {
+            style.size.height = px(count as f32 * FileEditor::LINE_HEIGHT).into();
+            (window.request_layout(style, [], cx), ())
+        }
     }
 
     fn prepaint(
@@ -629,20 +655,25 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> PrepaintState {
         let input = self.input.read(cx);
+        let font_size = px(13.);
+        let style = window.text_style();
+        let ranges = if input.composer {
+            visual_line_ranges(&input, bounds.size.width, &style, window)
+        } else {
+            input.line_ranges.clone()
+        };
         let visible = visible_line_range(
-            input.line_ranges.len(),
+            ranges.len(),
             bounds.top(),
             window.content_mask().bounds.top(),
             window.content_mask().bounds.bottom(),
         );
-        let font_size = px(13.);
-        let style = window.text_style();
         let mut lines = Vec::with_capacity(visible.len());
         let mut selection = Vec::new();
         let cursor_offset = input.cursor_offset();
         let mut cursor = None;
         for index in visible {
-            let range = input.line_ranges[index].clone();
+            let range = ranges[index].clone();
             let placeholder =
                 input.content.is_empty() && index == 0 && !input.placeholder.is_empty();
             let text: SharedString = if placeholder {
@@ -919,6 +950,60 @@ fn line_ranges(content: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+fn soft_wrapped_ranges(range: Range<usize>, offsets: &[usize]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::with_capacity(offsets.len() + 1);
+    let mut start = range.start;
+    for offset in offsets {
+        let end = range.start + (*offset).min(range.len());
+        if end > start && end < range.end {
+            ranges.push(start..end);
+            start = end;
+        }
+    }
+    ranges.push(start..range.end);
+    ranges
+}
+
+fn visual_line_ranges(
+    input: &FileEditor,
+    width: Pixels,
+    style: &gpui::TextStyle,
+    window: &mut Window,
+) -> Vec<Range<usize>> {
+    if !input.composer || input.content.is_empty() {
+        return input.line_ranges.clone();
+    }
+
+    let mut visual = Vec::new();
+    for range in &input.line_ranges {
+        if range.is_empty() {
+            visual.push(range.clone());
+            continue;
+        }
+        let text: SharedString = input.content[range.clone()].to_owned().into();
+        let runs = text_runs(input, range, style, false);
+        let wrapped = window
+            .text_system()
+            .shape_text(text, px(13.), &runs, Some(width.max(px(1.))), None)
+            .expect("shape message editor line");
+        let offsets = wrapped
+            .first()
+            .map(|line| {
+                line.wrap_boundaries()
+                    .iter()
+                    .map(|boundary| line_wrap_offset(line, *boundary))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        visual.extend(soft_wrapped_ranges(range.clone(), &offsets));
+    }
+    visual
+}
+
+fn line_wrap_offset(line: &gpui::WrappedLine, boundary: gpui::WrapBoundary) -> usize {
+    line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index
+}
+
 /// The lines close enough to the clip to be worth shaping this frame.
 ///
 /// The editor element stays as tall as the whole document so the ordinary
@@ -955,6 +1040,15 @@ mod tests {
     fn line_ranges_preserve_empty_and_trailing_lines() {
         assert_eq!(line_ranges(""), vec![0..0]);
         assert_eq!(line_ranges("a\n\nb\n"), vec![0..1, 2..2, 3..4, 5..5]);
+    }
+
+    #[test]
+    fn composer_wrap_offsets_become_visual_lines() {
+        assert_eq!(
+            soft_wrapped_ranges(10..30, &[6, 14]),
+            vec![10..16, 16..24, 24..30],
+        );
+        assert_eq!(soft_wrapped_ranges(4..9, &[]), vec![4..9]);
     }
 
     #[test]
