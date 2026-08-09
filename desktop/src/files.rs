@@ -38,6 +38,7 @@ pub struct FileTree {
     children: HashMap<String, Vec<BrowseEntry>>,
     expanded: HashSet<String>,
     loading: HashSet<String>,
+    failed: HashSet<String>,
 }
 
 impl FileTree {
@@ -51,6 +52,14 @@ impl FileTree {
     /// Whether this directory's listing has been fetched.
     pub fn is_loaded(&self, path: &str) -> bool {
         self.children.contains_key(path)
+    }
+
+    pub fn is_loading(&self, path: &str) -> bool {
+        self.loading.contains(path)
+    }
+
+    pub fn has_failed(&self, path: &str) -> bool {
+        self.failed.contains(path)
     }
 
     pub fn is_expanded(&self, path: &str) -> bool {
@@ -68,6 +77,7 @@ impl FileTree {
     /// Marks a directory as being listed, which draws its spinner.
     pub fn set_loading(&mut self, path: &str) {
         self.loading.insert(path.to_owned());
+        self.failed.remove(path);
     }
 
     /// Takes a directory's entries, sorted the way a tree reads.
@@ -81,11 +91,13 @@ impl FileTree {
         });
         self.children.insert(path.to_owned(), entries);
         self.loading.remove(path);
+        self.failed.remove(path);
     }
 
     /// Gives up on a listing, leaving the directory open and empty.
     pub fn set_failed(&mut self, path: &str) {
         self.loading.remove(path);
+        self.failed.insert(path.to_owned());
     }
 
     /// Forgets every listing, keeping what was open.
@@ -95,6 +107,7 @@ impl FileTree {
     pub fn invalidate(&mut self) {
         self.children.clear();
         self.loading.clear();
+        self.failed.clear();
     }
 
     /// Opens every directory on the way to `path`, so a file can be revealed
@@ -386,6 +399,15 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].expanded);
         assert!(!rows[0].loading);
+        assert!(tree.has_failed("secret"));
+
+        tree.set_loading("secret");
+        assert!(!tree.has_failed("secret"));
+        assert!(tree.is_loading("secret"));
+
+        tree.set_children("secret", vec![file("visible.txt")]);
+        assert!(!tree.has_failed("secret"));
+        assert!(!tree.is_loading("secret"));
     }
 
     #[test]

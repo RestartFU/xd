@@ -2490,6 +2490,7 @@ impl XdDesktop {
                     | RequestKind::FileBrowseList { .. }
                     | RequestKind::FileBrowseRead { .. }
                     | RequestKind::FileBrowseWrite { .. }
+                    | RequestKind::FileTreeList { .. }
                     | RequestKind::GitCommit { .. }
                     | RequestKind::GitPush { .. }
                     | RequestKind::TerminalOpen { .. }
@@ -2723,6 +2724,15 @@ impl XdDesktop {
                             preview.saving = false;
                         }
                     }
+                }
+                RequestKind::FileTreeList {
+                    chat_id,
+                    path,
+                    generation,
+                } if *generation == self.tree_generation
+                    && self.model.selected_chat.as_deref() == Some(chat_id.as_str()) =>
+                {
+                    self.file_tree.set_failed(path);
                 }
                 RequestKind::GitCommit { generation, .. }
                 | RequestKind::GitPush { generation, .. }
@@ -4995,7 +5005,15 @@ impl XdDesktop {
     }
 
     fn show_file_tab(&mut self, tab: files::FileTab, cx: &mut Context<Self>) {
+        let should_load_root = tab == files::FileTab::Tree && !self.file_tree.is_loaded("");
         self.open_files.active = tab;
+        // Chat selection can happen while its daemon is still reconnecting. In
+        // that case the eager request from `reset_file_tree` fails, and opening
+        // Files is the natural retry point. Repeated clicks also recover a
+        // request whose connection disappeared before it could answer.
+        if should_load_root {
+            self.list_tree_directory(String::new(), cx);
+        }
         // The editor is one entity behind whichever tab is in front, so moving
         // between tabs is what reloads its text.
         let showing = self
@@ -17751,6 +17769,16 @@ impl Render for XdDesktop {
                     .child(row.name)
             })
             .collect::<Vec<_>>();
+        let tree_is_empty = tree_rows.is_empty();
+        let tree_status = if self.file_tree.is_loading("") {
+            "Loading files…"
+        } else if self.file_tree.has_failed("") {
+            "Couldn’t load files. Click Files to retry."
+        } else if self.file_tree.is_loaded("") {
+            "This workspace has no visible files."
+        } else {
+            "Open Files to load this workspace."
+        };
         let tree_body = div()
             .id("file-tree")
             .flex_1()
@@ -17758,7 +17786,20 @@ impl Render for XdDesktop {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .children(tree_rows);
+            .children(tree_rows)
+            .when(tree_is_empty, |tree| {
+                tree.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px_4()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(tree_status),
+                )
+            });
 
         let saving_tab = self.open_files.current().map(|file| {
             (
