@@ -18,6 +18,18 @@ public data class TranscriptItem(
     val live: Boolean = false,
 )
 
+public enum class TodoStatus {
+    PENDING,
+    IN_PROGRESS,
+    COMPLETED,
+}
+
+public data class TodoItem(
+    val id: String,
+    val text: String,
+    val status: TodoStatus,
+)
+
 public data class ChatState(
     val chatId: String,
     val title: String = "",
@@ -48,6 +60,7 @@ public data class ChatState(
     val messages: List<TranscriptItem> = emptyList(),
     val liveItems: List<TranscriptItem> = emptyList(),
     val liveSegment: String = "",
+    val todos: List<TodoItem> = emptyList(),
     val pendingUser: TranscriptItem? = null,
     val loading: Boolean = false,
     val loadingOlder: Boolean = false,

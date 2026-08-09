@@ -3,11 +3,18 @@ package com.restartfu.xd.store
 import com.restartfu.xd.model.ChatState
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
+import com.restartfu.xd.model.TodoItem
+import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.MessagesReply
 import com.restartfu.xd.protocol.PngAttachment
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 public sealed interface TranscriptEffect {
     public data object Refetch : TranscriptEffect
@@ -118,6 +125,11 @@ public object TranscriptMachine {
             state.covers(input.turnId, input.turnSequence)
         ) {
             TranscriptTransition(state)
+        } else if (input.name.todoSnapshot() != null) {
+            TranscriptTransition(
+                state.copy(todos = input.name.todoSnapshot().orEmpty())
+                    .advancedTo(input.turnId, input.turnSequence),
+            )
         } else {
             val closedSegment = if (state.liveSegment.isEmpty()) {
                 state.liveItems
@@ -257,7 +269,7 @@ public object TranscriptMachine {
     ): TranscriptTransition {
         val chat = input.chat
         val liveItems = if (chat.working) {
-            chat.items.mapIndexed { index, item ->
+            chat.items.filterNot { it.text.todoSnapshot() != null }.mapIndexed { index, item ->
                 TranscriptItem(
                     id = "loaded-live-$index",
                     kind = if (item.tool) TranscriptKind.TOOL else TranscriptKind.ASSISTANT,
@@ -304,7 +316,12 @@ public object TranscriptMachine {
     }
 
     private fun ChatState.withMessages(reply: MessagesReply): ChatState {
-        val visible = reply.messages.filterNot { it.role == "duration" }
+        val snapshot = reply.messages.asReversed().firstNotNullOfOrNull {
+            it.content.todoSnapshot()
+        }
+        val visible = reply.messages.filterNot {
+            it.role == "duration" || it.content.todoSnapshot() != null
+        }
         return copy(
             messages = visible.mapIndexed { index, message ->
                 TranscriptItem(
@@ -315,6 +332,7 @@ public object TranscriptMachine {
                     label = message.label,
                 )
             },
+            todos = snapshot ?: todos,
             hasOlderMessages = reply.messages.size < reply.totalMessages,
         )
     }
@@ -326,3 +344,25 @@ public object TranscriptMachine {
         else -> TranscriptKind.SYSTEM
     }
 }
+
+private fun String.todoSnapshot(): List<TodoItem>? {
+    if (!startsWith(TODO_PREFIX)) return null
+    val encoded = removePrefix(TODO_PREFIX)
+    val values = runCatching { Json.parseToJsonElement(encoded) as? JsonArray }.getOrNull()
+        ?: return null
+    return values.mapNotNull { value ->
+        val fields = value as? JsonObject ?: return@mapNotNull null
+        val id = (fields["id"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+        val text = (fields["text"] as? JsonPrimitive)?.contentOrNull
+            ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val status = when ((fields["status"] as? JsonPrimitive)?.contentOrNull) {
+            "pending" -> TodoStatus.PENDING
+            "in_progress" -> TodoStatus.IN_PROGRESS
+            "completed" -> TodoStatus.COMPLETED
+            else -> return@mapNotNull null
+        }
+        TodoItem(id, text, status)
+    }
+}
+
+private const val TODO_PREFIX = "todo_list\n"

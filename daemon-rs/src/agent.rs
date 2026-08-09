@@ -16,6 +16,7 @@ pub enum AgentEvent {
     Text(String),
     TextDelta(String),
     Tool(String),
+    Todos(TodoUpdate),
     Usage {
         input: u64,
         output: u64,
@@ -23,6 +24,42 @@ pub enum AgentEvent {
     },
     Completed,
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoItem {
+    pub id: String,
+    pub text: String,
+    pub status: TodoStatus,
+}
+
+impl TodoItem {
+    pub fn new(id: impl Into<String>, text: impl Into<String>, status: TodoStatus) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+            status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TodoUpdate {
+    Replace(Vec<TodoItem>),
+    Upsert(TodoItem),
+    Patch {
+        id: String,
+        text: Option<String>,
+        status: Option<TodoStatus>,
+    },
+    Remove(String),
 }
 
 #[derive(Default)]
@@ -82,6 +119,7 @@ impl CodexParser {
                     return Vec::new();
                 };
                 match item.get("type").and_then(Value::as_str) {
+                    Some("todo_list") => codex_todo_update(item),
                     Some("command_execution") => {
                         if let Some(id) = item.get("id").and_then(Value::as_str) {
                             self.started_commands.insert(id.to_owned());
@@ -98,6 +136,11 @@ impl CodexParser {
                     _ => Vec::new(),
                 }
             }
+            Some("item.updated") => root
+                .get("item")
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("todo_list"))
+                .map(codex_todo_update)
+                .unwrap_or_default(),
             Some("item.completed") => {
                 let Some(item) = root.get("item") else {
                     return Vec::new();
@@ -119,6 +162,7 @@ impl CodexParser {
                     return vec![AgentEvent::Tool(diff)];
                 }
                 match item.get("type").and_then(Value::as_str) {
+                    Some("todo_list") => codex_todo_update(item),
                     Some("agent_message") => item
                         .get("text")
                         .and_then(Value::as_str)
@@ -278,9 +322,11 @@ pub struct ClaudeParser {
     /// by a blank line rather than running into the previous one.
     trailing_newlines: usize,
     pending_tools: HashMap<u64, PendingClaudeTool>,
+    completed_task_tools: HashMap<String, PendingClaudeTool>,
 }
 
 struct PendingClaudeTool {
+    id: Option<String>,
     name: String,
     arguments: String,
     overflowed: bool,
@@ -289,6 +335,7 @@ struct PendingClaudeTool {
 impl ClaudeParser {
     const MAX_PENDING_TOOLS: usize = 64;
     const ARGUMENT_LIMIT: usize = 2 * 1024 * 1024;
+    const MAX_COMPLETED_TASK_TOOLS: usize = 64;
 
     fn record_text(&mut self, text: &str) {
         self.saw_text = true;
@@ -332,6 +379,7 @@ impl ClaudeParser {
                 events
             }
             Some("stream_event") => self.stream_event(&root),
+            Some("user") => self.user_event(&root),
             Some("assistant") if !self.saw_streamed_text => self.assistant_event(&root),
             Some("result") => {
                 let mut events = Vec::new();
@@ -422,6 +470,7 @@ impl ClaudeParser {
                     self.pending_tools.insert(
                         index,
                         PendingClaudeTool {
+                            id: block.get("id").and_then(Value::as_str).map(str::to_owned),
                             name: block
                                 .get("name")
                                 .and_then(Value::as_str)
@@ -478,6 +527,17 @@ impl ClaudeParser {
                 let arguments = (!tool.overflowed)
                     .then(|| serde_json::from_str::<Value>(&tool.arguments).ok())
                     .flatten();
+                if let Some(event) = claude_task_update(&tool.name, arguments.as_ref()) {
+                    return vec![AgentEvent::Todos(event)];
+                }
+                if matches!(tool.name.as_str(), "TaskCreate" | "TaskList" | "TaskGet")
+                    && let Some(id) = tool.id.clone()
+                {
+                    if self.completed_task_tools.len() < Self::MAX_COMPLETED_TASK_TOOLS {
+                        self.completed_task_tools.insert(id, tool);
+                        return Vec::new();
+                    }
+                }
                 vec![AgentEvent::Tool(claude_tool_summary(
                     &tool.name,
                     arguments.as_ref(),
@@ -485,6 +545,25 @@ impl ClaudeParser {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn user_event(&mut self, root: &Value) -> Vec<AgentEvent> {
+        root.get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .filter_map(|block| {
+                let id = block.get("tool_use_id").and_then(Value::as_str)?;
+                let tool = self.completed_task_tools.remove(id)?;
+                let content = tool_result_text(block.get("content")?)?;
+                let arguments = (!tool.overflowed)
+                    .then(|| serde_json::from_str::<Value>(&tool.arguments).ok())
+                    .flatten();
+                claude_task_result(&tool.name, arguments.as_ref(), &content).map(AgentEvent::Todos)
+            })
+            .collect()
     }
 
     fn assistant_event(&mut self, root: &Value) -> Vec<AgentEvent> {
@@ -515,6 +594,149 @@ impl ClaudeParser {
         }
         events
     }
+}
+
+fn codex_todo_update(item: &Value) -> Vec<AgentEvent> {
+    let todos = item
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let text = item.get("text").and_then(Value::as_str)?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let status = if item
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                TodoStatus::Completed
+            } else {
+                TodoStatus::Pending
+            };
+            Some(TodoItem::new(
+                (index + 1).to_string(),
+                compact(text, 240),
+                status,
+            ))
+        })
+        .take(100)
+        .collect();
+    vec![AgentEvent::Todos(TodoUpdate::Replace(todos))]
+}
+
+fn claude_task_update(name: &str, arguments: Option<&Value>) -> Option<TodoUpdate> {
+    if name != "TaskUpdate" {
+        return None;
+    }
+    let arguments = arguments?;
+    let id = arguments
+        .get("taskId")
+        .or_else(|| arguments.get("task_id"))
+        .and_then(value_id)?
+        .to_owned();
+    let status = arguments
+        .get("status")
+        .and_then(Value::as_str)
+        .and_then(todo_status);
+    if arguments.get("status").and_then(Value::as_str) == Some("deleted") {
+        return Some(TodoUpdate::Remove(id));
+    }
+    let text = arguments
+        .get("subject")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| compact(text, 240));
+    Some(TodoUpdate::Patch { id, text, status })
+}
+
+fn claude_task_result(name: &str, arguments: Option<&Value>, content: &str) -> Option<TodoUpdate> {
+    match name {
+        "TaskCreate" => {
+            let id = content
+                .strip_prefix("Task #")?
+                .split_once(' ')?
+                .0
+                .trim_end_matches(':');
+            let text = arguments?.get("subject").and_then(Value::as_str)?.trim();
+            (!id.is_empty() && !text.is_empty()).then(|| {
+                TodoUpdate::Upsert(TodoItem::new(id, compact(text, 240), TodoStatus::Pending))
+            })
+        }
+        "TaskList" => Some(TodoUpdate::Replace(parse_claude_task_list(content))),
+        "TaskGet" => parse_claude_task_get(content).map(TodoUpdate::Upsert),
+        _ => None,
+    }
+}
+
+fn parse_claude_task_list(content: &str) -> Vec<TodoItem> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (id, rest) = line.strip_prefix('#')?.split_once(' ')?;
+            let (status, text) = rest.strip_prefix('[')?.split_once("] ")?;
+            let text = text.trim();
+            (!id.is_empty() && !text.is_empty()).then(|| {
+                TodoItem::new(
+                    id,
+                    compact(text, 240),
+                    todo_status(status).unwrap_or(TodoStatus::Pending),
+                )
+            })
+        })
+        .take(100)
+        .collect()
+}
+
+fn parse_claude_task_get(content: &str) -> Option<TodoItem> {
+    let mut lines = content.lines();
+    let heading = lines.next()?.trim().strip_prefix("Task #")?;
+    let (id, text) = heading.split_once(':')?;
+    let status = lines.find_map(|line| {
+        line.trim()
+            .strip_prefix("Status:")
+            .map(str::trim)
+            .and_then(todo_status)
+    });
+    let text = text.trim();
+    (!id.trim().is_empty() && !text.is_empty()).then(|| {
+        TodoItem::new(
+            id.trim(),
+            compact(text, 240),
+            status.unwrap_or(TodoStatus::Pending),
+        )
+    })
+}
+
+fn todo_status(value: &str) -> Option<TodoStatus> {
+    match value {
+        "pending" | "not_started" | "not-started" => Some(TodoStatus::Pending),
+        "in_progress" | "in-progress" => Some(TodoStatus::InProgress),
+        "completed" => Some(TodoStatus::Completed),
+        _ => None,
+    }
+}
+
+fn value_id(value: &Value) -> Option<&str> {
+    value.as_str()
+}
+
+fn tool_result_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    value.as_array().map(|blocks| {
+        blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 fn claude_usage(root: &Value) -> Option<&Value> {
@@ -1197,6 +1419,73 @@ mod tests {
         assert_eq!(
             workflow,
             "workflow_run\n31028502744\nhttps://github.com/RestartFU/xd/actions/runs/31028502744"
+        );
+    }
+
+    #[test]
+    fn parses_codex_todo_snapshots() {
+        let mut parser = CodexParser::default();
+        let events = parser.feed(
+            &serde_json::json!({
+                "type": "item.updated",
+                "item": {
+                    "id": "item_1",
+                    "type": "todo_list",
+                    "items": [
+                        {"text": "Trace the payload", "completed": true},
+                        {"text": "Render the pane", "completed": false}
+                    ]
+                }
+            })
+            .to_string(),
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::Todos(TodoUpdate::Replace(vec![
+                TodoItem::new("1", "Trace the payload", TodoStatus::Completed),
+                TodoItem::new("2", "Render the pane", TodoStatus::Pending),
+            ]))]
+        );
+    }
+
+    #[test]
+    fn parses_claude_task_create_update_and_list_results() {
+        let mut parser = ClaudeParser::default();
+        let mut events = Vec::new();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_create","name":"TaskCreate"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"subject\":\"Build the pane\",\"description\":\"Show tasks\",\"activeForm\":\"Building the pane\"}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_create","content":"Task #7 created successfully: Build the pane"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_update","name":"TaskUpdate"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"taskId\":\"7\",\"status\":\"in_progress\"}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_list","name":"TaskList"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2}}"#,
+            r##"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_list","content":"#7 [in_progress] Build the pane\n#8 [pending] Verify it"}]}}"##,
+        ] {
+            events.extend(parser.feed(line));
+        }
+
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::Todos(TodoUpdate::Upsert(TodoItem::new(
+                    "7",
+                    "Build the pane",
+                    TodoStatus::Pending,
+                ))),
+                AgentEvent::Todos(TodoUpdate::Patch {
+                    id: "7".into(),
+                    text: None,
+                    status: Some(TodoStatus::InProgress),
+                }),
+                AgentEvent::Todos(TodoUpdate::Replace(vec![
+                    TodoItem::new("7", "Build the pane", TodoStatus::InProgress),
+                    TodoItem::new("8", "Verify it", TodoStatus::Pending),
+                ])),
+            ]
         );
     }
 }

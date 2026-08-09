@@ -81,6 +81,21 @@ pub struct Message {
     image_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub text: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
 impl Message {
     pub fn new(
         id: Option<i64>,
@@ -232,6 +247,7 @@ pub struct AppModel {
     pub draft_revision: i64,
     pub live_text: String,
     pub live_items: Vec<Message>,
+    pub todos: Vec<TodoItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +321,7 @@ impl AppModel {
             self.draft_attachments.clear();
             self.live_text.clear();
             self.live_items.clear();
+            self.todos.clear();
         }
         Ok(())
     }
@@ -339,6 +356,7 @@ impl AppModel {
         self.draft_revision = -1;
         self.live_text.clear();
         self.live_items.clear();
+        self.todos.clear();
     }
 
     pub fn apply_chat(&mut self, body: &Value) {
@@ -491,6 +509,18 @@ impl AppModel {
             .messages
             .iter_mut()
             .for_each(Message::cache_markdown);
+        if direction != MessagePageDirection::Before
+            && let Some(todos) = snapshot
+                .messages
+                .iter()
+                .rev()
+                .find_map(|message| todo_snapshot(&message.content))
+        {
+            self.todos = todos;
+        }
+        snapshot
+            .messages
+            .retain(|message| todo_snapshot(&message.content).is_none());
         let has_older = body
             .get("has_older")
             .and_then(Value::as_bool)
@@ -590,6 +620,14 @@ impl AppModel {
                 }
             }
             "tool" if self.event_is_active(body) => {
+                if let Some(todos) = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(todo_snapshot)
+                {
+                    self.todos = todos;
+                    return;
+                }
                 if !self.live_text.is_empty() {
                     let text = std::mem::take(&mut self.live_text);
                     let label = self.selected_summary().map(|chat| chat.backend.clone());
@@ -747,8 +785,13 @@ impl AppModel {
             draft_revision: 0,
             live_text: String::new(),
             live_items: Vec::new(),
+            todos: Vec::new(),
         }
     }
+}
+
+fn todo_snapshot(content: &str) -> Option<Vec<TodoItem>> {
+    serde_json::from_str(content.strip_prefix("todo_list\n")?).ok()
 }
 
 fn string_array(values: &[Value]) -> Vec<String> {
@@ -1137,5 +1180,35 @@ mod tests {
             model.messages.last().and_then(|message| message.id),
             Some(600)
         );
+    }
+
+    #[test]
+    fn todo_snapshots_feed_the_pane_without_adding_transcript_rows() {
+        let marker = "todo_list\n[{\"id\":\"1\",\"text\":\"Build pane\",\"status\":\"in_progress\"},{\"id\":\"2\",\"text\":\"Verify pane\",\"status\":\"pending\"}]";
+        let mut model = AppModel::default();
+        model.select_chat("chat-1");
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "assistant", "content": "Starting"},
+                    {"id": 2, "role": "tool", "content": marker}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+
+        assert_eq!(model.messages.len(), 1);
+        assert_eq!(model.todos.len(), 2);
+        assert_eq!(model.todos[0].status, TodoStatus::InProgress);
+
+        model.apply_event(
+            "tool",
+            &json!({
+                "chat": "chat-1",
+                "text": "todo_list\n[{\"id\":\"1\",\"text\":\"Build pane\",\"status\":\"completed\"}]"
+            }),
+        );
+        assert!(model.live_items.is_empty());
+        assert_eq!(model.todos[0].status, TodoStatus::Completed);
     }
 }

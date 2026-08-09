@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -92,6 +94,7 @@ import com.restartfu.xd.model.ImageReference
 import com.restartfu.xd.model.MessagePart
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.model.TranscriptRow
+import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.syntax.CodeBlocks
 import com.restartfu.xd.voice.SpeakTagVisibility
@@ -446,6 +449,55 @@ private fun Composer(
         VoiceStatus(model.voice)
         remember(state) { AskBlock.pending(state) }?.let { ask ->
             AskButtons(ask, onAnswer = model::answer, enabled = !sending)
+        }
+        if (state.todos.isNotEmpty()) {
+            val completed = state.todos.count { it.status == TodoStatus.COMPLETED }
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 160.dp),
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 2.dp,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        "Tasks  $completed/${state.todos.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    state.todos.forEach { todo ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                when (todo.status) {
+                                    TodoStatus.PENDING -> "○"
+                                    TodoStatus.IN_PROGRESS -> "●"
+                                    TodoStatus.COMPLETED -> "✓"
+                                },
+                                color = when (todo.status) {
+                                    TodoStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    TodoStatus.IN_PROGRESS -> MaterialTheme.colorScheme.primary
+                                    TodoStatus.COMPLETED -> MaterialTheme.colorScheme.tertiary
+                                },
+                            )
+                            Text(
+                                todo.text,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (todo.status == TodoStatus.COMPLETED) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
         }
         if (state.shortcuts.isNotEmpty()) {
             Row(

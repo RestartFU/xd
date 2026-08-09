@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus, StateStore,
-    agent::{AgentCommand, AgentEvent, AgentParser},
+    agent::{AgentCommand, AgentEvent, AgentParser, TodoItem, TodoUpdate},
     ask::{self, Ask},
     claude_proxy::ClaudeProxy,
     secrets::SecretsStore,
@@ -43,6 +43,7 @@ struct RuntimeInner {
     claude_proxy: ClaudeProxy,
     /// Agent processes kept between a chat's turns, by chat.
     sessions: Mutex<HashMap<String, AgentSession>>,
+    todos: Mutex<HashMap<String, Vec<TodoItem>>>,
 }
 
 /// An agent process that outlives the turn it was started for.
@@ -155,6 +156,7 @@ impl TurnRuntime {
                 commands: Mutex::new(HashMap::new()),
                 claude_proxy: ClaudeProxy::new(),
                 sessions: Mutex::new(HashMap::new()),
+                todos: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -625,6 +627,34 @@ impl TurnRuntime {
                             Err(error) => latest_error = Some(error.to_string()),
                         }
                     }
+                    AgentEvent::Todos(update) => match self.todo_snapshot(&turn.chat_id, update) {
+                        Ok(todos) => {
+                            let text = format!("todo_list\n{}", todo_json(&todos));
+                            match self.inner.store.append_turn_message(
+                                &turn.chat_id,
+                                "tool",
+                                &text,
+                                None,
+                            ) {
+                                Ok(_) => {
+                                    had_activity = true;
+                                    self.publish_sequenced(
+                                        "tool",
+                                        &turn,
+                                        turn_id,
+                                        &progress,
+                                        json!({
+                                            "text": text,
+                                            "workdir": turn.workdir,
+                                            "context": turn.workdir,
+                                        }),
+                                    );
+                                }
+                                Err(error) => latest_error = Some(error.to_string()),
+                            }
+                        }
+                        Err(error) => latest_error = Some(error),
+                    },
                     AgentEvent::Completed => {
                         completed = true;
                         latest_error = None;
@@ -718,6 +748,54 @@ impl TurnRuntime {
         );
     }
 
+    fn todo_snapshot(&self, chat_id: &str, update: TodoUpdate) -> Result<Vec<TodoItem>, String> {
+        let mut snapshots = self
+            .inner
+            .todos
+            .lock()
+            .map_err(|_| "Todo state is unavailable.".to_owned())?;
+        if !snapshots.contains_key(chat_id) {
+            let existing = self
+                .inner
+                .store
+                .latest_todo_snapshot(chat_id)
+                .map_err(|error| error.to_string())?
+                .and_then(|marker| marker.strip_prefix("todo_list\n").map(str::to_owned))
+                .and_then(|json| todos_from_json(&json))
+                .unwrap_or_default();
+            snapshots.insert(chat_id.to_owned(), existing);
+        }
+        let todos = snapshots.entry(chat_id.to_owned()).or_default();
+        match update {
+            TodoUpdate::Replace(replacement) => *todos = replacement,
+            TodoUpdate::Upsert(item) => {
+                if let Some(existing) = todos.iter_mut().find(|todo| todo.id == item.id) {
+                    *existing = item;
+                } else {
+                    todos.push(item);
+                }
+            }
+            TodoUpdate::Patch { id, text, status } => {
+                if let Some(todo) = todos.iter_mut().find(|todo| todo.id == id) {
+                    if let Some(text) = text {
+                        todo.text = text;
+                    }
+                    if let Some(status) = status {
+                        todo.status = status;
+                    }
+                } else if let Some(text) = text {
+                    todos.push(TodoItem::new(
+                        id,
+                        text,
+                        status.unwrap_or(crate::agent::TodoStatus::Pending),
+                    ));
+                }
+            }
+            TodoUpdate::Remove(id) => todos.retain(|todo| todo.id != id),
+        }
+        Ok(todos.clone())
+    }
+
     fn finish(
         &self,
         turn: TurnSpec,
@@ -798,6 +876,47 @@ impl TurnRuntime {
         event.insert("turn_sequence".into(), sequence.into());
         self.inner.events.publish(Value::Object(event));
     }
+}
+
+fn todo_json(todos: &[TodoItem]) -> String {
+    Value::Array(
+        todos
+            .iter()
+            .map(|todo| {
+                json!({
+                    "id": todo.id,
+                    "text": todo.text,
+                    "status": match todo.status {
+                        crate::agent::TodoStatus::Pending => "pending",
+                        crate::agent::TodoStatus::InProgress => "in_progress",
+                        crate::agent::TodoStatus::Completed => "completed",
+                    },
+                })
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
+fn todos_from_json(json: &str) -> Option<Vec<TodoItem>> {
+    serde_json::from_str::<Value>(json)
+        .ok()?
+        .as_array()?
+        .iter()
+        .map(|todo| {
+            let status = match todo.get("status").and_then(Value::as_str)? {
+                "pending" => crate::agent::TodoStatus::Pending,
+                "in_progress" => crate::agent::TodoStatus::InProgress,
+                "completed" => crate::agent::TodoStatus::Completed,
+                _ => return None,
+            };
+            Some(TodoItem::new(
+                todo.get("id").and_then(Value::as_str)?,
+                todo.get("text").and_then(Value::as_str)?,
+                status,
+            ))
+        })
+        .collect()
 }
 
 /// Reads a process's stderr for as long as it lives, keeping the tail.

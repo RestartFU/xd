@@ -2,8 +2,8 @@
 //!
 //! GPUI paints text; it has no notion of selecting it. This wraps an already
 //! laid-out text element so dragging across it highlights a range, double-click
-//! selects a word, and Ctrl+C copies that range. Each block of text is laid out
-//! on its own, so a selection belongs to exactly one block.
+//! selects a word, and Ctrl+C copies that range. Markdown lays each block out
+//! separately, so every selectable carries its range in one shared document.
 
 use std::ops::Range;
 
@@ -16,7 +16,29 @@ use gpui::{
 
 const SELECTION: u32 = 0x6b8cff55;
 
-/// The one selection in the window, keyed by the block that owns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectionSource {
+    ChatMessage {
+        chat_id: String,
+        chat_title: String,
+        message_id: Option<i64>,
+        role: String,
+    },
+    WorkspaceFile {
+        chat_id: String,
+        path: String,
+    },
+}
+
+#[derive(Clone)]
+pub struct SelectedTextContext {
+    pub text: String,
+    pub source: SelectionSource,
+    pub position: Point<Pixels>,
+    pub menu_open: bool,
+}
+
+/// The one selection in the window, keyed by the document that owns it.
 #[derive(Clone, Default)]
 pub struct TextSelection {
     block: Option<u64>,
@@ -24,7 +46,10 @@ pub struct TextSelection {
     anchor: usize,
     head: usize,
     dragging: bool,
-    pressed_link: Option<usize>,
+    pressed_link: Option<(u64, usize)>,
+    source: Option<SelectionSource>,
+    action_position: Option<Point<Pixels>>,
+    action_menu_open: bool,
 }
 
 impl Global for TextSelection {}
@@ -48,6 +73,35 @@ impl TextSelection {
             .map(str::to_owned)
     }
 
+    pub fn context(cx: &App) -> Option<SelectedTextContext> {
+        let selection = cx.try_global::<Self>()?;
+        let text = selection
+            .text
+            .get(selection.range())
+            .filter(|text| !text.is_empty())?
+            .to_owned();
+        Some(SelectedTextContext {
+            text,
+            source: selection.source.clone()?,
+            position: selection.action_position?,
+            menu_open: selection.action_menu_open,
+        })
+    }
+
+    pub fn toggle_action_menu(cx: &mut App) {
+        if cx.try_global::<Self>().is_some() {
+            let selection = cx.global_mut::<Self>();
+            selection.action_menu_open = !selection.action_menu_open;
+        }
+    }
+
+    pub fn close_action_menu(cx: &mut App) -> bool {
+        if cx.try_global::<Self>().is_none() {
+            return false;
+        }
+        std::mem::take(&mut cx.global_mut::<Self>().action_menu_open)
+    }
+
     pub fn clear(cx: &mut App) {
         if cx
             .try_global::<Self>()
@@ -57,17 +111,29 @@ impl TextSelection {
         }
     }
 
-    fn owns(cx: &App, block: u64) -> bool {
+    fn owns(cx: &App, document: u64) -> bool {
         cx.try_global::<Self>()
-            .is_some_and(|selection| selection.block == Some(block))
+            .is_some_and(|selection| selection.block == Some(document))
     }
 }
 
-/// Makes a laid-out text element selectable. `block` identifies the text, so a
-/// drag that starts in one block replaces a selection held by another.
-pub fn selectable(block: u64, layout: TextLayout, element: impl IntoElement) -> Selectable {
+/// Makes one laid-out block selectable inside a shared document. The range is
+/// the exact slice of `text` painted by `layout`.
+pub fn selectable_in_document(
+    block: u64,
+    document: u64,
+    text: SharedString,
+    range: Range<usize>,
+    source: Option<SelectionSource>,
+    layout: TextLayout,
+    element: impl IntoElement,
+) -> Selectable {
     Selectable {
         block,
+        document,
+        document_text: Some(text),
+        document_range: Some(range),
+        source,
         layout,
         element: Some(element.into_any_element()),
         links: Vec::new(),
@@ -87,6 +153,34 @@ pub fn selectable_links(
 ) -> Selectable {
     Selectable {
         block,
+        document: block,
+        document_text: None,
+        document_range: None,
+        source: None,
+        layout,
+        element: Some(element.into_any_element()),
+        links,
+        link_listener: Some(Box::new(listener)),
+    }
+}
+
+pub fn selectable_links_in_document(
+    block: u64,
+    document: u64,
+    text: SharedString,
+    range: Range<usize>,
+    source: Option<SelectionSource>,
+    layout: TextLayout,
+    element: impl IntoElement,
+    links: Vec<Range<usize>>,
+    listener: impl Fn(usize, &mut Window, &mut App) + 'static,
+) -> Selectable {
+    Selectable {
+        block,
+        document,
+        document_text: Some(text),
+        document_range: Some(range),
+        source,
         layout,
         element: Some(element.into_any_element()),
         links,
@@ -98,6 +192,10 @@ type LinkListener = Box<dyn Fn(usize, &mut Window, &mut App)>;
 
 pub struct Selectable {
     block: u64,
+    document: u64,
+    document_text: Option<SharedString>,
+    document_range: Option<Range<usize>>,
+    source: Option<SelectionSource>,
     layout: TextLayout,
     element: Option<AnyElement>,
     links: Vec<Range<usize>>,
@@ -106,16 +204,20 @@ pub struct Selectable {
 
 impl Selectable {
     fn paint_selection(&self, window: &mut Window, cx: &App) {
-        if !TextSelection::owns(cx, self.block) {
+        if !TextSelection::owns(cx, self.document) {
             return;
         }
-        let range = cx
+        let document_range = self
+            .document_range
+            .clone()
+            .unwrap_or_else(|| 0..self.layout.len());
+        let Some(range) = cx
             .try_global::<TextSelection>()
             .map(TextSelection::range)
-            .unwrap_or_default();
-        if range.start >= range.end {
+            .and_then(|range| selection_range_in_block(&range, &document_range))
+        else {
             return;
-        }
+        };
         let (Some(start), Some(end)) = (
             self.layout.position_for_index(range.start),
             self.layout.position_for_index(range.end),
@@ -150,10 +252,18 @@ impl Selectable {
         hitbox: &Hitbox,
         link_listener: Option<LinkListener>,
         window: &mut Window,
-        cx: &App,
+        _cx: &App,
     ) {
         let block = self.block;
+        let document = self.document;
         let layout = self.layout.clone();
+        let layout_text = layout.text();
+        let document_text = self
+            .document_text
+            .clone()
+            .unwrap_or_else(|| layout_text.clone().into());
+        let document_range = self.document_range.clone().unwrap_or(0..layout_text.len());
+        let source = self.source.clone();
         let links = self.links.clone();
         let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
@@ -171,35 +281,51 @@ impl Selectable {
                 index..index
             };
             cx.set_global(TextSelection {
-                block: Some(block),
-                text: text.into(),
-                anchor: range.start,
-                head: range.end,
+                block: Some(document),
+                text: document_text.clone(),
+                anchor: document_range.start + range.start,
+                head: document_range.start + range.end,
                 // A small pointer movement between the two presses should not
                 // collapse the word that the second press just selected.
                 dragging: event.click_count == 1,
-                pressed_link: links.iter().position(|range| range.contains(&index)),
+                pressed_link: links
+                    .iter()
+                    .position(|range| range.contains(&index))
+                    .map(|link| (block, link)),
+                source: source.clone(),
+                action_position: Some(event.position),
+                action_menu_open: false,
             });
             window.refresh();
         });
 
+        let document_range = self
+            .document_range
+            .clone()
+            .unwrap_or_else(|| 0..self.layout.len());
         let layout = self.layout.clone();
+        let moved = hitbox.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || !event.dragging() {
+            if phase != DispatchPhase::Bubble
+                || !event.dragging()
+                || event.position.y < moved.top()
+                || event.position.y > moved.bottom()
+            {
                 return;
             }
             if !cx
                 .try_global::<TextSelection>()
-                .is_some_and(|selection| selection.dragging && selection.block == Some(block))
+                .is_some_and(|selection| selection.dragging && selection.block == Some(document))
             {
                 return;
             }
-            let index = index_at(&layout, event.position);
+            let index = document_range.start + index_at(&layout, event.position);
             let selection = cx.global_mut::<TextSelection>();
             if selection.head == index {
                 return;
             }
             selection.head = index;
+            selection.action_position = Some(event.position);
             window.refresh();
         });
 
@@ -209,14 +335,21 @@ impl Selectable {
         window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble
                 || event.button != MouseButton::Left
-                || !TextSelection::owns(cx, block)
+                || !TextSelection::owns(cx, document)
             {
                 return;
             }
             let pressed_link = {
                 let selection = cx.global_mut::<TextSelection>();
                 selection.dragging = false;
-                selection.pressed_link.take()
+                selection.action_position = Some(event.position);
+                match selection.pressed_link {
+                    Some((pressed_block, link)) if pressed_block == block => {
+                        selection.pressed_link = None;
+                        Some(link)
+                    }
+                    _ => None,
+                }
             };
             if released.is_hovered(window)
                 && let (Some(link), Some(listener)) = (pressed_link, link_listener.as_ref())
@@ -229,18 +362,17 @@ impl Selectable {
                 listener(link, window, cx);
             }
         });
-
-        // Only the block holding the selection needs to drop it, and it drops on
-        // the way down so a press on other text can claim it on the way back up.
-        if TextSelection::owns(cx, block) {
-            window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
-                if phase == DispatchPhase::Capture {
-                    TextSelection::clear(cx);
-                    window.refresh();
-                }
-            });
-        }
     }
+}
+
+/// The selected portion painted by one block, translated back to local bytes.
+fn selection_range_in_block(
+    selection: &Range<usize>,
+    block: &Range<usize>,
+) -> Option<Range<usize>> {
+    let start = selection.start.max(block.start);
+    let end = selection.end.min(block.end);
+    (start < end).then(|| start - block.start..end - block.start)
 }
 
 fn paint_row(window: &mut Window, start: Point<Pixels>, end: Point<Pixels>) {
@@ -444,6 +576,7 @@ mod tests {
                 head: 9,
                 dragging: false,
                 pressed_link: None,
+                ..Default::default()
             });
         });
         let link = point(px(10.0), px(10.0));
@@ -463,6 +596,7 @@ mod tests {
             head: 11,
             dragging: false,
             pressed_link: None,
+            ..Default::default()
         };
         let backward = TextSelection {
             anchor: 11,
@@ -476,6 +610,14 @@ mod tests {
     }
 
     #[test]
+    fn selection_ranges_continue_across_text_blocks() {
+        let selection = 2..16;
+
+        assert_eq!(selection_range_in_block(&selection, &(0..10)), Some(2..10));
+        assert_eq!(selection_range_in_block(&selection, &(12..23)), Some(0..4));
+    }
+
+    #[test]
     fn an_empty_selection_copies_nothing() {
         let empty = TextSelection {
             block: Some(1),
@@ -484,6 +626,7 @@ mod tests {
             head: 2,
             dragging: false,
             pressed_link: None,
+            ..Default::default()
         };
         assert_eq!(empty.range(), 2..2);
         assert!(empty.text.get(empty.range()).unwrap().is_empty());

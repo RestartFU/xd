@@ -3,6 +3,7 @@ package com.restartfu.xd.store
 import com.restartfu.xd.model.ChatState
 import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
+import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.LiveItemReply
 import com.restartfu.xd.protocol.MessageReply
@@ -165,6 +166,37 @@ class TranscriptMachineTest {
             result.messages.map { it.kind },
         )
         assertEquals(listOf(12_000L, 13_000L), result.messages.map { it.atMillis })
+    }
+
+    @Test
+    fun todoSnapshotsStayOutOfTheTranscriptAndUpdateLive() {
+        val marker = "todo_list\n" +
+            "[{\"id\":\"1\",\"text\":\"Build pane\",\"status\":\"in_progress\"}]"
+        var state = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat = chat(),
+                messages = messages(
+                    MessageReply("assistant", "Starting", 12),
+                    MessageReply("tool", marker, 13),
+                ),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertEquals(listOf("Starting"), state.messages.map { it.text })
+        assertEquals("Build pane", state.todos.single().text)
+        assertEquals(TodoStatus.IN_PROGRESS, state.todos.single().status)
+
+        state = reduce(
+            state,
+            TranscriptInput.Tool(
+                "todo_list\n" +
+                    "[{\"id\":\"1\",\"text\":\"Build pane\",\"status\":\"completed\"}]",
+            ),
+        ).state
+        assertTrue(state.liveItems.isEmpty())
+        assertEquals(TodoStatus.COMPLETED, state.todos.single().status)
     }
 
     @Test

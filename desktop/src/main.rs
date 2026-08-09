@@ -7,6 +7,7 @@ use std::{
     ffi::OsString,
     fs,
     hash::{Hash, Hasher},
+    ops::Range,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -41,7 +42,10 @@ use xd_desktop::{
     context_usage::{self, Severity as ContextSeverity},
     daemon::{DaemonHandle, DaemonUpdate, MessageCursor, RequestKind, StartedDaemon},
     markdown::{self, Block, CodeKind, CodeSpan, InlineKind, InlineText},
-    model::{AgentBackend, AppModel, Attachment, Folder, Message, MessagePageDirection},
+    model::{
+        AgentBackend, AppModel, Attachment, ChatSummary, Folder, Message, MessagePageDirection,
+        TodoStatus,
+    },
     remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
 };
 
@@ -72,7 +76,9 @@ use input::{
     SelectWordLeft, SelectWordRight, ShowCharacterPalette, Submit, Tab, Up, WordLeft, WordRight,
 };
 use presence::DiscordPresence;
-use selection::{selectable, selectable_links};
+use selection::{
+    SelectionSource, TextSelection, selectable_in_document, selectable_links_in_document,
+};
 use settings::{AccentPreset, AppSettings, GitWriter};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
@@ -1879,6 +1885,9 @@ impl XdDesktop {
                 | RequestKind::FileBrowseList { .. }
                 | RequestKind::FileBrowseRead { .. }
                 | RequestKind::FileBrowseWrite { .. }
+                | RequestKind::FileTreeList { .. }
+                | RequestKind::FileTabRead { .. }
+                | RequestKind::FileTabWrite { .. }
                 | RequestKind::GitCommit { .. }
                 | RequestKind::GitPush { .. }
                 | RequestKind::TerminalOpen { .. }
@@ -8236,6 +8245,7 @@ impl XdDesktop {
         self.composer_menu = None;
         self.pending_speech = None;
         self.speech_output.stop();
+        TextSelection::clear(cx);
         self.cancel_voice(false, cx);
         self.diff_generation = self.diff_generation.saturating_add(1);
         self.diff_panel = None;
@@ -8365,6 +8375,25 @@ impl XdDesktop {
             restore: false,
         });
         true
+    }
+
+    fn queue_selected_context(&mut self, target_chat_id: &str, cx: &mut Context<Self>) {
+        let Some(context) = TextSelection::context(cx) else {
+            return;
+        };
+        let prompt = selection_context_prompt(&context.text, &context.source);
+        let Some(daemon) = self.active_daemon().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a daemon.".into());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = daemon.queue_message(target_chat_id, &prompt) {
+            self.model.connection_error = Some(error);
+            cx.notify();
+            return;
+        }
+        TextSelection::clear(cx);
+        cx.notify();
     }
 
     fn clear_question(&mut self, cx: &mut Context<Self>) {
@@ -9150,6 +9179,8 @@ impl XdDesktop {
         daemon: Option<&DaemonHandle>,
         image_cache: &Arc<Mutex<MessageImageCache>>,
         workspace_root: Option<&str>,
+        source_chat_id: &str,
+        source_chat_title: &str,
     ) -> gpui::AnyElement {
         if message.role == "duration" {
             return turn_duration_label(&message.content)
@@ -9255,6 +9286,12 @@ impl XdDesktop {
                                             Some(expanded_sections),
                                             Some(desktop.clone()),
                                             Some(index),
+                                            Some(SelectionSource::ChatMessage {
+                                                chat_id: source_chat_id.to_owned(),
+                                                chat_title: source_chat_title.to_owned(),
+                                                message_id: message.id,
+                                                role: message.role.clone(),
+                                            }),
                                         )
                                         .text_sm()
                                         .line_height(px(21.0)),
@@ -9598,16 +9635,29 @@ impl XdDesktop {
         expanded_sections: Option<&HashSet<String>>,
         desktop: Option<Entity<Self>>,
         transcript_index: Option<usize>,
+        selection_source: Option<SelectionSource>,
     ) -> gpui::Div {
+        let selection_document_id = scoped_element_id(scope, usize::MAX);
+        let (selection_text, selection_ranges) = markdown_selection_document(&document.blocks);
+        let selection_text: SharedString = selection_text.into();
         let mut content = div().w_full().flex().flex_col().gap_2();
         for (block_index, block) in document.blocks.iter().cloned().enumerate() {
             let block_id = scoped_element_id(scope, block_index);
+            let selection_range = selection_ranges[block_index].clone();
             let element = match block {
                 Block::Heading { level, content } => {
-                    let heading = div()
-                        .mt_1()
-                        .font_weight(FontWeight::BOLD)
-                        .child(Self::inline_text(content, block_id));
+                    let heading =
+                        div()
+                            .mt_1()
+                            .font_weight(FontWeight::BOLD)
+                            .child(Self::inline_text(
+                                content,
+                                block_id,
+                                selection_document_id,
+                                selection_text.clone(),
+                                selection_range.expect("headings are selectable"),
+                                selection_source.clone(),
+                            ));
                     match level {
                         1 => heading.text_xl().line_height(px(30.0)),
                         2 => heading.text_lg().line_height(px(27.0)),
@@ -9617,7 +9667,14 @@ impl XdDesktop {
                 }
                 Block::Paragraph(content) => div()
                     .whitespace_normal()
-                    .child(Self::inline_text(content, block_id))
+                    .child(Self::inline_text(
+                        content,
+                        block_id,
+                        selection_document_id,
+                        selection_text.clone(),
+                        selection_range.expect("paragraphs are selectable"),
+                        selection_source.clone(),
+                    ))
                     .into_any_element(),
                 Block::Quote(content) => div()
                     .pl_3()
@@ -9625,7 +9682,14 @@ impl XdDesktop {
                     .border_l_2()
                     .border_color(rgb(0x59647a))
                     .text_color(rgb(MUTED))
-                    .child(Self::inline_text(content, block_id))
+                    .child(Self::inline_text(
+                        content,
+                        block_id,
+                        selection_document_id,
+                        selection_text.clone(),
+                        selection_range.expect("quotes are selectable"),
+                        selection_source.clone(),
+                    ))
                     .into_any_element(),
                 Block::ListItem {
                     number,
@@ -9645,7 +9709,14 @@ impl XdDesktop {
                                 number.map_or_else(|| "•".into(), |number| format!("{number}.")),
                             ),
                     )
-                    .child(div().flex_1().child(Self::inline_text(content, block_id)))
+                    .child(div().flex_1().child(Self::inline_text(
+                        content,
+                        block_id,
+                        selection_document_id,
+                        selection_text.clone(),
+                        selection_range.expect("list items are selectable"),
+                        selection_source.clone(),
+                    )))
                     .into_any_element(),
                 Block::Rule => div()
                     .w_full()
@@ -9723,7 +9794,15 @@ impl XdDesktop {
                                 .child({
                                     let code_text = code_text.with_highlights(highlights);
                                     let layout = code_text.layout().clone();
-                                    selectable(block_id, layout, code_text)
+                                    selectable_in_document(
+                                        block_id,
+                                        selection_document_id,
+                                        selection_text.clone(),
+                                        selection_range.expect("code blocks are selectable"),
+                                        selection_source.clone(),
+                                        layout,
+                                        code_text,
+                                    )
                                 }),
                         )
                         .into_any_element()
@@ -9750,7 +9829,15 @@ impl XdDesktop {
                             },
                         )]);
                         let layout = table_text.layout().clone();
-                        selectable(block_id, layout, table_text)
+                        selectable_in_document(
+                            block_id,
+                            selection_document_id,
+                            selection_text.clone(),
+                            selection_range.expect("tables are selectable"),
+                            selection_source.clone(),
+                            layout,
+                            table_text,
+                        )
                     })
                     .into_any_element(),
                 Block::Analysis(blocks) => {
@@ -9813,6 +9900,7 @@ impl XdDesktop {
                                 expanded_sections,
                                 desktop.clone(),
                                 transcript_index,
+                                selection_source.clone(),
                             )));
                     }
                     disclosure.into_any_element()
@@ -9823,7 +9911,14 @@ impl XdDesktop {
         content
     }
 
-    fn inline_text(content: InlineText, id: u64) -> gpui::AnyElement {
+    fn inline_text(
+        content: InlineText,
+        id: u64,
+        selection_document: u64,
+        selection_text: SharedString,
+        selection_range: Range<usize>,
+        selection_source: Option<SelectionSource>,
+    ) -> gpui::AnyElement {
         let links = content
             .spans
             .iter()
@@ -9859,15 +9954,34 @@ impl XdDesktop {
         let text = StyledText::new(content.text).with_highlights(highlights);
         let layout = text.layout().clone();
         if links.is_empty() {
-            return selectable(id, layout, text).into_any_element();
+            return selectable_in_document(
+                id,
+                selection_document,
+                selection_text,
+                selection_range,
+                selection_source,
+                layout,
+                text,
+            )
+            .into_any_element();
         }
         let ranges = links.iter().map(|(range, _)| range.clone()).collect();
         let urls = links.into_iter().map(|(_, url)| url).collect::<Vec<_>>();
-        selectable_links(id, layout, text, ranges, move |index, _, cx| {
-            if let Some(url) = urls.get(index) {
-                cx.open_url(url);
-            }
-        })
+        selectable_links_in_document(
+            id,
+            selection_document,
+            selection_text,
+            selection_range,
+            selection_source,
+            layout,
+            text,
+            ranges,
+            move |index, _, cx| {
+                if let Some(url) = urls.get(index) {
+                    cx.open_url(url);
+                }
+            },
+        )
         .into_any_element()
     }
 
@@ -10265,6 +10379,135 @@ impl Render for XdDesktop {
         let working = self.model.working;
         let working_for = self.model.working_for();
         let selected = self.model.selected_summary().cloned();
+        let selected_text_context = TextSelection::context(cx);
+        let selection_source_chat =
+            selected_text_context
+                .as_ref()
+                .map(|context| match &context.source {
+                    SelectionSource::ChatMessage { chat_id, .. }
+                    | SelectionSource::WorkspaceFile { chat_id, .. } => chat_id.as_str(),
+                });
+        let selection_context_targets = selection_source_chat
+            .map(|chat_id| {
+                selection_context_targets(&self.model.chats, chat_id)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let selection_context_action = selected_text_context
+            .filter(|_| self.model.connected && !selection_context_targets.is_empty())
+            .map(|context| {
+                let bounds = window.bounds();
+                let window_width = f32::from(bounds.size.width);
+                let window_height = f32::from(bounds.size.height);
+                let left = (f32::from(context.position.x) + 10.0)
+                    .clamp(12.0, (window_width - 272.0).max(12.0));
+                let top = (f32::from(context.position.y) + 12.0)
+                    .clamp(12.0, (window_height - 52.0).max(12.0));
+                let open_up = top > window_height * 0.55;
+                let target_rows = selection_context_targets
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, chat)| {
+                        let chat_id = chat.id.clone();
+                        let title = chat.title.unwrap_or_else(|| "New Chat".into());
+                        div()
+                            .id(("selection-context-target", index))
+                            .w_full()
+                            .min_w_0()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.queue_selected_context(&chat_id, cx);
+                            }))
+                            .when(chat.working, |row| row.child(working_dots(index, MUTED)))
+                            .child(div().min_w_0().overflow_hidden().child(title))
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>();
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(260.0))
+                    .relative()
+                    .child(
+                        div().flex().child(
+                            div()
+                                .id("selection-context-action")
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(accent))
+                                .bg(rgb(SURFACE))
+                                .shadow_lg()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xd6ddff))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(|_, window, cx| {
+                                    TextSelection::toggle_action_menu(cx);
+                                    window.refresh();
+                                })
+                                .child(if context.menu_open {
+                                    "Send to chat  ▴"
+                                } else {
+                                    "Send to chat  ▾"
+                                }),
+                        ),
+                    )
+                    .when(context.menu_open, |anchor| {
+                        anchor.child(
+                            div()
+                                .id("selection-context-targets")
+                                .absolute()
+                                .left(px(0.0))
+                                .when(open_up, |menu| menu.bottom(px(40.0)))
+                                .when(!open_up, |menu| menu.top(px(40.0)))
+                                .w_full()
+                                .max_h(px(260.0))
+                                .overflow_y_scroll()
+                                .p_2()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .shadow_lg()
+                                .child(
+                                    div()
+                                        .px_1()
+                                        .pb_1()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(MUTED))
+                                        .child("Queue context in"),
+                                )
+                                .children(target_rows),
+                        )
+                    })
+                    .into_any_element()
+            });
+        let selection_source_chat_id = selected
+            .as_ref()
+            .map(|chat| chat.id.clone())
+            .unwrap_or_default();
+        let selection_source_chat_title = selected
+            .as_ref()
+            .and_then(|chat| chat.title.clone())
+            .unwrap_or_else(|| "New Chat".into());
         let diff_open = self.diff_panel.is_some();
         let terminal_open = self.terminal_panel.is_some();
         let can_open_diff = selected.is_some();
@@ -12075,7 +12318,6 @@ impl Render for XdDesktop {
         let composer_selector_menu = self.composer_menu.and_then(|menu| {
             let (title, choices) = match menu {
                 ComposerMenu::Model if can_change_agent => {
-                    let multiple_backends = self.model.agent_backends.len() > 1;
                     let mut choices = Vec::new();
                     for (backend_id, model_id) in filtered_models(
                         &self.model.agent_backends,
@@ -12095,13 +12337,8 @@ impl Render for XdDesktop {
                             .favorite_models
                             .iter()
                             .any(|value| value == &key);
-                        let label = if multiple_backends {
-                            format!("{} · {}", backend.name, model.name)
-                        } else {
-                            model.name.clone()
-                        };
                         choices.push((
-                            label,
+                            model.name.clone(),
                             backend.id == self.model.backend
                                 && self.model.model.as_deref() == Some(model.id.as_str()),
                             ComposerChoice::Model {
@@ -12247,11 +12484,9 @@ impl Render for XdDesktop {
                 .enumerate()
                 .map(|(index, (label, selected, choice, favorite))| {
                     let desktop = menu_desktop.clone();
-                    let label = if selected {
-                        format!("✓  {label}")
-                    } else {
-                        label
-                    };
+                    let model_icon = favorite
+                        .as_ref()
+                        .and_then(|(backend_id, _, _)| agent_icon(backend_id));
                     let row = div()
                         .id(("composer-menu-choice", index))
                         .px_3()
@@ -12270,7 +12505,25 @@ impl Render for XdDesktop {
                                 this.apply_composer_choice(choice.clone(), cx);
                             });
                         })
-                        .child(div().min_w_0().flex_1().child(label))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .when(selected, |label| label.child("✓"))
+                                .when_some(model_icon, |label, (icon, color)| {
+                                    label.child(
+                                        svg()
+                                            .flex_shrink_0()
+                                            .path(icon)
+                                            .size(px(15.0))
+                                            .text_color(rgb(color)),
+                                    )
+                                })
+                                .child(label),
+                        )
                         .when(menu == ComposerMenu::Model && index < 9, |row| {
                             row.child(
                                 div()
@@ -12743,6 +12996,8 @@ impl Render for XdDesktop {
                     transcript_daemon.as_ref(),
                     &image_cache,
                     inline_diff_workspace_root.as_deref(),
+                    &selection_source_chat_id,
+                    &selection_source_chat_title,
                 )
             })
             .size_full()
@@ -12758,6 +13013,8 @@ impl Render for XdDesktop {
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
+        let can_stop = working && self.model.selected_chat.is_some() && self.model.connected;
+        let composer_action_enabled = if working { can_stop } else { can_send };
         let voice_available = voice_input::AVAILABLE
             && self.model.selected_chat.is_some()
             && self.model.connected
@@ -13234,6 +13491,56 @@ impl Render for XdDesktop {
         } else {
             self.connection_in_flight
         };
+        let completed_todos = self
+            .model
+            .todos
+            .iter()
+            .filter(|todo| todo.status == TodoStatus::Completed)
+            .count();
+        let todo_count = self.model.todos.len();
+        let todo_rows = self
+            .model
+            .todos
+            .iter()
+            .enumerate()
+            .map(|(index, todo)| {
+                let (symbol, color) = match todo.status {
+                    TodoStatus::Pending => ("○", MUTED),
+                    TodoStatus::InProgress => ("●", accent),
+                    TodoStatus::Completed => ("✓", 0x7fc49a),
+                };
+                div()
+                    .id(("todo-row", index))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .px_1()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(color))
+                            .child(symbol),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgb(if todo.status == TodoStatus::Completed {
+                                MUTED
+                            } else {
+                                TEXT
+                            }))
+                            .child(todo.text.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
 
         let composer = div()
             .flex_shrink_0()
@@ -13306,6 +13613,46 @@ impl Render for XdDesktop {
                                     .child("×"),
                             )
                         }),
+                )
+            })
+            .when(todo_count > 0, |element| {
+                element.child(
+                    div()
+                        .id("todo-pane")
+                        .min_w_0()
+                        .w_full()
+                        .max_w(px(1040.0))
+                        .mx_auto()
+                        .mb_2()
+                        .max_h(px(176.0))
+                        .overflow_y_scroll()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE))
+                        .child(
+                            div()
+                                .mb_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(MUTED))
+                                .child("Tasks")
+                                .child(
+                                    div()
+                                        .text_color(rgb(if completed_todos == todo_count {
+                                            0x7fc49a
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .child(format!("{completed_todos}/{todo_count}")),
+                                ),
+                        )
+                        .children(todo_rows),
                 )
             })
             .when(queue_count > 0, |element| {
@@ -13590,22 +13937,35 @@ impl Render for XdDesktop {
                             .items_center()
                             .justify_center()
                             .rounded_lg()
-                            .bg(rgb(if can_send { accent } else { SURFACE_HIGH }))
-                            .when(can_send, |button| {
-                                button
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(accent_hover)))
+                            .bg(rgb(if can_stop {
+                                0x6b3038
+                            } else if can_send {
+                                accent
+                            } else {
+                                SURFACE_HIGH
+                            }))
+                            .when(composer_action_enabled, |button| {
+                                button.cursor_pointer().hover(|style| {
+                                    style.bg(rgb(if working { 0x7b3943 } else { accent_hover }))
+                                })
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_send {
+                                if working {
+                                    this.cancel_turn();
+                                    cx.notify();
+                                } else if can_send {
                                     this.send_composer(cx);
                                 }
                             }))
                             .child(
                                 svg()
-                                    .path(SEND_ICON)
+                                    .path(if working { STOP_ICON } else { SEND_ICON })
                                     .size(px(18.0))
-                                    .text_color(rgb(if can_send { 0xffffff } else { MUTED })),
+                                    .text_color(rgb(if composer_action_enabled {
+                                        0xffffff
+                                    } else {
+                                        MUTED
+                                    })),
                             ),
                     ),
             )
@@ -13847,6 +14207,13 @@ impl Render for XdDesktop {
                     let modified = preview.content != preview.original;
                     let saving = preview.saving;
                     let markdown_scope = format!("workspace-{}", preview.path);
+                    let preview_selection_source =
+                        self.model.selected_chat.clone().map(|chat_id| {
+                            SelectionSource::WorkspaceFile {
+                                chat_id,
+                                path: preview.path.clone(),
+                            }
+                        });
                     let language = preview
                         .path
                         .rsplit_once('.')
@@ -13977,6 +14344,7 @@ impl Render for XdDesktop {
                                     None,
                                     None,
                                     None,
+                                    preview_selection_source,
                                 ))
                                 .into_any_element()
                         } else {
@@ -18514,7 +18882,9 @@ impl Render for XdDesktop {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
-                if this.directory_browser.is_some() {
+                if TextSelection::close_action_menu(cx) {
+                    cx.notify();
+                } else if this.directory_browser.is_some() {
                     this.close_directory_browser(cx);
                 } else if this.message_image_viewer.is_some() {
                     this.close_message_image(cx);
@@ -18588,6 +18958,7 @@ impl Render for XdDesktop {
             .font_family("Inter")
             .when(client_decorations, |root| root.child(titlebar))
             .child(content)
+            .when_some(selection_context_action, |root, action| root.child(action))
             .when_some(sidebar_context_overlay, |root, overlay| root.child(overlay))
             .child(
                 div()
@@ -19578,6 +19949,75 @@ fn scoped_element_id(scope: &str, index: usize) -> u64 {
     hasher.finish()
 }
 
+/// Flattens the rendered text blocks into the text Ctrl+C should receive and
+/// records where each separately laid-out block lives inside it.
+fn markdown_selection_document(blocks: &[Block]) -> (String, Vec<Option<Range<usize>>>) {
+    let mut text = String::new();
+    let mut ranges = Vec::with_capacity(blocks.len());
+    let mut has_block = false;
+    for block in blocks {
+        let block_text = match block {
+            Block::Heading { content, .. }
+            | Block::Paragraph(content)
+            | Block::Quote(content)
+            | Block::ListItem { content, .. } => Some(content.text.as_str()),
+            Block::Code(code) => Some(code.code.as_str()),
+            Block::Table(table) => Some(table.text.as_str()),
+            Block::Rule | Block::Analysis(_) => None,
+        };
+        let Some(block_text) = block_text else {
+            ranges.push(None);
+            continue;
+        };
+        if has_block {
+            text.push_str("\n\n");
+        }
+        has_block = true;
+        let start = text.len();
+        text.push_str(block_text);
+        ranges.push(Some(start..text.len()));
+    }
+    (text, ranges)
+}
+
+fn selection_context_targets<'a>(
+    chats: &'a [ChatSummary],
+    source_chat_id: &str,
+) -> Vec<&'a ChatSummary> {
+    let Some(workspace) = chats
+        .iter()
+        .find(|chat| chat.id == source_chat_id)
+        .map(|chat| chat.folder.as_str())
+    else {
+        return Vec::new();
+    };
+    chats
+        .iter()
+        .filter(|chat| chat.id != source_chat_id && chat.folder == workspace)
+        .collect()
+}
+
+fn selection_context_prompt(text: &str, source: &SelectionSource) -> String {
+    let attribution = match source {
+        SelectionSource::ChatMessage {
+            chat_id,
+            chat_title,
+            message_id,
+            role,
+        } => {
+            let message = message_id.map_or_else(
+                || format!("{role} message"),
+                |message_id| format!("{role} message #{message_id}"),
+            );
+            format!("{message} in chat \"{chat_title}\" (chat id: {chat_id})")
+        }
+        SelectionSource::WorkspaceFile { chat_id, path } => {
+            format!("workspace file \"{path}\" opened from chat {chat_id}")
+        }
+    };
+    format!("Context shared from {attribution}:\n\n{text}")
+}
+
 fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
     if !edit.submitting {
         return false;
@@ -20030,6 +20470,26 @@ mod tests {
     }
 
     #[test]
+    fn remote_endpoint_routes_file_tree_and_tab_replies() {
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::FileTreeList {
+            chat_id: "chat".into(),
+            path: String::new(),
+            generation: 1,
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::FileTabRead {
+            chat_id: "chat".into(),
+            path: "src/main.rs".into(),
+            generation: 1,
+        }));
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::FileTabWrite {
+            chat_id: "chat".into(),
+            path: "src/main.rs".into(),
+            content: "fn main() {}\n".into(),
+            generation: 1,
+        }));
+    }
+
+    #[test]
     fn workspace_file_navigation_stays_relative_to_the_chat() {
         assert_eq!(join_browse_path("", "src"), "src");
         assert_eq!(join_browse_path("src", "main.rs"), "src/main.rs");
@@ -20215,6 +20675,22 @@ mod tests {
     }
 
     #[test]
+    fn model_choices_replace_provider_name_prefixes_with_agent_marks() {
+        let source = include_str!("main.rs");
+        let menu = source
+            .split_once("let composer_selector_menu =")
+            .expect("composer selector render section")
+            .1
+            .split_once("let composer_selector_overlay =")
+            .expect("composer selector render section ends")
+            .0;
+
+        assert!(!menu.contains("format!(\"{} · {}\", backend.name, model.name)"));
+        assert!(menu.contains("agent_icon(backend_id)"));
+        assert!(menu.contains("model.name.clone()"));
+    }
+
+    #[test]
     fn composer_action_icons_are_embedded_and_drawable() {
         for path in ["icons/send.svg", "icons/mic.svg", "icons/stop.svg"] {
             let bytes = EmbeddedIcons
@@ -20223,6 +20699,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("the composer action icon {path} is embedded"));
             assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
         }
+    }
+
+    #[test]
+    fn composer_action_becomes_stop_while_a_turn_is_working() {
+        let source = include_str!("main.rs");
+        let action = source
+            .split_once(".id(\"send\")")
+            .expect("composer action is rendered")
+            .1
+            .split_once("let git_commit_input")
+            .expect("composer action render section ends")
+            .0;
+
+        assert!(action.contains("if working { STOP_ICON } else { SEND_ICON }"));
+        assert!(
+            action
+                .contains("if working {\n                                    this.cancel_turn();")
+        );
     }
 
     #[test]
@@ -20351,6 +20845,71 @@ mod tests {
         assert_eq!(first, scoped_element_id("message-1", 0));
         assert_ne!(first, scoped_element_id("message-2", 0));
         assert_ne!(first, scoped_element_id("message-1", 1));
+    }
+
+    #[test]
+    fn markdown_blocks_share_one_copyable_selection_document() {
+        let document = markdown::parse("first paragraph\n\nsecond paragraph");
+        let (text, ranges) = markdown_selection_document(&document.blocks);
+
+        assert_eq!(text, "first paragraph\n\nsecond paragraph");
+        assert_eq!(
+            &text[ranges[0].clone().expect("first paragraph is selectable")],
+            "first paragraph"
+        );
+        assert_eq!(
+            &text[ranges[1].clone().expect("second paragraph is selectable")],
+            "second paragraph"
+        );
+    }
+
+    #[test]
+    fn selected_context_names_the_source_chat_role_and_message() {
+        let source = selection::SelectionSource::ChatMessage {
+            chat_id: "chat-source".into(),
+            chat_title: "Selection bug".into(),
+            message_id: Some(42),
+            role: "assistant".into(),
+        };
+
+        let prompt = selection_context_prompt("the selected text", &source);
+
+        assert!(prompt.contains("Selection bug"));
+        assert!(prompt.contains("chat-source"));
+        assert!(prompt.contains("assistant message #42"));
+        assert!(prompt.ends_with("the selected text"));
+    }
+
+    #[test]
+    fn selection_context_targets_only_other_chats_in_the_workspace() {
+        let chats = vec![
+            xd_desktop::model::ChatSummary {
+                id: "source".into(),
+                folder: "workspace-a".into(),
+                title: Some("Source".into()),
+                backend: "codex".into(),
+                working: false,
+            },
+            xd_desktop::model::ChatSummary {
+                id: "target".into(),
+                folder: "workspace-a".into(),
+                title: Some("Target".into()),
+                backend: "codex".into(),
+                working: false,
+            },
+            xd_desktop::model::ChatSummary {
+                id: "elsewhere".into(),
+                folder: "workspace-b".into(),
+                title: Some("Elsewhere".into()),
+                backend: "codex".into(),
+                working: false,
+            },
+        ];
+
+        let targets = selection_context_targets(&chats, "source");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "target");
     }
 
     #[test]

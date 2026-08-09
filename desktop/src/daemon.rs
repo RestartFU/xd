@@ -1219,6 +1219,15 @@ impl DaemonHandle {
         )
     }
 
+    pub fn queue_message(&self, chat_id: &str, text: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::QueueMutation {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "queue", "chat": chat_id, "text": text}),
+        )
+    }
+
     pub fn edit_queue(
         &self,
         chat_id: &str,
@@ -1848,6 +1857,45 @@ mod tests {
                 },
                 ..
             } if chat_id == "chat-1" && old_text == "before" && new_text == "after"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn queues_a_message_without_starting_a_turn() {
+        let directory = env::temp_dir().join(format!("xd-queue-message-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "queue");
+            assert_eq!(request["chat"], "chat-2");
+            assert_eq!(request["text"], "shared context");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon.queue_message("chat-2", "shared context").unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::QueueMutation { chat_id },
+                ..
+            } if chat_id == "chat-2"
         ));
 
         server.join().unwrap();

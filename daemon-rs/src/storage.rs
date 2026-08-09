@@ -1280,6 +1280,20 @@ impl StateStore {
         Ok(database.last_insert_rowid())
     }
 
+    pub fn latest_todo_snapshot(&self, chat_id: &str) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database
+            .query_row(
+                "SELECT content FROM messages \
+                 WHERE chat_id = ? AND role = 'tool' AND content LIKE 'todo_list\n%' \
+                 ORDER BY id DESC LIMIT 1",
+                [chat_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
     pub fn set_session(
         &self,
         chat_id: &str,
