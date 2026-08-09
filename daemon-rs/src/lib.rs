@@ -326,6 +326,7 @@ impl Engine {
             Some("queue") => self.event_mutation(|store| store.queue(&request)),
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
+            Some("reorder-queue") => self.event_mutation(|store| store.reorder_queue(&request)),
             Some("steer-queue") => self.steer_queue(&request),
             Some("workflow-status") => self.workflow_status(owner, &request),
             Some("terminal-list") => self.terminal_list(&request),

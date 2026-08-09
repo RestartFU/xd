@@ -238,6 +238,7 @@ gpui::actions!(
     [
         OpenSearch,
         CloseSearch,
+        CopyRenderedSelection,
         SelectModel1,
         SelectModel2,
         SelectModel3,
@@ -809,6 +810,54 @@ struct QueueEdit {
     original: String,
     text: String,
     submitting: Option<String>,
+}
+
+#[derive(Clone)]
+struct QueueDrag {
+    chat_id: String,
+    index: usize,
+    text: String,
+    label: SharedString,
+    position: Point<gpui::Pixels>,
+}
+
+impl QueueDrag {
+    fn new(chat_id: String, index: usize, text: String) -> Self {
+        Self {
+            chat_id,
+            index,
+            label: queue_preview(&text).into(),
+            text,
+            position: Point::default(),
+        }
+    }
+
+    fn position(mut self, position: Point<gpui::Pixels>) -> Self {
+        self.position = position;
+        self
+    }
+}
+
+impl Render for QueueDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .pl(self.position.x + px(10.0))
+            .pt(self.position.y + px(10.0))
+            .child(
+                div()
+                    .max_w(px(300.0))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgba(0x101013ee))
+                    .shadow_md()
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .child(self.label.clone()),
+            )
+    }
 }
 
 #[derive(Clone)]
@@ -8529,6 +8578,31 @@ impl XdDesktop {
         }
     }
 
+    fn reorder_queued(
+        &mut self,
+        source: usize,
+        source_text: &str,
+        anchor: usize,
+        anchor_text: &str,
+        after: bool,
+    ) {
+        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+            return;
+        };
+        if source == anchor
+            || self.model.queue.get(source).map(String::as_str) != Some(source_text)
+            || self.model.queue.get(anchor).map(String::as_str) != Some(anchor_text)
+        {
+            return;
+        }
+        if let Some(daemon) = self.active_daemon().cloned()
+            && let Err(error) =
+                daemon.reorder_queue(chat_id, source, source_text, anchor, anchor_text, after)
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     fn cancel_turn(&mut self) {
         let Some(chat_id) = self.model.selected_chat.as_deref() else {
             return;
@@ -10444,28 +10518,31 @@ impl Render for XdDesktop {
                     .left(px(left))
                     .top(px(top))
                     .w(px(260.0))
-                    .relative()
                     .child(
                         div().flex().child(
                             div()
                                 .id("selection-context-action")
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .px_3()
                                 .py_2()
                                 .rounded_lg()
                                 .border_1()
                                 .border_color(rgb(accent))
-                                .bg(rgb(SURFACE))
+                                .bg(rgb(SURFACE_HIGH))
                                 .shadow_lg()
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xd6ddff))
+                                .text_color(rgb(TEXT))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                                .hover(|style| style.bg(rgb(0x242428)))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(|_, window, cx| {
                                     TextSelection::toggle_action_menu(cx);
                                     window.refresh();
                                 })
+                                .child(svg().path(SEND_ICON).size(px(13.0)).text_color(rgb(accent)))
                                 .child(if context.menu_open {
                                     "Send to chat  ▴"
                                 } else {
@@ -13228,7 +13305,13 @@ impl Render for XdDesktop {
                         .into_any_element();
                 }
                 let preview = queue_preview(prompt);
+                let dragged = QueueDrag::new(selected_chat_id.clone(), index, prompt.clone());
+                let drop_before_chat = selected_chat_id.clone();
+                let drop_after_chat = selected_chat_id.clone();
+                let before_anchor_text = prompt.clone();
+                let after_anchor_text = prompt.clone();
                 queue_message_shell()
+                    .relative()
                     .child(
                         div()
                             .min_w_0()
@@ -13238,9 +13321,19 @@ impl Render for XdDesktop {
                             .gap_2()
                             .child(
                                 div()
+                                    .id(("drag-queue", index))
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(accent))
+                                    .cursor_move()
+                                    .on_drag(dragged, |drag: &QueueDrag, position, _, cx| {
+                                        cx.new(|_| drag.clone().position(position))
+                                    })
+                                    .child("⠿")
                                     .child(format!("Queued {}", index + 1)),
                             )
                             .child(div().flex_1())
@@ -13298,6 +13391,60 @@ impl Render for XdDesktop {
                             ),
                     )
                     .child(queue_preview_element(preview))
+                    .child(
+                        div()
+                            .id(("reorder-queue-before", index))
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .h(px(10.0))
+                            .can_drop(move |value, _, _| {
+                                value.downcast_ref::<QueueDrag>().is_some_and(|drag| {
+                                    drag.chat_id == drop_before_chat && drag.index != index
+                                })
+                            })
+                            .drag_over::<QueueDrag>(move |style, _, _, _| {
+                                style.border_t_2().border_color(rgb(accent))
+                            })
+                            .on_drop(cx.listener(move |this, drag: &QueueDrag, _, cx| {
+                                this.reorder_queued(
+                                    drag.index,
+                                    &drag.text,
+                                    index,
+                                    &before_anchor_text,
+                                    false,
+                                );
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(("reorder-queue-after", index))
+                            .absolute()
+                            .bottom(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .h(px(10.0))
+                            .can_drop(move |value, _, _| {
+                                value.downcast_ref::<QueueDrag>().is_some_and(|drag| {
+                                    drag.chat_id == drop_after_chat && drag.index != index
+                                })
+                            })
+                            .drag_over::<QueueDrag>(move |style, _, _, _| {
+                                style.border_b_2().border_color(rgb(accent))
+                            })
+                            .on_drop(cx.listener(move |this, drag: &QueueDrag, _, cx| {
+                                this.reorder_queued(
+                                    drag.index,
+                                    &drag.text,
+                                    index,
+                                    &after_anchor_text,
+                                    true,
+                                );
+                                cx.notify();
+                            })),
+                    )
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -18900,6 +19047,11 @@ impl Render for XdDesktop {
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| {
                 this.open_search(window, cx);
             }))
+            .on_action(cx.listener(|_, _: &CopyRenderedSelection, _, cx| {
+                if let Some(text) = TextSelection::selected(cx) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
                 if TextSelection::close_action_menu(cx) {
                     cx.notify();
@@ -20967,6 +21119,23 @@ mod tests {
     }
 
     #[test]
+    fn selected_text_action_is_a_visible_positioned_overlay() {
+        let source = include_str!("main.rs");
+        let action = source
+            .split_once("let selection_context_action =")
+            .expect("selected text action render section")
+            .1
+            .split_once("let selection_source_chat_id =")
+            .expect("selected text action render section ends")
+            .0;
+
+        assert!(action.contains(".absolute()"));
+        assert!(!action.contains(".w(px(260.0))\n                    .relative()"));
+        assert!(action.contains(".path(SEND_ICON)"));
+        assert!(action.contains(".bg(rgb(SURFACE_HIGH))"));
+    }
+
+    #[test]
     fn live_transcript_updates_reuse_the_persisted_message_snapshot() {
         let mut model = AppModel {
             messages: vec![Message::new(Some(1), "user", "history", None)],
@@ -21699,6 +21868,8 @@ fn main() {
                 KeyBinding::new("ctrl-f", OpenSearch, Some("XdDesktop")),
                 KeyBinding::new("cmd-k", OpenSearch, Some("XdDesktop")),
                 KeyBinding::new("cmd-f", OpenSearch, Some("XdDesktop")),
+                KeyBinding::new("ctrl-c", CopyRenderedSelection, Some("XdDesktop")),
+                KeyBinding::new("cmd-c", CopyRenderedSelection, Some("XdDesktop")),
                 KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
                 KeyBinding::new("ctrl-1", SelectModel1, Some("XdDesktop")),
                 KeyBinding::new("ctrl-2", SelectModel2, Some("XdDesktop")),

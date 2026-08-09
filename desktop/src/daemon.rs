@@ -1262,6 +1262,31 @@ impl DaemonHandle {
         )
     }
 
+    pub fn reorder_queue(
+        &self,
+        chat_id: &str,
+        source: usize,
+        source_text: &str,
+        anchor: usize,
+        anchor_text: &str,
+        after: bool,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::QueueMutation {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({
+                "op": "reorder-queue",
+                "chat": chat_id,
+                "source": source,
+                "source-text": source_text,
+                "anchor": anchor,
+                "anchor-text": anchor_text,
+                "after": after,
+            }),
+        )
+    }
+
     pub fn cancel(&self, chat_id: &str) -> Result<(), String> {
         self.send(
             RequestKind::Cancel {
@@ -1864,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn queues_a_message_without_starting_a_turn() {
+    fn queues_and_reorders_messages_without_starting_a_turn() {
         let directory = env::temp_dir().join(format!("xd-queue-message-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
@@ -1882,6 +1907,21 @@ mod tests {
             assert_eq!(request["text"], "shared context");
             let request_id = request["_xd_request"].as_u64().unwrap();
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "reorder-queue");
+            assert_eq!(request["chat"], "chat-2");
+            assert_eq!(request["source"], 2);
+            assert_eq!(request["source-text"], "third");
+            assert_eq!(request["anchor"], 0);
+            assert_eq!(request["anchor-text"], "first");
+            assert_eq!(request["after"], false);
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
         let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
@@ -1890,6 +1930,16 @@ mod tests {
             DaemonUpdate::Connected { .. }
         ));
         daemon.queue_message("chat-2", "shared context").unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::QueueMutation { chat_id },
+                ..
+            } if chat_id == "chat-2"
+        ));
+        daemon
+            .reorder_queue("chat-2", 2, "third", 0, "first", false)
+            .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             DaemonUpdate::Reply {

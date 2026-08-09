@@ -2962,6 +2962,40 @@ impl StateStore {
         })
     }
 
+    pub fn reorder_queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+        let message = "reorder-queue needs a chat id, source, anchor, and their text.";
+        let chat_id = required_string(request, "chat", message)?;
+        let source_text = required_string_allow_empty(request, "source-text", message)?.to_owned();
+        let anchor_text = required_string_allow_empty(request, "anchor-text", message)?.to_owned();
+        let source = optional_integer(request, "source")?
+            .filter(|index| *index >= 0)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
+            as usize;
+        let anchor = optional_integer(request, "anchor")?
+            .filter(|index| *index >= 0)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
+            as usize;
+        let after = request
+            .get("after")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?;
+        self.mutate_queue(chat_id, move |queue| {
+            if queue.get(source) != Some(&source_text) || queue.get(anchor) != Some(&anchor_text) {
+                return Err(StorageError::InvalidRequest(
+                    "That queued message changed; try again.".into(),
+                ));
+            }
+            if source == anchor {
+                return Ok(false);
+            }
+            let selected = queue.remove(source);
+            let anchor = if source < anchor { anchor - 1 } else { anchor };
+            let destination = anchor + usize::from(after);
+            queue.insert(destination, selected);
+            Ok(true)
+        })
+    }
+
     pub fn steer_queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
         let message = "steer-queue needs a chat id, queue index, and text.";
         let chat_id = required_string(request, "chat", message)?;
@@ -6433,6 +6467,40 @@ mod tests {
         let conflict = store
             .edit_queue(&json!({
                 "chat": "chat-1", "index": 1, "old-text": "second", "text": "lost update"
+            }))
+            .unwrap_err();
+        assert!(conflict.to_string().contains("changed; try again"));
+
+        let (_, event) = store
+            .reorder_queue(&json!({
+                "chat": "chat-1",
+                "source": 0,
+                "source-text": "first",
+                "anchor": 1,
+                "anchor-text": "edited",
+                "after": true,
+            }))
+            .unwrap();
+        assert_eq!(event["queue"], json!(["edited", "first"]));
+        let (_, event) = store
+            .reorder_queue(&json!({
+                "chat": "chat-1",
+                "source": 1,
+                "source-text": "first",
+                "anchor": 0,
+                "anchor-text": "edited",
+                "after": false,
+            }))
+            .unwrap();
+        assert_eq!(event["queue"], json!(["first", "edited"]));
+        let conflict = store
+            .reorder_queue(&json!({
+                "chat": "chat-1",
+                "source": 0,
+                "source-text": "stale",
+                "anchor": 1,
+                "anchor-text": "edited",
+                "after": true,
             }))
             .unwrap_err();
         assert!(conflict.to_string().contains("changed; try again"));
