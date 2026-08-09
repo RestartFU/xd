@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,9 +17,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,6 +54,7 @@ internal fun PipelineCard(
     client: XdClient,
 ) {
     val context = LocalContext.current
+    var expanded by rememberSaveable(run.marker) { mutableStateOf(false) }
     val snapshot by produceState(
         initialValue = PipelineSnapshot(),
         key1 = run.marker,
@@ -79,91 +85,118 @@ internal fun PipelineCard(
     val terminal = status?.state == "completed"
     val running = !terminal && !snapshot.error
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable {
-                runCatching {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse(run.url)),
-                    )
-                }
-            },
+        modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
         ),
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                when {
-                    running -> CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
-                    snapshot.error -> Text(
-                        "!",
-                        color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    else -> Text(
-                        workflowIcon(status?.conclusion),
-                        color = workflowColour(status?.conclusion),
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
+        Column {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            ) {
                 Text(
-                    status?.name?.ifBlank { null } ?: "Pipeline",
-                    modifier = Modifier.weight(1f),
+                    "Workflow",
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
-                elapsedText(
-                    status?.startedAt,
-                    status?.completedAt,
-                    terminal,
-                )?.let { elapsed ->
-                    Text(
-                        elapsed,
-                        color = MaterialTheme.colorScheme.outline,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    when {
+                        running -> CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        snapshot.error -> Text(
+                            "!",
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        else -> Text(
+                            workflowIcon(status?.conclusion),
+                            color = workflowColour(status?.conclusion),
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                     Spacer(Modifier.width(8.dp))
-                }
-                if (terminal) {
                     Text(
-                        workflowLabel(status?.conclusion),
-                        color = workflowColour(status?.conclusion),
-                        style = MaterialTheme.typography.labelMedium,
+                        status?.name?.ifBlank { null } ?: run.repository,
+                        modifier = Modifier.weight(1f),
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                } else if (snapshot.error) {
+                    elapsedText(
+                        status?.startedAt,
+                        status?.completedAt,
+                        terminal,
+                    )?.let { elapsed ->
+                        Text(
+                            elapsed,
+                            color = MaterialTheme.colorScheme.outline,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    if (terminal) {
+                        Text(
+                            workflowLabel(status?.conclusion),
+                            color = workflowColour(status?.conclusion),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    } else if (snapshot.error) {
+                        Text(
+                            "Status unavailable",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
                     Text(
-                        "Status unavailable",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.labelMedium,
+                        if (expanded) "▾" else "▸",
+                        color = MaterialTheme.colorScheme.outline,
                     )
                 }
             }
-            Text(
-                "${run.repository} · #${run.id}",
-                color = MaterialTheme.colorScheme.outline,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (status != null) {
-                if (status.jobs.isEmpty()) {
+
+            if (expanded) {
+                Column(
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     Text(
-                        "No jobs reported yet",
+                        "${run.repository} · #${run.id}",
                         color = MaterialTheme.colorScheme.outline,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        status.jobs.forEach { job -> PipelineJob(job) }
+                    if (status != null) {
+                        if (status.jobs.isEmpty()) {
+                            Text(
+                                "No jobs reported yet",
+                                color = MaterialTheme.colorScheme.outline,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                status.jobs.forEach { job -> PipelineJob(job) }
+                            }
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(run.url)),
+                                )
+                            }
+                        },
+                    ) {
+                        Text("Open in GitHub ↗")
                     }
                 }
             }

@@ -11,6 +11,12 @@ public sealed interface TranscriptRow {
         val run: PipelineRun,
     ) : TranscriptRow
 
+    /** A delegated agent with its own status and task details. */
+    public data class Subagent(
+        val item: TranscriptItem,
+        val run: SubagentRun,
+    ) : TranscriptRow
+
     /** A run of ordinary tool calls worth hiding behind one line. */
     public data class Tools(val items: List<TranscriptItem>) : TranscriptRow {
         val label: String get() = "${items.size} tool calls"
@@ -47,9 +53,17 @@ public object ToolGrouping {
             } else {
                 null
             }
+            val subagent = if (item.kind == TranscriptKind.TOOL) {
+                SubagentRun.parse(item.text)
+            } else {
+                null
+            }
             if (pipeline != null) {
                 flush()
                 rows += TranscriptRow.Pipeline(item, pipeline)
+            } else if (subagent != null) {
+                flush()
+                rows += TranscriptRow.Subagent(item, subagent)
             } else if (item.kind == TranscriptKind.TOOL && ToolText.patch(item.text) == null) {
                 run += item
             } else {

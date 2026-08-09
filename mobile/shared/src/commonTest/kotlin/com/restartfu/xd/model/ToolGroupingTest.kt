@@ -74,6 +74,21 @@ class ToolGroupingTest {
     }
 
     @Test
+    fun aSubagentGetsItsOwnCardRow() {
+        val subagent = tool(
+            "subagent\nthread-1\nCodex · gpt-5.6-sol\nRunning · Review the diff",
+        )
+        val rows = ToolGrouping.rows(listOf(tool("before"), subagent, tool("after")))
+
+        assertEquals(3, rows.size)
+        assertIs<TranscriptRow.Single>(rows[0])
+        val card = assertIs<TranscriptRow.Subagent>(rows[1])
+        assertEquals("thread-1", card.run.key)
+        assertEquals("Review the diff", card.run.detail)
+        assertIs<TranscriptRow.Single>(rows[2])
+    }
+
+    @Test
     fun nonToolItemsPassThroughInOrder() {
         val items = listOf(message("first"), message("second"))
 
