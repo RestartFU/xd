@@ -6601,6 +6601,15 @@ impl XdDesktop {
             return;
         };
         self.kill_terminal_id(terminal_id, cx);
+        self.terminal_panel = None;
+        if self
+            .pane_resize
+            .is_some_and(|resize| resize.kind == PaneResizeKind::Terminal)
+        {
+            self.pane_resize = None;
+        }
+        self.remember_panes();
+        cx.notify();
     }
 
     fn kill_terminal_id(&mut self, terminal_id: String, cx: &mut Context<Self>) {
@@ -20194,6 +20203,26 @@ mod tests {
             panel.selected().map(|session| session.title.as_str()),
             Some("shell two")
         );
+    }
+
+    #[gpui::test]
+    fn terminal_header_trash_closes_the_pane(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.terminal_panel = Some(TerminalPanel {
+                chat_id: "chat".into(),
+                sessions: Vec::new(),
+                selected: Some("terminal".into()),
+                viewport: None,
+                opening: false,
+                loading: false,
+                error: None,
+            });
+
+            desktop.kill_terminal(cx);
+
+            assert!(desktop.terminal_panel.is_none());
+        });
     }
 
     #[test]
