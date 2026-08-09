@@ -95,6 +95,8 @@ pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
 const SEND_ICON: &str = "icons/send.svg";
+const MIC_ICON: &str = "icons/mic.svg";
+const STOP_ICON: &str = "icons/stop.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
@@ -12479,17 +12481,17 @@ impl Render for XdDesktop {
             && self.model.selected_chat.is_some()
             && self.model.connected
             && !self.sending;
-        let (voice_label, voice_active, voice_error) = match &self.voice_input.state {
-            VoiceState::Idle => ("● Voice".to_owned(), false, None),
-            VoiceState::Checking => ("Checking…".to_owned(), true, None),
-            VoiceState::NeedsModel => ("Download base.en (141 MiB)".to_owned(), true, None),
-            VoiceState::Downloading(progress) if *progress >= 0 => {
-                (format!("Downloading {progress}%"), true, None)
+        let (voice_icon, voice_active, voice_error) = match &self.voice_input.state {
+            VoiceState::Idle => (MIC_ICON, false, None),
+            VoiceState::NeedsModel => (MIC_ICON, true, None),
+            VoiceState::Downloading(progress) => {
+                let _progress = *progress;
+                (STOP_ICON, true, None)
             }
-            VoiceState::Downloading(_) => ("Downloading…".to_owned(), true, None),
-            VoiceState::Recording => ("■ Stop".to_owned(), true, None),
-            VoiceState::Transcribing => ("Cancel voice".to_owned(), true, None),
-            VoiceState::Failed(error) => ("Retry voice".to_owned(), false, Some(error.clone())),
+            VoiceState::Checking | VoiceState::Recording | VoiceState::Transcribing => {
+                (STOP_ICON, true, None)
+            }
+            VoiceState::Failed(error) => (MIC_ICON, false, Some(error.clone())),
         };
         let shortcuts_enabled =
             self.model.selected_chat.is_some() && self.model.connected && !self.sending;
@@ -13178,11 +13180,12 @@ impl Render for XdDesktop {
                     .child(
                         div()
                             .id("attach")
-                            .px_2()
-                            .py_2()
+                            .size(px(40.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .rounded_lg()
-                            .text_sm()
-                            .text_color(rgb(if can_attach { TEXT } else { MUTED }))
                             .when(can_attach, |button| {
                                 button
                                     .cursor_pointer()
@@ -13193,18 +13196,19 @@ impl Render for XdDesktop {
                                     this.attach_images(cx);
                                 }
                             }))
-                            .child("+ Attach"),
+                            .child(plus_icon(if can_attach { TEXT } else { MUTED })),
                     )
                     .when(voice_input::AVAILABLE, |composer| {
                         composer.child(
                             div()
                                 .id("voice-input")
-                                .px_2()
-                                .py_2()
+                                .size(px(40.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .rounded_lg()
                                 .bg(rgb(if voice_active { 0x26354d } else { SURFACE }))
-                                .text_sm()
-                                .text_color(rgb(if can_voice { TEXT } else { MUTED }))
                                 .when(can_voice, |button| {
                                     button
                                         .cursor_pointer()
@@ -13215,7 +13219,12 @@ impl Render for XdDesktop {
                                         this.toggle_voice(cx);
                                     }
                                 }))
-                                .child(voice_label),
+                                .child(
+                                    svg()
+                                        .path(voice_icon)
+                                        .size(px(18.0))
+                                        .text_color(rgb(if can_voice { TEXT } else { MUTED })),
+                                ),
                         )
                     })
                     .child(
@@ -18711,6 +18720,12 @@ impl AssetSource for EmbeddedIcons {
             SEND_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/send.svg").as_slice(),
             )),
+            MIC_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/mic.svg").as_slice(),
+            )),
+            STOP_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/stop.svg").as_slice(),
+            )),
             _ => None,
         })
     }
@@ -18720,6 +18735,8 @@ impl AssetSource for EmbeddedIcons {
             CLAUDE_ICON.into(),
             CODEX_ICON.into(),
             SEND_ICON.into(),
+            MIC_ICON.into(),
+            STOP_ICON.into(),
         ])
     }
 }
@@ -19637,12 +19654,14 @@ mod tests {
     }
 
     #[test]
-    fn composer_send_icon_is_embedded_and_drawable() {
-        let bytes = EmbeddedIcons
-            .load("icons/send.svg")
-            .expect("embedded icons load")
-            .expect("the composer send icon is embedded");
-        assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
+    fn composer_action_icons_are_embedded_and_drawable() {
+        for path in ["icons/send.svg", "icons/mic.svg", "icons/stop.svg"] {
+            let bytes = EmbeddedIcons
+                .load(path)
+                .expect("embedded icons load")
+                .unwrap_or_else(|| panic!("the composer action icon {path} is embedded"));
+            assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
+        }
     }
 
     #[test]
