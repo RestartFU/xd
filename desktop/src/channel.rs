@@ -28,6 +28,13 @@ pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
     );
 
     #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(background_creation_flags(true));
+    }
+
+    #[cfg(windows)]
     if let Some(bin) = _launcher.parent() {
         command
             .env("XD_TLS_PROXY_EXECUTABLE", bin.join("xd-tls-proxy.exe"))
@@ -52,6 +59,11 @@ pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
     }
 }
 
+#[cfg(any(windows, test))]
+fn background_creation_flags(windows: bool) -> u32 {
+    if windows { 0x0800_0000 } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +73,11 @@ mod tests {
         assert!(!nightly());
         assert_eq!(data_name(), OsString::from("xd"));
         assert_eq!(app_id(), "com.restartfu.Xd");
+    }
+
+    #[test]
+    fn background_daemons_use_the_windows_no_console_flag() {
+        assert_eq!(background_creation_flags(true), 0x0800_0000);
+        assert_eq!(background_creation_flags(false), 0);
     }
 }

@@ -10,7 +10,13 @@
     <MajorUpgrade
       AllowSameVersionUpgrades="yes"
       DowngradeErrorMessage="A newer version of $(ProductName) is already installed." />
-    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <MediaTemplate
+      EmbedCab="no"
+      CabinetTemplate="xd{0}.cab"
+      CompressionLevel="high"
+      MaximumUncompressedMediaSize="2048" />
+    <Icon Id="xd.ico" SourceFile="$(IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="xd.ico" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="ManufacturerFolder" Name="RestartFU">
@@ -28,6 +34,7 @@
             Name="$(ProductName)"
             Description="Workspace-organized AI conversations"
             Target="[INSTALLFOLDER]bin\xd.exe"
+            Icon="xd.ico"
             WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
           <RegistryValue

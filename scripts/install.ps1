@@ -1,17 +1,22 @@
-# Installs xd on Windows from its release checksum and MSI.
+# Installs xd on Windows through its small downloading setup executable, or
+# directly from a local MSI and external cabinet for CI/source builds.
 #
 # Latest nightly:
 #
 #   irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 #
 # Pass -Release when invoking a downloaded script file to install the newest
-# tagged release. -MsiPath and -ChecksumPath let CI exercise this exact path.
+# tagged release. The path parameters let CI exercise the offline MSI path.
 
 [CmdletBinding()]
 param(
     [switch] $Release,
+    [string] $SetupPath,
+    [string] $SetupChecksumPath,
     [string] $MsiPath,
     [string] $ChecksumPath,
+    [string] $CabPath,
+    [string] $CabChecksumPath,
     [switch] $Quiet,
     [switch] $InApp,
     [string] $StageDirectory,
@@ -26,11 +31,12 @@ $ErrorActionPreference = 'Stop'
 $repository = 'RestartFU/xd'
 $channel = if ($Release) { 'release' } else { 'nightly' }
 $installName = if ($Release) { 'xd' } else { 'xd-nightly' }
-$asset = if ($Release) {
-    'xd-windows-x86_64.msi'
+$setupAsset = if ($Release) {
+    'xd-windows-x86_64-setup.exe'
 } else {
-    'xd-nightly-windows-x86_64.msi'
+    'xd-nightly-windows-x86_64-setup.exe'
 }
+$cabAsset = 'xd1.cab'
 $baseUri = if ($Release) {
     "https://github.com/$repository/releases/latest/download"
 } else {
@@ -90,9 +96,27 @@ function Find-RunningInstalledProcess {
     return $null
 }
 
+function Confirm-Checksum(
+    [string] $Path,
+    [string] $Checksum,
+    [string] $Description
+) {
+    $Path = (Resolve-Path -LiteralPath $Path).Path
+    $Checksum = (Resolve-Path -LiteralPath $Checksum).Path
+    $expected = ((Get-Content -LiteralPath $Checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    if ($expected -notmatch '^[0-9a-f]{64}$') {
+        throw "$Description checksum has an invalid format."
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    if ($actual.ToLowerInvariant() -ne $expected) {
+        throw "$Description does not match its release checksum."
+    }
+    return $Path
+}
+
 # Refuse an external install while either the desktop or daemon still has an
 # installed executable mapped. The handoff path waits for both processes to
-# exit before invoking MSI, so it does not need this bypass.
+# exit before invoking the staged setup, so it does not need this bypass.
 if (-not $StageOnly -and $env:XD_ALLOW_RUNNING_INSTALL -ne '1') {
     $running = Find-RunningInstalledProcess
     if ($null -ne $running) {
@@ -107,38 +131,52 @@ try {
         }
         $StageDirectory = [IO.Path]::GetFullPath($StageDirectory)
         New-Item -ItemType Directory -Force -Path $StageDirectory | Out-Null
-        $MsiPath = Join-Path $StageDirectory $asset
-        $ChecksumPath = "$MsiPath.sha256"
+        $SetupPath = Join-Path $StageDirectory $setupAsset
+        $SetupChecksumPath = "$SetupPath.sha256"
         Write-Host "Downloading xd $channel..."
-        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$asset" -OutFile $MsiPath
-        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$asset.sha256" `
-            -OutFile $ChecksumPath
-    } elseif ([string]::IsNullOrWhiteSpace($MsiPath)) {
+        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$setupAsset" `
+            -OutFile $SetupPath
+        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$setupAsset.sha256" `
+            -OutFile $SetupChecksumPath
+    } elseif ([string]::IsNullOrWhiteSpace($MsiPath) -and
+        [string]::IsNullOrWhiteSpace($SetupPath)) {
         $downloadDirectory = Join-Path ([IO.Path]::GetTempPath()) (
             'xd-install-' + [guid]::NewGuid().ToString('N')
         )
         New-Item -ItemType Directory -Path $downloadDirectory | Out-Null
-        $MsiPath = Join-Path $downloadDirectory $asset
-        $ChecksumPath = "$MsiPath.sha256"
+        $SetupPath = Join-Path $downloadDirectory $setupAsset
+        $SetupChecksumPath = "$SetupPath.sha256"
 
         Write-Host "Downloading xd $channel..."
-        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$asset" -OutFile $MsiPath
-        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$asset.sha256" `
-            -OutFile $ChecksumPath
+        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$setupAsset" `
+            -OutFile $SetupPath
+        Invoke-WebRequest -UseBasicParsing -Uri "$baseUri/$setupAsset.sha256" `
+            -OutFile $SetupChecksumPath
     }
 
-    $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
-    if (-not [string]::IsNullOrWhiteSpace($ChecksumPath)) {
-        $ChecksumPath = (Resolve-Path -LiteralPath $ChecksumPath).Path
-        $expected = (
-            (Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split '\s+'
-        )[0].ToLowerInvariant()
-        if ($expected -notmatch '^[0-9a-f]{64}$') {
-            throw 'Release checksum has an invalid format.'
+    $usingSetup = -not [string]::IsNullOrWhiteSpace($SetupPath)
+    if ($usingSetup) {
+        if ([string]::IsNullOrWhiteSpace($SetupChecksumPath)) {
+            throw 'A setup checksum is required.'
         }
-        $actual = (Get-FileHash -LiteralPath $MsiPath -Algorithm SHA256).Hash
-        if ($actual.ToLowerInvariant() -ne $expected) {
-            throw 'Downloaded MSI does not match its release checksum.'
+        $SetupPath = Confirm-Checksum $SetupPath $SetupChecksumPath 'Downloaded setup'
+    } else {
+        $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
+        if (-not [string]::IsNullOrWhiteSpace($ChecksumPath)) {
+            $MsiPath = Confirm-Checksum $MsiPath $ChecksumPath 'MSI'
+        }
+        if ([string]::IsNullOrWhiteSpace($CabPath)) {
+            $CabPath = Join-Path (Split-Path -Parent $MsiPath) $cabAsset
+        }
+        $CabPath = (Resolve-Path -LiteralPath $CabPath).Path
+        if ([string]::IsNullOrWhiteSpace($CabChecksumPath)) {
+            $candidate = "$CabPath.sha256"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $CabChecksumPath = $candidate
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CabChecksumPath)) {
+            $CabPath = Confirm-Checksum $CabPath $CabChecksumPath 'MSI payload cabinet'
         }
     }
 
@@ -165,16 +203,27 @@ try {
     $isAdministrator = $principal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator
     )
-    $displayMode = if ($Quiet) { '/qn' } else { '/passive' }
-    $start = @{
-        FilePath = "$env:SystemRoot\System32\msiexec.exe"
-        ArgumentList = @(
-            '/i', "`"$MsiPath`"", $displayMode, '/norestart', 'REBOOT=ReallySuppress'
-        )
-        Wait = $true
-        PassThru = $true
+    if ($usingSetup) {
+        $arguments = @('/norestart')
+        if ($Quiet) { $arguments += '/quiet' }
+        $start = @{
+            FilePath = $SetupPath
+            ArgumentList = $arguments
+            Wait = $true
+            PassThru = $true
+        }
+    } else {
+        $displayMode = if ($Quiet) { '/qn' } else { '/passive' }
+        $start = @{
+            FilePath = "$env:SystemRoot\System32\msiexec.exe"
+            ArgumentList = @(
+                '/i', "`"$MsiPath`"", $displayMode, '/norestart', 'REBOOT=ReallySuppress'
+            )
+            Wait = $true
+            PassThru = $true
+        }
+        if (-not $isAdministrator) { $start['Verb'] = 'RunAs' }
     }
-    if (-not $isAdministrator) { $start['Verb'] = 'RunAs' }
 
     Write-Host 'Installing xd...'
     $process = Start-Process @start

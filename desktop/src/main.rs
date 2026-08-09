@@ -31,9 +31,9 @@ use gpui::{
     Context, CursorStyle, Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
     Image, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, PathPromptOptions, Point, Render, ResizeEdge, SharedString,
-    StyledText, TextRun, Timer, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowOptions, canvas, div, img, list, prelude::*, px, relative, rgb, rgba,
-    size, svg,
+    StyledText, TextRun, Timer, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*,
+    px, relative, rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -95,6 +95,8 @@ const SURFACE_HIGH: u32 = 0x1a1a1e;
 const BORDER: u32 = 0x2a2a2d;
 const TEXT: u32 = 0xf2f2f4;
 const MUTED: u32 = 0xa8a8ad;
+const UI_FONT: &str = "DM Sans";
+const EMBEDDED_UI_FONT: &[u8] = include_bytes!("../../data/fonts/DMSans-Variable.ttf");
 // The bundle ships this face and points fontconfig at itself. The generic
 // `monospace` alias resolves through the host's fontconfig instead, which lands
 // on DejaVu Sans Mono and reads nothing like the rest of the shell.
@@ -10366,6 +10368,8 @@ impl Render for XdDesktop {
         }
         self.presence.set_state(self.presence_state());
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
+        let custom_titlebar =
+            client_decorations || cfg!(any(target_os = "windows", target_os = "macos"));
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });
         let accent = self.settings.accent.color();
         let accent_hover = self.settings.accent.hover_color();
@@ -18808,7 +18812,11 @@ impl Render for XdDesktop {
             .bg(rgb(SIDEBAR))
             .on_mouse_down(MouseButton::Left, |event, window, _| {
                 if event.click_count >= 2 {
-                    window.zoom_window();
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
+                    } else {
+                        window.zoom_window();
+                    }
                 } else {
                     window.start_window_move();
                 }
@@ -18818,59 +18826,70 @@ impl Render for XdDesktop {
                     .min_w_0()
                     .flex_1()
                     .px_3()
+                    .when(cfg!(target_os = "macos"), |title| title.pl(px(72.0)))
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(MUTED))
+                    .window_control_area(WindowControlArea::Drag)
                     .child("xd"),
             )
-            .child(
-                div()
-                    .id("window-minimize")
-                    .w(px(38.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(|_, window, _| window.minimize_window())
-                    .child("−"),
-            )
-            .child(
-                div()
-                    .id("window-maximize")
-                    .w(px(38.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(|_, window, _| window.zoom_window())
-                    .child("□"),
-            )
-            .child(
-                div()
-                    .id("window-close")
-                    .w(px(42.0))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xffffff)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(|_, window, _| window.remove_window())
-                    .child("×"),
-            );
+            .when(!cfg!(target_os = "macos"), |titlebar| {
+                titlebar.child(
+                    div()
+                        .id("window-minimize")
+                        .w(px(38.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                        .window_control_area(WindowControlArea::Min)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, _| window.minimize_window())
+                        .child("−"),
+                )
+            })
+            .when(!cfg!(target_os = "macos"), |titlebar| {
+                titlebar.child(
+                    div()
+                        .id("window-maximize")
+                        .w(px(38.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                        .window_control_area(WindowControlArea::Max)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, _| window.zoom_window())
+                        .child("□"),
+                )
+            })
+            .when(!cfg!(target_os = "macos"), |titlebar| {
+                titlebar.child(
+                    div()
+                        .id("window-close")
+                        .w(px(42.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xffffff)))
+                        .window_control_area(WindowControlArea::Close)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, _| window.remove_window())
+                        .child("×"),
+                )
+            });
 
         div()
             .size_full()
@@ -18955,8 +18974,8 @@ impl Render for XdDesktop {
                 }
             }))
             .bg(rgb(BG))
-            .font_family("Inter")
-            .when(client_decorations, |root| root.child(titlebar))
+            .font_family(UI_FONT)
+            .when(custom_titlebar, |root| root.child(titlebar))
             .child(content)
             .when_some(selection_context_action, |root, action| root.child(action))
             .when_some(sidebar_context_overlay, |root, overlay| root.child(overlay))
@@ -20221,6 +20240,13 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn bundled_ui_font_can_be_registered(cx: &mut gpui::TestAppContext) {
+        assert_eq!(UI_FONT, "DM Sans");
+        assert!(EMBEDDED_UI_FONT.starts_with(&[0x00, 0x01, 0x00, 0x00]));
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+    }
+
+    #[gpui::test]
     fn working_row_aligns_with_the_transcript_column(cx: &mut gpui::TestAppContext) {
         struct WorkingRowFixture;
 
@@ -20257,6 +20283,34 @@ mod tests {
                 .downcast_mut::<gpui::AnimationElement<gpui::Div>>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn desktop_platforms_mount_the_in_app_titlebar() {
+        let source = include_str!("main.rs");
+        let render = source
+            .split_once("impl Render for XdDesktop")
+            .expect("desktop render implementation")
+            .1
+            .split_once("fn load_png_attachments")
+            .expect("end of desktop render implementation")
+            .0;
+
+        assert!(render.contains(
+            "client_decorations || cfg!(any(target_os = \"windows\", target_os = \"macos\"))"
+        ));
+        assert!(render.contains("when(custom_titlebar, |root| root.child(titlebar))"));
+        assert!(render.contains("window_control_area(WindowControlArea::Drag)"));
+        assert!(render.contains("window_control_area(WindowControlArea::Min)"));
+        assert!(render.contains("window_control_area(WindowControlArea::Max)"));
+        assert!(render.contains("window_control_area(WindowControlArea::Close)"));
+
+        let startup = source
+            .rsplit_once("WindowOptions {")
+            .expect("desktop window options")
+            .1;
+        assert!(startup.contains("appears_transparent: true"));
+        assert!(startup.contains("traffic_light_position: cfg!(target_os = \"macos\")"));
     }
 
     #[test]
@@ -21612,6 +21666,12 @@ fn headless_arguments(mut arguments: Vec<OsString>) -> Option<Vec<OsString>> {
     }
 }
 
+fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
+    text_system
+        .add_fonts(vec![Cow::Borrowed(EMBEDDED_UI_FONT)])
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments
@@ -21633,6 +21693,7 @@ fn main() {
     Application::new()
         .with_assets(EmbeddedIcons)
         .run(|cx: &mut App| {
+            install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
             cx.bind_keys([
                 KeyBinding::new("ctrl-k", OpenSearch, Some("XdDesktop")),
                 KeyBinding::new("ctrl-f", OpenSearch, Some("XdDesktop")),
@@ -21815,6 +21876,12 @@ fn main() {
                     is_resizable: true,
                     window_min_size: Some(size(px(760.0), px(560.0))),
                     window_background: WindowBackgroundAppearance::Opaque,
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("xd".into()),
+                        appears_transparent: true,
+                        traffic_light_position: cfg!(target_os = "macos")
+                            .then(|| point(px(12.0), px(10.0))),
+                    }),
                     window_decorations: Some(WindowDecorations::Client),
                     app_id: Some(xd_desktop::channel::app_id().into()),
                     ..Default::default()

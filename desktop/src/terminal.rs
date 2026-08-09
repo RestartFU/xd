@@ -88,9 +88,13 @@ impl TerminalScreen {
         for line in &mut self.grid {
             line.resize(columns, Cell::default());
         }
-        while self.grid.len() > rows {
+        let rows_above_viewport = self.row.saturating_sub(rows - 1);
+        for _ in 0..rows_above_viewport {
             self.scrollback.push(self.grid.remove(0));
         }
+        self.row = self.row.saturating_sub(rows_above_viewport);
+        self.saved.0 = self.saved.0.saturating_sub(rows_above_viewport);
+        self.grid.truncate(rows);
         while self.grid.len() < rows {
             self.grid.push(vec![Cell::default(); columns]);
         }
@@ -452,6 +456,20 @@ mod tests {
         let mut screen = TerminalScreen::new(12, 3);
         screen.feed(b"hello\rbye\r\nnext\x1b[1A\x1b[6G!");
         assert_eq!(screen.text(), "byelo!\nnext");
+    }
+
+    #[test]
+    fn resizing_shorter_keeps_a_visible_prompt_on_its_original_row() {
+        let mut screen = TerminalScreen::new(20, 4);
+        screen.feed(b"new terminal");
+
+        for rows in [3, 4, 2, 4] {
+            screen.resize(20, rows);
+            screen.feed(b"\r\x1b[2Knew terminal");
+        }
+
+        assert_eq!(screen.text(), "new terminal");
+        assert!(screen.scrollback.is_empty());
     }
 
     #[test]

@@ -25,7 +25,7 @@ macOS (Apple Silicon or Intel):
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 ```
 
-Windows x86_64 (PowerShell):
+Windows x86_64: download the small [setup executable](https://github.com/RestartFU/xd/releases/latest/download/xd-windows-x86_64-setup.exe), or use PowerShell:
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/RestartFU/xd/releases/latest/download/install.ps1))) -Release
@@ -45,7 +45,7 @@ macOS (Apple Silicon or Intel):
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
 ```
 
-Windows x86_64 (PowerShell):
+Windows x86_64: download the small [setup executable](https://github.com/RestartFU/xd/releases/download/nightly/xd-nightly-windows-x86_64-setup.exe), or use PowerShell:
 
 ```powershell
 irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
@@ -103,7 +103,8 @@ Native Windows builds require Rust, CMake, 7-Zip, the Windows SDK, and .NET:
 ```powershell
 ./scripts/build-windows.ps1 -OutputDirectory windows-dist -Profile nightly
 ./scripts/package-windows.ps1 -Payload windows-dist -OutputDirectory artifacts -Profile nightly
-# -> ./artifacts/xd-nightly-windows-x86_64.msi
+# -> small ./artifacts/xd-nightly-windows-x86_64-setup.exe
+# -> MSI metadata plus the downloaded payload cabinet
 ```
 
 Mobile builds use their own Docker image and also require nothing beyond

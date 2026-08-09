@@ -437,10 +437,10 @@ fn build_and_install(
                 "-NonInteractive",
                 "-File",
                 "scripts/install.ps1",
-                "-MsiPath",
-                "artifacts/xd-nightly-windows-x86_64.msi",
-                "-ChecksumPath",
-                "artifacts/xd-nightly-windows-x86_64.msi.sha256",
+                "-SetupPath",
+                "artifacts/xd-nightly-windows-x86_64-setup.exe",
+                "-SetupChecksumPath",
+                "artifacts/xd-nightly-windows-x86_64-setup.exe.sha256",
                 "-Quiet",
             ]);
             command

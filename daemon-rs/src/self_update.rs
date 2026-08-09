@@ -79,7 +79,7 @@ struct InstallLocation {
 #[derive(Clone)]
 struct StagedUpdate {
     directory: PathBuf,
-    msi: PathBuf,
+    setup: PathBuf,
     checksum: PathBuf,
 }
 
@@ -394,11 +394,11 @@ fn stage_windows_update(installer: &Path, channel: UpdateChannel) -> Result<Stag
         ));
     }
     let asset = if channel == UpdateChannel::Release {
-        "xd-windows-x86_64.msi"
+        "xd-windows-x86_64-setup.exe"
     } else {
-        "xd-nightly-windows-x86_64.msi"
+        "xd-nightly-windows-x86_64-setup.exe"
     };
-    let msi = directory.join(asset);
+    let setup = directory.join(asset);
     let checksum = directory.join(format!("{asset}.sha256"));
     let result = run_installer_process(
         installer_command(installer, channel, InstallerMode::Stage(directory.clone())),
@@ -408,13 +408,13 @@ fn stage_windows_update(installer: &Path, channel: UpdateChannel) -> Result<Stag
         let _ = fs::remove_dir_all(&directory);
         return Err(error);
     }
-    if !regular_file(&msi) || !regular_file(&checksum) {
+    if !regular_file(&setup) || !regular_file(&checksum) {
         let _ = fs::remove_dir_all(&directory);
         return Err("The Windows installer did not produce a complete staged update.".into());
     }
     Ok(StagedUpdate {
         directory,
-        msi,
+        setup,
         checksum,
     })
 }
@@ -547,7 +547,7 @@ fn windows_installer_arguments(
 #[cfg(any(windows, test))]
 struct WindowsHandoff<'a> {
     installer: &'a Path,
-    msi: &'a Path,
+    setup: &'a Path,
     checksum: &'a Path,
     cleanup: &'a Path,
     root: &'a Path,
@@ -583,8 +583,8 @@ fn windows_handoff_arguments(
         arguments.push("-Release".into());
     }
     for (flag, value) in [
-        ("-MsiPath", handoff.msi),
-        ("-ChecksumPath", handoff.checksum),
+        ("-SetupPath", handoff.setup),
+        ("-SetupChecksumPath", handoff.checksum),
         ("-CleanupDirectory", handoff.cleanup),
         ("-InstallRoot", handoff.root),
     ] {
@@ -609,7 +609,7 @@ fn spawn_windows_update_handoff(
 
     let handoff = WindowsHandoff {
         installer: &location.installer,
-        msi: &staged.msi,
+        setup: &staged.setup,
         checksum: &staged.checksum,
         cleanup: &staged.directory,
         root: &location.root,
@@ -954,8 +954,8 @@ mod tests {
     fn the_windows_handoff_names_the_channel_it_is_installing() {
         let handoff = WindowsHandoff {
             installer: Path::new("C:/Program Files/RestartFU/xd/bin/install.ps1"),
-            msi: Path::new("C:/Temp/xd-update/xd-windows-x86_64.msi"),
-            checksum: Path::new("C:/Temp/xd-update/xd-windows-x86_64.msi.sha256"),
+            setup: Path::new("C:/Temp/xd-update/xd-windows-x86_64-setup.exe"),
+            checksum: Path::new("C:/Temp/xd-update/xd-windows-x86_64-setup.exe.sha256"),
             cleanup: Path::new("C:/Temp/xd-update"),
             root: Path::new("C:/Program Files/RestartFU/xd"),
             desktop: Path::new("C:/Program Files/RestartFU/xd/bin/xd.exe"),
@@ -978,6 +978,9 @@ mod tests {
         );
         assert!(release.contains(&"C:/Program Files/RestartFU/xd".to_owned()));
         assert!(release.contains(&"C:/Program Files/RestartFU/xd/bin/xd.exe".to_owned()));
+        assert!(release.contains(&"-SetupPath".to_owned()));
+        assert!(release.contains(&"C:/Temp/xd-update/xd-windows-x86_64-setup.exe".to_owned()));
+        assert!(!release.contains(&"-MsiPath".to_owned()));
 
         let nightly = strings(windows_handoff_arguments(&handoff, UpdateChannel::Nightly));
         assert!(!nightly.contains(&"-Release".to_owned()));

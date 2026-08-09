@@ -41,11 +41,13 @@ FROM gpui-toolchain AS gpui-desktop-source
 
 WORKDIR /src/desktop
 COPY desktop/Cargo.toml desktop/Cargo.lock ./
+COPY desktop/build.rs ./build.rs
 RUN mkdir -p src \
  && touch src/lib.rs \
  && cargo fetch --locked \
  && rm -rf src
 COPY desktop/assets ./assets
+COPY data/fonts /src/data/fonts
 COPY desktop/src ./src
 
 FROM gpui-desktop-source AS gpui-desktop-tests

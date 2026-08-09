@@ -284,20 +284,31 @@ impl FileEditor {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        if let Some(text) = item.text() {
-            let text = text.replace("\r\n", "\n").replace('\r', "\n");
-            self.replace_text_in_range(None, &text, window, cx);
-        } else if self.allow_images
-            && let Some(ClipboardEntry::Image(image)) = item
-                .into_entries()
-                .find(|entry| matches!(entry, ClipboardEntry::Image(_)))
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                self.replace_text_in_range(None, &text, window, cx);
+                return;
+            }
+            if self.allow_images
+                && let Some(ClipboardEntry::Image(image)) = item
+                    .into_entries()
+                    .find(|entry| matches!(entry, ClipboardEntry::Image(_)))
+            {
+                cx.emit(EditorEvent::PasteImage {
+                    format: image.format(),
+                    bytes: image.bytes().to_vec(),
+                });
+                return;
+            }
+        }
+
+        if self.allow_images
+            && let Some(bytes) = windows_clipboard_png()
         {
             cx.emit(EditorEvent::PasteImage {
-                format: image.format(),
-                bytes: image.bytes().to_vec(),
+                format: ImageFormat::Png,
+                bytes,
             });
         }
     }
@@ -933,6 +944,44 @@ fn syntax_color(kind: CodeKind) -> u32 {
     }
 }
 
+#[cfg(any(windows, test))]
+fn encode_clipboard_rgba_as_png(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "Clipboard image dimensions are too large.".to_owned())?;
+    if width == 0 || height == 0 || rgba.len() != expected_len {
+        return Err("Clipboard image dimensions do not match its pixels.".to_owned());
+    }
+    let width =
+        u32::try_from(width).map_err(|_| "Clipboard image width is too large.".to_owned())?;
+    let height =
+        u32::try_from(height).map_err(|_| "Clipboard image height is too large.".to_owned())?;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|error| format!("Cannot encode clipboard image: {error}"))?;
+    Ok(png)
+}
+
+#[cfg(windows)]
+fn windows_clipboard_png() -> Option<Vec<u8>> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let image = clipboard.get_image().ok()?;
+    encode_clipboard_rgba_as_png(image.width, image.height, image.bytes.as_ref()).ok()
+}
+
+#[cfg(not(windows))]
+fn windows_clipboard_png() -> Option<Vec<u8>> {
+    None
+}
+
 impl Focusable for FileEditor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1097,5 +1146,13 @@ mod tests {
     fn an_empty_message_editor_styles_its_whole_placeholder() {
         assert_eq!(display_run_len(&(0..0), Some("Message xd…".len())), 13);
         assert_eq!(display_run_len(&(4..9), None), 5);
+    }
+
+    #[test]
+    fn windows_clipboard_pixels_are_encoded_as_png_attachments() {
+        let png = encode_clipboard_rgba_as_png(1, 1, &[0x12, 0x34, 0x56, 0xff])
+            .expect("encode a one-pixel clipboard image");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(encode_clipboard_rgba_as_png(2, 1, &[0; 4]).is_err());
     }
 }

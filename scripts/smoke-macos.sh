@@ -20,6 +20,15 @@ APP="${1:?macOS app bundle}"
 [ -f "$APP/Contents/Resources/xd.icns" ]
 
 plutil -lint "$APP/Contents/Info.plist"
+[ "$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")" = xd.icns ]
+case "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" in
+  ''|*[!0-9.]*) exit 1 ;;
+esac
+ICONSET=$(mktemp -d "${TMPDIR:-/tmp}/xd-icon-smoke.XXXXXX")
+trap 'rm -rf "$ICONSET"' EXIT INT TERM
+iconutil -c iconset "$APP/Contents/Resources/xd.icns" -o "$ICONSET"
+[ -f "$ICONSET/icon_16x16.png" ]
+[ -f "$ICONSET/icon_512x512@2x.png" ]
 codesign --verify --deep --strict "$APP"
 "$APP/Contents/MacOS/xd" --version
 

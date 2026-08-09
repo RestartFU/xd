@@ -17,6 +17,7 @@ use thiserror::Error;
 pub mod agent;
 mod ask;
 mod auth;
+mod background_process;
 mod claude_proxy;
 mod cli_versions;
 mod git_draft;

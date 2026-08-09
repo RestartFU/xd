@@ -1,0 +1,30 @@
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+  RequiredVersion="6.0.0">
+  <Bundle
+    Name="$(ProductName) Setup"
+    Manufacturer="RestartFU"
+    Version="$(Version)"
+    UpgradeCode="$(BundleUpgradeCode)"
+    Compressed="no"
+    IconSourceFile="$(IconPath)"
+    AboutUrl="https://github.com/RestartFU/xd">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        LicenseUrl=""
+        ShowVersion="yes"
+        SuppressOptionsUI="yes"
+        Theme="hyperlinkLicense" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <MsiPackage
+        SourceFile="$(MsiPath)"
+        Compressed="no"
+        DownloadUrl="$(DownloadBase)/{2}"
+        Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

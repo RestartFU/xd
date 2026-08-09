@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Read,
     path::Path,
-    process::{Command, ExitStatus, Stdio},
+    process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     EventBus,
     agent::{resolve_claude, resolve_codex},
+    background_process::command as background_command,
     claude_proxy::resolve_claude_proxy,
 };
 
@@ -173,7 +174,7 @@ fn snapshot_value(provider: &str, snapshot: &CliSnapshot) -> Value {
 }
 
 fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> {
-    let mut child = Command::new(executable)
+    let mut child = background_command(executable)
         .arg("--version")
         .env("DISABLE_AUTOUPDATER", "1")
         .env("NO_COLOR", "1")

@@ -6,4 +6,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+./scripts/test-app-icons.sh
+./scripts/test-windows-downloader.sh
 ./scripts/runner-docker-build.sh --target test --progress plain "$@" .

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    process::{ChildStdin, Command, Stdio},
+    process::{ChildStdin, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use crate::{
     EventBus,
     agent::{resolve_claude, resolve_codex},
+    background_process::command as background_command,
     claude_proxy::resolve_claude_proxy,
 };
 
@@ -177,7 +178,7 @@ impl AuthManager {
             session.pid
         };
         if let Some(pid) = pid {
-            let _ = Command::new("kill")
+            let _ = background_command("kill")
                 .args(["-INT", &pid.to_string()])
                 .status();
         }
@@ -245,7 +246,7 @@ impl AuthManager {
     fn run_session(&self, provider: &str, serial: u64, login: bool) {
         let mut command = match provider {
             "claude" => {
-                let mut command = Command::new(resolve_claude());
+                let mut command = background_command(resolve_claude());
                 command.args(if login {
                     ["auth", "login"].as_slice()
                 } else {
@@ -254,7 +255,7 @@ impl AuthManager {
                 command
             }
             "claude-mode" => {
-                let mut command = Command::new(resolve_claude_proxy());
+                let mut command = background_command(resolve_claude_proxy());
                 command.args(if login {
                     ["codex", "auth", "device"].as_slice()
                 } else {
@@ -263,7 +264,7 @@ impl AuthManager {
                 command
             }
             _ => {
-                let mut command = Command::new(resolve_codex());
+                let mut command = background_command(resolve_codex());
                 command.args(if login {
                     ["login", "--device-auth"].as_slice()
                 } else {
@@ -475,17 +476,17 @@ fn snapshot_value(provider: &str, snapshot: &AuthSnapshot) -> Value {
 fn check_status(provider: &str) -> AuthSnapshot {
     let mut command = match provider {
         "claude" => {
-            let mut command = Command::new(resolve_claude());
+            let mut command = background_command(resolve_claude());
             command.args(["auth", "status", "--json"]);
             command
         }
         "claude-mode" => {
-            let mut command = Command::new(resolve_claude_proxy());
+            let mut command = background_command(resolve_claude_proxy());
             command.args(["codex", "auth", "status"]);
             command
         }
         _ => {
-            let mut command = Command::new(resolve_codex());
+            let mut command = background_command(resolve_codex());
             command.args(["login", "status"]);
             command
         }

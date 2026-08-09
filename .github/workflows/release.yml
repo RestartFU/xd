@@ -320,7 +320,7 @@ jobs:
           -OutputDirectory windows-dist
           -Profile release
 
-      - name: Build and exercise the MSI
+      - name: Build and exercise the Windows downloader
         run: |
           ./scripts/package-windows.ps1 `
             -Payload windows-dist `
@@ -328,8 +328,8 @@ jobs:
             -Profile release `
             -Version '${{ needs.prepare.outputs.version }}'
           ./scripts/install.ps1 `
-            -MsiPath artifacts/xd-windows-x86_64.msi `
-            -ChecksumPath artifacts/xd-windows-x86_64.msi.sha256 `
+            -SetupPath artifacts/xd-windows-x86_64-setup.exe `
+            -SetupChecksumPath artifacts/xd-windows-x86_64-setup.exe.sha256 `
             -Quiet
 
           # Only what this job built. An artifact is rooted at the deepest
@@ -343,6 +343,10 @@ jobs:
           path: |
             artifacts/xd-windows-x86_64.msi
             artifacts/xd-windows-x86_64.msi.sha256
+            artifacts/xd1.cab
+            artifacts/xd1.cab.sha256
+            artifacts/xd-windows-x86_64-setup.exe
+            artifacts/xd-windows-x86_64-setup.exe.sha256
 
   publish:
     needs: [prepare, linux, macos, windows]
@@ -381,7 +385,11 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
           \`\`\`
 
-          Windows (PowerShell):
+          Windows downloader:
+
+          https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/xd-windows-x86_64-setup.exe
+
+          Or PowerShell:
 
           \`\`\`
           & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
@@ -399,6 +407,8 @@ jobs:
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip xd-macos-*.zip.sha256 \
               xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
+              xd1.cab xd1.cab.sha256 \
+              xd-windows-x86_64-setup.exe xd-windows-x86_64-setup.exe.sha256 \
               scripts/install.sh scripts/install-macos.sh scripts/install.ps1
           else
             gh release create "$tag" \
@@ -411,6 +421,10 @@ jobs:
               xd-macos-*.zip.sha256 \
               xd-windows-x86_64.msi \
               xd-windows-x86_64.msi.sha256 \
+              xd1.cab \
+              xd1.cab.sha256 \
+              xd-windows-x86_64-setup.exe \
+              xd-windows-x86_64-setup.exe.sha256 \
               scripts/install.sh \
               scripts/install-macos.sh \
               scripts/install.ps1

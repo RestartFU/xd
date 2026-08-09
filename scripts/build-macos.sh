@@ -75,6 +75,13 @@ done
 
 VERSION=$("$ROOT/scripts/bump-version.sh" --current)
 COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
+BUILD_VERSION=$VERSION
+if [ "$PROFILE" = nightly ]; then
+  BUILD_VERSION=$(git -C "$ROOT" show -s --format=%ct HEAD 2>/dev/null || true)
+  case "$BUILD_VERSION" in
+    ''|*[!0-9]*) BUILD_VERSION=$VERSION ;;
+  esac
+fi
 OUT="$ROOT/dist/macos"
 CACHE="$ROOT/.build-cache/macos-assets/$ARCH"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/xd-macos-build.XXXXXX")
@@ -181,6 +188,7 @@ sed \
   -e "s|@DISPLAY_NAME@|$DISPLAY_NAME|g" \
   -e "s|@APP_ID@|$APP_ID|g" \
   -e "s|@VERSION@|$VERSION|g" \
+  -e "s|@BUILD_VERSION@|$BUILD_VERSION|g" \
   installer/macos/Info.plist.in > "$APP/Contents/Info.plist"
 
 # Finder requires an icns file. Generate it from the same vector artwork used
