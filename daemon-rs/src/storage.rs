@@ -458,7 +458,7 @@ impl StateStore {
 
         let mut statement = database.prepare(
             "SELECT id, folder_id, title, backend, daemon_working FROM chats \
-             ORDER BY last_user_message_at DESC, created_at DESC",
+             ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let chats = statement
             .query_map([], |row| {
@@ -2715,11 +2715,16 @@ impl StateStore {
         };
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
+        let sort_order = database.query_row(
+            "SELECT COALESCE(MIN(sort_order), 0) - 1 FROM chats WHERE folder_id = ?",
+            [folder_id],
+            |row| row.get::<_, i64>(0),
+        )?;
         database.execute(
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
-              workdir, created_at, updated_at, last_user_message_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workdir, sort_order, created_at, updated_at, last_user_message_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -2732,6 +2737,7 @@ impl StateStore {
                 defaults.5,
                 defaults.6,
                 workdir,
+                sort_order,
                 now,
                 now,
                 now * 1_000_000,
@@ -2756,8 +2762,36 @@ impl StateStore {
 
     pub fn move_chat(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "move-chat needs a chat id")?;
-        let folder_id = required_string(request, "folder", "move-chat needs a folder")?;
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let folder_id = optional_string(request, "folder")?;
+        let before_id = optional_string(request, "before")?;
+        let after_id = optional_string(request, "after")?;
+        if before_id.is_some() && after_id.is_some() {
+            return Err(StorageError::InvalidRequest(
+                "Choose either a chat before or after which to move.".into(),
+            ));
+        }
+        if folder_id.is_some() && (before_id.is_some() || after_id.is_some()) {
+            return Err(StorageError::InvalidRequest(
+                "Choose either a destination workspace or an ordering anchor.".into(),
+            ));
+        }
+        let place_after = after_id.is_some();
+        let anchor_id = before_id.or(after_id);
+        if anchor_id == Some(chat_id) {
+            return Err(StorageError::InvalidRequest(
+                "A chat cannot be ordered around itself.".into(),
+            ));
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if let Some(anchor_id) = anchor_id {
+            reorder_chat(&mut database, chat_id, anchor_id, place_after)?;
+            return Ok(json!({"ok": true}));
+        }
+        let folder_id = folder_id.ok_or_else(|| {
+            StorageError::InvalidRequest(
+                "move-chat needs a destination workspace or ordering anchor".into(),
+            )
+        })?;
         let root = self.workspace_root.to_string_lossy();
         let folder_exists: bool = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_folders WHERE root_path = ? AND id = ?)",
@@ -2769,9 +2803,14 @@ impl StateStore {
                 "No such folder on the daemon.".into(),
             ));
         }
+        let sort_order = database.query_row(
+            "SELECT COALESCE(MIN(sort_order), 0) - 1 FROM chats WHERE folder_id = ?",
+            [folder_id],
+            |row| row.get::<_, i64>(0),
+        )?;
         let changed = database.execute(
-            "UPDATE chats SET folder_id = ?, updated_at = ? WHERE id = ?",
-            params![folder_id, now_seconds(), chat_id],
+            "UPDATE chats SET folder_id = ?, sort_order = ?, updated_at = ? WHERE id = ?",
+            params![folder_id, sort_order, now_seconds(), chat_id],
         )?;
         if changed != 1 {
             return Err(StorageError::NoChat(chat_id.into()));
@@ -3090,6 +3129,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_chat_session_context_columns(database)?;
             ensure_chat_partial_reply_columns(database)?;
             ensure_workspace_sort_order(database)?;
+            ensure_chat_sort_order(database)?;
             return Ok(());
         }
     }
@@ -3112,6 +3152,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            daemon_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
            partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, \
+           sort_order INTEGER NOT NULL DEFAULT 0, \
            last_user_message_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, \
            updated_at INTEGER NOT NULL, FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
          CREATE INDEX IF NOT EXISTS chats_folder ON chats (folder_id, updated_at DESC); \
@@ -3171,6 +3212,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_chat_session_context_columns(database)?;
     ensure_chat_partial_reply_columns(database)?;
     ensure_workspace_sort_order(database)?;
+    ensure_chat_sort_order(database)?;
     Ok(())
 }
 
@@ -3191,6 +3233,29 @@ fn ensure_workspace_sort_order(database: &Connection) -> Result<(), StorageError
     if !columns.contains("sort_order") {
         database.execute(
             "ALTER TABLE workspace_folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_chat_sort_order(database: &Connection) -> Result<(), StorageError> {
+    let has_chats: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chats')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_chats {
+        return Ok(());
+    }
+    let mut statement = database.prepare("PRAGMA table_info(chats)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
+    if !columns.contains("sort_order") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -3397,6 +3462,57 @@ fn reorder_workspace(
             "UPDATE workspace_folders SET sort_order = ?, updated_at = ? \
              WHERE root_path = ? AND id = ?",
             params![sort_order as i64, now, root, id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn reorder_chat(
+    database: &mut Connection,
+    chat_id: &str,
+    anchor_id: &str,
+    after: bool,
+) -> Result<(), StorageError> {
+    let source_exists: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?)",
+        [chat_id],
+        |row| row.get(0),
+    )?;
+    if !source_exists {
+        return Err(StorageError::NoChat(chat_id.into()));
+    }
+    let anchor_folder = database
+        .query_row(
+            "SELECT folder_id FROM chats WHERE id = ?",
+            [anchor_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(anchor_id.into()))?;
+    let mut ids = {
+        let mut statement = database.prepare(
+            "SELECT id FROM chats WHERE folder_id = ? \
+             ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
+        )?;
+        statement
+            .query_map([&anchor_folder], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if let Some(source_index) = ids.iter().position(|id| id == chat_id) {
+        ids.remove(source_index);
+    }
+    let Some(anchor_index) = ids.iter().position(|id| id == anchor_id) else {
+        return Err(StorageError::NoChat(anchor_id.into()));
+    };
+    ids.insert(anchor_index + usize::from(after), chat_id.to_owned());
+
+    let transaction = database.transaction()?;
+    let now = now_seconds();
+    for (sort_order, id) in ids.iter().enumerate() {
+        transaction.execute(
+            "UPDATE chats SET folder_id = ?, sort_order = ?, updated_at = ? WHERE id = ?",
+            params![anchor_folder, sort_order as i64, now, id],
         )?;
     }
     transaction.commit()?;
@@ -6434,6 +6550,61 @@ mod tests {
         assert_eq!(chat["folder"], "two");
         store.delete_chat(&json!({"chat": chat_id})).unwrap();
         assert!(matches!(store.chat(&chat_id), Err(StorageError::NoChat(_))));
+    }
+
+    #[test]
+    fn reorders_chats_around_another_chat_and_persists_the_order() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Workspace"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let alpha = store
+            .new_chat(&json!({"folder": folder, "title": "Alpha"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let bravo = store
+            .new_chat(&json!({"folder": folder, "title": "Bravo"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let charlie = store
+            .new_chat(&json!({"folder": folder, "title": "Charlie"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        store
+            .move_chat(&json!({"chat": alpha, "before": charlie}))
+            .unwrap();
+        let chat_ids = |tree: Value| {
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|chat| chat["folder"] == folder)
+                .map(|chat| chat["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            chat_ids(store.tree().unwrap()),
+            vec![alpha.clone(), charlie.clone(), bravo.clone()]
+        );
+
+        store
+            .move_chat(&json!({"chat": alpha, "after": bravo}))
+            .unwrap();
+        drop(store);
+        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(
+            chat_ids(reopened.tree().unwrap()),
+            vec![charlie, bravo, alpha]
+        );
     }
 
     #[test]

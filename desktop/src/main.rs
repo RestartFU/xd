@@ -106,6 +106,8 @@ const CODEX_ICON: &str = "icons/codex.svg";
 const SEND_ICON: &str = "icons/send.svg";
 const MIC_ICON: &str = "icons/mic.svg";
 const STOP_ICON: &str = "icons/stop.svg";
+const FOLDER_ICON: &str = "icons/folder.svg";
+const FILE_ICON: &str = "icons/file.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
@@ -531,6 +533,19 @@ fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32)
     (columns.clamp(20, 500), rows.clamp(4, 200))
 }
 
+fn visible_terminal_height(saved_height: u16, window_height: f32) -> u16 {
+    const MIN_TERMINAL_HEIGHT: f32 = 180.0;
+    const MAX_TERMINAL_HEIGHT: f32 = 640.0;
+    // Keep enough vertical room for the title bar, chat header, tabs,
+    // composer, and splitter. A pane enlarged in a tall window must not reopen
+    // below the edge of a shorter one.
+    const SHELL_HEIGHT: f32 = 220.0;
+    let available = (window_height - SHELL_HEIGHT).clamp(MIN_TERMINAL_HEIGHT, MAX_TERMINAL_HEIGHT);
+    (saved_height as f32)
+        .clamp(MIN_TERMINAL_HEIGHT, available)
+        .round() as u16
+}
+
 fn terminal_scroll_is_at_bottom(scroll: &ScrollHandle) -> bool {
     let remaining = f32::from(scroll.max_offset().height) + f32::from(scroll.offset().y);
     remaining <= 2.0
@@ -638,14 +653,18 @@ enum PaneResizeKind {
 const PANE_TERMINAL: u8 = 1;
 const PANE_DIFF: u8 = 4;
 
-fn pane_state_key(endpoint: ChatEndpoint, remote: Option<(&str, u16)>, chat_id: &str) -> String {
+fn connection_state_key(endpoint: ChatEndpoint, remote: Option<(&str, u16)>) -> String {
     match endpoint {
-        ChatEndpoint::Local => format!("local/{chat_id}"),
+        ChatEndpoint::Local => "local".into(),
         ChatEndpoint::Remote => {
             let (host, port) = remote.unwrap_or(("remote", 0));
-            format!("remote/{host}:{port}/{chat_id}")
+            format!("remote/{host}:{port}")
         }
     }
+}
+
+fn pane_state_key(endpoint: ChatEndpoint, remote: Option<(&str, u16)>, chat_id: &str) -> String {
+    format!("{}/{chat_id}", connection_state_key(endpoint, remote))
 }
 
 fn pane_state_mask(diff_open: bool, terminal_open: bool) -> u8 {
@@ -1271,7 +1290,6 @@ struct XdDesktop {
     sidebar_move_submitting: bool,
     sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
-    inactive_collapsed_folders: HashSet<String>,
     creating_workspace: bool,
     workspace_create_name: String,
     workspace_create_repo: String,
@@ -1322,8 +1340,8 @@ struct XdDesktop {
     workflow_statuses: Arc<HashMap<String, Value>>,
     workflow_pending: Arc<HashSet<String>>,
     workflow_ticking: HashSet<String>,
-    live_markdown_generation: u64,
-    live_markdown_scheduled: Option<u64>,
+    live_render_generation: u64,
+    live_render_scheduled: Option<u64>,
     pane_resize: Option<PaneResize>,
     window_settings_generation: u64,
     /// The banner text a dismissal timer is counting down, so a newer error
@@ -1446,13 +1464,15 @@ impl XdDesktop {
         .detach();
         let file_editor = cx.new(FileEditor::new);
         let tab_editor = cx.new(FileEditor::new);
-        cx.subscribe(&tab_editor, |this, _, event, cx| {
-            if let EditorEvent::Changed(text) = event {
+        cx.subscribe(&tab_editor, |this, _, event, cx| match event {
+            EditorEvent::Changed(text) => {
                 if let files::FileTab::File(path) = this.open_files.active.clone() {
                     this.open_files.edit(&path, text.clone());
                     cx.notify();
                 }
             }
+            EditorEvent::Save => this.save_file_tab(cx),
+            EditorEvent::PasteImage { .. } | EditorEvent::Submit => {}
         })
         .detach();
         cx.subscribe(&file_editor, |this, _, event, cx| match event {
@@ -1591,7 +1611,7 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) => {}
         })
         .detach();
-        let settings = AppSettings::load();
+        let mut settings = AppSettings::load();
         let source_build_input =
             cx.new(|cx| ComposerInput::new(cx, "main, #128, GitHub URL, or commit SHA…"));
         cx.subscribe(&source_build_input, |this, _, event, cx| match event {
@@ -1617,7 +1637,6 @@ impl XdDesktop {
             target: source_build::parse_target(&settings.build_source),
             ..Default::default()
         };
-        let collapsed_folders = settings.collapsed_folders.iter().cloned().collect();
         let (remote_credentials_file, remote_credentials, remote_error) =
             match CredentialsFile::default_path() {
                 Ok(path) => {
@@ -1629,6 +1648,30 @@ impl XdDesktop {
                 }
                 Err(error) => (None, None, Some(error.to_string())),
             };
+        let remote_key = remote_credentials
+            .as_ref()
+            .map(|credentials| format!("remote/{}:{}", credentials.host, credentials.port));
+        let active_endpoint = match (&settings.active_connection, &remote_key) {
+            (Some(saved), Some(remote)) if saved == remote => ChatEndpoint::Remote,
+            _ => ChatEndpoint::Local,
+        };
+        let active_connection = match active_endpoint {
+            ChatEndpoint::Local => "local".to_owned(),
+            ChatEndpoint::Remote => remote_key.expect("a cached remote connection has credentials"),
+        };
+        let collapsed_folders = settings
+            .collapsed_folder_sets
+            .get(&active_connection)
+            .or_else(|| {
+                (active_endpoint == ChatEndpoint::Local).then_some(&settings.collapsed_folders)
+            })
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        let corrected_active_connection =
+            settings.active_connection.as_deref() != Some(active_connection.as_str());
+        settings.active_connection = Some(active_connection);
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -1638,7 +1681,7 @@ impl XdDesktop {
                 draft_revision: -1,
                 ..Default::default()
             },
-            active_endpoint: ChatEndpoint::Local,
+            active_endpoint,
             settings,
             settings_open: false,
             settings_menu: None,
@@ -1727,7 +1770,6 @@ impl XdDesktop {
             sidebar_move_submitting: false,
             sidebar_move_destination: None,
             collapsed_folders,
-            inactive_collapsed_folders: HashSet::new(),
             creating_workspace: false,
             workspace_create_name: String::new(),
             workspace_create_repo: String::new(),
@@ -1775,14 +1817,17 @@ impl XdDesktop {
             workflow_statuses: Arc::new(HashMap::new()),
             workflow_pending: Arc::new(HashSet::new()),
             workflow_ticking: HashSet::new(),
-            live_markdown_generation: 0,
-            live_markdown_scheduled: None,
+            live_render_generation: 0,
+            live_render_scheduled: None,
             pane_resize: None,
             window_settings_generation: 0,
             expiring_error: None,
             error_generation: 0,
             next_shortcut_row_id: 0,
         };
+        if corrected_active_connection {
+            let _ = desktop.settings.save();
+        }
         cx.observe_window_bounds(window, |this, window, cx| {
             this.window_bounds_changed(window, cx);
         })
@@ -2051,13 +2096,11 @@ impl XdDesktop {
             self.draft_generation = self.draft_generation.saturating_add(1);
             self.cancel_voice(false, cx);
             std::mem::swap(&mut self.model, &mut self.inactive_model);
-            std::mem::swap(
-                &mut self.collapsed_folders,
-                &mut self.inactive_collapsed_folders,
-            );
             self.active_endpoint = endpoint;
+            self.remember_active_connection();
+            self.restore_collapsed_folders();
             self.model.selected_chat = None;
-            self.invalidate_live_markdown_work();
+            self.invalidate_live_render();
             self.transcript_snapshot = TranscriptSnapshot::default();
             self.transcript_loaded = false;
             self.transcript.reset(0);
@@ -3188,7 +3231,7 @@ impl XdDesktop {
                     return;
                 }
                 if selected_before.is_some() && self.model.selected_chat.is_none() {
-                    self.invalidate_live_markdown_work();
+                    self.invalidate_live_render();
                     if let Ok(mut images) = self.message_images.lock() {
                         images.clear();
                     }
@@ -3288,9 +3331,8 @@ impl XdDesktop {
                     self.close_secrets(cx);
                 }
                 if self.model.selected_chat.is_none() {
-                    let chat_id = (self.active_endpoint == ChatEndpoint::Local)
-                        .then(|| self.settings.last_chat.clone())
-                        .flatten()
+                    let chat_id = self
+                        .cached_last_chat()
                         .filter(|chat_id| self.model.chats.iter().any(|chat| &chat.id == chat_id))
                         .or_else(|| self.model.chats.first().map(|chat| chat.id.clone()));
                     if let Some(chat_id) = chat_id {
@@ -4562,7 +4604,7 @@ impl XdDesktop {
                 self.composer_menu = None;
                 self.clear_question(cx);
                 self.model.apply_event(name, &body);
-                self.invalidate_live_markdown_work();
+                self.invalidate_live_render();
                 self.transcript_snapshot.sync_live_text(&self.model);
                 self.transcript_snapshot.sync_live_items(&self.model);
                 self.sync_transcript_count(false);
@@ -4576,22 +4618,19 @@ impl XdDesktop {
                 let closed_live_text = name == "tool" && !self.model.live_text.is_empty();
                 self.model.apply_event(name, &body);
                 if name == "text" {
-                    self.transcript_snapshot.sync_live_text(&self.model);
-                    self.schedule_live_markdown_parse(cx);
+                    self.schedule_live_text_render(cx);
                 } else {
                     self.transcript_snapshot.sync_live_items(&self.model);
                     self.transcript_snapshot.sync_live_text(&self.model);
-                }
-                let new_count = self.model.display_message_count();
-                if closed_live_text {
-                    self.transcript.splice(old_count - 1..old_count, 2);
-                } else if new_count > old_count {
-                    self.transcript
-                        .splice(old_count..old_count, new_count - old_count);
-                } else if new_count > 0 {
-                    self.transcript.splice(new_count - 1..new_count, 1);
-                }
-                if name == "tool" {
+                    let new_count = self.model.display_message_count();
+                    if closed_live_text {
+                        self.transcript.splice(old_count - 1..old_count, 2);
+                    } else if new_count > old_count {
+                        self.transcript
+                            .splice(old_count..old_count, new_count - old_count);
+                    } else if new_count > 0 {
+                        self.transcript.splice(new_count - 1..new_count, 1);
+                    }
                     // A new tail row can change the count and status displayed
                     // by the run's head, which is a different virtualized row.
                     if new_count > 0 {
@@ -6007,11 +6046,9 @@ impl XdDesktop {
                 self.select_endpoint_chat(ChatEndpoint::Local, chat_id, cx);
             } else {
                 std::mem::swap(&mut self.model, &mut self.inactive_model);
-                std::mem::swap(
-                    &mut self.collapsed_folders,
-                    &mut self.inactive_collapsed_folders,
-                );
                 self.active_endpoint = ChatEndpoint::Local;
+                self.remember_active_connection();
+                self.restore_collapsed_folders();
                 self.transcript_snapshot = TranscriptSnapshot::default();
                 self.transcript_loaded = false;
                 self.transcript.reset(0);
@@ -6709,6 +6746,65 @@ impl XdDesktop {
             .as_ref()
             .map(|credentials| (credentials.host.as_str(), credentials.port));
         Some(pane_state_key(self.active_endpoint, remote, chat_id))
+    }
+
+    fn current_connection_key(&self) -> String {
+        let remote = self
+            .remote_credentials
+            .as_ref()
+            .map(|credentials| (credentials.host.as_str(), credentials.port));
+        connection_state_key(self.active_endpoint, remote)
+    }
+
+    fn cached_last_chat(&self) -> Option<String> {
+        let key = self.current_connection_key();
+        self.settings.last_chats.get(&key).cloned().or_else(|| {
+            (self.active_endpoint == ChatEndpoint::Local)
+                .then(|| self.settings.last_chat.clone())
+                .flatten()
+        })
+    }
+
+    fn remember_active_connection(&mut self) {
+        let key = self.current_connection_key();
+        if self.settings.active_connection.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.settings.active_connection = Some(key);
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn remember_last_chat(&mut self, chat_id: &str) {
+        let key = self.current_connection_key();
+        let mut changed = self.settings.last_chats.get(&key).map(String::as_str) != Some(chat_id);
+        self.settings.last_chats.insert(key, chat_id.to_owned());
+        if self.active_endpoint == ChatEndpoint::Local
+            && self.settings.last_chat.as_deref() != Some(chat_id)
+        {
+            self.settings.last_chat = Some(chat_id.to_owned());
+            changed = true;
+        }
+        if changed && let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn restore_collapsed_folders(&mut self) {
+        let key = self.current_connection_key();
+        self.collapsed_folders = self
+            .settings
+            .collapsed_folder_sets
+            .get(&key)
+            .or_else(|| {
+                (self.active_endpoint == ChatEndpoint::Local)
+                    .then_some(&self.settings.collapsed_folders)
+            })
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
     }
 
     fn remember_panes(&mut self) {
@@ -8044,6 +8140,61 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn reorder_sidebar_chat(
+        &mut self,
+        target: SidebarTarget,
+        anchor_id: String,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_move_submitting
+            || !sidebar_reorder_allowed(&self.model, &target, &anchor_id)
+        {
+            return;
+        }
+        let SidebarTarget::Chat(chat_id) = &target else {
+            return;
+        };
+        let Some(destination) = self
+            .model
+            .chats
+            .iter()
+            .find(|chat| chat.id == anchor_id)
+            .map(|chat| chat.folder.clone())
+        else {
+            return;
+        };
+        let result = self
+            .active_daemon()
+            .map(|daemon| daemon.reorder_chat(chat_id, &anchor_id, after));
+        match result {
+            Some(Ok(())) => {
+                self.cancel_sidebar_edit(cx);
+                self.sidebar_context_menu = None;
+                self.pending_sidebar_delete = None;
+                self.sidebar_delete_submitting = false;
+                if let Some(index) = self.model.chats.iter().position(|chat| chat.id == *chat_id) {
+                    let mut chat = self.model.chats.remove(index);
+                    chat.folder = destination;
+                    if let Some(anchor) = self
+                        .model
+                        .chats
+                        .iter()
+                        .position(|chat| chat.id == anchor_id)
+                    {
+                        self.model.chats.insert(anchor + usize::from(after), chat);
+                    }
+                }
+                self.sidebar_move = None;
+                self.sidebar_move_submitting = false;
+                self.sidebar_move_destination = None;
+            }
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
+        }
+        cx.notify();
+    }
+
     fn submit_sidebar_move(
         &mut self,
         target: SidebarTarget,
@@ -8577,16 +8728,11 @@ impl XdDesktop {
         }
         self.message_image_viewer = None;
         self.model.select_chat(chat_id.clone());
-        self.invalidate_live_markdown_work();
+        self.invalidate_live_render();
         self.reset_file_tree(cx);
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.transcript_loaded = false;
-        if self.active_endpoint == ChatEndpoint::Local {
-            self.settings.last_chat = Some(chat_id.clone());
-            if let Err(error) = self.settings.save() {
-                self.model.connection_error = Some(error);
-            }
-        }
+        self.remember_last_chat(&chat_id);
         self.composer_menu = None;
         self.pending_speech = None;
         self.speech_output.stop();
@@ -9429,15 +9575,22 @@ impl XdDesktop {
     }
 
     fn persist_collapsed_folders(&mut self) {
-        if self.active_endpoint == ChatEndpoint::Remote {
-            return;
-        }
+        let key = self.current_connection_key();
         let mut collapsed = self.collapsed_folders.iter().cloned().collect::<Vec<_>>();
         collapsed.sort();
-        if self.settings.collapsed_folders == collapsed {
+        let mut changed = self.settings.collapsed_folder_sets.get(&key) != Some(&collapsed);
+        self.settings
+            .collapsed_folder_sets
+            .insert(key, collapsed.clone());
+        if self.active_endpoint == ChatEndpoint::Local
+            && self.settings.collapsed_folders != collapsed
+        {
+            self.settings.collapsed_folders = collapsed;
+            changed = true;
+        }
+        if !changed {
             return;
         }
-        self.settings.collapsed_folders = collapsed;
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
         }
@@ -9485,60 +9638,39 @@ impl XdDesktop {
         }
     }
 
-    fn invalidate_live_markdown_work(&mut self) {
-        self.live_markdown_generation = self.live_markdown_generation.saturating_add(1);
-        self.live_markdown_scheduled = None;
+    fn invalidate_live_render(&mut self) {
+        self.live_render_generation = self.live_render_generation.saturating_add(1);
+        self.live_render_scheduled = None;
     }
 
-    fn schedule_live_markdown_parse(&mut self, cx: &mut Context<Self>) {
-        self.live_markdown_generation = self.live_markdown_generation.saturating_add(1);
-        if self.live_markdown_scheduled.is_some() {
+    fn schedule_live_text_render(&mut self, cx: &mut Context<Self>) {
+        self.live_render_generation = self.live_render_generation.saturating_add(1);
+        if self.live_render_scheduled.is_some() {
             return;
         }
-        let token = self.live_markdown_generation;
+        let token = self.live_render_generation;
         let chat_id = self.model.selected_chat.clone();
-        self.live_markdown_scheduled = Some(token);
+        self.live_render_scheduled = Some(token);
         cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_millis(16)).await;
-            let preparation = this
-                .update(cx, |this, cx| {
-                    if this.live_markdown_scheduled != Some(token)
-                        || this.model.selected_chat != chat_id
-                    {
-                        return None;
-                    }
-                    this.live_markdown_scheduled = None;
-                    let generation = this.live_markdown_generation;
-                    let content = this.model.live_text.clone();
-                    if content.is_empty() {
-                        return None;
-                    }
-                    let label = this
-                        .model
-                        .selected_summary()
-                        .map(|chat| chat.backend.clone());
-                    let parse = cx
-                        .background_executor()
-                        .spawn(async move { Message::new(None, "assistant", content, label) });
-                    Some((generation, parse))
-                })
-                .ok()
-                .flatten();
-            let Some((generation, parse)) = preparation else {
-                return;
-            };
-            let message = parse.await;
             let _ = this.update(cx, |this, cx| {
-                if this.live_markdown_generation != generation
-                    || this.model.selected_chat != chat_id
-                    || this.model.live_text != message.content
+                if this.live_render_scheduled != Some(token) || this.model.selected_chat != chat_id
                 {
                     return;
                 }
-                this.transcript_snapshot.live_text = Some(Arc::new(message));
-                let index = this.model.messages.len();
+                this.live_render_scheduled = None;
+                if this.model.live_text.is_empty() {
+                    return;
+                }
+                let had_live_text = this.transcript_snapshot.live_text.is_some();
+                this.transcript_snapshot.sync_live_text(&this.model);
+                let index = this.model.messages.len() + this.model.live_items.len();
                 let anchor = this.transcript.logical_scroll_top();
-                this.transcript.splice(index..index + 1, 1);
+                if had_live_text {
+                    this.transcript.splice(index..index + 1, 1);
+                } else {
+                    this.transcript.splice(index..index, 1);
+                }
                 this.transcript.scroll_to(anchor);
                 cx.notify();
             });
@@ -10887,7 +11019,10 @@ impl Render for XdDesktop {
         let sidebar_width = self.settings.sidebar_width;
         let sidebar_files_height = self.settings.sidebar_files_height;
         let diff_width = self.settings.diff_width;
-        let terminal_height = self.settings.terminal_height;
+        let terminal_height = visible_terminal_height(
+            self.settings.terminal_height,
+            f32::from(window.bounds().size.height),
+        );
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
         let active_machine_label = if remote_active { "REMOTE" } else { "LOCAL" };
         let messages = self.transcript_snapshot.clone();
@@ -12091,76 +12226,155 @@ impl Render for XdDesktop {
                 }
                 let context_menu_target = chat_target.clone();
                 let dragged_chat = SidebarDrag::new(chat_target.clone(), title.clone());
+                let reorder_before_model = self.model.clone();
+                let reorder_after_model = self.model.clone();
+                let reorder_before_anchor = chat.id.clone();
+                let reorder_after_anchor = chat.id.clone();
                 let moving_chat = sidebar_move.as_ref() == Some(&chat_target);
                 tree_rows.push(
                     div()
-                        .id(("chat", row_id))
-                        .min_w_0()
-                        .mr_2()
-                        .ml(px(indent + 10.0))
-                        .mb_1()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(if is_selected { SURFACE_HIGH } else { SIDEBAR }))
-                        .text_color(rgb(if is_selected || unread { TEXT } else { MUTED }))
-                        .text_sm()
-                        .when(unread, |row| row.font_weight(FontWeight::BOLD))
-                        .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.open_sidebar_context_menu(
-                                    Some(context_menu_target.clone()),
-                                    event.position,
-                                    cx,
-                                );
-                            }),
+                        .relative()
+                        .child(
+                            div()
+                                .id(("chat", row_id))
+                                .min_w_0()
+                                .mr_2()
+                                .ml(px(indent + 10.0))
+                                .mb_1()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(if is_selected { SURFACE_HIGH } else { SIDEBAR }))
+                                .text_color(rgb(if is_selected || unread { TEXT } else { MUTED }))
+                                .text_sm()
+                                .when(unread, |row| row.font_weight(FontWeight::BOLD))
+                                .hover(|style| style.bg(rgb(SURFACE_HIGH)).text_color(rgb(TEXT)))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_sidebar_context_menu(
+                                            Some(context_menu_target.clone()),
+                                            event.position,
+                                            cx,
+                                        );
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .id(("select-chat", row_id))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .overflow_hidden()
+                                        .cursor_move()
+                                        .on_drag(
+                                            dragged_chat,
+                                            |drag: &SidebarDrag, position, _, cx| {
+                                                cx.new(|_| drag.clone().position(position))
+                                            },
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, _, cx| {
+                                                if !event.is_right_click() {
+                                                    this.select_chat(chat_id.clone(), cx);
+                                                }
+                                            },
+                                        ))
+                                        .when(chat.working, |row| {
+                                            row.child(working_dots(row_id, MUTED))
+                                        })
+                                        .when(!chat.working, |row| {
+                                            row.when_some(
+                                                agent_icon(&chat.backend),
+                                                |row, (icon, color)| {
+                                                    row.child(
+                                                        svg()
+                                                            .flex_shrink_0()
+                                                            .path(icon)
+                                                            .size(px(13.0))
+                                                            .text_color(rgb(color)),
+                                                    )
+                                                },
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .child(title.clone()),
+                                        ),
+                                ),
                         )
                         .child(
                             div()
-                                .id(("select-chat", row_id))
-                                .min_w_0()
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .overflow_hidden()
-                                .cursor_move()
-                                .on_drag(dragged_chat, |drag: &SidebarDrag, position, _, cx| {
-                                    cx.new(|_| drag.clone().position(position))
+                                .id(("reorder-chat-before", row_id))
+                                .absolute()
+                                .top(px(0.0))
+                                .left(px(indent + 10.0))
+                                .right(px(8.0))
+                                .h(px(7.0))
+                                .can_drop(move |value, _, _| {
+                                    value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                                        sidebar_reorder_allowed(
+                                            &reorder_before_model,
+                                            &drag.target,
+                                            &reorder_before_anchor,
+                                        )
+                                    })
                                 })
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    if !event.is_right_click() {
-                                        this.select_chat(chat_id.clone(), cx);
+                                .drag_over::<SidebarDrag>(move |style, _, _, _| {
+                                    style.border_t_2().border_color(rgb(accent))
+                                })
+                                .on_drop(cx.listener({
+                                    let anchor = chat.id.clone();
+                                    move |this, drag: &SidebarDrag, _, cx| {
+                                        this.reorder_sidebar_chat(
+                                            drag.target.clone(),
+                                            anchor.clone(),
+                                            false,
+                                            cx,
+                                        );
                                     }
-                                }))
-                                .when(chat.working, |row| row.child(working_dots(row_id, MUTED)))
-                                .when(!chat.working, |row| {
-                                    row.when_some(
-                                        agent_icon(&chat.backend),
-                                        |row, (icon, color)| {
-                                            row.child(
-                                                svg()
-                                                    .flex_shrink_0()
-                                                    .path(icon)
-                                                    .size(px(13.0))
-                                                    .text_color(rgb(color)),
-                                            )
-                                        },
-                                    )
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(("reorder-chat-after", row_id))
+                                .absolute()
+                                .bottom(px(0.0))
+                                .left(px(indent + 10.0))
+                                .right(px(8.0))
+                                .h(px(7.0))
+                                .can_drop(move |value, _, _| {
+                                    value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
+                                        sidebar_reorder_allowed(
+                                            &reorder_after_model,
+                                            &drag.target,
+                                            &reorder_after_anchor,
+                                        )
+                                    })
                                 })
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .child(title.clone()),
-                                ),
+                                .drag_over::<SidebarDrag>(move |style, _, _, _| {
+                                    style.border_b_2().border_color(rgb(accent))
+                                })
+                                .on_drop(cx.listener({
+                                    let anchor = chat.id.clone();
+                                    move |this, drag: &SidebarDrag, _, cx| {
+                                        this.reorder_sidebar_chat(
+                                            drag.target.clone(),
+                                            anchor.clone(),
+                                            true,
+                                            cx,
+                                        );
+                                    }
+                                })),
                         )
                         .into_any_element(),
                 );
@@ -12399,10 +12613,10 @@ impl Render for XdDesktop {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .py_0p5()
+                        .py_1()
                         .pr_2()
                         .pl(px(12.0 + 12.0 * row.depth as f32))
-                        .text_xs()
+                        .text_sm()
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -12420,6 +12634,13 @@ impl Render for XdDesktop {
                                 _ => "",
                             },
                         ))
+                        .child(
+                            svg()
+                                .flex_shrink_0()
+                                .path(file_tree_icon(directory))
+                                .size(px(13.0))
+                                .text_color(rgb(if directory { TEXT } else { MUTED })),
+                        )
                         .text_color(rgb(if row.directory { TEXT } else { MUTED }))
                         .child(row.name)
                 })
@@ -19291,7 +19512,11 @@ impl Render for XdDesktop {
         let sidebar_context_overlay = self.sidebar_context_overlay(cx);
 
         // --- the tab strip, the tree, and whichever of them is in front ------
-        let active_tab = self.open_files.active.clone();
+        let active_tab = if remote_sidebar_files && self.open_files.active == files::FileTab::Tree {
+            files::FileTab::Chat
+        } else {
+            self.open_files.active.clone()
+        };
         let showing_chat = active_tab == files::FileTab::Chat;
         let tab_button = |label: String,
                           id: usize,
@@ -19314,7 +19539,10 @@ impl Render for XdDesktop {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.show_file_tab(tab.clone(), cx);
                 }))
-                .child(if dirty { format!("{label} •") } else { label })
+                .child(label)
+                .when(dirty, |row| {
+                    row.child(div().text_xs().text_color(rgb(TEXT)).child("●"))
+                })
                 .when_some(close, |row, path| {
                     row.child(
                         div()
@@ -19329,17 +19557,17 @@ impl Render for XdDesktop {
                     )
                 })
         };
-        let mut tabs = vec![
-            tab_button(
-                "Chat".into(),
-                0,
-                showing_chat,
-                false,
-                None,
-                cx,
-                files::FileTab::Chat,
-            ),
-            tab_button(
+        let mut tabs = vec![tab_button(
+            "Chat".into(),
+            0,
+            showing_chat,
+            false,
+            None,
+            cx,
+            files::FileTab::Chat,
+        )];
+        if !remote_sidebar_files {
+            tabs.push(tab_button(
                 "Files".into(),
                 1,
                 active_tab == files::FileTab::Tree,
@@ -19347,8 +19575,8 @@ impl Render for XdDesktop {
                 None,
                 cx,
                 files::FileTab::Tree,
-            ),
-        ];
+            ));
+        }
         for (index, file) in self.open_files.files.iter().enumerate() {
             tabs.push(tab_button(
                 file.name().to_owned(),
@@ -19383,10 +19611,10 @@ impl Render for XdDesktop {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .py_0p5()
+                    .py_1()
                     .pr_2()
                     .pl(px(8.0 + 12.0 * row.depth as f32))
-                    .text_xs()
+                    .text_sm()
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(SURFACE_HIGH)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -19404,6 +19632,13 @@ impl Render for XdDesktop {
                             _ => "",
                         },
                     ))
+                    .child(
+                        svg()
+                            .flex_shrink_0()
+                            .path(file_tree_icon(directory))
+                            .size(px(13.0))
+                            .text_color(rgb(if directory { TEXT } else { MUTED })),
+                    )
                     .text_color(rgb(if row.directory { TEXT } else { MUTED }))
                     .child(row.name)
             })
@@ -19440,34 +19675,25 @@ impl Render for XdDesktop {
                 )
             });
 
-        let saving_tab = self.open_files.current().map(|file| {
-            (
-                file.path.clone(),
-                file.dirty(),
-                file.saving,
-                file.error.clone(),
-            )
-        });
+        let editor_error = self
+            .open_files
+            .current()
+            .and_then(|file| file.error.clone());
         let editor_body = div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .when_some(
-                saving_tab
-                    .as_ref()
-                    .and_then(|(_, _, _, error)| error.clone()),
-                |column, error| {
-                    column.child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .text_xs()
-                            .text_color(rgb(0xf0a8b3))
-                            .child(error),
-                    )
-                },
-            )
+            .when_some(editor_error, |column, error| {
+                column.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(rgb(0xf0a8b3))
+                        .child(error),
+                )
+            })
             .child(
                 div()
                     .id("file-tab-editor")
@@ -19476,42 +19702,7 @@ impl Render for XdDesktop {
                     .overflow_y_scroll()
                     .p_2()
                     .child(self.tab_editor.clone()),
-            )
-            .when_some(saving_tab.clone(), |column, (path, dirty, saving, _)| {
-                column.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_1()
-                        .border_t_1()
-                        .border_color(rgb(BORDER))
-                        .child(div().text_xs().text_color(rgb(MUTED)).child(path.clone()))
-                        .child(
-                            div()
-                                .id("save-file-tab")
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .text_xs()
-                                .bg(rgb(if dirty && !saving {
-                                    SURFACE_HIGH
-                                } else {
-                                    SURFACE
-                                }))
-                                .text_color(rgb(if dirty && !saving { TEXT } else { MUTED }))
-                                .when(dirty && !saving, |button| {
-                                    button.cursor_pointer().on_click(
-                                        cx.listener(|this, _, _, cx| this.save_file_tab(cx)),
-                                    )
-                                })
-                                .child(if saving { "Saving…" } else { "Save" }),
-                        ),
-                )
-            });
+            );
 
         let content = div()
             .flex_1()
@@ -20269,6 +20460,10 @@ fn agent_icon(backend: &str) -> Option<(&'static str, u32)> {
     }
 }
 
+fn file_tree_icon(directory: bool) -> &'static str {
+    if directory { FOLDER_ICON } else { FILE_ICON }
+}
+
 /// Serves the agent marks compiled into the binary, so a bundle needs no icon
 /// theme on the host.
 struct EmbeddedIcons;
@@ -20291,6 +20486,12 @@ impl AssetSource for EmbeddedIcons {
             STOP_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/stop.svg").as_slice(),
             )),
+            FOLDER_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/folder.svg").as_slice(),
+            )),
+            FILE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/file.svg").as_slice(),
+            )),
             _ => None,
         })
     }
@@ -20302,6 +20503,8 @@ impl AssetSource for EmbeddedIcons {
             SEND_ICON.into(),
             MIC_ICON.into(),
             STOP_ICON.into(),
+            FOLDER_ICON.into(),
+            FILE_ICON.into(),
         ])
     }
 }
@@ -20892,8 +21095,13 @@ fn sidebar_drop_allowed(
 }
 
 fn sidebar_reorder_allowed(model: &AppModel, target: &SidebarTarget, anchor_id: &str) -> bool {
+    if let SidebarTarget::Chat(chat_id) = target {
+        return chat_id != anchor_id
+            && model.chats.iter().any(|chat| &chat.id == chat_id)
+            && model.chats.iter().any(|chat| chat.id == anchor_id);
+    }
     let SidebarTarget::Folder(folder_id) = target else {
-        return false;
+        unreachable!();
     };
     let Some(anchor) = model.folders.iter().find(|folder| folder.id == anchor_id) else {
         return false;
@@ -21191,6 +21399,20 @@ mod tests {
             ChatEndpoint::Local,
             RemoteState::Connected
         ));
+    }
+
+    #[test]
+    fn remote_sidebar_file_browser_removes_the_duplicate_main_files_tab() {
+        let source = include_str!("main.rs");
+        let built_in_tabs = source
+            .split_once("let mut tabs = vec![")
+            .expect("main tab setup")
+            .1
+            .split_once("for (index, file)")
+            .expect("opened file tabs")
+            .0;
+
+        assert!(built_in_tabs.contains("if !remote_sidebar_files {"));
     }
 
     #[gpui::test]
@@ -21541,6 +21763,66 @@ mod tests {
     }
 
     #[test]
+    fn file_browser_icons_are_embedded_and_rows_match_sidebar_scale() {
+        assert_eq!(file_tree_icon(true), FOLDER_ICON);
+        assert_eq!(file_tree_icon(false), FILE_ICON);
+        for path in [FOLDER_ICON, FILE_ICON] {
+            let bytes = EmbeddedIcons
+                .load(path)
+                .expect("embedded file browser icon loads")
+                .unwrap_or_else(|| panic!("the file browser icon {path} is embedded"));
+            assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
+        }
+
+        let source = include_str!("main.rs");
+        for marker in [
+            ".id((\"sidebar-file-row\", index))",
+            ".id((\"tree-row\", index))",
+        ] {
+            let row = source
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{marker} is rendered"))
+                .1
+                .split_once(".on_click")
+                .expect("file row styling ends before its click handler")
+                .0;
+            assert!(row.contains(".text_sm()"));
+        }
+    }
+
+    #[test]
+    fn open_file_tabs_use_a_dirty_dot_and_no_save_footer() {
+        let source = include_str!("main.rs");
+        let tabs = source
+            .split_once("let tab_button =")
+            .expect("file tab rendering")
+            .1
+            .split_once("let tab_strip =")
+            .expect("file tab rendering ends")
+            .0;
+        assert!(tabs.contains(".child(\"●\")"));
+
+        let editor = source
+            .split_once("let editor_body =")
+            .expect("file editor rendering")
+            .1
+            .split_once("let content = div()")
+            .expect("file editor rendering ends")
+            .0;
+        assert!(!editor.contains("save-file-tab"));
+        assert!(!editor.contains("Saving…"));
+
+        let subscription = source
+            .split_once("cx.subscribe(&tab_editor")
+            .expect("open file editor subscription")
+            .1
+            .split_once("cx.subscribe(&file_editor")
+            .expect("open file editor subscription ends")
+            .0;
+        assert!(subscription.contains("EditorEvent::Save => this.save_file_tab(cx)"));
+    }
+
+    #[test]
     fn composer_action_becomes_stop_while_a_turn_is_working() {
         let source = include_str!("main.rs");
         let action = source
@@ -21792,6 +22074,56 @@ mod tests {
         assert_eq!(snapshot.get(2).unwrap().content, "second partial");
     }
 
+    #[gpui::test]
+    fn streamed_text_deltas_are_coalesced_into_one_frame(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("chat-stream".into());
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-stream".into(),
+                folder: "workspace".into(),
+                title: Some("Stream".into()),
+                backend: "codex".into(),
+                working: true,
+            }];
+            desktop.transcript_snapshot = TranscriptSnapshot::default();
+            desktop.transcript.reset(0);
+
+            desktop.handle_event(
+                "text",
+                serde_json::json!({"chat": "chat-stream", "text": "smooth "}),
+                None,
+                cx,
+            );
+            desktop.handle_event(
+                "text",
+                serde_json::json!({"chat": "chat-stream", "text": "stream"}),
+                None,
+                cx,
+            );
+
+            assert_eq!(desktop.model.live_text, "smooth stream");
+            assert!(
+                desktop.transcript_snapshot.live_text.is_none(),
+                "token events should wait for the coalesced frame"
+            );
+            assert_eq!(desktop.transcript.item_count(), 0);
+        });
+
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            let rendered = desktop
+                .transcript_snapshot
+                .live_text
+                .as_deref()
+                .map(|message| message.content.as_str());
+            assert_eq!(rendered, Some("smooth stream"));
+            assert_eq!(desktop.transcript.item_count(), 1);
+        });
+    }
+
     #[test]
     fn collapsed_workspaces_hide_every_nested_descendant() {
         let folders = vec![
@@ -21983,7 +22315,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_reorder_accepts_siblings_and_rejects_descendant_cycles() {
+    fn sidebar_reorder_accepts_workspaces_and_chats_but_rejects_invalid_targets() {
         let model = AppModel {
             folders: vec![
                 Folder {
@@ -22007,6 +22339,22 @@ mod tests {
                     parent: Some("child".into()),
                 },
             ],
+            chats: vec![
+                xd_desktop::model::ChatSummary {
+                    id: "source-chat".into(),
+                    folder: "root".into(),
+                    title: Some("Source".into()),
+                    backend: "codex".into(),
+                    working: false,
+                },
+                xd_desktop::model::ChatSummary {
+                    id: "anchor-chat".into(),
+                    folder: "sibling".into(),
+                    title: Some("Anchor".into()),
+                    backend: "codex".into(),
+                    working: false,
+                },
+            ],
             ..Default::default()
         };
 
@@ -22025,10 +22373,20 @@ mod tests {
             &SidebarTarget::Folder("root".into()),
             "root"
         ));
+        assert!(sidebar_reorder_allowed(
+            &model,
+            &SidebarTarget::Chat("source-chat".into()),
+            "anchor-chat"
+        ));
         assert!(!sidebar_reorder_allowed(
             &model,
-            &SidebarTarget::Chat("chat".into()),
-            "sibling"
+            &SidebarTarget::Chat("source-chat".into()),
+            "source-chat"
+        ));
+        assert!(!sidebar_reorder_allowed(
+            &model,
+            &SidebarTarget::Chat("source-chat".into()),
+            "missing-chat"
         ));
     }
 
@@ -22173,6 +22531,13 @@ mod tests {
             terminal_geometry(100_000.0, 100_000.0, 8.0, 19.0),
             (500, 200)
         );
+    }
+
+    #[test]
+    fn terminal_height_is_clamped_to_the_visible_window() {
+        assert_eq!(visible_terminal_height(320, 780.0), 320);
+        assert_eq!(visible_terminal_height(640, 560.0), 340);
+        assert_eq!(visible_terminal_height(120, 560.0), 180);
     }
 
     #[test]
@@ -22329,6 +22694,11 @@ mod tests {
 
     #[test]
     fn pane_state_keys_keep_devices_and_chats_isolated() {
+        assert_eq!(connection_state_key(ChatEndpoint::Local, None), "local");
+        assert_eq!(
+            connection_state_key(ChatEndpoint::Remote, Some(("dev.example", 4001))),
+            "remote/dev.example:4001"
+        );
         assert_eq!(
             pane_state_key(ChatEndpoint::Local, None, "same-chat"),
             "local/same-chat"
@@ -22351,6 +22721,57 @@ mod tests {
         assert_eq!(pane_state_mask(true, true), PANE_DIFF | PANE_TERMINAL);
         assert_eq!(diff_collapse_key("local/chat", false), "local/chat/working");
         assert_eq!(diff_collapse_key("local/chat", true), "local/chat/branch");
+    }
+
+    #[gpui::test]
+    fn remote_navigation_state_is_cached_and_reconciled(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.remote_credentials =
+                Some(RemoteCredentials::new("dev.example", 4001, "token", "a".repeat(64)).unwrap());
+            desktop.collapsed_folders = HashSet::from(["folder-remote".into()]);
+
+            desktop.persist_collapsed_folders();
+
+            assert_eq!(
+                desktop
+                    .settings
+                    .collapsed_folder_sets
+                    .get("remote/dev.example:4001"),
+                Some(&vec!["folder-remote".to_owned()])
+            );
+
+            desktop.remember_last_chat("chat-remote");
+            assert_eq!(desktop.cached_last_chat().as_deref(), Some("chat-remote"));
+
+            desktop.settings.collapsed_folder_sets.insert(
+                "remote/dev.example:4001".into(),
+                vec!["folder-remote".into(), "folder-deleted-on-server".into()],
+            );
+            desktop.restore_collapsed_folders();
+            desktop.model.folders = vec![Folder {
+                id: "folder-remote".into(),
+                parent: None,
+                name: "Remote".into(),
+            }];
+            desktop.collapsed_folders.retain(|folder_id| {
+                desktop
+                    .model
+                    .folders
+                    .iter()
+                    .any(|folder| &folder.id == folder_id)
+            });
+            desktop.persist_collapsed_folders();
+            assert_eq!(
+                desktop
+                    .settings
+                    .collapsed_folder_sets
+                    .get("remote/dev.example:4001"),
+                Some(&vec!["folder-remote".to_owned()]),
+                "an authoritative tree can prune stale cached folder ids"
+            );
+        });
     }
 
     #[test]

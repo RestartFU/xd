@@ -103,7 +103,14 @@ pub struct AppSettings {
     pub git_writer_model: Option<String>,
     pub build_source: String,
     pub favorite_models: Vec<String>,
+    pub active_connection: Option<String>,
+    /// Last selected chat per daemon connection. `last_chat` remains as a
+    /// backwards-compatible fallback for existing local settings files.
+    pub last_chats: HashMap<String, String>,
     pub last_chat: Option<String>,
+    /// Collapsed workspace folders per daemon connection. The legacy flat
+    /// list below remains the fallback for the local daemon.
+    pub collapsed_folder_sets: HashMap<String, Vec<String>>,
     pub collapsed_folders: Vec<String>,
     pub collapsed_diff_files: HashMap<String, Vec<String>>,
     pub expanded_file_directories: HashMap<String, Vec<String>>,
@@ -127,7 +134,10 @@ impl Default for AppSettings {
             git_writer_model: None,
             build_source: String::new(),
             favorite_models: Vec::new(),
+            active_connection: None,
+            last_chats: HashMap::new(),
             last_chat: None,
+            collapsed_folder_sets: HashMap::new(),
             collapsed_folders: Vec::new(),
             collapsed_diff_files: HashMap::new(),
             expanded_file_directories: HashMap::new(),
@@ -249,7 +259,19 @@ mod tests {
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
             favorite_models: vec!["claude/claude-opus-5".into()],
+            active_connection: Some("remote/dev.example:4001".into()),
+            last_chats: HashMap::from([
+                ("local".into(), "chat-restore".into()),
+                ("remote/dev.example:4001".into(), "chat-remote".into()),
+            ]),
             last_chat: Some("chat-restore".into()),
+            collapsed_folder_sets: HashMap::from([
+                ("local".into(), vec!["folder-a".into(), "folder-b".into()]),
+                (
+                    "remote/dev.example:4001".into(),
+                    vec!["folder-remote".into()],
+                ),
+            ]),
             collapsed_folders: vec!["folder-a".into(), "folder-b".into()],
             collapsed_diff_files: HashMap::from([(
                 "local/chat-restore/working".into(),
@@ -310,6 +332,50 @@ mod tests {
         assert_eq!(
             saved["collapsed_diff_files"]["local/chat-one/working"],
             serde_json::json!(["src/main.rs", "README.md"])
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn connection_ui_state_survives_settings_round_trip() {
+        let directory = env::temp_dir().join(format!(
+            "xd-connection-state-settings-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("settings.json");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            &path,
+            br#"{
+                "active_connection": "remote/dev.example:4001",
+                "last_chats": {
+                    "local": "local-chat",
+                    "remote/dev.example:4001": "remote-chat"
+                },
+                "collapsed_folder_sets": {
+                    "local": ["local-folder"],
+                    "remote/dev.example:4001": ["remote-folder"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = load_from(&path).unwrap();
+        save_to(&path, &settings).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(saved["active_connection"], "remote/dev.example:4001");
+        assert_eq!(
+            saved["last_chats"]["remote/dev.example:4001"],
+            "remote-chat"
+        );
+        assert_eq!(
+            saved["collapsed_folder_sets"]["remote/dev.example:4001"],
+            serde_json::json!(["remote-folder"])
         );
         fs::remove_dir_all(directory).unwrap();
     }

@@ -269,8 +269,8 @@ impl OpenFiles {
         self.active = FileTab::File(path.to_owned());
     }
 
-    /// Closes a tab, landing on the one to its left -- or the chat, which is
-    /// always there to land on.
+    /// Closes a tab. Closing the active file returns to the chat; closing a
+    /// background file leaves the current tab alone.
     pub fn close(&mut self, path: &str) {
         let Some(at) = self.files.iter().position(|file| file.path == path) else {
             return;
@@ -279,10 +279,7 @@ impl OpenFiles {
         if self.active != FileTab::File(path.to_owned()) {
             return;
         }
-        self.active = match self.files.get(at.saturating_sub(1)) {
-            Some(file) => FileTab::File(file.path.clone()),
-            None => FileTab::Chat,
-        };
+        self.active = FileTab::Chat;
     }
 
     /// Takes a keystroke.
@@ -541,20 +538,20 @@ mod tests {
     }
 
     #[test]
-    fn closing_lands_on_the_tab_to_the_left() {
+    fn closing_the_active_file_returns_to_chat() {
         let mut open = OpenFiles::default();
         open.open("a.rs", String::new());
         open.open("b.rs", String::new());
         open.open("c.rs", String::new());
 
         open.close("c.rs");
-        assert_eq!(open.active, FileTab::File("b.rs".into()));
+        assert_eq!(open.active, FileTab::Chat);
 
-        // Closing the leftmost has nothing to its left, so it lands right.
+        // A tab that is not in front leaves the front alone.
+        open.open("b.rs", String::new());
         open.close("a.rs");
         assert_eq!(open.active, FileTab::File("b.rs".into()));
 
-        // A tab that is not in front leaves the front alone.
         open.open("d.rs", String::new());
         open.active = FileTab::Chat;
         open.close("d.rs");

@@ -373,6 +373,12 @@ impl TerminalScreen {
                     self.grid[self.row][column] = Cell::default();
                 }
             }
+            'P' => {
+                let column = self.column.min(self.columns);
+                let amount = amount.min(self.columns - column);
+                self.grid[self.row].copy_within(column + amount..self.columns, column);
+                self.grid[self.row][self.columns - amount..].fill(Cell::default());
+            }
             'm' => self.sgr(&values),
             's' => self.saved = (self.row, self.column),
             'u' => (self.row, self.column) = self.saved,
@@ -480,6 +486,19 @@ mod tests {
         let mut screen = TerminalScreen::new(12, 3);
         screen.feed(b"hello\rbye\r\nnext\x1b[1A\x1b[6G!");
         assert_eq!(screen.text(), "byelo!\nnext");
+    }
+
+    #[test]
+    fn readline_history_deletes_the_old_command_suffix() {
+        let mut screen = TerminalScreen::new(24, 3);
+        screen.feed(b"$ killport 19132");
+
+        // Bash/readline emits this when Down replaces the longer history entry
+        // with `make server`: return to the prompt, delete the three extra
+        // cells, then overwrite the retained prefix.
+        screen.feed(b"\r\x1b[C\x1b[C\x1b[3Pmake server");
+
+        assert_eq!(screen.text(), "$ make server");
     }
 
     #[test]

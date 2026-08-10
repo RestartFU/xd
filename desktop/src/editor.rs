@@ -73,6 +73,13 @@ struct PaintedLine {
     range: Range<usize>,
     layout: ShapedLine,
     bounds: Bounds<Pixels>,
+    line_number: Option<PaintedLineNumber>,
+}
+
+#[derive(Clone)]
+struct PaintedLineNumber {
+    layout: ShapedLine,
+    origin: Point<Pixels>,
 }
 
 impl EventEmitter<EditorEvent> for FileEditor {}
@@ -683,6 +690,11 @@ impl Element for EditorElement {
         let mut selection = Vec::new();
         let cursor_offset = input.cursor_offset();
         let mut cursor = None;
+        let gutter_width = if input.composer {
+            px(0.0)
+        } else {
+            px(line_number_gutter_width(ranges.len()))
+        };
         for index in visible {
             let range = ranges[index].clone();
             let placeholder =
@@ -698,11 +710,28 @@ impl Element for EditorElement {
                 .shape_line(text, font_size, &runs, None);
             let line_bounds = Bounds::new(
                 point(
-                    bounds.left(),
+                    bounds.left() + gutter_width,
                     bounds.top() + px(index as f32 * FileEditor::LINE_HEIGHT),
                 ),
-                size(bounds.size.width, px(FileEditor::LINE_HEIGHT)),
+                size(
+                    (bounds.size.width - gutter_width).max(px(1.0)),
+                    px(FileEditor::LINE_HEIGHT),
+                ),
             );
+            let line_number = (!input.composer).then(|| {
+                let number: SharedString = (index + 1).to_string().into();
+                let runs = vec![text_run(number.len(), &style, 0x6f737a)];
+                let layout = window
+                    .text_system()
+                    .shape_line(number, px(12.0), &runs, None);
+                PaintedLineNumber {
+                    origin: point(
+                        bounds.left() + gutter_width - px(10.0) - layout.width,
+                        line_bounds.top(),
+                    ),
+                    layout,
+                }
+            });
             let selected_start = input.selected_range.start.max(range.start);
             let selected_end = input.selected_range.end.min(range.end);
             if selected_start < selected_end
@@ -742,6 +771,7 @@ impl Element for EditorElement {
                 range,
                 layout,
                 bounds: line_bounds,
+                line_number,
             });
         }
         PrepaintState {
@@ -771,6 +801,12 @@ impl Element for EditorElement {
             window.paint_quad(selection);
         }
         for line in &state.lines {
+            if let Some(number) = &line.line_number {
+                number
+                    .layout
+                    .paint(number.origin, px(FileEditor::LINE_HEIGHT), window, cx)
+                    .expect("paint file editor line number");
+            }
             line.layout
                 .paint(line.bounds.origin, px(FileEditor::LINE_HEIGHT), window, cx)
                 .expect("paint file editor line");
@@ -999,6 +1035,11 @@ fn line_ranges(content: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+fn line_number_gutter_width(line_count: usize) -> f32 {
+    let digits = line_count.max(1).to_string().len().max(3);
+    16.0 + digits as f32 * 8.0
+}
+
 fn soft_wrapped_ranges(range: Range<usize>, offsets: &[usize]) -> Vec<Range<usize>> {
     let mut ranges = Vec::with_capacity(offsets.len() + 1);
     let mut start = range.start;
@@ -1089,6 +1130,14 @@ mod tests {
     fn line_ranges_preserve_empty_and_trailing_lines() {
         assert_eq!(line_ranges(""), vec![0..0]);
         assert_eq!(line_ranges("a\n\nb\n"), vec![0..1, 2..2, 3..4, 5..5]);
+    }
+
+    #[test]
+    fn file_line_number_gutter_grows_only_when_digit_count_grows() {
+        assert_eq!(line_number_gutter_width(1), 40.0);
+        assert_eq!(line_number_gutter_width(999), 40.0);
+        assert_eq!(line_number_gutter_width(1_000), 48.0);
+        assert_eq!(line_number_gutter_width(20_000), 56.0);
     }
 
     #[test]

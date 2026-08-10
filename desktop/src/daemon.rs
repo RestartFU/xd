@@ -206,7 +206,7 @@ pub enum RequestKind {
     },
     MoveChat {
         chat_id: String,
-        folder_id: String,
+        folder_id: Option<String>,
     },
     DeleteChat {
         chat_id: String,
@@ -802,9 +802,21 @@ impl DaemonHandle {
         self.send(
             RequestKind::MoveChat {
                 chat_id: chat_id.to_owned(),
-                folder_id: folder_id.to_owned(),
+                folder_id: Some(folder_id.to_owned()),
             },
             json!({"op": "move-chat", "chat": chat_id, "folder": folder_id}),
+        )
+    }
+
+    pub fn reorder_chat(&self, chat_id: &str, anchor_id: &str, after: bool) -> Result<(), String> {
+        let mut body = json!({"op": "move-chat", "chat": chat_id});
+        body[if after { "after" } else { "before" }] = Value::String(anchor_id.to_owned());
+        self.send(
+            RequestKind::MoveChat {
+                chat_id: chat_id.to_owned(),
+                folder_id: None,
+            },
+            body,
         )
     }
 
@@ -1981,6 +1993,50 @@ mod tests {
                 ..
             } if chat_id == "chat-2"
         ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn reorders_chats_before_and_after_an_anchor() {
+        let directory = env::temp_dir().join(format!("xd-reorder-chat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for (field, after) in [("before", false), ("after", true)] {
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["op"], "move-chat");
+                assert_eq!(request["chat"], "chat-1");
+                assert_eq!(request[field], "chat-2");
+                assert_eq!(request.get(if after { "before" } else { "after" }), None);
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+            }
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        for after in [false, true] {
+            daemon.reorder_chat("chat-1", "chat-2", after).unwrap();
+            assert!(matches!(
+                updates.recv_blocking().unwrap(),
+                DaemonUpdate::Reply {
+                    kind: RequestKind::MoveChat { chat_id, .. },
+                    ..
+                } if chat_id == "chat-1"
+            ));
+        }
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
