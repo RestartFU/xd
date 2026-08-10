@@ -6,6 +6,17 @@ backend, model, and project instructions.
 
 ![xd workspace, chat, terminal, and diff panes](docs/assets/xd-showcase.png)
 
+<table>
+  <tr>
+    <td><img src="docs/assets/xd-mobile-chat.png" alt="xd mobile chat"></td>
+    <td><img src="docs/assets/xd-mobile-diff.png" alt="xd mobile diff"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/xd-mobile-files.png" alt="xd mobile file browser"></td>
+    <td><img src="docs/assets/xd-mobile-terminal.png" alt="xd mobile terminal"></td>
+  </tr>
+</table>
+
 ## Install
 
 Stable and nightly install side by side with separate application identities,
