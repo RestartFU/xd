@@ -294,13 +294,13 @@ fn proxy_connection(
     loop {
         match local.read(&mut from_local) {
             Ok(0) => return Ok(()),
-            Ok(count) => tls.write_all(&from_local[..count])?,
+            Ok(count) => crate::write_all_retrying(&mut tls, &from_local[..count])?,
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),
         }
         match tls.read(&mut from_tls) {
             Ok(0) => return Ok(()),
-            Ok(count) => local.write_all(&from_tls[..count])?,
+            Ok(count) => crate::write_all_retrying(&mut local, &from_tls[..count])?,
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),

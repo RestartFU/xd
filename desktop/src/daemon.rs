@@ -1520,6 +1520,11 @@ fn spawn_reader(
                     }
                 }
 
+                if line.len() <= AUTHENTICATED_FRAME_LIMIT && line.last() != Some(&b'\n') {
+                    disconnect(&updates, "xd daemon closed while sending a response".into());
+                    return;
+                }
+
                 let frame = match ProtocolCodec::decode_line(&line, AUTHENTICATED_FRAME_LIMIT) {
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
@@ -1717,6 +1722,35 @@ mod tests {
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             DaemonUpdate::Event { name, .. } if name == "tree"
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn reports_a_connection_closed_mid_frame_without_a_json_parser_error() {
+        let directory = env::temp_dir().join(format!("xd-partial-frame-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(br#"{"event":"text","text":"unfinished"#)
+                .unwrap();
+        });
+
+        let (_daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Disconnected { message }
+                if message == "xd daemon closed while sending a response"
         ));
 
         server.join().unwrap();

@@ -62,8 +62,55 @@ impl FileTree {
         self.failed.contains(path)
     }
 
+    /// Listings that were in flight when a connection disappeared. Reissuing
+    /// these requests keeps expanded folders from being stranded on a spinner.
+    pub fn loading_paths(&self) -> Vec<String> {
+        let mut paths = self.loading.iter().cloned().collect::<Vec<_>>();
+        paths.sort_by(|left, right| {
+            left.matches('/')
+                .count()
+                .cmp(&right.matches('/').count())
+                .then_with(|| left.cmp(right))
+        });
+        paths
+    }
+
     pub fn is_expanded(&self, path: &str) -> bool {
         self.expanded.contains(path)
+    }
+
+    /// Restores the folders that were open the last time this chat was shown.
+    pub fn set_expanded(&mut self, paths: impl IntoIterator<Item = String>) {
+        self.expanded = paths.into_iter().filter(|path| !path.is_empty()).collect();
+    }
+
+    /// A stable snapshot suitable for settings persistence.
+    pub fn expanded_paths(&self) -> Vec<String> {
+        let mut paths = self.expanded.iter().cloned().collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    /// Restored descendants are fetched as soon as their parent arrives.
+    pub fn expanded_unloaded_children(&self, path: &str) -> Vec<String> {
+        self.children
+            .get(path)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.directory)
+            .map(|entry| {
+                if path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{path}/{}", entry.name)
+                }
+            })
+            .filter(|child| {
+                self.expanded.contains(child)
+                    && !self.children.contains_key(child)
+                    && !self.loading.contains(child)
+            })
+            .collect()
     }
 
     /// Opens or closes a directory, keeping what was open inside it: a folder
@@ -388,6 +435,16 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_can_retry_every_listing_that_was_in_flight() {
+        let mut tree = FileTree::default();
+        tree.set_loading("src/voice");
+        tree.set_loading("");
+        tree.set_loading("src");
+
+        assert_eq!(tree.loading_paths(), ["", "src", "src/voice"]);
+    }
+
+    #[test]
     fn a_listing_that_failed_leaves_the_directory_open_and_empty() {
         let mut tree = FileTree::default();
         tree.set_children("", vec![dir("secret")]);
@@ -421,6 +478,21 @@ mod tests {
         assert!(!tree.is_loaded("src"));
         assert!(tree.is_expanded("src"));
         assert!(tree.rows().is_empty());
+    }
+
+    #[test]
+    fn restored_expansion_state_fetches_each_visible_level() {
+        let mut tree = FileTree::default();
+        tree.set_expanded(["desktop".into(), "desktop/src".into()]);
+        assert_eq!(tree.expanded_paths(), ["desktop", "desktop/src"]);
+
+        tree.set_children("", vec![dir("desktop"), dir("daemon-rs")]);
+        assert_eq!(tree.expanded_unloaded_children(""), ["desktop"]);
+        tree.set_loading("desktop");
+        assert!(tree.expanded_unloaded_children("").is_empty());
+
+        tree.set_children("desktop", vec![dir("src"), file("Cargo.toml")]);
+        assert_eq!(tree.expanded_unloaded_children("desktop"), ["desktop/src"]);
     }
 
     #[test]

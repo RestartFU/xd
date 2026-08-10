@@ -117,6 +117,9 @@ impl ComposerInput {
 
     fn terminal_bytes(&self, bytes: impl Into<Vec<u8>>, cx: &mut Context<Self>) -> bool {
         if self.terminal {
+            // Once the user resumes typing, a terminal output selection should
+            // no longer intercept Ctrl+C as a copy on the next keypress.
+            TextSelection::clear(cx);
             cx.emit(ComposerEvent::Bytes(bytes.into()));
             cx.notify();
             true
@@ -296,6 +299,12 @@ impl ComposerInput {
         self.terminal_bytes(b"\x1b[B".to_vec(), cx);
     }
     fn interrupt(&mut self, _: &Interrupt, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal
+            && let Some(text) = TextSelection::selected(cx)
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            return;
+        }
         self.terminal_bytes(vec![3], cx);
     }
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {

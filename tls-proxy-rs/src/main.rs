@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{local_socket::UnixStream, private_fs::*};
@@ -27,6 +27,7 @@ mod local_socket;
 mod private_fs;
 
 const IO_TIMEOUT: Duration = Duration::from_millis(50);
+const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const COPY_BUFFER: usize = 64 * 1024;
 const MAX_IDENTITY_BYTES: u64 = 1024 * 1024;
 static TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
@@ -345,7 +346,7 @@ fn proxy_connection(
     loop {
         match tls.read(&mut from_tls) {
             Ok(0) => return Ok(()),
-            Ok(count) => upstream.write_all(&from_tls[..count])?,
+            Ok(count) => write_all_retrying(&mut upstream, &from_tls[..count])?,
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),
@@ -353,10 +354,56 @@ fn proxy_connection(
         match upstream.read(&mut from_upstream) {
             Ok(0) => return Ok(()),
             Ok(count) => {
-                tls.write_all(&from_upstream[..count])?;
-                tls.flush()?;
+                write_all_retrying(&mut tls, &from_upstream[..count])?;
+                flush_retrying(&mut tls)?;
             }
             Err(error) if retryable(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// The proxy polls both directions with short socket timeouts, but a short
+/// write timeout must not sever a large frame after forwarding only its prefix.
+/// Keep retrying while the peer makes progress and bound only a true stall.
+fn write_all_retrying(writer: &mut impl Write, mut bytes: &[u8]) -> io::Result<()> {
+    let mut last_progress = Instant::now();
+    while !bytes.is_empty() {
+        match writer.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(count) => {
+                bytes = &bytes[count..];
+                last_progress = Instant::now();
+            }
+            Err(error) if retryable(&error) && last_progress.elapsed() < WRITE_STALL_TIMEOUT => {
+                thread::yield_now();
+            }
+            Err(error) if retryable(&error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "proxy write made no progress for 30 seconds",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn flush_retrying(writer: &mut impl Write) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match writer.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if retryable(&error) && started.elapsed() < WRITE_STALL_TIMEOUT => {
+                thread::yield_now();
+            }
+            Err(error) if retryable(&error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "proxy flush made no progress for 30 seconds",
+                ));
+            }
             Err(error) => return Err(error),
         }
     }
@@ -378,6 +425,39 @@ mod tests {
         os::unix::fs::PermissionsExt,
         sync::atomic::{AtomicU64, Ordering},
     };
+
+    struct TemporarilyBlockedWriter {
+        blocked: bool,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for TemporarilyBlockedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.blocked {
+                self.blocked = true;
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let count = bytes.len().min(3);
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn temporary_write_backpressure_does_not_truncate_a_frame() {
+        let mut writer = TemporarilyBlockedWriter {
+            blocked: false,
+            bytes: Vec::new(),
+        };
+
+        write_all_retrying(&mut writer, b"complete frame\n").unwrap();
+
+        assert_eq!(writer.bytes, b"complete frame\n");
+    }
 
     static FIXTURE: AtomicU64 = AtomicU64::new(1);
 

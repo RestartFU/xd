@@ -496,6 +496,12 @@ struct TerminalPanel {
 }
 
 impl TerminalPanel {
+    fn begin_refresh(&mut self) {
+        self.loading = true;
+        self.opening = false;
+        self.error = None;
+    }
+
     fn selected(&self) -> Option<&TerminalTab> {
         let selected = self.selected.as_deref()?;
         self.sessions.iter().find(|session| session.id == selected)
@@ -624,6 +630,7 @@ fn question_from_event(body: &Value) -> Option<OpenQuestion> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaneResizeKind {
     Sidebar,
+    SidebarFiles,
     Diff,
     Terminal,
 }
@@ -659,11 +666,13 @@ struct PaneResize {
 fn resized_pane_size(kind: PaneResizeKind, initial_size: f32, delta: Point<f32>) -> u16 {
     let size = match kind {
         PaneResizeKind::Sidebar => initial_size + delta.x,
+        PaneResizeKind::SidebarFiles => initial_size - delta.y,
         PaneResizeKind::Diff => initial_size - delta.x,
         PaneResizeKind::Terminal => initial_size - delta.y,
     };
     let (minimum, maximum) = match kind {
         PaneResizeKind::Sidebar => (220.0, 520.0),
+        PaneResizeKind::SidebarFiles => (120.0, 640.0),
         PaneResizeKind::Diff => (320.0, 760.0),
         PaneResizeKind::Terminal => (180.0, 640.0),
     };
@@ -1209,6 +1218,11 @@ struct XdDesktop {
     message_image_viewer: Option<MessageImageViewer>,
     transcript: ListState,
     transcript_snapshot: TranscriptSnapshot,
+    /// Whether the selected chat has returned at least one transcript page.
+    /// This is deliberately separate from `messages.is_empty()`: a new chat is
+    /// successfully loaded and empty, while a request lost during reconnect is
+    /// still waiting to be hydrated.
+    transcript_loaded: bool,
     transcript_loading: bool,
     transcript_page_loading: bool,
     transcript_refresh_pending: bool,
@@ -1665,6 +1679,7 @@ impl XdDesktop {
             message_image_viewer: None,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_snapshot: TranscriptSnapshot::default(),
+            transcript_loaded: false,
             transcript_loading: false,
             transcript_page_loading: false,
             transcript_refresh_pending: false,
@@ -1877,12 +1892,8 @@ impl XdDesktop {
         }
     }
 
-    fn secrets_daemon(&self, folder_id: Option<&str>) -> Option<&DaemonHandle> {
-        if folder_id.is_some() {
-            self.active_daemon()
-        } else {
-            self.daemon.as_ref()
-        }
+    fn secrets_daemon(&self) -> Option<&DaemonHandle> {
+        self.active_daemon()
     }
 
     fn endpoint_model(&self, endpoint: ChatEndpoint) -> &AppModel {
@@ -1965,8 +1976,8 @@ impl XdDesktop {
                 | RequestKind::TerminalInput { .. }
                 | RequestKind::TerminalResize { .. }
                 | RequestKind::TerminalKill { .. }
-                | RequestKind::AgentSecrets { folder_id: Some(_) }
-                | RequestKind::SetAgentSecrets { folder_id: Some(_) }
+                | RequestKind::AgentSecrets { .. }
+                | RequestKind::SetAgentSecrets { .. }
                 | RequestKind::FolderContext { .. }
                 | RequestKind::SetFolderContext { .. }
                 | RequestKind::FolderSettings { .. }
@@ -2012,8 +2023,6 @@ impl XdDesktop {
         matches!(
             kind,
             RequestKind::DaemonUpdate { .. }
-                | RequestKind::AgentSecrets { folder_id: None }
-                | RequestKind::SetAgentSecrets { folder_id: None }
                 | RequestKind::Devices
                 | RequestKind::PeerPairing
                 | RequestKind::PairRemote
@@ -2050,6 +2059,7 @@ impl XdDesktop {
             self.model.selected_chat = None;
             self.invalidate_live_markdown_work();
             self.transcript_snapshot = TranscriptSnapshot::default();
+            self.transcript_loaded = false;
             self.transcript.reset(0);
             self.composer_menu = None;
             self.pending_speech = None;
@@ -2267,6 +2277,9 @@ impl XdDesktop {
         if let Some(daemon) = &self.remote_daemon {
             let _ = daemon.agent_catalog();
         }
+        if self.active_endpoint == ChatEndpoint::Remote {
+            self.refresh_selected_chat_after_connect(cx);
+        }
     }
 
     fn listen_for_remote(
@@ -2312,6 +2325,8 @@ impl XdDesktop {
                 if self.active_endpoint == ChatEndpoint::Remote {
                     self.sending = false;
                     self.transcript_loading = false;
+                    self.transcript_page_loading = false;
+                    self.transcript_refresh_pending = false;
                     self.pending_speech = None;
                     Arc::make_mut(&mut self.workflow_pending).clear();
                     if let Ok(mut images) = self.message_images.lock() {
@@ -2331,6 +2346,11 @@ impl XdDesktop {
                         panel.loading = false;
                         panel.opening = false;
                         panel.error = Some(message.clone());
+                    }
+                    if let Some(panel) = &mut self.secrets_panel {
+                        panel.loading = false;
+                        panel.submitting = false;
+                        panel.error = Some("Agent secrets disconnected.".into());
                     }
                     if self.auth_open {
                         self.cli_versions_loading = false;
@@ -2533,11 +2553,7 @@ impl XdDesktop {
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
-                if let Some(chat_id) = self.model.selected_chat.as_deref()
-                    && let Some(daemon) = self.active_daemon()
-                {
-                    let _ = daemon.git_state(chat_id);
-                }
+                self.refresh_selected_chat_after_connect(cx);
             }
             DaemonUpdate::Disconnected { message } => {
                 if self.connection_generation != generation {
@@ -3177,6 +3193,7 @@ impl XdDesktop {
                         images.clear();
                     }
                     self.transcript_snapshot = TranscriptSnapshot::default();
+                    self.transcript_loaded = false;
                     self.transcript.reset(0);
                 }
                 if self
@@ -3345,7 +3362,7 @@ impl XdDesktop {
                     panel.submitting = false;
                     panel.loading = true;
                 }
-                if let Some(daemon) = self.secrets_daemon(folder_id.as_deref()).cloned()
+                if let Some(daemon) = self.secrets_daemon().cloned()
                     && let Err(error) = daemon.agent_secrets(folder_id.as_deref())
                     && let Some(panel) = &mut self.secrets_panel
                 {
@@ -3672,7 +3689,12 @@ impl XdDesktop {
                 match serde_json::from_value::<Vec<BrowseEntry>>(
                     value.get("entries").cloned().unwrap_or_default(),
                 ) {
-                    Ok(entries) => self.file_tree.set_children(&path, entries),
+                    Ok(entries) => {
+                        self.file_tree.set_children(&path, entries);
+                        for child in self.file_tree.expanded_unloaded_children(&path) {
+                            self.list_tree_directory(child, cx);
+                        }
+                    }
                     Err(error) => {
                         self.file_tree.set_failed(&path);
                         self.model.connection_error =
@@ -4067,6 +4089,7 @@ impl XdDesktop {
                 }
                 self.transcript_loading = false;
                 self.transcript_page_loading = false;
+                self.transcript_loaded = true;
                 self.request_workflow_statuses();
                 if std::mem::take(&mut self.transcript_refresh_pending) {
                     self.request_messages(&chat_id);
@@ -5170,6 +5193,11 @@ impl XdDesktop {
     fn reset_file_tree(&mut self, cx: &mut Context<Self>) {
         self.tree_generation = self.tree_generation.saturating_add(1);
         self.file_tree = files::FileTree::default();
+        if let Some(key) = self.current_pane_key()
+            && let Some(expanded) = self.settings.expanded_file_directories.get(&key)
+        {
+            self.file_tree.set_expanded(expanded.iter().cloned());
+        }
         self.open_files = files::OpenFiles::default();
         self.tab_editor
             .update(cx, |editor, cx| editor.set_file("", String::new(), cx));
@@ -5198,6 +5226,7 @@ impl XdDesktop {
         let opening = !self.file_tree.is_expanded(&path);
         let loaded = self.file_tree.is_loaded(&path);
         self.file_tree.toggle(&path);
+        self.persist_expanded_file_directories();
         if opening && !loaded {
             self.list_tree_directory(path, cx);
         } else {
@@ -5754,7 +5783,7 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text("", cx));
         self.secret_value_input
             .update(cx, |input, cx| input.set_text("", cx));
-        match self.secrets_daemon(folder_id.as_deref()).cloned() {
+        match self.secrets_daemon().cloned() {
             Some(daemon) => {
                 if let Err(error) = daemon.agent_secrets(folder_id.as_deref())
                     && let Some(panel) = &mut self.secrets_panel
@@ -5984,6 +6013,7 @@ impl XdDesktop {
                 );
                 self.active_endpoint = ChatEndpoint::Local;
                 self.transcript_snapshot = TranscriptSnapshot::default();
+                self.transcript_loaded = false;
                 self.transcript.reset(0);
                 self.set_composer_text(String::new(), cx);
             }
@@ -6227,7 +6257,7 @@ impl XdDesktop {
             .map(|existing| (existing.clone(), None))
             .collect::<Vec<_>>();
         entries.push((name.to_owned(), Some(panel.value)));
-        match self.secrets_daemon(panel.folder_id.as_deref()).cloned() {
+        match self.secrets_daemon().cloned() {
             Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
                 Ok(()) => {
                     if let Some(current) = &mut self.secrets_panel {
@@ -6263,7 +6293,7 @@ impl XdDesktop {
             .filter(|existing| **existing != name)
             .map(|existing| (existing.clone(), None))
             .collect::<Vec<_>>();
-        match self.secrets_daemon(panel.folder_id.as_deref()).cloned() {
+        match self.secrets_daemon().cloned() {
             Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
                 Ok(()) => {
                     if let Some(current) = &mut self.secrets_panel {
@@ -6651,6 +6681,7 @@ impl XdDesktop {
             }
         } else if let Some(chat_id) = self.model.selected_chat.clone() {
             self.terminal_panel = Some(Self::new_terminal_panel(chat_id));
+            self.refresh_terminal_sessions(cx);
             self.terminal_cursor_visible = true;
             let focus = self.terminal_input.read(cx).focus_handle(cx);
             window.focus(&focus);
@@ -6707,6 +6738,7 @@ impl XdDesktop {
             && let Some(chat_id) = self.model.selected_chat.clone()
         {
             self.terminal_panel = Some(Self::new_terminal_panel(chat_id));
+            self.refresh_terminal_sessions(cx);
         }
     }
 
@@ -6718,6 +6750,7 @@ impl XdDesktop {
     ) {
         let initial_size = match kind {
             PaneResizeKind::Sidebar => self.settings.sidebar_width,
+            PaneResizeKind::SidebarFiles => self.settings.sidebar_files_height,
             PaneResizeKind::Diff => self.settings.diff_width,
             PaneResizeKind::Terminal => self.settings.terminal_height,
         } as f32;
@@ -6741,6 +6774,7 @@ impl XdDesktop {
         let size = resized_pane_size(resize.kind, resize.initial_size, delta);
         match resize.kind {
             PaneResizeKind::Sidebar => self.settings.sidebar_width = size,
+            PaneResizeKind::SidebarFiles => self.settings.sidebar_files_height = size,
             PaneResizeKind::Diff => self.settings.diff_width = size,
             PaneResizeKind::Terminal => self.settings.terminal_height = size,
         }
@@ -6871,6 +6905,34 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Reloads daemon-owned terminal sessions without closing the pane. This
+    /// runs both when the pane is restored and when its connection returns, so
+    /// a stale disconnect error cannot strand an otherwise live terminal.
+    fn refresh_terminal_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self
+            .terminal_panel
+            .as_ref()
+            .filter(|panel| self.model.selected_chat.as_deref() == Some(panel.chat_id.as_str()))
+            .map(|panel| panel.chat_id.clone())
+        else {
+            return;
+        };
+        if let Some(panel) = &mut self.terminal_panel {
+            panel.begin_refresh();
+        }
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.terminal_list(&chat_id));
+        if let Err(error) = result
+            && let Some(panel) = &mut self.terminal_panel
+        {
+            panel.loading = false;
+            panel.error = Some(error);
+        }
+        cx.notify();
+    }
+
     fn select_terminal(&mut self, terminal_id: String, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.terminal_panel else {
             return;
@@ -6906,6 +6968,7 @@ impl XdDesktop {
         };
         panel.loading = false;
         panel.opening = false;
+        panel.error = None;
         let previous = panel.selected.clone();
         let sessions = value
             .get("terminals")
@@ -8306,6 +8369,37 @@ impl XdDesktop {
         }
     }
 
+    /// Rehydrates the selected chat after its daemon connection comes back.
+    ///
+    /// Keep the transcript already on screen and ask only for rows after its
+    /// last message. If the first request was lost before any page arrived,
+    /// this naturally falls back to the tail page. The file root is retried as
+    /// well because its previous request may have died with the same socket.
+    fn refresh_selected_chat_after_connect(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        self.transcript_page_loading = false;
+        self.transcript_refresh_pending = false;
+        self.transcript_loading = !self.transcript_loaded;
+        self.request_chat(&chat_id);
+        self.request_messages(&chat_id);
+        let mut file_requests = self.file_tree.loading_paths();
+        if !self.file_tree.is_loaded("") && !file_requests.iter().any(String::is_empty) {
+            file_requests.insert(0, String::new());
+        }
+        for path in file_requests {
+            self.list_tree_directory(path, cx);
+        }
+        self.refresh_terminal_sessions(cx);
+        if let Some(daemon) = self.active_daemon()
+            && let Err(error) = daemon.git_state(&chat_id)
+        {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
     fn request_messages(&mut self, chat_id: &str) {
         if self.transcript_page_loading {
             self.transcript_refresh_pending = true;
@@ -8325,12 +8419,16 @@ impl XdDesktop {
         if self.transcript_page_loading {
             return;
         }
-        if let Some(daemon) = self.active_daemon() {
-            if let Err(error) = daemon.messages(chat_id, cursor) {
-                self.model.connection_error = Some(error);
-            } else {
-                self.transcript_page_loading = true;
-            }
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.messages(chat_id, cursor));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+            self.transcript_loading = false;
+            self.transcript_page_loading = false;
+        } else {
+            self.transcript_page_loading = true;
         }
     }
 
@@ -8465,6 +8563,11 @@ impl XdDesktop {
 
     fn select_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
+            if !self.transcript_loaded && !self.transcript_page_loading {
+                self.refresh_selected_chat_after_connect(cx);
+            } else if !self.file_tree.is_loaded("") && !self.file_tree.is_loading("") {
+                self.list_tree_directory(String::new(), cx);
+            }
             return;
         }
         self.sync_draft();
@@ -8477,6 +8580,7 @@ impl XdDesktop {
         self.invalidate_live_markdown_work();
         self.reset_file_tree(cx);
         self.transcript_snapshot = TranscriptSnapshot::default();
+        self.transcript_loaded = false;
         if self.active_endpoint == ChatEndpoint::Local {
             self.settings.last_chat = Some(chat_id.clone());
             if let Err(error) = self.settings.save() {
@@ -9334,6 +9438,33 @@ impl XdDesktop {
             return;
         }
         self.settings.collapsed_folders = collapsed;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn persist_expanded_file_directories(&mut self) {
+        let Some(key) = self.current_pane_key() else {
+            return;
+        };
+        let expanded = self.file_tree.expanded_paths();
+        if self.settings.expanded_file_directories.get(&key) == Some(&expanded) {
+            return;
+        }
+        if expanded.is_empty() {
+            if self
+                .settings
+                .expanded_file_directories
+                .remove(&key)
+                .is_none()
+            {
+                return;
+            }
+        } else {
+            self.settings
+                .expanded_file_directories
+                .insert(key, expanded);
+        }
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
         }
@@ -10754,6 +10885,7 @@ impl Render for XdDesktop {
         let accent = self.settings.accent.color();
         let accent_hover = self.settings.accent.hover_color();
         let sidebar_width = self.settings.sidebar_width;
+        let sidebar_files_height = self.settings.sidebar_files_height;
         let diff_width = self.settings.diff_width;
         let terminal_height = self.settings.terminal_height;
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
@@ -12311,8 +12443,9 @@ impl Render for XdDesktop {
                 .to_owned();
             div()
                 .id("remote-chat-files")
-                .flex_1()
-                .min_h_0()
+                .h(px(sidebar_files_height as f32))
+                .min_h(px(120.0))
+                .max_h(px(640.0))
                 .flex()
                 .flex_col()
                 .border_t_1()
@@ -12359,6 +12492,22 @@ impl Render for XdDesktop {
                                     .child(status),
                             )
                         }),
+                )
+        });
+        let sidebar_file_splitter = remote_sidebar_files.then(|| {
+            div()
+                .id("sidebar-files-resize")
+                .w_full()
+                .h(px(5.0))
+                .flex_shrink_0()
+                .bg(rgb(BG))
+                .cursor(CursorStyle::ResizeUpDown)
+                .hover(|style| style.bg(rgb(BORDER)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.begin_pane_resize(PaneResizeKind::SidebarFiles, event, cx);
+                    }),
                 )
         });
 
@@ -12684,6 +12833,9 @@ impl Render for XdDesktop {
                     )
                     .children(tree_rows),
             )
+            .when_some(sidebar_file_splitter, |sidebar, splitter| {
+                sidebar.child(splitter)
+            })
             .when_some(sidebar_file_browser, |sidebar, browser| {
                 sidebar.child(browser)
             });
@@ -13473,6 +13625,20 @@ impl Render for XdDesktop {
                 .text_xs()
                 .text_color(rgb(MUTED))
                 .child("Loading conversation…")
+                .into_any_element()
+        } else if self.transcript_snapshot.get(0).is_none() {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(if self.transcript_loaded {
+                    "No messages yet."
+                } else {
+                    "Conversation did not load. Select the chat to retry."
+                })
                 .into_any_element()
         } else {
             list(self.transcript.clone(), move |index, _window, _cx| {
@@ -15544,7 +15710,26 @@ impl Render for XdDesktop {
                     },
                 ));
             }
-            let output = StyledText::new(output_text).with_highlights(highlights);
+            let output_text: SharedString = output_text.into();
+            let output_range = 0..output_text.len();
+            let output = StyledText::new(output_text.clone()).with_highlights(highlights);
+            let output_layout = output.layout().clone();
+            let output = if let Some(terminal_id) = selected_id.as_deref() {
+                let scope = format!("terminal-output:{terminal_id}");
+                let document = scoped_element_id(&scope, 0);
+                selectable_in_document(
+                    document,
+                    document,
+                    output_text,
+                    output_range,
+                    None,
+                    output_layout,
+                    output,
+                )
+                .into_any_element()
+            } else {
+                output.into_any_element()
+            };
             let active = selected_id.is_some() && !panel.loading;
             let show_tabs = panel.sessions.len() > 1;
             let centered_title = (!show_tabs)
@@ -16800,10 +16985,10 @@ impl Render for XdDesktop {
                                             div()
                                                 .text_sm()
                                                 .text_color(rgb(TEXT))
-                                                .child("Agent secrets"),
+                                                .child("Connection-wide agent secrets"),
                                         )
                                         .child(div().text_xs().text_color(rgb(MUTED)).child(
-                                            "Private environment variables for local agents.",
+                                            "Private environment variables for agents on the selected connection.",
                                         )),
                                 )
                                 .child(div().text_color(rgb(MUTED)).child("›")),
@@ -16828,15 +17013,23 @@ impl Render for XdDesktop {
                 && !panel.submitting
                 && !panel.name.trim().is_empty()
                 && !panel.value.is_empty();
+            let connection_name = match self.active_endpoint {
+                ChatEndpoint::Local => "Local connection".to_owned(),
+                ChatEndpoint::Remote => self
+                    .remote_credentials
+                    .as_ref()
+                    .map(|credentials| credentials.host.clone())
+                    .unwrap_or_else(|| "Remote connection".to_owned()),
+            };
             let title = panel
                 .folder_name
                 .as_ref()
                 .map(|name| format!("Agent Secrets · {name}"))
-                .unwrap_or_else(|| "Agent Secrets · This Machine".into());
+                .unwrap_or_else(|| format!("Agent Secrets · {connection_name}"));
             let description = if panel.folder_id.is_some() {
-                "This workspace inherits global and parent secrets. Values set here override them for this workspace and its children."
+                "This workspace inherits connection-wide and parent secrets. Values set here override them for this workspace and its children."
             } else {
-                "Stored privately outside workspaces. Values never enter prompts or protocol replies; local agent processes receive them as environment variables."
+                "Applied to every agent launched through this connection. Values are stored privately outside workspaces and never enter prompts or protocol replies."
             };
             let rows = panel
                 .names
@@ -19072,7 +19265,9 @@ impl Render for XdDesktop {
         let resize_overlay = self.pane_resize.map(|resize| {
             let cursor = match resize.kind {
                 PaneResizeKind::Sidebar | PaneResizeKind::Diff => CursorStyle::ResizeLeftRight,
-                PaneResizeKind::Terminal => CursorStyle::ResizeUpDown,
+                PaneResizeKind::SidebarFiles | PaneResizeKind::Terminal => {
+                    CursorStyle::ResizeUpDown
+                }
             };
             div()
                 .absolute()
@@ -21083,14 +21278,17 @@ mod tests {
         }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentAuth));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentClis));
-        assert!(!XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
+        assert!(XdDesktop::remote_chat_reply(&RequestKind::AgentSecrets {
             folder_id: None,
         }));
+        assert!(XdDesktop::remote_chat_reply(
+            &RequestKind::SetAgentSecrets { folder_id: None }
+        ));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::Devices));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::DaemonUpdate {
             action: "install".into(),
         }));
-        assert!(XdDesktop::local_admin_reply(&RequestKind::AgentSecrets {
+        assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentSecrets {
             folder_id: None,
         }));
         assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentSecrets {
@@ -22005,8 +22203,14 @@ mod tests {
             viewport: None,
             opening: false,
             loading: false,
-            error: None,
+            error: Some("Terminal disconnected.".into()),
         };
+        panel.opening = true;
+        panel.begin_refresh();
+        assert!(panel.loading);
+        assert!(!panel.opening);
+        assert!(panel.error.is_none());
+
         panel.remove("terminal-one");
         assert_eq!(panel.selected.as_deref(), Some("terminal-two"));
         assert_eq!(
@@ -22090,6 +22294,14 @@ mod tests {
         assert_eq!(
             resized_pane_size(PaneResizeKind::Terminal, 320.0, Point { x: 0.0, y: -60.0 }),
             380
+        );
+        assert_eq!(
+            resized_pane_size(
+                PaneResizeKind::SidebarFiles,
+                280.0,
+                Point { x: 0.0, y: -80.0 }
+            ),
+            360
         );
         assert_eq!(
             resized_pane_size(
@@ -22501,6 +22713,7 @@ fn main() {
                 KeyBinding::new("tab", Tab, Some("TerminalInput")),
                 KeyBinding::new("escape", Escape, Some("TerminalInput")),
                 KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
+                KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
                 KeyBinding::new("ctrl-v", Paste, Some("TerminalInput")),
                 KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
             ]);
